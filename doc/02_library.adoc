@@ -272,8 +272,10 @@ Right-click an album card for actions on the complete album, including adding it
 to a playlist and setting or clearing favorites. Drag a card to Queue or a named
 playlist catalog row to append the complete album in album order. Track rows
 offer the shared track menu and can be dragged individually to either destination.
-Album transfers resolve all members before submission; failures or a concurrent
-collection change do not submit a partial album.
+Album transfers submit the exact album identity and a durable collection token.
+SQLite resolves and copies members within the destination write transaction;
+concurrent collection changes, including commits from another connection, reject
+stale intent without inserting a partial album.
 
 Search matches effective album titles or any member artist across the library,
 not just the loaded rows. Matching an artist keeps the complete album visible,

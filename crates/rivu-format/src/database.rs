@@ -1,8 +1,8 @@
 use anyhow::{Context, Result, bail, ensure};
 use rusqlite::{Connection, OptionalExtension};
 
-// The persisted album_trigger_revision key also governs queue metadata triggers.
-pub const ALBUM_TRIGGER_REVISION: i64 = 3;
+// The persisted marker governs album, queue metadata, and collection authority triggers.
+pub const ALBUM_TRIGGER_REVISION: i64 = 5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DatabaseState {
@@ -232,6 +232,46 @@ pub fn validate_structure(conn: &Connection) -> Result<()> {
         [ALBUM_TRIGGER_REVISION],
         |row| row.get(0),
     )?;
+    if current_triggers {
+        for (table, columns) in [
+            ("collection_meta", "singleton,sequence,album_revision"),
+            ("playlist_versions", "playlist_id,revision"),
+        ] {
+            conn.prepare(&format!("SELECT {columns} FROM {table} LIMIT 0"))
+                .with_context(|| {
+                    format!("Unsupported library database: incompatible table {table}")
+                })?;
+        }
+        let singleton: bool = conn.query_row(
+            "SELECT count(*)=1 AND count(CASE WHEN singleton=1 THEN 1 END)=1 FROM collection_meta",
+            [],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            singleton,
+            "Unsupported library database: missing collection_meta singleton"
+        );
+        for (table, name) in [
+            ("playlists", "collection_playlist_insert"),
+            ("playlists", "collection_playlist_delete"),
+            ("playlists", "collection_playlist_identity"),
+            ("playlist_entries", "collection_entry_insert"),
+            ("playlist_entries", "collection_entry_delete"),
+            ("playlist_entries", "collection_entry_update"),
+            ("tracks", "collection_track_insert"),
+            ("tracks", "collection_track_delete"),
+            ("tracks", "collection_track_update"),
+        ] {
+            let exists: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='trigger' AND name=?1 AND tbl_name=?2)",
+                [name, table], |row| row.get(0),
+            )?;
+            ensure!(
+                exists,
+                "Unsupported library database: missing trigger {name}"
+            );
+        }
+    }
     for name in [
         "queue_metadata",
         "albums_insert",
@@ -346,6 +386,7 @@ pub fn create_current(conn: &Connection) -> Result<()> {
     )?;
     tx.execute_batch(TRACK_INDEXES)?;
     tx.execute_batch(QUEUE_METADATA_TRIGGER)?;
+    install_collection_versions(&tx)?;
     create_summary_schema(&tx)?;
     tx.commit()?;
     Ok(())
@@ -473,6 +514,80 @@ fn install_summary_triggers(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+// One durable sequence prevents playlist deletion/recreation (including explicit ID
+// reuse) from reviving an old token. Triggers run in the writer's transaction, on
+// every connection, so rollbacks undo both collection data and its version.
+const COLLECTION_ENTRY_UPDATE_TRIGGER: &str = "
+    CREATE TRIGGER collection_entry_update AFTER UPDATE ON playlist_entries
+    WHEN old.id IS NOT new.id OR old.playlist_id IS NOT new.playlist_id
+        OR old.track_id IS NOT new.track_id OR old.position IS NOT new.position BEGIN
+        UPDATE collection_meta SET sequence=sequence+1;
+        UPDATE playlist_versions SET revision=(SELECT sequence FROM collection_meta)
+            WHERE playlist_id IN(old.playlist_id,new.playlist_id);
+    END;";
+
+fn install_collection_versions(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE collection_meta(
+            singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+            sequence INTEGER NOT NULL CHECK(typeof(sequence)='integer' AND sequence>=0),
+            album_revision INTEGER NOT NULL
+        );
+        INSERT INTO collection_meta VALUES(1,0,0);
+        CREATE TABLE playlist_versions(playlist_id INTEGER PRIMARY KEY,revision INTEGER NOT NULL);
+        INSERT INTO playlist_versions SELECT id,row_number() OVER (ORDER BY id) FROM playlists;
+        UPDATE collection_meta SET sequence=(SELECT count(*) FROM playlists);
+        CREATE TRIGGER collection_playlist_insert AFTER INSERT ON playlists BEGIN
+            UPDATE collection_meta SET sequence=sequence+1;
+            INSERT INTO playlist_versions SELECT new.id,sequence FROM collection_meta;
+        END;
+        CREATE TRIGGER collection_playlist_delete AFTER DELETE ON playlists BEGIN
+            UPDATE collection_meta SET sequence=sequence+1;
+            DELETE FROM playlist_versions WHERE playlist_id=old.id;
+        END;
+        CREATE TRIGGER collection_playlist_identity AFTER UPDATE OF id ON playlists
+        WHEN old.id IS NOT new.id BEGIN
+            UPDATE collection_meta SET sequence=sequence+1;
+            DELETE FROM playlist_versions WHERE playlist_id=old.id;
+            INSERT INTO playlist_versions SELECT new.id,sequence FROM collection_meta;
+        END;
+        CREATE TRIGGER collection_entry_insert AFTER INSERT ON playlist_entries BEGIN
+            UPDATE collection_meta SET sequence=sequence+1;
+            UPDATE playlist_versions SET revision=(SELECT sequence FROM collection_meta) WHERE playlist_id=new.playlist_id;
+        END;
+        CREATE TRIGGER collection_entry_delete AFTER DELETE ON playlist_entries BEGIN
+            UPDATE collection_meta SET sequence=sequence+1;
+            UPDATE playlist_versions SET revision=(SELECT sequence FROM collection_meta) WHERE playlist_id=old.playlist_id;
+        END;
+        CREATE TRIGGER collection_track_insert AFTER INSERT ON tracks BEGIN
+            UPDATE collection_meta SET sequence=sequence+1,album_revision=sequence+1;
+            UPDATE playlist_versions SET revision=(SELECT sequence FROM collection_meta)
+                WHERE playlist_id IN(SELECT playlist_id FROM playlist_entries WHERE track_id=new.id);
+        END;
+        CREATE TRIGGER collection_track_delete AFTER DELETE ON tracks BEGIN
+            UPDATE collection_meta SET sequence=sequence+1,album_revision=sequence+1;
+            UPDATE playlist_versions SET revision=(SELECT sequence FROM collection_meta)
+                WHERE playlist_id IN(SELECT playlist_id FROM playlist_entries WHERE track_id=old.id);
+        END;
+        CREATE TRIGGER collection_track_update AFTER UPDATE ON tracks
+        WHEN old.id IS NOT new.id OR old.path IS NOT new.path
+            OR COALESCE(old.title_override,old.raw_title) IS NOT COALESCE(new.title_override,new.raw_title)
+            OR COALESCE(old.artist_override,old.raw_artist) IS NOT COALESCE(new.artist_override,new.raw_artist)
+            OR COALESCE(old.album_override,old.raw_album) IS NOT COALESCE(new.album_override,new.raw_album)
+            OR old.disc_number IS NOT new.disc_number OR old.track_number IS NOT new.track_number
+            OR old.duration IS NOT new.duration OR old.codec IS NOT new.codec
+            OR old.bitrate_bps IS NOT new.bitrate_bps OR old.bitrate_exact IS NOT new.bitrate_exact
+            OR old.favorite IS NOT new.favorite OR old.missing IS NOT new.missing
+            OR old.play_count IS NOT new.play_count OR old.last_played IS NOT new.last_played BEGIN
+            UPDATE collection_meta SET sequence=sequence+1,album_revision=sequence+1;
+            UPDATE playlist_versions SET revision=(SELECT sequence FROM collection_meta)
+                WHERE old.id IS NOT new.id AND playlist_id IN(SELECT playlist_id FROM playlist_entries WHERE track_id IN(old.id,new.id));
+        END;",
+    )?;
+    conn.execute_batch(COLLECTION_ENTRY_UPDATE_TRIGGER)?;
+    Ok(())
+}
+
 /// Replace outdated album summary and queue metadata triggers without rebuilding data.
 /// A future marker is rejected before any write, within the same transaction.
 pub fn ensure_summary_triggers(conn: &Connection) -> Result<()> {
@@ -494,6 +609,19 @@ pub fn ensure_summary_triggers(conn: &Connection) -> Result<()> {
          DROP TRIGGER IF EXISTS queue_metadata;",
     )?;
     tx.execute_batch(QUEUE_METADATA_TRIGGER)?;
+    let has_versions: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='collection_meta')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_versions {
+        install_collection_versions(&tx)?;
+    } else {
+        // Preserve existing lifetime tokens while replacing revision 4's
+        // entry-update definition, which omitted occurrence identity changes.
+        tx.execute_batch("DROP TRIGGER IF EXISTS collection_entry_update;")?;
+        tx.execute_batch(COLLECTION_ENTRY_UPDATE_TRIGGER)?;
+    }
     install_summary_triggers(&tx)?;
     tx.commit()?;
     Ok(())
@@ -811,6 +939,171 @@ mod tests {
         let changes = conn.total_changes();
         assert!(validate_structure(&conn).is_err());
         assert_eq!(conn.total_changes(), changes);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod collection_version_tests {
+    use super::*;
+
+    fn revision(conn: &Connection, id: i64) -> Result<Option<i64>> {
+        Ok(conn
+            .query_row(
+                "SELECT revision FROM playlist_versions WHERE playlist_id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    #[test]
+    fn collection_authority_covers_reparenting_identity_reuse_and_track_removal() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        create_current(&conn)?;
+        conn.execute_batch("INSERT INTO tracks(id,path) VALUES(1,'/one.wav'),(2,'/two.wav');
+            INSERT INTO playlists(id,name) VALUES(1,'source'),(2,'target'),(3,'unrelated');
+            INSERT INTO playlist_entries(id,playlist_id,track_id,position) VALUES(1,1,1,0),(2,2,2,0);")?;
+        let before = [
+            revision(&conn, 1)?,
+            revision(&conn, 2)?,
+            revision(&conn, 3)?,
+        ];
+        conn.execute(
+            "UPDATE playlist_entries SET playlist_id=2,position=1 WHERE id=1",
+            [],
+        )?;
+        assert_ne!(revision(&conn, 1)?, before[0]);
+        assert_ne!(revision(&conn, 2)?, before[1]);
+        assert_eq!(revision(&conn, 3)?, before[2]);
+        let before_delete = revision(&conn, 2)?;
+        conn.execute("DELETE FROM tracks WHERE id=1", [])?;
+        assert_ne!(revision(&conn, 2)?, before_delete);
+        let before_reinsert = revision(&conn, 2)?;
+        conn.execute(
+            "INSERT INTO tracks(id,path) VALUES(1,'/replacement.wav')",
+            [],
+        )?;
+        assert_ne!(revision(&conn, 2)?, before_reinsert);
+        let old = revision(&conn, 1)?;
+        conn.execute("UPDATE playlists SET id=4 WHERE id=1", [])?;
+        assert_eq!(revision(&conn, 1)?, None);
+        assert_ne!(revision(&conn, 4)?, old);
+        conn.execute("UPDATE playlists SET id=1 WHERE id=4", [])?;
+        assert_ne!(revision(&conn, 1)?, old);
+        Ok(())
+    }
+
+    #[test]
+    fn older_trigger_contract_installs_collection_authority_without_rewriting_user_data()
+    -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        create_current(&conn)?;
+        conn.execute_batch(
+            "INSERT INTO tracks(id,path,raw_album) VALUES(1,'/music/one.wav','Album');
+            INSERT INTO playlists(id,name) VALUES(10,'Existing');
+            INSERT INTO playlist_entries(id,playlist_id,track_id,position) VALUES(20,10,1,0);
+            INSERT INTO queue_entries(id,track_id,position) VALUES(30,1,0),(31,1,1);
+            UPDATE queue_meta SET current_id=31,revision=42;
+            DROP TRIGGER collection_playlist_insert;
+            DROP TRIGGER collection_playlist_delete;
+            DROP TRIGGER collection_playlist_identity;
+            DROP TRIGGER collection_entry_insert;
+            DROP TRIGGER collection_entry_delete;
+            DROP TRIGGER collection_entry_update;
+            DROP TRIGGER collection_track_insert;
+            DROP TRIGGER collection_track_delete;
+            DROP TRIGGER collection_track_update;
+            DROP TABLE playlist_versions;
+            DROP TABLE collection_meta;
+            UPDATE schema_meta SET value=3 WHERE key='album_trigger_revision';",
+        )?;
+        validate_structure(&conn)?;
+        ensure_current(&conn)?;
+        validate_structure(&conn)?;
+        let token = revision(&conn, 10)?.unwrap();
+        assert_eq!(
+            conn.query_row("SELECT current_id,revision FROM queue_meta", [], |row| Ok(
+                (row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)
+            ))?,
+            (31, 42)
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT id,track_id,position FROM playlist_entries",
+                [],
+                |row| Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?
+                ))
+            )?,
+            (20, 1, 0)
+        );
+        let changes = conn.total_changes();
+        ensure_current(&conn)?;
+        assert_eq!(conn.total_changes(), changes);
+        assert_eq!(revision(&conn, 10)?, Some(token));
+        conn.execute_batch(
+            "DELETE FROM playlist_entries; DELETE FROM playlists;
+            INSERT INTO playlists(id,name) VALUES(10,'Recreated');",
+        )?;
+        assert_ne!(revision(&conn, 10)?, Some(token));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod entry_identity_maintenance_tests {
+    use super::*;
+
+    #[test]
+    fn revision_four_entry_identity_trigger_upgrades_without_resetting_tokens() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        create_current(&conn)?;
+        conn.execute_batch("INSERT INTO tracks(id,path) VALUES(1,'/one.wav');
+            INSERT INTO playlists(id,name) VALUES(1,'Existing');
+            INSERT INTO playlist_entries(id,playlist_id,track_id,position) VALUES(10,1,1,0);
+            DROP TRIGGER collection_entry_update;
+            CREATE TRIGGER collection_entry_update AFTER UPDATE ON playlist_entries
+            WHEN old.playlist_id IS NOT new.playlist_id OR old.track_id IS NOT new.track_id OR old.position IS NOT new.position BEGIN
+                UPDATE collection_meta SET sequence=sequence+1;
+                UPDATE playlist_versions SET revision=(SELECT sequence FROM collection_meta) WHERE playlist_id IN(old.playlist_id,new.playlist_id);
+            END;
+            UPDATE schema_meta SET value=4 WHERE key='album_trigger_revision';")?;
+        let token = || -> Result<i64> {
+            Ok(conn.query_row(
+                "SELECT revision FROM playlist_versions WHERE playlist_id=1",
+                [],
+                |row| row.get(0),
+            )?)
+        };
+        let before = token()?;
+        let sequence: i64 =
+            conn.query_row("SELECT sequence FROM collection_meta", [], |row| row.get(0))?;
+        ensure_current(&conn)?;
+        validate_structure(&conn)?;
+        assert_eq!(token()?, before);
+        assert_eq!(
+            conn.query_row("SELECT sequence FROM collection_meta", [], |row| row
+                .get::<_, i64>(0))?,
+            sequence
+        );
+        conn.execute("UPDATE playlist_entries SET id=20 WHERE id=10", [])?;
+        assert_ne!(token()?, before);
+        assert_eq!(
+            conn.query_row(
+                "SELECT track_id,position FROM playlist_entries WHERE id=20",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            )?,
+            (1, 0)
+        );
+        let maintained = token()?;
+        let changes = conn.total_changes();
+        ensure_current(&conn)?;
+        assert_eq!(conn.total_changes(), changes);
+        assert_eq!(token()?, maintained);
         Ok(())
     }
 }

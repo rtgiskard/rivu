@@ -383,6 +383,7 @@ fn playlist_group_requests_and_locations_round_trip_stable_identities() {
         revisions: rivu_protocol::response::QueryRevisions {
             library: 5,
             structure: 6,
+            album: 14,
             playlist: 7,
             queue: 8,
             playlist_entries: Some(rivu_protocol::response::PlaylistEntryRevision {
@@ -1591,15 +1592,8 @@ fn edit_track_wire_round_trip_preserves_omitted_and_explicit_fields() {
 }
 
 #[test]
-fn relative_playback_intents_round_trip_without_changing_existing_command_tags() {
+fn relative_playback_intents_round_trip() {
     let mut encoded = Vec::new();
-    encode_request_frame_into(
-        &WireRequest::Command(WireCommand::from(Command::Volume { value: 0.5 })),
-        &mut encoded,
-    )
-    .unwrap();
-    // Appended intent variants must not renumber the existing Volume tag.
-    assert_eq!(encoded[6], 16);
     for command in [
         Command::AdjustVolume { delta: -0.05 },
         Command::AdjustVolume { delta: 0.05 },
@@ -2523,6 +2517,61 @@ fn album_queries_and_commands_round_trip_exact_keys() {
             serde_json::to_value(Command::try_from(decoded).unwrap()).unwrap(),
             expected
         );
+    }
+}
+
+#[test]
+fn collection_commands_round_trip_source_and_destination_versions() {
+    use rivu_protocol::model::{
+        AlbumKey, CollectionDestination, CollectionInsertion, CollectionSource,
+    };
+    for source in [
+        CollectionSource::Album {
+            key: AlbumKey {
+                directory: "/music/专辑".into(),
+                title: "Exact title ".into(),
+            },
+            revision: u64::MAX,
+        },
+        CollectionSource::Playlist {
+            playlist_id: i64::MAX,
+            revision: u64::MAX,
+        },
+    ] {
+        for destination in [
+            CollectionDestination::Queue { insertion: None },
+            CollectionDestination::Queue {
+                insertion: Some(CollectionInsertion {
+                    index: u64::MAX,
+                    revision: 8,
+                }),
+            },
+            CollectionDestination::Playlist {
+                playlist_id: 4,
+                revision: 17,
+                index: None,
+            },
+            CollectionDestination::Playlist {
+                playlist_id: 4,
+                revision: 19,
+                index: Some(u64::MAX),
+            },
+        ] {
+            let command = Command::TransferCollection {
+                source: source.clone(),
+                destination,
+            };
+            let expected = serde_json::to_value(&command).unwrap();
+            let mut encoded = Vec::new();
+            encode_request_frame_into(&WireRequest::Command(command.into()), &mut encoded).unwrap();
+            let WireRequest::Command(decoded) = decode_request_frame(&encoded[4..]).unwrap() else {
+                panic!("wrong request");
+            };
+            assert_eq!(
+                serde_json::to_value(Command::try_from(decoded).unwrap()).unwrap(),
+                expected
+            );
+        }
     }
 }
 

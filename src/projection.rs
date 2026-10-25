@@ -32,6 +32,7 @@ pub struct GuiLibrarySnapshot {
     pub playlist_total: usize,
     pub revision: u64,
     pub structure_revision: u64,
+    pub album_revision: u64,
     pub playlist_revision: u64,
     pub playlist_entry_revisions: Arc<BTreeMap<i64, u64>>,
     pub metadata_revisions: Arc<rivu_protocol::model::MetadataRevisions>,
@@ -84,6 +85,7 @@ impl GuiSnapshot {
                 playlist_total: state.library.playlist_total,
                 revision: state.library.revision,
                 structure_revision: state.library.structure_revision,
+                album_revision: state.library.album_revision,
                 playlist_revision: state.library.playlist_revision,
                 playlist_entry_revisions: Arc::clone(&state.library.playlist_entry_revisions),
                 metadata_revisions: Arc::clone(&state.library.metadata_revisions),
@@ -134,6 +136,7 @@ pub struct TuiSnapshot {
 pub struct TuiLibrarySnapshot {
     pub revision: u64,
     pub structure_revision: u64,
+    pub album_revision: u64,
     pub playlist_revision: u64,
     pub playlist_entry_revisions: Arc<BTreeMap<i64, u64>>,
     pub metadata_revisions: Arc<rivu_protocol::model::MetadataRevisions>,
@@ -178,6 +181,7 @@ impl TuiSnapshot {
             library: TuiLibrarySnapshot {
                 revision: state.library.revision,
                 structure_revision: state.library.structure_revision,
+                album_revision: state.library.album_revision,
                 playlist_revision: state.library.playlist_revision,
                 playlist_entry_revisions: Arc::clone(&state.library.playlist_entry_revisions),
                 metadata_revisions: Arc::clone(&state.library.metadata_revisions),
@@ -290,6 +294,7 @@ impl GuiLibrarySnapshot {
             self.duplicate_groups_revision,
             self.duplicate_members_revision,
         )
+        .with_album_revision(self.album_revision)
         .with_playlist_scope(
             playlist_id,
             &self.playlist_entry_revisions,
@@ -333,6 +338,7 @@ impl TuiSnapshot {
             self.library.duplicate_groups_revision,
             self.library.duplicate_members_revision,
         )
+        .with_album_revision(self.library.album_revision)
         .with_playlist_scope(
             playlist_id,
             &self.library.playlist_entry_revisions,

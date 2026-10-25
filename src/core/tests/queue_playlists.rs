@@ -955,7 +955,7 @@ fn playlist_catalog_changes_preserve_unrelated_content_and_metadata_has_its_own_
         );
         assert_eq!(
             core.state.library.playlist_entry_revisions.len(),
-            core.store.playlist_ids().unwrap().len()
+            core.store.playlist_summary_page(None, 0, 0).unwrap().total
         );
         let query = Query::PlaylistEntryBatch {
             query: None,
@@ -1190,6 +1190,36 @@ fn album_commands_resolve_all_members_and_reject_stale_keys_before_stop() {
         .unwrap();
     assert_eq!(core.queue_ids.len(), MAX_QUERY_ROWS + 8);
     let first = core.store.album_tracks_page(&key, None, 0, 1).unwrap().rows[0].id;
+    core.command(Command::CreatePlaylist {
+        name: "whole album".into(),
+    })
+    .unwrap();
+    let source = rivu_protocol::model::CollectionSource::Album {
+        key: key.clone(),
+        revision: core.state.library.album_revision,
+    };
+    core.command(Command::TransferCollection {
+        source: source.clone(),
+        destination: rivu_protocol::model::CollectionDestination::Playlist {
+            playlist_id: 1,
+            revision: core.state.library.playlist_entry_revisions[&1],
+            index: None,
+        },
+    })
+    .unwrap();
+    assert_eq!(
+        core.store
+            .playlist_entries_page(1, None, 0, 0)
+            .unwrap()
+            .total,
+        MAX_QUERY_ROWS + 3
+    );
+    core.command(Command::TransferCollection {
+        source,
+        destination: rivu_protocol::model::CollectionDestination::Queue { insertion: None },
+    })
+    .unwrap();
+    assert_eq!(core.queue_ids.len(), 2 * (MAX_QUERY_ROWS + 3) + 5);
     write_pcm(&core.track(first).unwrap().path);
     let _commands = recording_audio(&mut core);
     core.command(Command::PlayAlbum { key }).unwrap();
@@ -1515,4 +1545,160 @@ fn failed_playlist_start_does_not_keep_an_obsolete_queue_selection() {
     assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
     assert_eq!(core.state.queue.current_id, None);
     missing(&mut core, Command::Resume, 2);
+}
+
+#[test]
+fn collection_transfers_reject_source_changes_after_the_last_page() {
+    use rivu_protocol::model::{AlbumKey, CollectionDestination, CollectionSource};
+    let (_directory, mut core) = fixture();
+    for track_id in [1, 2] {
+        core.command(Command::EditTrack {
+            track_id,
+            title: None,
+            artist: None,
+            album: Some("Album".into()),
+            decoder_hint: None,
+        })
+        .unwrap();
+    }
+    core.command(Command::CreatePlaylistWithTracks {
+        name: "source".into(),
+        track_ids: vec![2, 1],
+    })
+    .unwrap();
+    core.command(Command::CreatePlaylistWithTracks {
+        name: "target".into(),
+        track_ids: vec![4],
+    })
+    .unwrap();
+    let key = AlbumKey {
+        directory: core.track(1).unwrap().path.parent().unwrap().into(),
+        title: "Album".into(),
+    };
+    let album_source = CollectionSource::Album {
+        key: key.clone(),
+        revision: core.state.library.album_revision,
+    };
+    // Finish every page before changing the source; the submitted intent must
+    // still be rejected rather than copy either the old IDs or the latest album.
+    assert_eq!(
+        core.store
+            .album_tracks_page(&key, None, 0, 1)
+            .unwrap()
+            .rows
+            .len(),
+        1
+    );
+    assert_eq!(
+        core.store
+            .album_tracks_page(&key, None, 1, 1)
+            .unwrap()
+            .rows
+            .len(),
+        1
+    );
+    core.command(Command::EditTrack {
+        track_id: 2,
+        title: None,
+        artist: None,
+        album: Some("Other".into()),
+        decoder_hint: None,
+    })
+    .unwrap();
+    let playlist_source = CollectionSource::Playlist {
+        playlist_id: 1,
+        revision: core.state.library.playlist_entry_revisions[&1],
+    };
+    let last_entry = core
+        .store
+        .playlist_entries_page(1, None, 1, 1)
+        .unwrap()
+        .rows[0]
+        .id;
+    core.command(Command::MovePlaylistEntry {
+        entry_id: last_entry,
+        index: 0,
+    })
+    .unwrap();
+    let queue = core.queue_ids.clone();
+    let queue_state = core.state.queue.clone();
+    let target = core.store.playlist_track_ids(2, 20).unwrap();
+    let target_revision = core.state.library.playlist_entry_revisions[&2];
+    for source in [album_source, playlist_source] {
+        for destination in [
+            CollectionDestination::Queue { insertion: None },
+            CollectionDestination::Playlist {
+                playlist_id: 2,
+                revision: target_revision,
+                index: None,
+            },
+        ] {
+            assert!(
+                core.command(Command::TransferCollection {
+                    source: source.clone(),
+                    destination
+                })
+                .is_err()
+            );
+            assert_eq!(core.queue_ids, queue);
+            assert_eq!(core.state.queue, queue_state);
+            assert_eq!(core.store.playlist_track_ids(2, 20).unwrap(), target);
+            assert_eq!(
+                core.state.library.playlist_entry_revisions[&2],
+                target_revision
+            );
+        }
+    }
+}
+
+#[test]
+fn collection_transfers_keep_source_order_and_existing_occurrences() {
+    use rivu_protocol::model::{CollectionDestination, CollectionInsertion, CollectionSource};
+    let (_directory, mut core) = fixture();
+    core.command(Command::CreatePlaylistWithTracks {
+        name: "source".into(),
+        track_ids: vec![4, 2, 1],
+    })
+    .unwrap();
+    let source = CollectionSource::Playlist {
+        playlist_id: 1,
+        revision: core.state.library.playlist_entry_revisions[&1],
+    };
+    let current = core.queue_ids[2];
+    core.state.queue.current_id = Some(current);
+    core.save_queue().unwrap();
+    core.command(Command::TransferCollection {
+        source: source.clone(),
+        destination: CollectionDestination::Queue {
+            insertion: Some(CollectionInsertion {
+                index: 1,
+                revision: core.state.queue.revision,
+            }),
+        },
+    })
+    .unwrap();
+    assert_eq!(
+        queue_entries(&core)
+            .iter()
+            .map(|&(_, track)| track)
+            .collect::<Vec<_>>(),
+        [1, 4, 2, 1, 2, 2, 3, 4]
+    );
+    assert_eq!(core.state.queue.current_id, Some(current));
+    assert_eq!(core.state.queue.current_position, Some(5));
+    core.command(Command::CreatePlaylistWithTracks {
+        name: "target".into(),
+        track_ids: vec![2, 3],
+    })
+    .unwrap();
+    core.command(Command::TransferCollection {
+        source,
+        destination: CollectionDestination::Playlist {
+            playlist_id: 2,
+            revision: core.state.library.playlist_entry_revisions[&2],
+            index: Some(1),
+        },
+    })
+    .unwrap();
+    assert_eq!(core.store.playlist_track_ids(2, 20).unwrap(), [2, 4, 1, 3]);
 }

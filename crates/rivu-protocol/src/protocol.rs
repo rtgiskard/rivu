@@ -11,7 +11,7 @@ use rivu_format::media::DecoderHint;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub const PROTOCOL_VERSION: u8 = 9;
+pub const PROTOCOL_VERSION: u8 = 11;
 pub const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub const MAX_CLIENTS: usize = 16;
@@ -249,6 +249,10 @@ pub enum WireQuery {
 /// Binary command wire format. Variant order belongs to the versioned wire schema.
 #[derive(Serialize, Deserialize)]
 pub enum WireCommand {
+    TransferCollection {
+        source: crate::model::CollectionSource,
+        destination: crate::model::CollectionDestination,
+    },
     ShowWindow,
     OptimizeDatabase,
     SetFavorite {
@@ -1040,6 +1044,13 @@ impl TryFrom<WireCommand> for AppCommand {
 impl From<Command> for WireCommand {
     fn from(value: Command) -> Self {
         match value {
+            Command::TransferCollection {
+                source,
+                destination,
+            } => Self::TransferCollection {
+                source,
+                destination,
+            },
             Command::CheckOtherTracks { force } => Self::CheckOtherTracks { force },
             Command::QueueExternalPaths {
                 paths,
@@ -1294,6 +1305,13 @@ impl TryFrom<WireCommand> for Command {
 
     fn try_from(value: WireCommand) -> Result<Self> {
         Ok(match value {
+            WireCommand::TransferCollection {
+                source,
+                destination,
+            } => Self::TransferCollection {
+                source,
+                destination,
+            },
             WireCommand::CheckOtherTracks { force } => Self::CheckOtherTracks { force },
             WireCommand::QueueExternalPaths {
                 paths,

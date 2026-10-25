@@ -4624,3 +4624,83 @@ fn all_catalog_locate_matches_empty_root_pages_for_absolute_and_relative_paths()
         }
     }
 }
+
+#[test]
+fn collection_transfer_failures_preserve_queue_and_playlist_positions() {
+    use rivu_protocol::model::{
+        AlbumKey, CollectionDestination, CollectionInsertion, CollectionSource,
+    };
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    store.conn.execute_batch("INSERT INTO tracks(id,path,raw_album) VALUES(1,'/album/one.wav','Album'),(2,'/album/two.wav','Album'),(3,'/other/three.wav','Other');").unwrap();
+    store.enqueue_tracks(&[3, 3]).unwrap();
+    store
+        .set_queue_current(Some(store.queue_ids().unwrap()[1]))
+        .unwrap();
+    let playlist = store.create_playlist_with_tracks("target", &[3]).unwrap();
+    let source = CollectionSource::Album {
+        key: AlbumKey {
+            directory: "/album".into(),
+            title: "Album".into(),
+        },
+        revision: store.album_revision().unwrap(),
+    };
+    let queue = store.queue_page(None, 0, 20).unwrap();
+    let queue_state = store.queue_state().unwrap();
+    let entries = store.playlist_entries_page(playlist, None, 0, 20).unwrap();
+    let playlist_revision = store.playlist_entry_revision(playlist).unwrap().unwrap();
+    // Abort on a later row, after the destination gap has already been opened.
+    store.conn.execute_batch("CREATE TEMP TRIGGER reject_collection_queue BEFORE INSERT ON queue_entries WHEN new.track_id=2 BEGIN SELECT RAISE(ABORT,'rejected member'); END; CREATE TEMP TRIGGER reject_collection_playlist BEFORE INSERT ON playlist_entries WHEN new.track_id=2 BEGIN SELECT RAISE(ABORT,'rejected member'); END;").unwrap();
+    for destination in [
+        CollectionDestination::Queue {
+            insertion: Some(CollectionInsertion {
+                index: 1,
+                revision: queue_state.revision,
+            }),
+        },
+        CollectionDestination::Playlist {
+            playlist_id: playlist,
+            revision: playlist_revision,
+            index: Some(0),
+        },
+    ] {
+        assert!(store.transfer_collection(&source, destination).is_err());
+        assert_eq!(store.queue_page(None, 0, 20).unwrap(), queue);
+        assert_eq!(store.queue_state().unwrap(), queue_state);
+        assert_eq!(
+            store.playlist_entries_page(playlist, None, 0, 20).unwrap(),
+            entries
+        );
+        assert_eq!(
+            store.playlist_entry_revision(playlist).unwrap(),
+            Some(playlist_revision)
+        );
+    }
+    store
+        .conn
+        .execute_batch(
+            "DROP TRIGGER reject_collection_queue; DROP TRIGGER reject_collection_playlist;",
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .transfer_collection(&source, CollectionDestination::Queue { insertion: None },)
+            .unwrap()
+            .0,
+        2
+    );
+    assert_eq!(
+        store
+            .transfer_collection(
+                &source,
+                CollectionDestination::Playlist {
+                    playlist_id: playlist,
+                    revision: playlist_revision,
+                    index: Some(0)
+                },
+            )
+            .unwrap()
+            .0,
+        2
+    );
+    assert_eq!(store.playlist_track_ids(playlist, 20).unwrap(), [1, 2, 3]);
+}

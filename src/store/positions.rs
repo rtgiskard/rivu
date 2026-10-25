@@ -16,17 +16,6 @@ pub(super) fn insert_tracks(
     ids: &str,
     directories: Option<&str>,
 ) -> Result<usize> {
-    let index = i64::try_from(index)?;
-    let total: i64 = match scope {
-        PositionScope::Queue => tx.query_row(
-            "SELECT COALESCE(MAX(position)+1,0) FROM queue_entries", [], |row| row.get(0),
-        )?,
-        PositionScope::Playlist(id) => tx.query_row(
-            "SELECT (SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=?1) FROM playlists WHERE id=?1",
-            [id], |row| row.get(0),
-        )?,
-    };
-    anyhow::ensure!(index <= total, "Insertion index out of range");
     tx.execute_batch("CREATE TEMP TABLE insertion_tracks(ordinal INTEGER PRIMARY KEY,track_id INTEGER NOT NULL);")?;
     if let Some(directories) = directories {
         tx.execute(&format!(
@@ -45,6 +34,26 @@ pub(super) fn insert_tracks(
             [id],
         )?;
     }
+    insert_staged_tracks(tx, scope, index)
+}
+
+/// Consume SQL-staged occurrences without changing their order or multiplicity.
+pub(super) fn insert_staged_tracks(
+    tx: &Transaction<'_>,
+    scope: PositionScope,
+    index: usize,
+) -> Result<usize> {
+    let index = i64::try_from(index)?;
+    let total: i64 = match scope {
+        PositionScope::Queue => tx.query_row(
+            "SELECT COALESCE(MAX(position)+1,0) FROM queue_entries", [], |row| row.get(0),
+        )?,
+        PositionScope::Playlist(id) => tx.query_row(
+            "SELECT (SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=?1) FROM playlists WHERE id=?1",
+            [id], |row| row.get(0),
+        )?,
+    };
+    anyhow::ensure!(index <= total, "Insertion index out of range");
     let count: i64 = tx.query_row("SELECT COUNT(*) FROM insertion_tracks", [], |row| {
         row.get(0)
     })?;

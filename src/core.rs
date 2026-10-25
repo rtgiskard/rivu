@@ -94,7 +94,6 @@ pub(crate) struct CoreState {
     pub(crate) system: SystemState,
     pub(crate) scan_owner: Option<crate::projection::MediaTaskOwner>,
     pub(crate) revisions: StateRevisions,
-    pub(crate) playlist_content_sequence: u64,
 }
 
 impl CoreState {
@@ -105,6 +104,7 @@ impl CoreState {
         self.library.query_revisions(self.queue.revision, None)
     }
 
+    #[cfg(test)]
     pub(crate) fn playlist_query_revisions(&self, playlist_id: i64) -> QueryRevisions {
         self.library
             .query_revisions(self.queue.revision, Some(playlist_id))
@@ -132,6 +132,7 @@ impl CoreState {
             library: self.library.revision != previous.library.revision
                 || self.library.structure_revision != previous.library.structure_revision
                 || self.library.playlist_revision != previous.library.playlist_revision
+                || self.library.album_revision != previous.library.album_revision
                 || self.library.duplicate_groups_revision
                     != previous.library.duplicate_groups_revision
                 || self.library.duplicate_members_revision
@@ -916,15 +917,9 @@ impl Core {
     fn load_initial_state(&mut self) -> Result<()> {
         self.state.library.track_total = self.store.track_count()?;
         self.state.library.playlist_total = self.store.playlist_summary_page(None, 0, 0)?.total;
-        for id in self.store.playlist_ids()? {
-            self.state.playlist_content_sequence = self
-                .state
-                .playlist_content_sequence
-                .checked_add(1)
-                .expect("Playlist content revision exhausted");
-            Arc::make_mut(&mut self.state.library.playlist_entry_revisions)
-                .insert(id, self.state.playlist_content_sequence);
-        }
+        self.state.library.album_revision = self.store.album_revision()?;
+        self.state.library.playlist_entry_revisions =
+            Arc::new(self.store.playlist_entry_revisions()?);
         self.state.library.history = Arc::new(self.store.history(MAX_QUERY_ROWS)?);
         self.state.system.devices = Arc::new(audio::devices().unwrap_or_default());
         self.state.system.ffmpeg_status = if self.state.system.config.ffmpeg_enabled {

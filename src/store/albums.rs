@@ -1,6 +1,9 @@
 use super::rows::{LIBRARY_ROW_COLUMNS, TRACK_COLUMNS, library_row_from_row, track_from_row};
 use super::tracks::{search_filter, search_query};
-use super::{Store, queue::invalidate_structure};
+use super::{
+    Store,
+    queue::{integer, invalidate_structure},
+};
 use anyhow::{Context, Result, ensure};
 use rivu_format::database::{DIRECTORY, ORDER, TITLE, eligible_title};
 use rivu_protocol::model::{AlbumKey, AlbumSort, AlbumSummary, LibraryRow, MAX_QUERY_ROWS, Page};
@@ -16,6 +19,122 @@ fn album_filter() -> String {
 }
 
 impl Store {
+    /// Lock writers, validate durable tokens, and transfer in the same transaction.
+    /// No GUI-sized ID snapshot or process-local version check is used.
+    pub(crate) fn transfer_collection(
+        &self,
+        source: &rivu_protocol::model::CollectionSource,
+        destination: rivu_protocol::model::CollectionDestination,
+    ) -> Result<(usize, Vec<u64>)> {
+        use super::positions::{PositionScope, insert_staged_tracks};
+        use rivu_protocol::model::{CollectionDestination, CollectionSource};
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        match source {
+            CollectionSource::Album { revision, .. } => {
+                ensure!(
+                    self.album_revision()? == *revision,
+                    "Album collection changed"
+                );
+            }
+            CollectionSource::Playlist {
+                playlist_id,
+                revision,
+            } => {
+                self.check_playlist_entry_revision(*playlist_id, *revision)?;
+            }
+        }
+        if let CollectionDestination::Playlist {
+            playlist_id,
+            revision,
+            ..
+        } = destination
+        {
+            self.check_playlist_entry_revision(playlist_id, revision)?;
+        }
+        tx.execute_batch("CREATE TEMP TABLE insertion_tracks(ordinal INTEGER PRIMARY KEY,track_id INTEGER NOT NULL);")?;
+        match source {
+            CollectionSource::Album { key, .. } => {
+                let directory = key
+                    .directory
+                    .to_str()
+                    .context("Album directory is not UTF-8")?;
+                tx.execute(&format!(
+                    "INSERT INTO insertion_tracks SELECT row_number() OVER (ORDER BY {ORDER})-1,id FROM tracks INDEXED BY tracks_album_members WHERE {} ORDER BY {ORDER}",
+                    album_filter(),
+                ), params![directory, key.title])?;
+                let count: i64 =
+                    tx.query_row("SELECT COUNT(*) FROM insertion_tracks", [], |row| {
+                        row.get(0)
+                    })?;
+                ensure!(count > 0, "Album is empty");
+            }
+            CollectionSource::Playlist { playlist_id, .. } => {
+                let exists: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM playlists WHERE id=?1)",
+                    [playlist_id],
+                    |row| row.get(0),
+                )?;
+                ensure!(exists, "Playlist not found");
+                tx.execute("INSERT INTO insertion_tracks SELECT row_number() OVER (ORDER BY position,id)-1,track_id FROM playlist_entries WHERE playlist_id=?1 ORDER BY position,id", [playlist_id])?;
+            }
+        }
+        let missing: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM insertion_tracks s LEFT JOIN tracks t ON t.id=s.track_id WHERE t.id IS NULL)", [], |row| row.get(0))?;
+        ensure!(!missing, "Collection contains a missing track identity");
+        let (scope, index) = match destination {
+            CollectionDestination::Queue { insertion } => {
+                let index = if let Some(insertion) = insertion {
+                    let revision: u64 = tx.query_row(
+                        "SELECT revision FROM queue_meta WHERE singleton=1",
+                        [],
+                        |row| integer(row, 0),
+                    )?;
+                    ensure!(revision == insertion.revision, "Queue revision changed");
+                    usize::try_from(insertion.index)?
+                } else {
+                    tx.query_row(
+                        "SELECT COALESCE(MAX(position)+1,0) FROM queue_entries",
+                        [],
+                        |row| integer(row, 0),
+                    )?
+                };
+                (PositionScope::Queue, index)
+            }
+            CollectionDestination::Playlist {
+                playlist_id, index, ..
+            } => {
+                // Preserve the playlist's unique-track and first-occurrence policy.
+                tx.execute("DELETE FROM insertion_tracks WHERE track_id IN (SELECT track_id FROM playlist_entries WHERE playlist_id=?1) OR ordinal NOT IN (SELECT MIN(ordinal) FROM insertion_tracks GROUP BY track_id)", [playlist_id])?;
+                let total: usize = tx.query_row("SELECT (SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=?1) FROM playlists WHERE id=?1", [playlist_id], |row| integer(row, 0))?;
+                (
+                    PositionScope::Playlist(playlist_id),
+                    index.map(usize::try_from).transpose()?.unwrap_or(total),
+                )
+            }
+        };
+        let count = insert_staged_tracks(&tx, scope, index)?;
+        if matches!(scope, PositionScope::Queue) {
+            invalidate_structure(&tx, count != 0)?;
+        }
+        let ids = if matches!(
+            destination,
+            CollectionDestination::Queue { insertion: Some(_) }
+        ) {
+            let end = index
+                .checked_add(count)
+                .context("Queue insertion overflow")?;
+            tx.prepare("SELECT id FROM queue_entries WHERE position>=?1 AND position<?2 ORDER BY position,id")?
+                .query_map(params![i64::try_from(index)?, i64::try_from(end)?], |row| integer(row, 0))?
+                .collect::<rusqlite::Result<Vec<u64>>>()?
+        } else {
+            Vec::new()
+        };
+        tx.commit()?;
+        Ok((count, ids))
+    }
+
     pub fn albums_page(
         &self,
         query: Option<&str>,

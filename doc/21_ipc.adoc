@@ -46,7 +46,7 @@ the root application crate. A retained session reuses its existing current-threa
 runtime, socket, and framing buffers; the package boundary adds no worker,
 channel, state copy, or serialization pass. The GUI still calls Core directly,
 and GUI-only projections and admitted processing-audition state remain in the
-application. The wire version and byte representation remain unchanged.
+application.
 
 === Consumer and application lifetimes
 
@@ -131,7 +131,7 @@ The frame header is six bytes. `body_length` excludes the four-byte length field
 and includes the version, message type, and serialized body.
 
 Bodies use Postcard serialization without COBS framing. The current protocol
-version is `9`; clients and servers must use matching wire schemas. The four-byte
+version is `11`; clients and servers must use matching wire schemas. The four-byte
 frame length remains little-endian; body integers follow Postcard's encoding.
 Restart clients and hosts together after upgrading: incompatible versions are
 rejected before decoding the body. There is no compatibility alias or schema
@@ -396,11 +396,16 @@ of the catalog. Creation registers a fresh token; deletion removes it. A missing
 key means the playlist is unavailable, never a fallback to the catalog token.
 Actual membership changes and reorders advance only the owning content token;
 membership also changes summary counts. Rename changes only the summary token.
-The issuer survives deletion, so an old scalar mutation token cannot become valid
-again after another collection is created. Retention is bounded by extant
-playlists, with no per-track version table or mutation event log.
-Every scoped change advances the Library state-section token, so coalesced
-watches receive current scoped validity, not just a GUI-local command hint.
+SQLite issues the content/lifetime tokens from a durable shared sequence. Data and
+versions advance atomically in the writer's transaction, including writes from
+other connections; rollback restores both. Deleting and recreating a playlist,
+even with the same ID, cannot revive an old token. Retention is bounded by extant
+playlists, with no per-track version table or mutation event log. Core publishes
+its own committed scoped changes through the Library state-section token. A query
+also reconciles the collection authority actually observed in its SQLite snapshot
+and publishes changed playlist scopes before delivering its response, so GUI
+completion checks the same authority. Unchanged and unrelated scopes retain their
+tokens; failed version reads and cancelled queries do not invent observations.
 Creation and deletion publish their lifetime/catalog validity before refreshing
 `playlist_total`. Renames and membership edits retain that total and perform no
 catalog count read; their summary/content invalidation does not depend on one.
@@ -417,14 +422,15 @@ next request; disconnect or server shutdown terminates the wait.
 === Query results and pagination
 
 Query responses contain the requested projection and its data revisions, not a
-full client state or queue snapshot. Rows and revisions are captured in the same
-core dispatch. Publication sequence, four state-section tokens, query-data
-tokens, and consumer request generations have distinct responsibilities.
+full client state or queue snapshot. Collection rows and their durable versions
+are read in one SQLite snapshot. Publication sequence, four state-section tokens,
+query-data tokens, and consumer request generations have distinct responsibilities.
 
 `Query::stamp` is the sole query dependency contract for scheduling, projection
 identity, result acceptance, and batch validation. Library pages use library
-content; directory/album/location projections also use structure. A single
-Track query uses `track = {track_id, revision}`. Root counts use structure only.
+content; directory/album/location projections also use structure. Album projections
+add the durable `album` collection token. A single Track query uses
+`track = {track_id, revision}`. Root counts use structure only.
 Playlist summaries use the summary catalog only; full entry rows use
 `playlist_metadata = {playlist_id, revision}` plus their scoped content/lifetime
 token. Unfiltered compact entry locations use only their content token; filtered
@@ -452,6 +458,15 @@ scopes. Playlist presence is authoritative: retained metadata cannot resurrect a
 deleted collection's scope. If the retained metadata index does not match the
 current library token, selection falls back to that library token rather than
 reusing an unrelated scoped revision.
+
+Whole-collection transfers carry an album key plus its `album` revision, or a
+playlist ID plus its content/lifetime revision. Destination playlists carry their
+own content/lifetime token; positional Queue insertion carries `queue_meta`'s
+persisted revision. The Store acquires the write lock before validating all these
+tokens against the same database transaction that resolves members and inserts
+them. A prior commit on another connection therefore rejects stale intent without
+changing either destination. Album lookup uses exact parent/title and album order;
+Queue preserves repeated occurrences and playlists keep first-occurrence uniqueness.
 
 Entry pages/batches and scoped `PlaylistEntryLocations` (including empty results)
 attach `revisions.playlist_entries = {playlist_id, revision}` when the collection
@@ -705,6 +720,18 @@ replaces the whole queue in member order, and starts its first track.
 playback. Blank or stale keys fail without changing the queue or playback. Both commands
 resolve all current members in the backend independently of page limits; clients
 must not collect paged track IDs to perform album actions.
+
+`TransferCollection {source, destination}` copies a version-pinned whole Album
+or Playlist without collecting paged track payloads in the client. Album sources
+carry their key and Library/structure revisions; Playlist sources carry their
+ID and entry-content revision. Queue insertion carries an index and queue
+revision; Playlist destinations carry their ID, entry revision and optional
+index. Omitted positions append. Core validates these versions after Store has
+acquired its write transaction, then source staging and insertion use that same
+transaction. A changed source or destination rejects the whole operation.
+Queue transfers preserve source occurrences and order; Playlist transfers keep
+the existing unique-track/first-occurrence policy. GUI collection drops, album
+menu copies and playlist-to-queue Append use this intent rather than bare IDs.
 
 === Library root identity and configuration
 

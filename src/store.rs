@@ -14,6 +14,7 @@ mod rows;
 mod scan;
 mod schema;
 mod tracks;
+mod versions;
 
 use anyhow::{Result, bail};
 use rusqlite::Connection;

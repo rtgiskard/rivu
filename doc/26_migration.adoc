@@ -15,7 +15,7 @@ link:01_config.adoc#_configuration_upgrades[Configuration upgrades].
 === Current implementation
 
 The database schema and configuration schema are both `1`; they are independent
-version authorities. The current album-trigger maintenance revision is `3`.
+version authorities. The current album-trigger maintenance revision is `5`.
 
 * `rivu-migrate check` validates existing current configuration and the required
   structure of a schema 1 database, reporting outdated album-trigger maintenance.
@@ -127,18 +127,21 @@ link:01_config.adoc#_configuration_upgrades[Configuration upgrades].
 == Derived-trigger maintenance
 
 `albums` and `album_artists` are derived summaries maintained by SQLite triggers;
-the same maintenance revision also covers queue display-metadata invalidation.
+the same maintenance revision also covers queue metadata and collection versions.
 Business consumers need correct maintenance, not knowledge of historical trigger
 versions. A trigger's existence or successful execution does not prove semantic
 correctness: it might omit a relevant update or maintain the wrong grouping rule.
 
-`album_trigger_revision` identifies the installed album and queue metadata
-maintenance definitions. It is an internal maintenance marker, not a second
-database format version. Revision `3` also invalidates queue display rows when a
-source path changes. Installation replaces older definitions transactionally,
-preserving summaries, queue occurrences, and current selection; schema version
-remains `1`. An up-to-date marker skips installation. Offline preflight requires
-the named current triggers when the marker is current, but does not compare bodies.
+`album_trigger_revision` identifies the installed album, queue metadata, and
+collection-version maintenance definitions. It is an internal maintenance marker,
+not a second database format version. Revision `4` installs durable album and
+playlist content/lifetime tokens, seeded from existing playlists; SQLite triggers
+advance them in the same transaction as collection mutations on every connection.
+Revision `5` also advances playlist content tokens when entry identities change;
+upgrading its trigger definition preserves all previously issued lifetime tokens.
+Installation preserves summaries, queue occurrences, and current selection; schema
+version remains `1`. An up-to-date marker skips installation. Offline preflight
+requires current authority tables and named triggers, but does not compare bodies.
 
 A trigger implementation change with unchanged persistent semantics does not by
 itself require a database schema bump. A change to grouping meaning or persistent

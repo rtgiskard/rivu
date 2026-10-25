@@ -719,7 +719,7 @@ fn resumed_import_preserves_latest_playlist_tokens_and_snapshot_isolation() {
         let (directory, mut core) = fixture();
         core.create_playlist_with_tracks("Existing".into(), vec![1])
             .unwrap();
-        let existing_id = core.store.playlist_ids().unwrap()[0];
+        let existing_id = core.store.playlist_summary_page(None, 0, 1).unwrap().rows[0].id;
         let old_scopes = Arc::clone(&core.state.library.playlist_entry_revisions);
         write_pcm(&directory.path().join("imported.wav"));
         let path = directory.path().join("mix.m3u8");

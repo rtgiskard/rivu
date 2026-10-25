@@ -4,6 +4,7 @@ use std::sync::atomic::Ordering;
 
 mod admission;
 mod catalog;
+mod collection_authority;
 mod display;
 mod lifecycle;
 mod long_operations;
@@ -95,6 +96,7 @@ fn fixture_with_database(duration: Option<f64>, persistent: bool) -> (tempfile::
         .unwrap();
     let mut state = CoreState::default();
     state.library.track_total = store.track_count().unwrap();
+    state.library.album_revision = store.album_revision().unwrap();
     state.system.config_path = directory.path().join("config.toml");
     Arc::make_mut(&mut state.system.config)
         .library_roots

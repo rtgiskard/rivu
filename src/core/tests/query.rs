@@ -75,7 +75,7 @@ fn already_cancelled_read_never_enters_the_request_queue() {
 fn cancellation_after_dispatch_waits_for_the_physical_reply() {
     use std::sync::atomic::AtomicBool;
 
-    let (_directory, core) = fixture();
+    let (_directory, mut core) = fixture();
     let (handle, _analysis, mut requests) = display_fixture();
     let mut epoch = QueryEpoch::default();
     let ticket = epoch.ticket();

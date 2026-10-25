@@ -260,6 +260,8 @@ pub struct LibrarySnapshot {
     pub revision: u64,
     /// Changes only when the library tree or visible row ordering may change.
     pub structure_revision: u64,
+    /// Durable SQLite album membership/order/query token, shared with transfers.
+    pub album_revision: u64,
     /// Playlist summaries: identity, name, or member count. Not a content epoch.
     pub playlist_revision: u64,
     /// Content/lifetime tokens for every extant playlist; absence means deletion.
@@ -471,6 +473,7 @@ impl Default for LibrarySnapshot {
             playlist_total: 0,
             revision: 0,
             structure_revision: 0,
+            album_revision: 0,
             playlist_revision: 0,
             playlist_entry_revisions: Arc::default(),
             metadata_revisions: Arc::default(),
@@ -542,6 +545,7 @@ impl LibrarySnapshot {
             self.duplicate_groups_revision,
             self.duplicate_members_revision,
         )
+        .with_album_revision(self.album_revision)
         .with_playlist_scope(
             playlist_id,
             &self.playlist_entry_revisions,
@@ -573,9 +577,39 @@ impl LibrarySnapshot {
     }
 }
 
+/// A whole collection pinned to the membership/order version selected by its caller.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum CollectionSource {
+    Album { key: AlbumKey, revision: u64 },
+    Playlist { playlist_id: i64, revision: u64 },
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct CollectionInsertion {
+    pub index: u64,
+    pub revision: u64,
+}
+
+/// Queue copies retain occurrences; playlists retain their existing unique-track policy.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub enum CollectionDestination {
+    Queue {
+        insertion: Option<CollectionInsertion>,
+    },
+    Playlist {
+        playlist_id: i64,
+        revision: u64,
+        index: Option<u64>,
+    },
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum Command {
+    TransferCollection {
+        source: CollectionSource,
+        destination: CollectionDestination,
+    },
     PlayAlbum {
         key: AlbumKey,
     },

@@ -80,6 +80,8 @@ pub struct TrackRevision {
 pub struct QueryRevisions {
     pub library: u64,
     pub structure: u64,
+    /// Durable album collection token, read in the result's database snapshot.
+    pub album: u64,
     pub playlist: u64,
     pub queue: u64,
     pub playlist_entries: Option<PlaylistEntryRevision>,
@@ -90,6 +92,11 @@ pub struct QueryRevisions {
 }
 
 impl QueryRevisions {
+    pub fn with_album_revision(mut self, revision: u64) -> Self {
+        self.album = revision;
+        self
+    }
+
     /// Assemble the common library domains for model and consumer projections.
     pub fn from_library(
         library: u64,

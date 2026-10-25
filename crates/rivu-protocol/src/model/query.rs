@@ -266,9 +266,12 @@ impl Query {
                     stamp.library = revisions.library;
                 }
             }
-            Self::Albums { .. }
-            | Self::AlbumTracks { .. }
-            | Self::DirectoryPage { .. }
+            Self::Albums { .. } | Self::AlbumTracks { .. } => {
+                stamp.library = revisions.library;
+                stamp.structure = revisions.structure;
+                stamp.album = revisions.album;
+            }
+            Self::DirectoryPage { .. }
             | Self::OtherTracksPage { .. }
             | Self::OtherTracksLocate { .. }
             | Self::LibraryRootPage { .. }

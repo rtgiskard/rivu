@@ -108,11 +108,11 @@ and reader slot. Explicit selections query Track; playback-follow uses Core's
 current-track snapshot without another reservation. The edit session separately
 owns drafts and read/save acceptance.
 |Collection resolution
-|One owner serves album menus, album drops, and playlist-to-queue reads. Menu
-replacement cancels only its menu read; hiding/shutdown/destruction cancels the
-current collection read. Epoch checks around each page stop further pagination;
-no partial collection is published. Success still requires current source and
-destination revisions.
+|One cancellable owner resolves album-menu membership for favorite actions;
+replacement/hiding/shutdown retires its paged read without publishing partial
+results. Whole-collection Queue/Playlist copies submit source identity and
+versions directly; Core resolves them within the destination write transaction,
+without retaining a GUI collection-sized ID buffer.
 |Duplicate review
 |Track identities survive reference-only refreshes, but command eligibility uses
 current member facts. Dismissal/destruction requests cancellation without joining

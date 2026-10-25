@@ -11,13 +11,6 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use std::path::PathBuf;
 
 impl Store {
-    pub fn playlist_ids(&self) -> Result<Vec<i64>> {
-        let mut statement = self.conn.prepare("SELECT id FROM playlists ORDER BY id")?;
-        Ok(statement
-            .query_map([], |row| row.get(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?)
-    }
-
     pub fn playlist_entry(&self, entry_id: i64) -> Result<Option<PlaylistEntryLocation>> {
         // Positions are contiguous. The covering playlist_order index supplies the last
         // position without counting or projecting the entire playlist.
@@ -698,7 +691,15 @@ mod deletion_tests {
              INSERT INTO playlist_entries(id,playlist_id,track_id,position) VALUES
                 (100,10,1,0),(101,10,2,1),(102,10,3,2),(200,20,1,0);",
         )?;
-        assert_eq!(store.playlist_ids()?, vec![10, 20]);
+        assert_eq!(
+            store
+                .playlist_summary_page(None, 0, 10)?
+                .rows
+                .iter()
+                .map(|playlist| playlist.id)
+                .collect::<Vec<_>>(),
+            vec![10, 20]
+        );
         let expected = PlaylistEntryLocation {
             id: 102,
             playlist_id: 10,
@@ -742,11 +743,27 @@ mod deletion_tests {
             .execute_batch("DROP TRIGGER reject_playlist_delete")?;
         assert!(store.delete_playlist(20)?);
         assert_eq!(store.playlist_entry(200)?, None);
-        assert_eq!(store.playlist_ids()?, vec![10]);
+        assert_eq!(
+            store
+                .playlist_summary_page(None, 0, 10)?
+                .rows
+                .iter()
+                .map(|playlist| playlist.id)
+                .collect::<Vec<_>>(),
+            vec![10]
+        );
         let empty = store.create_playlist("empty")?;
         assert!(!store.delete_playlist(empty)?);
         assert!(store.delete_playlist(20).is_err());
-        assert_eq!(store.playlist_ids()?, vec![10]);
+        assert_eq!(
+            store
+                .playlist_summary_page(None, 0, 10)?
+                .rows
+                .iter()
+                .map(|playlist| playlist.id)
+                .collect::<Vec<_>>(),
+            vec![10]
+        );
         Ok(())
     }
 

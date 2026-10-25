@@ -9,7 +9,10 @@ use rivu_protocol::model::{
 use rusqlite::{OptionalExtension, Transaction, params};
 use std::path::PathBuf;
 
-fn integer<T: TryFrom<i64>>(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<T> {
+pub(super) fn integer<T: TryFrom<i64>>(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+) -> rusqlite::Result<T> {
     let value = row.get::<_, i64>(index)?;
     T::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(index, value))
 }
@@ -137,37 +140,21 @@ impl Store {
         Ok(())
     }
 
-    #[cfg(test)]
-    pub fn queue_page(
+    pub(crate) fn queue_page(
         &self,
         query: Option<&str>,
         offset: usize,
         limit: usize,
-    ) -> Result<Page<QueueRow>> {
-        let total = if query.is_none_or(str::is_empty) {
-            self.conn
-                .query_row("SELECT COUNT(*) FROM queue_entries", [], |row| {
-                    integer(row, 0)
-                })?
-        } else {
-            0
-        };
-        self.queue_page_with_total(query, offset, limit, total)
-    }
-
-    pub(crate) fn queue_page_with_total(
-        &self,
-        query: Option<&str>,
-        offset: usize,
-        limit: usize,
-        total: usize,
     ) -> Result<Page<QueueRow>> {
         let query = search_query(query);
         let filter = search_filter("t", "?1");
         let total = if query.is_some() {
             self.conn.query_row(&format!("SELECT COUNT(*) FROM queue_entries q JOIN tracks t ON t.id=q.track_id WHERE {filter}"), [query.as_deref()], |row| integer(row, 0))?
         } else {
-            total
+            self.conn
+                .query_row("SELECT COUNT(*) FROM queue_entries", [], |row| {
+                    integer(row, 0)
+                })?
         };
         if limit == 0 {
             return Ok(Page {

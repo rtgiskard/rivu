@@ -70,6 +70,8 @@ enum RemoveTarget {
 
 pub(super) struct ContentMenu {
     source: TrackSource,
+    album: Option<rivu_protocol::model::AlbumKey>,
+    album_revision: u64,
     nodes: Option<Vec<LibraryNode>>,
     tracks_only: bool,
     guard: ContentGuard,
@@ -112,21 +114,8 @@ enum ContentAction {
     RemoveLibraryRoot,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ResolutionOwner {
-    Menu,
-    AlbumDrop,
-    PlaylistAppend,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ResolutionWorker {
-    owner: ResolutionOwner,
-    generation: u64,
-}
-
 struct CollectionRead {
-    worker: ResolutionWorker,
+    worker: u64,
     ticket: crate::core::QueryTicket,
 }
 
@@ -135,7 +124,7 @@ struct CollectionRead {
 #[derive(Default)]
 pub(super) struct CollectionResolution {
     epoch: crate::core::QueryEpoch,
-    worker: Option<ResolutionWorker>,
+    worker: Option<u64>,
 }
 
 impl CollectionResolution {
@@ -143,29 +132,17 @@ impl CollectionResolution {
         self.worker.is_some()
     }
 
-    fn begin(&mut self, owner: ResolutionOwner) -> Option<CollectionRead> {
+    fn begin(&mut self) -> Option<CollectionRead> {
         if self.pending() {
             return None;
         }
         self.epoch.advance();
-        let worker = ResolutionWorker {
-            owner,
-            generation: self.epoch.generation(),
-        };
+        let worker = self.epoch.generation();
         self.worker = Some(worker);
         Some(CollectionRead {
             worker,
             ticket: self.epoch.ticket(),
         })
-    }
-
-    fn cancel_menu(&mut self) {
-        if self
-            .worker
-            .is_some_and(|worker| worker.owner == ResolutionOwner::Menu)
-        {
-            self.cancel();
-        }
     }
 
     pub(super) fn cancel(&mut self) {
@@ -257,47 +234,6 @@ fn resolve_album(
     }
 }
 
-fn resolve_playlist(
-    mut query_page: impl FnMut(
-        Query,
-        crate::core::QueryTicket,
-    ) -> rivu_protocol::response::QueryResponse,
-    playlist_id: i64,
-    revisions: rivu_protocol::response::QueryRevisions,
-    ticket: &crate::core::QueryTicket,
-) -> Result<Vec<i64>> {
-    let mut after = None;
-    let mut ids = Vec::new();
-    loop {
-        let query = Query::PlaylistEntryBatch {
-            query: None,
-            playlist_id,
-            after,
-            limit: rivu_protocol::model::MAX_QUERY_ROWS,
-            expected: Some(revisions),
-        };
-        let response = query_collection_page(&mut query_page, query.clone(), ticket)?;
-        let result = response.result?;
-        anyhow::ensure!(
-            query.stamp(response.revisions) == query.stamp(revisions),
-            "playlist changed"
-        );
-        let ViewResponse::PlaylistEntryBatch(batch) = result else {
-            anyhow::bail!("unexpected playlist response");
-        };
-        anyhow::ensure!(
-            batch.rows.len() <= rivu_protocol::model::MAX_QUERY_ROWS
-                && (batch.next.is_none() || (!batch.rows.is_empty() && batch.next != after)),
-            "incomplete playlist response"
-        );
-        ids.extend(batch.rows.into_iter().map(|row| row.track_id));
-        let Some(next) = batch.next else {
-            return Ok(ids);
-        };
-        after = Some(next);
-    }
-}
-
 fn valid_page(offset: usize, rows: usize, total: usize) -> bool {
     offset <= total
         && rows <= rivu_protocol::model::MAX_QUERY_ROWS
@@ -306,12 +242,8 @@ fn valid_page(offset: usize, rows: usize, total: usize) -> bool {
 }
 
 impl GuiApp {
-    fn begin_content_resolution(
-        &mut self,
-        owner: ResolutionOwner,
-        cx: &mut Context<Self>,
-    ) -> Option<CollectionRead> {
-        let Some(read) = self.content_resolution.begin(owner) else {
+    fn begin_content_resolution(&mut self, cx: &mut Context<Self>) -> Option<CollectionRead> {
+        let Some(read) = self.content_resolution.begin() else {
             self.error = Some(self.i18n.text("li-source-busy").to_owned());
             cx.notify();
             return None;
@@ -339,9 +271,7 @@ impl GuiApp {
         if !self.content_resolution.timeout(read) {
             return;
         }
-        if read.worker.owner == ResolutionOwner::Menu {
-            self.replace_content_menu(None, cx);
-        }
+        self.replace_content_menu(None, cx);
         if current && self.window_visible && !self.state.system.shutting_down {
             self.error = response.result.err().map(|error| error.to_string());
             cx.notify();
@@ -353,7 +283,7 @@ impl GuiApp {
         menu: Option<ContentMenu>,
         cx: &mut Context<Self>,
     ) -> Option<ContentMenu> {
-        self.content_resolution.cancel_menu();
+        self.content_resolution.cancel();
         let previous = std::mem::replace(&mut self.content_menu, menu);
         if previous.as_ref().is_some_and(|menu| menu.playlists)
             != self
@@ -437,6 +367,8 @@ impl GuiApp {
         };
         let menu = Some(ContentMenu {
             source: request.source,
+            album: album.clone(),
+            album_revision: self.state.library.album_revision,
             nodes,
             tracks_only,
             guard: guard.clone(),
@@ -452,7 +384,7 @@ impl GuiApp {
         });
         self.replace_content_menu(menu, cx);
         if let Some(key) = album {
-            let Some(read) = self.begin_content_resolution(ResolutionOwner::Menu, cx) else {
+            let Some(read) = self.begin_content_resolution(cx) else {
                 self.replace_content_menu(None, cx);
                 return;
             };
@@ -524,87 +456,65 @@ impl GuiApp {
         match source {
             TrackSource::Tracks(ids) => self.send_content_tracks(ids, destination, cx),
             TrackSource::Album(key) => {
-                self.refresh(cx);
-                let Some(read) = self.begin_content_resolution(ResolutionOwner::AlbumDrop, cx)
+                let source = rivu_protocol::model::CollectionSource::Album {
+                    key,
+                    revision: self.state.library.album_revision,
+                };
+                self.send_content_collection(source, destination, cx);
+            }
+        }
+    }
+
+    fn send_content_collection(
+        &mut self,
+        source: rivu_protocol::model::CollectionSource,
+        destination: DragDestination,
+        cx: &mut Context<Self>,
+    ) {
+        use rivu_protocol::model::{CollectionDestination, CollectionInsertion};
+        if !destination.current(&self.state) {
+            return;
+        }
+        let destination = match destination {
+            DragDestination::Queue => CollectionDestination::Queue { insertion: None },
+            DragDestination::QueueAt { index, revision } => CollectionDestination::Queue {
+                insertion: Some(CollectionInsertion {
+                    index: index as u64,
+                    revision,
+                }),
+            },
+            DragDestination::Playlist(playlist_id) => {
+                let Some(&revision) = self
+                    .state
+                    .library
+                    .playlist_entry_revisions
+                    .get(&playlist_id)
                 else {
                     return;
                 };
-                let ticket = read.ticket.clone();
-                let guard = ContentGuard::Library(
-                    self.state.library.revision,
-                    self.state.library.structure_revision,
-                );
-                let query = Query::AlbumTracks {
-                    key: key.clone(),
-                    query: None,
-                    offset: 0,
-                    limit: rivu_protocol::model::MAX_QUERY_ROWS,
-                };
-                let stamp = query.stamp(self.state.query_revisions(None));
-                let target_revision = destination.playlist_id().and_then(|id| {
-                    self.state
-                        .library
-                        .playlist_entry_revisions
-                        .get(&id)
-                        .copied()
-                });
-                let handle = self.handle.clone();
-                cx.spawn(async move |this, cx| {
-                    let result = crate::gui::query::run(
-                        handle,
-                        cx,
-                        move |handle| {
-                            resolve_album(
-                                |query, ticket| handle.query_if_current(query, ticket),
-                                key,
-                                stamp,
-                                &ticket,
-                            )
-                        },
-                        |response, cx| {
-                            let _ = this.update(cx, |this, cx| {
-                                let target_current = destination.current(&this.state)
-                                    && destination.playlist_id().is_none_or(|id| {
-                                        target_revision.is_some()
-                                            && this.state.library.playlist_entry_revisions.get(&id)
-                                                == target_revision.as_ref()
-                                    });
-                                let current = guard.current(this) && target_current;
-                                this.timeout_content_resolution(&read, response, current, cx);
-                            });
-                        },
-                    )
-                    .await;
-                    let _ = this.update(cx, |this, cx| {
-                        if !this.finish_content_resolution(&read, cx) {
-                            return;
-                        }
-                        let target_current = destination.current(&this.state)
-                            && destination.playlist_id().is_none_or(|id| {
-                                target_revision.is_some()
-                                    && this
-                                        .state
-                                        .library
-                                        .playlist_entry_revisions
-                                        .get(&id)
-                                        .copied()
-                                        == target_revision
-                            });
-                        match result {
-                            Ok(ids) if guard.current(this) && target_current => {
-                                this.send_content_tracks(ids, destination, cx)
-                            }
-                            Ok(_) => {
-                                this.error = Some(this.i18n.text("li-source-changed").to_owned())
-                            }
-                            Err(error) => this.error = Some(error.to_string()),
-                        }
-                        cx.notify();
-                    });
-                })
-                .detach();
+                CollectionDestination::Playlist {
+                    playlist_id,
+                    revision,
+                    index: None,
+                }
             }
-        }
+            DragDestination::PlaylistAt {
+                playlist_id,
+                index,
+                revision,
+            } => CollectionDestination::Playlist {
+                playlist_id,
+                revision,
+                index: Some(index as u64),
+            },
+        };
+        self.send(
+            Command::TransferCollection {
+                source,
+                destination,
+            },
+            cx,
+        );
     }
 
     pub(super) fn send_content_tracks(
@@ -683,6 +593,13 @@ impl GuiApp {
                     self.library.update(cx, |library, cx| {
                         library.resolve_library_drag(&nodes, destination, cx);
                     });
+                } else if let Some(key) = menu.album {
+                    let revision = menu.album_revision;
+                    self.send_content_collection(
+                        rivu_protocol::model::CollectionSource::Album { key, revision },
+                        destination,
+                        cx,
+                    );
                 } else {
                     self.send_content_tracks(track_ids, destination, cx);
                 }
@@ -980,67 +897,19 @@ impl GuiApp {
         else {
             return;
         };
-        let Some(read) = self.begin_content_resolution(ResolutionOwner::PlaylistAppend, cx) else {
-            return;
-        };
-        let ticket = read.ticket.clone();
-        let revisions = self.state.query_revisions(Some(playlist_id));
-        let handle = self.handle.clone();
-        cx.spawn(async move |this, cx| {
-            let result: anyhow::Result<Vec<i64>> = crate::gui::query::run(
-                handle,
-                cx,
-                move |handle| {
-                    resolve_playlist(
-                        |query, ticket| handle.query_if_current(query, ticket),
-                        playlist_id,
-                        revisions,
-                        &ticket,
-                    )
-                },
-                |response, cx| {
-                    let _ = this.update(cx, |this, cx| {
-                        let current = this
-                            .state
-                            .library
-                            .playlist_entry_revisions
-                            .get(&playlist_id)
-                            == Some(&revision);
-                        this.timeout_content_resolution(&read, response, current, cx);
-                    });
-                },
-            )
-            .await;
-            let _ = this.update(cx, |this, cx| {
-                if !this.finish_content_resolution(&read, cx) {
-                    return;
-                }
-                match result {
-                    Ok(ids)
-                        if this
-                            .state
-                            .library
-                            .playlist_entry_revisions
-                            .get(&playlist_id)
-                            == Some(&revision) =>
-                    {
-                        this.send_content_tracks(ids, super::DragDestination::Queue, cx)
-                    }
-                    Ok(_) => this.error = Some(this.i18n.text("li-source-changed").to_owned()),
-                    Err(error) => this.error = Some(error.to_string()),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
+        self.send_content_collection(
+            rivu_protocol::model::CollectionSource::Playlist {
+                playlist_id,
+                revision,
+            },
+            DragDestination::Queue,
+            cx,
+        );
     }
 }
 #[cfg(test)]
 mod tests {
-    use super::{
-        CollectionResolution, ContentDrag, ResolutionOwner, TrackSource, resolve_album,
-        resolve_playlist, valid_page,
-    };
+    use super::{CollectionResolution, ContentDrag, TrackSource, resolve_album, valid_page};
     use crate::core::QueryEpoch;
     use rivu_protocol::{
         model::Query,
@@ -1050,20 +919,16 @@ mod tests {
 
     #[test]
     fn collection_timeout_retires_logical_owner_but_not_physical_worker() {
-        for owner in [
-            ResolutionOwner::Menu,
-            ResolutionOwner::AlbumDrop,
-            ResolutionOwner::PlaylistAppend,
-        ] {
+        {
             let mut resolution = CollectionResolution::default();
-            let read = resolution.begin(owner).unwrap();
+            let read = resolution.begin().unwrap();
             assert!(resolution.timeout(&read));
             assert!(!read.ticket.is_current());
             assert!(resolution.pending());
-            assert!(resolution.begin(owner).is_none());
+            assert!(resolution.begin().is_none());
             assert!(!resolution.timeout(&read));
             assert!(resolution.finish(&read));
-            let latest = resolution.begin(owner).unwrap();
+            let latest = resolution.begin().unwrap();
             assert!(!resolution.timeout(&read));
             assert!(!resolution.finish(&read));
             assert!(latest.ticket.is_current());
@@ -1082,7 +947,7 @@ mod tests {
         let revisions = QueryRevisions::default();
         for timeout_at in 1..=2 {
             let mut resolution = CollectionResolution::default();
-            let read = resolution.begin(ResolutionOwner::AlbumDrop).unwrap();
+            let read = resolution.begin().unwrap();
             let mut calls = 0;
             let result = resolve_album(
                 |_, _| {
@@ -1095,32 +960,6 @@ mod tests {
                 },
                 key.clone(),
                 album_query().stamp(revisions),
-                &read.ticket,
-            );
-            assert!(matches!(
-                result.unwrap_err().downcast_ref::<QueryError>(),
-                Some(QueryError::Cancelled)
-            ));
-            assert_eq!(calls, timeout_at);
-            assert!(resolution.pending());
-            assert!(resolution.finish(&read));
-
-            let read = resolution.begin(ResolutionOwner::PlaylistAppend).unwrap();
-            let mut calls = 0;
-            let result = resolve_playlist(
-                |_, _| {
-                    calls += 1;
-                    if calls == timeout_at {
-                        assert!(resolution.timeout(&read));
-                    }
-                    playlist_batch(
-                        &[calls as i64],
-                        (calls == 1).then(|| playlist_cursor(1)),
-                        revisions,
-                    )
-                },
-                7,
-                revisions,
                 &read.ticket,
             );
             assert!(matches!(
@@ -1291,48 +1130,26 @@ mod tests {
     }
 
     #[test]
-    fn menu_cancellation_keeps_independent_operations_and_physical_gate() {
-        for operation in [
-            ResolutionOwner::Menu,
-            ResolutionOwner::AlbumDrop,
-            ResolutionOwner::PlaylistAppend,
-        ] {
-            let mut resolution = CollectionResolution::default();
-            let read = resolution.begin(operation).unwrap();
-            resolution.cancel_menu();
-            assert_eq!(read.ticket.is_current(), operation != ResolutionOwner::Menu);
-            assert!(resolution.pending());
-            assert!(resolution.begin(ResolutionOwner::Menu).is_none());
-
-            resolution.cancel();
-            assert!(!read.ticket.is_current());
-            assert!(resolution.pending());
-            assert!(resolution.begin(ResolutionOwner::AlbumDrop).is_none());
-            assert!(resolution.finish(&read));
-            assert!(!resolution.pending());
-
-            let next = resolution.begin(ResolutionOwner::PlaylistAppend).unwrap();
-            assert!(next.ticket.is_current());
-            assert!(!resolution.finish(&read));
-            assert!(resolution.pending());
-            assert!(next.ticket.is_current());
-            assert!(resolution.finish(&next));
-            assert!(!resolution.pending());
-        }
+    fn menu_cancellation_keeps_physical_gate_until_worker_finishes() {
+        let mut resolution = CollectionResolution::default();
+        let read = resolution.begin().unwrap();
+        resolution.cancel();
+        assert!(!read.ticket.is_current());
+        assert!(resolution.pending());
+        assert!(resolution.begin().is_none());
+        assert!(resolution.finish(&read));
+        let next = resolution.begin().unwrap();
+        assert!(!resolution.finish(&read));
+        assert!(next.ticket.is_current());
+        assert!(resolution.finish(&next));
     }
 
     #[test]
-    fn destroying_collection_owner_cancels_every_operation() {
-        for operation in [
-            ResolutionOwner::Menu,
-            ResolutionOwner::AlbumDrop,
-            ResolutionOwner::PlaylistAppend,
-        ] {
-            let mut resolution = CollectionResolution::default();
-            let read = resolution.begin(operation).unwrap();
-            drop(resolution);
-            assert!(!read.ticket.is_current());
-        }
+    fn destroying_collection_owner_cancels_menu_resolution() {
+        let mut resolution = CollectionResolution::default();
+        let read = resolution.begin().unwrap();
+        drop(resolution);
+        assert!(!read.ticket.is_current());
     }
 
     #[test]
@@ -1342,11 +1159,11 @@ mod tests {
             unreachable!()
         };
         let revisions = QueryRevisions::default();
-        for operation in [ResolutionOwner::Menu, ResolutionOwner::AlbumDrop] {
+        {
             // Cancel before dispatch, during an intermediate page, or during the final page.
             for cancel_at in 0..=2 {
                 let mut resolution = CollectionResolution::default();
-                let read = resolution.begin(operation).unwrap();
+                let read = resolution.begin().unwrap();
                 if cancel_at == 0 {
                     resolution.cancel();
                 }
@@ -1356,10 +1173,7 @@ mod tests {
                         assert!(ticket.is_current());
                         calls += 1;
                         if calls == cancel_at {
-                            match operation {
-                                ResolutionOwner::Menu => resolution.cancel_menu(),
-                                _ => resolution.cancel(),
-                            }
+                            resolution.cancel();
                         }
                         album_page(&[calls as i64], 2, revisions)
                     },
@@ -1373,203 +1187,10 @@ mod tests {
                 ));
                 assert_eq!(calls, cancel_at);
                 assert!(resolution.pending());
-                assert!(resolution.begin(ResolutionOwner::PlaylistAppend).is_none());
+                assert!(resolution.begin().is_none());
                 assert!(resolution.finish(&read));
                 assert!(!resolution.pending());
             }
-        }
-    }
-
-    fn playlist_cursor(
-        offset: usize,
-    ) -> rivu_protocol::model::BatchContinuation<rivu_protocol::model::PlaylistEntryCursor> {
-        rivu_protocol::model::BatchContinuation {
-            cursor: rivu_protocol::model::PlaylistEntryCursor {
-                position: offset as i64,
-                id: offset as i64,
-            },
-            offset,
-            scope: [1; 32],
-        }
-    }
-
-    fn playlist_batch(
-        ids: &[i64],
-        next: Option<
-            rivu_protocol::model::BatchContinuation<rivu_protocol::model::PlaylistEntryCursor>,
-        >,
-        revisions: QueryRevisions,
-    ) -> rivu_protocol::response::QueryResponse {
-        rivu_protocol::response::QueryResponse {
-            revisions,
-            result: Ok(ViewResponse::PlaylistEntryBatch(
-                rivu_protocol::model::Batch {
-                    rows: ids
-                        .iter()
-                        .enumerate()
-                        .map(|(offset, id)| rivu_protocol::model::PlaylistEntryRow {
-                            id: offset as i64,
-                            track_id: *id,
-                            position: offset,
-                            offset,
-                            title: String::new(),
-                            artist: String::new(),
-                            album: String::new(),
-                            duration: None,
-                            codec: String::new(),
-                            favorite: false,
-                            missing: false,
-                        })
-                        .collect(),
-                    next,
-                },
-            )),
-        }
-    }
-
-    #[test]
-    fn playlist_resolution_keeps_complete_order_and_occurrences() {
-        let revisions = QueryRevisions {
-            playlist_entries: Some(rivu_protocol::response::PlaylistEntryRevision {
-                playlist_id: 7,
-                revision: 4,
-            }),
-            ..Default::default()
-        };
-        let mut resolution = CollectionResolution::default();
-        let read = resolution.begin(ResolutionOwner::PlaylistAppend).unwrap();
-        let mut offsets = Vec::new();
-        let ids = resolve_playlist(
-            |query, ticket| {
-                assert!(ticket.is_current());
-                let Query::PlaylistEntryBatch {
-                    playlist_id,
-                    query,
-                    after,
-                    limit,
-                    expected,
-                } = query
-                else {
-                    unreachable!()
-                };
-                assert_eq!(playlist_id, 7);
-                assert!(query.is_none());
-                assert_eq!(limit, rivu_protocol::model::MAX_QUERY_ROWS);
-                assert_eq!(expected, Some(revisions));
-                offsets.push(after);
-                // Replacing/closing an unrelated menu cannot cancel this operation.
-                resolution.cancel_menu();
-                if after.is_none() {
-                    playlist_batch(&[9, 2], Some(playlist_cursor(2)), revisions)
-                } else {
-                    playlist_batch(&[9, 3], None, revisions)
-                }
-            },
-            7,
-            revisions,
-            &read.ticket,
-        )
-        .unwrap();
-        assert_eq!(offsets, [None, Some(playlist_cursor(2))]);
-        assert_eq!(ids, [9, 2, 9, 3]);
-        assert!(read.ticket.is_current());
-        assert!(resolution.pending());
-        assert!(resolution.finish(&read));
-        assert!(!resolution.pending());
-    }
-
-    #[test]
-    fn playlist_cancellation_stops_batches_without_publishing_or_releasing_worker() {
-        let revisions = QueryRevisions::default();
-        for cancel_at in 0..=2 {
-            let mut resolution = CollectionResolution::default();
-            let read = resolution.begin(ResolutionOwner::PlaylistAppend).unwrap();
-            if cancel_at == 0 {
-                resolution.cancel();
-            }
-            let mut calls = 0;
-            let result = resolve_playlist(
-                |_, ticket| {
-                    assert!(ticket.is_current());
-                    calls += 1;
-                    if calls == cancel_at {
-                        resolution.cancel();
-                    }
-                    let next = (calls == 1).then(|| playlist_cursor(1));
-                    playlist_batch(&[calls as i64], next, revisions)
-                },
-                7,
-                revisions,
-                &read.ticket,
-            );
-            assert!(matches!(
-                result.unwrap_err().downcast_ref::<QueryError>(),
-                Some(QueryError::Cancelled)
-            ));
-            assert_eq!(calls, cancel_at);
-            assert!(resolution.pending());
-            assert!(resolution.begin(ResolutionOwner::Menu).is_none());
-            assert!(resolution.finish(&read));
-            assert!(!resolution.pending());
-        }
-    }
-
-    #[test]
-    fn playlist_resolution_never_returns_partial_stale_or_incomplete_batches() {
-        let revisions = QueryRevisions {
-            library: 8,
-            playlist_entries: Some(rivu_protocol::response::PlaylistEntryRevision {
-                playlist_id: 7,
-                revision: 4,
-            }),
-            ..Default::default()
-        };
-        for failure in 0..5 {
-            let mut epoch = QueryEpoch::default();
-            let ticket = epoch.ticket();
-            let mut calls = 0;
-            let result = resolve_playlist(
-                |_, _| {
-                    calls += 1;
-                    if calls == 1 {
-                        return playlist_batch(&[9, 2], Some(playlist_cursor(2)), revisions);
-                    }
-                    match failure {
-                        0 => playlist_batch(
-                            &[8],
-                            None,
-                            QueryRevisions {
-                                library: 9,
-                                ..revisions
-                            },
-                        ),
-                        1 => playlist_batch(
-                            &[8],
-                            None,
-                            QueryRevisions {
-                                playlist_entries: Some(
-                                    rivu_protocol::response::PlaylistEntryRevision {
-                                        playlist_id: 7,
-                                        revision: 5,
-                                    },
-                                ),
-                                ..revisions
-                            },
-                        ),
-                        2 => playlist_batch(&[], Some(playlist_cursor(3)), revisions),
-                        3 => playlist_batch(&[8], Some(playlist_cursor(2)), revisions),
-                        _ => rivu_protocol::response::QueryResponse {
-                            revisions,
-                            result: Err(QueryError::Message("read failed".into())),
-                        },
-                    }
-                },
-                7,
-                revisions,
-                &ticket,
-            );
-            assert!(result.is_err());
-            assert_eq!(calls, 2);
         }
     }
 }

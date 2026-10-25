@@ -226,7 +226,7 @@ impl Core {
             ..crate::store::ScanImpacts::default()
         };
         self.invalidate_scan_impacts(impacts);
-        self.invalidate_playlist_members(affected_playlists);
+        self.invalidate_playlist_members(affected_playlists)?;
         let catalog = self.refresh_scan_catalog(impacts);
         // Only a fresh ID set can supply the queue projection's total. Retain
         // the previous queue snapshot if reading the committed IDs fails.
@@ -315,6 +315,7 @@ impl Core {
         impacts: crate::store::ScanImpacts,
     ) -> Result<()> {
         self.invalidate_scan_impacts(impacts);
+        self.state.library.album_revision = self.store.album_revision()?;
         let catalog = self.refresh_scan_catalog(impacts);
         // A failed projection read cannot hide another committed domain.
         let queue = if impacts.library {

@@ -1,7 +1,6 @@
 use super::*;
 use anyhow::{bail, ensure};
 use futures::FutureExt;
-use std::collections::BTreeMap;
 
 fn scan_message(progress: &ScanProgress) -> String {
     let unit = progress.total.map_or_else(
@@ -63,18 +62,12 @@ enum ScanInput {
     Import { path: PathBuf, name: String },
 }
 
-struct ImportPlaylistRevisions {
-    revision: u64,
-    entries: Arc<BTreeMap<i64, u64>>,
-}
-
 /// A worker's committed facts and prepared projections survive later failures.
 pub(super) struct ScanSaved {
     id: u64,
     progress: ScanProgress,
     library_committed: bool,
     playlist_id: Option<i64>,
-    playlist_entry_revisions: Option<Arc<BTreeMap<i64, u64>>>,
     outcome_uncertain: bool,
     impacts: Option<crate::store::ScanImpacts>,
     summary: String,
@@ -111,7 +104,6 @@ fn save_scan(
     database_path: &Path,
     current_id: Option<u64>,
     scan: ScanFinished,
-    import_revisions: Option<ImportPlaylistRevisions>,
     other_roots: Option<Vec<PathBuf>>,
     sender: tokio::sync::oneshot::Sender<ScanSaved>,
 ) {
@@ -122,7 +114,6 @@ fn save_scan(
             progress: scan.progress,
             library_committed: false,
             playlist_id: None,
-            playlist_entry_revisions: None,
             outcome_uncertain: false,
             impacts: None,
             summary: String::new(),
@@ -213,10 +204,6 @@ fn save_scan(
                 // Record the DB fact before preparing projections, so unwinding
                 // or any later refresh failure cannot erase the created id.
                 saved.playlist_id = Some(id);
-                let mut revisions =
-                    import_revisions.expect("Import saving reserves its playlist content revision");
-                Arc::make_mut(&mut revisions.entries).insert(id, revisions.revision);
-                saved.playlist_entry_revisions = Some(revisions.entries);
             }
             Err(error) => saved.error = Some(error),
         }
@@ -718,13 +705,6 @@ impl Core {
         } else {
             None
         };
-        // Capture only after relocation has retired: Saving rejects DB edits,
-        // so this O(1) snapshot cannot overwrite concurrent playlist changes.
-        // The worker pays for the shared BTreeMap copy only if import succeeds.
-        let import_revisions = scan.import.as_ref().map(|_| ImportPlaylistRevisions {
-            revision: self.next_playlist_entry_revision(),
-            entries: Arc::clone(&self.state.library.playlist_entry_revisions),
-        });
         let sender = self.scan_tx.clone();
         let current_id = self.state.queue.current_id;
         // Finished no longer awaits Core. Join preparation before scheduling the
@@ -735,14 +715,13 @@ impl Core {
             let progress = scan.progress.clone();
             let (completed, completion) = tokio::sync::oneshot::channel();
             let joined = tokio::task::spawn_blocking(move || {
-                save_scan(&database_path, current_id, scan, import_revisions, other_roots, completed)
+                save_scan(&database_path, current_id, scan, other_roots, completed)
             }).await;
             let saved = completion.await.unwrap_or_else(|_| ScanSaved {
                 id,
                 progress,
                 library_committed: false,
                 playlist_id: None,
-                playlist_entry_revisions: None,
                 outcome_uncertain: true,
                 impacts: None,
                 summary: String::new(),
@@ -846,9 +825,10 @@ impl Core {
                 }));
             }
         }
-        if saved.playlist_id.is_some() {
-            if let Some(revisions) = saved.playlist_entry_revisions {
-                self.state.library.playlist_entry_revisions = revisions;
+        if let Some(playlist_id) = saved.playlist_id {
+            if let Err(error) = self.refresh_playlist_entry_revision(playlist_id) {
+                errors
+                    .push(error.context("Playlist saved, but refreshing its content token failed"));
             }
             self.invalidate_playlist_creation(true);
             if let Some(total) = saved.playlist_total {
@@ -931,7 +911,6 @@ mod tests {
                         },
                         library_committed: false,
                         playlist_id: None,
-                        playlist_entry_revisions: None,
                         outcome_uncertain: false,
                         impacts: None,
                         summary: String::new(),
@@ -948,8 +927,6 @@ mod tests {
                     saved.impacts = Some(store.apply_scan(&ScanResult::default()).unwrap());
                     saved.library_committed = true;
                     saved.playlist_id = Some(store.create_playlist("Saved before panic").unwrap());
-                    saved.playlist_entry_revisions =
-                        Some(Arc::new(BTreeMap::from([(saved.playlist_id.unwrap(), 1)])));
                 }
                 panic!("saving worker failure");
             });
@@ -958,18 +935,9 @@ mod tests {
             assert!(saved.outcome_uncertain);
             assert_eq!(saved.library_committed, committed);
             assert_eq!(saved.playlist_id.is_some(), committed);
-            assert_eq!(
-                saved
-                    .playlist_entry_revisions
-                    .as_ref()
-                    .map(|entries| entries.len()),
-                committed.then_some(1)
-            );
             if let Some(id) = saved.playlist_id {
-                assert_eq!(
-                    saved.playlist_entry_revisions.as_ref().unwrap().get(&id),
-                    Some(&1)
-                );
+                let store = Store::open(&directory.path().join("library.db")).unwrap();
+                assert!(store.playlist_entry_revision(id).unwrap().is_some());
             }
             assert!(
                 saved

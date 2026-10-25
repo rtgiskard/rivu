@@ -6,11 +6,32 @@ impl Core {
         if self.database_maintenance_active() && self.maintenance_control(&command)? {
             return Ok(());
         }
-        self.apply_command(command)
+        let result = self.apply_command(command);
+        self.state.library.album_revision = self.store.album_revision()?;
+        result
     }
 
     fn apply_command(&mut self, command: Command) -> Result<()> {
         match command {
+            Command::TransferCollection {
+                source,
+                destination,
+            } => {
+                use rivu_protocol::model::CollectionDestination;
+                let (count, inserted) = self.store.transfer_collection(&source, destination)?;
+                match destination {
+                    CollectionDestination::Queue {
+                        insertion: Some(insertion),
+                    } => {
+                        self.insert_queue_ids(usize::try_from(insertion.index)?, inserted)?;
+                    }
+                    CollectionDestination::Queue { insertion: None } => self.append_queue_ids()?,
+                    CollectionDestination::Playlist { playlist_id, .. } if count != 0 => {
+                        self.invalidate_playlist_members(&[playlist_id])?;
+                    }
+                    CollectionDestination::Playlist { .. } => {}
+                }
+            }
             Command::PlayAlbum { key } => {
                 ensure!(
                     self.store.album_tracks_page(&key, None, 0, 0)?.total > 0,
@@ -266,7 +287,7 @@ impl Core {
                     &track_ids,
                     other_tracks.then_some(self.state.system.config.library_roots.as_slice()),
                 )? {
-                    self.invalidate_playlist_members(&[playlist_id]);
+                    self.invalidate_playlist_members(&[playlist_id])?;
                 }
             }
             Command::InsertPlaylist {
@@ -280,7 +301,7 @@ impl Core {
                     .store
                     .insert_playlist_tracks(playlist_id, &track_ids, index)?
                 {
-                    self.invalidate_playlist_members(&[playlist_id]);
+                    self.invalidate_playlist_members(&[playlist_id])?;
                 }
             }
             Command::InsertPlaylistSources {
@@ -299,7 +320,7 @@ impl Core {
                     other_tracks.then_some(self.state.system.config.library_roots.as_slice()),
                     index,
                 )? {
-                    self.invalidate_playlist_members(&[playlist_id]);
+                    self.invalidate_playlist_members(&[playlist_id])?;
                 }
             }
             Command::RemovePlaylistEntry { entry_id } => self.remove_playlist_entry(entry_id)?,

@@ -54,6 +54,11 @@ and starts playback; Append copies it without changing current playback. There
 is no playlist or queue-size cap. Empty or unknown playlists leave the queue
 unchanged.
 
+Desktop Append submits the playlist identity and selected content revision;
+SQLite checks it after acquiring the write lock, in the copying transaction. If
+membership/order changed before execution, including on another connection,
+Append fails without copying a stale or partial playlist.
+
 When the queue is nonempty, the GUI asks before replacing it by default. Cancel
 or Esc keeps queue and playback untouched. Configure this shared album/playlist
 preference under link:01_config.adoc#_volume_and_playback_controls[Volume and playback controls].
