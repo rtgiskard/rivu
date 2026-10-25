@@ -944,7 +944,6 @@ mod command;
 mod dispatch;
 mod export;
 mod maintenance;
-mod persistence;
 mod playback;
 mod playlists;
 mod processing;
@@ -952,6 +951,7 @@ mod queue;
 mod relocation;
 mod settings;
 mod tracks;
+mod write_gate;
 
 fn now() -> i64 {
     SystemTime::now()
