@@ -256,8 +256,8 @@ a fixed or minimum height. Its menu and panel catalog anchor above the actual
 footer bounds, with a 1rem right inset and a 0.5rem clearance from the other
 window edges. Menus size to their contents rather than a fixed width or the
 whole workspace; catalog items wrap to the available width. An individual
-overlong label truncates within its item and exposes its full text in a
-tooltip. Oversized menus scroll within the available height. Shared
+overlong label truncates within its item; catalog items do not show tooltips.
+Oversized menus scroll within the available height. Shared
 menus, tooltip width limits, and drag-preview width limits likewise retain
 0.5rem clearance on both sides of the viewport, following interface scale.
 The catalog's second row groups artwork and visualizations, followed by Audio
@@ -280,6 +280,14 @@ Tools align with the bottom of the complete title and subtitle/status block.
 Both the title-to-tools separation and the space between controls use `gap_1`
 (0.25rem). A separate `panel_toolbar` remains available for wrapping toolbars;
 it is not the heading's overflow policy.
+
+Layout management separates its heading, layout list and action footer with
+dividers. The card has a 0.75rem outer inset; list labels, form content, footer
+actions and status messages share a second 0.5rem inset below the heading.
+List names shrink within their rows while the current-layout marker
+and delete action retain a trailing slot. Duplicate and Rename stay grouped;
+Sync sits at the opposite end of a wrapping footer. Confirmation forms align
+Cancel and Submit to the right without changing button styling.
 
 List panels and Track details use `list_panel_header` for the same two-line title
 and secondary-text presentation. Track details supplies its editor/read status

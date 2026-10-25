@@ -97,8 +97,7 @@ impl GuiApp {
                             });
                             cx.new(|_| drag.clone())
                         })
-                })
-                .tooltip(rivu_ui::text_tooltip(title));
+                });
             if matches!(
                 kind,
                 "spectrum"

@@ -136,33 +136,39 @@ impl GuiApp {
     ) -> AnyElement {
         let theme = rivu_ui::theme::palette(cx);
         let mut content = rivu_ui::Dialog::scroll_card(theme, "layouts-content", window)
+            .p_3()
             .gap_2()
-            .child(rivu_ui::panel_heading_row(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .text_lg()
-                    .child(self.tr("shell-layouts")),
-                rivu_ui::panel_header_actions().child(
-                    IconButton::new("layouts-close", "", self.tr("shell-close-layouts"))
-                        .build(
-                            IconButtonStyle::Quiet,
-                            IconButtonDensity::Regular,
-                            cx,
-                            |this, window, cx| {
-                                this.shell.dismiss(shell::Surface::Layouts);
-                                this.layout_action = None;
-                                this.focus_layout(window, cx);
-                                cx.notify();
-                            },
-                        )
-                        .focus(|style| {
-                            style
-                                .border_color(gpui::transparent_black())
-                                .text_color(rgb(theme.accent))
-                        }),
-                ),
-            ));
+            .child(
+                rivu_ui::panel_heading_row(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_lg()
+                        .child(self.tr("shell-layouts")),
+                    rivu_ui::panel_header_actions().child(
+                        IconButton::new("layouts-close", "", self.tr("shell-close-layouts"))
+                            .build(
+                                IconButtonStyle::Quiet,
+                                IconButtonDensity::Regular,
+                                cx,
+                                |this, window, cx| {
+                                    this.shell.dismiss(shell::Surface::Layouts);
+                                    this.layout_action = None;
+                                    this.focus_layout(window, cx);
+                                    cx.notify();
+                                },
+                            )
+                            .focus(|style| {
+                                style
+                                    .border_color(gpui::transparent_black())
+                                    .text_color(rgb(theme.accent))
+                            }),
+                    ),
+                )
+                .pb_2()
+                .border_b_1()
+                .border_color(rgb(theme.border)),
+            );
         if let Some(action) = self.layout_action.clone() {
             let (title, submit) = match &action {
                 Action::Duplicate => (
@@ -178,20 +184,27 @@ impl GuiApp {
                     self.tr("shell-delete"),
                 ),
             };
-            content = content.child(caption(theme, title));
+            content = content.child(caption(theme, title).px_2());
             if let Action::Delete(name) = &action {
-                content = content.child(div().text_sm().child(self.i18n.format(
+                content = content.child(div().px_2().text_sm().child(self.i18n.format(
                     "shell-delete-layout-confirm",
                     &[("name", name.as_str().into())],
                 )));
             } else {
                 content = content.child(
                     FormField::new(theme, self.tr("shell-name"), self.layout_name.clone())
-                        .into_div(),
+                        .into_div()
+                        .px_2(),
                 );
             }
             content = content.child(
                 row()
+                    .flex_wrap()
+                    .justify_end()
+                    .px_2()
+                    .pt_2()
+                    .border_t_1()
+                    .border_color(rgb(theme.border))
                     .child(
                         IconButton::new(
                             "layout-action-cancel",
@@ -241,15 +254,22 @@ impl GuiApp {
             for (index, name) in names.enumerate() {
                 let current = name == self.workspace.layouts.active_name();
                 let target: SharedString = name.to_owned().into();
-                let mut choice = row().id(target.clone()).group("layout-choice-row").child(
-                    menu_item(
-                        ("layout-select", index),
-                        target.clone(),
-                        cx,
-                        move |this, window, cx| this.select_layout(&target, window, cx),
-                    )
-                    .flex_1(),
-                );
+                let mut choice = row()
+                    .id(target.clone())
+                    .group("layout-choice-row")
+                    .w_full()
+                    .min_h_8()
+                    .gap_1()
+                    .child(
+                        menu_item(
+                            ("layout-select", index),
+                            target.clone(),
+                            cx,
+                            move |this, window, cx| this.select_layout(&target, window, cx),
+                        )
+                        .flex_1()
+                        .min_w_0(),
+                    );
                 if current {
                     choice = choice.child(
                         div()
@@ -291,36 +311,51 @@ impl GuiApp {
                 .child(
                     div()
                         .id("layout-list")
+                        .pr_2()
                         .max_h((window.viewport_size().height * 0.5).min(px(360.)))
                         .overflow_y_scroll()
                         .child(choices),
                 )
                 .child(
                     row()
+                        .flex_wrap()
+                        .justify_between()
+                        .px_2()
+                        .pt_2()
+                        .border_t_1()
+                        .border_color(rgb(theme.border))
                         .child(
-                            IconButton::new(
-                                "layout-duplicate",
-                                "",
-                                self.tr("shell-duplicate-layout-as"),
-                            )
-                            .build(
-                                IconButtonStyle::Surface,
-                                IconButtonDensity::Regular,
-                                cx,
-                                |this, window, cx| {
-                                    this.begin_layout_action(Action::Duplicate, window, cx)
-                                },
-                            ),
-                        )
-                        .child(
-                            IconButton::new("layout-rename", "󰏫", self.tr("shell-rename-layout"))
-                                .build(
-                                    IconButtonStyle::Surface,
-                                    IconButtonDensity::Regular,
-                                    cx,
-                                    |this, window, cx| {
-                                        this.begin_layout_action(Action::Rename, window, cx)
-                                    },
+                            row()
+                                .flex_shrink_0()
+                                .child(
+                                    IconButton::new(
+                                        "layout-duplicate",
+                                        "",
+                                        self.tr("shell-duplicate-layout-as"),
+                                    )
+                                    .build(
+                                        IconButtonStyle::Surface,
+                                        IconButtonDensity::Regular,
+                                        cx,
+                                        |this, window, cx| {
+                                            this.begin_layout_action(Action::Duplicate, window, cx)
+                                        },
+                                    ),
+                                )
+                                .child(
+                                    IconButton::new(
+                                        "layout-rename",
+                                        "󰏫",
+                                        self.tr("shell-rename-layout"),
+                                    )
+                                    .build(
+                                        IconButtonStyle::Surface,
+                                        IconButtonDensity::Regular,
+                                        cx,
+                                        |this, window, cx| {
+                                            this.begin_layout_action(Action::Rename, window, cx)
+                                        },
+                                    ),
                                 ),
                         )
                         .child(
@@ -340,18 +375,16 @@ impl GuiApp {
         }
         match self.workspace.save_status {
             workspace::SaveStatus::Saving => {
-                content = content.child(status_message(
-                    theme,
-                    self.tr("shell-layouts-syncing"),
-                    StatusKind::Info,
-                ));
+                content = content.child(
+                    status_message(theme, self.tr("shell-layouts-syncing"), StatusKind::Info)
+                        .px_2(),
+                );
             }
             workspace::SaveStatus::Finished if self.workspace.save_error.is_none() => {
-                content = content.child(status_message(
-                    theme,
-                    self.tr("shell-layouts-synced"),
-                    StatusKind::Success,
-                ));
+                content = content.child(
+                    status_message(theme, self.tr("shell-layouts-synced"), StatusKind::Success)
+                        .px_2(),
+                );
             }
             _ => {}
         }
@@ -363,7 +396,8 @@ impl GuiApp {
                     error.clone(),
                     cx,
                 )
-                .text_color(rgb(theme.error)),
+                .text_color(rgb(theme.error))
+                .px_2(),
             );
         }
         rivu_ui::Dialog::backdrop("layouts-modal")
