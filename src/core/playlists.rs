@@ -63,13 +63,33 @@ impl Core {
         &mut self,
         playlist_id: i64,
     ) -> Result<()> {
+        let revision = self.store.playlist_entry_revision(playlist_id)?;
+        self.set_playlist_entry_revision(playlist_id, revision);
+        Ok(())
+    }
+
+    pub(in crate::core) fn set_playlist_entry_revision(
+        &mut self,
+        playlist_id: i64,
+        revision: Option<u64>,
+    ) -> bool {
+        if self
+            .state
+            .library
+            .playlist_entry_revisions
+            .get(&playlist_id)
+            .copied()
+            == revision
+        {
+            return false;
+        }
         let revisions = Arc::make_mut(&mut self.state.library.playlist_entry_revisions);
-        if let Some(revision) = self.store.playlist_entry_revision(playlist_id)? {
+        if let Some(revision) = revision {
             revisions.insert(playlist_id, revision);
         } else {
             revisions.remove(&playlist_id);
         }
-        Ok(())
+        true
     }
 
     pub(in crate::core) fn playlist_created(
@@ -77,9 +97,12 @@ impl Core {
         playlist_id: i64,
         has_members: bool,
     ) -> Result<()> {
-        self.refresh_playlist_entry_revision(playlist_id)?;
         self.invalidate_playlist_creation(has_members);
-        self.refresh_playlist_count()
+        let revision = self.refresh_playlist_entry_revision(playlist_id);
+        let count = self.refresh_playlist_count();
+        revision.and(count).context(
+            "Playlist creation committed, but refreshing views failed; some projections may be stale",
+        )
     }
 
     pub(in crate::core) fn invalidate_playlist_creation(&mut self, has_members: bool) {
@@ -98,7 +121,7 @@ impl Core {
         playlist_id: i64,
         had_members: bool,
     ) -> Result<()> {
-        Arc::make_mut(&mut self.state.library.playlist_entry_revisions).remove(&playlist_id);
+        self.set_playlist_entry_revision(playlist_id, None);
         if had_members {
             self.state.library.duplicate_members_revision = self
                 .state
@@ -114,16 +137,19 @@ impl Core {
         if ids.is_empty() {
             return Ok(());
         }
-        for &playlist_id in ids {
-            self.refresh_playlist_entry_revision(playlist_id)?;
-        }
         self.state.library.playlist_revision = self.state.library.playlist_revision.wrapping_add(1);
         self.state.library.duplicate_members_revision = self
             .state
             .library
             .duplicate_members_revision
             .wrapping_add(1);
-        Ok(())
+        let mut result = Ok(());
+        for &playlist_id in ids {
+            result = result.and(self.refresh_playlist_entry_revision(playlist_id));
+        }
+        result.context(
+            "Playlist changes committed, but refreshing entry tokens failed; previous tokens retained",
+        )
     }
 
     fn refresh_playlist_count(&mut self) -> Result<()> {

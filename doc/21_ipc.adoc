@@ -403,12 +403,22 @@ even with the same ID, cannot revive an old token. Retention is bounded by extan
 playlists, with no per-track version table or mutation event log. Core publishes
 its own committed scoped changes through the Library state-section token. A query
 also reconciles the collection authority actually observed in its SQLite snapshot
-and publishes changed playlist scopes before delivering its response, so GUI
+and publishes changed album or playlist scopes before delivering its response, so GUI
 completion checks the same authority. Unchanged and unrelated scopes retain their
 tokens; failed version reads and cancelled queries do not invent observations.
 Creation and deletion publish their lifetime/catalog validity before refreshing
 `playlist_total`. Renames and membership edits retain that total and perform no
 catalog count read; their summary/content invalidation does not depend on one.
+
+Revision reads follow the query's dependency domains: album pages read the album
+token, queue and duplicate-member queries read the queue token, and playlist
+content queries read only the owning playlist token. These reads share the rows'
+SQLite snapshot; publishing their observations does not re-read unrelated tokens.
+Successful commands outside maintenance reuse the album token refreshed by command
+execution when publishing. Event publication, failed commands and maintenance
+branches retain the normal refresh path. Playlist version maps use copy-on-write
+only when an observed value or presence changes; multiple scope updates before
+the next publication share the first copy.
 
 Playback-statistics writes return count and activity time directly to the Core.
 The bounded track cache and current/recent snapshots receive these scalar changes

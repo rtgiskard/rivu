@@ -17,7 +17,7 @@ pub(super) enum BusinessEvent {
 /// Facts actually read in a query's SQLite snapshot. Failed/cancelled reads
 /// cannot manufacture an observation from the response's fallback revisions.
 struct QueryAuthority {
-    album_revision: u64,
+    album_revision: Option<u64>,
     playlist: Option<(i64, Option<u64>)>,
 }
 
@@ -255,13 +255,19 @@ impl Core {
                         | Command::ProcessingGraphExport { .. }
                         | Command::ProcessingGraphAudition { .. }
                 );
+                let maintenance = self.database_maintenance_active();
                 let result = self.command(command);
                 if let Err(error) = &result
                     && (!library_owned || request.reply.is_none())
                 {
                     self.state.system.last_error = Some(format!("{error:#}"));
                 }
-                self.publish();
+                if !maintenance {
+                    // command() attempted the token refresh without changing its result.
+                    self.publish_snapshot();
+                } else {
+                    self.publish();
+                }
                 let scan_id = if result.is_ok() {
                     if starts_external {
                         self.active_external_admission
@@ -384,7 +390,7 @@ impl Core {
         }
     }
 
-    pub(in crate::core) fn publish(&mut self) {
+    pub(in crate::core) fn refresh_album_revision(&mut self) {
         match self.store.album_revision() {
             Ok(revision) => self.state.library.album_revision = revision,
             Err(error) => {
@@ -393,6 +399,15 @@ impl Core {
                 ))
             }
         }
+    }
+
+    pub(in crate::core) fn publish(&mut self) {
+        self.refresh_album_revision();
+        self.publish_snapshot();
+    }
+
+    /// Publish observations already captured by the serialized owner.
+    fn publish_snapshot(&mut self) {
         self.state.system.revision = self.state.system.revision.wrapping_add(1);
         {
             let mut shared = self.shared.write();
@@ -465,29 +480,18 @@ impl Core {
         }
         let (response, authority) = self.read_query(query);
         if let Some(authority) = authority {
-            let mut changed = self.state.library.album_revision != authority.album_revision;
-            self.state.library.album_revision = authority.album_revision;
-            if let Some((playlist_id, revision)) = authority.playlist
-                && self
-                    .state
-                    .library
-                    .playlist_entry_revisions
-                    .get(&playlist_id)
-                    .copied()
-                    != revision
-            {
-                let entries = Arc::make_mut(&mut self.state.library.playlist_entry_revisions);
-                if let Some(revision) = revision {
-                    entries.insert(playlist_id, revision);
-                } else {
-                    entries.remove(&playlist_id);
-                }
-                changed = true;
+            let mut changed = false;
+            if let Some(revision) = authority.album_revision {
+                changed = self.state.library.album_revision != revision;
+                self.state.library.album_revision = revision;
+            }
+            if let Some((playlist_id, revision)) = authority.playlist {
+                changed |= self.set_playlist_entry_revision(playlist_id, revision);
             }
             if changed {
                 // Core publishes before dispatch_request releases the response;
                 // GUI completion refreshes this snapshot before checking stamps.
-                self.publish();
+                self.publish_snapshot();
             }
         }
         response
@@ -533,7 +537,8 @@ impl Core {
                 _ => None,
             };
             authority = Some(QueryAuthority {
-                album_revision: revisions.album,
+                album_revision: matches!(query, Query::Albums { .. } | Query::AlbumTracks { .. })
+                    .then_some(revisions.album),
                 playlist: playlist_id
                     .map(|id| (id, revisions.playlist_entries.map(|scope| scope.revision))),
             });
@@ -560,8 +565,19 @@ impl Core {
 
     fn database_query_revisions(&self, query: &Query) -> Result<QueryRevisions, QueryError> {
         let mut revisions = self.state.query_revisions_for(query);
-        revisions.album = self.store.album_revision()?;
-        revisions.queue = self.store.queue_revision()?;
+        match query {
+            Query::Albums { .. } | Query::AlbumTracks { .. } => {
+                revisions.album = self.store.album_revision()?;
+            }
+            Query::QueuePage { .. }
+            | Query::QueueBatch { .. }
+            | Query::QueueEntries { .. }
+            | Query::DuplicateMembers { .. }
+            | Query::DuplicateMemberSelection { .. } => {
+                revisions.queue = self.store.queue_revision()?;
+            }
+            _ => {}
+        }
         let playlist_id = match query {
             Query::PlaylistEntries { playlist_id, .. }
             | Query::PlaylistEntryBatch { playlist_id, .. }

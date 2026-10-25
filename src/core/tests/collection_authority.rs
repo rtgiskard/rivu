@@ -546,3 +546,35 @@ fn external_playlist_entry_identity_change_rejects_stale_batch_cursor() {
         first.revisions.playlist_entries
     );
 }
+
+#[test]
+fn external_album_query_publishes_observed_token_before_reply() {
+    let (directory, mut core) = fixture_with_database(Some(10.0), true);
+    prepare(&mut core);
+    core.publish();
+    let query = album_query(&core);
+    let before = core.state.library.album_revision;
+    let (handle, control, worker, _) = navigation_runtime(core);
+    let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+    connection
+        .execute_batch(
+            "UPDATE tracks SET track_number=CASE id WHEN 1 THEN 2 ELSE 1 END WHERE id IN(1,2)",
+        )
+        .unwrap();
+    let response = handle.query(query.clone());
+    let snapshot = handle.gui_snapshot();
+    assert_ne!(response.revisions.album, before);
+    assert_eq!(
+        query.stamp(snapshot.query_revisions(None)),
+        query.stamp(response.revisions)
+    );
+    let Ok(ViewResponse::AlbumTracks(page)) = response.result else {
+        panic!("Expected album tracks")
+    };
+    assert_eq!(
+        page.rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+        [2, 1]
+    );
+    control.request_shutdown().unwrap();
+    worker.join().unwrap();
+}
