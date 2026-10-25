@@ -722,6 +722,13 @@ link:01_config.adoc[Configuration] and link:02_library.adoc[Library].
 
 === Scanning and metadata ownership
 
+Core owns task admission and retirement; library workers prepare filesystem facts,
+and Store commits database facts. link:../src/library/source.rs[Source preparation]
+is shared by scans and external queue admission: it owns descriptor identity,
+metadata reuse, probing and incremental hashing. Directory traversal, CUE expansion
+and scan coverage remain in `library::scan`; sharing source preparation does not
+apply those scan policies to external queue inputs.
+
 Scan-backed metadata and user overrides skip unchanged stored values. An override
 equal to the raw value still records editing intent; an omitted field continues
 to follow rescans. No-op edits succeed for existing tracks and reject unknown IDs.

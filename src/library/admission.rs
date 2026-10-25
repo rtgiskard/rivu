@@ -1,5 +1,6 @@
 use super::paths::{is_audio_path, logical_path};
-use super::scan::{MAX_REPORTED_SCAN_ERRORS, SOURCE_BATCH_SIZE, ScanRecord, prepare_sources};
+use super::scan::MAX_REPORTED_SCAN_ERRORS;
+use super::source::{HASH_CHUNK_BYTES, SOURCE_BATCH_SIZE, ScanRecord, prepare_sources};
 use super::{KnownFile, ScanCancellation};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -99,7 +100,7 @@ where
         return Ok(result);
     }
     let mut sources = HashMap::new();
-    let mut scratch = vec![0; 128 * 1024];
+    let mut scratch = vec![0; HASH_CHUNK_BYTES];
     let total = unique.len();
     let mut unique = unique.into_iter();
     loop {
@@ -255,7 +256,7 @@ mod tests {
         let metadata = std::fs::metadata(&path).unwrap();
         let known = KnownFile {
             size: metadata.len(),
-            modified_ns: super::super::scan::cache_modified_ns(metadata.modified().ok()),
+            modified_ns: super::super::source::cache_modified_ns(metadata.modified().ok()),
             fingerprint: Some(blake3::hash(b"cached encoded content").to_hex().to_string()),
             media: Some(MediaInfo {
                 title: "Cached title".into(),

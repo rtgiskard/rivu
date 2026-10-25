@@ -1,7 +1,7 @@
 use super::scan::{
     MAX_RECORDED_SCAN_UNCERTAINTIES, MAX_RECORDED_SKIPPED_DIRECTORIES, MAX_REPORTED_SCAN_ERRORS,
-    UNCACHEABLE_MODIFIED_NS, cache_modified_ns,
 };
+use super::source::{UNCACHEABLE_MODIFIED_NS, cache_modified_ns};
 use super::*;
 use anyhow::{Context, Result};
 use rivu_protocol::model::{CueSegment, PlaylistExportTrack, ScanPhase, Track};
@@ -62,7 +62,7 @@ fn scan_paths(
 fn source_lookup_batches_are_bounded_and_cover_only_encountered_sources() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let root = directory.path().to_path_buf();
-    let count = 2 * super::scan::SOURCE_BATCH_SIZE + 1;
+    let count = 2 * super::source::SOURCE_BATCH_SIZE + 1;
     for index in 0..count {
         wav(&root.join(format!("{index:03}.wav")), 75)?;
     }
@@ -71,7 +71,7 @@ fn source_lookup_batches_are_bounded_and_cover_only_encountered_sources() -> Res
     let result = super::scan_paths(
         std::slice::from_ref(&root),
         |paths| {
-            assert!(paths.len() <= super::scan::SOURCE_BATCH_SIZE);
+            assert!(paths.len() <= super::source::SOURCE_BATCH_SIZE);
             batches.push(paths.len());
             for path in paths {
                 assert!(path.starts_with(&root));
@@ -94,8 +94,8 @@ fn source_lookup_batches_are_bounded_and_cover_only_encountered_sources() -> Res
     assert_eq!(
         batches,
         [
-            super::scan::SOURCE_BATCH_SIZE,
-            super::scan::SOURCE_BATCH_SIZE,
+            super::source::SOURCE_BATCH_SIZE,
+            super::source::SOURCE_BATCH_SIZE,
             1
         ]
     );
@@ -106,7 +106,7 @@ fn source_lookup_batches_are_bounded_and_cover_only_encountered_sources() -> Res
 fn cue_lookup_batches_share_sources_across_sheet_batches() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let root = directory.path().to_path_buf();
-    let count = super::scan::SOURCE_BATCH_SIZE + 1;
+    let count = super::source::SOURCE_BATCH_SIZE + 1;
     for index in 0..count {
         wav(&root.join(format!("{index:03}.wav")), 75)?;
         fs::write(
@@ -139,7 +139,7 @@ fn cue_lookup_batches_share_sources_across_sheet_batches() -> Result<()> {
         |_, _, _, _, _| {},
     )?;
     assert!(result.errors.is_empty(), "{:?}", result.errors);
-    assert_eq!(batches, [super::scan::SOURCE_BATCH_SIZE, 1]);
+    assert_eq!(batches, [super::source::SOURCE_BATCH_SIZE, 1]);
     assert_eq!(seen.len(), count);
     assert_eq!(result.records.len(), count + 1);
     assert!(result.records.iter().all(|record| record.cue.is_some()));
@@ -494,11 +494,11 @@ fn cancellation_during_a_hash_read_stops_at_the_chunk_boundary() {
     };
     let mut scratch = [0; 128 * 1024];
     let mut hasher = blake3::Hasher::new();
-    let first = super::scan::hash_chunk(&mut reader, &mut scratch, &mut hasher, &cancellation);
+    let first = super::source::hash_chunk(&mut reader, &mut scratch, &mut hasher, &cancellation);
     assert_eq!(first.unwrap(), Some(scratch.len()));
     let first_hash = hasher.finalize();
     assert!(
-        super::scan::hash_chunk(&mut reader, &mut scratch, &mut hasher, &cancellation).is_err()
+        super::source::hash_chunk(&mut reader, &mut scratch, &mut hasher, &cancellation).is_err()
     );
     assert_eq!(
         hasher.finalize(),
