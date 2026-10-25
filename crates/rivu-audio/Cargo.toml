@@ -12,7 +12,7 @@ test-support = []
 
 [dependencies]
 rivu-dsp = { path = "../rivu-dsp", default-features = false, features = ["execution"] }
-rivu-format = { path = "../rivu-format" }
+rivu-format = { path = "../rivu-format", default-features = false }
 anyhow = "1"
 crossbeam-channel = "0.5"
 futures = "0.3"

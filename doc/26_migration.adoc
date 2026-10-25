@@ -51,6 +51,16 @@ It has no dependency on the application, UI, audio engine, or migration package.
 Current defaults and validation share this implementation rather than a second
 configuration model with different rules.
 
+The package has no default features. Its `database` feature enables the database
+module and SQLite dependency; the application and `rivu-migrate` explicitly enable
+it. `rivu-audio` leaves it disabled, so its standalone dependency graph uses the
+configuration and file-admission contracts without pulling in SQLite. Cargo may
+unify `database` when these consumers are built together; the application still
+requires SQLite.
+
+Run `cargo test -p rivu-format --no-default-features` for the non-database contracts,
+and add `--features database` to include schema and trigger behavior tests.
+
 The application depends on that current contract. Runtime owners, connection caches,
 Settings patches, Core, and UI remain application responsibilities. Application
 configuration I/O is distinct from the shared configuration representation.

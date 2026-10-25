@@ -17,7 +17,7 @@ ffmpeg = ["rivu-audio/ffmpeg"]
 embed-nerd-font = []
 
 [dependencies]
-rivu-format = { path = "crates/rivu-format" }
+rivu-format = { path = "crates/rivu-format", default-features = false, features = ["database"] }
 rivu-audio = { path = "crates/rivu-audio", default-features = false }
 rivu-ui = { path = "crates/rivu-ui" }
 rivu-dsp = { path = "crates/rivu-dsp", default-features = false, features = ["execution"] }
