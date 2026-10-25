@@ -2318,3 +2318,118 @@ fn msaa_material_kinds_share_dense_groups_but_keep_overlap_resolves() -> anyhow:
     compare_individual_material_draws(&mut renderer, &scene, size(96, 48))?;
     Ok(())
 }
+
+#[test]
+fn alpha_transitions_preserve_mixed_pixels_uploads_and_scratch_recovery() -> anyhow::Result<()> {
+    let mut renderer = WgpuHeadlessRenderer::new()?;
+    let mut scene = Scene::default();
+    for (index, material) in [
+        frame([1.0, 0.0, 0.0, 0.5]),
+        segment_frame([0.0, 0.5, 1.0, 0.5], 5.0, [0.0, 1.0, 0.0, 0.5])?,
+        palette_curve(&[[0.0, 0.0, 1.0, 0.5]])?,
+        GpuFrame::waveform(
+            vec![gpui::GpuWaveformColumn { levels: [0.5; 4] }; 4],
+            GpuPalette::new(&[[1.0, 1.0, 0.0, 0.5]; 2], 2)?,
+            gpui::GpuWaveformParams::default(),
+            limits(),
+        )?,
+        field_frame(
+            1,
+            1,
+            &[0.5],
+            GpuPalette::new(&[[1.0, 0.0, 1.0, 0.5]], 1)?,
+            GpuValueMapping::Linear { min: 0.0, max: 1.0 },
+        )?,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut record = draw(
+            GpuSource::Fixed(material),
+            bounds(4.25 + index as f32 * 24.0, 8.5, 20.0, 32.0),
+        );
+        record.scale_factor = 1.25;
+        record.opacity = 0.65;
+        scene.insert_primitive(record);
+    }
+    let mut native = curved_path().scale(1.25);
+    native.color = gpui::Hsla {
+        a: 0.5,
+        ..gpui::white()
+    }
+    .into();
+    native.content_mask.bounds = bounds(3.5, 4.25, 20.0, 24.0);
+    scene.insert_primitive(native);
+    scene.insert_primitive(quad(
+        bounds(12.0, 16.0, 8.0, 8.0),
+        gpui::Hsla {
+            a: 0.5,
+            ..gpui::blue()
+        },
+    ));
+    scene.finish();
+    let target = size(128, 48);
+    renderer.ensure_render_target(target)?;
+    let view = renderer.render_target.as_ref().unwrap().view.clone();
+    let mut retained = None;
+    for alpha in [
+        wgpu::CompositeAlphaMode::Opaque,
+        wgpu::CompositeAlphaMode::PreMultiplied,
+        wgpu::CompositeAlphaMode::PostMultiplied,
+        wgpu::CompositeAlphaMode::Opaque,
+    ] {
+        // Use the shared live transition, not a test-only pipeline rebuild.
+        renderer.core.update_alpha_mode(alpha);
+        renderer.core.render_frame(
+            &scene,
+            &view,
+            target,
+            alpha == wgpu::CompositeAlphaMode::PreMultiplied,
+            wgpu::Color::TRANSPARENT,
+        )?;
+        let actual = renderer.read_image()?;
+        assert!(actual.pixels().any(|pixel| pixel.0[3] > 0 && pixel.0[3] < 255));
+        let resources = (
+            renderer.msaa_attachment_stats(),
+            renderer.core.resources.materials.stats().3,
+            renderer.core.resources.materials.palette_stats().1,
+        );
+        if let Some(retained) = retained {
+            assert_eq!(resources, retained, "alpha changes must retain scratch and uploads");
+        }
+        retained = Some(resources);
+
+        // A fresh destination-mode core is an independent reference for both
+        // ordinary/native composites and the separately blended field material.
+        let mut fresh = WgpuHeadlessRenderer::new()?;
+        fresh.core = WgpuRendererCore::new(
+            &fresh.context,
+            Arc::new(WgpuAtlas::from_context(&fresh.context)),
+            fresh.core.target_format,
+            alpha,
+        );
+        fresh.ensure_render_target(target)?;
+        let fresh_view = fresh.render_target.as_ref().unwrap().view.clone();
+        fresh.core.render_frame(
+            &scene,
+            &fresh_view,
+            target,
+            alpha == wgpu::CompositeAlphaMode::PreMultiplied,
+            wgpu::Color::TRANSPARENT,
+        )?;
+        assert_eq!(actual, fresh.read_image()?, "alpha transition to {alpha:?}");
+    }
+
+    // Reattachment drops size-bound scratch, not immutable material uploads.
+    // Model that resource boundary without claiming a native surface was tested.
+    let before_release = renderer.read_image()?;
+    let (attachments, uploads, palettes) = retained.unwrap();
+    renderer.core.resources.invalidate_intermediate_textures();
+    assert_eq!(renderer.msaa_attachment_stats(), (None, attachments.1));
+    renderer.core.render_frame(&scene, &view, target, false, wgpu::Color::TRANSPARENT)?;
+    assert_eq!(renderer.read_image()?, before_release);
+    assert_eq!(renderer.msaa_attachment_stats().1, attachments.1 + 1);
+    assert_eq!(renderer.core.resources.materials.stats().3, uploads);
+    assert_eq!(renderer.core.resources.materials.palette_stats().1, palettes);
+    Ok(())
+}

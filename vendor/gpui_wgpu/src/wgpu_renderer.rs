@@ -1175,21 +1175,9 @@ impl WgpuRenderer {
             return;
         }
         self.surface_config.alpha_mode = new_alpha_mode;
-        let format = self.surface_config.format;
-
-        let Some(core) = self.core_mut() else {
-            return;
-        };
-        let resources = &mut core.resources;
-        resources.pipelines = WgpuRendererCore::create_pipelines(
-            &resources.device,
-            &resources.bind_group_layouts,
-            format,
-            new_alpha_mode,
-            core.rendering_params.path_sample_count,
-            core.dual_source_blending,
-            core.uses_webgl_instance_data,
-        );
+        if let Some(core) = self.core_mut() {
+            core.update_alpha_mode(new_alpha_mode);
+        }
 
         if let RendererState::Ready { surface, core } = &self.state {
             surface.configure(&core.resources.device, &self.surface_config);
@@ -1509,6 +1497,18 @@ impl WgpuRendererCore {
 
     fn resources_mut(&mut self) -> &mut WgpuResources {
         &mut self.resources
+    }
+
+    fn update_alpha_mode(&mut self, alpha_mode: wgpu::CompositeAlphaMode) {
+        self.resources.pipelines = Self::create_pipelines(
+            &self.resources.device,
+            &self.resources.bind_group_layouts,
+            self.target_format,
+            alpha_mode,
+            self.rendering_params.path_sample_count,
+            self.dual_source_blending,
+            self.uses_webgl_instance_data,
+        );
     }
 
     fn ensure_msaa_scratch(&mut self, extent: (u32, u32), size: Size<DevicePixels>) {
@@ -1898,7 +1898,7 @@ impl WgpuRendererCore {
                         let paths = &scene.paths[range];
 
                         drop(pass);
-                        let rasterized = self.draw_paths_to_intermediate(
+                        self.draw_paths_to_intermediate(
                             &mut encoder,
                             paths,
                             size,
@@ -1921,14 +1921,12 @@ impl WgpuRendererCore {
                             ..Default::default()
                         });
 
-                        if rasterized {
-                            self.draw_paths_from_intermediate(
-                                paths,
-                                raster,
-                                &mut instance_offset,
-                                &mut pass,
-                            )?;
-                        }
+                        self.draw_paths_from_intermediate(
+                            paths,
+                            raster,
+                            &mut instance_offset,
+                            &mut pass,
+                        )?;
                     }
                     PrimitiveBatch::Underlines(range) => self.draw_instances(
                         &instance_bindings.underlines,
@@ -2259,7 +2257,9 @@ impl WgpuRendererCore {
         size: Size<DevicePixels>,
         raster: Bounds<ScaledPixels>,
         instance_offset: &mut u64,
-    ) -> Result<bool> {
+    ) -> Result<()> {
+        // The frame plan admits only batches with vertices and a visible raster
+        // footprint, so an empty upload cannot reach this path.
         self.path_vertices.clear();
         for path in paths {
             let bounds = path.clipped_bounds();
@@ -2271,10 +2271,6 @@ impl WgpuRendererCore {
                     bounds,
                     raster_origin: [raster.origin.x.0, raster.origin.y.0],
                 }));
-        }
-
-        if self.path_vertices.is_empty() {
-            return Ok(false);
         }
 
         self.path_vertex_peak = self.path_vertex_peak.max(self.path_vertices.len());
@@ -2333,7 +2329,7 @@ impl WgpuRendererCore {
             );
         }
 
-        Ok(true)
+        Ok(())
     }
 
     fn release_frame_plan(&mut self) {
@@ -2705,8 +2701,8 @@ impl WgpuRenderer {
     }
 
     /// Replace the wgpu surface with a new one (e.g. after Android destroys
-    /// and recreates the native window).  Keeps the device, queue, atlas, and
-    /// all pipelines intact so cached `AtlasTextureId`s remain valid.
+    /// and recreates the native window). Keeps the device, queue, atlas, and
+    /// material uploads alive. Ordinary pipelines rebuild only if alpha changes.
     ///
     /// The `instance` **must** be the same [`wgpu::Instance`] that was used to
     /// create the adapter and device (i.e. from the [`WgpuContext`]).  Using a
@@ -2725,14 +2721,15 @@ impl WgpuRenderer {
 
         let surface = create_surface(instance, window_handle.as_raw())?;
 
-        let width = (config.size.width.0 as u32).max(1);
-        let height = (config.size.height.0 as u32).max(1);
+        let width = (config.size.width.0 as u32).clamp(1, self.max_texture_size);
+        let height = (config.size.height.0 as u32).clamp(1, self.max_texture_size);
 
         let alpha_mode = if config.transparent {
             self.transparent_alpha_mode
         } else {
             self.opaque_alpha_mode
         };
+        let alpha_changed = alpha_mode != self.surface_config.alpha_mode;
 
         self.surface_config.width = width;
         self.surface_config.height = height;
@@ -2754,6 +2751,9 @@ impl WgpuRenderer {
                 anyhow::bail!("Cannot replace the surface: GPU resources have been released")
             }
         };
+        if alpha_changed {
+            core.update_alpha_mode(alpha_mode);
+        }
         surface.configure(&core.resources.device, &self.surface_config);
         core.resources.invalidate_intermediate_textures();
         self.state = RendererState::Ready { surface, core };
@@ -3372,16 +3372,7 @@ mod tests {
             wgpu::CompositeAlphaMode::Opaque,
         ] {
             // The real transparency transition rebuilds pipelines but keeps attachments.
-            let core = &mut renderer.core;
-            core.resources.pipelines = WgpuRendererCore::create_pipelines(
-                &core.resources.device,
-                &core.resources.bind_group_layouts,
-                core.target_format,
-                alpha,
-                core.rendering_params.path_sample_count,
-                core.dual_source_blending,
-                core.uses_webgl_instance_data,
-            );
+            renderer.core.update_alpha_mode(alpha);
             let after = renderer.render_scene_to_image(&scene, size)?;
             assert_eq!(before, after);
             assert_eq!(renderer.msaa_attachment_stats(), attachments);
@@ -4291,46 +4282,51 @@ mod tests {
     }
     #[cfg(target_os = "linux")]
     #[test]
-    fn rejected_native_path_transport_does_not_allocate_msaa_scratch() -> anyhow::Result<()> {
-        let mut renderer = WgpuHeadlessRenderer::new()?;
-        renderer.core.material_ranges.reserve(8192);
-        renderer.core.native_rasters.reserve(8192);
-        // Keep the real transport limit, but make the fixture exceed it without
-        // allocating a large attachment or relying on a driver-specific limit.
-        renderer.core.max_instance_data_size = renderer.core.instance_data_capacity;
-        let mut path = rectangle_path(0.0, 0.0, 128.0, 96.0);
-        let count = (renderer.core.max_instance_data_size
-            / std::mem::size_of::<PathRasterizationVertex>() as u64
-            + 3)
-        .next_multiple_of(3) as usize;
-        let vertex = path.vertices[0].clone();
-        Arc::make_mut(&mut path.vertices).resize(count, vertex);
-        let mut rejected = Scene::default();
-        rejected.insert_primitive(path);
-        rejected.finish();
-        assert!(
-            renderer
-                .render_scene_no_readback(&rejected, device_size(128, 96))
-                .is_err()
-        );
-        assert_eq!(
-            renderer.msaa_attachment_stats(),
-            (None, 0),
-            "a rejected native upload must not allocate or retain an attachment"
-        );
-        assert_eq!(renderer.core.material_ranges.capacity(), 0);
-        assert_eq!(renderer.core.native_rasters.capacity(), 0);
-        let mut recovered = Scene::default();
-        let mut path = rectangle_path(4.0, 4.0, 8.0, 8.0);
-        path.color = gpui::red().into();
-        recovered.insert_primitive(path);
-        recovered.finish();
-        let image = renderer.render_scene_to_image(&recovered, device_size(128, 96))?;
-        assert_pixel(&image, 8, 8, RED);
-        let (extent, allocations) = renderer.msaa_attachment_stats();
-        let (width, height) = extent.expect("visible paths allocate scratch");
-        assert!(width >= 8 && height >= 8 && width <= 32 && height <= 32);
-        assert_eq!(allocations, 1);
+    fn rejected_native_path_transport_releases_msaa_scratch_and_recovers() -> anyhow::Result<()> {
+        for warmed in [false, true] {
+            let mut renderer = WgpuHeadlessRenderer::new()?;
+            let target = device_size(128, 96);
+            let mut recovered = Scene::default();
+            let mut path = rectangle_path(4.0, 4.0, 8.0, 8.0);
+            path.color = gpui::red().into();
+            recovered.insert_primitive(path);
+            recovered.finish();
+            if warmed {
+                let initial = renderer.render_scene_to_image(&recovered, target)?;
+                assert_pixel(&initial, 8, 8, RED);
+                assert!(renderer.msaa_attachment_stats().0.is_some());
+            }
+            renderer.core.material_ranges.reserve(8192);
+            renderer.core.native_rasters.reserve(8192);
+            // Exceed the real transport limit without a large attachment or a
+            // driver-specific limit; exercise both cold and already-used scratch.
+            renderer.core.max_instance_data_size = renderer.core.instance_data_capacity;
+            let mut path = rectangle_path(0.0, 0.0, 128.0, 96.0);
+            let count = (renderer.core.max_instance_data_size
+                / std::mem::size_of::<PathRasterizationVertex>() as u64
+                + 3)
+            .next_multiple_of(3) as usize;
+            let vertex = path.vertices[0].clone();
+            Arc::make_mut(&mut path.vertices).resize(count, vertex);
+            let mut rejected = Scene::default();
+            rejected.insert_primitive(path);
+            rejected.finish();
+            assert!(renderer.render_scene_no_readback(&rejected, target).is_err());
+            let previous_allocations = u64::from(warmed);
+            assert_eq!(
+                renderer.msaa_attachment_stats(),
+                (None, previous_allocations),
+                "a rejected native upload must not allocate or retain an attachment"
+            );
+            assert_eq!(renderer.core.material_ranges.capacity(), 0);
+            assert_eq!(renderer.core.native_rasters.capacity(), 0);
+            let image = renderer.render_scene_to_image(&recovered, target)?;
+            assert_pixel(&image, 8, 8, RED);
+            let (extent, allocations) = renderer.msaa_attachment_stats();
+            let (width, height) = extent.expect("visible paths allocate scratch");
+            assert!(width >= 8 && height >= 8 && width <= 32 && height <= 32);
+            assert_eq!(allocations, previous_allocations + 1);
+        }
         Ok(())
     }
 
