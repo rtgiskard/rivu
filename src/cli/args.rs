@@ -58,7 +58,6 @@ pub(super) enum PlaybackAction {
     Toggle,
     Stop,
     Next,
-    #[command(alias = "prev")]
     Previous,
     Seek {
         seconds: f64,

@@ -225,6 +225,11 @@ fn unsupported_database_leaves_valid_unversioned_configuration_untouched() {
     for sql in [
         "UPDATE schema_meta SET value=99 WHERE key='version'",
         "UPDATE schema_meta SET value=99 WHERE key='album_trigger_revision'",
+        "DELETE FROM schema_meta WHERE key='album_trigger_revision'",
+        "UPDATE schema_meta SET value=0 WHERE key='album_trigger_revision'",
+        "UPDATE schema_meta SET value=1 WHERE key='album_trigger_revision'",
+        "UPDATE schema_meta SET value=2 WHERE key='album_trigger_revision'",
+        "UPDATE schema_meta SET value=3 WHERE key='album_trigger_revision'",
         "DELETE FROM schema_meta WHERE key='version'",
         "DROP TABLE queue_entries",
     ] {
@@ -232,10 +237,25 @@ fn unsupported_database_leaves_valid_unversioned_configuration_untouched() {
         fs::write(&options.config, "# user formatting\n[playback]\n").unwrap();
         let connection = Connection::open(options.data_dir.join("library.db")).unwrap();
         connection.execute_batch(sql).unwrap();
+        let before = fs::read(options.data_dir.join("library.db")).unwrap();
         drop(connection);
+        for mode in [Mode::Check, Mode::Apply] {
+            let mut report = Report::default();
+            assert!(run(&options, mode, &mut report).is_err(), "{sql}");
+            assert!(report.backups.is_empty());
+        }
         let mut report = Report::default();
-        assert!(run(&options, Mode::Apply, &mut report).is_err(), "{sql}");
+        assert!(
+            apply_database_change(&options, &mut report, |_| panic!(
+                "unsupported database must not execute changes"
+            ))
+            .is_err()
+        );
         assert!(report.backups.is_empty());
+        assert_eq!(
+            fs::read(options.data_dir.join("library.db")).unwrap(),
+            before
+        );
         assert_eq!(
             fs::read_to_string(&options.config).unwrap(),
             "# user formatting\n[playback]\n"
@@ -244,27 +264,31 @@ fn unsupported_database_leaves_valid_unversioned_configuration_untouched() {
 }
 
 #[test]
-fn database_ownership_excludes_maintenance() {
+fn database_ownership_excludes_apply_even_without_a_migration() {
     let (_directory, options) = fixture();
     fs::write(&options.config, "[playback]\n").unwrap();
-    let connection = Connection::open(options.data_dir.join("library.db")).unwrap();
-    connection
-        .execute_batch("UPDATE schema_meta SET value=1 WHERE key='album_trigger_revision'")
-        .unwrap();
     let alias = options.data_dir.join("alias");
     symlink(&options.data_dir, &alias).unwrap();
     let owner = UnixListener::bind_addr(&data_directory_address(&alias).unwrap()).unwrap();
     assert!(execute(&options, Mode::Apply).is_err());
+    let mut report = Report::default();
+    assert!(
+        apply_database_change(&options, &mut report, |_| panic!(
+            "owned database must not execute changes"
+        ))
+        .is_err()
+    );
+    assert!(report.backups.is_empty());
     assert!(execute(&options, Mode::Check).is_ok());
     drop(owner);
     let report = execute(&options, Mode::Apply).unwrap();
-    assert_eq!(report.backups.len(), 1);
+    assert!(report.backups.is_empty());
     assert!(!execute(&options, Mode::Check).unwrap().needs_changes);
     assert_eq!(fs::read_to_string(&options.config).unwrap(), "[playback]\n");
 }
 
 #[test]
-fn sqlite_backup_includes_committed_wal_and_maintenance_preserves_user_state() {
+fn sqlite_backup_includes_committed_wal_and_transaction_preserves_user_state() {
     let (_directory, options) = fixture();
     let original = "# unversioned\n[playback]\nvolume_percent=37\n";
     fs::write(&options.config, original).unwrap();
@@ -276,30 +300,19 @@ fn sqlite_backup_includes_committed_wal_and_maintenance_preserves_user_state() {
     connection
         .pragma_update(None, "wal_autocheckpoint", 0)
         .unwrap();
-    connection.execute_batch("UPDATE schema_meta SET value=2 WHERE key='album_trigger_revision';
-        INSERT INTO playlists(name) VALUES('User playlist');
+    connection.execute_batch("INSERT INTO playlists(name) VALUES('User playlist');
         INSERT INTO albums(directory,title,artist,track_count) VALUES('/retained','Retain','Artist',1);
         INSERT INTO tracks(id,path) VALUES(1,'/music/original.flac');
         INSERT INTO queue_entries(id,track_id,position) VALUES(41,1,0),(42,1,1);
-        UPDATE queue_meta SET current_id=42,revision=9;
-        DROP TRIGGER queue_metadata;
-        CREATE TRIGGER queue_metadata AFTER UPDATE OF raw_title,raw_artist,raw_album,
-            title_override,artist_override,album_override,duration,favorite,missing,
-            play_count,codec,bitrate_bps,bitrate_exact ON tracks
-        WHEN (COALESCE(old.title_override,old.raw_title) IS NOT COALESCE(new.title_override,new.raw_title)
-            OR COALESCE(old.artist_override,old.raw_artist) IS NOT COALESCE(new.artist_override,new.raw_artist)
-            OR COALESCE(old.album_override,old.raw_album) IS NOT COALESCE(new.album_override,new.raw_album)
-            OR old.duration IS NOT new.duration
-            OR old.favorite IS NOT new.favorite OR old.missing IS NOT new.missing
-            OR old.play_count IS NOT new.play_count OR old.codec IS NOT new.codec
-            OR old.bitrate_bps IS NOT new.bitrate_bps OR old.bitrate_exact IS NOT new.bitrate_exact)
-            AND EXISTS(SELECT 1 FROM queue_entries WHERE track_id=new.id) BEGIN
-            UPDATE queue_meta SET revision=revision+1;
-        END;").unwrap();
+        UPDATE queue_meta SET current_id=42,revision=9;").unwrap();
     let checked = execute(&options, Mode::Check).unwrap();
-    assert!(checked.needs_changes);
-    assert_eq!(revision(&connection), 2);
-    let report = execute(&options, Mode::Apply).unwrap();
+    assert!(!checked.needs_changes);
+    let mut report = Report::default();
+    apply_database_change(&options, &mut report, |transaction| {
+        transaction.execute("UPDATE tracks SET raw_title='Changed' WHERE id=1", [])?;
+        Ok(())
+    })
+    .unwrap();
     assert_eq!(report.backups.len(), 1);
     assert_eq!(fs::read_to_string(&options.config).unwrap(), original);
     assert_eq!(fs::metadata(&options.config).unwrap().ino(), config_inode);
@@ -316,7 +329,7 @@ fn sqlite_backup_includes_committed_wal_and_maintenance_preserves_user_state() {
     let backup =
         Connection::open_with_flags(&report.backups[0].path, OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap();
-    assert_eq!(revision(&backup), 2);
+    assert_eq!(revision(&backup), database::ALBUM_TRIGGER_REVISION);
     for source in [&connection, &backup] {
         let name: String = source
             .query_row("SELECT name FROM playlists", [], |row| row.get(0))
@@ -332,11 +345,13 @@ fn sqlite_backup_includes_committed_wal_and_maintenance_preserves_user_state() {
         assert_eq!(title, "Retain");
         assert_eq!(
             source
-                .query_row("SELECT current_id,revision FROM queue_meta", [], |row| {
-                    Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-                })
+                .query_row(
+                    "SELECT current_id,COUNT(*) FROM queue_entries CROSS JOIN queue_meta",
+                    [],
+                    |row| { Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)) }
+                )
                 .unwrap(),
-            (42, 9)
+            (42, 2)
         );
         let entries = source
             .prepare("SELECT id,track_id,position FROM queue_entries ORDER BY position,id")
@@ -367,27 +382,45 @@ fn sqlite_backup_includes_committed_wal_and_maintenance_preserves_user_state() {
 }
 
 #[test]
-fn maintenance_failure_rolls_back_and_reentry_keeps_distinct_backups() {
+fn transactional_change_failure_rolls_back_and_reentry_keeps_distinct_backups() {
     let (_directory, options) = fixture();
     fs::write(&options.config, "# original\n[playback]\n").unwrap();
     let connection = Connection::open(options.data_dir.join("library.db")).unwrap();
-    connection.execute_batch("UPDATE schema_meta SET value=1 WHERE key='album_trigger_revision';
-        CREATE TRIGGER reject_maintenance BEFORE INSERT ON schema_meta
-        WHEN NEW.key='album_trigger_revision' BEGIN SELECT RAISE(ABORT,'maintenance rejected'); END;").unwrap();
     let mut failed = Report::default();
-    assert!(run(&options, Mode::Apply, &mut failed).is_err());
+    assert!(
+        apply_database_change(&options, &mut failed, |transaction| {
+            transaction.execute("INSERT INTO playlists(name) VALUES('Rolled back')", [])?;
+            bail!("migration rejected")
+        })
+        .is_err()
+    );
     assert_eq!(failed.backups.len(), 1);
     assert_eq!(failed.backups[0].status, BackupStatus::Complete);
-    assert_eq!(revision(&connection), 1);
+    assert_eq!(revision(&connection), database::ALBUM_TRIGGER_REVISION);
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM playlists", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
     assert_eq!(
         fs::read_to_string(&options.config).unwrap(),
         "# original\n[playback]\n"
     );
-    connection
-        .execute_batch("DROP TRIGGER reject_maintenance")
-        .unwrap();
-    let applied = execute(&options, Mode::Apply).unwrap();
-    assert_eq!(revision(&connection), database::ALBUM_TRIGGER_REVISION);
+    let mut applied = Report::default();
+    apply_database_change(&options, &mut applied, |transaction| {
+        transaction.execute("INSERT INTO playlists(name) VALUES('Committed')", [])?;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT name FROM playlists", [], |row| row
+                .get::<_, String>(0))
+            .unwrap(),
+        "Committed"
+    );
     assert_eq!(applied.backups.len(), 1);
     for earlier in &failed.backups {
         assert!(earlier.path.exists());

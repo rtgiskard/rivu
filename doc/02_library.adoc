@@ -746,12 +746,11 @@ rivu library keep-independent DESTINATION_ID
 
 == SQLite maintenance
 
-Rivu opens current version 1 databases only; unsupported or populated unversioned
-databases are rejected without resetting or deleting user data. Derived maintenance
-within that schema is automatic: it updates album-summary and queue-metadata
-triggers and installs or maintains durable collection-version authority. It does
-not rebuild or validate historical album summaries. Version authorities and the
-current maintenance revision are defined in
+Rivu opens schema `1` databases with derived-trigger revision `4` only. Populated
+databases with missing or noncurrent markers are rejected without resetting or
+deleting user data. Empty databases are initialized directly with current tables
+and triggers; existing databases are not automatically upgraded or repaired.
+Version authorities and the current maintenance revision are defined in
 link:26_migration.adoc[Database and configuration migration].
 
 === Independent migration tool
@@ -759,14 +758,14 @@ link:26_migration.adoc[Database and configuration migration].
 Run `rivu-migrate check` to inspect existing resources without modifying user data
 or configuration; SQLite may update reader-coordination sidecars. Stop the host
 and external database writers before `apply`. The application does not invoke the
-tool automatically. Its current maintenance covers derived triggers and collection
-version authority in a version 1 database, not historical schema conversion;
-configuration is validated, not rewritten. Missing resources are not created, and
-an explicitly selected missing database is an error.
+tool automatically. This release baseline has no migration steps: `apply` validates
+current resources under offline ownership without rewriting them or creating a
+backup. Configuration is validated, not rewritten. Missing resources are not
+created, and an explicitly selected missing database is an error.
 
-`check` exits with `0` when current, `1` when supported changes are needed, and `2`
-on error. `apply` exits with `0` on success and `2` on error, reporting resource
-status and any backup paths already created.
+`check` exits with `0` when current and `2` on error; exit `1` is reserved for
+supported migration steps when introduced. `apply` exits with `0` on success and
+`2` on error, reporting resource status and any backup paths already created.
 
 Use the same data directory and configuration path that select the intended host.
 For an explicitly selected existing library, for example:
@@ -779,10 +778,10 @@ rivu-migrate --data-dir /path/to/rivu-data --config /path/to/config.toml apply
 
 `--config` alone does not select the database directory. `check` does not reserve
 the resources: `apply` reinspects them under the application's directory-identity
-ownership, including aliases. Before changing the database it creates and reports
-a non-overwriting SQLite backup beside it, including committed WAL contents;
-copying a live `.db` alone is not equivalent. A failed maintenance transaction
-rolls back without changing configuration.
+ownership, including aliases. Future released database conversions use a
+non-overwriting SQLite backup beside the database, including committed WAL contents;
+copying a live `.db` alone is not equivalent. A failed migration transaction rolls
+back without changing configuration.
 
 After failure, inspect the reported state and explicitly rerun with the same
 target paths. Already-current resources are skipped and backups are not

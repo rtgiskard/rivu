@@ -156,7 +156,17 @@ mod tests {
 
     #[test]
     fn incompatible_databases_are_rejected_without_changing_schema_or_data() -> Result<()> {
-        for version in [None, Some(0), Some(2)] {
+        for (key, version) in [
+            ("version", None),
+            ("version", Some(0)),
+            ("version", Some(2)),
+            ("album_trigger_revision", None),
+            ("album_trigger_revision", Some(0)),
+            ("album_trigger_revision", Some(1)),
+            ("album_trigger_revision", Some(2)),
+            ("album_trigger_revision", Some(3)),
+            ("album_trigger_revision", Some(5)),
+        ] {
             let directory = tempfile::tempdir()?;
             let path = directory.path().join("library.db");
             let store = Store::open(&path)?;
@@ -181,11 +191,11 @@ mod tests {
             )?;
             if let Some(version) = version {
                 connection.execute(
-                    "UPDATE schema_meta SET value=?1 WHERE key='version'",
-                    [version],
+                    "UPDATE schema_meta SET value=?1 WHERE key=?2",
+                    rusqlite::params![version, key],
                 )?;
             } else {
-                connection.execute_batch("DROP TABLE schema_meta;")?;
+                connection.execute("DELETE FROM schema_meta WHERE key=?1", [key])?;
             }
             let schema_version: i64 =
                 connection.query_row("PRAGMA schema_version", [], |row| row.get(0))?;
@@ -213,16 +223,14 @@ mod tests {
                 })?,
                 [0, 1, 254, 255]
             );
-            if let Some(version) = version {
-                assert_eq!(
-                    connection.query_row(
-                        "SELECT value FROM schema_meta WHERE key='version'",
-                        [],
-                        |row| row.get::<_, i64>(0)
-                    )?,
-                    version
-                );
-            }
+            assert_eq!(
+                connection.query_row(
+                    "SELECT (SELECT value FROM schema_meta WHERE key=?1)",
+                    [key],
+                    |row| row.get::<_, Option<i64>>(0)
+                )?,
+                version
+            );
         }
         Ok(())
     }

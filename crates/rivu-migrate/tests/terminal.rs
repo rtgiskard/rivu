@@ -26,7 +26,7 @@ fn assert_terminal_safe(bytes: &[u8]) -> String {
 }
 
 #[test]
-fn success_resources_and_backup_paths_are_escaped_without_renaming_files() {
+fn success_resources_are_escaped_without_rewriting_files_or_creating_backups() {
     let directory = tempfile::tempdir().unwrap();
     let data = directory.path().join(HOSTILE);
     fs::create_dir(&data).unwrap();
@@ -36,9 +36,6 @@ fn success_resources_and_backup_paths_are_escaped_without_renaming_files() {
     let database_path = data.join("library.db");
     let connection = Connection::open(&database_path).unwrap();
     database::create_current(&connection).unwrap();
-    connection
-        .execute_batch("UPDATE schema_meta SET value=1 WHERE key='album_trigger_revision'")
-        .unwrap();
     drop(connection);
 
     let output = invoke(&data, &config);
@@ -48,15 +45,11 @@ fn success_resources_and_backup_paths_are_escaped_without_renaming_files() {
         stdout.contains(&format!("{ESCAPED}.toml: current")),
         "{stdout}"
     );
-    assert!(
-        stdout
-            .lines()
-            .any(|line| line.starts_with("Backup: ") && line.contains(ESCAPED))
-    );
+    assert!(!stdout.lines().any(|line| line.starts_with("Backup: ")));
     assert!(output.stderr.is_empty());
     assert_eq!(fs::read_to_string(&config).unwrap(), original);
     assert!(database_path.is_file());
-    assert!(fs::read_dir(&data).unwrap().any(|entry| {
+    assert!(!fs::read_dir(&data).unwrap().any(|entry| {
         entry
             .unwrap()
             .path()
@@ -66,7 +59,7 @@ fn success_resources_and_backup_paths_are_escaped_without_renaming_files() {
 }
 
 #[test]
-fn errors_escape_hostile_paths_and_inner_anyhow_causes() {
+fn unsupported_revision_errors_escape_hostile_paths_without_changes() {
     let directory = tempfile::tempdir().unwrap();
     let data = directory.path().join(HOSTILE);
     fs::create_dir(&data).unwrap();
@@ -74,28 +67,19 @@ fn errors_escape_hostile_paths_and_inner_anyhow_causes() {
     let connection = Connection::open(data.join("library.db")).unwrap();
     database::create_current(&connection).unwrap();
     connection
-        .execute_batch(
-            "UPDATE schema_meta SET value=1 WHERE key='album_trigger_revision';
-         CREATE TRIGGER reject_maintenance BEFORE INSERT ON schema_meta
-         WHEN NEW.key='album_trigger_revision'
-         BEGIN SELECT RAISE(ABORT,'inner\u{1b}[2J\n\t\u{009b}cause'); END;",
-        )
+        .execute_batch("UPDATE schema_meta SET value=1 WHERE key='album_trigger_revision'")
         .unwrap();
     drop(connection);
 
     let output = invoke(&data, &config);
     assert_eq!(output.status.code(), Some(2));
-    let stdout = assert_terminal_safe(&output.stdout);
     let stderr = assert_terminal_safe(&output.stderr);
-    assert!(stdout.contains(ESCAPED), "{stdout}");
+    assert!(stderr.contains(ESCAPED), "{stderr}");
     assert!(
-        stderr.contains("Applying transactional derived trigger maintenance"),
+        stderr.contains("Unsupported album trigger revision"),
         "{stderr}"
     );
-    assert!(
-        stderr.contains("inner\\x1b[2J\\n\\t\\u{009b}cause"),
-        "{stderr}"
-    );
+    assert!(output.stdout.is_empty());
     assert!(!config.exists());
 }
 

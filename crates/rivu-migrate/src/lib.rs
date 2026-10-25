@@ -89,7 +89,6 @@ impl Default for Report {
 struct DatabasePlan {
     path: PathBuf,
     connection: Connection,
-    maintenance: bool,
 }
 
 fn validate_config(path: &Path) -> Result<Option<PathBuf>> {
@@ -128,22 +127,11 @@ fn database_plan(options: &Options) -> Result<Option<DatabasePlan>> {
     let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .with_context(|| format!("Opening database read-only {}", path.display()))?;
     database::validate_structure(&connection).context("Validating database schema structure")?;
-    let maintenance = match database::inspect(&connection)? {
-        database::DatabaseState::Versioned {
-            album_trigger_revision,
-            ..
-        } => album_trigger_revision != Some(database::ALBUM_TRIGGER_REVISION),
-        _ => bail!("Database is not a supported versioned schema"),
-    };
-    Ok(Some(DatabasePlan {
-        path,
-        connection,
-        maintenance,
-    }))
+    Ok(Some(DatabasePlan { path, connection }))
 }
 
-/// On failure the report retains database backup paths and any completed or
-/// uncertain maintenance. Configuration is only read and validated.
+/// Validate existing resources without rewriting them. Apply additionally takes
+/// offline ownership; no released database migration is currently available.
 pub fn run(options: &Options, mode: Mode, report: &mut Report) -> Result<()> {
     // Apply inspects existing resources under the same ownership as the host;
     // acquiring only after preflight would leave the plan open to startup races.
@@ -177,13 +165,8 @@ pub fn run(options: &Options, mode: Mode, report: &mut Report) -> Result<()> {
     }
     match &database {
         Some(plan) => report.resources.push(format!(
-            "Database {}: schema 1; {} (supported derived trigger revision {})",
+            "Database {}: schema 1; current, untouched (required derived trigger revision {})",
             plan.path.display(),
-            if plan.maintenance {
-                "derived trigger maintenance required"
-            } else {
-                "current, untouched"
-            },
             database::ALBUM_TRIGGER_REVISION
         )),
         None => report.resources.push(format!(
@@ -191,106 +174,105 @@ pub fn run(options: &Options, mode: Mode, report: &mut Report) -> Result<()> {
             options.data_dir.join("library.db").display()
         )),
     }
-    report.needs_changes = database.as_ref().is_some_and(|p| p.maintenance);
-    // Advisory only: concurrent disk use can still make later writes fail.
-    // Probe even in check mode, but only budget resources that need changes.
-    storage_preflight(database.as_ref())?;
-    if mode == Mode::Check || !report.needs_changes {
-        return Ok(());
-    }
-
-    // Back up the complete database before attempting transactional maintenance.
-    if let Some(plan) = database.as_ref().filter(|p| p.maintenance) {
-        let (path, published, file) = reserve_backup(&plan.path)?;
-        report.backups.push(BackupReport {
-            path,
-            status: BackupStatus::Unpublished,
-            retained_partial: None,
-        });
-        let artifact = report.backups.last_mut().expect("just recorded backup");
-        let mut destination =
-            Connection::open_with_flags(&artifact.path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
-        {
-            let backup = Backup::new(&plan.connection, &mut destination)?;
-            loop {
-                match backup
-                    .step(256)
-                    .context("Copying SQLite backup (may be incomplete)")?
-                {
-                    StepResult::Done => break,
-                    StepResult::More => {}
-                    StepResult::Busy | StepResult::Locked => bail!(
-                        "SQLite backup is busy; backup {} may be incomplete",
-                        artifact.path.display()
-                    ),
-                    _ => bail!(
-                        "Unexpected SQLite backup state; backup {} may be incomplete",
-                        artifact.path.display()
-                    ),
-                }
-            }
-        }
-        destination
-            .close()
-            .map_err(|(_, error)| error)
-            .context("Closing SQLite backup")?;
-        file.sync_all().context("Syncing SQLite backup")?;
-        let mut partial = tempfile::TempPath::try_from_path(&artifact.path)?;
-        // Every failure artifact is evidence, not a disposable temporary file.
-        partial.disable_cleanup(true);
-        partial
-            .persist_noclobber(&published)
-            .map_err(|error| error.error)
-            .context("Publishing SQLite backup without replacement")?;
-        // Publication already happened even if the following directory sync
-        // fails. Keep the real path and never misreport this as a partial file.
-        let partial_path = std::mem::replace(&mut artifact.path, published);
-        artifact.status = BackupStatus::PublishedSyncUncertain;
-        // The no-replace link/unlink fallback can leave a complete-content
-        // alias behind. Report only aliases that actually remain.
-        match fs::symlink_metadata(&partial_path) {
-            Ok(_) => artifact.retained_partial = Some(partial_path),
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!(
-                        "Inspecting retained backup alias {}",
-                        partial_path.display()
-                    )
-                });
-            }
-        }
-        sync_parent(&artifact.path)?;
-        artifact.status = BackupStatus::Complete;
-    }
-
-    if let Some(plan) = &database
-        && plan.maintenance
-    {
-        let writer = Connection::open_with_flags(&plan.path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
-        // FULL makes SQLite's maintenance transaction durable, including WAL.
-        writer.pragma_update(None, "synchronous", "FULL")?;
-        report.database_status = "maintenance attempted; inspect database on failure";
-        database::ensure_summary_triggers(&writer)
-            .context("Applying transactional derived trigger maintenance")?;
-        report.database_status = "current derived triggers installed";
-    }
-    if let Some(plan) = &database {
-        database::validate_current(&plan.connection)?;
-        ensure!(
-            matches!(
-                database::inspect(&plan.connection)?,
-                database::DatabaseState::Versioned {
-                    album_trigger_revision: Some(database::ALBUM_TRIGGER_REVISION),
-                    ..
-                }
-            ),
-            "Database derived maintenance is not current after apply"
+    report.needs_changes = false;
+    if mode == Mode::Apply {
+        report.resources.push(
+            "No database migration is required for the current baseline; resources are unchanged."
+                .to_owned(),
         );
     }
-    report
-        .resources
-        .push("Apply complete: designated existing resources are current.".to_owned());
+    Ok(())
+}
+
+/// Execute a supplied database migration under offline ownership after validating
+/// configuration and the current database structure. Publish a durable SQLite
+/// backup before invoking `change` in a FULL-synchronous transaction. The operation
+/// must include its own postcondition validation; any error rolls it back. Reports
+/// retain backup artifacts and attempted/committed status even on failure.
+/// This is execution infrastructure, not a registered baseline migration.
+pub fn apply_database_change(
+    options: &Options,
+    report: &mut Report,
+    change: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<()>,
+) -> Result<()> {
+    let _owner = UnixListener::bind_addr(&data_directory_address(&options.data_dir)?)
+        .context("Cannot take data-directory ownership; stop the running Rivu instance first")?;
+    validate_config(&options.config)
+        .with_context(|| format!("Preflighting configuration {}", options.config.display()))?;
+    let plan = database_plan(options)?.context("No existing database to migrate")?;
+    storage_preflight(&plan)?;
+    // Back up the complete database before attempting a transactional change.
+    let (path, published, file) = reserve_backup(&plan.path)?;
+    report.backups.push(BackupReport {
+        path,
+        status: BackupStatus::Unpublished,
+        retained_partial: None,
+    });
+    let artifact = report.backups.last_mut().expect("just recorded backup");
+    let mut destination =
+        Connection::open_with_flags(&artifact.path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    {
+        let backup = Backup::new(&plan.connection, &mut destination)?;
+        loop {
+            match backup
+                .step(256)
+                .context("Copying SQLite backup (may be incomplete)")?
+            {
+                StepResult::Done => break,
+                StepResult::More => {}
+                StepResult::Busy | StepResult::Locked => bail!(
+                    "SQLite backup is busy; backup {} may be incomplete",
+                    artifact.path.display()
+                ),
+                _ => bail!(
+                    "Unexpected SQLite backup state; backup {} may be incomplete",
+                    artifact.path.display()
+                ),
+            }
+        }
+    }
+    destination
+        .close()
+        .map_err(|(_, error)| error)
+        .context("Closing SQLite backup")?;
+    file.sync_all().context("Syncing SQLite backup")?;
+    let mut partial = tempfile::TempPath::try_from_path(&artifact.path)?;
+    // Every failure artifact is evidence, not a disposable temporary file.
+    partial.disable_cleanup(true);
+    partial
+        .persist_noclobber(&published)
+        .map_err(|error| error.error)
+        .context("Publishing SQLite backup without replacement")?;
+    // Publication already happened even if the following directory sync
+    // fails. Keep the real path and never misreport this as a partial file.
+    let partial_path = std::mem::replace(&mut artifact.path, published);
+    artifact.status = BackupStatus::PublishedSyncUncertain;
+    // The no-replace link/unlink fallback can leave a complete-content
+    // alias behind. Report only aliases that actually remain.
+    match fs::symlink_metadata(&partial_path) {
+        Ok(_) => artifact.retained_partial = Some(partial_path),
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "Inspecting retained backup alias {}",
+                    partial_path.display()
+                )
+            });
+        }
+    }
+    sync_parent(&artifact.path)?;
+    artifact.status = BackupStatus::Complete;
+    let writer = Connection::open_with_flags(&plan.path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    // FULL makes the migration transaction durable, including WAL.
+    writer.pragma_update(None, "synchronous", "FULL")?;
+    report.database_status = "migration attempted; inspect database on failure";
+    let transaction = writer.unchecked_transaction()?;
+    change(&transaction).context("Applying transactional database migration")?;
+    transaction
+        .commit()
+        .context("Committing database migration")?;
+    report.database_status = "database migration committed";
     Ok(())
 }
 
@@ -298,10 +280,8 @@ fn database_storage_bytes(page_count: u64, page_size: u64) -> Result<u64> {
     let backup = page_count
         .checked_mul(page_size)
         .context("SQLite backup size overflows storage estimate")?;
-    // Current migration only replaces a fixed set of triggers and its marker;
-    // it does not rebuild tables. Allow two full-image equivalents including
-    // per-page journal/WAL framing, plus 16 MiB for schema growth and headers.
-    // This intentionally overestimates the small maintenance transaction.
+    // Budget a backup plus two full-image journal/WAL equivalents and 16 MiB
+    // for schema growth and headers. Future migrations must review this bound.
     let journal = page_size
         .checked_add(32)
         .and_then(|size| page_count.checked_mul(size))
@@ -313,10 +293,7 @@ fn database_storage_bytes(page_count: u64, page_size: u64) -> Result<u64> {
         .context("SQLite storage requirement overflows")
 }
 
-fn storage_preflight(database: Option<&DatabasePlan>) -> Result<()> {
-    let Some(plan) = database.filter(|plan| plan.maintenance) else {
-        return Ok(());
-    };
+fn storage_preflight(plan: &DatabasePlan) -> Result<()> {
     let estimate = || -> Result<()> {
         let pages = plan
             .connection

@@ -1011,29 +1011,18 @@ pub fn from_toml(contents: &str) -> Result<Config> {
     if let Some(version) = metadata.schema_version {
         ensure!(
             version == i64::from(CONFIG_SCHEMA_VERSION),
-            "unsupported configuration schema_version {version}; expected {CONFIG_SCHEMA_VERSION}; run a compatible rivu-migrate"
+            "unsupported configuration schema_version {version}; expected {CONFIG_SCHEMA_VERSION}"
         );
     }
-    let result = (|| {
-        let file: file::FileConfig =
-            toml::from_str(contents).context("cannot parse TOML configuration")?;
-        let mut config = file.into_config();
-        config.ui_language = normalize_language(&config.ui_language).to_owned();
-        if config.ui_font.is_empty() {
-            config.ui_font = DEFAULT_UI_FONT.to_owned();
-        }
-        config.validate()?;
-        Ok(config)
-    })();
-    if metadata.schema_version.is_none() {
-        result.with_context(|| {
-            format!(
-                "configuration without schema_version is interpreted as current schema {CONFIG_SCHEMA_VERSION}; if this is a legacy file, explicitly declare its original schema_version before migrating"
-            )
-        })
-    } else {
-        result
+    let file: file::FileConfig =
+        toml::from_str(contents).context("cannot parse TOML configuration")?;
+    let mut config = file.into_config();
+    config.ui_language = normalize_language(&config.ui_language).to_owned();
+    if config.ui_font.is_empty() {
+        config.ui_font = DEFAULT_UI_FONT.to_owned();
     }
+    config.validate()?;
+    Ok(config)
 }
 
 /// Validate a current configuration without filesystem side effects.

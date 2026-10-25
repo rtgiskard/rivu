@@ -5,7 +5,7 @@
 Rivu reads `~/.config/rivu/config.toml` by default (or the XDG configuration
 directory); path overrides are described in link:../readme.adoc[the README].
 A missing file uses the existing defaults. Existing files may omit top-level
-`schema_version`; omission means the current schema (`1`), not a historical format.
+`schema_version`; omission means the current schema (`1`).
 Omitted setting groups and fields use their defaults. Unreadable files, malformed
 TOML, unknown keys, misplaced fields, unsupported explicit schema versions, and
 invalid values are errors, not a reason to fall back to defaults.
@@ -108,9 +108,7 @@ host core; data-directory ownership prevents a second host for that directory.
 Separate hosts sharing one configuration file, or external editors, are not
 coordinated. Format-preserving saves do not provide conflict detection or a merge
 of concurrent edits, and do not reload settings into the running core. Exit Rivu
-before editing the file manually, then restart to load the changes. Legacy
-`.config.toml.rivu-lock` files are ignored and not automatically removed; remove
-them only after all older Rivu instances using that configuration have exited.
+before editing the file manually, then restart to load the changes.
 
 == Parameters
 
@@ -1101,14 +1099,11 @@ The application reads only the current configuration schema. A valid unversioned
 file needs no migration; normal application saves preserve an omitted
 `schema_version` rather than adding it.
 
-When an unversioned file fails current parsing or validation, the error retains
-the specific cause and explains the current-schema assumption. If it is an older
-configuration, declare its original top-level `schema_version` explicitly before
-using a compatible migration tool; do not label old content with the current
-version to bypass validation. Malformed TOML must first be corrected so its
-version can be read. File-access errors are not version errors.
+Parsing and validation failures retain their specific causes. Malformed TOML must
+be corrected before a version can be read. File-access errors are not version
+errors. Declaring the current version does not bypass field or value validation.
 
-Explicit noncurrent versions are rejected without trying historical decoders.
+Explicit noncurrent versions are rejected.
 The current `rivu-migrate` validates configuration but does not convert or rewrite
 it. See link:02_library.adoc#_sqlite_maintenance[SQLite maintenance] for the tool's
 commands, supported inputs, backups, and retry guarantees. Configuration and

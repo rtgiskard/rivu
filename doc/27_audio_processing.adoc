@@ -348,9 +348,13 @@ hints apply to both standalone processing controls and each graph node's fields.
 Preparation prints absolute `worker`, `interpreter` and `model_manifest` paths.
 Configure *all three*, not only the manifest, and preserve the venv executable
 symlink path rather than resolving it to base Python. The binary does not bundle
-the worker, models or Python. Each prepared bundle contains `runtime/` worker
-sidecars/schema, resources, hashes and license records. Keep these with the
-manifest. To copy an already verified bundle without a download:
+the worker, models or Python. Inference requires a provisioned manifest with
+`runtime` and `dependencies` records. Runtime metadata binds the bundle paths and
+interpreter hash; dependency records match the model pins and bind supplied
+notices to hashed files. Keep the hashed worker sidecars/schema, resources and
+license records with the manifest. Provisioning verifies construction artifacts
+and validates the completed bundle before printing paths. To copy an already
+verified bundle without a download:
 
 [source,shell]
 ----
@@ -372,10 +376,8 @@ a successful process exit and validate outputs before publication. Rust keeps
 the 64 KiB event-line limit and does not load the full report. Benchmark and corpus
 evaluation tools read the full report only after successful completion.
 
-For a version-1 runtime bundle, provision a new bundle from the verified manifest
-using the current provisioning tool and update the configured worker path.
-Do not replace sidecars inside an existing hashed bundle. Request and model
-manifest formats remain unchanged; old event streams fail the version check.
+Provision runtime bundles from verified manifests with current tooling. Keep hashed
+sidecars immutable; update the configured worker path to select a new bundle.
 
 For a shared worker, select the emitted runtime worker compatible with both
 prepared manifests; interpreters and manifests remain operation-specific:
@@ -752,36 +754,37 @@ startup and captured pipes. `evaluation_wall_seconds` starts before per-sample
 reference/input reads and request creation and ends after output reads, artifact
 writes, hashes, scoring and sample-record construction. It excludes record append,
 progress printing, cross-sample summaries and final aggregate report serialization
-or writing. `timing_summary` summarizes each field separately. Historical mixed
-wall-time fields cannot be relabeled as either measurement without rerunning.
+or writing. `timing_summary` summarizes each field separately; compare only
+measurements with matching timing boundaries.
 
-Paired SNR and SI-SDR use the same boundary semantics in both tool families:
-undefined scores and gains are JSON `null`, while exact positive-energy
-reconstruction is `"infinity"`. Improvement against an infinite baseline can be
-`"-infinity"`; infinity minus itself is undefined. Summaries exclude undefined
-values rather than treating them as zero, report defined/undefined and signed
-infinity counts, and preserve infinity in ordering. A median centered between
-opposite infinities is undefined. These numerical cases do not establish quality.
+Both tool families encode undefined scores/gains as JSON `null`. SNR requires
+nonzero reference energy; SI-SDR requires nonzero mean-centered reference energy.
+Exact reconstruction is `"infinity"` only when that condition holds. A constant
+reference therefore has undefined SI-SDR/gain; a silent estimate has undefined
+SI-SDR and zero gain for a nonconstant reference. Infinite-baseline gains can be
+`"-infinity"`; infinity minus itself is undefined.
+
+Summaries exclude undefined values, preserve infinity ordering, and report
+defined/undefined and signed infinity counts. A median between opposite infinities
+is undefined. These numerical cases do not establish quality.
 
 Music corpus manifest schema 2 records each prepared directory relative to the
 corpus root and explicitly binds `diagnostic_only` to source identity and SHA256.
 Directory numbering is not a diagnostic rule. During preparation, mark any known
 reference erratum with repeatable `--diagnostic-source` paths; the marker follows
-identical source bytes even when renamed or reordered. For example, bind these
-variables to the actual local source files before running:
+identical source bytes even when renamed or reordered. Run the following from the
+repository root after binding the variables to actual local source files. The
+output directory must not already exist; keep prepared corpora under `.cache/`:
 
 [source,shell]
 ----
 python tools/audio_quality/prepare_music.py "$al_james_source" "$other_source" \
   --diagnostic-source "$al_james_source" \
-  --output /absolute/new-music-float --provenance 'actual source and license'
+  --output .cache/new-music-float --provenance 'actual source and license'
 ----
 
-Schema-1 music corpora must be prepared again, or explicitly migrated by verifying
-every source/hash, recording its diagnostic boolean and relative track directory,
-and upgrading the schema. Changing only the schema number or assigning flags by
-old directory order is not a migration. Historical evidence retains its original
-measurement and corpus identity; this contract does not revalidate those results.
+Prepare a new corpus if its manifest lacks these identity records. Keep recorded
+measurements bound to their original corpus and timing definitions.
 
 Automatic metrics and actual listening are distinct evidence. No automated
 analysis is reported as human listening. Missing listening approval remains an

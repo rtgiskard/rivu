@@ -13,7 +13,7 @@ pub struct ProcessingAudition {
     pub id: u64,
     pub output: Option<GraphPort>,
     /// Cached graph output is Offline; a prepared live runner is Realtime or Hybrid.
-    /// Legacy denoise/separation audition has no graph mode.
+    /// Standalone denoise/separation audition has no graph mode.
     pub mode: Option<GraphExecutionMode>,
 }
 #[derive(Clone, Debug, Default)]

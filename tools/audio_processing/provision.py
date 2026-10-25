@@ -20,9 +20,7 @@ import os
 from pathlib import Path
 import shutil
 import sys
-from worker import check_packages, digest, read_json, validate_manifest
-
-RUNTIME_FILES = ("worker.py", "mossformer.py", "nsnet2.py", "request.schema.json", "event.schema.json")
+from worker import RUNTIME_FILES, check_packages, digest, read_json, validate_artifacts, validate_manifest
 
 
 def populate(base, manifest):
@@ -65,6 +63,7 @@ def populate(base, manifest):
     manifest["files"]={str(path.relative_to(base)):digest(path) for path in sorted(base.rglob("*"))
                        if path.is_file() and path.name!="manifest.json" and "__pycache__" not in path.parts}
     (base/"manifest.json").write_text(json.dumps(manifest,indent=2)+"\n")
+    validate_manifest(base/"manifest.json", manifest["operation"])
     return {"worker":manifest["runtime"]["worker"],"interpreter":manifest["runtime"]["interpreter"],
             "model_manifest":manifest["runtime"]["model_manifest"],"model":manifest["id"]}
 
@@ -87,7 +86,8 @@ def main():
     args=parser.parse_args()
     original=args.manifest.resolve()
     raw=read_json(original)
-    manifest=validate_manifest(original,raw["operation"])
+    # Provisioning consumes verified construction artifacts, not inference admission.
+    manifest = validate_artifacts(original, raw["operation"])
     check_packages(manifest)
     target=args.directory.resolve()
     if args.populate_new:

@@ -4,10 +4,10 @@
 
 == Scope and decisions
 
-This document describes current-format validation and derived-trigger maintenance,
-then the offline tool's backup and reentry protocol. The separate
-<<_future_historical_conversion>> and <<_future_application_invocation>> sections
-define design requirements, not additional supported inputs or startup behavior.
+This document describes current-format validation and the offline migration
+execution boundary. The separate <<_future_historical_conversion>> and
+<<_future_application_invocation>> sections define design requirements, not
+additional supported inputs or startup behavior.
 Operational commands belong in
 link:02_library.adoc#_sqlite_maintenance[SQLite maintenance] and
 link:01_config.adoc#_configuration_upgrades[Configuration upgrades].
@@ -15,16 +15,16 @@ link:01_config.adoc#_configuration_upgrades[Configuration upgrades].
 === Current implementation
 
 The database schema and configuration schema are both `1`; they are independent
-version authorities. The current derived-trigger maintenance revision is `5`.
+version authorities. The current derived-trigger maintenance revision is `4`.
 
-* `rivu-migrate check` validates existing current configuration and the required
-  structure of a schema 1 database, reporting outdated derived-trigger maintenance.
-* `rivu-migrate apply` backs up and installs current derived-trigger maintenance
-  under offline ownership. It preserves existing album summaries, queue
-  occurrences, and current selection; it does not rebuild or repair summaries.
-* No historical database-schema or configuration conversion is implemented.
-  Unversioned populated databases and unsupported explicit versions are errors.
-  An unversioned valid configuration is already current and is left untouched.
+* `rivu-migrate check` validates existing current configuration and a schema `1`
+  database with derived-trigger revision `4`.
+* `rivu-migrate apply` repeats validation under offline ownership. The current
+  release baseline has no migration steps, so current resources are left unchanged
+  and no backup is created.
+* Populated databases with missing or noncurrent schema/revision markers are
+  rejected, not upgraded or reset. No historical conversion is implemented.
+  A valid configuration without an explicit version is current and left untouched.
 
 
 === Integration scope
@@ -33,11 +33,11 @@ The application operates on current formats only. Historical recognition and
 conversion belong to an independent migration executable. Isolation is a dependency
 and responsibility boundary, not a prohibition on invoking another process.
 
-The implemented integration exposes an explicit maintenance executable. The
-application does not invoke it during startup; normal database opening performs
-only the <<_derived_trigger_maintenance,current-format trigger maintenance>>
-described below. A later startup integration may invoke the executable before
-business initialization without moving historical rules into the application.
+The application does not invoke the tool during startup. Normal database opening
+creates current structures only for an empty database and otherwise requires the
+current schema and maintenance marker. A later startup integration may invoke the
+executable before business initialization without moving historical rules into
+the application.
 
 Non-goals are automatic downgrade, a migration plugin framework, distributed or
 cross-file transactions, a recovery-state database, automatic paired restore,
@@ -94,7 +94,7 @@ and derived-summary correctness. Normal application opening uses the cheaper
 version/maintenance-marker guard rather than repeating offline structural preflight.
 
 A missing version is not evidence of a known oldest schema. Unknown, future, or
-malformed formats are rejected; current trigger maintenance cannot make them current.
+malformed formats are rejected; changing a marker does not make them current.
 
 Empty-database detection excludes only tables whose names begin with the literal
 `sqlite_` internal prefix. Names such as `sqlitex_data` are user tables, not SQLite
@@ -106,18 +106,18 @@ shared by application opening and offline inspection.
 
 The current configuration schema is `1`. A top-level integer `schema_version` is
 optional: omission means the current schema, not an inferred historical version.
-Missing files retain the normal application defaults. Normal application saves
-write an explicit current version; loading never rewrites a file to add one.
+Missing files retain the normal application defaults. New serialization writes
+an explicit current version; format-preserving saves retain an omitted version.
+Loading never rewrites a file to add one.
 Database and configuration versions evolve independently of each other and of
 the software release number.
 
 The application decodes only the current configuration schema. A valid unversioned
 document is current and requires no migration. Parsing and validation remain strict.
-An unversioned failure retains its specific cause and explains the current-schema
-assumption, advising an explicit original version if the input is historical.
-Malformed TOML cannot establish a version and must be corrected first. File I/O
-failures are not version failures. Explicit noncurrent versions are rejected before
-decoding current fields; no decoder guessing or historical aliases are allowed.
+Parsing and validation failures retain their specific causes. Malformed TOML
+cannot establish a version and must be corrected first. File I/O failures are not
+version failures. Explicit noncurrent versions are rejected before decoding
+current fields; no decoder guessing or historical aliases are allowed.
 
 The current migration tool validates configuration without conversion, backups,
 writer locks, or replacement. `format_version` is not an alias. User-facing loading,
@@ -134,15 +134,14 @@ correctness: it might omit a relevant update or maintain the wrong grouping rule
 
 `album_trigger_revision` identifies the installed album, queue metadata, and
 collection-version maintenance definitions. It is an internal maintenance marker,
-not a second database format version. Collection maintenance seeds durable album
-and playlist content/lifetime tokens when their authority tables are absent.
-SQLite triggers advance the tokens in the same transaction as collection
-mutations on every connection, including changes to playlist-entry identities.
-Updating trigger definitions preserves existing lifetime tokens, summaries,
-queue occurrences, and current selection; schema version remains `1`.
-An up-to-date marker skips installation. Offline preflight requires the authority
-tables and named triggers appropriate to the maintenance marker, but does not
-compare trigger bodies.
+not a second database format version. New databases create all current authority
+tables and triggers directly. SQLite triggers advance durable content/lifetime
+tokens in the same transaction as collection mutations on every connection,
+including changes to playlist-entry identities.
+
+The current contract requires revision `4`. A populated database with a missing,
+lower or higher revision is rejected before writes. Offline preflight also checks
+the current authority tables and named triggers, but does not compare trigger bodies.
 
 A trigger implementation change with unchanged persistent semantics does not by
 itself require a database schema bump. A change to grouping meaning or persistent
@@ -150,13 +149,10 @@ structure belongs to schema migration. Fixing maintenance behavior also requires
 checking whether existing summaries need rebuilding: replacing triggers only fixes
 future writes and does not automatically repair prior derived data.
 
-Normal application opening creates current structures for an empty database and
-transactionally installs current trigger definitions when a schema 1 database's
-maintenance marker is missing or older. An up-to-date marker skips reinstallation;
-an unknown future revision is rejected before writes. This uses the shared current
-definitions, not historical conversion branches or the offline executable. It
-preserves existing summaries rather than rebuilding them. The offline tool adds
-structural preflight and a backup before replacement; normal opening does not.
+Application opening initializes empty databases transactionally; it does not
+replace triggers or repair existing populated databases. Changing only a marker
+neither converts trigger definitions nor repairs summaries. Future released
+changes requiring conversion belong in the independent migration executable.
 
 == Target selection and exclusion
 
@@ -204,10 +200,8 @@ their normal formatting.
   SQLite and sync the file, publish the final `.bak` name without overwriting an
   existing file, then sync its parent directory. Report the actual location and
   completion state. Do not back up a resource that will not be changed.
-. Install current derived-trigger maintenance and its marker in one SQLite
-  transaction, creating collection authority tables if absent and otherwise
-  preserving issued lifetime tokens. Existing summary rows are preserved;
-  this is not historical schema conversion or a summary rebuild.
+. Execute the selected migration and update its authoritative markers in one
+  SQLite transaction. The current baseline supplies no conversion steps.
 . Return success only when the selected existing resources meet current contracts.
   Do not start the application, rewrite configuration, or delete backups as a side effect.
 
@@ -224,12 +218,12 @@ alias if a no-overwrite publication fallback leaves one. They do not delete
 evidence or trigger automatic rollback.
 
 
-Current maintenance does not scan the music library, access the network, probe
-decoders or infer missing user intent. Its costs include the database backup,
-SQLite transaction/WAL growth and reading configuration. Large database work stays
-in SQLite rather than copying the library into Rust collections. Before backup,
-preflight checks available capacity on the database destination filesystem,
-including backup and maintenance overhead.
+Migration execution must not scan the music library, access the network, probe
+decoders or infer missing user intent unless a specific released conversion
+requires it. Its costs include the database backup and SQLite transaction/WAL
+growth. Large database work stays in SQLite rather than copying the library into
+Rust collections. Before backup, preflight checks available capacity on the
+database destination filesystem, including backup and transaction overhead.
 Capacity estimates are advisory: other writers can consume space, so runtime
 storage errors remain errors rather than an excuse to drop data. No speedup is
 implied by this separation.

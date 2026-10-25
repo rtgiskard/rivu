@@ -8,7 +8,7 @@ use terminal::Terminal;
 #[derive(Parser)]
 #[command(
     version,
-    about = "Validate Rivu configuration and maintain existing databases without starting the player"
+    about = "Validate current Rivu configuration and database formats without starting the player"
 )]
 struct Args {
     #[arg(long, global = true, value_name = "DIRECTORY")]
@@ -21,9 +21,9 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Inspect files read-only; exit 1 when an upgrade is needed, 2 on error.
+    /// Inspect existing resources without reserving them; exit 2 on error.
     Check,
-    /// Validate configuration and back up database changes under offline ownership.
+    /// Validate current resources under offline ownership.
     Apply,
 }
 

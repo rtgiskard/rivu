@@ -8,10 +8,76 @@ import json
 import os
 from pathlib import Path
 import tempfile
+from unittest.mock import patch
 import unittest
-from worker import WorkerError, canonical_digest, deny_network, digest, process, resample_exact, validate_manifest, validate_request
+from worker import RUNTIME_FILES, WorkerError, canonical_digest, deny_network, digest, process, resample_exact, validate_artifacts, validate_manifest, validate_request
 
 ROOT = Path(__file__).resolve().parents[2]
+
+def bundle_fixture(base, operation="speech", model="nsnet2", provenance=None):
+    """Current admission fixture, not a downloadable or executable model."""
+    import sys
+    runtime = base / "runtime"
+    runtime.mkdir(exist_ok=True)
+    for name in RUNTIME_FILES:
+        (runtime / name).write_text("Synthetic sidecar fixture: " + name)
+    evidence = base / "weight-license.txt"
+    evidence.write_text("Factual test provenance; no permission grant.")
+    manifest = {"version":1, "operation":operation, "id":model, "packages":{"fixture":"1"},
+                "license_evidence":"weight-license.txt", "provenance":provenance or {},
+                "runtime":{"worker":str(runtime / "worker.py"), "interpreter":os.path.abspath(sys.executable),
+                           "interpreter_sha256":digest(sys.executable), "model_manifest":str(base / "manifest.json"),
+                           "worker_notice":"weight-license.txt", "cwd_independent":True},
+                "dependencies":{"fixture":{"version":"1", "notices":["weight-license.txt"],
+                    "license_expression":None, "license_classifiers":[], "notice_status":"test evidence"}},
+                "files":{str(path.relative_to(base)):digest(path) for path in [evidence, *(runtime / name for name in RUNTIME_FILES)]}}
+    (base / "manifest.json").write_text(json.dumps(manifest))
+    return manifest
+
+class ProvisionTests(unittest.TestCase):
+    def test_initial_construction_then_reprovision_preserves_source(self):
+        import io
+        import sys
+        from contextlib import redirect_stdout
+        from email.message import Message
+        from types import SimpleNamespace
+        import provision
+
+        metadata = Message()
+        metadata["Name"] = "fixture"
+        distribution = SimpleNamespace(metadata=metadata, version="1", files=[])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "prepared"
+            source.mkdir()
+            evidence = source / "weight-license.txt"
+            evidence.write_text("Construction provenance fixture.")
+            manifest_path = source / "manifest.json"
+            manifest_path.write_text(json.dumps({"version":1, "operation":"speech", "id":"nsnet2",
+                "packages":{"fixture":"1"}, "license_evidence":"weight-license.txt",
+                "files":{"weight-license.txt":digest(evidence)}}))
+            with patch("provision.importlib.metadata.distributions", return_value=[distribution]), \
+                 patch("worker.importlib.metadata.version", return_value="1"), redirect_stdout(io.StringIO()):
+                construction = manifest_path.read_bytes()
+                bundled = root / "bundled"
+                with patch.object(sys, "argv", ["provision.py", "--manifest", str(manifest_path),
+                                               "--directory", str(bundled)]):
+                    provision.main()
+                self.assertEqual(validate_manifest(bundled / "manifest.json", "speech")["id"], "nsnet2")
+                self.assertEqual(manifest_path.read_bytes(), construction)
+                with patch.object(sys, "argv", ["provision.py", "--manifest", str(manifest_path),
+                                               "--directory", str(source), "--populate-new"]):
+                    provision.main()
+                self.assertEqual(validate_manifest(manifest_path, "speech")["id"], "nsnet2")
+                before = manifest_path.read_bytes()
+                target = root / "reprovisioned"
+                with patch.object(sys, "argv", ["provision.py", "--manifest", str(manifest_path),
+                                               "--directory", str(target)]):
+                    provision.main()
+            current = validate_manifest(target / "manifest.json", "speech")
+            self.assertEqual(current["runtime"]["worker"], str(target / "runtime/worker.py"))
+            self.assertEqual(manifest_path.read_bytes(), before)
+            self.assertEqual((target / "weight-license.txt").read_bytes(), evidence.read_bytes())
 
 class ProtocolTests(unittest.TestCase):
     def request(self):
@@ -33,9 +99,7 @@ class ProtocolTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=scratch) as directory:
             base = Path(directory)
             artifact = base / "weight-license.txt"
-            artifact.write_text("explicit test fixture, not a weight")
-            manifest = {"version":1,"operation":"speech","id":"nsnet2","files":{"weight-license.txt":digest(artifact)},
-                        "license_evidence":"weight-license.txt"}
+            manifest = bundle_fixture(base)
             path = base / "manifest.json"
             path.write_text(json.dumps(manifest))
             self.assertEqual(validate_manifest(path,"speech"),manifest)
@@ -52,15 +116,11 @@ class ProtocolTests(unittest.TestCase):
         scratch.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=scratch) as directory:
             base = Path(directory)
-            evidence = base / "weight-license.txt"
-            evidence.write_text("Test provenance record: license unknown; no permission grant.")
             for operation, models in (("separate", ("melband_roformer_kim", "htdemucs")),
                                       ("speech", ("MossFormer2_SE_48K", "nsnet2", "DeepFilterNet3"))):
                 for model in models:
                     with self.subTest(model=model):
-                        manifest = {"version":1,"operation":operation,"id":model,
-                                    "files":{"weight-license.txt":digest(evidence)},
-                                    "license_evidence":"weight-license.txt"}
+                        manifest = bundle_fixture(base, operation, model)
                         path = base / "manifest.json"
                         path.write_text(json.dumps(manifest))
                         self.assertEqual(validate_manifest(path,operation)["id"],model)
@@ -70,6 +130,37 @@ class ProtocolTests(unittest.TestCase):
             path.write_text(json.dumps(manifest))
             with self.assertRaisesRegex(WorkerError,"unsupported model"):
                 validate_manifest(path,operation)
+
+    def test_construction_manifest_cannot_be_admitted_for_inference(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            manifest = bundle_fixture(base)
+            manifest.pop("runtime")
+            manifest.pop("dependencies")
+            path = base / "manifest.json"
+            path.write_text(json.dumps(manifest))
+            self.assertEqual(validate_artifacts(path, "speech"), manifest)
+            with self.assertRaisesRegex(WorkerError, "provisioned runtime"):
+                validate_manifest(path, "speech")
+
+    def test_runtime_and_dependency_metadata_are_required_and_bound(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            mutations = (
+                lambda value: value.pop("dependencies"),
+                lambda value: value["runtime"].update(model_manifest="/different/manifest.json"),
+                lambda value: value["runtime"].update(interpreter_sha256="0" * 64),
+                lambda value: value["files"].pop("runtime/worker.py"),
+                lambda value: value["dependencies"]["fixture"].update(version="2"),
+                lambda value: value["dependencies"]["fixture"].update(notices=["missing.txt"]),
+            )
+            for mutate in mutations:
+                manifest = bundle_fixture(base)
+                mutate(manifest)
+                path = base / "manifest.json"
+                path.write_text(json.dumps(manifest))
+                with self.subTest(mutation=mutate), self.assertRaises(WorkerError):
+                    validate_manifest(path, "speech")
 
     def test_config_hash_is_canonical_and_changes_with_controls(self):
         self.assertEqual(canonical_digest({"a":1,"b":2}),canonical_digest({"b":2,"a":1}))
@@ -120,11 +211,8 @@ class OutputContainerTests(unittest.TestCase):
             base = Path(directory)
             source = base / "input.wav"
             sf.write(source, np.zeros((32 * 48000, 2), dtype="float32"), 48000, subtype="FLOAT")
-            evidence = base / "weight-license.txt"
-            evidence.write_text("Container-format fixture; inference is not exercised.")
             manifest = base / "manifest.json"
-            manifest.write_text(json.dumps({"version":1,"operation":"separate","id":"htdemucs",
-                "files":{"weight-license.txt":digest(evidence)},"license_evidence":"weight-license.txt","packages":{}}))
+            bundle_fixture(base, "separate", "htdemucs")
             destination = base / "result"
             request = {"version":1,"task_id":"riff-stems","operation":"separate","input_path":str(source),
                        "output_dir":str(destination),"model_manifest":str(manifest)}
@@ -141,6 +229,7 @@ class OutputContainerTests(unittest.TestCase):
                                    frames=2**28 + 1)
             with patch("worker.build_engine", return_value=(48000, inspect_outputs)), \
                  patch("worker.deny_network"), patch.dict(os.environ), \
+                 patch("worker.importlib.metadata.version", return_value="1"), \
                  patch.object(sf, "info", return_value=info), \
                  patch("worker.shutil.disk_usage", return_value=SimpleNamespace(free=16 * 1024**3)):
                 with self.assertRaises(InspectedOutputs):
@@ -163,12 +252,8 @@ class OutputContainerTests(unittest.TestCase):
             source = base / "input.wav"
             audio = np.full((8001, 1), 0.25, dtype="float32")
             sf.write(source, audio, 8000, subtype="FLOAT")
-            evidence = base / "evidence.txt"
-            evidence.write_text("Synthetic inference fixture, not a prepared model")
             manifest = base / "manifest.json"
-            manifest.write_text(json.dumps({"version":1, "operation":"speech", "id":"nsnet2",
-                "files":{"evidence.txt":digest(evidence)}, "license_evidence":"evidence.txt",
-                "packages":{}, "provenance":{"record":"x" * 70000}}))
+            bundle_fixture(base, provenance={"record":"x" * 70000})
             destination = base / "result"
             request = {**ProtocolTests().request(), "input_path":str(source),
                        "output_dir":str(destination), "model_manifest":str(manifest)}
@@ -179,6 +264,7 @@ class OutputContainerTests(unittest.TestCase):
             # the actual main() JSONL serializer execute unchanged.
             with patch.object(worker, "build_engine", return_value=(8000, lambda samples: samples * 0.5)), \
                  patch.object(worker, "deny_network"), patch.object(worker, "CORE_SECONDS", 1), \
+                 patch("worker.importlib.metadata.version", return_value="1"), \
                  patch.dict(os.environ), patch.object(sys, "argv", ["worker.py", "--request", str(request_path)]), \
                  redirect_stdout(stdout):
                 self.assertEqual(worker.main(), 0)
