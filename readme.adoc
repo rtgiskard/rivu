@@ -1,21 +1,32 @@
 = Rivu
 
-Rivu is a local-first music player for Linux, with desktop, command-line,
-terminal, and headless modes that share one playback instance.
+Rivu is a lightweight, local-first music player for Linux, with GUI, TUI, and CLI
+access to a shared playback instance that can also run headless.
 
 == Features
 
-* Local music libraries with search, favorites, metadata editing, play counts,
-  and recent history
-* link:doc/02_library.adoc#_albums[Album browsing], playlists with M3U/M3U8
-  import/export, and editable playback queues
-* PipeWire output with multichannel routing and optional FFmpeg decoding
-* Optional MPRIS and system tray integration
-* Named desktop layouts with dockable panels and configurable appearance
-* Waveform, spectrum, spectrogram, audio visualizers, and album artwork
-* Live parametric EQ and node-based audio processing with offline rendering,
-  restoration, speech enhancement and vocal/accompaniment separation;
-  link:doc/27_audio_processing.adoc[usage, explicit model preparation and quality limits]
+* *Performance:* GPU-side geometry expansion and coloring for supported visualizations,
+  plus shared on-demand analysis, avoid repeated CPU work. Bounded track and visualization
+  caches control memory retention; Still Mode suspends visualization work without
+  stopping playback. See link:doc/22_cache.adoc[resource lifecycles]
+* *Customization:* named layouts, dockable panels, themes, fonts, visualization
+  and artwork styles, and i18n support
+* *Library and albums:* folder and link:doc/02_library.adoc#_albums[album browsing],
+  search, favorites, library-only metadata edits, play counts, and recent history.
+  SQLite-backed storage and link:doc/02_library.adoc#_paged_views[on-demand paged browsing]
+  support large collections without whole-library snapshots
+* *Playlists and queue:* M3U/M3U8 import/export, drag-and-drop ordering and transfers,
+  direct file additions, and a persistent playback queue
+* *Playback and output:* native decoding, optional FFmpeg support, and PipeWire
+  output with device selection and multichannel routing; optional MPRIS media
+  controls and system tray integration
+* *Audio processing:* live parametric EQ, restoration, speech enhancement, and
+  vocal/accompaniment separation; node graphs support real-time, hybrid, and offline
+  execution, auditioning, and WAV export without changing source media.
+  Neural backends require prepared local models; see
+  link:doc/27_audio_processing.adoc#_practical_workflow[workflow and quality limits]
+* *Visualizations and artwork:* waveform, spectrum, spectrogram, audio visualizers,
+  and album artwork
 
 Rivu plays local files; it does not fetch network media or cover art.
 The desktop requires Wayland; audio output requires a running PipeWire 1.2 or newer server.
@@ -25,26 +36,27 @@ The desktop requires Wayland; audio output requires a running PipeWire 1.2 or ne
 
 . Install Rivu using the <<_build_and_install,instructions below>>.
 . Run `rivu` (equivalent to `rivu gui`) to open the desktop UI.
-. Add a music directory with the Library `+` button. Hover its directory row and
-  use the scan button on the right to import tracks. Adding a directory and
-  starting Rivu do not scan it automatically.
-  Alternatively, drag individual audio files into Queue without configuring a
-  folder. This registers them under link:doc/02_library.adoc#_other[Other] and
-  appends queue entries without starting or replacing playback.
+. Add a music directory with the Library `+` button, then hover its row and use
+  the scan button to import tracks. Scanning is explicit: adding a directory or
+  starting Rivu does not scan it automatically.
 . Browse Library or Albums and double-click a track to play it.
+
+Alternatively, drag individual audio files into Queue without configuring a
+folder. This registers them under link:doc/02_library.adoc#_other[Other] and appends
+queue entries without starting or replacing playback.
 
 Music directories can also be set through `library.roots` in `config.toml`;
 use absolute paths, not `~`. See link:doc/02_library.adoc#_roots_and_scanning[Library]
 for scanning and path rules.
 
-=== Other modes and shutdown
+=== Other interfaces and shutdown
 
 [source,sh]
 ----
 # Run a foreground core without a desktop window
 rivu serve
 
-# Open the terminal client for an existing core
+# Open the TUI for an existing core
 rivu tui
 
 # Stop the running instance, including its GUI and desktop integrations
@@ -52,7 +64,8 @@ rivu quit
 ----
 
 Passing explicit paths to `rivu gui PATH...` or `rivu serve PATH...` requests a scan
-but does not add library roots. `rivu gui PATH...` also scans when raising an existing window.
+within configured library roots; it does not add roots. `rivu gui PATH...` also
+requests scanning when raising an existing window.
 One core runs per data directory. All clients must use the same `--data-dir` to
 reach the same instance. `--config` selects configuration when starting a core;
 it does not reconfigure an existing instance.
@@ -61,13 +74,14 @@ Closing the GUI window leaves playback and the core running. Reopen it with
 `rivu gui`; stop the instance with `rivu quit`, `Quit Rivu`, or MPRIS `Quit` when
 enabled. A `serve` instance must be stopped before starting a graphical host in
 the same data directory.
-Ctrl-C or SIGTERM also shuts down the core cleanly.
+Ctrl-C and SIGTERM also request a clean shutdown.
 
 == CLI
 
-CLI/TUI controls require a running core; `library probe` and `playback devices`
-can run independently. All commands accept `--data-dir DIRECTORY`, `--config FILE`,
-and `--json`. Use `rivu --help` or a subcommand's `--help` for exact arguments.
+CLI and TUI controls require a running core; `library probe` and `playback devices`
+can run independently. Global options include `--data-dir DIRECTORY`, `--config FILE`,
+and `--json`. JSON reply shapes vary by command; use `rivu --help` or a subcommand's
+`--help` for exact arguments.
 
 [source,sh]
 ----
@@ -94,9 +108,9 @@ typical Linux installation: `~/.local/share/rivu`) and
 The data directory contains `library.db` (library and playback state),
 `layout.json` (desktop layouts), the `artwork/` cache, and optional `logs/`.
 Stop the core before operating on `library.db`. The application rejects incompatible
-formats rather than migrating or resetting them. The independent `rivu-migrate`
-tool, installed alongside `rivu`, validates current formats and is the independent
-entry point for future release migrations. This baseline has no conversion steps.
+formats rather than migrating or resetting them. The separate `rivu-migrate` tool,
+installed alongside `rivu`, validates current configuration and database formats
+without starting the player; historical format conversion is not implemented.
 See link:doc/02_library.adoc#_sqlite_maintenance[SQLite maintenance] for commands,
 backups, and what rescanning cannot restore.
 IPC access and upgrade constraints are described in link:doc/21_ipc.adoc[IPC].
@@ -136,19 +150,28 @@ paru -S rivu-git
 
 === Build from source
 
-On Arch Linux, install the build and runtime prerequisites:
+From the repository root, install the Arch Linux build and runtime prerequisites:
 
 [source,sh]
 ----
-sudo pacman -S --needed rust make gcc binutils clang pkgconf libpipewire opus fontconfig libxkbcommon ffmpeg ttf-nerd-fonts-symbols-mono
+sudo pacman -S --needed rustup make gcc binutils clang pkgconf libpipewire opus fontconfig libxkbcommon ffmpeg ttf-nerd-fonts-symbols-mono
+rustup show
 make install PREFIX="$HOME/.local"
 ----
 
-Use the repository's Rust toolchain and `Cargo.lock` when building.
+The recommended setup is rustup, which selects the stable release pinned in
+`rust-toolchain.toml` and installs the requested `minimal` profile, `rustfmt`, and
+`clippy`. The Arch Linux `rustup` and `rust` packages are alternatives; distribution
+toolchains must match the pinned version and provide `rustfmt` and `clippy` for linting.
+
+Keep `Cargo.lock`; the Makefile uses `--locked` to prevent implicit dependency
+updates. Run `make lint` to check formatting and all workspace targets with all
+features, including font embedding.
+
 The install command builds the workspace and installs `rivu`, `rivu-migrate`,
 the desktop entry, and icons. Ensure `~/.local/bin` is on `PATH`.
-Use `make build` to build without installing, or `cargo build --workspace --release`
-directly. Plain `cargo build --release` builds only the application and its dependencies.
+Use `make build` to build without installing, or `cargo build --locked --workspace --release`
+directly. Plain `cargo build --locked --release` builds only the application and its dependencies.
 Build outputs default to `.cache/target/`; `CARGO_TARGET_DIR` overrides that path.
 
 Linux builds prefer `mold` when available and otherwise use the toolchain's
@@ -164,15 +187,14 @@ during startup or status queries. Native decoding works without them.
 The compiled extension is disabled at runtime until
 `playback.ffmpeg_enabled = true`; see link:doc/04_playback.adoc#_optional_ffmpeg_decoder[Playback]
 for decoder behavior and runtime dependencies.
-The application feature forwards to `rivu-audio/ffmpeg`; the
-link:doc/04_playback.adoc#_audio_runtime_crate[audio runtime crate] owns binding
-generation and native audio dependencies.
+See the link:doc/04_playback.adoc#_audio_runtime_crate[audio runtime crate] for
+FFmpeg binding generation and native audio dependencies.
 
 To build without FFmpeg support, omit the FFmpeg package and disable default features:
 
 [source,sh]
 ----
-cargo build --workspace --release --no-default-features
+cargo build --locked --workspace --release --no-default-features
 ----
 
 Install the resulting `.cache/target/release/rivu` and
@@ -190,7 +212,7 @@ Install Symbols Nerd Font Mono on the machine displaying the GUI (on Arch Linux,
 
 [source,sh]
 ----
-cargo build --release --features embed-nerd-font
+cargo build --locked --release --features embed-nerd-font
 ----
 
 Embedding requires Fontconfig's `fc-list` and an installed Nerd Font on the build
@@ -225,9 +247,12 @@ timestamp. Invalid values fail the build; About displays the timestamp locally.
 == Acknowledgements
 
 Special thanks to https://deadbeef.sourceforge.io/[DeaDBeeF] and its contributors.
-DeaDBeeF has been the author's music player for years and is an important
-reference for Rivu's direction.
+DeaDBeeF has been my music player for years and an important influence on Rivu.
+
+Thanks also to https://krosbits.in/musicolet/[Musicolet], my long-time music player on Android.
+Its playback-management concepts provided the foundation for Rivu's current approach.
 
 == License
 
-GPL-3.0-or-later.
+Rivu is licensed under the https://www.gnu.org/licenses/gpl-3.0.html[GNU General Public License v3.0 or later]
+(GPL-3.0-or-later).
