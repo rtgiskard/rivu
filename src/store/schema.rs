@@ -18,7 +18,7 @@ impl Store {
         }
         let c =
             Connection::open(path).with_context(|| format!("open database {}", path.display()))?;
-        c.busy_timeout(std::time::Duration::from_secs(5))?;
+        Self::configure_connection(&c)?;
         let empty =
             rivu_format::database::inspect(&c)? == rivu_format::database::DatabaseState::Empty;
         if !empty {
@@ -30,22 +30,9 @@ impl Store {
         if empty {
             rivu_format::database::create_current(&c)?;
         }
-        // SQLite's built-in lower() is ASCII-only; preserve frontend Unicode search.
-        c.create_scalar_function(
-            "lower",
-            1,
-            rusqlite::functions::FunctionFlags::SQLITE_UTF8
-                | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
-            |ctx| {
-                let value = ctx
-                    .get_raw(0)
-                    .as_str()
-                    .map_err(|error| rusqlite::Error::UserFunctionError(error.into()))?;
-                Ok(value.to_lowercase())
-            },
-        )?;
         let store = Self {
             conn: c,
+            revision_owned_counts: false,
             track_cache: RefCell::new(TrackCache {
                 entries: HashMap::new(),
                 capacity: (crate::config::DEFAULT_PAGE_SIZE as usize).saturating_mul(2),

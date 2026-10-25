@@ -1783,13 +1783,8 @@ impl Settings {
         };
         let handle = self.handle.clone();
         cx.spawn(async move |this, cx| {
-            let (response, committed) = cx
-                .background_executor()
-                .spawn(async move {
-                    let response = handle.apply_gui_settings(patch);
-                    (response, handle.config_snapshot())
-                })
-                .await;
+            let response = handle.apply_gui_settings(patch).await;
+            let committed = handle.config_snapshot();
             let _ = this.update(cx, |this, cx| {
                 let result = if response.is_success() {
                     Ok(())
@@ -2310,7 +2305,7 @@ mod tests {
         runtime: &Runtime,
         patch: ConfigPatch,
     ) -> (Arc<Config>, std::result::Result<(), String>) {
-        let response = runtime.handle.apply_gui_settings(patch);
+        let response = futures::executor::block_on(runtime.handle.apply_gui_settings(patch));
         let result = if response.is_success() {
             Ok(())
         } else {
@@ -2879,9 +2874,7 @@ mod tests {
         });
         let (patch, submission) = submit(&settings, cx);
         assert!(
-            runtime
-                .handle
-                .request_ack(Command::Volume { value: 0.2 })
+            futures::executor::block_on(runtime.handle.request_ack(Command::Volume { value: 0.2 }))
                 .is_success()
         );
         let (committed, result) = execute(&runtime, patch);
@@ -2917,9 +2910,7 @@ mod tests {
         .unwrap();
         let (patch, submission) = submit(&settings, cx);
         assert!(
-            runtime
-                .handle
-                .request_ack(Command::Volume { value: 0.3 })
+            futures::executor::block_on(runtime.handle.request_ack(Command::Volume { value: 0.3 }))
                 .is_success()
         );
         let (committed, result) = execute(&runtime, patch);
@@ -3045,9 +3036,7 @@ mod tests {
         });
         std::fs::remove_dir(&path).unwrap();
         assert!(
-            runtime
-                .handle
-                .request_ack(Command::Volume { value: 0.2 })
+            futures::executor::block_on(runtime.handle.request_ack(Command::Volume { value: 0.2 }))
                 .is_success()
         );
         let (patch, submission) = submit(&settings, cx);

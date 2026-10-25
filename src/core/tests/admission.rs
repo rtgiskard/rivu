@@ -1,13 +1,12 @@
 use super::*;
 
 fn admission_fixture() -> (tempfile::TempDir, Core) {
-    fixture_with_database(Some(10.0), true)
+    fixture_with_database(Some(10.0))
 }
 
 fn next_admission_event(core: &mut Core) -> crate::core::admission::Event {
-    let executor = core.executor.clone();
-    wait_on(&executor, async {
-        tokio::time::timeout(
+    futures::executor::block_on(async {
+        rivu_protocol::transport::timeout(
             Duration::from_secs(5),
             core.active_external_admission
                 .as_mut()
@@ -295,11 +294,11 @@ fn immediate_ack_exposes_task_id_before_background_saving_finishes() {
     let lock = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     lock.execute_batch("BEGIN IMMEDIATE").unwrap();
     let (handle, control, worker, _) = navigation_runtime(core);
-    let ack = handle.request_ack(Command::QueueExternalPaths {
+    let ack = futures::executor::block_on(handle.request_ack(Command::QueueExternalPaths {
         paths: vec![path.clone()],
         index: None,
         expected_revision: None,
-    });
+    }));
     assert_eq!(ack.status, AckStatus::Succeeded);
     let id = ack
         .scan_id

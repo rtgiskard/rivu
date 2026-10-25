@@ -236,11 +236,8 @@ impl CollectionResolution {
     }
 }
 
-fn query_collection_page(
-    query_page: &mut impl FnMut(
-        Query,
-        crate::core::QueryTicket,
-    ) -> rivu_protocol::response::QueryResponse,
+async fn query_collection_page<F: Future<Output = rivu_protocol::response::QueryResponse>>(
+    query_page: &mut impl FnMut(Query, crate::core::QueryTicket) -> F,
     query: Query,
     ticket: &crate::core::QueryTicket,
 ) -> Result<rivu_protocol::response::QueryResponse> {
@@ -248,7 +245,7 @@ fn query_collection_page(
         ticket.is_current(),
         rivu_protocol::response::QueryError::Cancelled
     );
-    let response = query_page(query, ticket.clone());
+    let response = query_page(query, ticket.clone()).await;
     anyhow::ensure!(
         ticket.is_current(),
         rivu_protocol::response::QueryError::Cancelled
@@ -257,11 +254,8 @@ fn query_collection_page(
 }
 
 // Each request is bounded; no subset is published before the complete collection succeeds.
-fn resolve_album(
-    mut query_page: impl FnMut(
-        Query,
-        crate::core::QueryTicket,
-    ) -> rivu_protocol::response::QueryResponse,
+async fn resolve_album<F: Future<Output = rivu_protocol::response::QueryResponse>>(
+    mut query_page: impl FnMut(Query, crate::core::QueryTicket) -> F,
     key: rivu_protocol::model::AlbumKey,
     expected: rivu_protocol::model::QueryStamp,
     ticket: &crate::core::QueryTicket,
@@ -279,7 +273,7 @@ fn resolve_album(
         if let Query::AlbumTracks { offset, .. } = &mut query {
             *offset = ids.len();
         }
-        let response = query_collection_page(&mut query_page, query, ticket)?;
+        let response = query_collection_page(&mut query_page, query, ticket).await?;
         let result = response.result?;
         anyhow::ensure!(
             scope.stamp(response.revisions) == expected,
@@ -480,13 +474,17 @@ impl GuiApp {
                 let result = crate::gui::query::run(
                     handle,
                     cx,
-                    move |handle| {
+                    move |handle| async move {
                         resolve_album(
-                            |query, ticket| handle.query_if_current(query, ticket),
+                            |query, ticket| {
+                                let handle = handle.clone();
+                                async move { handle.query_if_current(query, ticket).await }
+                            },
                             key,
                             stamp,
                             &ticket,
                         )
+                        .await
                     },
                     |response, cx| {
                         let _ = this.update(cx, |this, cx| {
@@ -1164,19 +1162,19 @@ mod tests {
             let mut resolution = CollectionResolution::default();
             let read = resolution.begin().unwrap();
             let mut calls = 0;
-            let result = resolve_album(
+            let result = futures::executor::block_on(resolve_album(
                 |_, _| {
                     calls += 1;
                     if calls == timeout_at {
                         assert!(resolution.timeout(&read));
                         assert!(resolution.pending());
                     }
-                    album_page(&[calls as i64], 2, revisions)
+                    futures::future::ready(album_page(&[calls as i64], 2, revisions))
                 },
                 key.clone(),
                 album_query().stamp(revisions),
                 &read.ticket,
-            );
+            ));
             assert!(matches!(
                 result.unwrap_err().downcast_ref::<QueryError>(),
                 Some(QueryError::Cancelled)
@@ -1185,6 +1183,50 @@ mod tests {
             assert!(resolution.pending());
             assert!(resolution.finish(&read));
         }
+    }
+
+    #[test]
+    fn album_cancellation_drains_a_pending_response_before_releasing_the_gate() {
+        futures::executor::block_on(async {
+            let Query::AlbumTracks { key, .. } = album_query() else {
+                unreachable!()
+            };
+            let revisions = QueryRevisions::default();
+            let mut resolution = CollectionResolution::default();
+            let read = resolution.begin().unwrap();
+            let (sender, receiver) = futures::channel::oneshot::channel();
+            let mut receiver = Some(receiver);
+            let mut calls = 0;
+            let result = {
+                let operation = resolve_album(
+                    |_, ticket| {
+                        assert!(ticket.is_current());
+                        calls += 1;
+                        let receiver = receiver.take().unwrap();
+                        async move { receiver.await.unwrap() }
+                    },
+                    key,
+                    album_query().stamp(revisions),
+                    &read.ticket,
+                );
+                futures::pin_mut!(operation);
+                assert!(futures::poll!(operation.as_mut()).is_pending());
+                resolution.cancel();
+                assert!(resolution.pending());
+                assert!(resolution.begin().is_none());
+                assert!(futures::poll!(operation.as_mut()).is_pending());
+                sender.send(album_page(&[1], 2, revisions)).unwrap();
+                operation.await
+            };
+            assert!(matches!(
+                result.unwrap_err().downcast_ref::<QueryError>(),
+                Some(QueryError::Cancelled)
+            ));
+            assert_eq!(calls, 1);
+            assert!(resolution.pending());
+            assert!(resolution.finish(&read));
+            assert!(!resolution.pending());
+        });
     }
 
     #[test]
@@ -1266,23 +1308,23 @@ mod tests {
         let mut offsets = Vec::new();
         let mut epoch = QueryEpoch::default();
         let ticket = epoch.ticket();
-        let ids = resolve_album(
+        let ids = futures::executor::block_on(resolve_album(
             |query, _| {
                 let Query::AlbumTracks { offset, limit, .. } = query else {
                     unreachable!()
                 };
                 offsets.push(offset);
                 assert_eq!(limit, rivu_protocol::model::MAX_QUERY_ROWS);
-                if offset == 0 {
+                futures::future::ready(if offset == 0 {
                     album_page(&[9, 2], 4, revisions)
                 } else {
                     album_page(&[8, 3], 4, revisions)
-                }
+                })
             },
             key,
             query.stamp(revisions),
             &ticket,
-        )
+        ))
         .unwrap();
         assert_eq!(offsets, [0, 2]);
         assert_eq!(ids, [9, 2, 8, 3]);
@@ -1303,13 +1345,13 @@ mod tests {
             let mut calls = 0;
             let mut epoch = QueryEpoch::default();
             let ticket = epoch.ticket();
-            let result = resolve_album(
+            let result = futures::executor::block_on(resolve_album(
                 |_, _| {
                     calls += 1;
                     if calls == 1 {
-                        return album_page(&[9, 2], 4, revisions);
+                        return futures::future::ready(album_page(&[9, 2], 4, revisions));
                     }
-                    match failure {
+                    futures::future::ready(match failure {
                         0 => album_page(
                             &[8, 3],
                             4,
@@ -1325,12 +1367,12 @@ mod tests {
                                 "read failed".into(),
                             )),
                         },
-                    }
+                    })
                 },
                 key.clone(),
                 query.stamp(revisions),
                 &ticket,
-            );
+            ));
             assert!(result.is_err());
             assert_eq!(calls, 2);
         }
@@ -1375,19 +1417,19 @@ mod tests {
                     resolution.cancel();
                 }
                 let mut calls = 0;
-                let result = resolve_album(
+                let result = futures::executor::block_on(resolve_album(
                     |_, ticket| {
                         assert!(ticket.is_current());
                         calls += 1;
                         if calls == cancel_at {
                             resolution.cancel();
                         }
-                        album_page(&[calls as i64], 2, revisions)
+                        futures::future::ready(album_page(&[calls as i64], 2, revisions))
                     },
                     key.clone(),
                     query.stamp(revisions),
                     &read.ticket,
-                );
+                ));
                 assert!(matches!(
                     result.unwrap_err().downcast_ref::<QueryError>(),
                     Some(QueryError::Cancelled)

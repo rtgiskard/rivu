@@ -124,7 +124,7 @@ fn core_source_changes_reject_collection_transfers_without_destination_changes()
 
 #[test]
 fn collection_transfer_rollback_preserves_all_tokens_and_rows() {
-    let (directory, mut core) = fixture_with_database(Some(10.0), true);
+    let (directory, mut core) = fixture_with_database(Some(10.0));
     prepare(&mut core);
     let before = core.state.query_revisions();
     let scopes = core.state.library.playlist_entry_revisions.clone();

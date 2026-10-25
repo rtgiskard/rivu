@@ -1355,6 +1355,7 @@ mod tests {
         Entity<AudioProcessing>,
         AnyWindowHandle,
     ) {
+        cx.executor().allow_parking();
         cx.update(|cx| {
             rivu_ui::theme::set_palette(crate::theme::palette(crate::theme::Theme::default()), cx);
             rivu_ui::theme::set_typography(
@@ -1414,6 +1415,15 @@ mod tests {
         cx.run_until_parked();
         cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
             .unwrap();
+    }
+
+    async fn wait_for_commands(
+        cx: &mut TestAppContext,
+        processing: &Entity<AudioProcessing>,
+        handle: AnyWindowHandle,
+    ) {
+        cx.condition(processing, |this, _| this.pending == 0).await;
+        draw(cx, handle);
     }
 
     fn node_point(
@@ -1482,7 +1492,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn clicking_nodes_moves_keyboard_ownership_and_delete_respects_source_protection(
+    async fn clicking_nodes_moves_keyboard_ownership_and_delete_respects_source_protection(
         cx: &mut TestAppContext,
     ) {
         let (_directory, runtime, processing, handle) = fixture(cx);
@@ -1500,19 +1510,23 @@ mod tests {
         press(cx, handle, source);
         release(cx, handle, source);
         key(cx, handle, "delete");
+        wait_for_commands(cx, &processing, handle).await;
         assert_eq!(runtime.handle.config_snapshot().processing_graph, original);
         press(cx, handle, output);
         release(cx, handle, output);
         key(cx, handle, "delete");
+        wait_for_commands(cx, &processing, handle).await;
         let graph = &runtime.handle.config_snapshot().processing_graph;
         assert_eq!(graph.nodes.iter().map(|n| n.id).collect::<Vec<_>>(), [1, 3]);
         assert!(graph.edges.is_empty());
         assert_eq!(graph.revision, 1);
         key(cx, handle, "ctrl-z");
+        wait_for_commands(cx, &processing, handle).await;
         let restored = &runtime.handle.config_snapshot().processing_graph;
         assert_eq!(restored.nodes, original.nodes);
         assert_eq!(restored.edges, original.edges);
         key(cx, handle, "ctrl-y");
+        wait_for_commands(cx, &processing, handle).await;
         assert_eq!(
             runtime
                 .handle
@@ -1525,9 +1539,11 @@ mod tests {
             [1, 3]
         );
         key(cx, handle, "ctrl-z");
+        wait_for_commands(cx, &processing, handle).await;
         press(cx, handle, output);
         release(cx, handle, output);
         key(cx, handle, "ctrl-d");
+        wait_for_commands(cx, &processing, handle).await;
         processing.read_with(cx, |this, _| assert_eq!(this.graph_ui.selected, Some(4)));
         assert!(
             runtime
@@ -1539,13 +1555,14 @@ mod tests {
                 .any(|n| n.id == 4)
         );
         key(cx, handle, "delete");
+        wait_for_commands(cx, &processing, handle).await;
         let after_duplicate_delete = &runtime.handle.config_snapshot().processing_graph;
         assert_eq!(after_duplicate_delete.nodes, original.nodes);
         assert_eq!(after_duplicate_delete.edges, original.edges);
     }
 
     #[gpui::test]
-    fn port_press_keeps_drag_idle_and_escape_preserves_the_selected_output(
+    async fn port_press_keeps_drag_idle_and_escape_preserves_the_selected_output(
         cx: &mut TestAppContext,
     ) {
         let (_directory, runtime, processing, handle) = fixture(cx);
@@ -1584,6 +1601,7 @@ mod tests {
         release(cx, handle, output);
         press(cx, handle, free_input);
         release(cx, handle, free_input);
+        wait_for_commands(cx, &processing, handle).await;
         let graph = &runtime.handle.config_snapshot().processing_graph;
         assert_eq!(graph.nodes, original.nodes);
         assert_eq!(

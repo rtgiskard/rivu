@@ -371,17 +371,18 @@ impl AlbumBrowser {
             let (response, count_response) = super::query::run(
                 handle,
                 cx,
-                move |handle| {
-                    let response = handle.query_if_current(worker_query, ticket.clone());
-                    let count = response
-                        .result
-                        .is_ok()
-                        .then_some(count_query)
-                        .flatten()
-                        .map(|query| {
-                            let response = handle.query_if_current(query.clone(), ticket);
-                            (query, response)
-                        });
+                move |handle| async move {
+                    let response = handle.query_if_current(worker_query, ticket.clone()).await;
+                    let count = if response.result.is_ok() {
+                        if let Some(query) = count_query {
+                            let response = handle.query_if_current(query.clone(), ticket).await;
+                            Some((query, response))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
                     (response, count)
                 },
                 |response, cx| {

@@ -778,7 +778,7 @@ impl Library {
                     let response = crate::gui::query::run(
                         handle,
                         cx,
-                        move |handle| handle.query_if_current(query, ticket),
+                        move |handle| async move { handle.query_if_current(query, ticket).await },
                         |response, cx| {
                             timed_out = true;
                             let _ = this.update(cx, |this, cx| {

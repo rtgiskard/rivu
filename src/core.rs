@@ -1,5 +1,5 @@
 //! Core waits for events and applies state transitions on one dedicated owner.
-//! Tokio drives bounded admission, async replies, IPC and independent long jobs.
+//! An application-owned executor drives admission, replies, IPC and long jobs.
 //! Caller timeout never cancels admitted work or authorizes replay. Real-time
 //! audio stays independent; shutdown completion includes physical retirement.
 
@@ -11,8 +11,10 @@ use crate::{
     store::Store,
 };
 use anyhow::{Context, Result};
-use crossbeam_channel::{Receiver, Sender, bounded};
+use async_channel as mpsc;
+use event_listener::Event;
 use futures::FutureExt;
+use futures::channel::oneshot;
 use parking_lot::{Mutex, RwLock};
 use rand::seq::SliceRandom;
 use rivu_audio::analysis::{AnalysisControl, AnalysisFrame, DisplayDemand};
@@ -32,10 +34,10 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::{Notify, mpsc, oneshot, watch};
 
-mod tasks;
-use tasks::{TaskRuntime, wait_on};
+mod query_worker;
+pub(crate) mod tasks;
+use tasks::TaskRuntime;
 
 mod query_epoch;
 pub(crate) use query_epoch::{QueryEpoch, QueryTicket};
@@ -61,7 +63,9 @@ enum Operation {
     Command(Command),
     GuiConfig(GuiConfigChange),
     Navigate(Navigation),
-    WaveformSnapshot(Sender<std::result::Result<Option<audio::WaveformScanSnapshot>, String>>),
+    WaveformSnapshot(
+        oneshot::Sender<std::result::Result<Option<audio::WaveformScanSnapshot>, String>>,
+    ),
 }
 
 #[derive(Clone, Copy)]
@@ -172,10 +176,10 @@ pub struct CoreHandle {
     analysis_control: Arc<AnalysisControl>,
     pub(crate) waveform: Arc<RwLock<audio::WaveformFrame>>,
     sender: mpsc::Sender<Request>,
-    executor: tokio::runtime::Handle,
-    revision_updates: watch::Receiver<StateRevisions>,
+    executor: Arc<async_executor::Executor<'static>>,
+    workers: Arc<tasks::BlockingPool>,
+    revision_updates: Arc<RwLock<Vec<mpsc::Sender<()>>>>,
     wakeup: Arc<RwLock<Option<Wakeup>>>,
-    subscribers: Arc<RwLock<Vec<Sender<()>>>>,
     // Window-scoped: cloning a GUI handle must not change IPC/CLI query policy.
     query_timeout: Option<QueryTimeout>,
     #[cfg(test)]
@@ -205,8 +209,9 @@ impl CoreHandle {
     /// Capture the active audio source and processing state without waiting on the GUI thread.
     pub(crate) fn waveform_snapshot(
         &self,
-    ) -> Result<Receiver<std::result::Result<Option<audio::WaveformScanSnapshot>, String>>> {
-        let (reply, receiver) = bounded(1);
+    ) -> Result<oneshot::Receiver<std::result::Result<Option<audio::WaveformScanSnapshot>, String>>>
+    {
+        let (reply, receiver) = oneshot::channel();
         self.sender
             .try_send(Request {
                 operation: Operation::WaveformSnapshot(reply),
@@ -225,11 +230,12 @@ impl CoreHandle {
             .context("Rivu is busy or stopped")
     }
 
-    pub(crate) fn apply_gui_settings(&self, patch: ConfigPatch) -> Ack {
-        self.operation_ack(
+    pub(crate) async fn apply_gui_settings(&self, patch: ConfigPatch) -> Ack {
+        self.operation_ack_async(
             Operation::GuiConfig(GuiConfigChange::Settings(Box::new(patch))),
             REPLY_TIMEOUT,
         )
+        .await
     }
 
     pub fn send(&self, command: Command) -> Result<()> {
@@ -273,32 +279,32 @@ impl CoreHandle {
     }
     pub fn set_wakeup(&self, callback: impl Fn() + Send + Sync + 'static) {
         *self.wakeup.write() = Some(Arc::new(callback));
-        self.notify_subscribers();
+        self.notify_revisions();
     }
     pub fn clear_wakeup(&self) {
         *self.wakeup.write() = None;
-        self.notify_subscribers();
+        self.notify_revisions();
     }
-    fn notify_subscribers(&self) {
-        self.subscribers.write().retain(|sender| {
-            !matches!(
-                sender.try_send(()),
-                Err(crossbeam_channel::TrySendError::Disconnected(_))
-            )
-        });
+    fn notify_revisions(&self) {
+        self.revision_updates
+            .write()
+            .retain(|sender| !matches!(sender.try_send(()), Err(mpsc::TrySendError::Closed(_))));
     }
-    pub fn subscribe(&self) -> Receiver<()> {
-        let (sender, receiver) = bounded(1);
-        self.subscribers.write().push(sender);
+
+    pub(crate) fn subscribe_revisions(&self) -> mpsc::Receiver<()> {
+        let (sender, receiver) = mpsc::bounded(1);
+        let mut subscribers = self.revision_updates.write();
+        subscribers.retain(|sender| !sender.is_closed());
+        subscribers.push(sender);
         receiver
     }
 
-    pub(crate) fn subscribe_revisions(&self) -> watch::Receiver<StateRevisions> {
-        self.revision_updates.clone()
+    pub(crate) fn executor(&self) -> &Arc<async_executor::Executor<'static>> {
+        &self.executor
     }
 
-    pub(crate) fn executor(&self) -> &tokio::runtime::Handle {
-        &self.executor
+    pub(crate) fn workers(&self) -> &Arc<tasks::BlockingPool> {
+        &self.workers
     }
 
     pub(crate) async fn query_async(&self, query: Query) -> QueryResponse {
@@ -306,9 +312,9 @@ impl CoreHandle {
             .await
     }
     #[cfg(test)]
-    /// Query metadata and rows are produced in the same Core dispatch.
+    /// Drive the runtime-neutral query port for synchronous test owners.
     pub fn query(&self, query: Query) -> QueryResponse {
-        self.query_with_ticket(query, None, false, REPLY_TIMEOUT)
+        futures::executor::block_on(self.query_async(query))
     }
 
     /// Report GUI waiting failures without treating them as physical completion.
@@ -321,27 +327,20 @@ impl CoreHandle {
     }
 
     /// GUI reads retain their caller's physical slot until reply or disconnect.
-    pub(crate) fn query_for_gui(&self, query: Query) -> QueryResponse {
-        self.query_with_ticket(query, None, true, REPLY_TIMEOUT)
+    pub(crate) async fn query_for_gui(&self, query: Query) -> QueryResponse {
+        self.query_with_ticket_async(query, None, true, REPLY_TIMEOUT)
+            .await
     }
 
     /// Cancel stale queued reads without interrupting an already executing read.
     /// A timeout notifies the GUI, then drains and discards the actual reply.
-    pub(crate) fn query_if_current(&self, query: Query, ticket: QueryTicket) -> QueryResponse {
-        self.query_with_ticket(query, Some(ticket), true, REPLY_TIMEOUT)
-    }
-
-    fn query_with_ticket(
+    pub(crate) async fn query_if_current(
         &self,
         query: Query,
-        ticket: Option<QueryTicket>,
-        physical_retirement: bool,
-        timeout: Duration,
+        ticket: QueryTicket,
     ) -> QueryResponse {
-        wait_on(
-            &self.executor,
-            self.query_with_ticket_async(query, ticket, physical_retirement, timeout),
-        )
+        self.query_with_ticket_async(query, Some(ticket), true, REPLY_TIMEOUT)
+            .await
     }
 
     async fn query_with_ticket_async(
@@ -367,7 +366,7 @@ impl CoreHandle {
         };
         let response = match self.admit(request).await {
             Err(error) => Err(format!("Core unavailable: {error}")),
-            Ok(()) => match tokio::time::timeout(duration, &mut rx).await {
+            Ok(()) => match rivu_protocol::transport::timeout(duration, &mut rx).await {
                 Ok(result) => result.map_err(|error| format!("Core response unavailable: {error}")),
                 Err(error) => {
                     let message = format!("Core response unavailable: {error}");
@@ -399,7 +398,7 @@ impl CoreHandle {
     }
 
     async fn admit(&self, request: Request) -> Result<()> {
-        tokio::time::timeout(ADMISSION_TIMEOUT, self.sender.send(request))
+        rivu_protocol::transport::timeout(ADMISSION_TIMEOUT, self.sender.send(request))
             .await
             .context("Core queue admission timed out")?
             .context("Rivu is stopped")
@@ -424,26 +423,15 @@ impl CoreHandle {
         self.state.read().revisions
     }
 
-    pub fn request_ack(&self, command: Command) -> Ack {
+    pub async fn request_ack(&self, command: Command) -> Ack {
         let duration = command_reply_timeout(&command);
-        self.operation_ack(Operation::Command(command), duration)
+        self.operation_ack_async(Operation::Command(command), duration)
+            .await
     }
 
     /// Navigate in one Core dispatch, preserving its status at execution time.
-    pub(crate) fn navigate(&self, direction: Navigation) -> Ack {
-        self.operation_ack(Operation::Navigate(direction), REPLY_TIMEOUT)
-    }
-
-    fn operation_ack(&self, operation: Operation, duration: Duration) -> Ack {
-        wait_on(
-            &self.executor,
-            self.operation_ack_async(operation, duration),
-        )
-    }
-
-    pub(crate) async fn request_ack_async(&self, command: Command) -> Ack {
-        let duration = command_reply_timeout(&command);
-        self.operation_ack_async(Operation::Command(command), duration)
+    pub(crate) async fn navigate(&self, direction: Navigation) -> Ack {
+        self.operation_ack_async(Operation::Navigate(direction), REPLY_TIMEOUT)
             .await
     }
 
@@ -460,7 +448,7 @@ impl CoreHandle {
                 self.revision(),
             );
         }
-        match tokio::time::timeout(duration, rx).await {
+        match rivu_protocol::transport::timeout(duration, rx).await {
             Ok(Ok(CoreResponse::Ack(ack))) => ack,
             Ok(Ok(CoreResponse::Query(_))) => unreachable!("command request returned query"),
             result => Ack::new(
@@ -489,7 +477,7 @@ pub(crate) struct RuntimeControl {
 #[derive(Default)]
 struct Completion {
     state: Mutex<CompletionState>,
-    acknowledged: Notify,
+    acknowledged: Event,
 }
 
 #[derive(Default)]
@@ -501,7 +489,7 @@ struct CompletionState {
 
 impl RuntimeControl {
     fn new() -> (Self, mpsc::Receiver<()>) {
-        let (shutdown, receiver) = mpsc::channel(1);
+        let (shutdown, receiver) = async_channel::bounded(1);
         (
             Self {
                 shutdown,
@@ -513,8 +501,8 @@ impl RuntimeControl {
 
     pub(crate) fn request_shutdown(&self) -> Result<()> {
         match self.shutdown.try_send(()) {
-            Ok(()) | Err(mpsc::error::TrySendError::Full(())) => Ok(()),
-            Err(mpsc::error::TrySendError::Closed(())) => {
+            Ok(()) | Err(mpsc::TrySendError::Full(())) => Ok(()),
+            Err(mpsc::TrySendError::Closed(())) => {
                 anyhow::bail!("Rivu is stopped")
             }
         }
@@ -525,9 +513,7 @@ impl RuntimeControl {
         let requested = self.request_shutdown();
         let waiting = async {
             loop {
-                let notified = self.completion.acknowledged.notified();
-                tokio::pin!(notified);
-                notified.as_mut().enable();
+                let notified = self.completion.acknowledged.listen();
                 {
                     let state = self.completion.state.lock();
                     if state.ack.is_some() || state.finished || requested.is_err() {
@@ -537,7 +523,7 @@ impl RuntimeControl {
                 notified.await;
             }
         };
-        let _ = tokio::time::timeout(REPLY_TIMEOUT, waiting).await;
+        let _ = rivu_protocol::transport::timeout(REPLY_TIMEOUT, waiting).await;
         self.completion.state.lock().ack.clone().unwrap_or_else(|| {
             let status = if requested.is_err() {
                 AckStatus::NotAdmitted
@@ -558,7 +544,7 @@ impl RuntimeControl {
 
     fn acknowledge(&self, ack: Ack) {
         self.completion.state.lock().ack = Some(ack);
-        self.completion.acknowledged.notify_waiters();
+        self.completion.acknowledged.notify(usize::MAX);
     }
 
     pub(crate) fn set_completion_callback(&self, callback: impl Fn() + Send + Sync + 'static) {
@@ -577,7 +563,7 @@ impl RuntimeControl {
         state.finished = true;
         let callback = state.callback.clone();
         drop(state);
-        self.completion.acknowledged.notify_waiters();
+        self.completion.acknowledged.notify(usize::MAX);
         if let Some(callback) = callback {
             callback();
         }
@@ -596,7 +582,7 @@ pub struct Runtime {
     pub handle: CoreHandle,
     pub(crate) control: RuntimeControl,
     worker: Option<JoinHandle<()>>,
-    // Last field: Drop joins Core before the Tokio driver/pool can stop. App
+    // Last field: Drop joins Core before the application executor can stop. App
     // separately retires IPC before releasing this lifecycle owner.
     _tasks: TaskRuntime,
 }
@@ -657,11 +643,10 @@ impl Runtime {
         tracing::info!("audio_engine_ready");
         let tasks = TaskRuntime::start()?;
         let executor = tasks.handle.clone();
-        let (sender, receiver) = mpsc::channel(64);
+        let (sender, receiver) = async_channel::bounded(64);
         let (control, shutdown_receiver) = RuntimeControl::new();
         let shared = Arc::new(RwLock::new(CoreState::default()));
         let wakeup = Arc::new(RwLock::new(None));
-        let subscribers = Arc::new(RwLock::new(Vec::new()));
         let initial = {
             let mut state = CoreState::default();
             state.playback.volume = config.volume;
@@ -673,7 +658,7 @@ impl Runtime {
             state
         };
         *shared.write() = initial.clone();
-        let (revision_updates, revision_rx) = watch::channel(initial.revisions);
+        let revision_updates = Arc::new(RwLock::new(Vec::new()));
         let handle = CoreHandle {
             state: shared.clone(),
             analysis: engine.analysis.clone(),
@@ -681,25 +666,26 @@ impl Runtime {
             waveform: Arc::clone(&engine.waveform),
             sender,
             executor: executor.clone(),
-            revision_updates: revision_rx,
+            workers: Arc::clone(&tasks.workers),
+            revision_updates: Arc::clone(&revision_updates),
             wakeup: wakeup.clone(),
-            subscribers: subscribers.clone(),
             query_timeout: None,
             #[cfg(test)]
             _test_tasks: None,
         };
-        let (scan_tx, scan_rx) = mpsc::channel(3);
-        let (relocation_tx, relocation_rx) = mpsc::channel(1);
+        let (scan_tx, scan_rx) = async_channel::bounded(3);
+        let (relocation_tx, relocation_rx) = async_channel::bounded(1);
         let core = Core {
             store,
             engine,
             logging,
             executor: executor.clone(),
+            workers: Arc::clone(&tasks.workers),
+            read_queries: None,
             revision_updates,
             state: initial,
             shared,
             wakeup,
-            subscribers,
             generation: 0,
             output_settings_request: 0,
             next_playlist_token: 0,
@@ -817,7 +803,7 @@ enum ScanEvent {
     KnownSources {
         id: u64,
         paths: Vec<PathBuf>,
-        reply: tokio::sync::oneshot::Sender<Result<Vec<Option<library::KnownFile>>>>,
+        reply: oneshot::Sender<Result<Vec<Option<library::KnownFile>>>>,
     },
     Finished(ScanFinished),
     Saved(catalog::ScanSaved),
@@ -827,20 +813,21 @@ struct ScanTask {
     status: ScanTaskStatus,
     owner: crate::projection::MediaTaskOwner,
     cancellation: library::ScanCancellation,
-    worker: tokio::task::JoinHandle<()>,
+    worker: async_executor::Task<()>,
     pending_save: Option<ScanFinished>,
 }
 struct RelocationTask {
     status: RelocationTaskStatus,
     prepared: crate::store::PreparedRelocation,
     cancellation: library::ScanCancellation,
-    worker: Option<tokio::task::JoinHandle<()>>,
+    worker: Option<async_executor::Task<()>>,
 }
 impl Drop for RelocationTask {
     fn drop(&mut self) {
         self.cancellation.cancel();
         if let Some(worker) = self.worker.take() {
-            let _ = futures::executor::block_on(worker);
+            let _ =
+                futures::executor::block_on(std::panic::AssertUnwindSafe(worker).catch_unwind());
         }
     }
 }
@@ -852,12 +839,13 @@ struct Core {
     store: Store,
     engine: AudioEngine,
     logging: Option<logging::Control>,
-    executor: tokio::runtime::Handle,
-    revision_updates: watch::Sender<StateRevisions>,
+    executor: Arc<async_executor::Executor<'static>>,
+    workers: Arc<tasks::BlockingPool>,
+    read_queries: Option<query_worker::ReadQueries>,
+    revision_updates: Arc<RwLock<Vec<mpsc::Sender<()>>>>,
     state: CoreState,
     shared: Arc<RwLock<CoreState>>,
     wakeup: Arc<RwLock<Option<Wakeup>>>,
-    subscribers: Arc<RwLock<Vec<Sender<()>>>>,
     generation: u64,
     output_settings_request: u64,
     next_playlist_token: u64,
@@ -898,6 +886,10 @@ impl Drop for Core {
     fn drop(&mut self) {
         // Runs on the dedicated Core owner (or a synchronous test owner),
         // including unwind. Cancellation is intent, never retirement.
+        if let Some(reads) = &self.read_queries {
+            reads.fence.transition().finish(true);
+        }
+        drop(self.read_queries.take());
         drop(self.active_export.take());
         drop(self.active_external_admission.take());
         if let Some(task) = self.active_scan.take() {
@@ -906,7 +898,9 @@ impl Drop for Core {
                 task.cancellation.cancel();
             }
             while self.scan_rx.try_recv().is_ok() {}
-            let _ = futures::executor::block_on(task.worker);
+            let _ = futures::executor::block_on(
+                std::panic::AssertUnwindSafe(task.worker).catch_unwind(),
+            );
             while self.scan_rx.try_recv().is_ok() {}
         }
         self.relocation_rx.close();

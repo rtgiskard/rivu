@@ -111,7 +111,7 @@ fn scan_matches_progressive(scan: &WaveformFrame, progressive: &WaveformFrame) -
 }
 
 type SnapshotReply =
-    crossbeam_channel::Receiver<Result<Option<rivu_audio::WaveformScanSnapshot>, String>>;
+    futures::channel::oneshot::Receiver<Result<Option<rivu_audio::WaveformScanSnapshot>, String>>;
 
 struct PreparedScan {
     generation: u64,
@@ -1148,37 +1148,40 @@ impl Waveform {
         let cancelled = Arc::clone(&request.cancelled);
         let generation = setup.generation;
         cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    let mut snapshot = match setup.snapshot {
-                        Some(reply) => reply?
-                            .recv()
-                            .map_err(|error| anyhow::anyhow!(error))?
-                            .map_err(|error| anyhow::anyhow!(error))?
-                            .unwrap_or(setup.fallback),
-                        None => setup.fallback,
-                    };
-                    // Saved original-file hints must not be applied to an audition cache.
-                    if snapshot.path == display_source.path
-                        && snapshot.range == display_source.range
-                    {
-                        snapshot.decoder_hint = display_source.decoder_hint;
-                    }
-                    let mut frame = rivu_audio::waveform(
-                        &snapshot,
-                        setup.buffer_mb,
-                        setup.ffmpeg_enabled,
-                        &cancelled,
-                    )?;
-                    // Scan validates the actual opened source. Display metadata and
-                    // seek interaction intentionally retain the original timeline.
-                    frame.path = Some(display_source.path.clone());
-                    frame.range = display_source.range;
-                    frame.decoder_hint = display_source.decoder_hint;
-                    Ok(frame)
-                })
-                .await;
+            let result = async {
+                let snapshot = match setup.snapshot {
+                    Some(reply) => reply?
+                        .await
+                        .map_err(|error| anyhow::anyhow!(error))?
+                        .map_err(|error| anyhow::anyhow!(error))?
+                        .unwrap_or(setup.fallback),
+                    None => setup.fallback,
+                };
+                cx.background_executor()
+                    .spawn(async move {
+                        let mut snapshot = snapshot;
+                        // Saved original-file hints must not be applied to an audition cache.
+                        if snapshot.path == display_source.path
+                            && snapshot.range == display_source.range
+                        {
+                            snapshot.decoder_hint = display_source.decoder_hint;
+                        }
+                        let mut frame = rivu_audio::waveform(
+                            &snapshot,
+                            setup.buffer_mb,
+                            setup.ffmpeg_enabled,
+                            &cancelled,
+                        )?;
+                        // Scan validates the actual opened source. Display metadata and
+                        // seek interaction intentionally retain the original timeline.
+                        frame.path = Some(display_source.path.clone());
+                        frame.range = display_source.range;
+                        frame.decoder_hint = display_source.decoder_hint;
+                        Ok(frame)
+                    })
+                    .await
+            }
+            .await;
             let _ = this.update(cx, |this, cx| {
                 if this.finish_full(generation, result) {
                     cx.notify();

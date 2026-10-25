@@ -1,10 +1,12 @@
 use anyhow::{Context, Result, bail};
+use async_io::Async;
 use bytes::BytesMut;
+use futures_lite::future;
 use rivu_protocol::protocol::{
     SessionState, WireCommand, WireQuery, WireRequest, WireResponse, state_response,
 };
 use rivu_protocol::transport::{
-    read_response_frame, unpack_error, unpack_hello, write_request_frame_buffered,
+    read_response_frame, timeout, unpack_error, unpack_hello, write_request_frame_buffered,
 };
 use rivu_protocol::{
     AppCommand,
@@ -13,6 +15,7 @@ use rivu_protocol::{
     response::{Ack, AckStatus, QueryResponse, StateResponse, StateRevisions, StateSections},
 };
 use std::{
+    os::unix::net::UnixStream,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -20,7 +23,6 @@ use std::{
     },
     time::Duration,
 };
-use tokio::{net::UnixStream, runtime::Builder, time::timeout};
 
 #[derive(Debug)]
 pub struct InstanceChanged;
@@ -58,13 +60,13 @@ pub struct SessionStop {
 #[derive(Default)]
 struct SessionStopState {
     cancelled: AtomicBool,
-    notify: tokio::sync::Notify,
+    notify: event_listener::Event,
 }
 
 impl SessionStop {
     pub fn cancel(&self) {
         self.state.cancelled.store(true, Ordering::Release);
-        self.state.notify.notify_waiters();
+        self.state.notify.notify(usize::MAX);
     }
 
     pub fn is_cancelled(&self) -> bool {
@@ -72,35 +74,28 @@ impl SessionStop {
     }
 
     pub async fn cancelled(&self) {
-        let notified = self.state.notify.notified();
-        tokio::pin!(notified);
-        notified.as_mut().enable();
+        // Register before checking the sticky flag so cancellation cannot fall
+        // between the check and installing this waiter's wakeup.
+        let listener = self.state.notify.listen();
         if !self.is_cancelled() {
-            notified.await;
+            listener.await;
         }
     }
 }
 
-/// Serial IPC requests share a runtime, socket, handshake, and framing buffers.
+/// Serial IPC requests share a socket, handshake, and framing buffers.
 /// A failed exchange discards the socket; only a later request reconnects, and
 /// the failed request is never replayed because its mutation may have executed.
 pub struct ClientSession {
-    runtime: tokio::runtime::Runtime,
     data_dir: PathBuf,
-    stream: Option<UnixStream>,
+    stream: Option<Async<UnixStream>>,
     stop: SessionStop,
     read_buffer: BytesMut,
     write_buffer: Vec<u8>,
     session: SessionState,
     expected_instance: Option<u32>,
-}
-
-fn client_runtime() -> Result<tokio::runtime::Runtime> {
-    Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .context("creating IPC runtime")
+    #[cfg(test)]
+    response_clock: Option<Arc<tests::ResponseClock>>,
 }
 
 /// Create a session for a data directory; connect and handshake on its first request.
@@ -110,7 +105,6 @@ pub fn client_session(data_dir: &Path) -> Result<ClientSession> {
 
 pub fn client_session_with_cancel(data_dir: &Path, stop: SessionStop) -> Result<ClientSession> {
     Ok(ClientSession {
-        runtime: client_runtime()?,
         data_dir: data_dir.to_owned(),
         stream: None,
         stop,
@@ -118,6 +112,8 @@ pub fn client_session_with_cancel(data_dir: &Path, stop: SessionStop) -> Result<
         write_buffer: Vec::new(),
         session: SessionState::Unbound,
         expected_instance: None,
+        #[cfg(test)]
+        response_clock: None,
     })
 }
 
@@ -182,11 +178,19 @@ impl ClientSession {
         wait_timeout: Duration,
         write_started: &mut bool,
     ) -> Result<WireResponse> {
-        let result = self.runtime.block_on(async {
-            tokio::select! {
-                biased;
-                _ = self.stop.cancelled() => bail!("IPC request cancelled"),
-                response = async {
+        #[cfg(test)]
+        let response_clock = self
+            .response_clock
+            .as_deref()
+            .filter(|_| matches!(request, WireRequest::Command(_)))
+            .map(|clock| (clock, clock.now()));
+        let result = async_io::block_on(async {
+            future::or(
+                async {
+                    self.stop.cancelled().await;
+                    bail!("IPC request cancelled")
+                },
+                async {
                     if self.stream.is_none() {
                         self.stream = Some(rivu_protocol::protocol::connect(&self.data_dir).await.with_context(|| {
                             format!(
@@ -198,21 +202,25 @@ impl ClientSession {
                     let stream = self.stream.as_mut().unwrap();
                     write_request_frame_buffered(stream, request, &mut self.write_buffer, write_started).await?;
                     let response = read_response_frame(stream, &mut self.read_buffer);
-                    if matches!(request, WireRequest::Watch(_)) {
+                    let response = if matches!(request, WireRequest::Watch(_)) {
                         response.await
                     } else {
-                        timeout(rivu_protocol::transport::response_timeout(wait_timeout), response)
-                            .await
-                            .context("Reading IPC response timed out")?
-                    }
-                } => {
-                    let response = response?;
+                        let deadline = rivu_protocol::transport::response_timeout(wait_timeout);
+                        #[cfg(test)]
+                        let response = match response_clock {
+                            Some((clock, started)) => clock.timeout_at(started + deadline, response).await,
+                            None => timeout(deadline, response).await,
+                        };
+                        #[cfg(not(test))]
+                        let response = timeout(deadline, response).await;
+                        response.context("Reading IPC response timed out")?
+                    }?;
                     if self.stop.is_cancelled() {
                         bail!("IPC request cancelled");
                     }
                     Ok(response)
-                }
-            }
+                },
+            ).await
         });
         if result.is_err() {
             self.disconnect();
@@ -328,6 +336,65 @@ mod tests {
         protocol::{HelloResponse, MAX_REQUEST, wire_state},
         transport::{decode_request_frame, encode_response_frame_into},
     };
+    use std::sync::{Condvar, Mutex};
+
+    #[derive(Default)]
+    struct ClockState {
+        now: Duration,
+        observed: Duration,
+    }
+
+    /// Command-response clock only: socket handshakes retain real deadlines.
+    #[derive(Default)]
+    pub(super) struct ResponseClock {
+        state: Mutex<ClockState>,
+        changed: event_listener::Event,
+        observed: Condvar,
+    }
+
+    impl ResponseClock {
+        pub(super) fn now(&self) -> Duration {
+            self.state.lock().unwrap().now
+        }
+
+        fn advance_and_wait_for_poll(&self, now: Duration) {
+            let mut state = self.state.lock().unwrap();
+            assert!(now > state.now);
+            state.now = now;
+            self.changed.notify(usize::MAX);
+            // This is a stuck-test watchdog, not the response deadline. The
+            // server cannot reply until the client has checked the new time.
+            let (_state, watchdog) = self
+                .observed
+                .wait_timeout_while(state, Duration::from_secs(5), |state| state.observed < now)
+                .unwrap();
+            assert!(!watchdog.timed_out(), "response deadline was not polled");
+        }
+
+        pub(super) async fn timeout_at<T>(
+            &self,
+            deadline: Duration,
+            operation: impl Future<Output = T>,
+        ) -> Result<T, rivu_protocol::transport::Elapsed> {
+            future::or(async { Ok(operation.await) }, async {
+                loop {
+                    let listener = self.changed.listen();
+                    let expired = {
+                        let mut state = self.state.lock().unwrap();
+                        state.observed = state.now;
+                        self.observed.notify_all();
+                        state.now >= deadline
+                    };
+                    if expired {
+                        return Err(rivu_protocol::transport::Elapsed);
+                    }
+                    listener.await;
+                }
+            })
+            .await
+        }
+    }
+
     fn socket_test_directory() -> tempfile::TempDir {
         let cache =
             std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join(".cache");
@@ -393,93 +460,32 @@ mod tests {
 
     #[test]
     fn optimize_database_accepts_reply_after_old_response_deadline() {
-        use rivu_protocol::model::Command;
-        use rivu_protocol::{
-            protocol::{HelloResponse, MAX_REQUEST, wire_state},
-            transport::{decode_request_frame, read_frame, write_frame_buffered},
-        };
         use std::os::unix::net::UnixListener;
 
         let directory = socket_test_directory();
         let listener =
             UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
                 .unwrap();
-        listener.set_nonblocking(true).unwrap();
         let mut client = client_session(directory.path()).unwrap();
-        let server = {
-            let _entered = client.runtime.enter();
-            tokio::time::pause();
-            let listener = tokio::net::UnixListener::from_std(listener).unwrap();
-            // Paused time must not advance while real socket I/O is pending.
-            // Only the deliberate server delay below may advance the clock.
-            let keep_awake = || async {
-                loop {
-                    tokio::task::yield_now().await;
-                }
-            };
-            let mut io_guards = tokio::task::JoinSet::new();
-            let handshake_guard = io_guards.spawn(keep_awake());
-            tokio::spawn(async move {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let mut pending = BytesMut::new();
-                let mut buffer = Vec::new();
-                let frame = read_frame(&mut stream, MAX_REQUEST, &mut pending)
-                    .await
-                    .unwrap();
-                assert!(matches!(
-                    decode_request_frame(&frame).unwrap(),
-                    WireRequest::Hello(_)
-                ));
-                write_frame_buffered(
-                    &mut stream,
-                    &WireResponse::Hello(HelloResponse {
-                        instance_id: 1u32.to_le_bytes(),
-                        state: wire_state(StateResponse {
-                            revisions: StateRevisions::default(),
-                            playback: None,
-                            queue: None,
-                            library: None,
-                            system: None,
-                        }),
-                    }),
-                    &mut buffer,
-                )
-                .await
-                .unwrap();
-                let frame = read_frame(&mut stream, MAX_REQUEST, &mut pending)
-                    .await
-                    .unwrap();
-                assert!(matches!(
-                    decode_request_frame(&frame).unwrap(),
-                    WireRequest::Command(WireCommand::OptimizeDatabase)
-                ));
-                handshake_guard.abort();
-                // The old 120s client deadline would expire before this timer.
-                tokio::time::sleep(Duration::from_secs(121)).await;
-                io_guards.spawn(keep_awake());
-                write_frame_buffered(
-                    &mut stream,
-                    &WireResponse::Ack(Ack {
-                        status: AckStatus::Succeeded,
-                        error: None,
-                        revision: 17,
-                        scan_id: None,
-                        relocation_id: None,
-                        processing_id: None,
-                    }),
-                    &mut buffer,
-                )
-                .await
-                .unwrap();
-                // Dropping this set aborts the I/O guards on every exit path.
-                io_guards
-            })
-        };
+        let clock = Arc::new(ResponseClock::default());
+        client.response_clock = Some(clock.clone());
+        let server = std::thread::spawn(move || {
+            let mut stream = listener.accept().unwrap().0;
+            complete_test_handshake(&mut stream);
+            assert!(matches!(
+                read_test_command(&mut stream),
+                Command::OptimizeDatabase
+            ));
+            // Cross the old 120s deadline, then wait until the client's timeout
+            // branch has observed it before making the response readable.
+            clock.advance_and_wait_for_poll(Duration::from_secs(121));
+            reply_test_ack(&mut stream, Ack::from_result(Ok(()), 17));
+        });
 
         let ack = client.request_ack(Command::OptimizeDatabase).unwrap();
         assert!(ack.is_success());
         assert_eq!(ack.revision, 17);
-        drop(client.runtime.block_on(server).unwrap());
+        server.join().unwrap();
     }
 
     #[test]
@@ -491,14 +497,18 @@ mod tests {
         let listener =
             UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
                 .unwrap();
-        let (read, command_read) = tokio::sync::oneshot::channel();
+        let clock = Arc::new(ResponseClock::default());
+        let command_clock = clock.clone();
         let server = std::thread::spawn(move || {
             let mut stream = listener.accept().unwrap().0;
             complete_test_handshake(&mut stream);
             assert!(
                 matches!(read_test_command(&mut stream), Command::CreatePlaylist { name } if name == "first")
             );
-            read.send(()).unwrap();
+            command_clock.advance_and_wait_for_poll(
+                rivu_protocol::transport::response_timeout(query_wait_timeout())
+                    + Duration::from_secs(1),
+            );
             assert_eq!(stream.read(&mut [0]).unwrap(), 0);
             let mut stream = listener.accept().unwrap().0;
             complete_test_handshake(&mut stream);
@@ -508,25 +518,7 @@ mod tests {
             reply_test_ack(&mut stream, Ack::from_result(Ok(()), 2));
         });
         let mut client = client_session(directory.path()).unwrap();
-        let guard = {
-            let _entered = client.runtime.enter();
-            tokio::time::pause();
-            // Keep real socket I/O from triggering Tokio's automatic time advance.
-            let guard = tokio::spawn(async {
-                loop {
-                    tokio::task::yield_now().await;
-                }
-            });
-            tokio::spawn(async move {
-                command_read.await.unwrap();
-                tokio::time::advance(
-                    rivu_protocol::transport::response_timeout(query_wait_timeout())
-                        + Duration::from_secs(1),
-                )
-                .await;
-            });
-            guard
-        };
+        client.response_clock = Some(clock);
         let error = client
             .request_ack(Command::CreatePlaylist {
                 name: "first".into(),
@@ -545,7 +537,6 @@ mod tests {
                 .unwrap()
                 .is_success()
         );
-        guard.abort();
         server.join().unwrap();
     }
 
@@ -621,5 +612,36 @@ mod tests {
         assert!(client.read_buffer.is_empty());
         assert!(client.read_buffer.capacity() <= rivu_protocol::transport::RETAINED_BUFFER_LIMIT);
         assert!(client.write_buffer.capacity() <= rivu_protocol::transport::RETAINED_BUFFER_LIMIT);
+    }
+
+    #[test]
+    fn cancelling_a_blocked_watch_wakes_the_session_and_closes_the_socket() {
+        use std::{io::Read, os::unix::net::UnixListener, sync::mpsc};
+
+        let directory = socket_test_directory();
+        let listener =
+            UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
+                .unwrap();
+        let (watch_started, wait_for_watch) = mpsc::sync_channel(0);
+        let server = std::thread::spawn(move || {
+            let mut stream = listener.accept().unwrap().0;
+            complete_test_handshake(&mut stream);
+            assert!(matches!(
+                read_test_request(&mut stream),
+                WireRequest::Watch(_)
+            ));
+            watch_started.send(()).unwrap();
+            assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+        });
+        let mut client = client_session(directory.path()).unwrap();
+        let stop = client.cancellation();
+        let cancellation = std::thread::spawn(move || {
+            wait_for_watch.recv().unwrap();
+            stop.cancel();
+        });
+        assert_eq!(client.watch_until(StateRevisions::default()).unwrap(), None);
+        assert!(client.stream.is_none());
+        cancellation.join().unwrap();
+        server.join().unwrap();
     }
 }

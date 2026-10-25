@@ -2,8 +2,6 @@ use crate::{
     app::AppHandle, artwork::DEFAULT_IMAGE, core::CoreHandle, i18n::Localizer,
     projection::TraySnapshot,
 };
-use anyhow::Result;
-use crossbeam_channel::{Receiver, Sender, bounded, select_biased};
 use futures::{FutureExt, StreamExt, channel::oneshot, future::Shared};
 use parking_lot::RwLock;
 use rivu_protocol::model::{Command, PlaybackStatus, RepeatMode};
@@ -14,7 +12,6 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
-    thread::{self, JoinHandle},
     time::Duration,
 };
 use zbus::{
@@ -79,35 +76,19 @@ impl TrayData {
 }
 
 pub(crate) struct TrayController {
-    stop: Option<Sender<()>>,
     cancel: Option<oneshot::Sender<()>>,
-    worker: Option<JoinHandle<()>>,
+    worker: Option<async_executor::Task<()>>,
 }
 
 impl TrayController {
-    pub(crate) fn start(
-        handle: CoreHandle,
-        app: AppHandle,
-        i18n: Arc<Localizer>,
-    ) -> Result<Option<Self>> {
-        let (stop, stop_receiver) = bounded(1);
+    pub(crate) fn start(handle: CoreHandle, app: AppHandle, i18n: Arc<Localizer>) -> Self {
         let (cancel, cancelled) = oneshot::channel();
-        let worker = match thread::Builder::new()
-            .name("rivu-tray".into())
-            .spawn(move || run_bus(handle, app, i18n, stop_receiver, cancelled))
-        {
-            Ok(worker) => worker,
-            Err(error) => {
-                tracing::warn!(error = %error, "tray_unavailable: could not start D-Bus thread");
-                return Ok(None);
-            }
-        };
-
-        Ok(Some(Self {
-            stop: Some(stop),
+        let executor = handle.executor().clone();
+        let worker = executor.spawn(run_bus(handle, app, i18n, cancelled));
+        Self {
             cancel: Some(cancel),
             worker: Some(worker),
-        }))
+        }
     }
 }
 
@@ -116,20 +97,18 @@ impl Drop for TrayController {
         if let Some(cancel) = self.cancel.take() {
             let _ = cancel.send(());
         }
-        if let Some(stop) = self.stop.take() {
-            let _ = stop.try_send(());
-        }
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+        if let Some(worker) = self.worker.take()
+            && async_io::block_on(std::panic::AssertUnwindSafe(worker).catch_unwind()).is_err()
+        {
+            tracing::warn!("tray_service_panicked");
         }
     }
 }
 
-fn run_bus(
+async fn run_bus(
     handle: CoreHandle,
     app: AppHandle,
     i18n: Arc<Localizer>,
-    stop: Receiver<()>,
     cancelled: oneshot::Receiver<()>,
 ) {
     let cancelled = cancelled.shared();
@@ -140,7 +119,7 @@ fn run_bus(
     }));
     // Subscribe after the published baseline, before bus setup. Reconcile even
     // when no later publication wakes this worker.
-    let updates = handle.subscribe();
+    let updates = handle.subscribe_revisions();
     let service_name = format!(
         "org.freedesktop.StatusNotifierItem-{}-{}",
         std::process::id(),
@@ -163,12 +142,10 @@ fn run_bus(
             .build()
             .await
     };
-    let connection = match futures::executor::block_on(async {
-        futures::select_biased! {
-            _ = cancelled.clone().fuse() => None,
-            connection = setup.fuse() => Some(connection),
-        }
-    }) {
+    let connection = match futures::select_biased! {
+        _ = cancelled.clone().fuse() => None,
+        connection = setup.fuse() => Some(connection),
+    } {
         Some(Ok(connection)) => connection,
         Some(Err(error)) => {
             tracing::warn!(error = %error, "tray_unavailable: connecting to the session bus");
@@ -177,74 +154,64 @@ fn run_bus(
         None => return,
     };
 
-    let item_address = connection
-        .unique_name()
-        .map(|name| name.as_str().to_owned())
-        .unwrap_or_else(|| service_name.clone());
-    let watcher_connection = connection.clone();
-    let (watcher_stop, watcher_stopped) = oneshot::channel();
-    let watcher = match thread::Builder::new()
-        .name("rivu-tray-watcher".into())
-        .spawn(move || {
-            futures::executor::block_on(watch_watcher(
-                watcher_connection,
-                item_address,
-                watcher_stopped,
-            ))
-        }) {
-        Ok(watcher) => Some(watcher),
-        Err(error) => {
-            tracing::warn!(error = %error, "tray_watcher_monitor_unavailable");
-            None
-        }
-    };
+    let service = async {
+        let item_address = connection
+            .unique_name()
+            .map(|name| name.as_str().to_owned())
+            .unwrap_or_else(|| service_name.clone());
+        let watcher_connection = connection.clone();
+        let (watcher_stop, watcher_stopped) = oneshot::channel();
+        let watcher = handle.executor().spawn(watch_watcher(
+            watcher_connection,
+            item_address,
+            watcher_stopped,
+        ));
 
-    if !futures::executor::block_on(apply_update(
-        &data,
-        &connection,
-        handle.tray_snapshot(),
-        cancelled.clone(),
-    )) {
-        loop {
-            select_biased! {
-                recv(stop) -> _ => break,
-                recv(updates) -> update => {
-                    if update.is_err()
-                        || futures::executor::block_on(apply_update(
-                            &data,
-                            &connection,
-                            handle.tray_snapshot(),
-                            cancelled.clone(),
-                        ))
-                    {
-                        break;
+        if !apply_update(
+            &data,
+            &connection,
+            handle.tray_snapshot(),
+            cancelled.clone(),
+        )
+        .await
+        {
+            loop {
+                futures::select_biased! {
+                    _ = cancelled.clone().fuse() => break,
+                    update = updates.recv().fuse() => {
+                        if update.is_err()
+                            || apply_update(
+                                &data,
+                                &connection,
+                                handle.tray_snapshot(),
+                                cancelled.clone(),
+                            ).await
+                        {
+                            break;
+                        }
                     }
                 }
             }
         }
-    }
-    // Cancel watcher setup and registration before closing the session socket.
-    let _ = watcher_stop.send(());
-    if let Some(watcher) = watcher {
-        let _ = watcher.join();
-    }
-    // Keep connection setup outside Tokio so zbus uses its independent async-io
-    // executor while this worker blocks on core publications.
-    let runtime = match tokio::runtime::Builder::new_current_thread()
-        .enable_time()
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            tracing::warn!(error = %error, "tray_connection_close_failed: could not start deadline timer");
-            return;
+        // Cancel watcher setup and registration before closing the session socket.
+        let _ = watcher_stop.send(());
+        if std::panic::AssertUnwindSafe(watcher)
+            .catch_unwind()
+            .await
+            .is_err()
+        {
+            tracing::warn!("tray_watcher_panicked");
         }
     };
-    // Disconnecting releases the item and service name. Do not wait for a bus
-    // reply or outstanding peer calls during application shutdown.
-    match runtime
-        .block_on(async { tokio::time::timeout(Duration::from_secs(1), connection.close()).await })
+    if std::panic::AssertUnwindSafe(service)
+        .catch_unwind()
+        .await
+        .is_err()
     {
+        tracing::warn!("tray_publisher_panicked");
+    }
+    // Disconnecting releases the item and service name without an unbounded drain.
+    match rivu_protocol::transport::timeout(Duration::from_secs(1), connection.close()).await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => tracing::warn!(error = %error, "tray_connection_close_failed"),
         Err(_) => tracing::warn!("tray_connection_close_timed_out"),

@@ -27,12 +27,66 @@ pub(crate) use tracks::PlaybackSource;
 
 pub(crate) struct Store {
     conn: Connection,
+    // Read-only owners invalidate these counts on published revision changes.
+    revision_owned_counts: bool,
     track_cache: RefCell<cache::TrackCache>,
     count_cache: RefCell<Option<tracks::TrackCount>>,
     duplicate_group_count_cache: RefCell<Option<duplicates::DuplicateGroupCount>>,
 }
 
+/// A borrowed SQLite snapshot. Query workers explicitly finish it before
+/// releasing their maintenance lease; Drop also closes early-return paths.
+pub(crate) struct ReadSnapshot<'a> {
+    store: &'a Store,
+    active: bool,
+}
+
+impl std::ops::Deref for ReadSnapshot<'_> {
+    type Target = Store;
+    fn deref(&self) -> &Store {
+        self.store
+    }
+}
+
+impl ReadSnapshot<'_> {
+    /// A failed rollback requires retiring the connection before its read lease.
+    pub(crate) fn finish(mut self) -> Result<()> {
+        self.active = false;
+        self.store.conn.execute_batch("ROLLBACK")?;
+        Ok(())
+    }
+}
+
+impl Drop for ReadSnapshot<'_> {
+    fn drop(&mut self) {
+        if self.active
+            && let Err(error) = self.store.conn.execute_batch("ROLLBACK")
+        {
+            tracing::error!(%error, "read_snapshot_rollback_failed");
+        }
+    }
+}
+
 impl Store {
+    fn configure_connection(conn: &Connection) -> Result<()> {
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        // SQLite's built-in lower() is ASCII-only; preserve frontend Unicode search.
+        conn.create_scalar_function(
+            "lower",
+            1,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+            |ctx| {
+                let value = ctx
+                    .get_raw(0)
+                    .as_str()
+                    .map_err(|error| rusqlite::Error::UserFunctionError(error.into()))?;
+                Ok(value.to_lowercase())
+            },
+        )?;
+        Ok(())
+    }
+
     pub(crate) fn playlist_ids(&self) -> Result<Vec<i64>> {
         Ok(self
             .conn
@@ -43,17 +97,31 @@ impl Store {
 
     /// Validate the playlist once and pin its read snapshot before any export I/O.
     pub(crate) fn open_export(path: &std::path::Path, playlist_id: i64) -> Result<Self> {
-        let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        conn.execute_batch("BEGIN DEFERRED")?;
-        let exists = conn.query_row(
+        let store = Self::open_read_snapshot(path)?;
+        let exists = store.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM playlists WHERE id=?1)",
             [playlist_id],
             |row| row.get::<_, bool>(0),
         )?;
         anyhow::ensure!(exists, "Playlist not found");
+        Ok(store)
+    }
+
+    /// Pin an isolated read transaction; no schema writes or shared cache ownership.
+    pub(crate) fn open_read_snapshot(path: &std::path::Path) -> Result<Self> {
+        let store = Self::open_reader(path)?;
+        store.pin_read_snapshot()?;
+        Ok(store)
+    }
+
+    /// Reuse the connection, but never carry a read transaction between requests.
+    /// The owner must invalidate counts when the published library revision changes.
+    pub(crate) fn open_reader(path: &std::path::Path) -> Result<Self> {
+        let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        Self::configure_connection(&conn)?;
         Ok(Self {
             conn,
+            revision_owned_counts: true,
             track_cache: RefCell::new(cache::TrackCache {
                 entries: std::collections::HashMap::new(),
                 capacity: 0,
@@ -62,6 +130,30 @@ impl Store {
             count_cache: RefCell::new(None),
             duplicate_group_count_cache: RefCell::new(None),
         })
+    }
+
+    /// On error, retire this connection: transaction rollback may also have failed.
+    pub(crate) fn read_snapshot(&self) -> Result<ReadSnapshot<'_>> {
+        self.pin_read_snapshot()?;
+        Ok(ReadSnapshot {
+            store: self,
+            active: true,
+        })
+    }
+
+    fn pin_read_snapshot(&self) -> Result<()> {
+        self.conn.execute_batch("BEGIN DEFERRED")?;
+        // BEGIN is lazy: the first actual read establishes the WAL snapshot.
+        if let Err(error) = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM sqlite_schema", [], |row| {
+                row.get::<_, i64>(0)
+            })
+        {
+            self.conn.execute_batch("ROLLBACK")?;
+            return Err(error.into());
+        }
+        Ok(())
     }
 
     /// Background jobs open their own connection; never share this connection or caches.

@@ -5,13 +5,13 @@ use anyhow::ensure;
 pub(in crate::core) struct OptimizationTask {
     pub(in crate::core) finished: oneshot::Receiver<Result<DatabaseOptimization>>,
     pub(in crate::core) reply: Option<oneshot::Sender<CoreResponse>>,
-    worker: Option<tokio::task::JoinHandle<()>>,
+    worker: Option<async_executor::Task<()>>,
 }
 
 impl OptimizationTask {
     fn join(&mut self) -> Result<()> {
         if let Some(worker) = self.worker.take() {
-            futures::executor::block_on(worker).map_err(|_| {
+            futures::executor::block_on(std::panic::AssertUnwindSafe(worker).catch_unwind()).map_err(|_| {
                 anyhow::anyhow!(
                     "Database optimization worker panicked; the database may already have changed"
                 )
@@ -55,11 +55,17 @@ impl Core {
         let current_id = self.state.queue.current_id;
         let path = self.store.database_path()?;
         let (finished_tx, finished) = oneshot::channel();
+        let workers = self.workers.clone();
+        let reads = self
+            .read_queries
+            .as_ref()
+            .map(|reads| Arc::clone(&reads.fence));
         let worker = self.executor.spawn(async move {
+            if let Some(reads) = reads { reads.idle().await; }
             // SQLite VACUUM/ANALYZE/checkpoint are synchronous and may commit.
             // Await their real completion even during shutdown; cancellation of
             // an async waiter cannot retire the connection or undo those facts.
-            let result = tokio::task::spawn_blocking(move || {
+            let result = workers.execute(move || {
                 Store::open(&path).and_then(|store| {
                     store.set_queue_current(current_id)?;
                     store
@@ -114,7 +120,7 @@ impl Core {
         // VACUUM is not cancellable here. Shutdown waits for physical completion,
         // with no hard duration bound and no replay after an unknown outcome.
         let result = task.join().and_then(|()| {
-            task.finished.try_recv().unwrap_or_else(|_| {
+            task.finished.try_recv().ok().flatten().unwrap_or_else(|| {
                 Err(anyhow::anyhow!(
                     "Database optimization worker ended without a result; the database may already have changed"
                 ))

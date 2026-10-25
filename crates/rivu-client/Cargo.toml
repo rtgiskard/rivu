@@ -8,8 +8,9 @@ description = "Reusable synchronous Rivu IPC client sessions"
 rivu-protocol = { path = "../rivu-protocol" }
 anyhow = "1"
 bytes = "1"
-tokio = { version = "1", default-features = false, features = ["rt", "net", "io-util", "sync", "time", "macros"] }
+async-io = "2"
+event-listener = "5"
+futures-lite = "2"
 
 [dev-dependencies]
 tempfile = "3.27"
-tokio = { version = "1", features = ["test-util"] }

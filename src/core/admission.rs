@@ -136,7 +136,7 @@ pub(in crate::core) struct ExternalAdmissionTask {
     index: Option<usize>,
     expected_revision: Option<u64>,
     cancellation: library::ScanCancellation,
-    worker: Option<tokio::task::JoinHandle<()>>,
+    worker: Option<async_executor::Task<()>>,
 }
 
 impl ExternalAdmissionTask {
@@ -154,26 +154,32 @@ impl ExternalAdmissionTask {
     }
 
     pub(in crate::core) async fn next_event(&mut self) -> Event {
-        tokio::select! {
-            result = &mut self.finished => result.unwrap_or_else(|_| {
-                if self.is_saving() {
+        let is_saving = self.is_saving();
+        let finished = (&mut self.finished).fuse();
+        let event = async {
+            match self.events.recv().await {
+                Ok(event) => event,
+                Err(_) => std::future::pending().await,
+            }
+        }
+        .fuse();
+        futures::pin_mut!(finished, event);
+        futures::select! {
+            result = finished => result.unwrap_or_else(|_| {
+                if is_saving {
                     Event::Saved(Box::new(Saved::uncertain(anyhow::anyhow!("External audio saving ended without a result; database changes may already be committed"))))
                 } else {
                     Event::Prepared(Err(anyhow::anyhow!("External audio preparation ended without a result; nothing was registered or queued")))
                 }
             }),
-            event = async {
-                match self.events.recv().await {
-                    Some(event) => event,
-                    None => std::future::pending().await,
-                }
-            } => event,
+            event = event => event,
         }
     }
 
     fn join(&mut self) -> Result<()> {
         if let Some(worker) = self.worker.take() {
-            futures::executor::block_on(worker).context("External audio worker panicked")?;
+            futures::executor::block_on(std::panic::AssertUnwindSafe(worker).catch_unwind())
+                .map_err(|_| anyhow::anyhow!("External audio worker panicked"))?;
         }
         Ok(())
     }
@@ -201,17 +207,23 @@ async fn lookup_sources(
 ) -> Result<Vec<Option<library::KnownFile>>> {
     cancellation.check()?;
     let (reply, receive) = oneshot::channel();
-    tokio::select! {
-        biased;
-        _ = cancellation.cancelled() => bail!("External audio admission cancelled"),
-        result = sender.send(Event::KnownSources { paths, reply }) => {
-            result.context("External audio admission owner disconnected")?;
+    {
+        let cancelled = cancellation.cancelled().fuse();
+        let send = sender.send(Event::KnownSources { paths, reply }).fuse();
+        futures::pin_mut!(cancelled, send);
+        futures::select_biased! {
+            _ = cancelled => bail!("External audio admission cancelled"),
+            result = send => result.context("External audio admission owner disconnected")?,
         }
     }
-    let result = tokio::select! {
-        biased;
-        _ = cancellation.cancelled() => bail!("External audio admission cancelled"),
-        result = receive => result.context("External audio source lookup disconnected")?,
+    let result = {
+        let cancelled = cancellation.cancelled().fuse();
+        let receive = receive.fuse();
+        futures::pin_mut!(cancelled, receive);
+        futures::select_biased! {
+            _ = cancelled => bail!("External audio admission cancelled"),
+            result = receive => result.context("External audio source lookup disconnected")?,
+        }
     };
     cancellation.check()?;
     result
@@ -256,14 +268,16 @@ impl Core {
         let cancellation = library::ScanCancellation::default();
         let worker_cancellation = cancellation.clone();
         let ffmpeg_enabled = self.state.system.config.ffmpeg_enabled;
-        let (sender, events) = mpsc::channel(3);
+        let (sender, events) = async_channel::bounded(3);
         let (finished_tx, finished) = oneshot::channel();
+        let workers = self.workers.clone();
         let worker = self.executor.spawn(async move {
             let lookup_cancellation = worker_cancellation.clone();
             let lookup_sender = sender.clone();
             let mut last_phase = None;
             let mut last_emit = Instant::now() - Duration::from_millis(100);
             let preparation = library::prepare_external_admission(
+                &workers,
                 paths,
                 move |paths| {
                     lookup_sources(lookup_sender.clone(), paths, lookup_cancellation.clone())
@@ -276,7 +290,7 @@ impl Core {
                     {
                         last_phase = Some(progress.phase);
                         last_emit = Instant::now();
-                        if sender.capacity() == sender.max_capacity() {
+                        if sender.is_empty() {
                             let _ = sender.try_send(Event::Progress(progress));
                         }
                     }
@@ -392,8 +406,9 @@ impl Core {
         let index = task.index;
         let queue_total = self.queue_ids.len();
         let current_id = self.state.queue.current_id;
+        let workers = self.workers.clone();
         task.worker = Some(self.executor.spawn(async move {
-            let joined = tokio::task::spawn_blocking(move || {
+            let joined = workers.execute(move || {
                 save_external(path, prepared, index, queue_total, current_id, facts_tx);
             }).await;
             let mut saved = facts_rx.await.unwrap_or_else(|_| Saved::uncertain(anyhow::anyhow!("External audio saving worker produced no completion facts")));
@@ -543,7 +558,7 @@ impl Core {
         };
         if task.is_saving() {
             let joined = task.join();
-            let event = task.finished.try_recv().unwrap_or_else(|_| {
+            let event = task.finished.try_recv().ok().flatten().unwrap_or_else(|| {
                 Event::Saved(Box::new(Saved::uncertain(anyhow::anyhow!(
                     "External audio saving ended without completion facts during shutdown"
                 ))))
@@ -578,17 +593,19 @@ mod tests {
         let worker_cancellation = cancellation.clone();
         let retired = Arc::new(AtomicBool::new(false));
         let worker_retired = retired.clone();
-        let (sender, events) = mpsc::channel(3);
+        let (sender, events) = async_channel::bounded(3);
         let (finished_tx, finished) = oneshot::channel();
         let (entered_tx, entered) = std::sync::mpsc::sync_channel(0);
+        let workers = runtime.workers.clone();
         let worker = runtime.handle.spawn(async move {
-            tokio::task::spawn_blocking(move || {
-                entered_tx.send(()).unwrap();
-                futures::executor::block_on(worker_cancellation.cancelled());
-                worker_retired.store(true, Ordering::Release);
-            })
-            .await
-            .unwrap();
+            workers
+                .execute(move || {
+                    entered_tx.send(()).unwrap();
+                    futures::executor::block_on(worker_cancellation.cancelled());
+                    worker_retired.store(true, Ordering::Release);
+                })
+                .await
+                .unwrap();
             drop(sender);
             let _ = finished_tx.send(Event::Prepared(Ok(library::ExternalAdmission::default())));
         });
@@ -623,7 +640,7 @@ mod tests {
 
     #[test]
     fn lost_commit_facts_block_database_operations_without_replaying_the_save() {
-        let (directory, mut core) = super::super::tests::fixture_with_database(None, true);
+        let (directory, mut core) = super::super::tests::fixture_with_database(None);
         let path = directory.path().join("uncertain.wav");
         let mut writer = hound::WavWriter::create(
             &path,
@@ -647,7 +664,7 @@ mod tests {
         })
         .unwrap();
         loop {
-            let event = wait_on(&core.executor.clone(), async {
+            let event = futures::executor::block_on(async {
                 core.active_external_admission
                     .as_mut()
                     .unwrap()

@@ -101,7 +101,7 @@ fn missing_config_is_created_only_at_apply_or_orderly_exit() {
             ))))
             .unwrap();
         } else {
-            let (sender, receiver) = mpsc::channel(1);
+            let (sender, receiver) = async_channel::bounded(1);
             drop(sender);
             core = run_until_disconnected(core, receiver);
         }
@@ -142,7 +142,7 @@ fn changed_apply_and_exit_preserve_comments_and_untouched_normalized_settings() 
             ))))
             .unwrap();
         } else {
-            let (sender, receiver) = mpsc::channel(1);
+            let (sender, receiver) = async_channel::bounded(1);
             drop(sender);
             core = run_until_disconnected(core, receiver);
         }
@@ -234,7 +234,7 @@ fn changed_apply_and_exit_reject_invalid_existing_input_without_overwriting_it()
             let config = Arc::new(core.effective_config());
             assert!(core.command(Command::Configure { config }).is_err());
         } else {
-            let (sender, receiver) = mpsc::channel(1);
+            let (sender, receiver) = async_channel::bounded(1);
             drop(sender);
             core = run_until_disconnected(core, receiver);
         }
@@ -308,7 +308,7 @@ fn no_op_apply_and_change_back_exit_do_not_replace_saved_config() {
     .unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), original);
     assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
-    let (sender, receiver) = mpsc::channel(1);
+    let (sender, receiver) = async_channel::bounded(1);
     drop(sender);
     drop(run_until_disconnected(core, receiver));
     assert_eq!(std::fs::read(&path).unwrap(), original);
@@ -317,7 +317,7 @@ fn no_op_apply_and_change_back_exit_do_not_replace_saved_config() {
 
 #[test]
 fn queue_save_failure_does_not_prevent_final_config_save() {
-    let (directory, mut core) = fixture_with_database(Some(10.0), true);
+    let (directory, mut core) = fixture_with_database(Some(10.0));
     let _audio = recording_audio(&mut core);
     core.command(Command::Volume { value: 0.25 }).unwrap();
     core.update_gui_config(GuiConfigChange::ToggleWaveformSeek)
@@ -330,7 +330,7 @@ fn queue_save_failure_does_not_prevent_final_config_save() {
          BEGIN SELECT RAISE(FAIL, 'queue save blocked'); END;",
         )
         .unwrap();
-    let (sender, receiver) = mpsc::channel(1);
+    let (sender, receiver) = async_channel::bounded(1);
     drop(sender);
     core = run_until_disconnected(core, receiver);
     assert!(
@@ -361,7 +361,7 @@ fn busy_audio_configuration_rejects_the_whole_batch_before_persistence() {
             .unwrap();
         let baseline = core.state.clone();
         let saved = std::fs::read(&core.state.system.config_path).unwrap();
-        let (commands, mut receive) = mpsc::channel(64);
+        let (commands, receive) = async_channel::bounded(64);
         for index in 0..64 - available {
             commands
                 .try_send(AudioCommand::Volume(index as f32))
@@ -511,7 +511,7 @@ fn shutdown_flush_reports_failure_and_retains_live_settings() {
         mode: RepeatMode::All,
     })
     .unwrap();
-    let (sender, receiver) = mpsc::channel(1);
+    let (sender, receiver) = async_channel::bounded(1);
     drop(sender);
     core = run_until_disconnected(core, receiver);
     let state = core.shared.read();
@@ -872,7 +872,7 @@ fn settings_failed_save_retry_merges_against_latest_runtime() {
 #[test]
 fn settings_saved_audio_failure_keeps_committed_desired_configuration() {
     let (_directory, mut core) = fixture();
-    let (commands, receiver) = mpsc::channel(64);
+    let (commands, receiver) = async_channel::bounded(64);
     drop(receiver);
     core.engine.replace_commands(commands);
     let baseline = core.state.system.config.clone();
@@ -1077,7 +1077,7 @@ fn unavailable_output_targets_remain_desired_and_persist_across_entry_points() {
 #[test]
 fn configure_saved_but_disconnected_audio_retains_desired_settings() {
     let (_directory, mut core) = fixture();
-    let (commands, receiver) = mpsc::channel(64);
+    let (commands, receiver) = async_channel::bounded(64);
     drop(receiver);
     core.engine.replace_commands(commands);
     let mut config = core.state.system.config.as_ref().clone();
@@ -1130,7 +1130,7 @@ fn still_mode_toggle_commits_without_accessing_unwritable_config_path() {
 #[test]
 fn still_mode_applied_but_disconnected_audio_retains_unsaved_settings() {
     let (_directory, mut core) = fixture();
-    let (commands, receiver) = mpsc::channel(1);
+    let (commands, receiver) = async_channel::bounded(1);
     drop(receiver);
     core.engine.replace_commands(commands);
     // Pending playback settings must be incorporated in the same memory snapshot.
@@ -1167,16 +1167,16 @@ fn ffmpeg_external_load_result_survives_runtime_disable_and_reenable() {
     Arc::make_mut(&mut core.state.system.config).ffmpeg_enabled = false;
     core.state.system.ffmpeg_status = "disabled".into();
     let (handle, control, worker, _publications) = navigation_runtime(core);
-    let changes = handle.subscribe();
+    let changes = handle.subscribe_revisions();
     let configure = |enabled| {
         let mut config = handle.config_snapshot().as_ref().clone();
         config.ffmpeg_enabled = enabled;
-        let ack = handle.operation_ack(
+        let ack = futures::executor::block_on(handle.operation_ack_async(
             Operation::Command(Command::Configure {
                 config: Arc::new(config),
             }),
             Duration::from_secs(5),
-        );
+        ));
         assert!(ack.is_success(), "{:?}", ack.error);
     };
 
@@ -1189,9 +1189,12 @@ fn ffmpeg_external_load_result_survives_runtime_disable_and_reenable() {
     assert_ne!(expected, "not loaded");
     let deadline = Instant::now() + Duration::from_secs(5);
     while handle.state.read().system.ffmpeg_status != expected {
-        changes
-            .recv_deadline(deadline)
-            .expect("external decoder load result must reach core state");
+        futures::executor::block_on(rivu_protocol::transport::timeout_at(
+            deadline,
+            changes.recv(),
+        ))
+        .expect("external decoder load result must reach core state before deadline")
+        .expect("core revision subscription must remain connected");
     }
 
     configure(false);

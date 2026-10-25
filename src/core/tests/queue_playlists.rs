@@ -269,7 +269,7 @@ fn indexed_playlist_commands_advance_only_changed_members_and_reject_stale_drops
 
 #[test]
 fn playlist_creation_count_failure_keeps_the_committed_lifetime_registered() {
-    let (directory, mut core) = fixture_with_database(Some(10.0), true);
+    let (directory, mut core) = fixture_with_database(Some(10.0));
     // Fixture a committed producer result before exercising Core's completion.
     let playlist_id = core.store.create_playlist("Committed playlist").unwrap();
     let before = core.state.query_revisions();
@@ -1362,7 +1362,7 @@ fn interval_queue_moves_match_stable_selection_order_and_preserve_current() {
 
 #[test]
 fn failed_queue_moves_preserve_memory_order_current_history_and_revision() {
-    let (directory, mut core) = fixture_with_database(Some(10.0), true);
+    let (directory, mut core) = fixture_with_database(Some(10.0));
     playing(&mut core, 3);
     core.played = vec![1, 3, 5];
     core.played_cursor = 2;

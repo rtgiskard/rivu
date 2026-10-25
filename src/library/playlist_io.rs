@@ -1,6 +1,7 @@
 use super::ScanCancellation;
 use super::input::{MAX_CUE_BYTES, read_input_async};
 use super::paths::{is_cue_path, logical_path};
+use crate::core::tasks::BlockingPool;
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use futures::{FutureExt, Stream, StreamExt};
 use rivu_protocol::model::PlaylistExportTrack;
@@ -25,13 +26,14 @@ const COOPERATIVE_ROWS: usize = 256;
 
 /// Keep formatting on the async task, but submit only bounded file writes.
 /// The buffer and descriptor return after every write, including I/O errors.
-struct ExportWriter {
+struct ExportWriter<'a> {
+    workers: &'a BlockingPool,
     file: Option<std::fs::File>,
     bytes: Vec<u8>,
     cancellation: ScanCancellation,
 }
 
-impl ExportWriter {
+impl ExportWriter<'_> {
     async fn write_all(&mut self, mut bytes: &[u8]) -> Result<()> {
         while !bytes.is_empty() {
             let count = bytes.len().min(EXPORT_BUFFER_BYTES - self.bytes.len());
@@ -51,13 +53,15 @@ impl ExportWriter {
         }
         let mut file = self.file.take().context("playlist writer has no file")?;
         let mut bytes = std::mem::take(&mut self.bytes);
-        let (file, bytes, result) = tokio::task::spawn_blocking(move || {
-            let result = file.write_all(&bytes);
-            bytes.clear();
-            (file, bytes, result)
-        })
-        .await
-        .context("Playlist file write worker panicked")?;
+        let (file, bytes, result) = self
+            .workers
+            .execute(move || {
+                let result = file.write_all(&bytes);
+                bytes.clear();
+                (file, bytes, result)
+            })
+            .await
+            .context("Playlist file write worker panicked")?;
         self.file = Some(file);
         self.bytes = bytes;
         result.context("write playlist")?;
@@ -73,7 +77,9 @@ pub(crate) struct PlaylistImport {
 /// Import a bounded CUE sheet in sheet order, or a UTF-8 M3U/M3U8 playlist.
 #[cfg(test)]
 pub fn import_playlist(path: &Path) -> Result<Vec<M3uItem>> {
+    let workers = &BlockingPool::new(4);
     Ok(test_io(prepare_playlist_import(
+        workers,
         path,
         &ScanCancellation::default(),
         None,
@@ -84,7 +90,9 @@ pub fn import_playlist(path: &Path) -> Result<Vec<M3uItem>> {
 /// Read a bounded UTF-8 M3U/M3U8, expanding complete CUE sheets in order.
 #[cfg(test)]
 pub fn import_m3u(path: &Path) -> Result<Vec<M3uItem>> {
+    let workers = &BlockingPool::new(4);
     Ok(test_io(prepare_import(
+        workers,
         path,
         false,
         &ScanCancellation::default(),
@@ -95,19 +103,16 @@ pub fn import_m3u(path: &Path) -> Result<Vec<M3uItem>> {
 
 #[cfg(test)]
 fn test_io<T>(future: impl Future<Output = T>) -> T {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("playlist test runtime")
-        .block_on(future)
+    futures::executor::block_on(future)
 }
 
 pub(crate) async fn prepare_playlist_import(
+    workers: &BlockingPool,
     path: &Path,
     cancellation: &ScanCancellation,
     roots: Option<&[PathBuf]>,
 ) -> Result<PlaylistImport> {
-    prepare_import(path, is_cue_path(path), cancellation, roots).await
+    prepare_import(workers, path, is_cue_path(path), cancellation, roots).await
 }
 
 struct ImportBuilder {
@@ -164,6 +169,7 @@ impl ImportBuilder {
 }
 
 async fn prepare_import(
+    workers: &BlockingPool,
     path: &Path,
     cue: bool,
     cancellation: &ScanCancellation,
@@ -183,7 +189,7 @@ async fn prepare_import(
     let paths = if cue {
         vec![path]
     } else {
-        let bytes = read_input_async(&path, MAX_IMPORT_FILE_BYTES, cancellation)
+        let bytes = read_input_async(workers, &path, MAX_IMPORT_FILE_BYTES, cancellation)
             .await
             .with_context(|| format!("Reading import playlist {}", path.display()))?;
         builder.bytes_read = bytes.len();
@@ -191,49 +197,50 @@ async fn prepare_import(
         let roots = roots.map(<[PathBuf]>::to_vec);
         // UTF-8 validation, line parsing and logical path expansion are bounded
         // CPU work, not filesystem I/O on the async driver.
-        tokio::task::spawn_blocking(move || -> Result<Vec<PathBuf>> {
-            let text =
-                std::str::from_utf8(bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes))
-                    .with_context(|| {
-                        format!("Decoding import playlist {} as UTF-8", path.display())
+        workers
+            .execute(move || -> Result<Vec<PathBuf>> {
+                let text =
+                    std::str::from_utf8(bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes))
+                        .with_context(|| {
+                            format!("Decoding import playlist {} as UTF-8", path.display())
+                        })?;
+                let parent = path.parent().unwrap_or_else(|| Path::new("."));
+                let mut paths = Vec::new();
+                let mut retained = 0;
+                for raw_line in text.lines() {
+                    cancellation.check()?;
+                    let line = raw_line.trim_end_matches('\r');
+                    if line.is_empty() || line.starts_with('#') {
+                        continue;
+                    }
+                    let item_path = PathBuf::from(line);
+                    let item_path = logical_path(&if item_path.is_absolute() {
+                        item_path
+                    } else {
+                        parent.join(item_path)
                     })?;
-            let parent = path.parent().unwrap_or_else(|| Path::new("."));
-            let mut paths = Vec::new();
-            let mut retained = 0;
-            for raw_line in text.lines() {
-                cancellation.check()?;
-                let line = raw_line.trim_end_matches('\r');
-                if line.is_empty() || line.starts_with('#') {
-                    continue;
-                }
-                let item_path = PathBuf::from(line);
-                let item_path = logical_path(&if item_path.is_absolute() {
-                    item_path
-                } else {
-                    parent.join(item_path)
-                })?;
-                if let Some(roots) = &roots {
+                    if let Some(roots) = &roots {
+                        ensure!(
+                            roots.iter().any(|root| item_path.starts_with(root)),
+                            "Import source is outside configured library roots: {}",
+                            item_path.display()
+                        );
+                    }
                     ensure!(
-                        roots.iter().any(|root| item_path.starts_with(root)),
-                        "Import source is outside configured library roots: {}",
-                        item_path.display()
+                        paths.len() < MAX_IMPORT_ENTRIES,
+                        "import expansion exceeds {MAX_IMPORT_ENTRIES} entries"
                     );
+                    retained += std::mem::size_of::<PathBuf>() + item_path.as_os_str().len();
+                    ensure!(
+                        retained <= MAX_RETAINED_BYTES,
+                        "import expansion exceeds retained data limit"
+                    );
+                    paths.push(item_path);
                 }
-                ensure!(
-                    paths.len() < MAX_IMPORT_ENTRIES,
-                    "import expansion exceeds {MAX_IMPORT_ENTRIES} entries"
-                );
-                retained += std::mem::size_of::<PathBuf>() + item_path.as_os_str().len();
-                ensure!(
-                    retained <= MAX_RETAINED_BYTES,
-                    "import expansion exceeds retained data limit"
-                );
-                paths.push(item_path);
-            }
-            Ok(paths)
-        })
-        .await
-        .context("Playlist import parser panicked")??
+                Ok(paths)
+            })
+            .await
+            .context("Playlist import parser panicked")??
     };
     for (index, path) in paths.into_iter().enumerate() {
         cancellation.check()?;
@@ -249,6 +256,7 @@ async fn prepare_import(
                 None
             } else {
                 let bytes = read_input_async(
+                    workers,
                     &path,
                     MAX_CUE_BYTES.min(MAX_IMPORT_BYTES - builder.bytes_read),
                     cancellation,
@@ -259,15 +267,16 @@ async fn prepare_import(
                 Some(bytes)
             };
             let cancellation = cancellation.clone();
-            builder = tokio::task::spawn_blocking(move || -> Result<ImportBuilder> {
-                let sheet = bytes
-                    .map(|bytes| super::cue::parse_input(&bytes, &path, &cancellation))
-                    .transpose()?;
-                builder.add_sheet(path, sheet, &cancellation)?;
-                Ok(builder)
-            })
-            .await
-            .context("Playlist import CUE parser panicked")??;
+            builder = workers
+                .execute(move || -> Result<ImportBuilder> {
+                    let sheet = bytes
+                        .map(|bytes| super::cue::parse_input(&bytes, &path, &cancellation))
+                        .transpose()?;
+                    builder.add_sheet(path, sheet, &cancellation)?;
+                    Ok(builder)
+                })
+                .await
+                .context("Playlist import CUE parser panicked")??;
         } else {
             ensure!(
                 builder.result.items.len() < MAX_IMPORT_ENTRIES,
@@ -284,7 +293,7 @@ async fn prepare_import(
             });
         }
         if index % COOPERATIVE_ROWS == COOPERATIVE_ROWS - 1 {
-            tokio::task::yield_now().await;
+            futures_lite::future::yield_now().await;
         }
     }
     cancellation.check()?;
@@ -297,7 +306,12 @@ async fn prepare_import(
 
 /// Export a database-ordered stream of unique playlist tracks atomically.
 /// SQLite enforces uniqueness; retain only the current CUE validation run.
-pub async fn export_m3u<S>(path: &Path, tracks: S, cancellation: &ScanCancellation) -> Result<()>
+pub async fn export_m3u<S>(
+    workers: &BlockingPool,
+    path: &Path,
+    tracks: S,
+    cancellation: &ScanCancellation,
+) -> Result<()>
 where
     S: Stream<Item = Result<PlaylistExportTrack>>,
 {
@@ -308,46 +322,55 @@ where
         .context("playlist has no parent directory")?
         .to_path_buf();
     let temporary_parent = parent.clone();
-    let (file, temporary) = tokio::task::spawn_blocking(move || {
-        tempfile::NamedTempFile::new_in(temporary_parent)
-            .map(tempfile::NamedTempFile::into_parts)
-            .context("create temporary playlist")
-    })
-    .await
-    .context("Playlist temporary file worker panicked")??;
+    let (file, temporary) = workers
+        .execute(move || {
+            tempfile::NamedTempFile::new_in(temporary_parent)
+                .map(tempfile::NamedTempFile::into_parts)
+                .context("create temporary playlist")
+        })
+        .await
+        .context("Playlist temporary file worker panicked")??;
     let mut writer = ExportWriter {
+        workers,
         file: Some(file),
         bytes: Vec::with_capacity(EXPORT_BUFFER_BYTES),
         cancellation: cancellation.clone(),
     };
-    let result =
-        std::panic::AssertUnwindSafe(write_export(&mut writer, &parent, tracks, cancellation))
-            .catch_unwind()
-            .await
-            .unwrap_or_else(|_| {
-                Err(anyhow!(
-                    "Playlist export writer panicked; destination was not replaced"
-                ))
-            });
+    let result = std::panic::AssertUnwindSafe(write_export(
+        workers,
+        &mut writer,
+        &parent,
+        tracks,
+        cancellation,
+    ))
+    .catch_unwind()
+    .await
+    .unwrap_or_else(|_| {
+        Err(anyhow!(
+            "Playlist export writer panicked; destination was not replaced"
+        ))
+    });
     // Every submitted write has physically ended before closing or replacing.
     let file = writer.file.take();
     let cancellation = cancellation.clone();
-    tokio::task::spawn_blocking(move || -> Result<()> {
-        drop(file);
-        result?;
-        // Atomic file commit: cancellation after this check cannot undo replacement.
-        cancellation.check()?;
-        temporary
-            .persist(&path)
-            .with_context(|| format!("replace playlist {}", path.display()))?;
-        Ok(())
-    })
-    .await
-    .context("Playlist replacement worker panicked")?
+    workers
+        .execute(move || -> Result<()> {
+            drop(file);
+            result?;
+            // Atomic file commit: cancellation after this check cannot undo replacement.
+            cancellation.check()?;
+            temporary
+                .persist(&path)
+                .with_context(|| format!("replace playlist {}", path.display()))?;
+            Ok(())
+        })
+        .await
+        .context("Playlist replacement worker panicked")?
 }
 
 async fn write_export<S>(
-    writer: &mut ExportWriter,
+    workers: &BlockingPool,
+    writer: &mut ExportWriter<'_>,
     parent: &Path,
     tracks: S,
     cancellation: &ScanCancellation,
@@ -365,7 +388,7 @@ where
         rows += 1;
         if rows == COOPERATIVE_ROWS {
             rows = 0;
-            tokio::task::yield_now().await;
+            futures_lite::future::yield_now().await;
             cancellation.check()?;
         }
         let mut track = item?;
@@ -403,16 +426,15 @@ where
             continue;
         }
         if let Some(cue) = &track.cue {
-            let bytes = read_input_async(&cue.sheet, MAX_CUE_BYTES, cancellation)
+            let bytes = read_input_async(workers, &cue.sheet, MAX_CUE_BYTES, cancellation)
                 .await
                 .with_context(|| format!("Reading export CUE {}", cue.sheet.display()))?;
             let sheet_path = cue.sheet.clone();
             let parse_cancellation = cancellation.clone();
-            let sheet = tokio::task::spawn_blocking(move || {
-                super::cue::parse_input(&bytes, &sheet_path, &parse_cancellation)
-            })
-            .await
-            .context("Playlist export CUE parser panicked")??;
+            let sheet = workers
+                .execute(move || super::cue::parse_input(&bytes, &sheet_path, &parse_cancellation))
+                .await
+                .context("Playlist export CUE parser panicked")??;
             let expected = sheet
                 .tracks
                 .first()
@@ -462,7 +484,7 @@ where
     Ok(())
 }
 
-async fn write_single_line(writer: &mut ExportWriter, text: &str) -> Result<()> {
+async fn write_single_line(writer: &mut ExportWriter<'_>, text: &str) -> Result<()> {
     for (index, part) in text.split(['\r', '\n']).enumerate() {
         if index != 0 {
             writer.write_all(b" ").await?;
@@ -472,7 +494,11 @@ async fn write_single_line(writer: &mut ExportWriter, text: &str) -> Result<()> 
     Ok(())
 }
 
-async fn write_relative_path(writer: &mut ExportWriter, parent: &Path, track: &Path) -> Result<()> {
+async fn write_relative_path(
+    writer: &mut ExportWriter<'_>,
+    parent: &Path,
+    track: &Path,
+) -> Result<()> {
     let display_path = path_relative_to(parent, track);
     let text = display_path.to_str().ok_or_else(|| {
         anyhow!(
@@ -523,33 +549,37 @@ fn path_relative_to(parent: &Path, target: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn stream_panic_preserves_destination_and_retires_temporary_file() -> Result<()> {
-        let directory = tempfile::tempdir()?;
-        let destination = directory.path().join("playlist.m3u8");
-        let original = b"original playlist\n";
-        std::fs::write(&destination, original)?;
-        let track = PlaylistExportTrack {
-            path: directory.path().join("song.wav"),
-            title: "x".repeat(EXPORT_BUFFER_BYTES * 2),
-            artist: String::new(),
-            duration: None,
-            cue: None,
-        };
-        let tracks = std::iter::once(Ok(track)).chain(std::iter::from_fn(|| {
-            panic!("injected export stream panic")
-        }));
-        let error = export_m3u(
-            &destination,
-            futures::stream::iter(tracks),
-            &ScanCancellation::default(),
-        )
-        .await
-        .unwrap_err();
-        assert!(error.to_string().contains("writer panicked"));
-        assert_eq!(std::fs::read(&destination)?, original);
-        assert_eq!(std::fs::read_dir(directory.path())?.count(), 1);
-        Ok(())
+    #[test]
+    fn stream_panic_preserves_destination_and_retires_temporary_file() -> Result<()> {
+        futures::executor::block_on(async {
+            let workers = &BlockingPool::new(4);
+            let directory = tempfile::tempdir()?;
+            let destination = directory.path().join("playlist.m3u8");
+            let original = b"original playlist\n";
+            std::fs::write(&destination, original)?;
+            let track = PlaylistExportTrack {
+                path: directory.path().join("song.wav"),
+                title: "x".repeat(EXPORT_BUFFER_BYTES * 2),
+                artist: String::new(),
+                duration: None,
+                cue: None,
+            };
+            let tracks = std::iter::once(Ok(track)).chain(std::iter::from_fn(|| {
+                panic!("injected export stream panic")
+            }));
+            let error = export_m3u(
+                workers,
+                &destination,
+                futures::stream::iter(tracks),
+                &ScanCancellation::default(),
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains("writer panicked"));
+            assert_eq!(std::fs::read(&destination)?, original);
+            assert_eq!(std::fs::read_dir(directory.path())?.count(), 1);
+            Ok(())
+        })
     }
 }
 
@@ -559,41 +589,47 @@ mod batch_tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    #[tokio::test]
-    async fn ready_rows_yield_in_bounded_batches_and_cancel_without_replacement() -> Result<()> {
-        let directory = tempfile::tempdir()?;
-        let destination = directory.path().join("playlist.m3u8");
-        std::fs::write(&destination, b"original\n")?;
-        let cancellation = ScanCancellation::default();
-        let reads = Arc::new(AtomicUsize::new(0));
-        let observed = Arc::new(AtomicUsize::new(0));
-        let track = PlaylistExportTrack {
-            path: directory.path().join("song.wav"),
-            title: "Song".into(),
-            artist: String::new(),
-            duration: None,
-            cue: None,
-        };
-        let tracks = futures::stream::iter((0..COOPERATIVE_ROWS * 2).map(|index| {
-            reads.fetch_add(1, Ordering::Relaxed);
-            if index == 0 {
-                let reads = reads.clone();
-                let observed = observed.clone();
-                let cancellation = cancellation.clone();
-                tokio::spawn(async move {
-                    observed.store(reads.load(Ordering::Relaxed), Ordering::Relaxed);
-                    cancellation.cancel();
-                });
-            }
-            Ok(track.clone())
-        }));
-        let error = export_m3u(&destination, tracks, &cancellation)
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("cancelled"));
-        assert_eq!(observed.load(Ordering::Relaxed), COOPERATIVE_ROWS);
-        assert_eq!(std::fs::read(&destination)?, b"original\n");
-        assert_eq!(std::fs::read_dir(directory.path())?.count(), 1);
-        Ok(())
+    #[test]
+    fn ready_rows_yield_in_bounded_batches_and_cancel_without_replacement() -> Result<()> {
+        let executor = async_executor::Executor::new();
+        futures::executor::block_on(executor.run(async {
+            let workers = &BlockingPool::new(4);
+            let directory = tempfile::tempdir()?;
+            let destination = directory.path().join("playlist.m3u8");
+            std::fs::write(&destination, b"original\n")?;
+            let cancellation = ScanCancellation::default();
+            let reads = Arc::new(AtomicUsize::new(0));
+            let observed = Arc::new(AtomicUsize::new(0));
+            let track = PlaylistExportTrack {
+                path: directory.path().join("song.wav"),
+                title: "Song".into(),
+                artist: String::new(),
+                duration: None,
+                cue: None,
+            };
+            let tracks = futures::stream::iter((0..COOPERATIVE_ROWS * 2).map(|index| {
+                reads.fetch_add(1, Ordering::Relaxed);
+                if index == 0 {
+                    let reads = reads.clone();
+                    let observed = observed.clone();
+                    let cancellation = cancellation.clone();
+                    executor
+                        .spawn(async move {
+                            observed.store(reads.load(Ordering::Relaxed), Ordering::Relaxed);
+                            cancellation.cancel();
+                        })
+                        .detach();
+                }
+                Ok(track.clone())
+            }));
+            let error = export_m3u(workers, &destination, tracks, &cancellation)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("cancelled"));
+            assert_eq!(observed.load(Ordering::Relaxed), COOPERATIVE_ROWS);
+            assert_eq!(std::fs::read(&destination)?, b"original\n");
+            assert_eq!(std::fs::read_dir(directory.path())?.count(), 1);
+            Ok(())
+        }))
     }
 }

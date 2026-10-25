@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn committed_track_edit_invalidates_before_failed_refresh_and_same_edit_is_noop() {
-    let (directory, mut core) = fixture_with_database(Some(10.0), true);
+    let (directory, mut core) = fixture_with_database(Some(10.0));
     core.state.queue.current_id = Some(1);
     core.state.current_track = Some(Arc::new(core.track(1).unwrap()));
     core.save_queue().unwrap();
@@ -68,7 +68,7 @@ fn committed_track_edit_invalidates_before_failed_refresh_and_same_edit_is_noop(
 
 #[test]
 fn failed_edits_and_empty_deletions_do_not_invalidate() {
-    let (directory, mut core) = fixture_with_database(Some(10.0), true);
+    let (directory, mut core) = fixture_with_database(Some(10.0));
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     connection
         .execute_batch(
@@ -101,7 +101,7 @@ fn failed_edits_and_empty_deletions_do_not_invalidate() {
 #[test]
 fn committed_track_deletions_invalidate_before_failed_refresh() {
     for missing in [false, true] {
-        let (directory, mut core) = fixture_with_database(Some(10.0), true);
+        let (directory, mut core) = fixture_with_database(Some(10.0));
         if missing {
             let path = core.track(2).unwrap().path;
             let impacts = core
@@ -188,7 +188,7 @@ fn committed_track_deletions_invalidate_before_failed_refresh() {
 fn committed_deletions_isolate_history_and_queue_read_failures() {
     for missing in [false, true] {
         for fail_queue_ids in [false, true] {
-            let (directory, mut core) = fixture_with_database(Some(10.0), true);
+            let (directory, mut core) = fixture_with_database(Some(10.0));
             if missing {
                 let path = core.track(2).unwrap().path;
                 let impacts = core
@@ -741,7 +741,7 @@ fn failed_track_deletion_retains_persisted_current_occurrence_and_fences_audio()
             PlaybackStatus::Paused,
             PlaybackStatus::Playing,
         ] {
-            let (directory, mut core) = fixture_with_database(Some(10.0), true);
+            let (directory, mut core) = fixture_with_database(Some(10.0));
             if missing {
                 let path = core.track(2).unwrap().path;
                 let impacts = core
@@ -944,7 +944,7 @@ fn metadata_edit_refreshes_published_history_without_rewriting_old_snapshots() {
 fn current_metadata_edit_preflights_capacity_without_blocking_unrelated_facts() {
     let (_directory, mut core) = fixture();
     pending(&mut core, 1);
-    let (commands, mut receive) = mpsc::channel(1);
+    let (commands, receive) = async_channel::bounded(1);
     commands.try_send(AudioCommand::Volume(0.5)).unwrap();
     let _idle_commands = core.engine.replace_commands(commands);
     let current = Arc::clone(core.state.current_track.as_ref().unwrap());
@@ -1005,7 +1005,7 @@ fn current_metadata_edit_preflights_capacity_without_blocking_unrelated_facts() 
 fn committed_metadata_refresh_preserves_the_old_snapshot_until_audio_admission() {
     let (_directory, mut core) = fixture();
     pending(&mut core, 1);
-    let (commands, mut receive) = mpsc::channel(1);
+    let (commands, receive) = async_channel::bounded(1);
     commands.try_send(AudioCommand::Volume(0.5)).unwrap();
     let _idle_commands = core.engine.replace_commands(commands);
     let current = Arc::clone(core.state.current_track.as_ref().unwrap());
@@ -1071,7 +1071,7 @@ fn committed_metadata_refresh_preserves_the_old_snapshot_until_audio_admission()
 
 #[test]
 fn committed_deletion_invalidates_all_affected_playlists_before_projection_failure() {
-    let (directory, mut core) = fixture_with_database(Some(10.0), true);
+    let (directory, mut core) = fixture_with_database(Some(10.0));
     for (name, track_ids) in [("First", vec![2, 3]), ("Second", vec![2, 4])] {
         core.command(Command::CreatePlaylistWithTracks {
             name: name.into(),

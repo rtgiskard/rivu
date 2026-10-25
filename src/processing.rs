@@ -1,6 +1,7 @@
 //! Offline processing runs outside Core and never publishes directly into player state.
 use crate::config::Config;
 use anyhow::{Context, Result, bail, ensure};
+use async_channel::{Receiver, Sender, bounded};
 use rivu_audio as audio;
 use rivu_protocol::model::*;
 use std::{
@@ -15,7 +16,6 @@ use std::{
     thread::{self, JoinHandle},
     time::Duration,
 };
-use tokio::sync::mpsc::{Receiver, Sender, channel};
 
 pub(crate) mod graph;
 mod reclaim;
@@ -116,7 +116,7 @@ pub(crate) struct Service {
 }
 impl Service {
     pub fn new(data_dir: PathBuf) -> Self {
-        let (sender, receiver) = channel(8);
+        let (sender, receiver) = bounded(8);
         Self {
             sender,
             receiver,
@@ -305,7 +305,7 @@ impl Service {
                         run(track, stamp, config, directory, initial, &flag, &tx)
                     }
                 })();
-                let _ = tx.blocking_send(Event::Finished {
+                let _ = tx.send_blocking(Event::Finished {
                     id,
                     result: result.map(Box::new),
                 });
@@ -1167,7 +1167,7 @@ pub(crate) fn mix(
             let (_, path) = file.keep().map_err(|error| error.error)?;
             Ok(path)
         })();
-        if let Err(error) = tx.blocking_send(Event::MixFinished {
+        if let Err(error) = tx.send_blocking(Event::MixFinished {
             id,
             generation,
             result: outcome,

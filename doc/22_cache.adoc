@@ -36,14 +36,16 @@ before reads resume. This bounds entries, not track-string bytes, and is neither
 a whole-library snapshot nor a GUI page cache. Read-only export does not use it.
 
 Library track/display pages retain one latest exact filtered count, keyed by
-normalized filters and optional root. SQLite's local-change counter gates reuse;
-explicit transactions neither read nor populate it, avoiding rollback leakage.
-A separate scalar slot retains the duplicate-group total under the same counter
-and transaction rules, so unchanged-data pagination does not repeat its full
-grouped count. Local writes invalidate totals through that counter; Core explicitly
-clears caches after background commits. No external-commit polling, rows or
-multi-query map are retained. Root aggregation and
-directory child relations are request-local; persistent album summaries are
+normalized filters and optional root. A separate scalar slot retains the
+duplicate-group total, so unchanged-data pagination does not repeat its full
+grouped count. The read-query owner reuses both across pinned read snapshots and
+clears them when the published library-section revision changes. Read-only mode
+alone is not an invalidation rule: the owner validates publication before using
+the snapshot and its counts. Writable Store connections use SQLite's local-change
+counter; their explicit transactions neither read nor populate counts, avoiding
+rollback leakage. Core explicitly clears caches after background commits.
+No external-commit polling, rows or multi-query map are retained. Root aggregation
+and directory child relations are request-local; persistent album summaries are
 transactionally maintained database projections, not an evictable page cache.
 Their query costs and invariants are in
 link:21_ipc.adoc#_transactional_inputs_and_bounded_storage_queries[IPC storage queries].

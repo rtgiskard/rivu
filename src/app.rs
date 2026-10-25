@@ -11,19 +11,18 @@ use crate::{
     tray::TrayController,
 };
 use anyhow::{Context, Result, anyhow, bail};
+use async_signal::{Signal, Signals};
 #[cfg(test)]
 use crossbeam_channel::bounded;
-use futures::{StreamExt, channel::mpsc};
+use futures::{FutureExt, StreamExt, channel::mpsc};
 use gpui::{App as GpuiApp, GraphicalEnvironment, QuitMode, Subscription, Task, WindowingRequest};
 use rivu_protocol::AppCommand;
 use rivu_protocol::{model::Command, response::Ack};
-use signal_hook::{
-    consts::{SIGINT, SIGTERM},
-    iterator::{Handle as SignalHandle, Signals},
-};
+#[cfg(test)]
+use std::thread;
 #[cfg(test)]
 use std::time::Duration;
-use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc, thread};
+use std::{cell::RefCell, panic::AssertUnwindSafe, path::PathBuf, rc::Rc, sync::Arc};
 #[derive(Default)]
 struct ControlState {
     graphical: bool,
@@ -167,14 +166,9 @@ impl AppHandle {
         std::mem::take(&mut state.quit_pending) && !state.shutting_down
     }
 
-    pub(crate) fn request_ack(&self, command: AppCommand) -> Ack {
-        let _guard = self.core.executor().enter();
-        futures::executor::block_on(self.request_ack_async(command))
-    }
-
     pub(crate) async fn request_ack_async(&self, command: AppCommand) -> Ack {
         match command {
-            AppCommand::Core(command) => self.core.request_ack_async(command).await,
+            AppCommand::Core(command) => self.core.request_ack(command).await,
             AppCommand::ShowWindow => Ack::from_result(self.raise(), self.core.revision()),
             AppCommand::Shutdown => {
                 let _ = self.request_shutdown();
@@ -254,7 +248,8 @@ impl App {
         graphical: bool,
     ) -> Result<Self> {
         let socket_owner = ipc::SocketOwner::acquire(&data_dir)?;
-        let signals = Signals::new([SIGINT, SIGTERM]).context("Registering shutdown signals")?;
+        let signals =
+            Signals::new([Signal::Int, Signal::Term]).context("Registering shutdown signals")?;
         let config = Runtime::load_startup_config(&config_path)?;
         let i18n = Arc::new(crate::i18n::Localizer::new(if graphical {
             &config.ui_language
@@ -265,7 +260,7 @@ impl App {
         let runtime =
             Runtime::start_with_logging(&data_dir, &config_path, config, session.control())?;
         let handle = AppHandle::new(&runtime, graphical);
-        let signals = ShutdownSignals::start(signals, handle.clone())?;
+        let signals = ShutdownSignals::start(signals, handle.clone());
         let server = ipc::Server::start(&socket_owner, runtime.handle.clone(), handle.clone())?;
         let artwork = Arc::new(ArtworkManager::new(&data_dir));
         let mut app = Self {
@@ -284,7 +279,7 @@ impl App {
             app.runtime.handle.clone(),
             app.handle.clone(),
             Arc::clone(&app.artwork),
-        )?);
+        ));
         if !paths.is_empty() {
             app.runtime.handle.send(Command::Scan {
                 paths,
@@ -471,11 +466,11 @@ impl App {
         if let Some(gui) = &self.gui
             && self.runtime.handle.config_snapshot().tray_enabled
         {
-            self.tray = TrayController::start(
+            self.tray = Some(TrayController::start(
                 self.runtime.handle.clone(),
                 self.handle.clone(),
                 Arc::clone(&gui.i18n),
-            )?;
+            ));
         }
         let app = Rc::new(RefCell::new(self));
         let gpui_owner = Rc::clone(&app);
@@ -585,7 +580,7 @@ impl App {
     /// Drain producers before flushing, only after core join and outside GPUI.
     fn stop_services(&mut self) {
         drop(self.media.take());
-        // Server::drop drains its JoinSet while Core still owns the Tokio driver.
+        // Server::drop drains its owned sessions before the async executor stops.
         drop(self.server.take());
         drop(self.signals.take());
         if let Some(mut session) = self.session.take() {
@@ -607,34 +602,36 @@ impl Drop for App {
 }
 
 struct ShutdownSignals {
-    handle: SignalHandle,
-    worker: Option<thread::JoinHandle<()>>,
+    worker: Option<async_executor::Task<()>>,
 }
 
 impl ShutdownSignals {
-    fn start(mut signals: Signals, app: AppHandle) -> Result<Self> {
-        let handle = signals.handle();
-        let worker = thread::Builder::new()
-            .name("rivu-signals".into())
-            .spawn(move || {
-                // Coalesce signals; wait for capacity only in this worker.
-                if let Some(signal) = signals.forever().next() {
-                    tracing::info!(signal, "shutdown_signal_received");
-                    let _ = app.request_shutdown();
+    fn start(mut signals: Signals, app: AppHandle) -> Self {
+        let executor = Arc::clone(app.core.executor());
+        let worker = executor.spawn(async move {
+            if let Some(signal) = signals.next().await {
+                match signal {
+                    Ok(signal) => {
+                        tracing::info!(?signal, "shutdown_signal_received");
+                        let _ = app.request_shutdown();
+                    }
+                    Err(error) => tracing::warn!(%error, "shutdown_signal_failed"),
                 }
-            })?;
-        Ok(Self {
-            handle,
+            }
+        });
+        Self {
             worker: Some(worker),
-        })
+        }
     }
 }
 
 impl Drop for ShutdownSignals {
     fn drop(&mut self) {
-        self.handle.close();
         if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+            // Services retire while the application's executor is still running.
+            if async_io::block_on(AssertUnwindSafe(worker.cancel()).catch_unwind()).is_err() {
+                tracing::warn!("shutdown_signal_task_panicked");
+            }
         }
     }
 }
@@ -881,9 +878,14 @@ mod tests {
             .map(|_| {
                 let started = started.clone();
                 let released = released.clone();
-                runtime.handle.executor().spawn_blocking(move || {
-                    started.send(()).unwrap();
-                    let _ = released.recv();
+                let workers = Arc::clone(runtime.handle.workers());
+                runtime.handle.executor().spawn(async move {
+                    workers
+                        .execute(move || {
+                            started.send(()).unwrap();
+                            let _ = released.recv();
+                        })
+                        .await
                 })
             })
             .collect();

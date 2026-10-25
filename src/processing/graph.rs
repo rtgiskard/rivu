@@ -443,7 +443,7 @@ fn node_event(
         status: entry.clone(),
     };
     if matches!(phase, ProcessingPhase::Failed | ProcessingPhase::Cancelled) {
-        let _ = tx.blocking_send(event);
+        let _ = tx.send_blocking(event);
     } else {
         let _ = tx.try_send(event);
     }

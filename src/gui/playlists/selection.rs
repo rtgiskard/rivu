@@ -957,15 +957,17 @@ impl Playlists {
                     let response = crate::gui::query::run(
                         handle,
                         cx,
-                        move |handle| {
-                            handle.query_if_current(
-                                Query::PlaylistEntryLocations {
-                                    query,
-                                    playlist_id,
-                                    entry_ids,
-                                },
-                                ticket,
-                            )
+                        move |handle| async move {
+                            handle
+                                .query_if_current(
+                                    Query::PlaylistEntryLocations {
+                                        query,
+                                        playlist_id,
+                                        entry_ids,
+                                    },
+                                    ticket,
+                                )
+                                .await
                         },
                         |response, cx| {
                             let _ = this.update(cx, |this, cx| {
@@ -1159,16 +1161,18 @@ impl Playlists {
                     let response = crate::gui::query::run(
                         handle,
                         cx,
-                        move |handle| {
-                            handle.query_if_current(
-                                Query::PlaylistEntries {
-                                    query,
-                                    playlist_id: scope.playlist_id,
-                                    offset,
-                                    limit,
-                                },
-                                ticket,
-                            )
+                        move |handle| async move {
+                            handle
+                                .query_if_current(
+                                    Query::PlaylistEntries {
+                                        query,
+                                        playlist_id: scope.playlist_id,
+                                        offset,
+                                        limit,
+                                    },
+                                    ticket,
+                                )
+                                .await
                         },
                         |response, cx| {
                             let _ = this.update(cx, |this, cx| {
@@ -1281,16 +1285,18 @@ impl Playlists {
             let response = crate::gui::query::run(
                 handle,
                 cx,
-                move |handle| {
-                    handle.query_if_current(
-                        Query::PlaylistEntries {
-                            query,
-                            playlist_id: job.scope.playlist_id,
-                            offset: job.offset,
-                            limit: 1,
-                        },
-                        ticket,
-                    )
+                move |handle| async move {
+                    handle
+                        .query_if_current(
+                            Query::PlaylistEntries {
+                                query,
+                                playlist_id: job.scope.playlist_id,
+                                offset: job.offset,
+                                limit: 1,
+                            },
+                            ticket,
+                        )
+                        .await
                 },
                 |response, cx| {
                     let _ = this.update(cx, |this, cx| {

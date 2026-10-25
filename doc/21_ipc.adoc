@@ -37,14 +37,14 @@ database or DSP execution features through Cargo feature unification.
 
 `rivu-client` exposes `ClientSession`, cancellation, instance binding, command
 failure evidence, and the one-shot `get_state`, `query`, and `request_ack` helpers.
-The session API is synchronous and owns its runtime; async callers must run it
-outside their runtime's asynchronous execution context. Both session and one-shot
+The session API is synchronous and drives its I/O futures on the calling thread;
+async callers must keep it off their executor thread. Both session and one-shot
 `query` consume a `Query`; `request_ack` consumes a value convertible to
 `AppCommand`. Callers clone explicitly only when retaining a request for later use.
 External Rust clients depend on `rivu-client` and `rivu-protocol` directly, not on
-the root application crate. A retained session reuses its existing current-thread
-runtime, socket, and framing buffers; the package boundary adds no worker,
-channel, state copy, or serialization pass. The GUI still calls Core directly,
+the root application crate. A retained session reuses its socket and framing
+buffers; the package boundary adds no worker, channel, state copy, or
+serialization pass. The GUI still calls Core directly,
 and GUI-only projections and admitted processing-audition state remain in the
 application.
 
@@ -83,19 +83,31 @@ closing a window is not framework teardown or a promise of headless-equivalent m
 === Owner execution and retirement
 
 Core waits for events and applies state transitions on one persistent dedicated
-thread. Bounded Tokio channels carry requests, audio facts, processing, scan and
-relocation events; one-shot channels carry export and optimization completion.
-The owner selects one event per turn with randomized selection, using the shared
-Tokio reactor for I/O and timers. IPC awaits its bounded request/reply path;
-revision watching observes authoritative publication.
+thread. Bounded runtime-neutral async channels carry requests, audio facts,
+processing, scan and relocation events; one-shot channels carry replies and
+export and optimization completion. The owner selects one event per turn with
+randomized selection. IPC and in-process async consumers await the same business
+ports without an ambient runtime. Revision subscriptions coalesce notifications;
+consumers read the current authoritative projection after a wakeup.
 
-Synchronous SQLite work and the corresponding business transition stay atomic
-on that owner, off the shared I/O driver and file/probe blocking pool. Independent
-async tasks coordinate bounded synchronous file stages, probes, and background
-transactions on a shared four-thread blocking pool; waiting for Core holds no
-file-work slot. App retains the runtime until Core and IPC retire. Core unwinds
-and retires on its own thread, joining started work before lifecycle completion.
-Cancelling a waiter is neither worker retirement nor rollback.
+Synchronous SQLite writes and their business transitions stay atomic on Core.
+A separate bounded query owner reuses one read connection and prepared statements,
+pins a SQLite snapshot for each request, and validates the captured query scope
+against published Core state. A transition fence prevents a committed database
+change from being read with the preceding publication. Reader caches follow the
+published library revision; maintenance waits for physical snapshot retirement.
+Requests capture only shared configuration, query and cache-invalidation revisions,
+and the shared playlist-entry revision map; playback and task-status payloads are
+not copied into the read queue.
+
+App retains an explicitly owned async executor through Core and IPC retirement.
+Independent jobs coordinate file I/O and bounded synchronous file, probe and
+background transaction stages. A shared blocking pool admits at most four such
+stages concurrently; waiting for Core, task admission, and command replies hold
+no blocking slot. A physical closure retains its slot even if its async waiter
+is cancelled. Core unwinds and retires on its own thread, joining started work
+before lifecycle completion; the executor stops after accepted work and blocking
+stages retire. Cancelling a waiter is neither worker retirement nor rollback.
 
 === Projection and view costs
 
@@ -191,6 +203,9 @@ The transport retains partial input across cancelled reads and keeps frames
 independent. Sessions process requests serially; frames have no request IDs or
 multiplexed response matching.
 
+Requests and responses share one frame writer, which enforces the direction's
+size limit while serializing the header and body into the session buffer.
+
 Sessions reuse encoding buffers up to 256 KiB capacity. Larger send buffers are
 released after the write and flush, before an idle request or Watch wait; repeated
 bulk transfers therefore allocate again. Above 64 KiB, encoding capacity grows
@@ -217,7 +232,7 @@ identity changes; they are not ordered identifiers, authentication credentials,
 or globally unique identifiers.
 
 The TUI keeps separate command, query, and Watch sessions on its existing
-workers. Each worker reuses its runtime, connection, and framing buffers;
+workers. Each worker reuses its connection and framing buffers;
 Watch never blocks command or query traffic. Replacing a query discards its
 result but drains the active exchange before sending only the latest pending
 query. Exiting the TUI closes an in-flight socket wait, including command and

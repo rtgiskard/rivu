@@ -119,8 +119,8 @@ fn validate_pair(source: &RelocationRow, target: &RelocationRow) -> Result<()> {
 
 impl Store {
     fn duplicate_group_count(&self) -> Result<usize> {
-        // Explicit snapshots never escape their transaction; local writes invalidate.
-        let cacheable = self.conn.is_autocommit();
+        // Writable transactions bypass counts; read-only owners fence invalidation.
+        let cacheable = self.revision_owned_counts || self.conn.is_autocommit();
         let changes = self.conn.total_changes();
         if cacheable
             && let Some(cached) = self.duplicate_group_count_cache.borrow().as_ref()

@@ -10,7 +10,9 @@ use super::{
 };
 use crate::analysis::AnalysisWorker;
 use anyhow::anyhow;
+use async_channel::TryRecvError;
 use crossbeam_channel::{Receiver, select};
+use futures::FutureExt;
 use parking_lot::RwLock;
 use rivu_dsp::equalizer::config::EqualizerConfig;
 use rivu_format::media::DecoderHint;
@@ -19,14 +21,12 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::sync::{mpsc, mpsc::error::TryRecvError};
-use tokio_util::sync::CancellationToken;
 
 // Include coalesced seeks and read-ahead barriers in each scheduling round.
 const MAX_COMMANDS_PER_ROUND: usize = 64;
 
 struct CommandInbox {
-    receiver: mpsc::Receiver<AudioCommand>,
+    receiver: async_channel::Receiver<AudioCommand>,
     // A non-seek read ahead is an ordering barrier, not a command to discard.
     pending: Option<AudioCommand>,
 }
@@ -113,7 +113,7 @@ impl Opening {
 pub(super) struct Worker {
     commands: CommandInbox,
     commands_ready: Receiver<()>,
-    events: mpsc::Sender<AudioEvent>,
+    events: async_channel::Sender<AudioEvent>,
     shutdown: AudioShutdownReceiver,
     analyzer: AnalysisWorker,
     waveform: Arc<RwLock<WaveformFrame>>,
@@ -132,9 +132,9 @@ pub(super) struct Worker {
 }
 impl Worker {
     pub(super) fn new(
-        commands: mpsc::Receiver<AudioCommand>,
+        commands: async_channel::Receiver<AudioCommand>,
         commands_ready: Receiver<()>,
-        events: mpsc::Sender<AudioEvent>,
+        events: async_channel::Sender<AudioEvent>,
         shutdown: AudioShutdownReceiver,
         analyzer: AnalysisWorker,
         waveform: Arc<RwLock<WaveformFrame>>,
@@ -228,7 +228,7 @@ impl Worker {
                 } else {
                     Ok(None)
                 };
-                let _ = reply.try_send(snapshot);
+                let _ = reply.send(snapshot);
             }
             AudioCommand::FfmpegEnabled(enabled) => {
                 self.ffmpeg_enabled = enabled;
@@ -679,18 +679,23 @@ impl Worker {
 // Backpressure stays on the scheduling thread, never the real-time callback.
 // The bounded channel cannot silently lose lifecycle events while a receiver
 // remains connected. Shutdown explicitly cancels a blocked send.
-fn send_event(events: &mpsc::Sender<AudioEvent>, shutdown: &CancellationToken, event: AudioEvent) {
+fn send_event(
+    events: &async_channel::Sender<AudioEvent>,
+    shutdown: &async_channel::Receiver<()>,
+    event: AudioEvent,
+) {
     if matches!(event, AudioEvent::Progress { .. }) {
         let _ = events.try_send(event);
     } else {
-        // This executor blocks only the dedicated non-RT audio worker. Tokio
-        // sync primitives need no runtime, and cancellation interrupts capacity
-        // backpressure even while Core retains the sole receiver during Drop.
+        // Block only the dedicated non-RT worker. Closing the shutdown signal
+        // interrupts capacity backpressure even while Core holds the receiver.
         futures::executor::block_on(async {
-            tokio::select! {
-                biased;
-                _ = shutdown.cancelled() => {},
-                _ = events.send(event) => {},
+            let cancelled = shutdown.recv().fuse();
+            let send = events.send(event).fuse();
+            futures::pin_mut!(cancelled, send);
+            futures::select_biased! {
+                _ = cancelled => {},
+                _ = send => {},
             }
         });
     }
@@ -701,18 +706,17 @@ mod tests {
     use super::*;
     use crate::{AudioShutdown, AudioStop, shutdown_channel};
     use crossbeam_channel::bounded;
-    use futures::FutureExt;
-    use tokio::sync::oneshot;
+    use futures::channel::oneshot;
 
     fn opening_worker() -> (
         Worker,
-        mpsc::Sender<AudioCommand>,
-        mpsc::Receiver<AudioEvent>,
+        async_channel::Sender<AudioCommand>,
+        async_channel::Receiver<AudioEvent>,
         AudioShutdown,
     ) {
-        let (send, commands) = mpsc::channel(MAX_COMMANDS_PER_ROUND);
+        let (send, commands) = async_channel::bounded(MAX_COMMANDS_PER_ROUND);
         let (_wake, commands_ready) = bounded(1);
-        let (events, receive) = mpsc::channel(16);
+        let (events, receive) = async_channel::bounded(16);
         let (stop, shutdown) = shutdown_channel();
         let analyzer = AnalysisWorker::new(Arc::new(RwLock::new(
             crate::analysis::AnalysisFrame::default(),
@@ -755,7 +759,7 @@ mod tests {
                 1,
             )
             .unwrap();
-            let (mut worker, _commands, mut events, _shutdown) = opening_worker();
+            let (mut worker, _commands, events, _shutdown) = opening_worker();
             worker.ffmpeg_enabled = hint == DecoderHint::Ffmpeg;
             worker.command(AudioCommand::GraphAudition {
                 path: original.path().to_owned(),
@@ -903,7 +907,7 @@ mod tests {
                 .unwrap();
             assert!(worker.control_round());
             assert_eq!(
-                snapshot.try_recv().unwrap(),
+                snapshot.try_recv().unwrap().unwrap(),
                 AudioSnapshot {
                     generation: 41,
                     ..Default::default()
@@ -940,7 +944,7 @@ mod tests {
         let old = crate::source::opening_prefix_file(1024, true);
         let empty = crate::source::opening_prefix_file(0, false);
         for hint in opening_hints() {
-            let (mut worker, commands, mut events, _shutdown) = opening_worker();
+            let (mut worker, commands, events, _shutdown) = opening_worker();
             load_prefix(&mut worker, old.path(), hint, 41);
             worker.poll_opening();
             assert!(worker.opening.is_some());
@@ -992,7 +996,7 @@ mod tests {
     #[test]
     fn rejected_output_settings_cancel_the_opening_generation() {
         let file = crate::source::opening_prefix_file(1024, true);
-        let (mut worker, commands, mut events, _shutdown) = opening_worker();
+        let (mut worker, commands, events, _shutdown) = opening_worker();
         load_prefix(&mut worker, file.path(), DecoderHint::Native, 41);
         worker.poll_opening();
         assert!(worker.opening.is_some());
@@ -1016,7 +1020,7 @@ mod tests {
 
     #[test]
     fn disabling_ffmpeg_before_the_first_open_round_cancels_its_generation() {
-        let (mut worker, commands, mut events, _shutdown) = opening_worker();
+        let (mut worker, commands, events, _shutdown) = opening_worker();
         load_prefix(
             &mut worker,
             std::path::Path::new("unopened.mka"),
@@ -1043,7 +1047,7 @@ mod tests {
     #[test]
     fn disabling_ffmpeg_cancels_its_real_opening_without_started_or_failed() {
         let file = crate::source::opening_prefix_file(1024, true);
-        let (mut worker, commands, mut events, _shutdown) = opening_worker();
+        let (mut worker, commands, events, _shutdown) = opening_worker();
         load_prefix(&mut worker, file.path(), DecoderHint::Ffmpeg, 41);
         worker.poll_opening();
         assert!(worker.opening.is_some());
@@ -1069,9 +1073,9 @@ mod tests {
 
     #[test]
     fn rejected_output_change_keeps_new_target_instead_of_reusing_previous_device() {
-        let (_send, commands) = mpsc::channel(1);
+        let (_send, commands) = async_channel::bounded(1);
         let (_wake, commands_ready) = bounded(1);
-        let (events, mut receive) = mpsc::channel(2);
+        let (events, receive) = async_channel::bounded(2);
         let (_stop, shutdown) = shutdown_channel();
         let analyzer = AnalysisWorker::new(Arc::new(RwLock::new(
             crate::analysis::AnalysisFrame::default(),
@@ -1110,162 +1114,173 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn stop_snapshot_drains_backpressured_lifecycle_events_before_acknowledging() {
-        let (commands, receive) = mpsc::channel(1);
-        let (command_wake, commands_ready) = bounded(1);
-        commands.try_send(AudioCommand::Volume(0.4)).unwrap();
-        let (events, event_receive) = mpsc::channel(1);
-        events
-            .try_send(AudioEvent::Ended {
-                generation: 1,
-                bitrate_bps: None,
-            })
+    #[test]
+    fn stop_snapshot_drains_backpressured_lifecycle_events_before_acknowledging() {
+        futures::executor::block_on(async {
+            let (commands, receive) = async_channel::bounded(1);
+            let (command_wake, commands_ready) = bounded(1);
+            commands.try_send(AudioCommand::Volume(0.4)).unwrap();
+            let (events, event_receive) = async_channel::bounded(1);
+            events
+                .try_send(AudioEvent::Ended {
+                    generation: 1,
+                    bitrate_bps: None,
+                })
+                .unwrap();
+            let (shutdown, cancelled) = shutdown_channel();
+            let analyzer = AnalysisWorker::new(Arc::new(RwLock::new(
+                crate::analysis::AnalysisFrame::default(),
+            )))
             .unwrap();
-        let (shutdown, cancelled) = shutdown_channel();
-        let analyzer = AnalysisWorker::new(Arc::new(RwLock::new(
-            crate::analysis::AnalysisFrame::default(),
-        )))
-        .unwrap();
-        let worker = Worker::new(
-            receive,
-            commands_ready,
-            events,
-            cancelled,
-            analyzer,
-            Arc::new(RwLock::new(WaveformFrame::default())),
-            1024,
-        );
-        let worker = std::thread::spawn(move || {
-            worker.event(AudioEvent::Ended {
-                generation: 2,
-                bitrate_bps: None,
-            });
-            worker.run();
-        });
-        let mut retired = Vec::new();
-        let mut stop = AudioStop::new(commands, command_wake, event_receive);
-        let snapshot = stop
-            .wait(|event| {
-                if let AudioEvent::Ended { generation, .. } = event {
-                    retired.push(generation);
-                }
-            })
-            .await;
-        drop(shutdown);
-        worker.join().unwrap();
-        assert_eq!(snapshot.unwrap(), AudioSnapshot::default());
-        assert_eq!(retired, [1, 2]);
-    }
-
-    #[tokio::test]
-    async fn cancelled_stop_wait_retains_its_receiver_and_never_replays_admission() {
-        let (commands, mut receive) = mpsc::channel(1);
-        let (command_wake, commands_ready) = bounded(1);
-        commands.try_send(AudioCommand::Volume(0.4)).unwrap();
-        let (events, event_receive) = mpsc::channel(1);
-        events
-            .try_send(AudioEvent::DecoderStopped { generation: 7 })
-            .unwrap();
-        let mut stop = AudioStop::new(commands, command_wake, event_receive);
-        let mut retired = Vec::new();
-        assert!(
-            stop.wait(|event| retired.push(event))
-                .now_or_never()
-                .is_none()
-        );
-        assert!(matches!(
-            retired.as_slice(),
-            [AudioEvent::DecoderStopped { generation: 7 }]
-        ));
-        assert!(matches!(
-            receive.try_recv().unwrap(),
-            AudioCommand::Volume(0.4)
-        ));
-
-        assert!(
-            stop.wait(|event| retired.push(event))
-                .now_or_never()
-                .is_none()
-        );
-        commands_ready.try_recv().unwrap();
-        let AudioCommand::StopAndSnapshot(reply) = receive.try_recv().unwrap() else {
-            panic!("stop was not admitted after capacity became available");
-        };
-        assert!(
-            stop.wait(|event| retired.push(event))
-                .now_or_never()
-                .is_none()
-        );
-        assert!(
-            receive.is_empty(),
-            "cancelled acknowledgement wait replayed stop"
-        );
-
-        events
-            .try_send(AudioEvent::DecoderStopped { generation: 8 })
-            .unwrap();
-        let snapshot = AudioSnapshot {
-            generation: 7,
-            position_seconds: 3.5,
-            listened_seconds: 2.5,
-        };
-        reply.send(snapshot).unwrap();
-        assert_eq!(
-            stop.wait(|event| retired.push(event)).await.unwrap(),
-            snapshot
-        );
-        assert!(matches!(
-            retired.as_slice(),
-            [
-                AudioEvent::DecoderStopped { generation: 7 },
-                AudioEvent::DecoderStopped { generation: 8 },
-            ]
-        ));
-        let mut event_receive = stop.into_events();
-        events
-            .try_send(AudioEvent::DecoderStopped { generation: 9 })
-            .unwrap();
-        assert!(matches!(
-            event_receive.try_recv(),
-            Ok(AudioEvent::DecoderStopped { generation: 9 })
-        ));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn stop_deadline_covers_capacity_acknowledgement_and_closed_event_delivery() {
-        for queue_full in [false, true] {
-            let (commands, receive) = mpsc::channel(1);
-            let (command_wake, _commands_ready) = bounded(1);
-            if queue_full {
-                commands.try_send(AudioCommand::Volume(0.4)).unwrap();
-            }
-            let (events, event_receive) = mpsc::channel(1);
-            let mut stop = AudioStop::new(commands, command_wake, event_receive);
-            assert!(stop.wait(|_| {}).now_or_never().is_none());
-            assert_eq!(receive.len(), 1);
-            // After admission a closed event channel must not bypass the same
-            // deadline while the worker still owns the unacknowledged reply.
-            if !queue_full {
-                drop(events);
-            }
-            tokio::time::advance(Duration::from_secs(5)).await;
-            let error = stop.wait(|_| {}).await.unwrap_err();
-            assert!(
-                error
-                    .to_string()
-                    .contains("did not stop before the deadline")
+            let worker = Worker::new(
+                receive,
+                commands_ready,
+                events,
+                cancelled,
+                analyzer,
+                Arc::new(RwLock::new(WaveformFrame::default())),
+                1024,
             );
-            assert_eq!(receive.len(), 1, "a timed-out stop was replayed");
-            let _events = stop.into_events();
-        }
+            let worker = std::thread::spawn(move || {
+                worker.event(AudioEvent::Ended {
+                    generation: 2,
+                    bitrate_bps: None,
+                });
+                worker.run();
+            });
+            let mut retired = Vec::new();
+            let mut stop = AudioStop::new(commands, command_wake, event_receive);
+            let snapshot = stop
+                .wait(|event| {
+                    if let AudioEvent::Ended { generation, .. } = event {
+                        retired.push(generation);
+                    }
+                })
+                .await;
+            drop(shutdown);
+            worker.join().unwrap();
+            assert_eq!(snapshot.unwrap(), AudioSnapshot::default());
+            assert_eq!(retired, [1, 2]);
+        });
+    }
+
+    #[test]
+    fn cancelled_stop_wait_retains_its_receiver_and_never_replays_admission() {
+        futures::executor::block_on(async {
+            let (commands, receive) = async_channel::bounded(1);
+            let (command_wake, commands_ready) = bounded(1);
+            commands.try_send(AudioCommand::Volume(0.4)).unwrap();
+            let (events, event_receive) = async_channel::bounded(1);
+            events
+                .try_send(AudioEvent::DecoderStopped { generation: 7 })
+                .unwrap();
+            let mut stop = AudioStop::new(commands, command_wake, event_receive);
+            let mut retired = Vec::new();
+            assert!(
+                stop.wait(|event| retired.push(event))
+                    .now_or_never()
+                    .is_none()
+            );
+            assert!(matches!(
+                retired.as_slice(),
+                [AudioEvent::DecoderStopped { generation: 7 }]
+            ));
+            assert!(matches!(
+                receive.try_recv().unwrap(),
+                AudioCommand::Volume(0.4)
+            ));
+
+            assert!(
+                stop.wait(|event| retired.push(event))
+                    .now_or_never()
+                    .is_none()
+            );
+            commands_ready.try_recv().unwrap();
+            let AudioCommand::StopAndSnapshot(reply) = receive.try_recv().unwrap() else {
+                panic!("stop was not admitted after capacity became available");
+            };
+            assert!(
+                stop.wait(|event| retired.push(event))
+                    .now_or_never()
+                    .is_none()
+            );
+            assert!(
+                receive.is_empty(),
+                "cancelled acknowledgement wait replayed stop"
+            );
+
+            events
+                .try_send(AudioEvent::DecoderStopped { generation: 8 })
+                .unwrap();
+            let snapshot = AudioSnapshot {
+                generation: 7,
+                position_seconds: 3.5,
+                listened_seconds: 2.5,
+            };
+            reply.send(snapshot).unwrap();
+            assert_eq!(
+                stop.wait(|event| retired.push(event)).await.unwrap(),
+                snapshot
+            );
+            assert!(matches!(
+                retired.as_slice(),
+                [
+                    AudioEvent::DecoderStopped { generation: 7 },
+                    AudioEvent::DecoderStopped { generation: 8 },
+                ]
+            ));
+            let event_receive = stop.into_events();
+            events
+                .try_send(AudioEvent::DecoderStopped { generation: 9 })
+                .unwrap();
+            assert!(matches!(
+                event_receive.try_recv(),
+                Ok(AudioEvent::DecoderStopped { generation: 9 })
+            ));
+        });
+    }
+
+    #[test]
+    fn stop_deadline_covers_capacity_acknowledgement_and_closed_event_delivery() {
+        futures::executor::block_on(async {
+            for queue_full in [false, true] {
+                let (commands, receive) = async_channel::bounded(1);
+                let (command_wake, _commands_ready) = bounded(1);
+                if queue_full {
+                    commands.try_send(AudioCommand::Volume(0.4)).unwrap();
+                }
+                let (events, event_receive) = async_channel::bounded(1);
+                let created = Instant::now();
+                let mut stop = AudioStop::new(commands, command_wake, event_receive);
+                assert!(stop.deadline >= created + Duration::from_secs(5));
+                assert!(stop.deadline <= Instant::now() + Duration::from_secs(5));
+                assert!(stop.wait(|_| {}).now_or_never().is_none());
+                assert_eq!(receive.len(), 1);
+                // After admission a closed event channel must not bypass the same
+                // deadline while the worker still owns the unacknowledged reply.
+                if !queue_full {
+                    drop(events);
+                }
+                // Exercise a real timer wake after cancelling the first wait; the
+                // production request keeps the five-second deadline checked above.
+                stop.deadline = Instant::now() + Duration::from_millis(10);
+                let error = stop.wait(|_| {}).await.unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains("did not stop before the deadline")
+                );
+                assert_eq!(receive.len(), 1, "a timed-out stop was replayed");
+                let _events = stop.into_events();
+            }
+        });
     }
 
     #[test]
     fn still_mode_discards_stopped_waveforms_without_changing_playback_policy() {
-        let (_send, commands) = mpsc::channel(1);
+        let (_send, commands) = async_channel::bounded(1);
         let (_wake, commands_ready) = bounded(1);
-        let (events, _receive) = mpsc::channel(1);
+        let (events, _receive) = async_channel::bounded(1);
         let (_stop, shutdown) = shutdown_channel();
         let analyzer = AnalysisWorker::new(Arc::new(RwLock::new(
             crate::analysis::AnalysisFrame::default(),
@@ -1355,7 +1370,7 @@ mod tests {
         ];
         for barrier in barriers {
             let kind = std::mem::discriminant(&barrier);
-            let (send, receiver) = mpsc::channel(4);
+            let (send, receiver) = async_channel::bounded(4);
             for command in [
                 AudioCommand::Seek(10.0),
                 AudioCommand::Seek(20.0),
@@ -1390,7 +1405,7 @@ mod tests {
 
     #[test]
     fn seek_batches_are_bounded_and_keep_the_remaining_targets() {
-        let (send, receiver) = mpsc::channel(MAX_COMMANDS_PER_ROUND + 2);
+        let (send, receiver) = async_channel::bounded(MAX_COMMANDS_PER_ROUND + 2);
         for target in 1..=MAX_COMMANDS_PER_ROUND + 2 {
             send.try_send(AudioCommand::Seek(target as f64)).unwrap();
         }
@@ -1417,13 +1432,13 @@ mod tests {
         ));
         assert!(matches!(
             inbox.try_recv_round(&mut remaining),
-            Err(TryRecvError::Disconnected)
+            Err(TryRecvError::Closed)
         ));
     }
 
     #[test]
     fn replenished_commands_yield_each_round_without_reordering() {
-        let (send, receiver) = mpsc::channel(1);
+        let (send, receiver) = async_channel::bounded(1);
         send.try_send(AudioCommand::Volume(0.0)).unwrap();
         let mut inbox = CommandInbox {
             receiver,
@@ -1450,7 +1465,7 @@ mod tests {
 
     #[test]
     fn round_boundary_keeps_a_seek_read_ahead_barrier_before_later_seeks() {
-        let (send, receiver) = mpsc::channel(MAX_COMMANDS_PER_ROUND + 1);
+        let (send, receiver) = async_channel::bounded(MAX_COMMANDS_PER_ROUND + 1);
         for target in 1..MAX_COMMANDS_PER_ROUND {
             send.try_send(AudioCommand::Seek(target as f64)).unwrap();
         }
@@ -1483,7 +1498,7 @@ mod tests {
 
     #[test]
     fn single_seek_does_not_wait_for_more_input() {
-        let (send, receiver) = mpsc::channel(1);
+        let (send, receiver) = async_channel::bounded(1);
         send.try_send(AudioCommand::Seek(7.0)).unwrap();
         let (done, completed) = bounded(1);
         let worker = std::thread::spawn(move || {
@@ -1511,10 +1526,10 @@ mod tests {
 
         for explicit in [false, true] {
             for borrowed in [false, true] {
-                let (commands, receive) = mpsc::channel(1);
+                let (commands, receive) = async_channel::bounded(1);
                 let (command_wake, commands_ready) = bounded(1);
                 commands.try_send(AudioCommand::Pause(true)).unwrap();
-                let (events, event_receive) = mpsc::channel(1);
+                let (events, event_receive) = async_channel::bounded(1);
                 events
                     .try_send(AudioEvent::Ended {
                         generation: 1,
@@ -1563,7 +1578,7 @@ mod tests {
                 });
                 completed.recv_timeout(Duration::from_secs(2)).unwrap();
                 closer.join().unwrap();
-                if let Some(mut held_events) = held_events {
+                if let Some(held_events) = held_events {
                     assert!(matches!(
                         held_events.try_recv(),
                         Ok(AudioEvent::Ended { generation: 1, .. })
@@ -1575,8 +1590,8 @@ mod tests {
 
     #[test]
     fn full_event_queue_drops_progress_but_retains_lifecycle_events() {
-        let (events, mut receive) = mpsc::channel(1);
-        let shutdown = CancellationToken::new();
+        let (events, receive) = async_channel::bounded(1);
+        let (_cancel, shutdown) = async_channel::bounded(1);
         events
             .try_send(AudioEvent::Ended {
                 generation: 1,
@@ -1608,15 +1623,15 @@ mod tests {
             );
         });
         assert!(matches!(
-            receive.blocking_recv().unwrap(),
+            receive.recv_blocking().unwrap(),
             AudioEvent::Ended { generation: 1, .. }
         ));
         assert!(matches!(
-            receive.blocking_recv().unwrap(),
+            receive.recv_blocking().unwrap(),
             AudioEvent::DecoderStopped { generation: 2 }
         ));
         assert!(matches!(
-            receive.blocking_recv().unwrap(),
+            receive.recv_blocking().unwrap(),
             AudioEvent::Failed { generation: 3, .. }
         ));
         sender.join().unwrap();
@@ -1624,7 +1639,7 @@ mod tests {
 
     #[test]
     fn shutdown_cancels_a_full_event_queue() {
-        let (events, _receive) = mpsc::channel(1);
+        let (events, _receive) = async_channel::bounded(1);
         let (stop, shutdown) = shutdown_channel();
         events
             .try_send(AudioEvent::Ended {
@@ -1648,7 +1663,7 @@ mod tests {
 
     #[test]
     fn invalid_equalizer_settings_report_config_and_current_generation() {
-        let (mut worker, _commands, mut events, _shutdown) = opening_worker();
+        let (mut worker, _commands, events, _shutdown) = opening_worker();
         let invalid = Arc::new(EqualizerConfig {
             preamp_db: f64::NAN,
             ..Default::default()

@@ -22,19 +22,19 @@ fn runtime_completion_notifies_on_panic_and_reconciles_late_registration() {
         let _ = late.try_send(());
     });
     assert_eq!(late_wakes.try_recv(), Ok(()));
-    let ack = wait_on(&executor(), control.shutdown_ack_async(|| 17));
+    let ack = futures::executor::block_on(control.shutdown_ack_async(|| 17));
     assert_eq!(ack.status, AckStatus::Unknown);
     assert_eq!(ack.revision, 17);
 }
 
 #[test]
 fn lifecycle_shutdown_coalesces_without_business_queue_capacity() {
-    let (control, mut shutdown) = RuntimeControl::new();
+    let (control, shutdown) = RuntimeControl::new();
     for _ in 0..1000 {
         control.request_shutdown().unwrap();
     }
     assert_eq!(shutdown.try_recv(), Ok(()));
-    assert_eq!(shutdown.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+    assert_eq!(shutdown.try_recv(), Err(async_channel::TryRecvError::Empty));
 }
 
 #[test]
@@ -48,8 +48,8 @@ fn shutdown_cancels_and_closes_an_async_scan_worker_before_retirement() {
     }
 
     for drop_owner in [false, true] {
-        let (_directory, mut core) = fixture_with_database(Some(10.0), true);
-        // Keep Tokio alive until Drop has joined the scan worker.
+        let (_directory, mut core) = fixture_with_database(Some(10.0));
+        // Keep the executor alive until Drop has joined the scan worker.
         let _tasks = core._test_tasks.take().unwrap();
         let cancellation = library::ScanCancellation::default();
         let observed = cancellation.clone();
@@ -79,7 +79,7 @@ fn shutdown_cancels_and_closes_an_async_scan_worker_before_retirement() {
                     id: 1,
                     progress: notify_progress.clone(),
                 }),
-                Err(mpsc::error::TrySendError::Closed(_))
+                Err(async_channel::TrySendError::Closed(_))
             );
             wake_tx.try_send(disconnected).unwrap();
         }))));
@@ -139,7 +139,7 @@ fn shutdown_cancels_and_closes_an_async_scan_worker_before_retirement() {
 
 #[test]
 fn shutdown_drains_scan_saving_and_preserves_committed_facts() {
-    let (directory, mut core) = fixture_with_database(Some(10.0), true);
+    let (directory, mut core) = fixture_with_database(Some(10.0));
     let source = directory.path().join("saved-on-shutdown.wav");
     write_pcm(&source);
     core.scan(vec![source.clone()], true).unwrap();
@@ -167,21 +167,21 @@ fn shutdown_drains_scan_saving_and_preserves_committed_facts() {
 
 #[test]
 fn saturated_command_queue_reports_not_admitted_without_inserting_the_command() {
-    let (handle, _analysis, mut requests) = display_fixture();
+    let (handle, _analysis, requests) = display_fixture();
     handle
         .sender
-        .blocking_send(Request {
+        .send_blocking(Request {
             operation: Operation::Command(Command::Pause),
             reply: None,
         })
         .unwrap();
-    let ack = handle.operation_ack(
+    let ack = futures::executor::block_on(handle.operation_ack_async(
         Operation::Command(Command::Volume { value: 0.4 }),
         Duration::ZERO,
-    );
+    ));
     assert_eq!(ack.status, AckStatus::NotAdmitted);
     assert!(matches!(
-        requests.blocking_recv().unwrap().operation,
+        requests.recv_blocking().unwrap().operation,
         Operation::Command(Command::Pause)
     ));
     assert!(requests.try_recv().is_err());
@@ -189,11 +189,11 @@ fn saturated_command_queue_reports_not_admitted_without_inserting_the_command() 
 
 #[test]
 fn admitted_command_timeout_leaves_owner_request_intact_without_replaying() {
-    let (handle, _analysis, mut requests) = display_fixture();
-    let ack = handle.operation_ack(
+    let (handle, _analysis, requests) = display_fixture();
+    let ack = futures::executor::block_on(handle.operation_ack_async(
         Operation::Command(Command::Volume { value: 0.4 }),
         Duration::ZERO,
-    );
+    ));
     assert_eq!(ack.status, AckStatus::Unknown);
     assert!(
         ack.error
@@ -202,7 +202,7 @@ fn admitted_command_timeout_leaves_owner_request_intact_without_replaying() {
             .contains("do not automatically retry")
     );
     // The owner can still receive and execute this exact request after timeout.
-    let request = requests.blocking_recv().unwrap();
+    let request = requests.recv_blocking().unwrap();
     assert!(
         matches!(request.operation, Operation::Command(Command::Volume { value }) if value == 0.4)
     );
@@ -218,11 +218,13 @@ fn admitted_command_timeout_leaves_owner_request_intact_without_replaying() {
 
 #[test]
 fn owner_disconnect_after_admission_reports_unknown_not_rejection() {
-    let (handle, _analysis, mut requests) = display_fixture();
+    let (handle, _analysis, requests) = display_fixture();
     let owner = thread::spawn(move || {
-        drop(requests.blocking_recv().unwrap());
+        drop(requests.recv_blocking().unwrap());
     });
-    let ack = handle.operation_ack(Operation::Command(Command::Pause), REPLY_TIMEOUT);
+    let ack = futures::executor::block_on(
+        handle.operation_ack_async(Operation::Command(Command::Pause), REPLY_TIMEOUT),
+    );
     assert_eq!(ack.status, AckStatus::Unknown);
     owner.join().unwrap();
 }
@@ -231,13 +233,13 @@ fn owner_disconnect_after_admission_reports_unknown_not_rejection() {
 fn shutdown_acknowledgement_does_not_claim_runtime_teardown_is_finished() {
     let (control, _shutdown) = RuntimeControl::new();
     control.acknowledge(Ack::from_result(Ok(()), 9));
-    assert!(wait_on(&executor(), control.shutdown_ack_async(|| 0)).is_success());
+    assert!(futures::executor::block_on(control.shutdown_ack_async(|| 0)).is_success());
     assert!(!control.completion.state.lock().finished);
 }
 
 #[test]
 fn accepted_shutdown_reports_stop_failure_without_rejecting_the_request() {
-    let (directory, mut core) = fixture_with_database(Some(10.0), true);
+    let (directory, mut core) = fixture_with_database(Some(10.0));
     let _audio = recording_audio(&mut core);
     playing(&mut core, 1);
     progress(&mut core, 3.0, 3.0);
@@ -250,10 +252,7 @@ fn accepted_shutdown_reports_stop_failure_without_rejecting_the_request() {
         )
         .unwrap();
     let (handle, control, worker, _) = navigation_runtime(core);
-    let ack = wait_on(
-        handle.executor(),
-        control.shutdown_ack_async(|| handle.revision()),
-    );
+    let ack = futures::executor::block_on(control.shutdown_ack_async(|| handle.revision()));
     assert_eq!(ack.status, AckStatus::Succeeded);
     let core = worker.join().unwrap();
     assert!(core.state.system.shutting_down);
@@ -272,16 +271,22 @@ fn accepted_shutdown_reports_stop_failure_without_rejecting_the_request() {
 
 #[test]
 fn async_replies_and_admission_do_not_need_a_blocking_pool_slot() {
-    let (_directory, mut core) = fixture_with_database(Some(10.0), true);
+    let (_directory, mut core) = fixture_with_database(Some(10.0));
     let tasks = TaskRuntime::with_blocking_threads(1).unwrap();
     core.executor = tasks.handle.clone();
+    core.workers = tasks.workers.clone();
     core._test_tasks = Some(tasks);
     let (handle, control, worker, _) = navigation_runtime(core);
     let (started, running) = bounded(1);
     let (release, released) = bounded(1);
-    let blocker = handle.executor.spawn_blocking(move || {
-        started.send(()).unwrap();
-        let _ = released.recv();
+    let workers = handle.workers().clone();
+    let blocker = handle.executor.spawn(async move {
+        workers
+            .execute(move || {
+                started.send(()).unwrap();
+                let _ = released.recv();
+            })
+            .await
     });
     running.recv_timeout(Duration::from_secs(5)).unwrap();
 
@@ -292,46 +297,45 @@ fn async_replies_and_admission_do_not_need_a_blocking_pool_slot() {
         async move {
             assert!(
                 handle
-                    .request_ack_async(Command::Volume { value: 0.42 })
+                    .request_ack(Command::Volume { value: 0.42 })
                     .await
                     .is_success()
             );
             assert!(matches!(
-                handle.query_async(Query::Track { track_id: 1 }).await.result,
+                handle.query_for_gui(Query::Track { track_id: 1 }).await.result,
                 Ok(rivu_protocol::response::ViewResponse::Track(Some(track))) if track.id == 1
             ));
         }
     });
-    wait_on(handle.executor(), async {
-        tokio::time::timeout(Duration::from_secs(5), futures::future::join_all(requests))
-            .await
-            .unwrap();
+    futures::executor::block_on(async {
+        rivu_protocol::transport::timeout(
+            Duration::from_secs(5),
+            futures::future::join_all(requests),
+        )
+        .await
+        .unwrap();
     });
     assert_eq!(handle.state.read().playback.volume, 0.42);
 
     let optimizing = handle.executor.spawn({
         let handle = handle.clone();
-        async move { handle.request_ack_async(Command::OptimizeDatabase).await }
+        async move { handle.request_ack(Command::OptimizeDatabase).await }
     });
-    wait_on(handle.executor(), async {
-        tokio::time::timeout(Duration::from_secs(5), async {
+    futures::executor::block_on(async {
+        rivu_protocol::transport::timeout(Duration::from_secs(5), async {
             loop {
-                let response = handle.query_async(Query::Track { track_id: 1 }).await;
+                let response = handle.query_for_gui(Query::Track { track_id: 1 }).await;
                 if matches!(&response.result, Err(QueryError::Message(error)) if error.contains("maintenance")) {
                     break;
                 }
-                tokio::task::yield_now().await;
+                futures_lite::future::yield_now().await;
             }
         }).await.unwrap();
     });
     assert!(!optimizing.is_finished());
     release.send(()).unwrap();
     futures::executor::block_on(blocker).unwrap();
-    assert!(
-        futures::executor::block_on(optimizing)
-            .unwrap()
-            .is_success()
-    );
+    assert!(futures::executor::block_on(optimizing).is_success());
     control.request_shutdown().unwrap();
     worker.join().unwrap();
 }
@@ -374,7 +378,7 @@ fn preparation_panic_publishes_a_terminal_failure_and_releases_scan_admission() 
 }
 
 #[test]
-fn owner_failure_retires_background_work_without_blocking_tokio() {
+fn owner_failure_retires_background_work_without_blocking_executor() {
     for during_request in [false, true] {
         let (_directory, mut core) = fixture();
         // Keep the shared runtime alive outside the owner being unwound.
@@ -382,8 +386,12 @@ fn owner_failure_retires_background_work_without_blocking_tokio() {
         let executor = core.executor.clone();
         let cancellation = library::ScanCancellation::default();
         let observed = cancellation.clone();
-        let scan = executor.spawn(async move { observed.cancelled().await });
-        let scan_retired = scan.abort_handle();
+        let retired_scan = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let scan_retired = retired_scan.clone();
+        let scan = executor.spawn(async move {
+            observed.cancelled().await;
+            scan_retired.store(true, Ordering::Release);
+        });
         core.active_scan = Some(ScanTask {
             status: ScanTaskStatus {
                 id: 1,
@@ -411,7 +419,7 @@ fn owner_failure_retires_background_work_without_blocking_tokio() {
             released.recv().unwrap();
             panic!("injected Core owner failure");
         }));
-        let (requests, receiver) = mpsc::channel(1);
+        let (requests, receiver) = async_channel::bounded(1);
         requests
             .try_send(Request {
                 operation: Operation::Command(Command::Volume { value: 0.37 }),
@@ -420,9 +428,9 @@ fn owner_failure_retires_background_work_without_blocking_tokio() {
             .unwrap();
         let (control, shutdown) = RuntimeControl::new();
         let (completed, completion) = bounded(1);
-        let retired = scan_retired.clone();
+        let retired = retired_scan.clone();
         control.set_completion_callback(move || {
-            completed.send(retired.is_finished()).unwrap();
+            completed.send(retired.load(Ordering::Acquire)).unwrap();
         });
         let worker_control = control.clone();
         let worker = thread::spawn(move || {
@@ -443,15 +451,15 @@ fn owner_failure_retires_background_work_without_blocking_tokio() {
         release.send(()).unwrap();
         assert!(worker.join().is_err());
         responsive.unwrap();
-        wait_on(&executor, ping_task).unwrap();
+        futures::executor::block_on(ping_task);
         assert!(completion.recv_timeout(Duration::from_secs(5)).unwrap());
-        assert!(scan_retired.is_finished());
+        assert!(retired_scan.load(Ordering::Acquire));
     }
 }
 
 #[test]
 fn unrelated_album_query_failure_preserves_command_results_and_scan_identity() {
-    let (directory, mut core) = fixture_with_database(Some(10.0), true);
+    let (directory, mut core) = fixture_with_database(Some(10.0));
     let original_error = format!(
         "{:#}",
         core.command(Command::Volume { value: -1.0 }).unwrap_err()
@@ -472,17 +480,17 @@ fn unrelated_album_query_failure_preserves_command_results_and_scan_identity() {
             .result
             .is_err()
     );
-    let accepted = handle.request_ack(Command::Volume { value: 0.37 });
+    let accepted = futures::executor::block_on(handle.request_ack(Command::Volume { value: 0.37 }));
     assert_eq!(accepted.status, AckStatus::Succeeded);
     assert_eq!(handle.state.read().playback.volume, 0.37);
     assert!(handle.state.read().system.last_error.is_none());
-    let rejected = handle.request_ack(Command::Volume { value: -1.0 });
+    let rejected = futures::executor::block_on(handle.request_ack(Command::Volume { value: -1.0 }));
     assert_eq!(rejected.status, AckStatus::Failed);
     assert_eq!(rejected.error.as_deref(), Some(original_error.as_str()));
-    let accepted = handle.request_ack(Command::Scan {
+    let accepted = futures::executor::block_on(handle.request_ack(Command::Scan {
         paths: vec![directory.path().join("1.wav")],
         force: true,
-    });
+    }));
     assert_eq!(accepted.status, AckStatus::Succeeded);
     let id = accepted
         .scan_id

@@ -1,14 +1,22 @@
 use crate::app::AppHandle;
 use crate::core::CoreHandle;
 use anyhow::{Context, Error, Result, bail};
-use bytes::{BufMut, Bytes, BytesMut};
+use async_channel::{Receiver, Sender};
+use async_io::Async;
+use bytes::{Bytes, BytesMut};
+use futures::{
+    FutureExt, StreamExt,
+    io::{AsyncRead, AsyncReadExt},
+    stream::FuturesUnordered,
+};
 use rand::RngExt;
 use rivu_protocol::protocol::{
     HELLO_TIMEOUT, HelloResponse, MAX_CLIENTS, MAX_REQUEST, SessionState, UNKNOWN_INSTANCE,
     WireRequest, WireResponse, wire_state,
 };
 use rivu_protocol::transport::{
-    bridge_timeout, decode_request_frame, read_frame, write_error_frame, write_frame_buffered,
+    bridge_timeout, decode_request_frame, read_frame, timeout, timeout_at, write_error_frame,
+    write_frame_buffered,
 };
 use rivu_protocol::{AppCommand, query_wait_timeout};
 use rivu_protocol::{
@@ -18,15 +26,10 @@ use rivu_protocol::{
 use std::{
     fs,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
-use tokio::{
-    io::{AsyncRead, AsyncReadExt},
-    net::{UnixListener, UnixStream},
-    sync::watch,
-    task::JoinSet,
-    time::{Instant, timeout, timeout_at},
-};
+type UnixStream = Async<std::os::unix::net::UnixStream>;
+type UnixListener = Async<std::os::unix::net::UnixListener>;
 /// Holds the abstract listener before any database or audio startup side effects.
 /// The kernel releases the address after the last listening descriptor closes.
 pub struct SocketOwner {
@@ -52,21 +55,17 @@ impl SocketOwner {
 /// and every connection have retired, before SocketOwner releases authority.
 pub struct Server {
     data_dir: PathBuf,
-    shutdown: watch::Sender<bool>,
-    worker: Option<tokio::task::JoinHandle<()>>,
+    shutdown: Sender<()>,
+    worker: Option<async_executor::Task<()>>,
 }
 
 impl Server {
     pub(crate) fn start(owner: &SocketOwner, handle: CoreHandle, app: AppHandle) -> Result<Self> {
         let data_dir = owner.data_dir.clone();
-        let listener = {
-            let _guard = handle.executor().enter();
-            UnixListener::from_std(owner.listener.try_clone()?)?
-        };
-        let (shutdown, shutdown_rx) = watch::channel(false);
-        let revision_rx = handle.subscribe_revisions();
+        let listener = Async::new(owner.listener.try_clone()?)?;
+        let (shutdown, shutdown_rx) = async_channel::bounded(1);
         let executor = handle.executor().clone();
-        let worker = executor.spawn(run_server(listener, handle, app, revision_rx, shutdown_rx));
+        let worker = executor.spawn(run_server(listener, handle, app, shutdown_rx));
         tracing::info!(path = %data_dir.display(), "ipc_server_started");
         Ok(Self {
             data_dir,
@@ -79,9 +78,9 @@ impl Server {
 impl Drop for Server {
     fn drop(&mut self) {
         tracing::info!(path = %self.data_dir.display(), "ipc_server_stopping");
-        let _ = self.shutdown.send(true);
+        self.shutdown.close();
         if let Some(worker) = self.worker.take() {
-            let _ = futures::executor::block_on(worker);
+            async_io::block_on(worker);
         }
     }
 }
@@ -114,14 +113,16 @@ impl RequestReader {
         // Idle sessions have no expiry. Start one absolute deadline at the first
         // byte, retaining it when Watch updates cancel and resume this future.
         if self.pending.is_empty() {
+            let mut prefix = [0; 4];
             let read = stream
-                .read_buf(&mut (&mut self.pending).limit(4))
+                .read(&mut prefix)
                 .await
                 .context("Reading IPC frame")?;
             if read == 0 {
                 bail!("IPC connection closed while reading frame");
             }
             self.deadline = Some(Instant::now() + FRAME_TIMEOUT);
+            self.pending.extend_from_slice(&prefix[..read]);
         }
         let deadline = self.deadline.expect("Started request frame has a deadline");
         let frame = timeout_at(deadline, read_frame(stream, MAX_REQUEST, &mut self.pending))
@@ -142,18 +143,18 @@ async fn wait_for_revisions(
     reader: &mut RequestReader,
     handle: &CoreHandle,
     expected: StateRevisions,
-    updates: &mut watch::Receiver<StateRevisions>,
-    shutdown: &mut watch::Receiver<bool>,
+    updates: &Receiver<()>,
+    shutdown: &Receiver<()>,
 ) -> Result<Option<WatchResult>> {
     loop {
         let current = handle.state_revisions();
         if current != expected {
             return Ok(Some(WatchResult::Revisions(current)));
         }
-        tokio::select! {
-            changed = updates.changed() => { if changed.is_err() { return Ok(None); } }
-            changed = shutdown.changed() => { if changed.is_err() || *shutdown.borrow() { return Ok(None); } }
-            frame = reader.read(stream) => return Ok(Some(WatchResult::Request(frame?))),
+        futures::select! {
+            changed = updates.recv().fuse() => { if changed.is_err() { return Ok(None); } }
+            _ = shutdown.recv().fuse() => return Ok(None),
+            frame = reader.read(stream).fuse() => return Ok(Some(WatchResult::Request(frame?))),
         }
     }
 }
@@ -163,30 +164,29 @@ async fn serve_connection(
     handle: CoreHandle,
     app: AppHandle,
     instance_id: u32,
-    mut updates: watch::Receiver<StateRevisions>,
-    mut shutdown: watch::Receiver<bool>,
+    updates: Receiver<()>,
+    shutdown: Receiver<()>,
 ) -> Result<()> {
     let mut reader = RequestReader::default();
     let mut pending_request = None;
     let mut write_buffer = Vec::new();
     let mut session = SessionState::Unbound;
     loop {
-        if *shutdown.borrow() {
+        // Socket readiness alone does not impose a cooperative execution budget.
+        futures_lite::future::yield_now().await;
+        if shutdown.is_closed() {
             return Ok(());
         }
         let bytes = if let Some(frame) = pending_request.take() {
             frame
         } else if session.is_bound() {
-            tokio::select! {
-                frame = reader.read(&mut stream) => frame?,
-                changed = shutdown.changed() => {
-                    if changed.is_err() || *shutdown.borrow() { return Ok(()); }
-                    continue;
-                }
+            futures::select! {
+                frame = reader.read(&mut stream).fuse() => frame?,
+                _ = shutdown.recv().fuse() => return Ok(()),
             }
         } else {
-            tokio::select! {
-                frame = timeout(HELLO_TIMEOUT, reader.read(&mut stream)) => {
+            futures::select! {
+                frame = timeout(HELLO_TIMEOUT, reader.read(&mut stream)).fuse() => {
                     match frame {
                         Ok(frame) => frame?,
                         Err(_) => {
@@ -195,10 +195,7 @@ async fn serve_connection(
                         }
                     }
                 }
-                changed = shutdown.changed() => {
-                    if changed.is_err() || *shutdown.borrow() { return Ok(()); }
-                    continue;
-                }
+                _ = shutdown.recv().fuse() => return Ok(()),
             }
         };
         let request = match decode_request_frame(&bytes) {
@@ -311,8 +308,8 @@ async fn serve_connection(
                     &mut reader,
                     &handle,
                     expected,
-                    &mut updates,
-                    &mut shutdown,
+                    &updates,
+                    &shutdown,
                 )
                 .await?
                 else {
@@ -336,8 +333,7 @@ async fn run_server(
     listener: UnixListener,
     handle: CoreHandle,
     app: AppHandle,
-    updates: watch::Receiver<StateRevisions>,
-    mut shutdown: watch::Receiver<bool>,
+    shutdown: Receiver<()>,
 ) {
     let instance_id = {
         let mut rng = rand::rng();
@@ -348,11 +344,30 @@ async fn run_server(
             }
         }
     };
-    let mut clients = JoinSet::new();
-    let revisions = updates;
+    let mut clients = FuturesUnordered::new();
+    enum Event {
+        Accepted(std::io::Result<(UnixStream, std::os::unix::net::SocketAddr)>),
+        Completed(Option<Result<()>>),
+        Shutdown,
+    }
     loop {
-        tokio::select! {
-            accepted = listener.accept() => {
+        futures_lite::future::yield_now().await;
+        let event = {
+            let completed = async {
+                if clients.is_empty() {
+                    std::future::pending().await
+                } else {
+                    clients.next().await
+                }
+            };
+            futures::select! {
+                accepted = listener.accept().fuse() => Event::Accepted(accepted),
+                _ = shutdown.recv().fuse() => Event::Shutdown,
+                result = completed.fuse() => Event::Completed(result),
+            }
+        };
+        match event {
+            Event::Accepted(accepted) => {
                 let (mut stream, _) = match accepted {
                     Ok(connection) => connection,
                     Err(error) => {
@@ -364,46 +379,67 @@ async fn run_server(
                     tracing::warn!(error = %error, "ipc_peer_rejected");
                     continue;
                 }
-                // len includes completed tasks; reclaim at most MAX_CLIENTS
-                // before deciding admission, without polling active sessions.
+                // Reclaim completed sessions without polling idle sockets.
                 for _ in 0..MAX_CLIENTS {
-                    if clients.try_join_next().is_none() {
-                        break;
+                    match clients.next().now_or_never() {
+                        Some(Some(result)) => log_connection_result(result),
+                        _ => break,
                     }
                 }
                 if clients.len() < MAX_CLIENTS {
-                    clients.spawn(serve_connection(
+                    let connection = serve_connection(
                         stream,
                         handle.clone(),
                         app.clone(),
                         instance_id,
-                        revisions.clone(),
+                        handle.subscribe_revisions(),
                         shutdown.clone(),
-                    ));
+                    );
+                    clients.push(handle.executor().spawn(async move {
+                        std::panic::AssertUnwindSafe(connection)
+                            .catch_unwind()
+                            .await
+                            .unwrap_or_else(|_| {
+                                Err(anyhow::anyhow!("IPC connection task panicked"))
+                            })
+                    }));
                 } else {
-                    tracing::warn!(clients = clients.len(), max_clients = MAX_CLIENTS, "ipc_client_limit_reached");
+                    tracing::warn!(
+                        clients = clients.len(),
+                        max_clients = MAX_CLIENTS,
+                        "ipc_client_limit_reached"
+                    );
                     let mut buffer = Vec::new();
-                    if let Err(error) = write_error_frame(&mut stream, &mut buffer, "IPC server is busy").await {
+                    if let Err(error) =
+                        write_error_frame(&mut stream, &mut buffer, "IPC server is busy").await
+                    {
                         tracing::debug!(error = %error, "ipc_busy_response_failed");
                     }
                 }
             }
-            changed = shutdown.changed() => { if changed.is_err() || *shutdown.borrow() { break; } }
-            result = clients.join_next(), if !clients.is_empty() => {
-                if let Some(Err(error)) = result {
-                    tracing::warn!(error = %error, "ipc_connection_task_failed");
+            Event::Shutdown => break,
+            Event::Completed(result) => {
+                if let Some(result) = result {
+                    log_connection_result(result);
                 }
             }
         }
     }
-    // Idle sessions observe shutdown; accepted operations finish their reply
-    // before App retires the socket and releases instance authority.
+    // Idle sessions observe shutdown; accepted operations drain their replies.
+    // Dropping remaining owned Tasks after the deadline cancels their transport,
+    // never the business operation already accepted by Core.
     let _ = timeout(Duration::from_secs(120), async {
-        while clients.join_next().await.is_some() {}
+        while let Some(result) = clients.next().await {
+            log_connection_result(result);
+        }
     })
     .await;
-    clients.abort_all();
-    while clients.join_next().await.is_some() {}
+}
+
+fn log_connection_result(result: Result<()>) {
+    if let Err(error) = result {
+        tracing::debug!(error = %error, "ipc_connection_ended");
+    }
 }
 
 pub fn is_no_instance(error: &Error) -> bool {
@@ -420,58 +456,68 @@ pub fn is_no_instance(error: &Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::io::AsyncWriteExt;
     use std::{
         future::Future,
         task::{Context as TaskContext, Waker},
     };
-    use tokio::io::AsyncWriteExt;
 
-    #[tokio::test(start_paused = true)]
-    async fn idle_request_wait_accepts_a_frame_after_the_completion_interval() {
-        let (mut writer, mut stream) = tokio::io::duplex(32);
-        let reading = tokio::spawn(async move { RequestReader::default().read(&mut stream).await });
-        tokio::task::yield_now().await;
-        tokio::time::advance(FRAME_TIMEOUT * 2).await;
-        writer.write_all(&[2, 0, 0, 0, 14, 1]).await.unwrap();
-        assert_eq!(reading.await.unwrap().unwrap().as_ref(), &[14, 1]);
+    fn socket_pair() -> (UnixStream, UnixStream) {
+        let (write, read) = std::os::unix::net::UnixStream::pair().unwrap();
+        (Async::new(write).unwrap(), Async::new(read).unwrap())
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn partial_request_deadline_survives_cancel_and_additional_bytes() {
-        let (mut writer, mut stream) = tokio::io::duplex(32);
-        let mut reader = RequestReader::default();
-        writer.write_all(&[2]).await.unwrap();
-        {
-            let mut reading = std::pin::pin!(reader.read(&mut stream));
-            let mut context = TaskContext::from_waker(Waker::noop());
-            assert!(reading.as_mut().poll(&mut context).is_pending());
-        }
-        tokio::time::advance(FRAME_TIMEOUT - Duration::from_secs(1)).await;
-        writer.write_all(&[0, 0, 0, 14]).await.unwrap();
-        {
-            let mut reading = std::pin::pin!(reader.read(&mut stream));
-            let mut context = TaskContext::from_waker(Waker::noop());
-            assert!(reading.as_mut().poll(&mut context).is_pending());
-        }
-        tokio::time::advance(Duration::from_secs(2)).await;
-        assert!(
-            reader
-                .read(&mut stream)
-                .await
-                .unwrap_err()
-                .to_string()
-                .contains("completion timed out")
-        );
+    #[test]
+    fn idle_request_wait_accepts_a_frame_after_the_completion_interval() {
+        async_io::block_on(async {
+            let (mut writer, mut stream) = socket_pair();
+            let mut reader = RequestReader::default();
+            let receive = reader.read(&mut stream);
+            let send = async {
+                async_io::Timer::after(FRAME_TIMEOUT * 2).await;
+                writer.write_all(&[2, 0, 0, 0, 14, 1]).await.unwrap();
+            };
+            let (frame, _) = futures::join!(receive, send);
+            assert_eq!(frame.unwrap().as_ref(), &[14, 1]);
+        });
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn completed_request_resets_the_deadline_for_the_next_frame() {
-        let (mut writer, mut stream) = tokio::io::duplex(32);
-        let mut reader = RequestReader::default();
-        writer.write_all(&[2, 0, 0, 0, 14, 1]).await.unwrap();
-        assert_eq!(reader.read(&mut stream).await.unwrap().as_ref(), &[14, 1]);
-        tokio::time::advance(FRAME_TIMEOUT * 2).await;
-        writer.write_all(&[2, 0, 0, 0, 14, 2]).await.unwrap();
-        assert_eq!(reader.read(&mut stream).await.unwrap().as_ref(), &[14, 2]);
+    #[test]
+    fn partial_request_deadline_survives_cancel_and_additional_bytes() {
+        async_io::block_on(async {
+            let (mut writer, mut stream) = socket_pair();
+            let mut reader = RequestReader::default();
+            writer.write_all(&[2]).await.unwrap();
+            {
+                let mut reading = std::pin::pin!(reader.read(&mut stream));
+                let mut context = TaskContext::from_waker(Waker::noop());
+                assert!(reading.as_mut().poll(&mut context).is_pending());
+            }
+            // Resume a partially read frame whose original deadline expired.
+            // Additional bytes must not start a fresh completion interval.
+            reader.deadline = Some(Instant::now() - FRAME_TIMEOUT);
+            writer.write_all(&[0, 0, 0, 14]).await.unwrap();
+            assert!(
+                reader
+                    .read(&mut stream)
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("completion timed out")
+            );
+        });
+    }
+
+    #[test]
+    fn completed_request_resets_the_deadline_for_the_next_frame() {
+        async_io::block_on(async {
+            let (mut writer, mut stream) = socket_pair();
+            let mut reader = RequestReader::default();
+            writer.write_all(&[2, 0, 0, 0, 14, 1]).await.unwrap();
+            assert_eq!(reader.read(&mut stream).await.unwrap().as_ref(), &[14, 1]);
+            async_io::Timer::after(FRAME_TIMEOUT * 2).await;
+            writer.write_all(&[2, 0, 0, 0, 14, 2]).await.unwrap();
+            assert_eq!(reader.read(&mut stream).await.unwrap().as_ref(), &[14, 2]);
+        });
     }
 }

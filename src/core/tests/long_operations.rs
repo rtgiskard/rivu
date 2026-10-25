@@ -7,7 +7,7 @@ fn saving_with_write_lock() -> (tempfile::TempDir, Core, rusqlite::Connection) {
 fn saving_with_write_lock_and_processing(
     processing: bool,
 ) -> (tempfile::TempDir, Core, rusqlite::Connection) {
-    let (directory, mut core) = fixture_with_database(Some(10.0), true);
+    let (directory, mut core) = fixture_with_database(Some(10.0));
     write_pcm_frames(&directory.path().join("1.wav"), 100);
     if processing {
         core.command(Command::StartProcessing {
@@ -52,11 +52,14 @@ fn processing_cancellation_remains_available_while_scan_holds_saving_phase() {
     assert!(core.database_maintenance_active());
     core.command(Command::CancelProcessing { id: 1 }).unwrap();
     loop {
-        let event = wait_on(&core.executor, async {
-            tokio::time::timeout(Duration::from_secs(5), core.processing.receiver.recv())
-                .await
-                .unwrap()
-                .unwrap()
+        let event = futures::executor::block_on(async {
+            rivu_protocol::transport::timeout(
+                Duration::from_secs(5),
+                core.processing.receiver.recv(),
+            )
+            .await
+            .unwrap()
+            .unwrap()
         });
         let finished = matches!(event, crate::processing::Event::Finished { .. });
         core.processing_event(event);
@@ -122,7 +125,7 @@ fn eof_during_scan_saving_preserves_later_pause_intent() {
 
 #[test]
 fn export_snapshot_keeps_order_and_metadata_across_concurrent_edits() {
-    let (directory, mut core) = fixture_with_database(Some(10.0), true);
+    let (directory, mut core) = fixture_with_database(Some(10.0));
     core.command(Command::CreatePlaylistWithTracks {
         name: "Snapshot".into(),
         track_ids: vec![1, 2, 3],
@@ -200,10 +203,12 @@ fn export_cancelled_after_last_row_preserves_existing_destination() {
         None
     }));
     assert!(
-        wait_on(
-            &core.executor,
-            library::export_m3u(&destination, futures::stream::iter(tracks), &cancellation),
-        )
+        futures::executor::block_on(library::export_m3u(
+            &core.workers,
+            &destination,
+            futures::stream::iter(tracks),
+            &cancellation
+        ),)
         .is_err()
     );
     assert_eq!(std::fs::read(&destination).unwrap(), b"original\n");
@@ -272,7 +277,7 @@ fn failed_deferred_activity_preserves_controls_and_guards_producer_replacement()
 
 #[test]
 fn existing_playback_controls_remain_usable_while_database_is_write_locked() {
-    let (directory, mut core) = fixture_with_database(Some(10.0), true);
+    let (directory, mut core) = fixture_with_database(Some(10.0));
     let _audio = recording_audio(&mut core);
     playing(&mut core, 1);
     let lock = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();

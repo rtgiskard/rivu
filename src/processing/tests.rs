@@ -17,16 +17,12 @@ fn bounded(run: impl FnOnce() + Send + 'static) {
 }
 
 fn next_event(service: &mut Service) -> Event {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_time()
-        .build()
-        .unwrap()
-        .block_on(async {
-            tokio::time::timeout(Duration::from_secs(10), service.receiver.recv())
-                .await
-                .expect("processing worker did not report completion")
-                .expect("processing events closed before completion")
-        })
+    futures::executor::block_on(async {
+        rivu_protocol::transport::timeout(Duration::from_secs(10), service.receiver.recv())
+            .await
+            .expect("processing worker did not report completion")
+            .expect("processing events closed before completion")
+    })
 }
 
 fn completed(service: &mut Service, track: &Track, config: &Arc<Config>) -> ProcessingResult {
@@ -92,7 +88,7 @@ fn fixture() -> (tempfile::TempDir, Service, Track, Arc<Config>) {
 
 fn block_reclamation(service: &mut Service, track: &Track, config: &Arc<Config>) {
     let result = completed(service, track, config);
-    for _ in 0..service.sender.max_capacity() {
+    for _ in 0..service.sender.capacity().unwrap() {
         service
             .sender
             .try_send(Event::Progress {
@@ -110,7 +106,7 @@ fn block_reclamation(service: &mut Service, track: &Track, config: &Arc<Config>)
 }
 
 fn unblock_reclamation(service: &mut Service) {
-    for _ in 0..service.sender.max_capacity() {
+    for _ in 0..service.sender.capacity().unwrap() {
         assert!(matches!(next_event(service), Event::Progress { id: 0, .. }));
     }
     match next_event(service) {
@@ -145,7 +141,7 @@ fn failed_processing_spawns_do_not_consume_retirement_capacity() {
             );
             assert!(service.active.is_none());
         }
-        assert_eq!(service.sender.capacity(), 0);
+        assert_eq!(service.sender.len(), service.sender.capacity().unwrap());
         assert_eq!(service.retiring_bytes(), 0);
         service.reclaimer.as_mut().unwrap().fail_spawns = false;
         let status = service
@@ -200,7 +196,7 @@ fn failed_mix_spawns_do_not_consume_retirement_capacity() {
             );
             assert!(service.active.is_none());
         }
-        assert_eq!(service.sender.capacity(), 0);
+        assert_eq!(service.sender.len(), service.sender.capacity().unwrap());
         assert_eq!(service.retiring_bytes(), 0);
         service.reclaimer.as_mut().unwrap().fail_spawns = false;
         mix(&mut service, 1, 7, 0.0, 0.0).unwrap();

@@ -365,7 +365,7 @@ impl Metadata {
             let response = super::query::run(
                 handle,
                 cx,
-                move |handle| handle.query_if_current(read.query(), ticket),
+                move |handle| async move { handle.query_if_current(read.query(), ticket).await },
                 |response, cx| {
                     let _ = this.update(cx, |this, cx| {
                         this.refresh(cx);
@@ -471,10 +471,7 @@ impl Metadata {
         let hint_change = self.metadata.submitted_hint_change(&command);
         let handle = self.context.handle().clone();
         cx.spawn(async move |this, cx| {
-            let ack = cx
-                .background_executor()
-                .spawn(async move { handle.request_ack(command) })
-                .await;
+            let ack = handle.request_ack(command).await;
             let _ = this.update(cx, |this, cx| {
                 this.finish_save(token, values, hint_change, ack, cx);
             });

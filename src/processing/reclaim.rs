@@ -63,12 +63,12 @@ impl Reclaimer {
                             if let Some(error) = &failure {
                                 pending.fetch_add(result.cache_bytes, Ordering::Release);
                                 failures.push(result);
-                                let _ = events.blocking_send(Event::Finished {
+                                let _ = events.send_blocking(Event::Finished {
                                     id,
                                     result: Err(anyhow::anyhow!(error.clone())),
                                 });
                             } else {
-                                let _ = events.blocking_send(Event::ReadyToPublish { id, result });
+                                let _ = events.send_blocking(Event::ReadyToPublish { id, result });
                             }
                         }
                         Work::Barrier(reply) => {

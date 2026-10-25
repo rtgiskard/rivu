@@ -1,8 +1,8 @@
 //! Session-bus MPRIS2 adapter. The application owns one media manager; this
 //! module owns enable transitions, cancellable registration and publication.
-//! Retiring a service cancels sends, joins the publisher, drains accepted
-//! replies with a deadline, then closes the connection. Playback changes come
-//! from the core subscription, never a library polling loop.
+//! Owned executor tasks cancel publication, drain accepted replies with a
+//! deadline, then close the connection before application executor retirement.
+//! Playback changes come from the core subscription, never a polling loop.
 
 use crate::{
     app::AppHandle,
@@ -10,17 +10,11 @@ use crate::{
     core::{CoreHandle, Navigation},
     projection::MprisSnapshot,
 };
-use anyhow::{Context, Result};
-use crossbeam_channel::{Receiver, Sender, bounded, select_biased};
+use anyhow::{Context, Result, anyhow};
 use futures::{FutureExt, channel::oneshot};
 use rivu_protocol::AppCommand;
 use rivu_protocol::model::{Command, PlaybackStatus, RepeatMode};
-use std::{
-    collections::HashMap,
-    sync::Arc,
-    thread::{self, JoinHandle},
-    time::Duration,
-};
+use std::{collections::HashMap, panic::AssertUnwindSafe, sync::Arc, time::Duration};
 use zbus::{
     Connection,
     connection::Builder,
@@ -37,164 +31,142 @@ const MICROS_PER_SECOND: f64 = 1_000_000.0;
 type Metadata = HashMap<String, OwnedValue>;
 
 pub(crate) struct MediaWorker {
-    stop: crossbeam_channel::Sender<()>,
-    worker: Option<thread::JoinHandle<()>>,
+    stop: Option<oneshot::Sender<()>>,
+    worker: Option<async_executor::Task<()>>,
 }
 
 impl MediaWorker {
-    pub(crate) fn start(
-        handle: CoreHandle,
-        app: AppHandle,
-        artwork: Arc<ArtworkManager>,
-    ) -> Result<Self> {
-        let changes = handle.subscribe();
-        let (stop, stop_receiver) = bounded(1);
-        let worker = thread::Builder::new()
-            .name("rivu-mpris-manager".into())
-            .spawn(move || {
-                let mut service = None;
-                let mut registration = None;
-                let not_registering = crossbeam_channel::never();
-                let mut enabled = None;
-                loop {
-                    let state = handle.mpris_service_state();
-                    if state.shutting_down {
-                        break;
+    pub(crate) fn start(handle: CoreHandle, app: AppHandle, artwork: Arc<ArtworkManager>) -> Self {
+        let changes = handle.subscribe_revisions();
+        let executor = Arc::clone(handle.executor());
+        let (stop, stopped) = oneshot::channel();
+        let worker = executor.spawn(async move {
+            let mut stopped = stopped.fuse();
+            let mut service: Option<Mpris> = None;
+            let mut registration: Option<Registration> = None;
+            let mut enabled = None;
+            loop {
+                let state = handle.mpris_service_state();
+                if state.shutting_down {
+                    break;
+                }
+                if enabled != Some(state.enabled) {
+                    enabled = Some(state.enabled);
+                    if let Some(pending) = registration.take() {
+                        pending.cancel().await;
                     }
-                    if enabled != Some(state.enabled) {
-                        enabled = Some(state.enabled);
-                        registration = None;
-                        service = None;
-                        if state.enabled {
-                            match Registration::start(
-                                handle.clone(),
-                                app.clone(),
-                                Arc::clone(&artwork),
-                            ) {
-                                Ok(pending) => registration = Some(pending),
-                                Err(error) => {
-                                    let _ = handle.send(Command::MprisStatus {
-                                        status: format!("MPRIS unavailable: {error:#}"),
-                                    });
-                                }
-                            }
-                        } else {
-                            let _ = handle.send(Command::MprisStatus {
-                                status: "Desktop media controls disabled".to_owned(),
-                            });
+                    if let Some(active) = service.take() {
+                        active.retire().await;
+                    }
+                    if state.enabled {
+                        registration = Some(Registration::spawn(
+                            handle.executor(),
+                            register(handle.clone(), app.clone(), Arc::clone(&artwork)),
+                        ));
+                    } else {
+                        let _ = handle.send(Command::MprisStatus {
+                            status: "Desktop media controls disabled".to_owned(),
+                        });
+                    }
+                }
+                let connection = {
+                    let registered = async {
+                        match registration.as_mut() {
+                            Some(pending) => pending.result().await,
+                            None => futures::future::pending().await,
                         }
                     }
-                    let registered = registration
-                        .as_ref()
-                        .map_or(&not_registering, Registration::result);
-                    select_biased! {
-                        recv(stop_receiver) -> _ => break,
-                        recv(changes) -> changed => {
+                    .fuse();
+                    futures::pin_mut!(registered);
+                    futures::select_biased! {
+                        _ = stopped => break,
+                        changed = changes.recv().fuse() => {
                             if changed.is_err() {
                                 break;
                             }
+                            continue;
                         }
-                        recv(registered) -> connection => {
-                            registration = None;
-                            // Never start a publisher for a cancelled enable request.
-                            let state = handle.mpris_service_state();
-                            if state.shutting_down {
-                                break;
-                            }
-                            if !state.enabled {
-                                continue;
-                            }
-                            match connection
-                                .context("MPRIS registration worker stopped")
-                                .and_then(|result| result)
-                                .and_then(|connection| {
-                                    Mpris::start(
-                                        connection,
-                                        handle.clone(),
-                                        app.clone(),
-                                        Arc::clone(&artwork),
-                                    )
-                                })
-                            {
-                                Ok(started) => {
-                                    service = Some(started);
-                                }
-                                Err(error) => {
-                                    let _ = handle.send(Command::MprisStatus {
-                                        status: format!("MPRIS unavailable: {error:#}"),
-                                    });
-                                }
-                            }
-                        }
+                        connection = registered => connection,
                     }
+                };
+                registration = None;
+                // Reconcile intent again: registration may finish with
+                // disable or shutdown already queued by the core.
+                let state = handle.mpris_service_state();
+                match connection {
+                    Ok(connection) if state.enabled && !state.shutting_down => {
+                        service = Some(Mpris::start(
+                            connection,
+                            handle.clone(),
+                            app.clone(),
+                            Arc::clone(&artwork),
+                        ));
+                    }
+                    Ok(connection) => retire_connection(connection).await,
+                    Err(error) if state.enabled && !state.shutting_down => {
+                        let _ = handle.send(Command::MprisStatus {
+                            status: format!("MPRIS unavailable: {error:#}"),
+                        });
+                    }
+                    Err(_) => {}
                 }
-                drop(registration);
-                drop(service);
-            })?;
-        Ok(Self {
-            stop,
+            }
+            if let Some(pending) = registration {
+                pending.cancel().await;
+            }
+            if let Some(active) = service {
+                active.retire().await;
+            }
+        });
+        Self {
+            stop: Some(stop),
             worker: Some(worker),
-        })
+        }
     }
 }
 
 impl Drop for MediaWorker {
     fn drop(&mut self) {
-        let _ = self.stop.try_send(());
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
-    }
-}
-
-/// The media manager owns and joins each attempt, including cancelled builds.
-struct Registration {
-    result: Receiver<Result<Connection>>,
-    stop: Option<oneshot::Sender<()>>,
-    worker: Option<JoinHandle<()>>,
-}
-
-impl Registration {
-    fn start(handle: CoreHandle, app: AppHandle, artwork: Arc<ArtworkManager>) -> Result<Self> {
-        Self::spawn(register(handle, app, artwork))
-    }
-
-    fn spawn(attempt: impl Future<Output = Result<Connection>> + Send + 'static) -> Result<Self> {
-        let (registered, result) = bounded(1);
-        let (stop, stopped) = oneshot::channel();
-        let worker = thread::Builder::new()
-            .name("rivu-mpris-register".into())
-            .spawn(move || {
-                futures::executor::block_on(async move {
-                    // Cancellation covers connect, authentication, and name acquisition.
-                    futures::select_biased! {
-                        _ = stopped.fuse() => {},
-                        result = attempt.fuse() => {
-                            let _ = registered.try_send(result);
-                        },
-                    }
-                });
-            })
-            .context("Starting MPRIS registration")?;
-        Ok(Self {
-            result,
-            stop: Some(stop),
-            worker: Some(worker),
-        })
-    }
-
-    fn result(&self) -> &Receiver<Result<Connection>> {
-        &self.result
-    }
-}
-
-impl Drop for Registration {
-    fn drop(&mut self) {
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
         }
         if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+            // App owns this boundary, outside GPUI and before executor stop.
+            if async_io::block_on(AssertUnwindSafe(worker).catch_unwind()).is_err() {
+                tracing::warn!("mpris_manager_task_panicked");
+            }
+        }
+    }
+}
+
+/// Every registration attempt is owned, including cancellation during connect,
+/// authentication or name acquisition. Completed connections still drain replies.
+struct Registration {
+    worker: async_executor::Task<Result<Connection>>,
+}
+
+impl Registration {
+    fn spawn(
+        executor: &Arc<async_executor::Executor<'static>>,
+        attempt: impl Future<Output = Result<Connection>> + Send + 'static,
+    ) -> Self {
+        Self {
+            worker: executor.spawn(attempt),
+        }
+    }
+
+    async fn result(&mut self) -> Result<Connection> {
+        AssertUnwindSafe(&mut self.worker)
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|_| Err(anyhow!("MPRIS registration task panicked")))
+    }
+
+    async fn cancel(self) {
+        match AssertUnwindSafe(self.worker.cancel()).catch_unwind().await {
+            Ok(Some(Ok(connection))) => retire_connection(connection).await,
+            Err(_) => tracing::warn!("mpris_registration_task_panicked"),
+            Ok(_) => {}
         }
     }
 }
@@ -227,10 +199,10 @@ async fn register(
 }
 
 struct Mpris {
-    connection: Option<Connection>,
-    stop: Sender<()>,
-    cancel: Option<oneshot::Sender<()>>,
-    publisher: Option<JoinHandle<()>>,
+    connection: Connection,
+    cancel: oneshot::Sender<()>,
+    publisher: async_executor::Task<()>,
+    handle: CoreHandle,
 }
 
 impl Mpris {
@@ -239,100 +211,120 @@ impl Mpris {
         handle: CoreHandle,
         app: AppHandle,
         artwork: Arc<ArtworkManager>,
-    ) -> Result<Self> {
-        let updates = handle.subscribe();
+    ) -> Self {
+        let updates = handle.subscribe_revisions();
         let initial = handle.mpris_snapshot();
         let initial_can_raise = app.can_raise();
-        let (stop, stopped) = bounded(1);
         let (cancel, mut cancelled) = oneshot::channel();
         let bus = connection.clone();
-        let publisher = thread::Builder::new()
-            .name("rivu-mpris".into())
-            .spawn(move || {
-                // This worker is the sole writer of publisher success/failure status.
-                // A fast initial failure must not be overwritten by the manager.
-                let _ = handle.send(Command::MprisStatus {
-                    status: "Connected to desktop media controls".to_owned(),
-                });
-                let mut previous = initial;
-                let mut previous_can_raise = initial_can_raise;
-                let mut metadata = TrackMetadata::from_snapshot(&previous, &artwork);
-                let mut loaded_artwork = None;
-                if !publish_until_cancelled(
-                    &mut cancelled,
+        let executor = Arc::clone(handle.executor());
+        let publisher_handle = handle.clone();
+        let publisher = executor.spawn(async move {
+            // The publisher alone owns success/failure status; initial failure
+            // must not be overwritten by a delayed manager success message.
+            let _ = handle.send(Command::MprisStatus {
+                status: "Connected to desktop media controls".to_owned(),
+            });
+            let mut previous = initial;
+            let mut previous_can_raise = initial_can_raise;
+            let mut metadata = TrackMetadata::from_snapshot(&previous, &artwork);
+            let mut loaded_artwork = None;
+            if !publish_until_cancelled(
+                &mut cancelled,
+                &handle,
+                publish_artwork(
+                    &bus,
                     &handle,
-                    publish_artwork(&bus, &handle, &previous, &mut metadata, &artwork, &mut loaded_artwork),
-                ) {
-                    return;
-                }
-                loop {
-                    select_biased! {
-                        recv(stopped) -> _ => break,
-                        recv(updates) -> update => {
-                            if update.is_err() { break; }
-                            let current = handle.mpris_snapshot();
-                            let current_can_raise = app.can_raise();
-                            if !publish_until_cancelled(&mut cancelled, &handle, async {
-                                publish_changes(
-                                    &bus,
-                                    &previous,
-                                    &current,
-                                    &mut metadata,
-                                    &artwork,
-                                    previous_can_raise,
-                                    current_can_raise,
-                                ).await?;
-                                publish_artwork(
-                                    &bus, &handle, &current, &mut metadata, &artwork, &mut loaded_artwork,
-                                ).await
-                            }) {
-                                break;
-                            }
-                            if current.shutting_down { break; }
-                            previous = current;
-                            previous_can_raise = current_can_raise;
-                        }
+                    &previous,
+                    &mut metadata,
+                    &artwork,
+                    &mut loaded_artwork,
+                ),
+            )
+            .await
+            {
+                return;
+            }
+            loop {
+                futures::select_biased! {
+                    _ = (&mut cancelled).fuse() => break,
+                    update = updates.recv().fuse() => {
+                        if update.is_err() { break; }
                     }
                 }
-            })
-            .context("Starting MPRIS publisher")?;
-        Ok(Self {
-            connection: Some(connection),
-            stop,
-            cancel: Some(cancel),
-            publisher: Some(publisher),
-        })
+                let current = handle.mpris_snapshot();
+                let current_can_raise = app.can_raise();
+                if !publish_until_cancelled(&mut cancelled, &handle, async {
+                    publish_changes(
+                        &bus,
+                        &previous,
+                        &current,
+                        &mut metadata,
+                        &artwork,
+                        previous_can_raise,
+                        current_can_raise,
+                    )
+                    .await?;
+                    publish_artwork(
+                        &bus,
+                        &handle,
+                        &current,
+                        &mut metadata,
+                        &artwork,
+                        &mut loaded_artwork,
+                    )
+                    .await
+                })
+                .await
+                {
+                    break;
+                }
+                if current.shutting_down {
+                    break;
+                }
+                previous = current;
+                previous_can_raise = current_can_raise;
+            }
+        });
+        Self {
+            connection,
+            cancel,
+            publisher,
+            handle: publisher_handle,
+        }
+    }
+
+    async fn retire(self) {
+        let _ = self.cancel.send(());
+        if AssertUnwindSafe(self.publisher)
+            .catch_unwind()
+            .await
+            .is_err()
+        {
+            let _ = self.handle.send(Command::MprisStatus {
+                status: "publisher stopped: publisher task panicked".to_owned(),
+            });
+            tracing::warn!("mpris_publisher_task_panicked");
+        }
+        retire_connection(self.connection).await;
     }
 }
 
-impl Drop for Mpris {
-    fn drop(&mut self) {
-        if let Some(cancel) = self.cancel.take() {
-            let _ = cancel.send(());
-        }
-        let _ = self.stop.try_send(());
-        if let Some(publisher) = self.publisher.take() {
-            let _ = publisher.join();
-        }
-        if let Some(connection) = self.connection.take() {
-            retire_connection(connection);
-        }
-    }
-}
-
-/// Bus writes are asynchronous so cancellation can release a backpressured
-/// publisher before the manager joins it. Cold artwork loads stay on this worker.
-fn publish_until_cancelled(
+/// Cancellation releases backpressured bus sends without detaching their task.
+async fn publish_until_cancelled(
     cancelled: &mut oneshot::Receiver<()>,
     handle: &CoreHandle,
     publication: impl Future<Output = zbus::Result<()>>,
 ) -> bool {
-    match futures::executor::block_on(async {
+    let result = {
+        let publication = publication.fuse();
+        futures::pin_mut!(publication);
         futures::select_biased! {
             _ = cancelled.fuse() => None,
-            result = publication.fuse() => Some(result),
+            result = publication => Some(result),
         }
-    }) {
+    };
+    match result {
         Some(Ok(())) => true,
         Some(Err(error)) => {
             let _ = handle.send(Command::MprisStatus {
@@ -345,37 +337,22 @@ fn publish_until_cancelled(
     }
 }
 
-fn retire_connection(connection: Connection) {
-    // zbus uses its independent async-io executor. Only the shutdown deadline
-    // needs this runtime; do not move connection setup onto it.
-    let runtime = match tokio::runtime::Builder::new_current_thread()
-        .enable_time()
-        .build()
+async fn retire_connection(connection: Connection) {
+    // zbus and the deadlines use runtime-independent async-io driving.
+    // Removing entry points and taking exclusive guards drains accepted Quit
+    // acknowledgements: zbus holds read guards through sending method replies.
+    if rivu_protocol::transport::timeout(Duration::from_secs(1), drain_interfaces(&connection))
+        .await
+        .is_err()
     {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            tracing::warn!(error = %error, "mpris_connection_drain_failed");
-            return;
-        }
-    };
-    runtime.block_on(async {
-        // Remove public entry points before waiting for active calls. zbus holds
-        // each interface's read guard through sending its method reply, so the
-        // exclusive guards below also drain an accepted Quit's acknowledgement.
-        if tokio::time::timeout(Duration::from_secs(1), drain_interfaces(&connection))
-            .await
-            .is_err()
-        {
-            tracing::warn!("mpris_connection_drain_timed_out");
-        }
-        // Closing, rather than only dropping a graceful-shutdown future, retires
-        // the bus name even if a peer still holds an outstanding call/reference.
-        match tokio::time::timeout(Duration::from_secs(1), connection.close()).await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => tracing::warn!(error = %error, "mpris_connection_close_failed"),
-            Err(_) => tracing::warn!("mpris_connection_close_timed_out"),
-        }
-    });
+        tracing::warn!("mpris_connection_drain_timed_out");
+    }
+    // Close all clones and release the name even when a peer retains a call.
+    match rivu_protocol::transport::timeout(Duration::from_secs(1), connection.close()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::warn!(error = %error, "mpris_connection_close_failed"),
+        Err(_) => tracing::warn!("mpris_connection_close_timed_out"),
+    }
 }
 
 async fn drain_interfaces(connection: &Connection) {
@@ -413,8 +390,8 @@ impl Root {
         })
     }
 
-    fn quit(&self) -> fdo::Result<()> {
-        let ack = self.app.request_ack(AppCommand::Shutdown);
+    async fn quit(&self) -> fdo::Result<()> {
+        let ack = self.app.request_ack_async(AppCommand::Shutdown).await;
         if ack.is_success() {
             Ok(())
         } else {
@@ -462,69 +439,71 @@ struct Player {
 }
 
 impl Player {
-    fn navigate(&self, direction: Navigation) -> fdo::Result<()> {
-        acknowledge(self.handle.navigate(direction))
+    async fn navigate(&self, direction: Navigation) -> fdo::Result<()> {
+        acknowledge(self.handle.navigate(direction).await)
     }
 }
 
 #[zbus::interface(name = "org.mpris.MediaPlayer2.Player")]
 impl Player {
-    fn next(&self) -> fdo::Result<()> {
+    async fn next(&self) -> fdo::Result<()> {
         if !can_go_next(&self.handle.mpris_snapshot()) {
             return Ok(());
         }
-        self.navigate(Navigation::Next)
+        self.navigate(Navigation::Next).await
     }
 
-    fn previous(&self) -> fdo::Result<()> {
+    async fn previous(&self) -> fdo::Result<()> {
         if !can_go_previous(&self.handle.mpris_snapshot()) {
             return Ok(());
         }
-        self.navigate(Navigation::Previous)
+        self.navigate(Navigation::Previous).await
     }
 
-    fn pause(&self) -> fdo::Result<()> {
-        request(&self.handle, Command::Pause).map(|_| ())
+    async fn pause(&self) -> fdo::Result<()> {
+        request(&self.handle, Command::Pause).await
     }
 
-    fn play_pause(&self) -> fdo::Result<()> {
-        request(&self.handle, Command::Toggle).map(|_| ())
+    async fn play_pause(&self) -> fdo::Result<()> {
+        request(&self.handle, Command::Toggle).await
     }
 
-    fn stop(&self) -> fdo::Result<()> {
-        request(&self.handle, Command::Stop).map(|_| ())
+    async fn stop(&self) -> fdo::Result<()> {
+        request(&self.handle, Command::Stop).await
     }
 
-    fn play(&self) -> fdo::Result<()> {
+    async fn play(&self) -> fdo::Result<()> {
         let state = self.handle.mpris_snapshot();
         if state.queue.total == 0 || state.playback.status == PlaybackStatus::Playing {
             return Ok(());
         }
-        request(&self.handle, Command::Resume).map(|_| ())
+        request(&self.handle, Command::Resume).await
     }
 
-    fn seek(&self, offset: i64) -> fdo::Result<()> {
+    async fn seek(&self, offset: i64) -> fdo::Result<()> {
         let state = self.handle.mpris_snapshot();
         if !can_seek(&state) {
             return Ok(());
         }
         match relative_seek(state.playback.position, offset, state.playback.duration) {
-            SeekTarget::Next => self.next(),
-            SeekTarget::Position(seconds) => request(
-                &self.handle,
-                Command::SeekQueue {
-                    queue_id: state
-                        .queue
-                        .current_id
-                        .expect("seekable track has a queue entry"),
-                    seconds,
-                },
-            )
-            .map(|_| ()),
+            SeekTarget::Next => self.next().await,
+            SeekTarget::Position(seconds) => {
+                request(
+                    &self.handle,
+                    Command::SeekQueue {
+                        queue_id: state
+                            .queue
+                            .current_id
+                            .expect("seekable track has a queue entry"),
+                        seconds,
+                    },
+                )
+                .await
+            }
         }
     }
 
-    fn set_position(&self, track_id: ObjectPath<'_>, position: i64) -> fdo::Result<()> {
+    async fn set_position(&self, track_id: ObjectPath<'_>, position: i64) -> fdo::Result<()> {
         let state = self.handle.mpris_snapshot();
         if !can_seek(&state) {
             return Ok(());
@@ -538,7 +517,7 @@ impl Player {
         let Some(seconds) = absolute_seek(position, state.playback.duration) else {
             return Ok(());
         };
-        request(&self.handle, Command::SeekQueue { queue_id, seconds }).map(|_| ())
+        request(&self.handle, Command::SeekQueue { queue_id, seconds }).await
     }
 
     fn open_uri(&self, uri: &str) -> fdo::Result<()> {
@@ -565,7 +544,7 @@ impl Player {
     }
 
     #[zbus(property)]
-    fn set_loop_status(&self, value: &str) -> fdo::Result<()> {
+    async fn set_loop_status(&self, value: &str) -> fdo::Result<()> {
         let mode = match value {
             "None" => RepeatMode::Off,
             "Track" => RepeatMode::One,
@@ -576,7 +555,7 @@ impl Player {
                 ));
             }
         };
-        request(&self.handle, Command::Repeat { mode }).map(|_| ())
+        request(&self.handle, Command::Repeat { mode }).await
     }
 
     #[zbus(property(emits_changed_signal = "const"))]
@@ -600,8 +579,8 @@ impl Player {
     }
 
     #[zbus(property)]
-    fn set_shuffle(&self, enabled: bool) -> fdo::Result<()> {
-        request(&self.handle, Command::Shuffle { enabled }).map(|_| ())
+    async fn set_shuffle(&self, enabled: bool) -> fdo::Result<()> {
+        request(&self.handle, Command::Shuffle { enabled }).await
     }
 
     #[zbus(property)]
@@ -617,7 +596,7 @@ impl Player {
     }
 
     #[zbus(property)]
-    fn set_volume(&self, value: f64) -> fdo::Result<()> {
+    async fn set_volume(&self, value: f64) -> fdo::Result<()> {
         if !value.is_finite() {
             return Err(fdo::Error::InvalidArgs("Volume must be finite".into()));
         }
@@ -629,7 +608,7 @@ impl Player {
                 value: value.clamp(0.0, 1.0) as f32,
             },
         )
-        .map(|_| ())
+        .await
     }
 
     #[zbus(property(emits_changed_signal = "false"))]
@@ -678,8 +657,8 @@ impl Player {
     }
 }
 
-fn request(handle: &CoreHandle, command: Command) -> fdo::Result<()> {
-    acknowledge(handle.request_ack(command))
+async fn request(handle: &CoreHandle, command: Command) -> fdo::Result<()> {
+    acknowledge(handle.request_ack(command).await)
 }
 
 fn acknowledge(response: rivu_protocol::response::Ack) -> fdo::Result<()> {
@@ -871,14 +850,14 @@ fn refresh_metadata(
     true
 }
 
-/// Cold probes run only on the existing publisher. Re-read playback after the
-/// blocking load: a completion may warm the cache but never publish stale art.
+/// Cold probes use the application's blocking pool, never its reactor.
+/// Re-read playback after loading: stale completion may only warm the cache.
 async fn publish_artwork(
     connection: &Connection,
     handle: &CoreHandle,
     requested: &MprisSnapshot,
     metadata: &mut Option<TrackMetadata>,
-    artwork: &ArtworkManager,
+    artwork: &Arc<ArtworkManager>,
     loaded: &mut Option<ArtworkIdentity>,
 ) -> zbus::Result<()> {
     let Some(track) = requested
@@ -895,7 +874,13 @@ async fn publish_artwork(
         return Ok(());
     }
     let identity = ArtworkIdentity::for_track(track);
-    let result = artwork.load(track);
+    let manager = Arc::clone(artwork);
+    let track = track.clone();
+    let result = handle
+        .workers()
+        .execute(move || manager.load(&track))
+        .await
+        .map_err(|error| zbus::Error::Failure(format!("Loading MPRIS artwork: {error:#}")))?;
     let current = handle.mpris_snapshot();
     if current.shutting_down
         || !current
@@ -1038,6 +1023,7 @@ async fn publish_changes(
 mod tests {
     use super::*;
     use crate::config::ConfigPersistence;
+    use crossbeam_channel::bounded;
     use rivu_protocol::model::{PlaybackState, QueueState, Track};
     use std::{
         io::{BufRead, BufReader},
@@ -1062,11 +1048,16 @@ mod tests {
     }
 
     fn wait_status(handle: &CoreHandle, expected: &str) {
-        let changes = handle.subscribe();
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while handle.gui_snapshot().system.mpris_status != expected {
-            changes.recv_deadline(deadline).unwrap();
-        }
+        let changes = handle.subscribe_revisions();
+        async_io::block_on(rivu_protocol::transport::timeout(
+            Duration::from_secs(5),
+            async {
+                while handle.gui_snapshot().system.mpris_status != expected {
+                    changes.recv().await.unwrap();
+                }
+            },
+        ))
+        .unwrap();
     }
 
     struct Dropped(Arc<AtomicBool>);
@@ -1084,8 +1075,7 @@ mod tests {
             runtime.handle.clone(),
             AppHandle::new(&runtime, false),
             Arc::new(ArtworkManager::new(directory.path())),
-        )
-        .unwrap();
+        );
         wait_status(&runtime.handle, "Desktop media controls disabled");
         drop(manager);
         runtime.control.request_shutdown().unwrap();
@@ -1093,39 +1083,63 @@ mod tests {
     }
 
     #[test]
-    fn registration_cancellation_drops_pending_build_before_join_returns() {
-        let dropped = Arc::new(AtomicBool::new(false));
-        let guard = Dropped(Arc::clone(&dropped));
-        let (polled, entered) = bounded(1);
-        let attempt = Registration::spawn(async move {
-            let _guard = guard;
-            polled.send(()).unwrap();
-            futures::future::pending::<Result<Connection>>().await
-        })
-        .unwrap();
-        entered.recv_timeout(Duration::from_secs(5)).unwrap();
-        drop(attempt);
-        assert!(dropped.load(Ordering::SeqCst));
+    fn registration_panic_becomes_an_error_and_manager_drop_contains_panics() {
+        let (_directory, mut runtime) = runtime_fixture();
+        let mut attempt = Registration::spawn(runtime.handle.executor(), async {
+            panic!("registration panic regression");
+        });
+        let error = async_io::block_on(attempt.result()).unwrap_err();
+        assert_eq!(error.to_string(), "MPRIS registration task panicked");
+
+        let (stop, _stopped) = oneshot::channel();
+        let worker = runtime.handle.executor().spawn(async {
+            panic!("manager panic regression");
+        });
+        drop(MediaWorker {
+            stop: Some(stop),
+            worker: Some(worker),
+        });
+        runtime.control.request_shutdown().unwrap();
+        runtime.join().unwrap();
     }
 
     #[test]
-    fn publisher_cancellation_drops_pending_send_before_join_returns() {
+    fn registration_cancellation_drops_pending_build_before_retirement_returns() {
+        let (_directory, mut runtime) = runtime_fixture();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let guard = Dropped(Arc::clone(&dropped));
+        let (polled, entered) = bounded(1);
+        let attempt = Registration::spawn(runtime.handle.executor(), async move {
+            let _guard = guard;
+            polled.send(()).unwrap();
+            futures::future::pending::<Result<Connection>>().await
+        });
+        entered.recv_timeout(Duration::from_secs(5)).unwrap();
+        async_io::block_on(attempt.cancel());
+        assert!(dropped.load(Ordering::SeqCst));
+        runtime.control.request_shutdown().unwrap();
+        runtime.join().unwrap();
+    }
+
+    #[test]
+    fn publisher_cancellation_drops_pending_send_before_retirement_returns() {
         let (_directory, mut runtime) = runtime_fixture();
         let handle = runtime.handle.clone();
         let dropped = Arc::new(AtomicBool::new(false));
         let guard = Dropped(Arc::clone(&dropped));
         let (cancel, mut cancelled) = oneshot::channel();
         let (polled, entered) = bounded(1);
-        let publisher = thread::spawn(move || {
+        let publisher = runtime.handle.executor().spawn(async move {
             publish_until_cancelled(&mut cancelled, &handle, async move {
                 let _guard = guard;
                 polled.send(()).unwrap();
                 futures::future::pending::<zbus::Result<()>>().await
             })
+            .await
         });
         entered.recv_timeout(Duration::from_secs(5)).unwrap();
         cancel.send(()).unwrap();
-        assert!(!publisher.join().unwrap());
+        assert!(!async_io::block_on(publisher));
         assert!(dropped.load(Ordering::SeqCst));
         assert!(runtime.handle.gui_snapshot().system.mpris_status.is_empty());
         runtime.control.request_shutdown().unwrap();
@@ -1142,16 +1156,22 @@ mod tests {
             })
             .unwrap();
         let (_cancel, mut cancelled) = oneshot::channel();
-        assert!(!publish_until_cancelled(&mut cancelled, handle, async {
-            Err(zbus::Error::Failure("test send failure".to_owned()))
-        }));
+        assert!(!async_io::block_on(publish_until_cancelled(
+            &mut cancelled,
+            handle,
+            async { Err(zbus::Error::Failure("test send failure".to_owned())) }
+        )));
         let failure = "publisher stopped: test send failure";
         wait_status(handle, failure);
         let (cancel, mut cancelled) = oneshot::channel();
         cancel.send(()).unwrap();
-        assert!(!publish_until_cancelled(&mut cancelled, handle, async {
-            panic!("cancelled publication must not be polled");
-        }));
+        assert!(!async_io::block_on(publish_until_cancelled(
+            &mut cancelled,
+            handle,
+            async {
+                panic!("cancelled publication must not be polled");
+            }
+        )));
         assert_eq!(handle.gui_snapshot().system.mpris_status, failure);
         runtime.control.request_shutdown().unwrap();
         runtime.join().unwrap();
@@ -1219,8 +1239,11 @@ mod tests {
         // Model a peer whose reply has not finished: the exclusive drain cannot
         // complete, but the deadline must still close all connection clones.
         let active_reply = futures::executor::block_on(root.get());
-        let retire = thread::spawn(move || retire_connection(connection));
-        retire.join().unwrap();
+        let retire = runtime
+            .handle
+            .executor()
+            .spawn(retire_connection(connection));
+        async_io::block_on(retire);
         assert!(retained.is_closed());
         assert!(futures::executor::block_on(
             retained.object_server().interface::<_, Root>(OBJECT_PATH),
@@ -1241,27 +1264,69 @@ mod tests {
     }
 
     #[test]
+    fn publisher_panic_still_retires_connection_and_releases_bus_name() {
+        let bus = TestBus::start();
+        let (_directory, mut runtime) = runtime_fixture();
+        let connection = bus.serve_root(AppHandle::new(&runtime, false));
+        let retained = connection.clone();
+        let (cancel, _cancelled) = oneshot::channel();
+        let publisher = runtime.handle.executor().spawn(async {
+            panic!("publisher panic regression");
+        });
+        let service = Mpris {
+            connection,
+            cancel,
+            publisher,
+            handle: runtime.handle.clone(),
+        };
+        async_io::block_on(service.retire());
+        wait_status(
+            &runtime.handle,
+            "publisher stopped: publisher task panicked",
+        );
+        assert!(retained.is_closed());
+        let replacement = async_io::block_on(
+            Builder::address(bus.address.as_str())
+                .unwrap()
+                .name(BUS_NAME)
+                .unwrap()
+                .build(),
+        )
+        .unwrap();
+        async_io::block_on(replacement.close()).unwrap();
+        runtime.control.request_shutdown().unwrap();
+        runtime.join().unwrap();
+    }
+
+    #[test]
     fn accepted_quit_reply_survives_service_retirement() {
         let bus = TestBus::start();
         let (_directory, mut runtime) = runtime_fixture();
         let connection = bus.serve_root(AppHandle::new(&runtime, false));
-        let changes = runtime.handle.subscribe();
+        let changes = runtime.handle.subscribe_revisions();
         let client = bus.connect();
-        let quit = thread::spawn(move || {
-            futures::executor::block_on(client.call_method(
-                Some(BUS_NAME),
-                OBJECT_PATH,
-                Some("org.mpris.MediaPlayer2"),
-                "Quit",
-                &(),
-            ))
+        let quit = runtime.handle.executor().spawn(async move {
+            client
+                .call_method(
+                    Some(BUS_NAME),
+                    OBJECT_PATH,
+                    Some("org.mpris.MediaPlayer2"),
+                    "Quit",
+                    &(),
+                )
+                .await
         });
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !runtime.handle.is_shutting_down() {
-            changes.recv_deadline(deadline).unwrap();
-        }
-        retire_connection(connection);
-        quit.join().unwrap().unwrap();
+        async_io::block_on(rivu_protocol::transport::timeout(
+            Duration::from_secs(5),
+            async {
+                while !runtime.handle.is_shutting_down() {
+                    changes.recv().await.unwrap();
+                }
+            },
+        ))
+        .unwrap();
+        async_io::block_on(retire_connection(connection));
+        async_io::block_on(quit).unwrap();
         runtime.join().unwrap();
     }
 

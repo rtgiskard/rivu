@@ -59,7 +59,7 @@ fn audio_progress_publishes_album_token_only_when_statistics_change() {
 
 #[test]
 fn audio_progress_publishes_committed_statistics_without_rereading_queue_projection() {
-    let (directory, mut core) = fixture_with_database(Some(10.0), true);
+    let (directory, mut core) = fixture_with_database(Some(10.0));
     add_test_album(&mut core);
     playing(&mut core, 1);
     core.publish();
@@ -92,7 +92,7 @@ fn audio_progress_publishes_committed_statistics_without_rereading_queue_project
 
 #[test]
 fn audio_bitrate_commit_publishes_tokens_without_rereading_queue_projection() {
-    let (directory, mut core) = fixture_with_database(Some(10.0), true);
+    let (directory, mut core) = fixture_with_database(Some(10.0));
     add_test_album(&mut core);
     precision_pending(&mut core);
     core.publish();
@@ -136,7 +136,7 @@ fn terminal_audio_events_publish_metadata_committed_by_retiring_started() {
             info.bitrate_bps = Some(192_000);
             info.bitrate_exact = true;
         }
-        let (sender, events) = mpsc::channel(1);
+        let (sender, events) = async_channel::bounded(1);
         core.engine.events = Some(events);
         sender.try_send(event).unwrap();
         let terminal = if failed {
@@ -207,7 +207,7 @@ fn audio_eof_resolved_duration_publishes_final_count_and_album_token() {
 
 #[test]
 fn rejected_audio_progress_count_preserves_statistics_and_album_token() {
-    let (directory, mut core) = fixture_with_database(Some(10.0), true);
+    let (directory, mut core) = fixture_with_database(Some(10.0));
     playing(&mut core, 1);
     core.publish();
     let before = core.shared.read().clone();
@@ -244,7 +244,7 @@ fn rejected_audio_progress_count_preserves_statistics_and_album_token() {
 
 #[test]
 fn committed_play_count_invalidates_once_without_queue_projection_reads() {
-    let (directory, mut core) = fixture_with_database(Some(10.0), true);
+    let (directory, mut core) = fixture_with_database(Some(10.0));
     playing(&mut core, 1);
     let before_count = core.state.current_track().unwrap().play_count;
     let before = core.state.query_revisions();
@@ -280,7 +280,7 @@ fn committed_play_count_invalidates_once_without_queue_projection_reads() {
 #[test]
 fn saturated_audio_admission_preserves_state_requests_events_and_command_order() {
     let (_directory, mut core) = fixture();
-    let (commands, mut receive) = mpsc::channel(64);
+    let (commands, receive) = async_channel::bounded(64);
     core.engine.replace_commands(commands.clone());
     core.command(Command::Device {
         name: Some("accepted-output".into()),
@@ -292,7 +292,7 @@ fn saturated_audio_admission_preserves_state_requests_events_and_command_order()
             .try_send(AudioCommand::Volume(index as f32))
             .unwrap();
     }
-    let (events, event_receive) = mpsc::channel(128);
+    let (events, event_receive) = async_channel::bounded(128);
     for index in 0..128 {
         events
             .try_send(AudioEvent::OutputSettingsFailed {
@@ -571,7 +571,7 @@ fn full_eof_upgrades_estimate_but_stale_and_stopped_events_do_not() {
         .unwrap();
         assert!(!core.store.track(1).unwrap().unwrap().bitrate_exact);
         if drain {
-            let (send, receive) = mpsc::channel(1);
+            let (send, receive) = async_channel::bounded(1);
             core.engine.events = Some(receive);
             send.try_send(AudioEvent::Ended {
                 generation,
@@ -633,7 +633,7 @@ fn same_track_restart_retains_queued_started_and_eof_bitrate_upgrades() {
             event
         };
         let _commands = recording_audio(&mut core);
-        let (sender, events) = mpsc::channel(1);
+        let (sender, events) = async_channel::bounded(1);
         core.engine.events = Some(events);
         sender.try_send(event).unwrap();
 
@@ -891,7 +891,7 @@ fn stop_ack_records_queued_start_and_snapshot_without_terminal_navigation() {
         let (_directory, mut core) = fixture();
         pending(&mut core, 1);
         let generation = core.generation;
-        let (sender, events) = mpsc::channel(8);
+        let (sender, events) = async_channel::bounded(8);
         core.engine.events = Some(events);
         sender.try_send(started_event(&core, Some(10.0))).unwrap();
         sender.try_send(started_event(&core, Some(10.0))).unwrap();
@@ -948,10 +948,10 @@ fn stop_ack_records_queued_start_and_snapshot_without_terminal_navigation() {
 
 #[test]
 fn queued_start_rejection_fences_once_without_recursive_stop_or_count() {
-    let (directory, mut core) = fixture_with_database(Some(10.0), true);
+    let (directory, mut core) = fixture_with_database(Some(10.0));
     pending(&mut core, 1);
     let generation = core.generation;
-    let (sender, events) = mpsc::channel(4);
+    let (sender, events) = async_channel::bounded(4);
     core.engine.events = Some(events);
     sender.try_send(started_event(&core, Some(10.0))).unwrap();
     sender
@@ -1047,7 +1047,7 @@ fn started_uses_valid_decoder_duration_or_keeps_known_metadata_duration() {
 
 #[test]
 fn rejected_recent_update_stops_without_counting_the_start() {
-    let (directory, mut core) = fixture_with_database(Some(10.0), true);
+    let (directory, mut core) = fixture_with_database(Some(10.0));
     pending(&mut core, 1);
     let generation = core.generation;
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
@@ -1192,7 +1192,7 @@ fn crossing_play_threshold_refreshes_published_history_count_during_playback() {
 #[test]
 fn ordinary_stop_retains_failed_statistics_without_recounting_committed_plays() {
     for failure in ["activity", "count", "history"] {
-        let (directory, mut core) = fixture_with_database(Some(10.0), true);
+        let (directory, mut core) = fixture_with_database(Some(10.0));
         playing(&mut core, 1);
         core.playback.as_mut().unwrap().paused_at = Some(17);
         core.playback.as_mut().unwrap().last_heard_at = Some(17);
@@ -1284,14 +1284,14 @@ fn stop_bookkeeping_error_does_not_skip_final_confirmed_statistics() {
 
 #[test]
 fn stop_retains_later_progress_after_queued_start_projection_failure() {
-    let (directory, mut core) = fixture_with_database(Some(10.0), true);
+    let (directory, mut core) = fixture_with_database(Some(10.0));
     pending(&mut core, 1);
     let generation = core.generation;
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     connection
         .execute_batch("CREATE TRIGGER reject_stop_projection AFTER UPDATE OF last_played ON tracks WHEN NEW.id=1 BEGIN UPDATE tracks SET last_played='unreadable' WHERE id=4; END;")
         .unwrap();
-    let (sender, events) = mpsc::channel(4);
+    let (sender, events) = async_channel::bounded(4);
     core.engine.events = Some(events);
     sender.try_send(started_event(&core, Some(10.0))).unwrap();
     for heard in [3.0, 8.0] {

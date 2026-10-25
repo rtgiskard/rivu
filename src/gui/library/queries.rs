@@ -5,7 +5,7 @@ use gpui::Context;
 use rivu_protocol::{model::Query, response::ViewResponse};
 use std::rc::Rc;
 
-fn library_search_counts(
+async fn library_search_counts(
     handle: &crate::core::CoreHandle,
     request: &model::SearchCountRequest,
 ) -> Option<model::SearchCountResult> {
@@ -38,18 +38,20 @@ fn library_search_counts(
         }) {
             continue;
         }
-        let response = handle.query_if_current(
-            Query::LibraryRootPage {
-                path: root.clone(),
-                query: query.clone(),
-                favorite: *favorite,
-                missing: *missing,
-                sort: *sort,
-                offset: 0,
-                limit: 0,
-            },
-            ticket.clone(),
-        );
+        let response = handle
+            .query_if_current(
+                Query::LibraryRootPage {
+                    path: root.clone(),
+                    query: query.clone(),
+                    favorite: *favorite,
+                    missing: *missing,
+                    sort: *sort,
+                    offset: 0,
+                    limit: 0,
+                },
+                ticket.clone(),
+            )
+            .await;
         if worker_query.stamp(response.revisions) != worker_query.stamp(*revisions) {
             return None;
         }
@@ -60,18 +62,20 @@ fn library_search_counts(
         let root_total = if query.is_none() && favorite.is_none() && missing.is_none() {
             root_matched
         } else {
-            let response = handle.query_if_current(
-                Query::LibraryRootPage {
-                    path: root.clone(),
-                    query: None,
-                    favorite: None,
-                    missing: None,
-                    sort: *sort,
-                    offset: 0,
-                    limit: 0,
-                },
-                ticket.clone(),
-            );
+            let response = handle
+                .query_if_current(
+                    Query::LibraryRootPage {
+                        path: root.clone(),
+                        query: None,
+                        favorite: None,
+                        missing: None,
+                        sort: *sort,
+                        offset: 0,
+                        limit: 0,
+                    },
+                    ticket.clone(),
+                )
+                .await;
             if worker_query.stamp(response.revisions) != worker_query.stamp(*revisions) {
                 return None;
             }
@@ -84,17 +88,19 @@ fn library_search_counts(
         total += root_total;
         root_counts.insert(root.clone(), (root_matched, root_total));
     }
-    let response = handle.query_if_current(
-        Query::OtherTracksPage {
-            query: query.clone(),
-            favorite: *favorite,
-            missing: *missing,
-            sort: *sort,
-            offset: 0,
-            limit: 0,
-        },
-        ticket.clone(),
-    );
+    let response = handle
+        .query_if_current(
+            Query::OtherTracksPage {
+                query: query.clone(),
+                favorite: *favorite,
+                missing: *missing,
+                sort: *sort,
+                offset: 0,
+                limit: 0,
+            },
+            ticket.clone(),
+        )
+        .await;
     if worker_query.stamp(response.revisions) != worker_query.stamp(*revisions) {
         return None;
     }
@@ -105,7 +111,9 @@ fn library_search_counts(
     let other_total = if query.is_none() && favorite.is_none() && missing.is_none() {
         other_matched
     } else {
-        let response = handle.query_if_current(Query::OtherTracksCount, ticket.clone());
+        let response = handle
+            .query_if_current(Query::OtherTracksCount, ticket.clone())
+            .await;
         if worker_query.stamp(response.revisions) != worker_query.stamp(*revisions) {
             return None;
         }
@@ -142,7 +150,7 @@ impl Library {
             let response = crate::gui::query::run(
                 handle,
                 cx,
-                move |handle| handle.query_if_current(query, ticket),
+                move |handle| async move { handle.query_if_current(query, ticket).await },
                 |response, cx| {
                     timed_out = true;
                     let _ = this.update(cx, |this, cx| {
@@ -203,8 +211,8 @@ impl Library {
             let (request, counts) = crate::gui::query::run(
                 handle,
                 cx,
-                move |handle| {
-                    let counts = library_search_counts(&handle, &request);
+                move |handle| async move {
+                    let counts = library_search_counts(&handle, &request).await;
                     (request, counts)
                 },
                 |response, cx| {
@@ -307,7 +315,7 @@ impl Library {
             let response = crate::gui::query::run(
                 handle,
                 cx,
-                move |handle| handle.query_if_current(query, ticket),
+                move |handle| async move { handle.query_if_current(query, ticket).await },
                 |response, cx| {
                     timed_out = true;
                     let _ = this.update(cx, |this, cx| {
@@ -461,7 +469,9 @@ mod tests {
         let mut library = LibraryBrowser::default();
         let (_, request) = library.prepare_search_counts(&roots, revisions);
         let request = request.unwrap();
-        let result = super::library_search_counts(&runtime.handle, &request).unwrap();
+        let result =
+            futures::executor::block_on(super::library_search_counts(&runtime.handle, &request))
+                .unwrap();
         assert_eq!(result.totals, (5, 5));
         assert_eq!(result.other_tracks, (1, 1));
         assert_eq!(result.roots.len(), 2);
@@ -472,12 +482,15 @@ mod tests {
         let (_, request) = library.prepare_search_counts(&roots, revisions);
         let request = request.unwrap();
         library.cancel_pending_reads();
-        let cancelled = super::library_search_counts(&runtime.handle, &request);
+        let cancelled =
+            futures::executor::block_on(super::library_search_counts(&runtime.handle, &request));
         assert!(cancelled.is_none());
         assert!(!library.accept_search_counts(request, &roots, revisions, cancelled));
         let (_, request) = library.prepare_search_counts(&roots, revisions);
         let request = request.unwrap();
-        let result = super::library_search_counts(&runtime.handle, &request).unwrap();
+        let result =
+            futures::executor::block_on(super::library_search_counts(&runtime.handle, &request))
+                .unwrap();
         assert_eq!(result.totals, (3, 5));
         assert_eq!(result.other_tracks, (1, 1));
         assert!(library.accept_search_counts(request, &roots, revisions, Some(result)));
@@ -487,7 +500,9 @@ mod tests {
         library.refresh_search("not indexed".into());
         let (_, request) = library.prepare_search_counts(&roots, revisions);
         let request = request.unwrap();
-        let result = super::library_search_counts(&runtime.handle, &request).unwrap();
+        let result =
+            futures::executor::block_on(super::library_search_counts(&runtime.handle, &request))
+                .unwrap();
         assert_eq!(result.totals, (0, 5));
         assert_eq!(result.other_tracks, (0, 1));
         assert!(library.accept_search_counts(request, &roots, revisions, Some(result)));
@@ -505,7 +520,9 @@ mod tests {
         let revisions = runtime.handle.query(Query::OtherTracksCount).revisions;
         let (_, request) = library.prepare_search_counts(&[], revisions);
         let request = request.unwrap();
-        let result = super::library_search_counts(&runtime.handle, &request).unwrap();
+        let result =
+            futures::executor::block_on(super::library_search_counts(&runtime.handle, &request))
+                .unwrap();
         assert_eq!(result.totals, (3, 5));
         assert_eq!(result.other_tracks, (3, 5));
         assert!(result.roots.is_empty());

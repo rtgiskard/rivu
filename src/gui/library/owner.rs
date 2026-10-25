@@ -195,10 +195,7 @@ impl Library {
             self.scan_error = None;
             let handle = self.context.handle().clone();
             cx.spawn(async move |this, cx| {
-                let ack = cx
-                    .background_executor()
-                    .spawn(async move { handle.request_ack(command) })
-                    .await;
+                let ack = handle.request_ack(command).await;
                 let _ = this.update(cx, |this, cx| {
                     if !ack.is_success() {
                         this.scan_error = Some(

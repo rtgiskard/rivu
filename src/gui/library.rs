@@ -1251,16 +1251,29 @@ mod library_root_tests {
         );
     }
 
-    fn draw_library(window: &mut VisualTestContext, app: &Entity<Library>) {
-        // The first draw demands the forest; the second renders accepted roots
-        // after the independently completed zero-track count.
-        for _ in 0..2 {
-            app.update(&mut window.cx, |this, cx| this.refresh(cx));
-            window.draw(point(px(0.), px(0.)), size(px(900.), px(600.)), |_, _| {
-                app.clone().into_any_element()
-            });
-            window.run_until_parked();
-        }
+    async fn draw_library(
+        window: &mut VisualTestContext,
+        app: &Entity<Library>,
+        roots: &[PathBuf],
+    ) {
+        app.update(&mut window.cx, |this, cx| this.refresh(cx));
+        window.draw(point(px(0.), px(0.)), size(px(900.), px(600.)), |_, _| {
+            app.clone().into_any_element()
+        });
+        // Viewport demand starts native query-reader work. Wait for its accepted
+        // projection rather than assuming a fixed number of draws completes it.
+        window
+            .condition(app, |this, _| {
+                let tree = this.library.tree();
+                this.library.search_counts() == Some((0, 0))
+                    && tree.row_count() == roots.len()
+                    && roots.iter().enumerate().all(|(index, root)| {
+                        matches!(tree.item(index), Some(TreeItem::Entry(row))
+                            if row.depth == 0
+                                && matches!(&row.row, DirectoryRow::Directory { path } if path == root))
+                    })
+            })
+            .await;
     }
 
     fn assert_roots(window: &mut VisualTestContext, app: &Entity<Library>, roots: &[PathBuf]) {
@@ -1287,7 +1300,7 @@ mod library_root_tests {
     }
 
     #[gpui::test]
-    fn empty_library_projects_first_added_appended_and_removed_roots(
+    async fn empty_library_projects_first_added_appended_and_removed_roots(
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(|cx| {
@@ -1309,6 +1322,7 @@ mod library_root_tests {
         }
         .save(&config_path)
         .unwrap();
+        cx.executor().allow_parking();
         let runtime = Runtime::start(directory.path(), &config_path).unwrap();
         settle_config(&runtime.handle);
         let i18n = Arc::new(Localizer::new("en-US"));
@@ -1326,14 +1340,14 @@ mod library_root_tests {
             scroll: Default::default(),
         };
         let (app, window) = cx.add_window_view(|_, cx| Library::new(context, cx));
-        // Native worker threads cannot wake GPUI's deterministic scheduler.
-        // FIFO Core barriers and draw_library's refresh own test synchronization.
+        // Snapshot publication uses explicit FIFO barriers and refreshes;
+        // native query completion is awaited through the GPUI condition.
         runtime.handle.set_wakeup(|| {});
         app.update(&mut window.cx, |this, cx| {
             this.set_available(true);
             this.set_visible(true, cx);
         });
-        draw_library(window, &app);
+        draw_library(window, &app, &[]).await;
         assert_roots(window, &app, &[]);
 
         let first = directory.path().join("first");
@@ -1357,7 +1371,7 @@ mod library_root_tests {
         ] {
             runtime.handle.update_gui_config(change).unwrap();
             settle_config(&runtime.handle);
-            draw_library(window, &app);
+            draw_library(window, &app, &expected).await;
             assert_roots(window, &app, &expected);
         }
     }

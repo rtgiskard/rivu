@@ -23,21 +23,39 @@ impl Core {
         mut shutdown: mpsc::Receiver<()>,
         control: &RuntimeControl,
     ) {
-        let executor = self.executor.clone();
+        match self
+            .store
+            .database_path()
+            .and_then(|path| query_worker::ReadQueries::start(path, Arc::clone(&self.shared)))
+        {
+            Ok(reads) => self.read_queries = Some(reads),
+            Err(error) => {
+                self.state.system.last_error = Some(format!("Starting read queries: {error:#}"));
+                self.publish();
+                self.finalize();
+                return;
+            }
+        }
         let mut ffmpeg_status_ticks = None;
-        while let Some(event) = wait_on(
-            &executor,
-            self.next_event(
-                &mut requests,
-                &mut shutdown,
-                &mut ffmpeg_status_ticks,
-                control,
-            ),
-        ) {
-            if !self.business_event(event) {
+        while let Some(event) = futures::executor::block_on(self.next_event(
+            &mut requests,
+            &mut shutdown,
+            &mut ffmpeg_status_ticks,
+            control,
+        )) {
+            let transition = self
+                .read_queries
+                .as_ref()
+                .map(|reads| reads.fence.transition());
+            let continuing = self.business_event(event);
+            if let Some(transition) = transition {
+                transition.finish(self.database_maintenance_active() || !continuing);
+            }
+            if !continuing {
                 break;
             }
         }
+        drop(self.read_queries.take());
         self.finalize();
     }
 
@@ -45,17 +63,11 @@ impl Core {
         &mut self,
         requests: &mut mpsc::Receiver<Request>,
         shutdown: &mut mpsc::Receiver<()>,
-        ffmpeg_status_ticks: &mut Option<tokio::time::Interval>,
+        ffmpeg_status_ticks: &mut Option<Instant>,
         control: &RuntimeControl,
     ) -> Option<BusinessEvent> {
         if self.state.system.ffmpeg_status == "not loaded" {
-            ffmpeg_status_ticks.get_or_insert_with(|| {
-                let period = Duration::from_millis(100);
-                let mut ticks =
-                    tokio::time::interval_at(tokio::time::Instant::now() + period, period);
-                ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                ticks
-            });
+            ffmpeg_status_ticks.get_or_insert_with(|| Instant::now() + Duration::from_millis(100));
         } else {
             *ffmpeg_status_ticks = None;
         }
@@ -71,27 +83,27 @@ impl Core {
         } = self;
         // Consume one event per iteration, with randomized selection to avoid
         // permanent priority for a hot input.
-        Some(tokio::select! {
-            _ = shutdown.recv() => BusinessEvent::Shutdown(control.clone()),
-            request = requests.recv() => BusinessEvent::Request(request?),
-            event = engine.events.as_mut().expect("Core owns audio events").recv() => {
+        Some(futures::select! {
+            _ = shutdown.recv().fuse() => BusinessEvent::Shutdown(control.clone()),
+            request = requests.recv().fuse() => BusinessEvent::Request(request.ok()?),
+            event = engine.events.as_ref().expect("Core owns audio events").recv().fuse() => {
                 event.map_or(BusinessEvent::AudioStopped, BusinessEvent::Audio)
-            }
-            scan = scan_rx.recv() => BusinessEvent::Scan(scan?),
-            relocation = relocation_rx.recv() => BusinessEvent::Relocation(relocation?),
-            event = processing.receiver.recv() => BusinessEvent::Processing(event?),
+            },
+            scan = scan_rx.recv().fuse() => BusinessEvent::Scan(scan.ok()?),
+            relocation = relocation_rx.recv().fuse() => BusinessEvent::Relocation(relocation.ok()?),
+            event = processing.receiver.recv().fuse() => BusinessEvent::Processing(event.ok()?),
             event = async {
                 match active_external_admission.as_mut() {
                     Some(task) => task.next_event().await,
                     None => std::future::pending().await,
                 }
-            } => BusinessEvent::ExternalAdmission(event),
+            }.fuse() => BusinessEvent::ExternalAdmission(event),
             result = async {
                 match active_export.as_mut() {
                     Some(task) => (&mut task.finished).await,
                     None => std::future::pending().await,
                 }
-            } => BusinessEvent::Export(result.unwrap_or_else(|_| Err(anyhow::anyhow!(
+            }.fuse() => BusinessEvent::Export(result.unwrap_or_else(|_| Err(anyhow::anyhow!(
                 "Playlist export ended without a result; inspect the destination before retrying"
             )))),
             result = async {
@@ -99,15 +111,18 @@ impl Core {
                     Some(task) => (&mut task.finished).await,
                     None => std::future::pending().await,
                 }
-            } => BusinessEvent::Optimization(result.unwrap_or_else(|_| Err(anyhow::anyhow!(
+            }.fuse() => BusinessEvent::Optimization(result.unwrap_or_else(|_| Err(anyhow::anyhow!(
                 "Database optimization ended without a result; the database may already have changed"
             )))),
             _ = async {
-                match ffmpeg_status_ticks.as_mut() {
-                    Some(ticks) => { ticks.tick().await; }
+                match ffmpeg_status_ticks {
+                    Some(deadline) => {
+                        async_io::Timer::at(*deadline).await;
+                        *deadline = Instant::now() + Duration::from_millis(100);
+                    }
                     None => std::future::pending().await,
                 }
-            } => BusinessEvent::FfmpegStatus,
+            }.fuse() => BusinessEvent::FfmpegStatus,
         })
     }
 }
@@ -214,18 +229,27 @@ impl Core {
     fn dispatch_request(&mut self, request: Request) {
         match request.operation {
             Operation::Query { query, ticket } => {
-                let response = self.query_response_if_current(&query, ticket.as_ref());
-                if let Some(reply) = request.reply {
-                    let _ = reply.send(CoreResponse::Query(response));
+                if let Some(reads) = &self.read_queries
+                    && !matches!(
+                        &query,
+                        Query::ScanTask { .. }
+                            | Query::RelocationTask { .. }
+                            | Query::ProcessingTask { .. }
+                    )
+                    && !self.database_maintenance_active()
+                {
+                    if let Some(reply) = request.reply {
+                        reads.submit(query, ticket, &self.state, reply);
+                    }
+                } else {
+                    let response = self.query_response_if_current(&query, ticket.as_ref());
+                    if let Some(reply) = request.reply {
+                        let _ = reply.send(CoreResponse::Query(response));
+                    }
                 }
             }
             Operation::WaveformSnapshot(reply) => {
-                if let Err(error) = self
-                    .engine
-                    .send(AudioCommand::WaveformSnapshot(reply.clone()))
-                {
-                    let _ = reply.try_send(Err(format!("{error:#}")));
-                }
+                let _ = self.engine.send(AudioCommand::WaveformSnapshot(reply));
             }
             Operation::Command(command) => {
                 let starts_scan = matches!(
@@ -381,7 +405,7 @@ impl Core {
     /// Publish observations already captured by the serialized owner.
     pub(in crate::core) fn publish(&mut self) {
         self.state.system.revision = self.state.system.revision.wrapping_add(1);
-        {
+        let revisions_changed = {
             let mut shared = self.shared.write();
             let changed = self.state.changed_sections(&shared);
             let revisions = &mut self.state.revisions;
@@ -415,22 +439,15 @@ impl Core {
                 // The in-process wakeup sequence advances even without a System change.
                 shared.system.revision = self.state.system.revision;
             }
+            let revisions_changed = shared.revisions != *revisions;
             shared.revisions = *revisions;
+            revisions_changed
+        };
+        if revisions_changed {
+            self.revision_updates.write().retain(|sender| {
+                !matches!(sender.try_send(()), Err(mpsc::TrySendError::Closed(_)))
+            });
         }
-        self.revision_updates.send_if_modified(|revisions| {
-            if *revisions == self.state.revisions {
-                false
-            } else {
-                *revisions = self.state.revisions;
-                true
-            }
-        });
-        self.subscribers.write().retain(|sender| {
-            !matches!(
-                sender.try_send(()),
-                Err(crossbeam_channel::TrySendError::Disconnected(_))
-            )
-        });
         let callback = self.wakeup.read().clone();
         if let Some(callback) = callback {
             callback();
@@ -459,114 +476,11 @@ impl Core {
     }
 
     fn read_query(&self, query: &Query) -> QueryResponse {
-        let mut revisions = self.state.query_revisions_for(query);
-        let result = self.view_in_snapshot(query, revisions);
-        if let Ok(ViewResponse::PlaylistEntry(Some(entry))) = &result {
-            revisions.playlist_entries = self
-                .state
-                .library
-                .playlist_entry_revisions
-                .get(&entry.playlist_id)
-                .map(|&revision| rivu_protocol::response::PlaylistEntryRevision {
-                    playlist_id: entry.playlist_id,
-                    revision,
-                });
-        }
-        QueryResponse { revisions, result }
-    }
-
-    #[cfg(test)]
-    pub(in crate::core) fn view(&self, query: &Query) -> Result<ViewResponse, QueryError> {
-        self.query_response(query).result
-    }
-
-    fn view_in_snapshot(
-        &self,
-        query: &Query,
-        current: QueryRevisions,
-    ) -> Result<ViewResponse, QueryError> {
-        if self.database_maintenance_active()
-            && !matches!(
-                query,
-                Query::ScanTask { .. }
-                    | Query::RelocationTask { .. }
-                    | Query::ProcessingTask { .. }
-            )
-        {
-            return Err(QueryError::Message(
-                "Database maintenance is in progress; retry this read after it finishes".into(),
-            ));
-        }
-        let current_stamp = query.stamp(current);
-        let expected = match query {
-            Query::TrackBatch { expected, .. }
-            | Query::PlaylistSummaryBatch { expected, .. }
-            | Query::PlaylistEntryBatch { expected, .. }
-            | Query::QueueBatch { expected, .. } => *expected,
-            _ => None,
-        };
-        if let Some(mut expected) = expected {
-            if let Query::PlaylistEntryBatch { after, .. } = query
-                && expected.playlist_entries.is_none()
-                && after.is_none()
-            {
-                // A non-scoped baseline can begin, never continue, a traversal.
-                if expected.library != current.library {
-                    return Err(QueryError::RevisionChanged);
-                }
-                expected.playlist_metadata = current.playlist_metadata;
-                expected.playlist_entries = current.playlist_entries;
-            }
-            if query.stamp(expected) != query.stamp(current) {
-                return Err(QueryError::RevisionChanged);
-            }
-        }
-        Ok(match query {
-            Query::Albums {
-                query,
-                sort,
-                offset,
-                limit,
-            } => ViewResponse::Albums(self.store.albums_page(
-                query.as_deref(),
-                *sort,
-                *offset,
-                *limit,
-            )?),
-            Query::AlbumTracks {
-                key,
-                query,
-                offset,
-                limit,
-            } => ViewResponse::AlbumTracks(self.store.album_tracks_page(
-                key,
-                query.as_deref(),
-                *offset,
-                *limit,
-            )?),
-            Query::DuplicateGroups { offset, limit } => {
-                ViewResponse::DuplicateGroups(self.store.duplicate_groups_page(*offset, *limit)?)
-            }
-            Query::DuplicateMembers {
-                fingerprint,
-                offset,
-                limit,
-            } => ViewResponse::DuplicateMembers(self.store.duplicate_members_page(
-                fingerprint,
-                *offset,
-                *limit,
-            )?),
-            Query::DuplicateMemberSelection {
-                fingerprint,
-                track_ids,
-            } => ViewResponse::DuplicateMembers(
-                self.store
-                    .duplicate_member_selection(fingerprint, track_ids)?,
-            ),
-            Query::ProcessingTask { id } => {
-                ViewResponse::ProcessingTask(self.processing_status(*id).map(Box::new))
-            }
-            Query::RelocationTask { id } => ViewResponse::RelocationTask(
+        let result = match query {
+            Query::ProcessingTask { id } => Some(Ok(ViewResponse::ProcessingTask(
+                self.processing_status(*id).map(Box::new),
+            ))),
+            Query::RelocationTask { id } => Some(
                 self.active_relocation
                     .as_ref()
                     .map(|task| &task.status)
@@ -577,30 +491,11 @@ impl Core {
                             .find(|status| status.id == *id)
                     })
                     .cloned()
-                    .context("Unknown or expired relocation task")?,
+                    .context("Unknown or expired relocation task")
+                    .map(ViewResponse::RelocationTask)
+                    .map_err(Into::into),
             ),
-            Query::QueuePage {
-                query,
-                offset,
-                limit,
-            } => {
-                ViewResponse::QueuePage(self.store.queue_page(query.as_deref(), *offset, *limit)?)
-            }
-            Query::QueueBatch {
-                query,
-                after,
-                limit,
-                ..
-            } => ViewResponse::QueueBatch(self.store.queue_batch(
-                query.as_deref(),
-                *after,
-                *limit,
-                current_stamp,
-            )?),
-            Query::QueueEntries { query, queue_ids } => {
-                ViewResponse::QueueEntries(self.store.queue_entries(query.as_deref(), queue_ids)?)
-            }
-            Query::ScanTask { id } => ViewResponse::ScanTask(
+            Query::ScanTask { id } => Some(
                 self.active_scan
                     .as_ref()
                     .map(|task| &task.status)
@@ -613,193 +508,29 @@ impl Core {
                     })
                     .or_else(|| self.scan_results.iter().find(|status| status.id == *id))
                     .cloned()
-                    .context("Unknown or expired scan task")?,
+                    .context("Unknown or expired scan task")
+                    .map(ViewResponse::ScanTask)
+                    .map_err(Into::into),
             ),
-            Query::OtherTracksPage {
-                query,
-                favorite,
-                missing,
-                sort,
-                offset,
-                limit,
-            } => ViewResponse::LibraryPage(self.store.other_tracks_page(
-                &self.state.system.config.library_roots,
-                query.as_deref(),
-                *favorite,
-                *missing,
-                *sort,
-                *offset,
-                *limit,
-            )?),
-            Query::OtherTracksCount => ViewResponse::OtherTracksCount(
-                self.store
-                    .other_tracks_count(&self.state.system.config.library_roots)?,
-            ),
-            Query::OtherTracksLocate {
-                track_id,
-                query,
-                favorite,
-                missing,
-                sort,
-            } => ViewResponse::LibraryLocate(self.store.other_tracks_location(
-                &self.state.system.config.library_roots,
-                *track_id,
-                query.as_deref(),
-                *favorite,
-                *missing,
-                *sort,
-            )?),
-            Query::LibraryPage {
-                query,
-                favorite,
-                missing,
-                sort,
-                offset,
-                limit,
-            } => ViewResponse::LibraryPage(self.store.library_view_page(
-                query.as_deref(),
-                *favorite,
-                *missing,
-                *sort,
-                *offset,
-                *limit,
-            )?),
-            Query::LibraryRootPage {
-                path,
-                query,
-                favorite,
-                missing,
-                sort,
-                offset,
-                limit,
-            } => ViewResponse::LibraryPage(self.store.library_root_page(
-                path,
-                query.as_deref(),
-                *favorite,
-                *missing,
-                *sort,
-                *offset,
-                *limit,
-            )?),
-            Query::LibraryRootCounts { roots } => {
-                ViewResponse::LibraryRootCounts(self.store.library_root_counts(roots)?)
+            _ => None,
+        };
+        if let Some(result) = result {
+            QueryResponse {
+                revisions: self.state.query_revisions_for(query),
+                result,
             }
-            Query::LibraryLocate {
-                track_id,
-                path,
-                tree,
+        } else {
+            query_worker::read_snapshot(
+                &self.store,
+                &self.state,
                 query,
-                favorite,
-                missing,
-                sort,
-            } => ViewResponse::LibraryLocate(self.store.library_location(
-                *track_id,
-                path,
-                *tree,
-                query.as_deref(),
-                *favorite,
-                *missing,
-                *sort,
-            )?),
-            Query::TrackPage {
-                query,
-                favorite,
-                missing,
-                offset,
-                limit,
-            } => ViewResponse::TrackPage(self.store.library_page(
-                query.as_deref(),
-                *favorite,
-                *missing,
-                *offset,
-                *limit,
-            )?),
-            Query::DirectoryPage {
-                path,
-                query,
-                favorite,
-                missing,
-                offset,
-                limit,
-            } => ViewResponse::DirectoryPage(self.store.directory_page(
-                path,
-                query.as_deref(),
-                *favorite,
-                *missing,
-                *offset,
-                *limit,
-            )?),
-            Query::PlaylistSummaries {
-                query,
-                offset,
-                limit,
-            } => ViewResponse::PlaylistSummaries(self.store.playlist_summary_page(
-                query.as_deref(),
-                *offset,
-                *limit,
-            )?),
-            Query::PlaylistEntries {
-                playlist_id,
-                query,
-                offset,
-                limit,
-            } => ViewResponse::PlaylistEntries(self.store.playlist_entries_page(
-                *playlist_id,
-                query.as_deref(),
-                *offset,
-                *limit,
-            )?),
-            Query::Track { track_id } => ViewResponse::Track(self.store.track(*track_id)?),
-            Query::PlaylistEntry { entry_id } => {
-                ViewResponse::PlaylistEntry(self.store.playlist_entry(*entry_id)?)
-            }
-            Query::PlaylistEntryLocations {
-                playlist_id,
-                query,
-                entry_ids,
-            } => ViewResponse::PlaylistEntryLocations(self.store.playlist_entry_locations(
-                *playlist_id,
-                query.as_deref(),
-                entry_ids,
-            )?),
-            Query::LibraryStats => ViewResponse::LibraryStats(self.store.library_stats()?),
-            Query::TrackBatch {
-                query,
-                favorite,
-                missing,
-                after,
-                limit,
-                ..
-            } => ViewResponse::TrackBatch(self.store.track_batch(
-                query.as_deref(),
-                *favorite,
-                *missing,
-                *after,
-                *limit,
-            )?),
-            Query::PlaylistSummaryBatch {
-                query,
-                after,
-                limit,
-                ..
-            } => ViewResponse::PlaylistSummaryBatch(self.store.playlist_summary_batch(
-                query.as_deref(),
-                *after,
-                *limit,
-            )?),
-            Query::PlaylistEntryBatch {
-                playlist_id,
-                query,
-                after,
-                limit,
-                ..
-            } => ViewResponse::PlaylistEntryBatch(self.store.playlist_entry_batch(
-                *playlist_id,
-                query.as_deref(),
-                *after,
-                *limit,
-                current_stamp,
-            )?),
-        })
+                self.database_maintenance_active(),
+            )
+        }
+    }
+
+    #[cfg(test)]
+    pub(in crate::core) fn view(&self, query: &Query) -> Result<ViewResponse, QueryError> {
+        self.query_response(query).result
     }
 }

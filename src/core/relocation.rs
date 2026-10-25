@@ -76,28 +76,30 @@ fn check_source_absent(metadata: std::io::Result<Metadata>) -> Result<()> {
 async fn verify_target(
     prepared: crate::store::PreparedRelocation,
     cancellation: library::ScanCancellation,
+    workers: Arc<tasks::BlockingPool>,
 ) -> Result<VerifiedTarget> {
     cancellation.check()?;
     let admitted = prepared.clone();
-    let mut verified = tokio::task::spawn_blocking(move || -> Result<VerifiedTarget> {
-        require_source_absent(&admitted.source.path)?;
-        let file = rivu_format::input::open_regular_file(&admitted.target.path)
-            .context("Opening relocation target")?;
-        let metadata = file
-            .metadata()
-            .context("Reading relocation target metadata")?;
-        let identity = FileIdentity::read(&metadata)?;
-        ensure!(
-            identity.size == admitted.target.file_size
-                && identity.modified_ns()? == admitted.target.modified_ns,
-            "Target metadata changed since the library scan; scan again before confirming"
-        );
-        let verified = VerifiedTarget { file, identity };
-        verified.revalidate(&admitted.target.path)?;
-        Ok(verified)
-    })
-    .await
-    .context("Relocation admission worker panicked")??;
+    let mut verified = workers
+        .execute(move || -> Result<VerifiedTarget> {
+            require_source_absent(&admitted.source.path)?;
+            let file = rivu_format::input::open_regular_file(&admitted.target.path)
+                .context("Opening relocation target")?;
+            let metadata = file
+                .metadata()
+                .context("Reading relocation target metadata")?;
+            let identity = FileIdentity::read(&metadata)?;
+            ensure!(
+                identity.size == admitted.target.file_size
+                    && identity.modified_ns()? == admitted.target.modified_ns,
+                "Target metadata changed since the library scan; scan again before confirming"
+            );
+            let verified = VerifiedTarget { file, identity };
+            verified.revalidate(&admitted.target.path)?;
+            Ok(verified)
+        })
+        .await
+        .context("Relocation admission worker panicked")??;
     let mut buffer = vec![0u8; 128 * 1024];
     let mut hasher = blake3::Hasher::new();
     let mut remaining = verified.identity.size;
@@ -105,40 +107,42 @@ async fn verify_target(
         let cancellation = cancellation.clone();
         // Bound each pool lease to 4 MiB, checking cancellation each 128 KiB.
         // The descriptor, scratch and hash state move, not copy, between leases.
-        (verified, buffer, hasher, remaining) = tokio::task::spawn_blocking(move || {
-            let mut budget = remaining.min(4 * 1024 * 1024);
-            while budget != 0 {
-                cancellation.check()?;
-                let limit = budget.min(buffer.len() as u64) as usize;
-                let count = match verified.file.read(&mut buffer[..limit]) {
-                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                    result => result.context("Reading relocation target")?,
-                };
-                if count == 0 {
-                    remaining = 0;
-                    break;
+        (verified, buffer, hasher, remaining) = workers
+            .execute(move || {
+                let mut budget = remaining.min(4 * 1024 * 1024);
+                while budget != 0 {
+                    cancellation.check()?;
+                    let limit = budget.min(buffer.len() as u64) as usize;
+                    let count = match verified.file.read(&mut buffer[..limit]) {
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                        result => result.context("Reading relocation target")?,
+                    };
+                    if count == 0 {
+                        remaining = 0;
+                        break;
+                    }
+                    remaining -= count as u64;
+                    budget -= count as u64;
+                    hasher.update(&buffer[..count]);
                 }
-                remaining -= count as u64;
-                budget -= count as u64;
-                hasher.update(&buffer[..count]);
-            }
+                cancellation.check()?;
+                Ok::<_, anyhow::Error>((verified, buffer, hasher, remaining))
+            })
+            .await
+            .context("Relocation read worker panicked")??;
+    }
+    workers
+        .execute(move || {
             cancellation.check()?;
-            Ok::<_, anyhow::Error>((verified, buffer, hasher, remaining))
+            verified.revalidate(&prepared.target.path)?;
+            ensure!(
+                hasher.finalize().to_hex().as_str() == prepared.source.fingerprint,
+                "Fresh target content does not match the old file fingerprint; relocation refused"
+            );
+            Ok(verified)
         })
         .await
-        .context("Relocation read worker panicked")??;
-    }
-    tokio::task::spawn_blocking(move || {
-        cancellation.check()?;
-        verified.revalidate(&prepared.target.path)?;
-        ensure!(
-            hasher.finalize().to_hex().as_str() == prepared.source.fingerprint,
-            "Fresh target content does not match the old file fingerprint; relocation refused"
-        );
-        Ok(verified)
-    })
-    .await
-    .context("Relocation target retirement worker panicked")?
+        .context("Relocation target retirement worker panicked")?
 }
 
 impl VerifiedTarget {
@@ -193,8 +197,10 @@ impl Core {
         let cancellation = library::ScanCancellation::default();
         let worker_cancellation = cancellation.clone();
         let worker_prepared = prepared.clone();
-        let worker = self
-            .spawn_relocation_verification(id, verify_target(worker_prepared, worker_cancellation));
+        let worker = self.spawn_relocation_verification(
+            id,
+            verify_target(worker_prepared, worker_cancellation, self.workers.clone()),
+        );
         let status = RelocationTaskStatus {
             id,
             source_id,
@@ -217,17 +223,19 @@ impl Core {
         &self,
         id: u64,
         verify: impl Future<Output = Result<VerifiedTarget>> + Send + 'static,
-    ) -> tokio::task::JoinHandle<()> {
+    ) -> async_executor::Task<()> {
         let sender = self.relocation_tx.clone();
-        let executor = self.executor.clone();
         self.executor.spawn(async move {
             // Await the actual verification future, including panics while polling.
             // Completion cannot retire admission before its resources have ended.
-            let result = executor.spawn(verify).await.unwrap_or_else(|_| {
-                Err(anyhow::anyhow!(
-                    "Relocation verification worker panicked; relocation was not committed"
-                ))
-            });
+            let result = std::panic::AssertUnwindSafe(verify)
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|_| {
+                    Err(anyhow::anyhow!(
+                        "Relocation verification worker panicked; relocation was not committed"
+                    ))
+                });
             let _ = sender.send(RelocationFinished { id, result }).await;
         })
     }
@@ -258,7 +266,8 @@ impl Core {
         }
         let mut task = self.active_relocation.take().unwrap();
         if let Some(worker) = task.worker.take() {
-            let _ = futures::executor::block_on(worker);
+            let _ =
+                futures::executor::block_on(std::panic::AssertUnwindSafe(worker).catch_unwind());
         }
         if task.cancellation.is_cancelled() {
             task.status.phase = RelocationPhase::Cancelled;
@@ -312,7 +321,9 @@ impl Core {
             // Closing wakes a supervisor awaiting bounded completion capacity.
             while self.relocation_rx.try_recv().is_ok() {}
             if let Some(worker) = task.worker.take() {
-                let _ = futures::executor::block_on(worker);
+                let _ = futures::executor::block_on(
+                    std::panic::AssertUnwindSafe(worker).catch_unwind(),
+                );
             }
             // A cancelled successful verification still owns its descriptor in
             // the completion port. Drop it before retiring relocation admission.
@@ -351,8 +362,8 @@ mod tests {
         (directory, PreparedRelocation { source, target })
     }
 
-    #[tokio::test]
-    async fn fresh_hash_rejects_matching_cached_hash_for_different_bytes() {
+    #[test]
+    fn fresh_hash_rejects_matching_cached_hash_for_different_bytes() {
         let (_directory, mut prepared) = prepared();
         // Both database identities still agree; only reading the bytes detects this.
         prepared.source.fingerprint = blake3::hash(b"historical bytes").to_hex().to_string();
@@ -360,48 +371,67 @@ mod tests {
             .target
             .fingerprint
             .clone_from(&prepared.source.fingerprint);
-        let error = verify_target(prepared, library::ScanCancellation::default())
-            .await
-            .err()
-            .unwrap();
+        let error = futures::executor::block_on(verify_target(
+            prepared,
+            library::ScanCancellation::default(),
+            tasks::BlockingPool::new(4),
+        ))
+        .err()
+        .unwrap();
         assert!(error.to_string().contains("Fresh target content"));
     }
 
-    #[tokio::test]
-    async fn verification_requires_old_path_absent_and_observes_cancellation() {
+    #[test]
+    fn verification_requires_old_path_absent_and_observes_cancellation() {
         let (_directory, prepared) = prepared();
         let cancellation = library::ScanCancellation::default();
         cancellation.cancel();
-        assert!(verify_target(prepared.clone(), cancellation).await.is_err());
+        assert!(
+            futures::executor::block_on(verify_target(
+                prepared.clone(),
+                cancellation,
+                tasks::BlockingPool::new(4),
+            ))
+            .is_err()
+        );
         std::fs::write(&prepared.source.path, b"old file returned").unwrap();
         assert!(
-            verify_target(prepared, library::ScanCancellation::default())
-                .await
-                .err()
-                .unwrap()
-                .to_string()
-                .contains("exists again")
+            futures::executor::block_on(verify_target(
+                prepared,
+                library::ScanCancellation::default(),
+                tasks::BlockingPool::new(4),
+            ))
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("exists again")
         );
     }
 
-    #[tokio::test]
-    async fn verified_descriptor_rejects_path_replacement_before_commit() {
+    #[test]
+    fn verified_descriptor_rejects_path_replacement_before_commit() {
         let (_directory, prepared) = prepared();
-        let verified = verify_target(prepared.clone(), library::ScanCancellation::default())
-            .await
-            .unwrap();
+        let verified = futures::executor::block_on(verify_target(
+            prepared.clone(),
+            library::ScanCancellation::default(),
+            tasks::BlockingPool::new(4),
+        ))
+        .unwrap();
         let replacement = prepared.target.path.with_extension("replacement");
         std::fs::write(&replacement, b"actual file bytes").unwrap();
         std::fs::rename(&replacement, &prepared.target.path).unwrap();
         assert!(verified.revalidate(&prepared.target.path).is_err());
     }
 
-    #[tokio::test]
-    async fn verified_descriptor_rejects_in_place_write_before_commit() {
+    #[test]
+    fn verified_descriptor_rejects_in_place_write_before_commit() {
         let (_directory, prepared) = prepared();
-        let verified = verify_target(prepared.clone(), library::ScanCancellation::default())
-            .await
-            .unwrap();
+        let verified = futures::executor::block_on(verify_target(
+            prepared.clone(),
+            library::ScanCancellation::default(),
+            tasks::BlockingPool::new(4),
+        ))
+        .unwrap();
         std::fs::write(&prepared.target.path, b"changed bytes").unwrap();
         assert!(verified.revalidate(&prepared.target.path).is_err());
     }
@@ -417,13 +447,10 @@ mod tests {
         assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
         let (completed, receive) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            let result = runtime.block_on(verify_target(
+            let result = futures::executor::block_on(verify_target(
                 prepared,
                 library::ScanCancellation::default(),
+                tasks::BlockingPool::new(4),
             ));
             let _ = completed.send(result);
         });

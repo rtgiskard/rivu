@@ -2,6 +2,7 @@ use super::paths::{is_audio_path, logical_path};
 use super::scan::MAX_REPORTED_SCAN_ERRORS;
 use super::source::{HASH_CHUNK_BYTES, SOURCE_BATCH_SIZE, ScanRecord, prepare_sources};
 use super::{KnownFile, ScanCancellation};
+use crate::core::tasks::BlockingPool;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -28,6 +29,7 @@ impl ExternalAdmission {
 }
 
 pub(crate) async fn prepare_external_admission<Fut>(
+    workers: &BlockingPool,
     paths: Vec<PathBuf>,
     mut known_sources: impl FnMut(Vec<PathBuf>) -> Fut,
     ffmpeg_enabled: bool,
@@ -51,24 +53,25 @@ where
             break;
         }
         let token = cancellation.clone();
-        let normalized = tokio::task::spawn_blocking(move || {
-            let mut normalized = Vec::with_capacity(batch.len());
-            for path in batch {
+        let normalized = workers
+            .execute(move || {
+                let mut normalized = Vec::with_capacity(batch.len());
+                for path in batch {
+                    token.check()?;
+                    let candidate = (|| {
+                        let path = logical_path(&path)?;
+                        path.to_str().context("Audio source path is not UTF-8")?;
+                        anyhow::ensure!(is_audio_path(&path), "Not a supported local audio file");
+                        Ok::<_, anyhow::Error>(path)
+                    })();
+                    normalized
+                        .push(candidate.map_err(|error| format!("{}: {error:#}", path.display())));
+                }
                 token.check()?;
-                let candidate = (|| {
-                    let path = logical_path(&path)?;
-                    path.to_str().context("Audio source path is not UTF-8")?;
-                    anyhow::ensure!(is_audio_path(&path), "Not a supported local audio file");
-                    Ok::<_, anyhow::Error>(path)
-                })();
-                normalized
-                    .push(candidate.map_err(|error| format!("{}: {error:#}", path.display())));
-            }
-            token.check()?;
-            Ok::<_, anyhow::Error>(normalized)
-        })
-        .await
-        .context("External file normalization worker failed")??;
+                Ok::<_, anyhow::Error>(normalized)
+            })
+            .await
+            .context("External file normalization worker failed")??;
         let normalized_len = normalized.len();
         for candidate in normalized {
             match candidate {
@@ -117,6 +120,7 @@ where
             path: batch.first().cloned(),
         });
         prepare_sources(
+            workers,
             batch,
             &mut known_sources,
             &mut sources,
@@ -180,6 +184,7 @@ mod tests {
 
     #[test]
     fn exact_files_keep_order_duplicates_and_short_audio_without_expansion() {
+        let workers = &BlockingPool::new(4);
         let directory = tempfile::tempdir().unwrap();
         let first = directory.path().join("first.wav");
         let second = directory.path().join("second.wav");
@@ -196,32 +201,29 @@ mod tests {
         )
         .unwrap();
         std::fs::write(&playlist, "second.wav\n").unwrap();
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
+
         let mut lookups = Vec::new();
-        let result = runtime
-            .block_on(prepare_external_admission(
-                vec![
-                    second.clone(),
-                    nested,
-                    first.clone(),
-                    cue,
-                    first.with_file_name("./first.wav"),
-                    playlist,
-                    directory.path().join("missing.wav"),
-                ],
-                |paths| {
-                    let known = vec![None; paths.len()];
-                    lookups.extend(paths);
-                    std::future::ready(Ok(known))
-                },
-                false,
-                &ScanCancellation::default(),
-                |_| {},
-            ))
-            .unwrap();
+        let result = futures::executor::block_on(prepare_external_admission(
+            workers,
+            vec![
+                second.clone(),
+                nested,
+                first.clone(),
+                cue,
+                first.with_file_name("./first.wav"),
+                playlist,
+                directory.path().join("missing.wav"),
+            ],
+            |paths| {
+                let known = vec![None; paths.len()];
+                lookups.extend(paths);
+                std::future::ready(Ok(known))
+            },
+            false,
+            &ScanCancellation::default(),
+            |_| {},
+        ))
+        .unwrap();
         let queued: Vec<_> = result
             .occurrences
             .iter()
@@ -242,6 +244,7 @@ mod tests {
 
     #[test]
     fn exact_probe_reuses_unchanged_cache_and_preserves_logical_symlink_path() {
+        let workers = &BlockingPool::new(4);
         let directory = tempfile::tempdir().unwrap();
         let original = directory.path().join("not-decodable.wav");
         std::fs::write(&original, b"cached encoded content").unwrap();
@@ -275,22 +278,19 @@ mod tests {
             }),
             cue: None,
         };
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let result = runtime
-            .block_on(prepare_external_admission(
-                vec![path.clone(), path.clone()],
-                |paths| {
-                    assert_eq!(paths, vec![path.clone()]);
-                    std::future::ready(Ok(vec![Some(known.clone())]))
-                },
-                false,
-                &ScanCancellation::default(),
-                |_| {},
-            ))
-            .unwrap();
+
+        let result = futures::executor::block_on(prepare_external_admission(
+            workers,
+            vec![path.clone(), path.clone()],
+            |paths| {
+                assert_eq!(paths, vec![path.clone()]);
+                std::future::ready(Ok(vec![Some(known.clone())]))
+            },
+            false,
+            &ScanCancellation::default(),
+            |_| {},
+        ))
+        .unwrap();
         assert_eq!(result.records[0].path, path);
         assert_eq!(result.records[0].media.title, "Cached title");
         assert_eq!(result.occurrences, vec![0, 0]);
@@ -299,6 +299,7 @@ mod tests {
 
     #[test]
     fn cache_batches_and_invalid_diagnostics_remain_bounded() {
+        let workers = &BlockingPool::new(4);
         let directory = tempfile::tempdir().unwrap();
         let files: Vec<_> = (0..SOURCE_BATCH_SIZE + 3)
             .map(|index| {
@@ -313,26 +314,23 @@ mod tests {
             (0..MAX_REPORTED_SCAN_ERRORS + 10)
                 .map(|index| directory.path().join(format!("{index}.m3u"))),
         );
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
+
         let mut lookup_count = 0;
         let mut batches = 0;
-        let result = runtime
-            .block_on(prepare_external_admission(
-                paths,
-                |paths| {
-                    assert!(paths.len() <= SOURCE_BATCH_SIZE);
-                    lookup_count += paths.len();
-                    batches += 1;
-                    std::future::ready(Ok(vec![None; paths.len()]))
-                },
-                false,
-                &ScanCancellation::default(),
-                |_| {},
-            ))
-            .unwrap();
+        let result = futures::executor::block_on(prepare_external_admission(
+            workers,
+            paths,
+            |paths| {
+                assert!(paths.len() <= SOURCE_BATCH_SIZE);
+                lookup_count += paths.len();
+                batches += 1;
+                std::future::ready(Ok(vec![None; paths.len()]))
+            },
+            false,
+            &ScanCancellation::default(),
+            |_| {},
+        ))
+        .unwrap();
         assert_eq!(lookup_count, files.len());
         assert_eq!(batches, 2);
         assert_eq!(result.records.len(), files.len());
@@ -343,22 +341,19 @@ mod tests {
 
     #[test]
     fn cancelled_exact_admission_returns_no_partial_result() {
+        let workers = &BlockingPool::new(4);
         let token = ScanCancellation::default();
         token.cancel();
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
         assert!(
-            runtime
-                .block_on(prepare_external_admission(
-                    vec!["/missing.wav".into()],
-                    |_| std::future::ready(Ok(Vec::new())),
-                    false,
-                    &token,
-                    |_| {},
-                ))
-                .is_err()
+            futures::executor::block_on(prepare_external_admission(
+                workers,
+                vec!["/missing.wav".into()],
+                |_| std::future::ready(Ok(Vec::new())),
+                false,
+                &token,
+                |_| {},
+            ))
+            .is_err()
         );
     }
 }

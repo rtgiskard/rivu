@@ -465,22 +465,18 @@ impl Core {
     }
     pub(in crate::core) fn stop_playback(&mut self, natural: bool) -> Result<()> {
         let mut stop = self.engine.stop_request();
-        let executor = self.executor.clone();
         let generation = self.generation;
         let mut bookkeeping = Ok(());
         // Only the persistent synchronous business owner enters this wait.
-        // Tokio's driver remains free, and the stop handle is the sole audio
+        // The application executor remains free, and the stop handle is the sole audio
         // event consumer until it returns the receiver (also on timeout).
-        let snapshot = wait_on(
-            &executor,
-            stop.wait(|event| {
-                if let Err(error) = self.retiring_audio_event(generation, event)
-                    && bookkeeping.is_ok()
-                {
-                    bookkeeping = Err(error);
-                }
-            }),
-        )
+        let snapshot = futures::executor::block_on(stop.wait(|event| {
+            if let Err(error) = self.retiring_audio_event(generation, event)
+                && bookkeeping.is_ok()
+            {
+                bookkeeping = Err(error);
+            }
+        }))
         .map(Some);
         self.engine.restore_events(stop.into_events());
         self.finish_playback(snapshot, natural, bookkeeping)

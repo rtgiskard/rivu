@@ -6,17 +6,18 @@ pub(in crate::core) struct ExportTask {
     pub(in crate::core) finished: oneshot::Receiver<Result<()>>,
     pub(in crate::core) reply: Option<oneshot::Sender<CoreResponse>>,
     cancellation: library::ScanCancellation,
-    worker: Option<tokio::task::JoinHandle<()>>,
+    worker: Option<async_executor::Task<()>>,
 }
 
 impl ExportTask {
     fn join(&mut self) -> Result<()> {
         if let Some(worker) = self.worker.take() {
-            futures::executor::block_on(worker).map_err(|_| {
-                anyhow::anyhow!(
-                    "Playlist export worker panicked; inspect the destination before retrying"
-                )
-            })?;
+            futures::executor::block_on(std::panic::AssertUnwindSafe(worker).catch_unwind())
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "Playlist export worker panicked; inspect the destination before retrying"
+                    )
+                })?;
         }
         Ok(())
     }
@@ -36,6 +37,7 @@ struct ExportSource {
     rows: std::vec::IntoIter<PlaylistExportTrack>,
     done: bool,
     cancellation: library::ScanCancellation,
+    workers: Arc<tasks::BlockingPool>,
 }
 
 impl ExportSource {
@@ -55,14 +57,16 @@ impl ExportSource {
             let after = self.after;
             // The same connection/read transaction moves through short bounded
             // queries. Never hold a blocking worker while awaiting file writes.
-            let batch = tokio::task::spawn_blocking(move || {
-                let batch = store.playlist_export_batch(playlist_id, after, MAX_QUERY_ROWS);
-                (store, batch)
-            })
-            .await;
+            let batch = self
+                .workers
+                .execute(move || {
+                    let batch = store.playlist_export_batch(playlist_id, after, MAX_QUERY_ROWS);
+                    (store, batch)
+                })
+                .await;
             let (store, batch) = match batch {
                 Ok(batch) => batch,
-                Err(error) => return Some(Err(error.into())),
+                Err(error) => return Some(Err(error)),
             };
             self.store = Some(store);
             match batch {
@@ -82,36 +86,42 @@ async fn export_snapshot(
     playlist_id: i64,
     path: &Path,
     cancellation: &library::ScanCancellation,
+    workers: Arc<tasks::BlockingPool>,
 ) -> Result<()> {
     cancellation.check()?;
     let database = database.to_path_buf();
     let source_cancellation = cancellation.clone();
     // Admission and the first bounded query share one blocking dispatch.
-    let mut source = tokio::task::spawn_blocking(move || -> Result<ExportSource> {
-        source_cancellation.check()?;
-        let store = Store::open_export(&database, playlist_id)?;
-        let batch = store.playlist_export_batch(playlist_id, None, MAX_QUERY_ROWS)?;
-        Ok(ExportSource {
-            store: Some(store),
-            playlist_id,
-            after: batch.next,
-            rows: batch.rows.into_iter(),
-            done: batch.next.is_none(),
-            cancellation: source_cancellation,
+    let source_workers = workers.clone();
+    let mut source = workers
+        .execute(move || -> Result<ExportSource> {
+            source_cancellation.check()?;
+            let store = Store::open_export(&database, playlist_id)?;
+            let batch = store.playlist_export_batch(playlist_id, None, MAX_QUERY_ROWS)?;
+            Ok(ExportSource {
+                store: Some(store),
+                playlist_id,
+                after: batch.next,
+                rows: batch.rows.into_iter(),
+                done: batch.next.is_none(),
+                cancellation: source_cancellation,
+                workers: source_workers,
+            })
         })
-    })
-    .await
-    .context("Playlist export snapshot worker panicked")??;
+        .await
+        .context("Playlist export snapshot worker panicked")??;
     let tracks = futures::stream::unfold(&mut source, |source| async move {
         source.next().await.map(|track| (track, source))
     });
-    let result = std::panic::AssertUnwindSafe(library::export_m3u(path, tracks, cancellation))
-        .catch_unwind()
-        .await
-        .unwrap_or_else(|_| Err(anyhow::anyhow!("Playlist export worker panicked")));
+    let result =
+        std::panic::AssertUnwindSafe(library::export_m3u(&workers, path, tracks, cancellation))
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("Playlist export worker panicked")));
     // Close the pinned read transaction off the driver, including after unwind.
     let store = source.store.take();
-    let retired = tokio::task::spawn_blocking(move || drop(store))
+    let retired = workers
+        .execute(move || drop(store))
         .await
         .context("Playlist export snapshot retirement panicked");
     retired.and(result)
@@ -132,15 +142,20 @@ impl Core {
         let cancellation = library::ScanCancellation::default();
         let worker_cancellation = cancellation.clone();
         let (finished_tx, finished) = oneshot::channel();
-        let executor = self.executor.clone();
+        let workers = self.workers.clone();
         let worker = self.executor.spawn(async move {
             let started = Instant::now();
-            let job = executor.spawn(async move {
-                export_snapshot(&database, playlist_id, &path, &worker_cancellation).await
-            });
-            // Joining, rather than a catch_unwind around a future constructor,
-            // observes panics while polling and guarantees resources have ended.
-            let result = job.await.unwrap_or_else(|_| {
+            // Catch panics while polling the real job, after its resources retire.
+            let result = std::panic::AssertUnwindSafe(export_snapshot(
+                &database,
+                playlist_id,
+                &path,
+                &worker_cancellation,
+                workers,
+            ))
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|_| {
                 Err(anyhow::anyhow!(
                     "Playlist export worker panicked; inspect the destination before retrying"
                 ))
@@ -178,7 +193,7 @@ impl Core {
         let task = self.active_export.as_mut()?;
         task.cancellation.cancel();
         let result = task.join().and_then(|()| {
-            task.finished.try_recv().unwrap_or_else(|_| Err(anyhow::anyhow!(
+            task.finished.try_recv().ok().flatten().unwrap_or_else(|| Err(anyhow::anyhow!(
                 "Playlist export worker ended without a result; inspect the destination before retrying"
             )))
         });
@@ -196,15 +211,13 @@ mod tests {
         path: &Path,
         cancellation: &library::ScanCancellation,
     ) -> Result<()> {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?
-            .block_on(super::export_snapshot(
-                database,
-                playlist_id,
-                path,
-                cancellation,
-            ))
+        futures::executor::block_on(super::export_snapshot(
+            database,
+            playlist_id,
+            path,
+            cancellation,
+            tasks::BlockingPool::new(4),
+        ))
     }
 
     #[test]
@@ -278,50 +291,54 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn async_pages_keep_one_snapshot_across_concurrent_playlist_edits() -> Result<()> {
-        let directory = tempfile::tempdir()?;
-        let database = directory.path().join("library.db");
-        let store = Store::open(&database)?;
-        let playlist_id = store.create_playlist("Paged snapshot")?;
-        let total = MAX_QUERY_ROWS + 3;
-        let writer = rusqlite::Connection::open(&database)?;
-        writer.execute(
+    #[test]
+    fn async_pages_keep_one_snapshot_across_concurrent_playlist_edits() -> Result<()> {
+        futures::executor::block_on(async {
+            let directory = tempfile::tempdir()?;
+            let database = directory.path().join("library.db");
+            let store = Store::open(&database)?;
+            let playlist_id = store.create_playlist("Paged snapshot")?;
+            let total = MAX_QUERY_ROWS + 3;
+            let writer = rusqlite::Connection::open(&database)?;
+            writer.execute(
             "WITH RECURSIVE ids(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM ids WHERE id<?1)
              INSERT INTO tracks(id,path,raw_title) SELECT id,'/music/'||id||'.wav','Track '||id FROM ids",
             [total as i64],
         )?;
-        writer.execute(
+            writer.execute(
             "INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT ?1,id,id-1 FROM tracks",
             [playlist_id],
         )?;
-        let snapshot =
-            tokio::task::spawn_blocking(move || Store::open_export(&database, playlist_id))
+            let workers = tasks::BlockingPool::new(4);
+            let snapshot = workers
+                .execute(move || Store::open_export(&database, playlist_id))
                 .await??;
-        let mut source = ExportSource {
-            store: Some(snapshot),
-            playlist_id,
-            after: None,
-            rows: Vec::new().into_iter(),
-            done: false,
-            cancellation: library::ScanCancellation::default(),
-        };
-        assert_eq!(source.next().await.unwrap()?.title, "Track 1");
-        writer.execute(
-            "UPDATE tracks SET raw_title='Edited' WHERE id=?1",
-            [total as i64],
-        )?;
-        writer.execute(
-            "DELETE FROM playlist_entries WHERE playlist_id=?1 AND track_id=?2",
-            rusqlite::params![playlist_id, total as i64],
-        )?;
-        for id in 2..=total {
-            let track = source.next().await.context("snapshot lost a row")??;
-            assert_eq!(track.path, PathBuf::from(format!("/music/{id}.wav")));
-            assert_eq!(track.title, format!("Track {id}"));
-        }
-        assert!(source.next().await.is_none());
-        tokio::task::spawn_blocking(move || drop(source)).await?;
-        Ok(())
+            let mut source = ExportSource {
+                store: Some(snapshot),
+                playlist_id,
+                after: None,
+                rows: Vec::new().into_iter(),
+                done: false,
+                cancellation: library::ScanCancellation::default(),
+                workers: workers.clone(),
+            };
+            assert_eq!(source.next().await.unwrap()?.title, "Track 1");
+            writer.execute(
+                "UPDATE tracks SET raw_title='Edited' WHERE id=?1",
+                [total as i64],
+            )?;
+            writer.execute(
+                "DELETE FROM playlist_entries WHERE playlist_id=?1 AND track_id=?2",
+                rusqlite::params![playlist_id, total as i64],
+            )?;
+            for id in 2..=total {
+                let track = source.next().await.context("snapshot lost a row")??;
+                assert_eq!(track.path, PathBuf::from(format!("/music/{id}.wav")));
+                assert_eq!(track.title, format!("Track {id}"));
+            }
+            assert!(source.next().await.is_none());
+            workers.execute(move || drop(source)).await?;
+            Ok(())
+        })
     }
 }

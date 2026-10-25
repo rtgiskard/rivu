@@ -1,5 +1,6 @@
 use super::*;
 use crate::library::ScanRecord;
+use crossbeam_channel::{Receiver, bounded};
 use std::sync::atomic::Ordering;
 
 mod admission;
@@ -18,21 +19,15 @@ mod relocation;
 mod settings;
 mod tracks;
 
-pub(super) fn executor() -> tokio::runtime::Handle {
-    static TASKS: std::sync::LazyLock<TaskRuntime> =
-        std::sync::LazyLock::new(|| TaskRuntime::start().unwrap());
-    TASKS.handle.clone()
-}
-
-// Bound synchronous test waits while exercising the production Tokio ports.
-trait TokioReceiverExt<T> {
+// Bound synchronous test waits while exercising production task ports.
+trait TaskReceiverExt<T> {
     fn recv_timeout(&mut self, timeout: Duration) -> Result<T>;
 }
 
-impl<T> TokioReceiverExt<T> for tokio::sync::mpsc::Receiver<T> {
+impl<T> TaskReceiverExt<T> for async_channel::Receiver<T> {
     fn recv_timeout(&mut self, timeout: Duration) -> Result<T> {
-        wait_on(&executor(), async {
-            tokio::time::timeout(timeout, self.recv())
+        futures::executor::block_on(async {
+            rivu_protocol::transport::timeout(timeout, self.recv())
                 .await
                 .context("Timed out waiting for task event")?
                 .context("Task event channel disconnected")
@@ -47,19 +42,12 @@ fn fixture() -> (tempfile::TempDir, Core) {
 }
 
 fn fixture_with_duration(duration: Option<f64>) -> (tempfile::TempDir, Core) {
-    fixture_with_database(duration, false)
+    fixture_with_database(duration)
 }
 
-pub(super) fn fixture_with_database(
-    duration: Option<f64>,
-    persistent: bool,
-) -> (tempfile::TempDir, Core) {
+pub(super) fn fixture_with_database(duration: Option<f64>) -> (tempfile::TempDir, Core) {
     let directory = tempfile::tempdir().unwrap();
-    let database_path = if persistent {
-        directory.path().join("library.db")
-    } else {
-        Path::new(":memory:").to_path_buf()
-    };
+    let database_path = directory.path().join("library.db");
     let store = Store::open(&database_path).unwrap();
     store
         .apply_scan(&ScanResult {
@@ -103,19 +91,20 @@ pub(super) fn fixture_with_database(
     Arc::make_mut(&mut state.system.config)
         .library_roots
         .push(directory.path().to_path_buf());
-    let (scan_tx, scan_rx) = mpsc::channel(3);
-    let (relocation_tx, relocation_rx) = mpsc::channel(1);
+    let (scan_tx, scan_rx) = async_channel::bounded(3);
+    let (relocation_tx, relocation_rx) = async_channel::bounded(1);
     let tasks = TaskRuntime::start().unwrap();
     let mut core = Core {
         store,
+        read_queries: None,
         engine: AudioEngine::new(1).unwrap(),
         logging: None,
         executor: tasks.handle.clone(),
-        revision_updates: watch::channel(state.revisions).0,
+        workers: tasks.workers.clone(),
+        revision_updates: Arc::new(RwLock::new(Vec::new())),
         shared: Arc::new(RwLock::new(state.clone())),
         state,
         wakeup: Arc::new(RwLock::new(None)),
-        subscribers: Arc::new(RwLock::new(Vec::new())),
         generation: 1,
         output_settings_request: 0,
         queue_ids: Vec::new(),
@@ -157,12 +146,12 @@ pub(super) fn fixture_with_database(
 // Capture the commands Core really sends without opening a platform device.
 // The existing idle worker remains alive for its event/analysis ownership.
 fn recording_audio(core: &mut Core) -> Receiver<AudioCommand> {
-    let (commands, mut receive) = mpsc::channel(64);
+    let (commands, receive) = async_channel::bounded(64);
     let (record, recorded) = crossbeam_channel::unbounded();
     let idle_commands = core.engine.replace_commands(commands);
     thread::spawn(move || {
         let mut final_snapshot = audio::AudioSnapshot::default();
-        while let Some(command) = receive.blocking_recv() {
+        while let Ok(command) = receive.recv_blocking() {
             match &command {
                 AudioCommand::Load {
                     generation,
@@ -221,7 +210,7 @@ fn navigation_runtime(
     Arc<Mutex<Vec<MprisSnapshot>>>,
 ) {
     core.publish();
-    let (sender, requests) = mpsc::channel(64);
+    let (sender, requests) = async_channel::bounded(64);
     let handle = CoreHandle {
         state: core.shared.clone(),
         analysis: core.engine.analysis.clone(),
@@ -229,9 +218,9 @@ fn navigation_runtime(
         waveform: core.engine.waveform.clone(),
         sender,
         executor: core.executor.clone(),
-        revision_updates: core.revision_updates.subscribe(),
+        workers: core.workers.clone(),
+        revision_updates: core.revision_updates.clone(),
         wakeup: core.wakeup.clone(),
-        subscribers: core.subscribers.clone(),
         query_timeout: None,
         _test_tasks: None,
     };
@@ -278,7 +267,7 @@ fn display_fixture() -> (
         signal: crate::config::VisualizationSignal::After,
     });
     worker.set_playback_active(true);
-    let (sender, receiver) = mpsc::channel(1);
+    let (sender, receiver) = async_channel::bounded(1);
     let tasks = Arc::new(TaskRuntime::start().unwrap());
     let handle = CoreHandle {
         state: Arc::new(RwLock::new(CoreState::default())),
@@ -287,9 +276,9 @@ fn display_fixture() -> (
         waveform: Arc::new(RwLock::new(audio::WaveformFrame::default())),
         sender,
         executor: tasks.handle.clone(),
-        revision_updates: watch::channel(StateRevisions::default()).1,
+        workers: tasks.workers.clone(),
+        revision_updates: Arc::new(RwLock::new(Vec::new())),
         wakeup: Arc::new(RwLock::new(None)),
-        subscribers: Arc::new(RwLock::new(Vec::new())),
         query_timeout: None,
         _test_tasks: Some(tasks),
     };

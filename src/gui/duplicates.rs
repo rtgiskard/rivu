@@ -786,7 +786,7 @@ impl Duplicates {
             let response = crate::gui::query::run(
                 handle,
                 cx,
-                move |handle| handle.query_if_current(worker_query, ticket),
+                move |handle| async move { handle.query_if_current(worker_query, ticket).await },
                 |response, cx| {
                     let _ = this.update(cx, |this, cx| {
                         if this.duplicate_review.timeout_groups(
@@ -875,12 +875,20 @@ impl Duplicates {
                 return;
             }
             let worker_query = query.clone();
+            let executor = cx.background_executor().clone();
             let (response, existence, selected) = crate::gui::query::run(
                 handle,
                 cx,
-                move |handle| {
-                    let response = handle.query_if_current(worker_query.clone(), ticket.clone());
-                    let existence = member_existence(&response);
+                move |handle| async move {
+                    let response = handle
+                        .query_if_current(worker_query.clone(), ticket.clone())
+                        .await;
+                    let (response, existence) = executor
+                        .spawn(async move {
+                            let existence = member_existence(&response);
+                            (response, existence)
+                        })
+                        .await;
                     let selected = match (&worker_query, &response.result) {
                         (
                             Query::DuplicateMembers { fingerprint, .. },
@@ -893,14 +901,21 @@ impl Duplicates {
                             if track_ids.is_empty() {
                                 None
                             } else {
-                                let selected = handle.query_if_current(
-                                    Query::DuplicateMemberSelection {
-                                        fingerprint: fingerprint.clone(),
-                                        track_ids,
-                                    },
-                                    ticket.clone(),
-                                );
-                                let exists = member_existence(&selected);
+                                let selected = handle
+                                    .query_if_current(
+                                        Query::DuplicateMemberSelection {
+                                            fingerprint: fingerprint.clone(),
+                                            track_ids,
+                                        },
+                                        ticket.clone(),
+                                    )
+                                    .await;
+                                let (selected, exists) = executor
+                                    .spawn(async move {
+                                        let exists = member_existence(&selected);
+                                        (selected, exists)
+                                    })
+                                    .await;
                                 Some((selected, exists))
                             }
                         }
@@ -979,20 +994,23 @@ impl Duplicates {
         };
         let handle = self.context.handle().clone();
         cx.spawn(async move |this, cx| {
-            let response = crate::gui::query::run(
-                handle,
-                cx,
-                move |handle| handle.query_for_gui(Query::RelocationTask { id }),
-                |response, cx| {
-                    let _ = this.update(cx, |this, cx| {
-                        if this.duplicate_review.timeout_task_read(epoch, id, response) {
-                            this.sync_duplicate_review(cx);
-                            cx.notify();
-                        }
-                    });
-                },
-            )
-            .await;
+            let response =
+                crate::gui::query::run(
+                    handle,
+                    cx,
+                    move |handle| async move {
+                        handle.query_for_gui(Query::RelocationTask { id }).await
+                    },
+                    |response, cx| {
+                        let _ = this.update(cx, |this, cx| {
+                            if this.duplicate_review.timeout_task_read(epoch, id, response) {
+                                this.sync_duplicate_review(cx);
+                                cx.notify();
+                            }
+                        });
+                    },
+                )
+                .await;
             let _ = this.update(cx, |this, cx| {
                 this.finish_retained_relocation(epoch, id, response, cx);
             });
@@ -1035,10 +1053,7 @@ impl Duplicates {
         let handle = self.context.handle().clone();
         cx.spawn(async move |this, cx| {
             let ack_handle = handle.clone();
-            let ack = cx
-                .background_executor()
-                .spawn(async move { ack_handle.request_ack(command) })
-                .await;
+            let ack = ack_handle.request_ack(command).await;
             let relocation_id = ack.relocation_id;
             let accepted = this
                 .update(cx, |this, cx| {

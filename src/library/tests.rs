@@ -396,18 +396,17 @@ fn async_source_lookup_releases_the_only_blocking_slot() -> Result<()> {
     let root = directory.path().to_path_buf();
     let audio = root.join("audio.wav");
     wav(&audio, 150)?;
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .max_blocking_threads(1)
-        .build()?;
-    runtime.block_on(async {
+    let workers = &crate::core::tasks::BlockingPool::new(1);
+    futures::executor::block_on(async {
         let cancellation = ScanCancellation::default();
-        let (lookup, requested) = tokio::sync::oneshot::channel();
-        let (reply, response) = tokio::sync::oneshot::channel::<Result<Vec<Option<KnownFile>>>>();
+        let (lookup, requested) = futures::channel::oneshot::channel();
+        let (reply, response) =
+            futures::channel::oneshot::channel::<Result<Vec<Option<KnownFile>>>>();
         let mut lookup = Some(lookup);
         let mut response = Some(response);
         let paths = [root.clone()];
         let scan = super::scan_paths_with_cues(
+            workers,
             &paths,
             |paths| {
                 assert_eq!(paths.as_slice(), std::slice::from_ref(&audio));
@@ -415,9 +414,11 @@ fn async_source_lookup_releases_the_only_blocking_slot() -> Result<()> {
                 let response = response.take().unwrap();
                 async move { response.await.context("lookup owner disconnected")? }
             },
-            false,
-            &paths,
-            1,
+            super::scan::ScanSettings {
+                ffmpeg_enabled: false,
+                library_roots: &paths,
+                max_depth: 1,
+            },
             (&cancellation, None),
             |_, _, _, _, _| {},
         );
@@ -425,12 +426,12 @@ fn async_source_lookup_releases_the_only_blocking_slot() -> Result<()> {
             requested.await?;
             // This cannot run if an entire scan closure occupies the sole slot
             // while synchronously waiting for its source lookup reply.
-            tokio::time::timeout(Duration::from_secs(5), tokio::task::spawn_blocking(|| ()))
+            rivu_protocol::transport::timeout(Duration::from_secs(5), workers.execute(|| ()))
                 .await??;
             reply.send(Ok(vec![None])).unwrap();
             anyhow::Ok(())
         };
-        let (result, owner) = tokio::join!(scan, owner);
+        let (result, owner) = futures::join!(scan, owner);
         owner?;
         let result = result?;
         assert!(result.errors.is_empty(), "{:?}", result.errors);
@@ -440,35 +441,38 @@ fn async_source_lookup_releases_the_only_blocking_slot() -> Result<()> {
     })
 }
 
-#[tokio::test]
-async fn cancellation_wakes_every_async_waiter_and_remains_observable() {
-    let cancellation = ScanCancellation::default();
-    let first = cancellation.clone();
-    let second = cancellation.clone();
-    let (first, second, ()) = tokio::time::timeout(Duration::from_secs(5), async {
-        tokio::join!(
-            async move {
-                first.cancelled().await;
-                first.check()
-            },
-            async move {
-                second.cancelled().await;
-                second.check()
-            },
-            async {
-                tokio::task::yield_now().await;
-                cancellation.cancel();
-            },
-        )
+#[test]
+fn cancellation_wakes_every_async_waiter_and_remains_observable() {
+    futures::executor::block_on(async {
+        let cancellation = ScanCancellation::default();
+        let first = cancellation.clone();
+        let second = cancellation.clone();
+        let (first, second, ()) =
+            rivu_protocol::transport::timeout(Duration::from_secs(5), async {
+                futures::join!(
+                    async move {
+                        first.cancelled().await;
+                        first.check()
+                    },
+                    async move {
+                        second.cancelled().await;
+                        second.check()
+                    },
+                    async {
+                        futures_lite::future::yield_now().await;
+                        cancellation.cancel();
+                    },
+                )
+            })
+            .await
+            .unwrap();
+        assert!(first.is_err());
+        assert!(second.is_err());
+        rivu_protocol::transport::timeout(Duration::from_secs(5), cancellation.cancelled())
+            .await
+            .unwrap();
+        assert!(cancellation.is_cancelled());
     })
-    .await
-    .unwrap();
-    assert!(first.is_err());
-    assert!(second.is_err());
-    tokio::time::timeout(Duration::from_secs(5), cancellation.cancelled())
-        .await
-        .unwrap();
-    assert!(cancellation.is_cancelled());
 }
 
 #[test]
@@ -508,88 +512,92 @@ fn cancellation_during_a_hash_read_stops_at_the_chunk_boundary() {
     assert_eq!(reader.reads, 2);
 }
 
-#[tokio::test]
-async fn bounded_playlist_reads_enforce_capacity_and_cancellation_boundaries() -> Result<()> {
-    use super::input::{MAX_CUE_BYTES, read_chunks_async, read_input_async};
+#[test]
+fn bounded_playlist_reads_enforce_capacity_and_cancellation_boundaries() -> Result<()> {
+    futures::executor::block_on(async {
+        use super::input::{MAX_CUE_BYTES, read_chunks_async, read_input_async};
+        let workers = &crate::core::tasks::BlockingPool::new(4);
 
-    let directory = tempfile::tempdir()?;
-    let sheet = directory.path().join("album.cue");
-    let cancellation = ScanCancellation::default();
-    let bytes = vec![b' '; MAX_CUE_BYTES];
-    fs::write(&sheet, &bytes)?;
-    assert_eq!(
-        read_input_async(&sheet, MAX_CUE_BYTES, &cancellation).await?,
-        bytes
-    );
-    File::options()
-        .write(true)
-        .open(&sheet)?
-        .set_len(MAX_CUE_BYTES as u64 + 1)?;
-    assert!(
-        read_input_async(&sheet, MAX_CUE_BYTES, &cancellation)
-            .await
-            .is_err()
-    );
-    // A source that grows after metadata was checked is still bounded per chunk.
-    let grown = std::io::Cursor::new(vec![b' '; MAX_CUE_BYTES + 1]);
-    assert!(
-        read_chunks_async(grown, Vec::new(), MAX_CUE_BYTES, &cancellation)
-            .await
-            .is_err()
-    );
-
-    struct CancellingReader {
-        cancellation: ScanCancellation,
-        reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-        at_eof: bool,
-    }
-    impl std::io::Read for CancellingReader {
-        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-            self.reads
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            self.cancellation.cancel();
-            if self.at_eof {
-                Ok(0)
-            } else {
-                buffer.fill(b' ');
-                Ok(buffer.len())
-            }
-        }
-    }
-    for at_eof in [false, true] {
+        let directory = tempfile::tempdir()?;
+        let sheet = directory.path().join("album.cue");
         let cancellation = ScanCancellation::default();
-        let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let reader = CancellingReader {
-            cancellation: cancellation.clone(),
-            reads: reads.clone(),
-            at_eof,
-        };
+        let bytes = vec![b' '; MAX_CUE_BYTES];
+        fs::write(&sheet, &bytes)?;
+        assert_eq!(
+            read_input_async(workers, &sheet, MAX_CUE_BYTES, &cancellation).await?,
+            bytes
+        );
+        File::options()
+            .write(true)
+            .open(&sheet)?
+            .set_len(MAX_CUE_BYTES as u64 + 1)?;
         assert!(
-            read_chunks_async(reader, Vec::new(), MAX_CUE_BYTES, &cancellation)
+            read_input_async(workers, &sheet, MAX_CUE_BYTES, &cancellation)
                 .await
                 .is_err()
         );
-        assert_eq!(reads.load(std::sync::atomic::Ordering::Relaxed), 1);
-        // Cancellation wins before metadata lookup or decoding malformed input.
+        // A source that grows after metadata was checked is still bounded per chunk.
+        let grown = std::io::Cursor::new(vec![b' '; MAX_CUE_BYTES + 1]);
         assert!(
-            read_input_async(
-                &directory.path().join("absent.cue"),
-                MAX_CUE_BYTES,
-                &cancellation
-            )
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("cancelled")
+            read_chunks_async(workers, grown, Vec::new(), MAX_CUE_BYTES, &cancellation)
+                .await
+                .is_err()
         );
-        assert!(
-            super::cue::parse_input(&[0xff], &sheet, &cancellation)
+
+        struct CancellingReader {
+            cancellation: ScanCancellation,
+            reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+            at_eof: bool,
+        }
+        impl std::io::Read for CancellingReader {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                self.reads
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.cancellation.cancel();
+                if self.at_eof {
+                    Ok(0)
+                } else {
+                    buffer.fill(b' ');
+                    Ok(buffer.len())
+                }
+            }
+        }
+        for at_eof in [false, true] {
+            let cancellation = ScanCancellation::default();
+            let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let reader = CancellingReader {
+                cancellation: cancellation.clone(),
+                reads: reads.clone(),
+                at_eof,
+            };
+            assert!(
+                read_chunks_async(workers, reader, Vec::new(), MAX_CUE_BYTES, &cancellation)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(reads.load(std::sync::atomic::Ordering::Relaxed), 1);
+            // Cancellation wins before metadata lookup or decoding malformed input.
+            assert!(
+                read_input_async(
+                    workers,
+                    &directory.path().join("absent.cue"),
+                    MAX_CUE_BYTES,
+                    &cancellation
+                )
+                .await
                 .unwrap_err()
                 .to_string()
                 .contains("cancelled")
-        );
-    }
-    Ok(())
+            );
+            assert!(
+                super::cue::parse_input(&[0xff], &sheet, &cancellation)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("cancelled")
+            );
+        }
+        Ok(())
+    })
 }
 
 #[test]
@@ -2455,20 +2463,19 @@ fn playlist_tracks<'a>(
     })
 }
 
-// Scan/import fixtures stay synchronous; the actual writer is driven by Tokio,
-// including its awaited filesystem operations and streaming input boundary.
+// Scan/import fixtures stay synchronous; drive the actual writer's awaited
+// filesystem operations and streaming input boundary with the futures executor.
 fn export_m3u<I>(path: &Path, tracks: I, cancellation: &ScanCancellation) -> Result<()>
 where
     I: IntoIterator<Item = Result<PlaylistExportTrack>>,
 {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?
-        .block_on(super::export_m3u(
-            path,
-            futures::stream::iter(tracks),
-            cancellation,
-        ))
+    let workers = &crate::core::tasks::BlockingPool::new(4);
+    futures::executor::block_on(super::export_m3u(
+        workers,
+        path,
+        futures::stream::iter(tracks),
+        cancellation,
+    ))
 }
 
 #[test]

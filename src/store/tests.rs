@@ -4751,3 +4751,89 @@ fn collection_transfer_failures_preserve_queue_and_playlist_positions() {
     );
     assert_eq!(store.playlist_track_ids(playlist, 20).unwrap(), [1, 2, 3]);
 }
+
+#[test]
+fn reader_snapshots_preserve_unicode_search() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("reader.db");
+    let writer = Store::open(&path).unwrap();
+    writer
+        .conn
+        .execute(
+            "INSERT INTO tracks(path,raw_title) VALUES('/unicode.wav','ÄNEEDLE')",
+            [],
+        )
+        .unwrap();
+    let reader = Store::open_reader(&path).unwrap();
+    let snapshot = reader.read_snapshot().unwrap();
+    let page = snapshot
+        .library_page(Some("äne"), None, None, 0, 1)
+        .unwrap();
+    assert_eq!(page.total, 1);
+    assert_eq!(page.rows[0].title, "ÄNEEDLE");
+    snapshot.finish().unwrap();
+}
+
+#[test]
+fn reader_snapshots_reuse_counts_until_published_invalidation() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("reader.db");
+    let writer = Store::open(&path).unwrap();
+    writer
+        .conn
+        .execute_batch(
+            "WITH RECURSIVE ids(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM ids WHERE id<256)
+         INSERT INTO tracks(id,path,raw_title,fingerprint)
+         SELECT id,'/track-'||id,CASE WHEN id%2=0 THEN 'needle' ELSE 'other' END,
+             CAST(printf('%032d',(id-1)/2) AS BLOB) FROM ids;",
+        )
+        .unwrap();
+    let reader = Store::open_reader(&path).unwrap();
+    let counts = || {
+        let snapshot = reader.read_snapshot().unwrap();
+        let filtered = snapshot
+            .library_page(Some("needle"), None, None, 0, 0)
+            .unwrap()
+            .total;
+        let duplicates = snapshot.duplicate_groups_page(0, 0).unwrap().total;
+        snapshot.finish().unwrap();
+        (filtered, duplicates)
+    };
+    let steps = SqlVmSteps::new(&reader.conn);
+    assert_eq!(counts(), (128, 128));
+    let cold = steps.take();
+    assert_eq!(counts(), (128, 128));
+    let warm = steps.take();
+    assert!(
+        warm * 4 < cold,
+        "unchanged snapshots repeated full counts: cold={cold}, warm={warm}"
+    );
+    writer
+        .conn
+        .execute(
+            "UPDATE tracks SET raw_title='changed',fingerprint=NULL WHERE id=2",
+            [],
+        )
+        .unwrap();
+    reader.invalidate_caches();
+    assert_eq!(counts(), (127, 127));
+    let transaction = writer.conn.unchecked_transaction().unwrap();
+    transaction
+        .execute("UPDATE tracks SET raw_title='transient'", [])
+        .unwrap();
+    assert_eq!(
+        writer
+            .library_page(Some("needle"), None, None, 0, 0)
+            .unwrap()
+            .total,
+        0
+    );
+    transaction.rollback().unwrap();
+    assert_eq!(
+        writer
+            .library_page(Some("needle"), None, None, 0, 0)
+            .unwrap()
+            .total,
+        127
+    );
+}

@@ -284,10 +284,7 @@ impl AudioProcessing {
         let handle = self.context.handle().clone();
         let graph_command = matches!(&command, Command::ProcessingGraphEdit { .. });
         cx.spawn(async move |this, cx| {
-            let ack = cx
-                .background_executor()
-                .spawn(async move { handle.request_ack(command) })
-                .await;
+            let ack = handle.request_ack(command).await;
             let success = ack.is_success();
             let _ = this.update(cx, |this, cx| {
                 this.pending = this.pending.saturating_sub(1);

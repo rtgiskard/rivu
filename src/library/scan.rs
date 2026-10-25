@@ -1,29 +1,46 @@
 use super::paths::{is_audio_path, is_cue_path, logical_path};
 use super::source::{HASH_CHUNK_BYTES, KnownFile, SOURCE_BATCH_SIZE, ScanRecord, prepare_sources};
+use crate::core::tasks::BlockingPool;
 use anyhow::{Context, Result, anyhow, bail};
 use rivu_protocol::model::{CueSegment, ScanPhase};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use tokio_util::sync::CancellationToken;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Cooperative cancellation shared by the scan owner and its async preparation.
 #[derive(Clone, Debug, Default)]
 pub struct ScanCancellation {
-    token: CancellationToken,
+    state: Arc<ScanCancellationState>,
+}
+
+#[derive(Debug, Default)]
+struct ScanCancellationState {
+    cancelled: AtomicBool,
+    event: event_listener::Event,
 }
 
 impl ScanCancellation {
     pub fn cancel(&self) {
-        self.token.cancel();
+        if !self.state.cancelled.swap(true, Ordering::AcqRel) {
+            self.state.event.notify(usize::MAX);
+        }
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.token.is_cancelled()
+        self.state.cancelled.load(Ordering::Acquire)
     }
 
     pub(crate) async fn cancelled(&self) {
-        self.token.cancelled().await;
+        while !self.is_cancelled() {
+            let listener = self.state.event.listen();
+            // Register before checking again so cancellation cannot be missed.
+            if self.is_cancelled() {
+                return;
+            }
+            listener.await;
+        }
     }
 
     pub fn check(&self) -> Result<()> {
@@ -155,6 +172,7 @@ impl ScanResult {
 /// expanding playlists/CUE sheets. Roots record confirmed absence only; failed
 /// opens, probes and permission checks never authorize missing reconciliation.
 pub(crate) async fn recheck_sources<Fut>(
+    workers: &BlockingPool,
     paths: &[PathBuf],
     mut known_sources: impl FnMut(Vec<PathBuf>) -> Fut,
     ffmpeg_enabled: bool,
@@ -180,18 +198,19 @@ where
         cancellation.check()?;
         let batch = chunk.to_vec();
         let token = cancellation.clone();
-        let inspected = tokio::task::spawn_blocking(move || {
-            let mut inspected = Vec::with_capacity(batch.len());
-            for path in batch {
-                token.check()?;
-                path.to_str().context("Audio source path is not UTF-8")?;
-                let metadata = fs::metadata(&path);
-                inspected.push((path, metadata));
-            }
-            Ok::<_, anyhow::Error>(inspected)
-        })
-        .await
-        .context("Registered source inspection worker failed")??;
+        let inspected = workers
+            .execute(move || {
+                let mut inspected = Vec::with_capacity(batch.len());
+                for path in batch {
+                    token.check()?;
+                    path.to_str().context("Audio source path is not UTF-8")?;
+                    let metadata = fs::metadata(&path);
+                    inspected.push((path, metadata));
+                }
+                Ok::<_, anyhow::Error>(inspected)
+            })
+            .await
+            .context("Registered source inspection worker failed")??;
         cancellation.check()?;
         let mut present = Vec::with_capacity(inspected.len());
         for (path, metadata) in inspected {
@@ -208,6 +227,7 @@ where
         }
         let mut sources = HashMap::new();
         prepare_sources(
+            workers,
             present,
             &mut known_sources,
             &mut sources,
@@ -256,26 +276,38 @@ pub fn scan_paths(
     cancellation: &ScanCancellation,
     progress: impl FnMut(ScanPhase, usize, Option<usize>, usize, Option<&Path>),
 ) -> Result<ScanResult> {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?
-        .block_on(scan_paths_with_cues(
-            paths,
-            |paths| std::future::ready(known_sources(&paths)),
+    let workers = &BlockingPool::new(4);
+    futures::executor::block_on(scan_paths_with_cues(
+        workers,
+        paths,
+        |paths| std::future::ready(known_sources(&paths)),
+        ScanSettings {
             ffmpeg_enabled,
             library_roots,
             max_depth,
-            (cancellation, None),
-            progress,
-        ))
+        },
+        (cancellation, None),
+        progress,
+    ))
+}
+
+pub(crate) struct ScanSettings<'a> {
+    pub(crate) ffmpeg_enabled: bool,
+    /// Normalized absolute logical paths published by the core.
+    pub(crate) library_roots: &'a [PathBuf],
+    /// Depth relative to each requested directory, which is depth zero.
+    pub(crate) max_depth: u32,
 }
 
 pub(crate) async fn scan_paths_with_cues<Fut>(
+    workers: &BlockingPool,
     paths: &[PathBuf],
     mut known_sources: impl FnMut(Vec<PathBuf>) -> Fut,
-    ffmpeg_enabled: bool,
-    library_roots: &[PathBuf],
-    max_depth: u32,
+    ScanSettings {
+        ffmpeg_enabled,
+        library_roots,
+        max_depth,
+    }: ScanSettings<'_>,
     (cancellation, mut sheets): (
         &ScanCancellation,
         Option<HashMap<PathBuf, super::cue::CueSheet>>,
@@ -330,12 +362,13 @@ where
         }
         result.roots.push(root.clone());
         let root_index = result.roots.len() - 1;
-        let metadata = match tokio::task::spawn_blocking({
-            let root = root.clone();
-            move || fs::metadata(root)
-        })
-        .await
-        .context("Scan root metadata worker failed")?
+        let metadata = match workers
+            .execute({
+                let root = root.clone();
+                move || fs::metadata(root)
+            })
+            .await
+            .context("Scan root metadata worker failed")?
         {
             Ok(metadata) => metadata,
             Err(error) => {
@@ -394,6 +427,7 @@ where
             }
         } else {
             discover_directory(
+                workers,
                 &root,
                 metadata,
                 (root_index, max_depth),
@@ -412,13 +446,14 @@ where
         result.errors.len(),
         None,
     );
-    let files = tokio::task::spawn_blocking(move || {
-        let mut files: Vec<_> = files.into_iter().collect();
-        files.sort();
-        files
-    })
-    .await
-    .context("Scan discovery ordering worker failed")?;
+    let files = workers
+        .execute(move || {
+            let mut files: Vec<_> = files.into_iter().collect();
+            files.sort();
+            files
+        })
+        .await
+        .context("Scan discovery ordering worker failed")?;
     cancellation.check()?;
     let total = files.len();
     let mut processed = 0;
@@ -438,7 +473,7 @@ where
         let mut pending = HashSet::new();
         for path in cue_paths.by_ref().take(SOURCE_BATCH_SIZE) {
             cancellation.check()?;
-            let sheet = read_cue(path, library_roots, cancellation, sheets.as_mut()).await;
+            let sheet = read_cue(workers, path, library_roots, cancellation, sheets.as_mut()).await;
             if let Ok(sheet) = &sheet {
                 for track in &sheet.tracks {
                     if !sources.contains_key(&track.file) {
@@ -454,6 +489,7 @@ where
         let mut pending: Vec<_> = pending.into_iter().collect();
         pending.sort();
         prepare_sources(
+            workers,
             pending,
             &mut known_sources,
             &mut sources,
@@ -501,6 +537,7 @@ where
             .cloned()
             .collect();
         prepare_sources(
+            workers,
             pending,
             &mut known_sources,
             &mut sources,
@@ -534,28 +571,29 @@ where
         }
     }
     cancellation.check()?;
-    let result = tokio::task::spawn_blocking(move || {
-        suppressed.retain(|path| !explicit_audio.contains(path));
-        result.suppressed_sources = suppressed.into_iter().collect();
-        result.suppressed_sources.sort();
-        result.skipped_directories.sort_unstable_by(|a, b| {
-            a.path
-                .cmp(&b.path)
-                .then_with(|| a.root_index.cmp(&b.root_index))
-        });
-        result.records.sort_by(|a, b| {
-            let identity =
-                |record: &ScanRecord| record.cue.as_ref().map(|cue| cue.number).unwrap_or(0);
-            let a_path = a.cue.as_ref().map_or(&a.path, |cue| &cue.sheet);
-            let b_path = b.cue.as_ref().map_or(&b.path, |cue| &cue.sheet);
-            a_path
-                .cmp(b_path)
-                .then_with(|| identity(a).cmp(&identity(b)))
-        });
-        result
-    })
-    .await
-    .context("Scan result ordering worker failed")?;
+    let result = workers
+        .execute(move || {
+            suppressed.retain(|path| !explicit_audio.contains(path));
+            result.suppressed_sources = suppressed.into_iter().collect();
+            result.suppressed_sources.sort();
+            result.skipped_directories.sort_unstable_by(|a, b| {
+                a.path
+                    .cmp(&b.path)
+                    .then_with(|| a.root_index.cmp(&b.root_index))
+            });
+            result.records.sort_by(|a, b| {
+                let identity =
+                    |record: &ScanRecord| record.cue.as_ref().map(|cue| cue.number).unwrap_or(0);
+                let a_path = a.cue.as_ref().map_or(&a.path, |cue| &cue.sheet);
+                let b_path = b.cue.as_ref().map_or(&b.path, |cue| &cue.sheet);
+                a_path
+                    .cmp(b_path)
+                    .then_with(|| identity(a).cmp(&identity(b)))
+            });
+            result
+        })
+        .await
+        .context("Scan result ordering worker failed")?;
     progress(
         ScanPhase::ReadingMetadata,
         processed,
@@ -570,6 +608,7 @@ where
 /// One sequential DFS: at most max_depth + 1 directory readers, no task per
 /// entry, and inode ancestry detects loops without erasing logical aliases.
 async fn discover_directory(
+    workers: &BlockingPool,
     root: &Path,
     metadata: fs::Metadata,
     (root_index, max_depth): (usize, u32),
@@ -591,7 +630,8 @@ async fn discover_directory(
     }
 
     let root_path = root.to_path_buf();
-    let entries = tokio::task::spawn_blocking(move || fs::read_dir(root_path))
+    let entries = workers
+        .execute(move || fs::read_dir(root_path))
         .await
         .context("Scan directory admission worker failed")?;
     let entries = match entries {
@@ -610,77 +650,78 @@ async fn discover_directory(
     while !stack.is_empty() {
         cancellation.check()?;
         let token = cancellation.clone();
-        let (next_stack, discoveries) = tokio::task::spawn_blocking(move || {
-            let mut discoveries = Vec::new();
-            // Count reader exhaustion/errors too, so a deep unwind is bounded.
-            for _ in 0..DIRECTORY_BATCH_SIZE {
-                token.check()?;
-                let Some(directory) = stack.last_mut() else {
-                    break;
-                };
-                let entry = match directory.entries.next() {
-                    Some(Ok(entry)) => entry,
-                    None => {
-                        stack.pop();
-                        continue;
-                    }
-                    Some(Err(error)) => {
-                        let path = directory.path.clone();
-                        stack.pop();
-                        discoveries.push(Discovery::Error(path, error));
-                        continue;
-                    }
-                };
-                let path = entry.path();
-                let file_type = match entry.file_type() {
-                    Ok(file_type) => file_type,
-                    Err(error) => {
-                        discoveries.push(Discovery::Error(path, error));
-                        continue;
-                    }
-                };
-                let metadata = if file_type.is_dir() || file_type.is_symlink() {
-                    match fs::metadata(&path) {
-                        Ok(metadata) => Some(metadata),
+        let (next_stack, discoveries) = workers
+            .execute(move || {
+                let mut discoveries = Vec::new();
+                // Count reader exhaustion/errors too, so a deep unwind is bounded.
+                for _ in 0..DIRECTORY_BATCH_SIZE {
+                    token.check()?;
+                    let Some(directory) = stack.last_mut() else {
+                        break;
+                    };
+                    let entry = match directory.entries.next() {
+                        Some(Ok(entry)) => entry,
+                        None => {
+                            stack.pop();
+                            continue;
+                        }
+                        Some(Err(error)) => {
+                            let path = directory.path.clone();
+                            stack.pop();
+                            discoveries.push(Discovery::Error(path, error));
+                            continue;
+                        }
+                    };
+                    let path = entry.path();
+                    let file_type = match entry.file_type() {
+                        Ok(file_type) => file_type,
                         Err(error) => {
                             discoveries.push(Discovery::Error(path, error));
                             continue;
                         }
+                    };
+                    let metadata = if file_type.is_dir() || file_type.is_symlink() {
+                        match fs::metadata(&path) {
+                            Ok(metadata) => Some(metadata),
+                            Err(error) => {
+                                discoveries.push(Discovery::Error(path, error));
+                                continue;
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    token.check()?;
+                    if let Some(metadata) = metadata.filter(fs::Metadata::is_dir) {
+                        if stack.len() > max_depth as usize {
+                            discoveries.push(Discovery::Depth(path));
+                            continue;
+                        }
+                        let identity = (metadata.dev(), metadata.ino());
+                        if stack.iter().any(|directory| directory.identity == identity) {
+                            discoveries.push(Discovery::Error(
+                                path,
+                                std::io::Error::other("filesystem loop detected"),
+                            ));
+                            continue;
+                        }
+                        match fs::read_dir(&path) {
+                            Ok(entries) => stack.push(Directory {
+                                path,
+                                identity,
+                                entries,
+                            }),
+                            Err(error) => discoveries.push(Discovery::Error(path, error)),
+                        }
+                    } else if is_audio_path(&path) || is_cue_path(&path) {
+                        discoveries.push(Discovery::File(path));
                     }
-                } else {
-                    None
-                };
-                token.check()?;
-                if let Some(metadata) = metadata.filter(fs::Metadata::is_dir) {
-                    if stack.len() > max_depth as usize {
-                        discoveries.push(Discovery::Depth(path));
-                        continue;
-                    }
-                    let identity = (metadata.dev(), metadata.ino());
-                    if stack.iter().any(|directory| directory.identity == identity) {
-                        discoveries.push(Discovery::Error(
-                            path,
-                            std::io::Error::other("filesystem loop detected"),
-                        ));
-                        continue;
-                    }
-                    match fs::read_dir(&path) {
-                        Ok(entries) => stack.push(Directory {
-                            path,
-                            identity,
-                            entries,
-                        }),
-                        Err(error) => discoveries.push(Discovery::Error(path, error)),
-                    }
-                } else if is_audio_path(&path) || is_cue_path(&path) {
-                    discoveries.push(Discovery::File(path));
                 }
-            }
-            token.check()?;
-            Ok::<_, anyhow::Error>((stack, discoveries))
-        })
-        .await
-        .context("Scan directory batch worker failed")??;
+                token.check()?;
+                Ok::<_, anyhow::Error>((stack, discoveries))
+            })
+            .await
+            .context("Scan directory batch worker failed")??;
         stack = next_stack;
         cancellation.check()?;
         for discovery in discoveries {
@@ -747,6 +788,7 @@ fn traversal_error(
 }
 
 async fn read_cue(
+    workers: &BlockingPool,
     path: &Path,
     library_roots: &[PathBuf],
     cancellation: &ScanCancellation,
@@ -759,17 +801,20 @@ async fn read_cue(
             .remove(path)
             .context("Import CUE sheet was not prepared"),
         None => {
-            let bytes =
-                super::input::read_input_async(path, super::input::MAX_CUE_BYTES, cancellation)
-                    .await
-                    .with_context(|| format!("Reading CUE {}", path.display()))?;
+            let bytes = super::input::read_input_async(
+                workers,
+                path,
+                super::input::MAX_CUE_BYTES,
+                cancellation,
+            )
+            .await
+            .with_context(|| format!("Reading CUE {}", path.display()))?;
             let path = path.to_path_buf();
             let cancellation = cancellation.clone();
-            tokio::task::spawn_blocking(move || {
-                super::cue::parse_input(&bytes, &path, &cancellation)
-            })
-            .await
-            .context("CUE parser worker failed")?
+            workers
+                .execute(move || super::cue::parse_input(&bytes, &path, &cancellation))
+                .await
+                .context("CUE parser worker failed")?
         }
     };
     cancellation.check()?;
@@ -882,111 +927,125 @@ mod recheck_tests {
         }
     }
 
-    #[tokio::test]
-    async fn exact_recheck_never_expands_inputs_and_only_confirms_absence() {
-        let directory = tempfile::tempdir().unwrap();
-        let nested = directory.path().join("nested");
-        fs::create_dir(&nested).unwrap();
-        fs::write(nested.join("unregistered.wav"), b"audio not requested").unwrap();
-        let sheet = directory.path().join("registered.cue");
-        fs::write(
-            &sheet,
-            b"FILE \"nested/unregistered.wav\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\n",
-        )
-        .unwrap();
-        let missing = directory.path().join("absent.wav");
-        let invalid = directory.path().join("invalid.wav");
-        fs::write(&invalid, b"not audio").unwrap();
-        let mut looked_up = Vec::new();
-        let result = recheck_sources(
-            &[
-                nested.clone(),
-                sheet.clone(),
-                missing.clone(),
-                invalid.clone(),
-            ],
-            |paths| {
-                looked_up.extend(paths.iter().cloned());
-                std::future::ready(Ok(vec![None; paths.len()]))
-            },
-            false,
-            &ScanCancellation::default(),
-            |_, _, _, _, _| {},
-        )
-        .await
-        .unwrap();
-        assert_eq!(result.roots, vec![missing]);
-        assert!(result.records.is_empty());
-        assert_eq!(result.errors.len(), 3);
-        assert!(
-            looked_up
-                .iter()
-                .all(|path| path == &sheet || path == &invalid)
-        );
-        assert!(!looked_up.contains(&nested.join("unregistered.wav")));
+    #[test]
+    fn exact_recheck_never_expands_inputs_and_only_confirms_absence() {
+        futures::executor::block_on(async {
+            let workers = &BlockingPool::new(4);
+            let directory = tempfile::tempdir().unwrap();
+            let nested = directory.path().join("nested");
+            fs::create_dir(&nested).unwrap();
+            fs::write(nested.join("unregistered.wav"), b"audio not requested").unwrap();
+            let sheet = directory.path().join("registered.cue");
+            fs::write(
+                &sheet,
+                b"FILE \"nested/unregistered.wav\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\n",
+            )
+            .unwrap();
+            let missing = directory.path().join("absent.wav");
+            let invalid = directory.path().join("invalid.wav");
+            fs::write(&invalid, b"not audio").unwrap();
+            let mut looked_up = Vec::new();
+            let result = recheck_sources(
+                workers,
+                &[
+                    nested.clone(),
+                    sheet.clone(),
+                    missing.clone(),
+                    invalid.clone(),
+                ],
+                |paths| {
+                    looked_up.extend(paths.iter().cloned());
+                    std::future::ready(Ok(vec![None; paths.len()]))
+                },
+                false,
+                &ScanCancellation::default(),
+                |_, _, _, _, _| {},
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.roots, vec![missing]);
+            assert!(result.records.is_empty());
+            assert_eq!(result.errors.len(), 3);
+            assert!(
+                looked_up
+                    .iter()
+                    .all(|path| path == &sheet || path == &invalid)
+            );
+            assert!(!looked_up.contains(&nested.join("unregistered.wav")));
+        })
     }
 
-    #[tokio::test]
-    async fn exact_recheck_reuses_cache_and_force_callback_bypasses_it() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("cached.wav");
-        fs::write(&path, b"intentionally unprobeable cached bytes").unwrap();
-        let known = cached(&path);
-        let result = recheck_sources(
-            &[path.clone(), path.clone()],
-            |paths| std::future::ready(Ok(vec![Some(known.clone()); paths.len()])),
-            false,
-            &ScanCancellation::default(),
-            |_, _, _, _, _| {},
-        )
-        .await
-        .unwrap();
-        assert_eq!(result.records.len(), 1);
-        assert_eq!(result.records[0].media.title, "Cached");
-        assert!(result.errors.is_empty());
-        let forced = recheck_sources(
-            &[path],
-            |paths| std::future::ready(Ok(vec![None; paths.len()])),
-            false,
-            &ScanCancellation::default(),
-            |_, _, _, _, _| {},
-        )
-        .await
-        .unwrap();
-        assert!(forced.records.is_empty());
-        assert_eq!(forced.errors.len(), 1);
-        assert!(forced.roots.is_empty());
+    #[test]
+    fn exact_recheck_reuses_cache_and_force_callback_bypasses_it() {
+        futures::executor::block_on(async {
+            let workers = &BlockingPool::new(4);
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("cached.wav");
+            fs::write(&path, b"intentionally unprobeable cached bytes").unwrap();
+            let known = cached(&path);
+            let result = recheck_sources(
+                workers,
+                &[path.clone(), path.clone()],
+                |paths| std::future::ready(Ok(vec![Some(known.clone()); paths.len()])),
+                false,
+                &ScanCancellation::default(),
+                |_, _, _, _, _| {},
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.records.len(), 1);
+            assert_eq!(result.records[0].media.title, "Cached");
+            assert!(result.errors.is_empty());
+            let forced = recheck_sources(
+                workers,
+                &[path],
+                |paths| std::future::ready(Ok(vec![None; paths.len()])),
+                false,
+                &ScanCancellation::default(),
+                |_, _, _, _, _| {},
+            )
+            .await
+            .unwrap();
+            assert!(forced.records.is_empty());
+            assert_eq!(forced.errors.len(), 1);
+            assert!(forced.roots.is_empty());
+        })
     }
 
-    #[tokio::test]
-    async fn exact_recheck_preserves_probe_failures_and_observes_cancellation_after_lookup() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("probe.wav");
-        fs::write(&path, b"unreadable probe").unwrap();
-        let failed = recheck_sources(
-            std::slice::from_ref(&path),
-            |_| std::future::ready(Err(anyhow!(std::io::ErrorKind::PermissionDenied))),
-            false,
-            &ScanCancellation::default(),
-            |_, _, _, _, _| {},
-        )
-        .await
-        .unwrap();
-        assert!(failed.records.is_empty());
-        assert!(failed.roots.is_empty());
-        assert_eq!(failed.errors.len(), 1);
-        let cancellation = ScanCancellation::default();
-        let cancelled = recheck_sources(
-            &[path],
-            |paths| {
-                cancellation.cancel();
-                std::future::ready(Ok(vec![None; paths.len()]))
-            },
-            false,
-            &cancellation,
-            |_, _, _, _, _| {},
-        )
-        .await;
-        assert!(cancelled.unwrap_err().to_string().contains("cancelled"));
+    #[test]
+    fn exact_recheck_preserves_probe_failures_and_observes_cancellation_after_lookup() {
+        futures::executor::block_on(async {
+            let workers = &BlockingPool::new(4);
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("probe.wav");
+            fs::write(&path, b"unreadable probe").unwrap();
+            let failed = recheck_sources(
+                workers,
+                std::slice::from_ref(&path),
+                |_| std::future::ready(Err(anyhow!(std::io::ErrorKind::PermissionDenied))),
+                false,
+                &ScanCancellation::default(),
+                |_, _, _, _, _| {},
+            )
+            .await
+            .unwrap();
+            assert!(failed.records.is_empty());
+            assert!(failed.roots.is_empty());
+            assert_eq!(failed.errors.len(), 1);
+            let cancellation = ScanCancellation::default();
+            let cancelled = recheck_sources(
+                workers,
+                &[path],
+                |paths| {
+                    cancellation.cancel();
+                    std::future::ready(Ok(vec![None; paths.len()]))
+                },
+                false,
+                &cancellation,
+                |_, _, _, _, _| {},
+            )
+            .await;
+            assert!(cancelled.unwrap_err().to_string().contains("cancelled"));
+        })
     }
 }

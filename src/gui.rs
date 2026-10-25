@@ -1420,7 +1420,7 @@ impl GuiApp {
             let response = query::run(
                 handle,
                 cx,
-                move |handle| handle.query_for_gui(Query::Track { track_id }),
+                move |handle| async move { handle.query_for_gui(Query::Track { track_id }).await },
                 |response, cx| {
                     let _ = this.update(cx, |this, cx| {
                         this.refresh(cx);

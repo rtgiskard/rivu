@@ -69,9 +69,8 @@ fn relocation_fixture() -> (tempfile::TempDir, Core, i64, i64) {
 }
 
 fn receive_relocation(core: &mut Core) -> RelocationFinished {
-    let executor = core.executor.clone();
-    wait_on(&executor, async {
-        tokio::time::timeout(Duration::from_secs(5), core.relocation_rx.recv())
+    futures::executor::block_on(async {
+        rivu_protocol::transport::timeout(Duration::from_secs(5), core.relocation_rx.recv())
             .await
             .unwrap()
             .unwrap()
@@ -355,7 +354,7 @@ fn cancellation_keeps_relocation_admission_until_the_async_worker_retires() {
         cancellation: library::ScanCancellation::default(),
         worker: Some(worker),
     });
-    wait_on(&core.executor, observe_started).unwrap();
+    futures::executor::block_on(observe_started).unwrap();
     core.cancel_relocation(id).unwrap();
     assert!(core.active_relocation.is_some());
     assert!(core.relocation_rx.try_recv().is_err());

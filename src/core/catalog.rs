@@ -23,10 +23,7 @@ fn scan_message(progress: &ScanProgress) -> String {
 // Capacity three covers coalesced progress, one outstanding lookup (possibly
 // abandoned by cancellation), and the reliable terminal event. Reliable sends
 // await capacity; progress is droppable and never consumes more than one slot.
-async fn deliver_scan_event(
-    sender: &tokio::sync::mpsc::Sender<ScanEvent>,
-    event: ScanEvent,
-) -> Result<()> {
+async fn deliver_scan_event(sender: &mpsc::Sender<ScanEvent>, event: ScanEvent) -> Result<()> {
     sender
         .send(event)
         .await
@@ -34,22 +31,30 @@ async fn deliver_scan_event(
 }
 
 async fn lookup_scan_sources(
-    sender: tokio::sync::mpsc::Sender<ScanEvent>,
+    sender: mpsc::Sender<ScanEvent>,
     id: u64,
     paths: Vec<PathBuf>,
     cancellation: library::ScanCancellation,
 ) -> Result<Vec<Option<library::KnownFile>>> {
     cancellation.check()?;
-    let (reply, receive) = tokio::sync::oneshot::channel();
-    tokio::select! {
-        biased;
-        _ = cancellation.cancelled() => bail!("scan cancelled"),
-        result = deliver_scan_event(&sender, ScanEvent::KnownSources { id, paths, reply }) => result?,
+    let (reply, receive) = futures::channel::oneshot::channel();
+    {
+        let cancelled = cancellation.cancelled().fuse();
+        let send = deliver_scan_event(&sender, ScanEvent::KnownSources { id, paths, reply }).fuse();
+        futures::pin_mut!(cancelled, send);
+        futures::select_biased! {
+            _ = cancelled => bail!("scan cancelled"),
+            result = send => result?,
+        }
     }
-    let result = tokio::select! {
-        biased;
-        _ = cancellation.cancelled() => bail!("scan cancelled"),
-        result = receive => result.context("scan source lookup disconnected")?,
+    let result = {
+        let cancelled = cancellation.cancelled().fuse();
+        let receive = receive.fuse();
+        futures::pin_mut!(cancelled, receive);
+        futures::select_biased! {
+            _ = cancelled => bail!("scan cancelled"),
+            result = receive => result.context("scan source lookup disconnected")?,
+        }
     };
     cancellation.check()?;
     result
@@ -79,7 +84,7 @@ pub(super) struct ScanSaved {
 }
 
 struct ScanSavingCompletion {
-    sender: Option<tokio::sync::oneshot::Sender<ScanSaved>>,
+    sender: Option<oneshot::Sender<ScanSaved>>,
     saved: Option<ScanSaved>,
 }
 
@@ -105,7 +110,7 @@ fn save_scan(
     current_id: Option<u64>,
     scan: ScanFinished,
     other_roots: Option<Vec<PathBuf>>,
-    sender: tokio::sync::oneshot::Sender<ScanSaved>,
+    sender: oneshot::Sender<ScanSaved>,
 ) {
     let mut completion = ScanSavingCompletion {
         sender: Some(sender),
@@ -293,6 +298,7 @@ impl Core {
         let cancellation = library::ScanCancellation::default();
         let worker_cancellation = cancellation.clone();
         let sender = self.scan_tx.clone();
+        let workers = self.workers.clone();
         let worker = self.spawn_scan_preparation(id, async move {
             let mut latest = ScanProgress {
                 phase: ScanPhase::Discovering,
@@ -313,7 +319,7 @@ impl Core {
                 if transition || last_emit.elapsed() >= Duration::from_millis(100) {
                     last_phase = Some(phase);
                     last_emit = Instant::now();
-                    if progress_sender.capacity() == progress_sender.max_capacity() {
+                    if progress_sender.is_empty() {
                         let event = ScanProgress {
                             phase,
                             processed,
@@ -339,19 +345,21 @@ impl Core {
                     let token = worker_cancellation.clone();
                     // Always await the blocking enumeration: cancellation retires
                     // the physical worker rather than merely dropping its handle.
-                    let paths = tokio::task::spawn_blocking(move || {
-                        token.check()?;
-                        let roots = library::normalize_roots(&query_config.library_roots)?;
-                        let store = Store::open(&database_path)
-                            .context("Opening Other check database failed")?;
-                        let paths = store.other_tracks_sources(&roots)?;
-                        token.check()?;
-                        Ok::<_, anyhow::Error>(paths)
-                    })
-                    .await
-                    .context("Other source enumeration worker failed")??;
+                    let paths = workers
+                        .execute(move || {
+                            token.check()?;
+                            let roots = library::normalize_roots(&query_config.library_roots)?;
+                            let store = Store::open(&database_path)
+                                .context("Opening Other check database failed")?;
+                            let paths = store.other_tracks_sources(&roots)?;
+                            token.check()?;
+                            Ok::<_, anyhow::Error>(paths)
+                        })
+                        .await
+                        .context("Other source enumeration worker failed")??;
                     worker_cancellation.check()?;
                     return library::recheck_sources(
+                        &workers,
                         &paths,
                         |paths| {
                             let sender = sender.clone();
@@ -375,6 +383,7 @@ impl Core {
                     ScanInput::Import { path, name } => {
                         import = Some((name, Vec::new()));
                         let prepared = library::prepare_playlist_import(
+                            &workers,
                             &path,
                             &worker_cancellation,
                             Some(&config.library_roots),
@@ -395,6 +404,7 @@ impl Core {
                     ScanInput::OtherTracks { .. } => unreachable!("Other check handled above"),
                 };
                 library::scan_paths_with_cues(
+                    &workers,
                     &paths,
                     |paths| {
                         let sender = sender.clone();
@@ -407,9 +417,11 @@ impl Core {
                             }
                         }
                     },
-                    ffmpeg_enabled,
-                    &config.library_roots,
-                    config.scan_max_depth,
+                    library::ScanSettings {
+                        ffmpeg_enabled,
+                        library_roots: &config.library_roots,
+                        max_depth: config.scan_max_depth,
+                    },
                     (&worker_cancellation, sheets),
                     &mut progress,
                 )
@@ -470,7 +482,7 @@ impl Core {
         &self,
         id: u64,
         prepare: impl Future<Output = ScanFinished> + Send + 'static,
-    ) -> tokio::task::JoinHandle<()> {
+    ) -> async_executor::Task<()> {
         let sender = self.scan_tx.clone();
         self.executor.spawn(async move {
             let finished = std::panic::AssertUnwindSafe(prepare)
@@ -608,9 +620,9 @@ impl Core {
             // Saving is an accepted commit, not cancellable traversal. Drain its
             // sole completion before joining, even if delivery is backpressured.
             while self.active_scan.is_some() {
-                match self.scan_rx.blocking_recv() {
-                    Some(event) => self.scan_event(event),
-                    None => {
+                match self.scan_rx.recv_blocking() {
+                    Ok(event) => self.scan_event(event),
+                    Err(_) => {
                         let task = self.active_scan.take().unwrap();
                         self.complete_unsaved_scan(
                             task,
@@ -709,12 +721,14 @@ impl Core {
         let current_id = self.state.queue.current_id;
         // Finished no longer awaits Core. Join preparation before scheduling the
         // accepted, non-cancellable transaction, then supervise its retirement.
-        let _ = futures::executor::block_on(task.worker);
+        let _ =
+            futures::executor::block_on(std::panic::AssertUnwindSafe(task.worker).catch_unwind());
+        let workers = self.workers.clone();
         task.worker = self.executor.spawn(async move {
             let id = scan.id;
             let progress = scan.progress.clone();
-            let (completed, completion) = tokio::sync::oneshot::channel();
-            let joined = tokio::task::spawn_blocking(move || {
+            let (completed, completion) = futures::channel::oneshot::channel();
+            let joined = workers.execute(move || {
                 save_scan(&database_path, current_id, scan, other_roots, completed)
             }).await;
             let saved = completion.await.unwrap_or_else(|_| ScanSaved {
@@ -741,7 +755,8 @@ impl Core {
     }
 
     fn complete_unsaved_scan(&mut self, mut task: ScanTask, result: Result<()>, cancelled: bool) {
-        let _ = futures::executor::block_on(task.worker);
+        let _ =
+            futures::executor::block_on(std::panic::AssertUnwindSafe(task.worker).catch_unwind());
         if cancelled {
             task.status.progress.phase = ScanPhase::Cancelled;
             task.status.message = "Scan cancelled".into();
@@ -762,7 +777,8 @@ impl Core {
             return;
         }
         let mut task = self.active_scan.take().unwrap();
-        let retired = futures::executor::block_on(task.worker);
+        let retired =
+            futures::executor::block_on(std::panic::AssertUnwindSafe(task.worker).catch_unwind());
         if saved.outcome_uncertain || retired.is_err() {
             self.database_outcome_uncertain();
             task.status.progress = saved.progress;
@@ -887,7 +903,7 @@ mod tests {
             let directory = tempfile::tempdir().unwrap();
             let database_path = directory.path().join("library.db");
             drop(Store::open(&database_path).unwrap());
-            let (sender, receiver) = tokio::sync::oneshot::channel();
+            let (sender, receiver) = futures::channel::oneshot::channel();
             let worker = thread::spawn(move || {
                 let mut completion = ScanSavingCompletion {
                     sender: Some(sender),

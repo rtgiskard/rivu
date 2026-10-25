@@ -619,8 +619,8 @@ impl Store {
         if query.is_none() && favorite.is_none() && missing.is_none() && prefix.is_none() {
             return self.track_count();
         }
-        // Local writes invalidate; explicit transaction snapshots are never cached.
-        let cacheable = self.conn.is_autocommit();
+        // Writable transactions bypass counts; read-only owners fence invalidation.
+        let cacheable = self.revision_owned_counts || self.conn.is_autocommit();
         let changes = self.conn.total_changes();
         if cacheable
             && let Some(cached) = self.count_cache.borrow().as_ref()

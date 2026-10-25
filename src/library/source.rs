@@ -1,4 +1,5 @@
 use super::ScanCancellation;
+use crate::core::tasks::BlockingPool;
 use anyhow::{Context, Result, bail};
 use rivu_audio::{MediaInfo, SourceIdentity, probe_file};
 use rivu_format::input::open_regular_file;
@@ -163,6 +164,7 @@ impl PendingSource {
 }
 
 pub(super) async fn prepare_sources<Fut>(
+    workers: &BlockingPool,
     paths: Vec<PathBuf>,
     known_sources: &mut impl FnMut(Vec<PathBuf>) -> Fut,
     sources: &mut HashMap<PathBuf, std::result::Result<ScanRecord, String>>,
@@ -181,23 +183,24 @@ where
             return Ok(());
         }
         let token = cancellation.clone();
-        let admitted = tokio::task::spawn_blocking(move || {
-            let mut admitted = Vec::with_capacity(batch.len());
-            for path in batch {
+        let admitted = workers
+            .execute(move || {
+                let mut admitted = Vec::with_capacity(batch.len());
+                for path in batch {
+                    token.check()?;
+                    let opened = (|| {
+                        path.to_str().context("Audio source path is not UTF-8")?;
+                        let file = open_regular_file(&path)?;
+                        let metadata = file.metadata()?;
+                        Ok::<_, anyhow::Error>((file, metadata))
+                    })();
+                    admitted.push((path, opened));
+                }
                 token.check()?;
-                let opened = (|| {
-                    path.to_str().context("Audio source path is not UTF-8")?;
-                    let file = open_regular_file(&path)?;
-                    let metadata = file.metadata()?;
-                    Ok::<_, anyhow::Error>((file, metadata))
-                })();
-                admitted.push((path, opened));
-            }
-            token.check()?;
-            Ok::<_, anyhow::Error>(admitted)
-        })
-        .await
-        .context("Scan source admission worker failed")??;
+                Ok::<_, anyhow::Error>(admitted)
+            })
+            .await
+            .context("Scan source admission worker failed")??;
         cancellation.check()?;
         let mut opened = Vec::with_capacity(admitted.len());
         let mut lookup_paths = Vec::with_capacity(admitted.len());
@@ -253,31 +256,32 @@ where
             cancellation.check()?;
             let token = cancellation.clone();
             let mut buffer = std::mem::take(scratch);
-            let (remaining, completed, buffer) = tokio::task::spawn_blocking(move || {
-                let mut completed = Vec::new();
-                for _ in 0..SOURCE_STEPS_PER_TURN {
-                    token.check()?;
-                    let Some(source) = pending.front_mut() else {
-                        break;
-                    };
-                    match source.step(ffmpeg_enabled, &token, &mut buffer) {
-                        Ok(Some(record)) => {
-                            pending.pop_front();
-                            completed.push((record.path.clone(), Ok(record)));
-                        }
-                        Ok(None) => {}
-                        Err(error) => {
-                            token.check()?;
-                            let source = pending.pop_front().expect("front source is present");
-                            completed.push((source.path, Err(format!("{error:#}"))));
+            let (remaining, completed, buffer) = workers
+                .execute(move || {
+                    let mut completed = Vec::new();
+                    for _ in 0..SOURCE_STEPS_PER_TURN {
+                        token.check()?;
+                        let Some(source) = pending.front_mut() else {
+                            break;
+                        };
+                        match source.step(ffmpeg_enabled, &token, &mut buffer) {
+                            Ok(Some(record)) => {
+                                pending.pop_front();
+                                completed.push((record.path.clone(), Ok(record)));
+                            }
+                            Ok(None) => {}
+                            Err(error) => {
+                                token.check()?;
+                                let source = pending.pop_front().expect("front source is present");
+                                completed.push((source.path, Err(format!("{error:#}"))));
+                            }
                         }
                     }
-                }
-                token.check()?;
-                Ok::<_, anyhow::Error>((pending, completed, buffer))
-            })
-            .await
-            .context("Scan source batch worker failed")??;
+                    token.check()?;
+                    Ok::<_, anyhow::Error>((pending, completed, buffer))
+                })
+                .await
+                .context("Scan source batch worker failed")??;
             *scratch = buffer;
             pending = remaining;
             cancellation.check()?;

@@ -1023,16 +1023,12 @@ impl Core {
         self.processing.pending_audition = None;
         let generation = self.generation;
         let mut bookkeeping = Ok(());
-        let executor = self.executor.clone();
         let mut stop = self.engine.stop_request();
-        let snapshot = wait_on(
-            &executor,
-            stop.wait(|event| {
-                if bookkeeping.is_ok() {
-                    bookkeeping = self.retiring_audio_event(generation, event);
-                }
-            }),
-        );
+        let snapshot = futures::executor::block_on(stop.wait(|event| {
+            if bookkeeping.is_ok() {
+                bookkeeping = self.retiring_audio_event(generation, event);
+            }
+        }));
         self.engine.restore_events(stop.into_events());
         let snapshot = match snapshot {
             Ok(snapshot) if bookkeeping.is_ok() => snapshot,

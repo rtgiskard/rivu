@@ -2,12 +2,12 @@ use super::*;
 
 // Scan commits use another connection; all catalog task tests need a real DB.
 fn fixture() -> (tempfile::TempDir, Core) {
-    fixture_with_database(Some(10.0), true)
+    fixture_with_database(Some(10.0))
 }
 
 #[test]
 fn committed_scan_invalidates_before_failed_refresh() {
-    let (directory, mut core) = fixture_with_database(Some(10.0), true);
+    let (directory, mut core) = fixture_with_database(Some(10.0));
     let track = core.track(1).unwrap();
     let path = track.path.clone();
     core.state.queue.current_id = Some(1);
@@ -73,7 +73,7 @@ fn committed_scan_invalidates_before_failed_refresh() {
 
 #[test]
 fn scan_count_failure_preserves_playlist_domains_and_still_refreshes_queue() {
-    let (directory, mut core) = fixture_with_database(Some(10.0), true);
+    let (directory, mut core) = fixture_with_database(Some(10.0));
     core.command(Command::CreatePlaylist {
         name: "Retained".into(),
     })
@@ -381,7 +381,7 @@ fn imports_preserve_valid_explicit_and_default_name_whitespace() {
 #[test]
 fn import_task_errors_distinguish_scan_save_from_playlist_creation_failure() {
     for scan_saved in [false, true] {
-        let (directory, mut core) = fixture_with_database(Some(10.0), true);
+        let (directory, mut core) = fixture_with_database(Some(10.0));
         let source = directory.path().join("new.wav");
         core.create_playlist_with_tracks("Existing".into(), vec![1])
             .unwrap();
@@ -803,7 +803,7 @@ fn save_prepared_scan(core: &mut Core, scan: ScanFinished) -> ScanTaskStatus {
             crate::projection::MediaTaskOwner::Library
         },
         cancellation: library::ScanCancellation::default(),
-        worker: core.executor.spawn_blocking(|| {}),
+        worker: core.executor.spawn(async {}),
         pending_save: None,
     });
     core.scan_event(ScanEvent::Finished(scan));
@@ -990,10 +990,10 @@ fn scan_start_ack_binds_the_accepted_task() {
     let (directory, mut core) = fixture();
     let path = directory.path().join("1.wav");
     write_pcm(&path);
-    let (requests, receiver) = mpsc::channel(3);
+    let (requests, receiver) = async_channel::bounded(3);
     let (reply, ack) = oneshot::channel();
     requests
-        .blocking_send(Request {
+        .send_blocking(Request {
             operation: Operation::Command(Command::Scan {
                 paths: vec![path],
                 force: false,
@@ -1003,7 +1003,7 @@ fn scan_start_ack_binds_the_accepted_task() {
         .unwrap();
     drop(requests);
     core = run_until_disconnected(core, receiver);
-    let CoreResponse::Ack(ack) = ack.blocking_recv().unwrap() else {
+    let CoreResponse::Ack(ack) = futures::executor::block_on(ack).unwrap() else {
         panic!("Expected ack");
     };
     assert!(ack.is_success());
@@ -1020,10 +1020,10 @@ fn scan_start_ack_binds_the_accepted_task() {
 fn rejected_library_scan_ack_preserves_unrelated_global_errors() {
     let (_directory, mut core) = fixture();
     core.state.system.last_error = Some("Unrelated audio failure".into());
-    let (requests, receiver) = mpsc::channel(1);
+    let (requests, receiver) = async_channel::bounded(1);
     let (reply, ack) = oneshot::channel();
     requests
-        .blocking_send(Request {
+        .send_blocking(Request {
             operation: Operation::Command(Command::Scan {
                 paths: Vec::new(),
                 force: false,
@@ -1033,7 +1033,7 @@ fn rejected_library_scan_ack_preserves_unrelated_global_errors() {
         .unwrap();
     drop(requests);
     core = run_until_disconnected(core, receiver);
-    let CoreResponse::Ack(ack) = ack.blocking_recv().unwrap() else {
+    let CoreResponse::Ack(ack) = futures::executor::block_on(ack).unwrap() else {
         panic!("Expected ack");
     };
     assert!(!ack.is_success());
@@ -1836,7 +1836,7 @@ fn committed_impacts_refresh_current_track_activity_and_probe_metadata() {
 
 #[test]
 fn database_optimization_requires_stopped_playback_and_no_scan() {
-    let (_directory, mut core) = fixture_with_database(Some(10.0), true);
+    let (_directory, mut core) = fixture_with_database(Some(10.0));
     playing(&mut core, 1);
     core.state.system.database_optimization = Some(DatabaseOptimization {
         database_bytes_before: 1,
@@ -2109,10 +2109,9 @@ fn accepted_import_allows_dispatch_and_cancellation_before_commit() {
 }
 
 fn settle_optimization(core: &mut Core) -> Result<()> {
-    let executor = core.executor.clone();
     let finished = &mut core.active_optimization.as_mut().unwrap().finished;
-    let result = wait_on(&executor, async {
-        tokio::time::timeout(Duration::from_secs(15), finished)
+    let result = futures::executor::block_on(async {
+        rivu_protocol::transport::timeout(Duration::from_secs(15), finished)
             .await
             .unwrap()
             .unwrap()
@@ -2125,17 +2124,16 @@ fn settle_optimization(core: &mut Core) -> Result<()> {
 
 #[test]
 fn database_optimization_remains_single_flight_after_requester_disconnects() {
-    let (_directory, mut core) = fixture_with_database(Some(10.0), true);
+    let (_directory, mut core) = fixture_with_database(Some(10.0));
     core.command(Command::OptimizeDatabase).unwrap();
     let (reply, requester) = oneshot::channel();
     core.active_optimization.as_mut().unwrap().reply = Some(reply);
     drop(requester);
     assert!(core.command(Command::OptimizeDatabase).is_err());
     assert!(core.active_optimization.is_some());
-    let executor = core.executor.clone();
     let finished = &mut core.active_optimization.as_mut().unwrap().finished;
-    let result = wait_on(&executor, async {
-        tokio::time::timeout(Duration::from_secs(15), finished)
+    let result = futures::executor::block_on(async {
+        rivu_protocol::transport::timeout(Duration::from_secs(15), finished)
             .await
             .unwrap()
             .unwrap()
@@ -2153,7 +2151,7 @@ fn database_optimization_remains_single_flight_after_requester_disconnects() {
 
 #[test]
 fn database_optimization_checkpoint_failure_retires_owner_and_allows_explicit_retry() {
-    let (directory, mut core) = fixture_with_database(Some(10.0), true);
+    let (directory, mut core) = fixture_with_database(Some(10.0));
     core.command(Command::SetFavorite {
         track_ids: vec![1],
         favorite: true,
@@ -2184,7 +2182,7 @@ fn database_optimization_checkpoint_failure_retires_owner_and_allows_explicit_re
 
 #[test]
 fn database_optimization_shutdown_waits_for_final_worker_result() {
-    let (_directory, mut core) = fixture_with_database(Some(10.0), true);
+    let (_directory, mut core) = fixture_with_database(Some(10.0));
     core.command(Command::OptimizeDatabase).unwrap();
     let (reply, result) = core.shutdown_optimization().unwrap();
     result.unwrap();

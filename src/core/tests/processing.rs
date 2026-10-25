@@ -24,8 +24,8 @@ fn source(directory: &Path) -> Vec<f32> {
     samples
 }
 fn next_processing_event(core: &mut Core, timeout: Duration) -> Result<crate::processing::Event> {
-    wait_on(&core.executor, async {
-        tokio::time::timeout(timeout, core.processing.receiver.recv())
+    futures::executor::block_on(async {
+        rivu_protocol::transport::timeout(timeout, core.processing.receiver.recv())
             .await
             .context("Timed out waiting for processing event")?
             .context("Processing event channel disconnected")
@@ -54,12 +54,12 @@ fn recording_final_snapshot(
     core: &mut Core,
     snapshot: audio::AudioSnapshot,
 ) -> Receiver<AudioCommand> {
-    let (commands, mut receive) = mpsc::channel(64);
+    let (commands, receive) = async_channel::bounded(64);
     let previous = core.engine.replace_commands(commands);
     let (record, recorded) = crossbeam_channel::unbounded();
     thread::spawn(move || {
         let _previous = previous;
-        while let Some(command) = receive.blocking_recv() {
+        while let Ok(command) = receive.recv_blocking() {
             match command {
                 AudioCommand::StopAndSnapshot(reply) => {
                     let (recorded_reply, _) = oneshot::channel();
@@ -148,7 +148,7 @@ fn cancellation_after_physical_completion_still_prevents_publication() {
 
 #[test]
 fn uncertain_database_rejects_held_processing_completion_before_source_read_or_export() {
-    let (directory, mut core) = fixture_with_database(Some(10.0), true);
+    let (directory, mut core) = fixture_with_database(Some(10.0));
     source(directory.path());
     core.start_processing(1, ProcessingOperation::Denoise, None)
         .unwrap();
@@ -312,7 +312,7 @@ fn empty_equalizer_batches_use_log_uniform_neutral_cell_centers() {
     use rivu_dsp::equalizer::config::{EqBand, MAX_BANDS};
     for count in [1, 6, MAX_BANDS] {
         let (_directory, mut core) = fixture();
-        let (commands, mut receive) = mpsc::channel(64);
+        let (commands, receive) = async_channel::bounded(64);
         let _idle_commands = core.engine.replace_commands(commands);
         assert!(core.state.current_track.is_none());
         core.equalizer_edit(EqualizerEdit::AddBands { count })
@@ -407,7 +407,7 @@ fn equalizer_batches_fill_largest_log_gaps_without_rewriting_edited_bands() {
 fn invalid_equalizer_batch_counts_preserve_memory_disk_and_audio_atomically() {
     use rivu_dsp::equalizer::config::MAX_BANDS;
     let (_directory, mut core) = fixture();
-    let (commands, mut receive) = mpsc::channel(64);
+    let (commands, receive) = async_channel::bounded(64);
     let _idle_commands = core.engine.replace_commands(commands);
     core.equalizer_edit(EqualizerEdit::AddBand {
         band: rivu_dsp::equalizer::config::EqBand::default(),
@@ -512,7 +512,7 @@ fn rate_bounded_gap_filling_preserves_existing_out_of_range_bands() {
 #[test]
 fn unusable_equalizer_batch_frequency_range_is_rejected_atomically() {
     let (_directory, mut core) = fixture();
-    let (commands, mut receive) = mpsc::channel(64);
+    let (commands, receive) = async_channel::bounded(64);
     let _idle_commands = core.engine.replace_commands(commands);
     let mut track = core.track(1).unwrap();
     track.sample_rate = 40;
@@ -1812,7 +1812,7 @@ fn shutdown_closes_processing_delivery_and_retires_unpublished_outputs() {
         })
         .ok()
         .unwrap();
-    while core.processing.sender.capacity() != 0 {
+    while core.processing.sender.len() < core.processing.sender.capacity().unwrap() {
         core.processing
             .sender
             .try_send(crate::processing::Event::Progress {
@@ -1831,7 +1831,7 @@ fn shutdown_closes_processing_delivery_and_retires_unpublished_outputs() {
     let (release, released) = bounded(1);
     let worker = thread::spawn(move || {
         let rejected = sender
-            .blocking_send(crate::processing::Event::Finished {
+            .send_blocking(crate::processing::Event::Finished {
                 id: blocked.status.id,
                 result: Ok(Box::new(blocked)),
             })

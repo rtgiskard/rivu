@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn cancelled_queued_read_skips_store_and_does_not_cancel_another_owner() {
-    let (directory, core) = fixture_with_database(Some(10.0), true);
+    let (directory, core) = fixture_with_database(Some(10.0));
     core.store.set_track_cache_page_size(0);
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     connection
@@ -12,11 +12,11 @@ fn cancelled_queued_read_skips_store_and_does_not_cancel_another_owner() {
 
     let mut cancelled = QueryEpoch::default();
     let mut current = QueryEpoch::default();
-    let (sender, requests) = mpsc::channel(3);
+    let (sender, requests) = async_channel::bounded(3);
     let enqueue = |track_id, ticket| {
         let (reply, response) = oneshot::channel();
         sender
-            .blocking_send(Request {
+            .send_blocking(Request {
                 operation: Operation::Query {
                     query: Query::Track { track_id },
                     ticket,
@@ -34,21 +34,21 @@ fn cancelled_queued_read_skips_store_and_does_not_cancel_another_owner() {
     drop(run_until_disconnected(core, requests));
 
     assert!(matches!(
-        stale.blocking_recv().unwrap(),
+        futures::executor::block_on(stale).unwrap(),
         CoreResponse::Query(QueryResponse {
             result: Err(QueryError::Cancelled),
             ..
         })
     ));
     assert!(matches!(
-        independent.blocking_recv().unwrap(),
+        futures::executor::block_on(independent).unwrap(),
         CoreResponse::Query(QueryResponse {
             result: Ok(ViewResponse::Track(Some(track))),
             ..
         }) if track.id == 2
     ));
     assert!(matches!(
-        unconditional.blocking_recv().unwrap(),
+        futures::executor::block_on(unconditional).unwrap(),
         CoreResponse::Query(QueryResponse {
             result: Err(QueryError::Message(_)),
             ..
@@ -58,13 +58,12 @@ fn cancelled_queued_read_skips_store_and_does_not_cancel_another_owner() {
 
 #[test]
 fn already_cancelled_read_never_enters_the_request_queue() {
-    let (handle, _analysis, mut requests) = display_fixture();
+    let (handle, _analysis, requests) = display_fixture();
     let mut epoch = QueryEpoch::default();
     let ticket = epoch.ticket();
     epoch.cancel();
     assert!(matches!(
-        handle
-            .query_if_current(Query::Track { track_id: 1 }, ticket)
+        futures::executor::block_on(handle.query_if_current(Query::Track { track_id: 1 }, ticket))
             .result,
         Err(QueryError::Cancelled)
     ));
@@ -83,7 +82,9 @@ fn cancellation_after_dispatch_waits_for_the_physical_reply() {
     let worker_gate = Arc::clone(&gate);
     let (finished, completion) = bounded(1);
     let worker = thread::spawn(move || {
-        let response = handle.query_if_current(Query::Track { track_id: 1 }, ticket);
+        let response = futures::executor::block_on(
+            handle.query_if_current(Query::Track { track_id: 1 }, ticket),
+        );
         worker_gate.store(false, Ordering::Release);
         finished.send(response).unwrap();
     });
@@ -114,7 +115,7 @@ fn cancellation_after_dispatch_waits_for_the_physical_reply() {
 #[test]
 fn gui_timeout_notifies_without_retiring_and_discards_late_reply_or_disconnect() {
     for disconnect in [false, true] {
-        let (handle, _analysis, mut requests) = display_fixture();
+        let (handle, _analysis, requests) = display_fixture();
         let (notice, notices) = bounded(1);
         let handle = handle.with_query_timeout(move |response| notice.send(response).unwrap());
         let mut epoch = QueryEpoch::default();
@@ -122,15 +123,15 @@ fn gui_timeout_notifies_without_retiring_and_discards_late_reply_or_disconnect()
         let (finished, completion) = bounded(1);
         let worker = thread::spawn(move || {
             finished
-                .send(handle.query_with_ticket(
+                .send(futures::executor::block_on(handle.query_with_ticket_async(
                     Query::Track { track_id: 1 },
                     Some(ticket),
                     true,
                     Duration::ZERO,
-                ))
+                )))
                 .unwrap();
         });
-        let request = requests.blocking_recv().unwrap();
+        let request = requests.recv_blocking().unwrap();
         let notification = notices.recv().unwrap();
         assert!(matches!(notification.result, Err(QueryError::Message(_))));
         // Logical replacement/cancellation cannot complete the submitted worker.
@@ -160,12 +161,16 @@ fn gui_timeout_notifies_without_retiring_and_discards_late_reply_or_disconnect()
 
 #[test]
 fn non_gui_timeout_does_not_wait_for_physical_retirement_or_notify_gui() {
-    let (handle, _analysis, mut requests) = display_fixture();
+    let (handle, _analysis, requests) = display_fixture();
     let handle = handle.with_query_timeout(|_| panic!("non-GUI query notified GUI"));
-    let result =
-        handle.query_with_ticket(Query::Track { track_id: 1 }, None, false, Duration::ZERO);
+    let result = futures::executor::block_on(handle.query_with_ticket_async(
+        Query::Track { track_id: 1 },
+        None,
+        false,
+        Duration::ZERO,
+    ));
     assert!(matches!(result.result, Err(QueryError::Message(_))));
-    let request = requests.blocking_recv().unwrap();
+    let request = requests.recv_blocking().unwrap();
     assert!(
         request
             .reply
@@ -181,7 +186,7 @@ fn non_gui_timeout_does_not_wait_for_physical_retirement_or_notify_gui() {
 #[test]
 fn directory_missing_query_composes_filters_ancestors_and_exact_pages() {
     use rivu_protocol::model::DirectoryRow;
-    let (directory, core) = fixture_with_database(Some(10.0), true);
+    let (directory, core) = fixture_with_database(Some(10.0));
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     connection
         .execute_batch(
