@@ -23,7 +23,7 @@ use gpui::{
     SharedString, Style, Subscription, TextRun, UTF16Selection, UnderlineStyle, Window, actions,
     div, fill, point, px, relative, rgb, size,
 };
-use unicode_segmentation::UnicodeSegmentation;
+use unicode_segmentation::GraphemeCursor;
 
 const INPUT_LINE_HEIGHT: f32 = 20.;
 const INPUT_VERTICAL_PADDING: f32 = 7.;
@@ -503,17 +503,16 @@ impl Input {
     }
 
     fn previous_boundary(&self, offset: usize) -> usize {
-        self.content
-            .grapheme_indices(true)
-            .rev()
-            .find_map(|(index, _)| (index < offset).then_some(index))
+        GraphemeCursor::new(offset, self.content.len(), true)
+            .prev_boundary(&self.content, 0)
+            .expect("complete input text provides all grapheme context")
             .unwrap_or(0)
     }
 
     fn next_boundary(&self, offset: usize) -> usize {
-        self.content
-            .grapheme_indices(true)
-            .find_map(|(index, _)| (index > offset).then_some(index))
+        GraphemeCursor::new(offset, self.content.len(), true)
+            .next_boundary(&self.content, 0)
+            .expect("complete input text provides all grapheme context")
             .unwrap_or(self.content.len())
     }
 
@@ -549,10 +548,7 @@ impl Input {
             .map(|range| self.replace_range_from_utf16(range))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
-        self.content = (self.content[..range.start].to_owned()
-            + new_text.as_ref()
-            + &self.content[range.end..])
-            .into();
+        self.content = replacing_text(&self.content, &range, new_text.as_ref()).into();
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
         self.selection_reversed = false;
         self.marked_range = None;
@@ -609,6 +605,14 @@ impl Input {
         self.move_to(anchor, cx);
         self.select_to(focus, cx);
     }
+}
+
+fn replacing_text(text: &str, range: &Range<usize>, replacement: &str) -> String {
+    let mut result = String::with_capacity(text.len() - range.len() + replacement.len());
+    result.push_str(&text[..range.start]);
+    result.push_str(replacement);
+    result.push_str(&text[range.end..]);
+    result
 }
 
 fn single_line_text(text: &str) -> Cow<'_, str> {
@@ -785,10 +789,7 @@ impl EntityInputHandler for Input {
             });
         }
         let new_text = single_line_text(new_text);
-        self.content = (self.content[..range.start].to_owned()
-            + new_text.as_ref()
-            + &self.content[range.end..])
-            .into();
+        self.content = replacing_text(&self.content, &range, new_text.as_ref()).into();
         self.marked_range = Some(range.start..range.start + new_text.len());
         self.selected_range = selected_range_after_replacement(
             new_text.as_ref(),
@@ -907,8 +908,9 @@ impl Element for InputElement {
             underline: None,
             strikethrough: None,
         };
+        let mut marked_runs;
         let runs = if let Some(marked) = input.marked_range.as_ref() {
-            vec![
+            marked_runs = [
                 TextRun {
                     len: marked.start,
                     ..run.clone()
@@ -926,17 +928,22 @@ impl Element for InputElement {
                     len: display_text.len() - marked.end,
                     ..run
                 },
-            ]
-            .into_iter()
-            .filter(|run| run.len > 0)
-            .collect()
+            ];
+            let mut count = 0;
+            for index in 0..marked_runs.len() {
+                if marked_runs[index].len > 0 {
+                    marked_runs.swap(count, index);
+                    count += 1;
+                }
+            }
+            &marked_runs[..count]
         } else {
-            vec![run]
+            std::slice::from_ref(&run)
         };
         let font_size = style.font_size_in_pixels(window.rem_size());
         let line = window
             .text_system()
-            .shape_line(display_text, font_size, &runs, None);
+            .shape_line(display_text, font_size, runs, None);
         let cursor_pos = line.x_for_index(cursor_offset);
         let scroll_offset = scroll_to_caret(
             input.scroll_offset,
@@ -1957,6 +1964,131 @@ mod tests {
                 assert!(input.read(cx).selection_subscriptions.is_none());
                 assert_eq!(other.read(cx).selected_range, 9..9);
             });
+        }
+    }
+
+    #[test]
+    fn navigation_and_deletion_preserve_extended_graphemes_and_scalar_selections() {
+        let mut cx = gpui::TestAppContext::single();
+        cx.update(crate::theme::init_test);
+        let (input, _, handle) = selection_fixture(&mut cx);
+        let graphemes = [
+            "a",
+            "e\u{301}",
+            "🇦🇧",
+            "🇨🇩",
+            "🇪",
+            "👩🏽‍💻",
+            "क्‍ष",
+            "각",
+            "\u{600}ب",
+            "z",
+        ];
+        let text = graphemes.concat();
+        cx.update_window(handle, |_, window, cx| {
+            input.update(cx, |input, cx| {
+                let mut start = 0;
+                for grapheme in graphemes {
+                    let end = start + grapheme.len();
+                    let start_utf16 = text[..start].encode_utf16().count();
+                    let end_utf16 = text[..end].encode_utf16().count();
+                    input.set_text(text.clone(), cx);
+                    // IME and accessibility may place the caret at scalar boundaries
+                    // inside a grapheme; navigation must still use the whole string.
+                    for (inside, _) in grapheme.char_indices() {
+                        let offset_utf16 = text[..start + inside].encode_utf16().count();
+                        input.replace_text_in_range(
+                            Some(offset_utf16..offset_utf16),
+                            "",
+                            window,
+                            cx,
+                        );
+                        input.right(&Right, window, cx);
+                        assert_eq!(
+                            input.selected_text_range(false, window, cx).unwrap().range,
+                            end_utf16..end_utf16,
+                            "right within {grapheme:?}"
+                        );
+                    }
+                    for inside in grapheme
+                        .char_indices()
+                        .map(|(index, _)| index)
+                        .skip(1)
+                        .chain(std::iter::once(grapheme.len()))
+                    {
+                        let offset_utf16 = text[..start + inside].encode_utf16().count();
+                        input.replace_text_in_range(
+                            Some(offset_utf16..offset_utf16),
+                            "",
+                            window,
+                            cx,
+                        );
+                        input.left(&Left, window, cx);
+                        assert_eq!(
+                            input.selected_text_range(false, window, cx).unwrap().range,
+                            start_utf16..start_utf16,
+                            "left within {grapheme:?}"
+                        );
+                    }
+                    let without_grapheme = format!("{}{}", &text[..start], &text[end..]);
+                    input.move_to(end, cx);
+                    input.backspace(&Backspace, window, cx);
+                    assert_eq!(input.text(), without_grapheme, "backspace {grapheme:?}");
+                    input.set_text(text.clone(), cx);
+                    input.move_to(start, cx);
+                    input.delete(&Delete, window, cx);
+                    assert_eq!(input.text(), without_grapheme, "delete {grapheme:?}");
+                    start = end;
+                }
+                input.set_text("", cx);
+                input.left(&Left, window, cx);
+                input.right(&Right, window, cx);
+                assert_eq!(
+                    input.selected_text_range(false, window, cx).unwrap().range,
+                    0..0
+                );
+            });
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn preedit_at_edges_and_empty_composition_keep_display_and_marked_ranges() {
+        let mut cx = gpui::TestAppContext::single();
+        cx.update(crate::theme::init_test);
+        let input = cx.update(|cx| cx.new(|cx| Input::new("Draft", "", "Type here", cx)));
+        let window = cx.add_window({
+            let input = input.clone();
+            move |_, _| InputDialog {
+                input,
+                escapes: Default::default(),
+            }
+        });
+        let handle = window.into();
+        for (range, preedit, display, marked) in [
+            (0..0, "候", "候a中😀z", 0..1),
+            (1..4, "候", "a候z", 1..2),
+            (5..5, "候", "a中😀z候", 5..6),
+            (0..5, "候", "候", 0..1),
+            (0..5, "", "Type here", 0..0),
+        ] {
+            cx.update_window(handle, |_, window, cx| {
+                input.update(cx, |input, cx| {
+                    input.set_text("a中😀z", cx);
+                    input.replace_and_mark_text_in_range(Some(range), preedit, None, window, cx);
+                    assert_eq!(input.marked_text_range(window, cx), Some(marked));
+                });
+                window.draw(cx).clear(cx);
+                assert_eq!(input.read(cx).last_layout.as_ref().unwrap().text, display);
+                input.update(cx, |input, cx| {
+                    assert!(input.dismiss_composition(cx));
+                    assert_eq!(input.text(), "a中😀z");
+                    assert_eq!(input.marked_text_range(window, cx), None);
+                });
+                window.draw(cx).clear(cx);
+                assert_eq!(input.read(cx).last_layout.as_ref().unwrap().text, "a中😀z");
+            })
+            .unwrap();
         }
     }
 

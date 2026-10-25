@@ -678,6 +678,10 @@ Text replacement, including IME preedit, invalidates its shaped-text hit-test
 cache. Pointer events arriving before the next paint cannot use offsets from
 the previous text; fresh geometry is published when the new text is painted.
 All editing paths keep single-line text by replacing line breaks with spaces.
+Caret movement and deletion follow extended grapheme boundaries, queried from
+the current offset with the complete text as Unicode context. Text replacement
+plans the resulting string capacity once; preedit shaping uses at most three
+stack-resident runs without retaining a cross-edit boundary cache.
 `InputEvent::Changed` reports both edit origin and whether IME composition is
 active. Preedit is visible but is not a committed
 configuration value; unmarking emits a committed change even when the text is
