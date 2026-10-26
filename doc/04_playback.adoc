@@ -523,9 +523,24 @@ is required; unavailable media controls are reported in status without preventin
 playback. If enabling fails, disable and re-enable the setting after restoring
 the session bus; registration does not retry automatically.
 
-MPRIS and Track details prefer embedded front-cover artwork, then another
-supported image. Without a cover, MPRIS uses the bundled icon; Track details uses
-the generated default artwork, including while a cold lookup is pending.
+MPRIS, Track details, album cards, and the Album artwork panel prefer embedded
+front-cover artwork, then another supported embedded image. If none is available,
+Rivu checks only the audio file's immediate directory, without descending into
+subdirectories. Candidate stems must be exactly `cover`, `folder`, or `front`, in
+that order, ignoring case. Supported extensions are PNG, JPG/JPEG, GIF, WebP, BMP,
+TIF/TIFF, and ICO, also ignoring case. Within each priority, filenames sort
+case-insensitively with their original bytes as a tie-breaker. Invalid,
+unsupported, or oversized candidates are skipped. File contents determine the
+cached image format; an extension alone does not establish it.
+Without a real cover, GUI consumers use their bundled SVG default directly,
+including while a cold lookup is pending. MPRIS lazily exports the bundled PNG
+icon on its existing background publisher; reading metadata never creates files.
+Directory results and misses remain cached for the current source path; moving
+a track to a different path retries directory discovery. Directory images are not
+watched for edits; a fresh lookup after eviction or application restart rediscovers
+them. The encoded-file limit
+is configured separately from decoded-image memory in
+link:01_config.adoc#_desktop_settings[Settings].
 Actual covers keep their original aspect ratio in the full, static preview.
 Local images are cached under the data directory's `artwork/` and exposed through
 `mpris:artUrl` when available. Background loading updates the selected preview

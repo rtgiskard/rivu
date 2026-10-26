@@ -524,7 +524,9 @@ impl ArtworkLoader {
             if active.matches(track) {
                 self.pending = None;
             } else if !self.pending.as_ref().is_some_and(|pending| {
-                pending.id == track.id && pending.fingerprint == track.fingerprint
+                pending.id == track.id
+                    && pending.fingerprint == track.fingerprint
+                    && pending.path == track.path
             }) {
                 self.pending = Some(track.clone());
             }
@@ -1801,6 +1803,24 @@ mod tests {
         let next = loader.finish(&active, Some(&latest)).unwrap();
         assert_eq!(next.id, latest.id);
         assert_eq!(next.fingerprint, latest.fingerprint);
+        assert!(loader.pending.is_none());
+    }
+
+    #[test]
+    fn relocation_keeps_latest_path_pending_and_rejects_old_completion_identity() {
+        let mut loader = ArtworkLoader::default();
+        let first = track(1, "original");
+        let mut skipped = first.clone();
+        skipped.path = "/moved/first.wav".into();
+        let mut latest = skipped.clone();
+        latest.path = "/moved/second.wav".into();
+        assert!(loader.prepare(Some(&first)).is_some());
+        let active = ArtworkIdentity::for_track(&first);
+        assert!(loader.prepare(Some(&skipped)).is_none());
+        assert!(loader.prepare(Some(&latest)).is_none());
+        assert!(!active.matches(&latest));
+        let next = loader.finish(&active, Some(&latest)).unwrap();
+        assert_eq!(next.path, latest.path);
         assert!(loader.pending.is_none());
     }
 

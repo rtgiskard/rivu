@@ -89,6 +89,38 @@ fn unversioned_current_files_load_without_being_rewritten() {
 }
 
 #[test]
+fn artwork_file_limit_round_trips_and_rejects_out_of_range_values() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    write_current_config(&path, "[interface]\n").unwrap();
+    assert_eq!(Config::load(&path).unwrap().artwork_file_limit_mb, 16);
+    for limit in [1, 16, 32, 64] {
+        write_current_config(
+            &path,
+            format!("[interface]\nartwork_file_limit_mb = {limit}\n"),
+        )
+        .unwrap();
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.artwork_file_limit_mb, limit);
+        config.save(&path).unwrap();
+        assert_eq!(Config::load(&path).unwrap(), config);
+    }
+    for limit in [0, 65, u32::MAX] {
+        let config = Config {
+            artwork_file_limit_mb: limit,
+            ..Config::default()
+        };
+        assert!(config.validate().is_err());
+        write_current_config(
+            &path,
+            format!("[interface]\nartwork_file_limit_mb = {limit}\n"),
+        )
+        .unwrap();
+        assert!(Config::load(&path).is_err());
+    }
+}
+
+#[test]
 fn artwork_decode_budget_round_trips_and_rejects_out_of_range_values() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
@@ -130,6 +162,7 @@ fn artwork_decode_budget_patch_preserves_concurrent_unedited_fields() {
     let mut latest = Config {
         volume: 0.25,
         album_artwork_fps: 30,
+        artwork_file_limit_mb: 32,
         ..baseline.clone()
     };
     let expected = Config {
@@ -142,6 +175,7 @@ fn artwork_decode_budget_patch_preserves_concurrent_unedited_fields() {
     latest.artwork_decode_budget_mb = 256;
     ConfigPatch::between(&baseline, &baseline).apply_to(&mut latest);
     assert_eq!(latest.artwork_decode_budget_mb, 256);
+    assert_eq!(latest.artwork_file_limit_mb, 32);
 }
 
 #[test]
@@ -831,6 +865,7 @@ fn save_reload_replaces_file_and_leaves_no_temporary_files() {
         album_artwork_direction: AlbumArtworkDirection::Counterclockwise,
         album_artwork_fps: 120,
         artwork_decode_budget_mb: 128,
+        artwork_file_limit_mb: 32,
         gpu_material_budget_mb: 64,
         visualization_cache: false,
         page_size: 32,

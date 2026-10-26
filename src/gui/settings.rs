@@ -102,6 +102,7 @@ enum Field {
     PlayCountThreshold,
     LogRetentionWeeks,
     MediaReadBuffer,
+    ArtworkFileLimit,
     ArtworkDecodeBudget,
     GpuMaterialBudget,
     Font,
@@ -184,6 +185,7 @@ impl Field {
             Self::PlayCountThreshold => "settings-play-count-threshold",
             Self::LogRetentionWeeks => "settings-log-retention-weeks",
             Self::MediaReadBuffer => "settings-media-read-buffer-mib",
+            Self::ArtworkFileLimit => "settings-artwork-file-limit-mib",
             Self::ArtworkDecodeBudget => "settings-artwork-decode-budget-mib",
             Self::GpuMaterialBudget => "settings-gpu-material-budget-mib",
             Self::Font => "settings-font-family",
@@ -260,6 +262,7 @@ impl Field {
             Self::PlayCountThreshold => settings.tr("settings-play-count-threshold-hint"),
             Self::LogRetentionWeeks => "1–520.".into(),
             Self::MediaReadBuffer => settings.tr("settings-media-buffer-hint"),
+            Self::ArtworkFileLimit => settings.tr("settings-artwork-file-limit-hint"),
             Self::ArtworkDecodeBudget => settings.tr("settings-artwork-decode-budget-hint"),
             Self::GpuMaterialBudget => settings.tr("settings-gpu-material-budget-hint"),
             Self::Font => settings.tr("settings-font-hint"),
@@ -729,6 +732,7 @@ impl Settings {
             Field::PlayCountThreshold,
             Field::LogRetentionWeeks,
             Field::MediaReadBuffer,
+            Field::ArtworkFileLimit,
             Field::ArtworkDecodeBudget,
             Field::GpuMaterialBudget,
             Field::Font,
@@ -1092,6 +1096,12 @@ impl Settings {
             cx,
         );
         self.set_value(
+            Field::ArtworkFileLimit,
+            self.model.draft.artwork_file_limit_mb.to_string(),
+            unchanged,
+            cx,
+        );
+        self.set_value(
             Field::ArtworkDecodeBudget,
             self.model.draft.artwork_decode_budget_mb.to_string(),
             unchanged,
@@ -1360,6 +1370,7 @@ impl Settings {
         )?;
         config.log_retention_weeks = self.number(Field::LogRetentionWeeks, cx)?;
         config.media_read_buffer_mb = self.number(Field::MediaReadBuffer, cx)?;
+        config.artwork_file_limit_mb = self.number(Field::ArtworkFileLimit, cx)?;
         config.artwork_decode_budget_mb = self.number(Field::ArtworkDecodeBudget, cx)?;
         config.gpu_material_budget_mb = self.number(Field::GpuMaterialBudget, cx)?;
         config.ui_font = self.value(Field::Font, cx).trim().to_owned();

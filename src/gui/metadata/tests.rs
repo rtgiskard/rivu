@@ -423,13 +423,7 @@ fn hiding_details_releases_cached_artwork_until_revealed(cx: &mut TestAppContext
     let mut selected = track(7, "Cover");
     selected.path = path;
     metadata.update(cx, |this, cx| {
-        assert!(
-            !this
-                .artwork_manager
-                .load(&selected)
-                .unwrap()
-                .is_placeholder()
-        );
+        assert!(this.artwork_manager.load(&selected).is_some());
         artwork_selection(this, selected, cx);
         this.visible = true;
         this.prepare_artwork(cx);
@@ -444,6 +438,38 @@ fn hiding_details_releases_cached_artwork_until_revealed(cx: &mut TestAppContext
         this.prepare_artwork(cx);
         assert!(this.artwork_view.image(cx).is_some());
         assert_eq!(this.metadata.identity(), Some(7));
+    });
+}
+
+#[gpui::test]
+fn completed_negative_artwork_keeps_fallback_when_details_reopen(cx: &mut TestAppContext) {
+    let (directory, _runtime, metadata) = fixture(cx);
+    let mut selected = track(7, "Missing cover");
+    selected.path = directory.path().join("missing-cover.wav");
+    metadata.update(cx, |this, cx| {
+        assert!(this.artwork_manager.load(&selected).is_none());
+        assert!(this.artwork_manager.is_loaded(&selected));
+        assert!(this.artwork_manager.cached(&selected).is_none());
+        artwork_selection(this, selected.clone(), cx);
+        this.visible = true;
+        this.prepare_artwork(cx);
+        assert!(this.artwork_view.image(cx).is_none());
+        this.set_visible(false, cx);
+    });
+    // A completed miss is not a new acquisition demand on every render/reopen.
+    crate::artwork::tests::tagged_wav(&selected.path);
+    metadata.update(cx, |this, cx| {
+        this.set_visible(true, cx);
+        this.prepare_artwork(cx);
+        assert!(this.artwork_view.image(cx).is_none());
+    });
+    cx.run_until_parked();
+    metadata.update(cx, |this, cx| {
+        assert!(this.artwork_manager.is_loaded(&selected));
+        assert!(this.artwork_manager.cached(&selected).is_none());
+        assert!(this.artwork_view.image(cx).is_none());
+        this.prepare_artwork(cx);
+        assert!(this.artwork_view.image(cx).is_none());
     });
 }
 

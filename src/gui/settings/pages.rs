@@ -103,6 +103,7 @@ impl Settings {
         );
         content = column()
             .gap_2()
+            .child(self.single(Field::ArtworkFileLimit, cx))
             .child(self.single(Field::ArtworkDecodeBudget, cx))
             .child(content);
         if let Some((days, clean)) = self.artwork_cache_busy {

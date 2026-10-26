@@ -315,7 +315,7 @@ fn apic_header_byte<B: ReadBytes>(reader: &mut B, left: &mut usize, header: &mut
 pub fn read_apic_frame_stream<B: ReadBytes>(reader: &mut B, size: usize, frame: &FrameInfo<'_>) -> Result<FrameResult> {
     let mut left = size;
     let result: Result<FrameResult> = (|| {
-        if !crate::budget::visual_allowed(1) || size > crate::budget::MAX_VISUAL_BYTES + crate::budget::VISUAL_HEADER_BYTES {
+        if !crate::budget::visual_frame_allowed(size) {
             return Ok(FrameResult::Skipped);
         }
         let mut header = Vec::new();

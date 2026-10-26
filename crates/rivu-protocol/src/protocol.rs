@@ -11,7 +11,7 @@ use rivu_format::media::DecoderHint;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub const PROTOCOL_VERSION: u8 = 10;
+pub const PROTOCOL_VERSION: u8 = 11;
 pub const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub const MAX_CLIENTS: usize = 16;
@@ -1666,6 +1666,7 @@ pub struct WireConfig {
     album_artwork_period_seconds: f32,
     album_artwork_direction: rivu_format::config::AlbumArtworkDirection,
     album_artwork_fps: u16,
+    artwork_file_limit_mb: u32,
     artwork_decode_budget_mb: u32,
     gpu_material_budget_mb: u32,
     spectrogram_labels: bool,
@@ -1769,6 +1770,7 @@ impl From<&rivu_format::config::Config> for WireConfig {
             album_artwork_period_seconds: value.album_artwork_period_seconds,
             album_artwork_direction: value.album_artwork_direction,
             album_artwork_fps: value.album_artwork_fps,
+            artwork_file_limit_mb: value.artwork_file_limit_mb,
             artwork_decode_budget_mb: value.artwork_decode_budget_mb,
             gpu_material_budget_mb: value.gpu_material_budget_mb,
             spectrogram_labels: value.spectrogram_labels,
@@ -1874,6 +1876,7 @@ impl From<WireConfig> for rivu_format::config::Config {
             album_artwork_period_seconds: value.album_artwork_period_seconds,
             album_artwork_direction: value.album_artwork_direction,
             album_artwork_fps: value.album_artwork_fps,
+            artwork_file_limit_mb: value.artwork_file_limit_mb,
             artwork_decode_budget_mb: value.artwork_decode_budget_mb,
             gpu_material_budget_mb: value.gpu_material_budget_mb,
             spectrogram_labels: value.spectrogram_labels,

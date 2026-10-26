@@ -373,7 +373,6 @@ impl AlbumArtwork {
     }
 
     fn replace_artwork(&mut self, artwork: Option<LoadedArtwork>, cx: &mut Context<Self>) {
-        let artwork = artwork.filter(|artwork| !artwork.is_placeholder());
         let changed = self.view.replace(artwork, cx);
         if changed {
             cx.notify();

@@ -426,16 +426,19 @@ not assumed hit rates or submission counts.
 == Native metadata admission
 
 Native playback, probes, and full-waveform reads retain tags but skip embedded
-visuals before their payload buffers are allocated. Artwork extraction admits
-images up to 8 MiB, with a separate 16 MiB aggregate visual-frame allowance.
+visuals before their payload buffers are allocated. Artwork extraction owns a
+separate budget: its encoded single-image limit defaults to 16 MiB and follows
+`interface.artwork_file_limit_mb` (1–64 MiB, applied after restart). Its aggregate
+visual-frame allowance is twice that limit; encoded staging admits three times
+the sum of that limit and 64 KiB of framing allowance. Base64 and unsynchronised
+pictures check decoded size before allocating their payload buffers.
 Text admission is capped at 1 MiB per encoded item and a 4 MiB aggregate charge
 that includes decoding/copy allowance and per-operation overhead. At most 4096
 admission operations are allowed, including frames, decoded strings, and packet
-fragments; this is not an exact retained-tag count. Encoded metadata staging,
-including visual encodings and metadata-packet assembly, has a separate 24 MiB
-aggregate admission allowance; nested metadata is limited to eight levels.
-Oversized metadata is skipped without rejecting otherwise decodable audio; these
-limits do not guarantee complete tags or chapters for such files.
+fragments; this is not an exact retained-tag count. Other metadata readers keep
+the fixed 24 MiB encoded-staging allowance; nested metadata is limited to eight
+levels. Oversized metadata is skipped without rejecting otherwise decodable audio;
+these limits do not guarantee complete tags or chapters for such files.
 
 One opened native source owns its remaining allowance across probing, packet
 reads, and seeks. Artwork extraction owns a separate probe allowance. Synchronous
@@ -464,15 +467,18 @@ display images. Releasing one layer does not imply reclamation of the others.
 
 Artwork lookup is independent of visualization caching. One application-session
 manager is shared by MPRIS and every graphical window, including reopened and
-reloaded windows. Cache-only reads return completed artwork or the bundled icon
-without media I/O or waiting for a probe. Blocking loads run on GPUI's existing
-background executor and the existing MPRIS publisher, not new artwork threads.
-Cold source extraction accepts only regular files. Nonblocking opening rejects
+reloaded windows. Cache-only reads return only completed real covers, without
+media I/O or waiting for a probe. The GUI uses its embedded SVG default directly,
+without track lookup entries or exported default-image files. MPRIS lazily exports
+its PNG fallback on the existing background publisher; its cache-only metadata
+getter never creates that file or retries a failed export. Blocking loads run on
+GPUI's existing background executor and the MPRIS publisher, not new artwork
+threads. Source extraction accepts only regular files. Nonblocking opening rejects
 FIFOs without waiting for a writer, and the opened file is checked before probing.
 Regular-file probing and filesystem I/O can still block those background callers.
 
 The GUI keeps one active load and only the latest pending selection. Completions
-are matched by track ID and fingerprint before updating the selected preview or
+are matched by track ID, fingerprint, and source path before updating the selected preview or
 publishing MPRIS metadata; a late result can warm the cache, never replace a
 newer identity. MPRIS signals metadata after artwork becomes available, including
 an initial cold load without another playback update.
@@ -482,21 +488,22 @@ clears queued demand without cancelling a submitted shared load; completion may
 warm the cache but cannot start another hidden lookup. Revealing it acquires the
 latest track. Other consumers, including MPRIS, retain their own acquisition demand.
 
-The lookup key is track ID plus source fingerprint. Resident requests for the
-same identity share one probe outside the lookup lock. Consumers hold the lookup
-result itself, so loading, GUI, and MPRIS references keep that version resident.
+The content key is track ID plus source fingerprint. Resident requests for the
+same content share one probe outside the lookup lock. In-flight loads retain the
+lookup, while GUI and MPRIS consumers retain its published file directly. Either
+keeps that version resident.
 A changed fingerprint creates a new version without discarding an old version
 still in use. The GUI retires replaced results after the next window-frame
 boundary; MPRIS retains its published result until replacement or shutdown, and
 its property getter retains the returned result until the next read or shutdown.
 There is no separate file lease counter or session-wide visited-file registry.
 
-Successful probes, including a source with no usable embedded cover, remain
-reusable after a path move that preserves track ID and fingerprint. Source-open
-and probe failures instead belong to the attempted path: a different path retries
-that content identity, while repeated demand at the unchanged failed path stays
-completed. A request sharing an unfinished probe at another path waits for that
-singleflight result, then retries its own path only if the shared probe failed.
+Successful embedded covers remain reusable after a path move that preserves
+track ID and fingerprint. Directory covers, misses, and source/probe failures
+belong to the attempted source path: a different path retries discovery while
+repeated demand at an unchanged path stays completed. A request sharing an
+unfinished probe at another path waits for that result, then retries its own path
+unless the shared result was an embedded cover.
 
 Lookup retention targets 64 entries. FIFO eviction selects only idle results;
 active results can temporarily exceed that target. Idle overflow is trimmed on
@@ -522,11 +529,17 @@ releases these negative records; the shared 64-entry retention target is unchang
 
 Encoded images use immutable content-hash filenames under `artwork/cache`.
 Identical bytes reuse an existing file, independent of track identity; files
-provide paths for GPUI and URLs for external MPRIS consumers. Each newly extracted
-image is limited to 8 MiB. The bundled fallback is stored separately. There is
-no automatic file-count or total-byte budget, startup directory inventory, or
-automatic cleanup. No persistent track-to-image index is restored after restart:
+provide paths for GPUI and URLs for external MPRIS consumers. Embedded and directory
+images share byte-sniffed, content-hash storage. Each encoded image is limited by
+`interface.artwork_file_limit_mb`, independently of the decoded-image budget.
+Directory discovery checks only the source's immediate directory and exact
+`cover`, `folder`, or `front` stems; full candidate rules are documented in
+link:04_playback.adoc#_mpris_and_artwork[MPRIS and artwork].
+There is no automatic file-count or total-byte budget, startup directory inventory,
+or automatic cleanup. No persistent track-to-image index is restored after restart:
 the first source probe discovers the image hash, then reuses its file if present.
+The MPRIS default export uses the same content-hash directory and is protected
+once exported; later sessions can clean it when it is no longer resident.
 
 Only explicit link:01_config.adoc#_artwork_cache_maintenance[Settings maintenance]
 enumerates disposable files. Statistics and cleanup use modification age, not
@@ -543,7 +556,7 @@ takes the exclusive gate before inspecting protection and deleting, so cleanup
 can wait for a slow probe. Probing and filesystem I/O do not hold the lookup
 mutex; render and MPRIS property reads remain cache-only and do not wait for the
 maintenance gate. Maintenance ignores symlinks and unrelated names, reports
-inspection/deletion failures, and leaves the fallback and audio sources untouched.
+inspection/deletion failures, and leaves audio sources untouched.
 
 === Window-owned real-cover decoding
 
@@ -602,7 +615,7 @@ retain their playback cursors; multiple artwork panels share decoded pixels but
 not cursor state. GPUI still handles display scaling; Rivu does not resize
 real-cover buffers or generate thumbnails. Trusted decorations and generated
 default artwork keep their separate policies. Encoded-file maintenance does not
-measure or reclaim decoded images; the encoded 8 MiB limit is not a pixel budget.
+measure or reclaim decoded images; the encoded-file limit is not a pixel budget.
 
 === Generated defaults and decorations
 

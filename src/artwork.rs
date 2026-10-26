@@ -7,7 +7,7 @@ use rivu_protocol::model::Track;
 use std::{
     collections::{HashMap, VecDeque},
     fs,
-    io::{self, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::{Arc, OnceLock},
     time::{Duration, SystemTime},
@@ -16,7 +16,7 @@ use symphonia::{
     core::{
         formats::{FormatOptions, TrackType, probe::Hint},
         io::{MediaSourceStream, MediaSourceStreamOptions},
-        meta::{Metadata, MetadataOptions, StandardVisualKey, Visual},
+        meta::{Metadata, MetadataOptions, StandardVisualKey},
     },
     default::get_probe,
 };
@@ -24,37 +24,24 @@ use symphonia::{
 pub(crate) static DEFAULT_IMAGE: &[u8] = include_bytes!("../data/icons/rivu.png");
 
 const MAX_ARTWORK_ENTRIES: usize = 64;
-const MAX_IMAGE_BYTES: usize = symphonia_metadata::budget::MAX_VISUAL_BYTES;
+pub(crate) const DEFAULT_MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 
 struct ArtworkFile {
     uri: String,
     path: Arc<Path>,
-    placeholder: bool,
 }
 
-/// Holds the lookup result that protects a published URI until it is released.
+/// Holds a published file and protects its URI until it is released.
 #[derive(Clone)]
-pub struct Artwork(Arc<CachedArtwork>);
+pub struct Artwork(Arc<ArtworkFile>);
 
 impl Artwork {
     pub fn uri(&self) -> &str {
-        &self.file().uri
+        &self.0.uri
     }
 
     pub(crate) fn path(&self) -> Arc<Path> {
-        Arc::clone(&self.file().path)
-    }
-
-    pub(crate) fn is_placeholder(&self) -> bool {
-        self.file().placeholder
-    }
-
-    fn file(&self) -> &ArtworkFile {
-        self.0
-            .lookup
-            .get()
-            .and_then(|lookup| lookup.image.as_deref())
-            .expect("published artwork")
+        Arc::clone(&self.0.path)
     }
 }
 
@@ -100,6 +87,7 @@ impl ArtworkCacheReport {
 pub(crate) struct ArtworkIdentity {
     id: i64,
     fingerprint: Option<String>,
+    path: PathBuf,
 }
 
 impl ArtworkIdentity {
@@ -107,10 +95,15 @@ impl ArtworkIdentity {
         Self {
             id: track.id,
             fingerprint: track.fingerprint.clone(),
+            path: track.path.clone(),
         }
     }
 
     pub(crate) fn matches(&self, track: &Track) -> bool {
+        self.matches_content(track) && self.path == track.path
+    }
+
+    fn matches_content(&self, track: &Track) -> bool {
         self.id == track.id && self.fingerprint == track.fingerprint
     }
 }
@@ -120,22 +113,27 @@ struct CachedArtwork {
     lookup: OnceLock<ArtworkLookup>,
 }
 
+enum ArtworkSource {
+    Embedded(Arc<ArtworkFile>),
+    Directory(Option<Arc<ArtworkFile>>),
+}
+
 struct ArtworkLookup {
     image: Option<Arc<ArtworkFile>>,
-    failed_path: Option<PathBuf>,
+    source_path: Option<PathBuf>,
 }
 
 impl ArtworkLookup {
     fn applies_to(&self, path: &Path) -> bool {
-        self.failed_path
+        self.source_path
             .as_deref()
-            .is_none_or(|failed_path| failed_path == path)
+            .is_none_or(|source_path| source_path == path)
     }
 }
 
 impl CachedArtwork {
     fn matches(&self, track: &Track) -> bool {
-        self.identity.matches(track)
+        self.identity.matches_content(track)
             && self
                 .lookup
                 .get()
@@ -168,7 +166,14 @@ impl ArtworkCache {
                     .items
                     .get(&entry.identity.id)
                     .is_some_and(|latest| Arc::ptr_eq(latest, entry));
+                // In-flight loads hold the lookup; published Artwork handles
+                // hold its file directly. Either keeps this version resident.
                 Arc::strong_count(entry) == 1 + usize::from(indexed)
+                    && entry
+                        .lookup
+                        .get()
+                        .and_then(|lookup| lookup.image.as_ref())
+                        .is_none_or(|file| Arc::strong_count(file) == 1)
             }) else {
                 break;
             };
@@ -199,7 +204,8 @@ impl ArtworkCache {
 
 pub struct ArtworkManager {
     directory: PathBuf,
-    default: Option<Artwork>,
+    max_image_bytes: usize,
+    default: OnceLock<Option<Artwork>>,
     // Background acquisition holds a reader through file creation and lookup
     // publication. Cleanup holds a writer only for one file at a time. Cache-
     // only reads never take this gate, and no lookup lock covers filesystem I/O.
@@ -210,31 +216,44 @@ pub struct ArtworkManager {
 impl ArtworkManager {
     pub fn new(data_dir: &Path) -> Self {
         let directory = data_dir.join("artwork");
-        let default = write_image(&directory.join("default.png"), DEFAULT_IMAGE)
-            .ok()
-            .map(|uri| {
-                let lookup = OnceLock::new();
-                let _ = lookup.set(ArtworkLookup {
-                    image: Some(artwork_file(uri, true)),
-                    failed_path: None,
-                });
-                Artwork(Arc::new(CachedArtwork {
-                    identity: ArtworkIdentity {
-                        id: 0,
-                        fingerprint: None,
-                    },
-                    lookup,
-                }))
-            });
-        // Published file URIs are absolute; keep maintenance paths comparable
-        // when --data-dir was supplied as a relative path.
-        let directory = fs::canonicalize(&directory).unwrap_or(directory);
         Self {
             directory,
-            default,
+            max_image_bytes: DEFAULT_MAX_IMAGE_BYTES,
+            default: OnceLock::new(),
             maintenance: RwLock::new(()),
             entries: Mutex::new(ArtworkCache::default()),
         }
+    }
+
+    /// Configure the encoded artwork limit before sharing this session manager.
+    pub(crate) fn with_max_image_bytes(mut self, bytes: usize) -> Self {
+        self.max_image_bytes = bytes;
+        self
+    }
+
+    /// MPRIS-only cache read; never creates a file or waits for an export.
+    pub(crate) fn cached_default(&self) -> Option<Artwork> {
+        self.default.get().and_then(Clone::clone)
+    }
+
+    /// MPRIS-only blocking export. Failure is logged and remembered once per session.
+    pub(crate) fn export_default(&self) -> Option<Artwork> {
+        let _acquisition = self.maintenance.read();
+        self.default
+            .get_or_init(|| {
+                let path = self
+                    .directory
+                    .join("cache")
+                    .join(format!("{}.png", blake3::hash(DEFAULT_IMAGE)));
+                match write_image(&path, DEFAULT_IMAGE) {
+                    Ok(uri) => Some(Artwork(artwork_file(uri))),
+                    Err(error) => {
+                        tracing::warn!(%error, "mpris_default_artwork_export_failed");
+                        None
+                    }
+                }
+            })
+            .clone()
     }
 
     /// Cache-only acquisition: no filesystem work or probe waiting.
@@ -248,8 +267,14 @@ impl ArtworkManager {
                     .get()
                     .is_some_and(|lookup| lookup.applies_to(&track.path) && lookup.image.is_some())
             })
-            .map(|entry| Artwork(Arc::clone(entry)))
-            .or_else(|| self.default.clone())
+            .and_then(|entry| {
+                entry
+                    .lookup
+                    .get()?
+                    .image
+                    .as_ref()
+                    .map(|file| Artwork(Arc::clone(file)))
+            })
     }
 
     pub fn is_loaded(&self, track: &Track) -> bool {
@@ -263,14 +288,10 @@ impl ArtworkManager {
 
     /// Blocking singleflight load; a late old version never replaces its successor.
     pub fn load(&self, track: &Track) -> Option<Artwork> {
-        self.load_with(track, || self.embedded_uri(&track.path))
+        self.load_with(track, || self.source_uri(&track.path, self.max_image_bytes))
     }
 
-    fn load_with(
-        &self,
-        track: &Track,
-        probe: impl FnOnce() -> Result<Option<Arc<ArtworkFile>>, ()>,
-    ) -> Option<Artwork> {
+    fn load_with(&self, track: &Track, probe: impl FnOnce() -> ArtworkSource) -> Option<Artwork> {
         let _acquisition = self.maintenance.read();
         let mut probe = Some(probe);
         loop {
@@ -290,31 +311,18 @@ impl ArtworkManager {
                 }
             };
             let lookup = cached.lookup.get_or_init(|| {
-                let result = probe.take().expect("one source probe")();
-                ArtworkLookup {
-                    failed_path: result.is_err().then(|| track.path.clone()),
-                    image: result.ok().flatten().or_else(|| {
-                        self.default.as_ref().map(|artwork| {
-                            Arc::clone(
-                                artwork
-                                    .0
-                                    .lookup
-                                    .get()
-                                    .expect("default initialized")
-                                    .image
-                                    .as_ref()
-                                    .expect("default image"),
-                            )
-                        })
-                    }),
-                }
+                let (image, source_path) = match probe.take().expect("one source probe")() {
+                    ArtworkSource::Embedded(image) => (Some(image), None),
+                    ArtworkSource::Directory(image) => (image, Some(track.path.clone())),
+                };
+                ArtworkLookup { source_path, image }
             });
             // A concurrent request may have shared an unfinished old-path probe.
-            // Only its failure is path-bound; successful content remains reusable.
+            // Only embedded content is reusable without checking the new directory.
             if !lookup.applies_to(&track.path) {
                 continue;
             }
-            let result = lookup.image.as_ref().map(|_| Artwork(Arc::clone(&cached)));
+            let result = lookup.image.as_ref().map(|file| Artwork(Arc::clone(file)));
             self.entries.lock().trim();
             return result;
         }
@@ -323,14 +331,16 @@ impl ArtworkManager {
     /// Explicit disk inventory/cleanup. Startup and ordinary loads never enumerate
     /// the cache, and disk space has no automatic budget or session-wide index.
     pub fn maintain(&self, older_than: Duration, clean: bool) -> io::Result<ArtworkCacheReport> {
-        let directory = self.directory.join("cache");
-        let entries = match fs::read_dir(&directory) {
-            Ok(entries) => entries,
+        // Published URIs use canonical paths. Resolve only for explicit
+        // maintenance so relative/symlinked data directories compare correctly.
+        let directory = match fs::canonicalize(self.directory.join("cache")) {
+            Ok(directory) => directory,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 return Ok(ArtworkCacheReport::default());
             }
             Err(error) => return Err(error),
         };
+        let entries = fs::read_dir(&directory)?;
         let now = SystemTime::now();
         let mut report = ArtworkCacheReport::default();
         for entry in entries {
@@ -373,7 +383,13 @@ impl ArtworkManager {
             }
             report.expired_files += 1;
             report.expired_bytes += metadata.len();
-            if self.entries.lock().protects(&path) {
+            if self.entries.lock().protects(&path)
+                || self
+                    .default
+                    .get()
+                    .and_then(Option::as_ref)
+                    .is_some_and(|artwork| artwork.0.path.as_ref() == path)
+            {
                 report.protected_files += 1;
                 report.protected_bytes += metadata.len();
                 continue;
@@ -391,13 +407,79 @@ impl ArtworkManager {
         Ok(report)
     }
 
-    fn embedded_uri(&self, path: &Path) -> Result<Option<Arc<ArtworkFile>>, ()> {
+    fn source_uri(&self, path: &Path, limit: usize) -> ArtworkSource {
+        if let Ok(Some(image)) = self.embedded_uri(path, limit) {
+            ArtworkSource::Embedded(image)
+        } else {
+            ArtworkSource::Directory(self.directory_uri(path, limit))
+        }
+    }
+
+    fn directory_uri(&self, path: &Path, limit: usize) -> Option<Arc<ArtworkFile>> {
+        let directory = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let mut candidates: Vec<_> = fs::read_dir(directory)
+            .ok()?
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let path = entry.path();
+                let priority = directory_image_priority(&path)?;
+                let extension = path.extension()?.to_str()?;
+                if ![
+                    "png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "ico",
+                ]
+                .iter()
+                .any(|supported| extension.eq_ignore_ascii_case(supported))
+                {
+                    return None;
+                }
+                let kind = entry.file_type().ok()?;
+                (kind.is_file() || kind.is_symlink()).then_some((priority, path))
+            })
+            .collect();
+        candidates.sort_unstable_by(|left, right| {
+            left.0.cmp(&right.0).then_with(|| {
+                let left = left.1.file_name().expect("directory image filename");
+                let right = right.1.file_name().expect("directory image filename");
+                left.as_encoded_bytes()
+                    .iter()
+                    .map(u8::to_ascii_lowercase)
+                    .cmp(right.as_encoded_bytes().iter().map(u8::to_ascii_lowercase))
+                    .then_with(|| left.cmp(right))
+            })
+        });
+        let mut bytes = Vec::new();
+        for (_, candidate) in candidates {
+            let Ok(file) = rivu_format::input::open_regular_file(&candidate) else {
+                continue;
+            };
+            let Ok(metadata) = file.metadata() else {
+                continue;
+            };
+            if metadata.len() > limit as u64 {
+                continue;
+            }
+            bytes.clear();
+            // A file may grow after metadata(): the reader still admits at most
+            // the image budget plus one byte to detect overflow.
+            if file.take(limit as u64 + 1).read_to_end(&mut bytes).is_ok()
+                && let Some(image) = self.image_uri(&bytes, limit)
+            {
+                return Some(image);
+            }
+        }
+        None
+    }
+
+    fn embedded_uri(&self, path: &Path, limit: usize) -> Result<Option<Arc<ArtworkFile>>, ()> {
         let file = rivu_format::input::open_regular_file(path).map_err(|_| ())?;
         let mut hint = Hint::new();
         if let Some(extension) = path.extension().and_then(|value| value.to_str()) {
             hint.with_extension(extension);
         }
-        let mut budget = rivu_audio::metadata_budget(true);
+        let mut budget = symphonia_metadata::budget::MetadataBudget::for_artwork(limit);
         let mut format = budget
             .with(|| {
                 get_probe().probe(
@@ -411,13 +493,14 @@ impl ArtworkManager {
         let track_id = format
             .default_track(TrackType::Audio)
             .map(|track| u64::from(track.id));
-        Ok(self.metadata_uri(format.metadata(), track_id))
+        Ok(self.metadata_uri(format.metadata(), track_id, limit))
     }
 
     fn metadata_uri(
         &self,
         mut metadata: Metadata<'_>,
         track_id: Option<u64>,
+        limit: usize,
     ) -> Option<Arc<ArtworkFile>> {
         let mut fallback = None;
         while let Some(revision) = metadata.current() {
@@ -431,7 +514,7 @@ impl ArtworkManager {
             for visual in visuals {
                 let front_cover = visual.usage == Some(StandardVisualKey::FrontCover);
                 if (front_cover || fallback.is_none())
-                    && let Some(uri) = self.visual_uri(visual)
+                    && let Some(uri) = self.image_uri(&visual.data, limit)
                 {
                     if front_cover {
                         return Some(uri);
@@ -446,13 +529,13 @@ impl ArtworkManager {
         fallback
     }
 
-    fn visual_uri(&self, visual: &Visual) -> Option<Arc<ArtworkFile>> {
-        if visual.data.len() > MAX_IMAGE_BYTES {
+    fn image_uri(&self, bytes: &[u8], limit: usize) -> Option<Arc<ArtworkFile>> {
+        if bytes.len() > limit {
             return None;
         }
-        // Sniff the bytes rather than trusting a tag-supplied MIME type or name.
+        // Sniff the bytes rather than trusting tag MIME types or file names.
         // Keep the original image; desktop clients handle decoding and scaling.
-        let extension = match image::guess_format(&visual.data).ok()? {
+        let extension = match image::guess_format(bytes).ok()? {
             image::ImageFormat::Png => "png",
             image::ImageFormat::Jpeg => "jpg",
             image::ImageFormat::Gif => "gif",
@@ -462,17 +545,26 @@ impl ArtworkManager {
             image::ImageFormat::Ico => "ico",
             _ => return None,
         };
-        let hash = blake3::hash(&visual.data);
+        let hash = blake3::hash(bytes);
         let path = self
             .directory
             .join("cache")
             .join(format!("{hash}.{extension}"));
-        let uri = write_image(&path, &visual.data).ok()?;
-        Some(artwork_file(uri, false))
+        let uri = write_image(&path, bytes).ok()?;
+        Some(artwork_file(uri))
     }
 }
 
-fn artwork_file(uri: String, placeholder: bool) -> Arc<ArtworkFile> {
+fn directory_image_priority(path: &Path) -> Option<u8> {
+    match path.file_stem().and_then(|stem| stem.to_str()) {
+        Some(stem) if stem.eq_ignore_ascii_case("cover") => Some(0),
+        Some(stem) if stem.eq_ignore_ascii_case("folder") => Some(1),
+        Some(stem) if stem.eq_ignore_ascii_case("front") => Some(2),
+        _ => None,
+    }
+}
+
+fn artwork_file(uri: String) -> Arc<ArtworkFile> {
     let path = url::Url::parse(&uri)
         .expect("artwork file URI")
         .to_file_path()
@@ -480,7 +572,6 @@ fn artwork_file(uri: String, placeholder: bool) -> Arc<ArtworkFile> {
     Arc::new(ArtworkFile {
         uri,
         path: Arc::from(path),
-        placeholder,
     })
 }
 
@@ -523,6 +614,138 @@ fn write_image(path: &Path, data: &[u8]) -> io::Result<String> {
 pub(crate) mod tests {
     use super::*;
     use std::fs::File;
+
+    const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+
+    #[test]
+    fn startup_and_negative_lookups_never_export_default_artwork() {
+        let directory = tempfile::tempdir().unwrap();
+        let data = directory.path().join("data");
+        let manager = ArtworkManager::new(&data);
+        let selected = track(directory.path().join("missing.wav"));
+        assert!(manager.cached(&selected).is_none());
+        assert!(manager.cached_default().is_none());
+        assert!(!data.exists());
+        assert!(manager.load(&selected).is_none());
+        assert!(manager.is_loaded(&selected));
+        assert!(
+            manager
+                .load_with(&selected, || panic!("negative lookup reprobed"))
+                .is_none()
+        );
+        assert!(!data.exists());
+        let exported = manager.export_default().unwrap();
+        assert_eq!(fs::read(file_path(exported.uri())).unwrap(), DEFAULT_IMAGE);
+        assert!(manager.cached(&selected).is_none());
+        assert!(
+            manager
+                .load_with(&selected, || panic!("export changed negative lookup"))
+                .is_none()
+        );
+        assert!(!data.join("artwork/default.png").exists());
+    }
+
+    #[test]
+    fn default_export_is_singleflight_and_protected_without_track_lookups() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = ArtworkManager::new(directory.path());
+        let barrier = std::sync::Barrier::new(4);
+        let held = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..4)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        manager.export_default().unwrap()
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert!(held.iter().all(|image| image == &held[0]));
+        let path = file_path(held[0].uri());
+        assert!(managed_filename(path.file_name().unwrap()));
+        assert_eq!(manager.cached_default(), Some(held[0].clone()));
+        age_file(&path);
+        let report = manager.maintain(Duration::ZERO, true).unwrap();
+        assert_eq!(
+            (report.files, report.protected_files, report.removed_files),
+            (1, 1, 0)
+        );
+        assert_eq!(fs::read(&path).unwrap(), DEFAULT_IMAGE);
+        assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn failed_default_export_is_remembered_after_filesystem_recovers() {
+        let directory = tempfile::tempdir().unwrap();
+        let blocked = directory.path().join("data");
+        fs::write(&blocked, b"not a directory").unwrap();
+        let manager = ArtworkManager::new(&blocked);
+        assert!(manager.cached_default().is_none());
+        assert!(manager.export_default().is_none());
+        fs::remove_file(&blocked).unwrap();
+        fs::create_dir(&blocked).unwrap();
+        assert!(manager.export_default().is_none());
+        assert!(manager.cached_default().is_none());
+        assert!(!blocked.join("artwork").exists());
+    }
+
+    #[test]
+    fn configured_encoded_limit_applies_to_embedded_and_directory_images() {
+        let directory = tempfile::tempdir().unwrap();
+        for (version, size) in [(2, 9), (3, 16), (4, 17)] {
+            let source = directory.path().join(format!("large-{version}.wav"));
+            let size = size * 1024 * 1024;
+            budget_tagged_wav(&source, version, &[(DEFAULT_IMAGE, size, 3)]);
+            let selected = track(source);
+            let default = ArtworkManager::new(directory.path());
+            let result = default.load(&selected);
+            assert_eq!(result.is_some(), size <= DEFAULT_MAX_IMAGE_BYTES);
+            let small = ArtworkManager::new(directory.path()).with_max_image_bytes(1024 * 1024);
+            assert!(small.load(&selected).is_none());
+            let large =
+                ArtworkManager::new(directory.path()).with_max_image_bytes(64 * 1024 * 1024);
+            let image = large.load(&selected).unwrap();
+            assert_eq!(
+                fs::metadata(file_path(image.uri())).unwrap().len(),
+                size as u64
+            );
+        }
+        let cover = directory.path().join("cover.png");
+        fs::write(&cover, DEFAULT_IMAGE).unwrap();
+        File::options()
+            .write(true)
+            .open(&cover)
+            .unwrap()
+            .set_len(DEFAULT_MAX_IMAGE_BYTES as u64)
+            .unwrap();
+        let selected = track(directory.path().join("missing.wav"));
+        let default = ArtworkManager::new(directory.path());
+        assert_eq!(
+            fs::metadata(file_path(default.load(&selected).unwrap().uri()))
+                .unwrap()
+                .len(),
+            DEFAULT_MAX_IMAGE_BYTES as u64
+        );
+        let small = ArtworkManager::new(directory.path()).with_max_image_bytes(1024 * 1024);
+        assert!(small.load(&selected).is_none());
+        File::options()
+            .write(true)
+            .open(&cover)
+            .unwrap()
+            .set_len(DEFAULT_MAX_IMAGE_BYTES as u64 + 1)
+            .unwrap();
+        assert!(
+            ArtworkManager::new(directory.path())
+                .load(&selected)
+                .is_none()
+        );
+        let large = ArtworkManager::new(directory.path()).with_max_image_bytes(64 * 1024 * 1024);
+        assert!(large.load(&selected).is_some());
+    }
 
     fn assert_budget_audio(path: &Path) {
         use rivu_audio::{ProbeBackend, SourceRenderer};
@@ -884,10 +1107,6 @@ pub(crate) mod tests {
             budget_unsynchronised_wav(&path, version, tag_wide);
             let manager = ArtworkManager::new(directory.path());
             let artwork = manager.load(&track(path)).unwrap();
-            assert!(
-                !artwork.is_placeholder(),
-                "ID3v2.{version}, tag-wide={tag_wide}"
-            );
             assert_eq!(fs::read(file_path(artwork.uri())).unwrap(), DEFAULT_IMAGE);
         }
     }
@@ -911,7 +1130,6 @@ pub(crate) mod tests {
         budget_tagged_wav(&path, 3, &pictures);
         let manager = ArtworkManager::new(directory.path());
         let artwork = manager.load(&track(path)).unwrap();
-        assert!(!artwork.is_placeholder());
         assert_eq!(fs::read(file_path(artwork.uri())).unwrap(), bmp);
     }
 
@@ -922,9 +1140,9 @@ pub(crate) mod tests {
             for size in [DEFAULT_IMAGE.len(), MAX_IMAGE_BYTES] {
                 let path = directory.path().join(format!("small-{version}-{size}.wav"));
                 budget_tagged_wav(&path, version, &[(DEFAULT_IMAGE, size, 3)]);
-                let manager = ArtworkManager::new(directory.path());
+                let manager =
+                    ArtworkManager::new(directory.path()).with_max_image_bytes(MAX_IMAGE_BYTES);
                 let artwork = manager.load(&track(path)).unwrap();
-                assert!(!artwork.is_placeholder(), "ID3v2.{version}, {size} bytes");
                 let retained = fs::read(file_path(artwork.uri())).unwrap();
                 assert_eq!(retained.len(), size);
                 assert!(retained.starts_with(DEFAULT_IMAGE));
@@ -951,9 +1169,9 @@ pub(crate) mod tests {
                         (DEFAULT_IMAGE, DEFAULT_IMAGE.len(), 3),
                     ],
                 );
-                let manager = ArtworkManager::new(directory.path());
+                let manager =
+                    ArtworkManager::new(directory.path()).with_max_image_bytes(MAX_IMAGE_BYTES);
                 let artwork = manager.load(&track(path)).unwrap();
-                assert!(!artwork.is_placeholder());
                 assert_eq!(fs::read(file_path(artwork.uri())).unwrap(), DEFAULT_IMAGE);
             }
         }
@@ -972,9 +1190,8 @@ pub(crate) mod tests {
                 (DEFAULT_IMAGE, DEFAULT_IMAGE.len(), 3),
             ],
         );
-        let manager = ArtworkManager::new(directory.path());
+        let manager = ArtworkManager::new(directory.path()).with_max_image_bytes(MAX_IMAGE_BYTES);
         let artwork = manager.load(&track(path)).unwrap();
-        assert!(!artwork.is_placeholder());
         assert_eq!(
             fs::metadata(file_path(artwork.uri())).unwrap().len(),
             MAX_IMAGE_BYTES as u64
@@ -982,12 +1199,14 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn metadata_budget_oversized_only_uses_default_cover() {
+    fn metadata_budget_oversized_only_has_no_real_cover() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("only-oversized.wav");
         budget_tagged_wav(&path, 3, &[(DEFAULT_IMAGE, 27 * 1024 * 1024, 3)]);
         let manager = ArtworkManager::new(directory.path());
-        assert!(manager.load(&track(path)).unwrap().is_placeholder());
+        let selected = track(path);
+        assert!(manager.load(&selected).is_none());
+        assert!(manager.is_loaded(&selected));
     }
 
     fn file_path(uri: &str) -> PathBuf {
@@ -1015,10 +1234,8 @@ pub(crate) mod tests {
         tagged_wav(&source);
         let manager = ArtworkManager::new(directory.path());
         let mut selected = track(source);
-        assert!(manager.cached(&selected).unwrap().is_placeholder());
+        assert!(manager.cached(&selected).is_none());
         let first = manager.load(&selected).unwrap();
-        // Matching the bundled bytes does not turn an embedded cover into a fallback.
-        assert!(!first.is_placeholder());
         let path = file_path(first.uri());
         assert_eq!(fs::read(&path).unwrap(), DEFAULT_IMAGE);
         assert!(first.uri().contains("%23"));
@@ -1030,11 +1247,8 @@ pub(crate) mod tests {
         selected.title = "Edited title".into();
         assert_eq!(manager.load(&selected), Some(second));
         selected.fingerprint = Some("changed".into());
-        assert_eq!(
-            result_uri(manager.load(&selected)),
-            result_uri(manager.default.clone())
-        );
-        assert!(manager.cached(&selected).unwrap().is_placeholder());
+        assert!(manager.load(&selected).is_none());
+        assert!(manager.cached(&selected).is_none());
     }
 
     #[test]
@@ -1048,19 +1262,17 @@ pub(crate) mod tests {
             if old_path == "unprobeable.wav" {
                 fs::write(&selected.path, b"not an audio file").unwrap();
             }
-            let failed = manager.load(&selected).unwrap();
-            assert!(failed.is_placeholder());
+            assert!(manager.load(&selected).is_none());
             assert!(manager.is_loaded(&selected));
             assert_eq!(
                 manager.load_with(&selected, || panic!("unchanged failure reprobed")),
-                Some(failed)
+                None
             );
 
             selected.path = cover_source.clone();
             assert!(!manager.is_loaded(&selected));
-            assert!(manager.cached(&selected).unwrap().is_placeholder());
+            assert!(manager.cached(&selected).is_none());
             let recovered = manager.load(&selected).unwrap();
-            assert!(!recovered.is_placeholder());
             assert_eq!(fs::read(file_path(recovered.uri())).unwrap(), DEFAULT_IMAGE);
             selected.path = directory.path().join("moved-again.wav");
             assert_eq!(
@@ -1071,20 +1283,242 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn successful_no_cover_result_is_reused_after_path_changes() {
+    fn no_cover_result_retries_directory_after_relocation() {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("no-cover.wav");
         tagged_wav_image(&source, b"unsupported image bytes");
         let manager = ArtworkManager::new(directory.path());
         let mut selected = track(source);
-        let no_cover = manager.load(&selected).unwrap();
-        assert!(no_cover.is_placeholder());
-        selected.path = directory.path().join("moved.wav");
+        assert!(manager.load(&selected).is_none());
         assert!(manager.is_loaded(&selected));
         assert_eq!(
-            manager.load_with(&selected, || panic!("successful no-cover result reprobed")),
-            Some(no_cover)
+            manager.load_with(&selected, || panic!("unchanged negative reprobed")),
+            None
         );
+        let moved = directory.path().join("moved");
+        fs::create_dir(&moved).unwrap();
+        selected.path = moved.join("track.wav");
+        write_test_wave(&mut File::create(&selected.path).unwrap());
+        fs::write(moved.join("cover.png"), DEFAULT_IMAGE).unwrap();
+        assert!(!manager.is_loaded(&selected));
+        assert!(manager.cached(&selected).is_none());
+        let recovered = manager.load(&selected).unwrap();
+        assert_eq!(fs::read(file_path(recovered.uri())).unwrap(), DEFAULT_IMAGE);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_fifo_and_fifo_symlink_do_not_block_following_image() {
+        let directory = tempfile::tempdir().unwrap();
+        let fifo = directory.path().join("cover.png");
+        let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: name is a live NUL-terminated path, and mkfifo retains no pointer.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        std::os::unix::fs::symlink(&fifo, directory.path().join("folder.png")).unwrap();
+        fs::write(directory.path().join("front.png"), DEFAULT_IMAGE).unwrap();
+        let selected = track(directory.path().join("track.wav"));
+        let manager = ArtworkManager::new(directory.path());
+        let (complete, completed) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let artwork = manager.load(&selected).unwrap();
+            complete
+                .send(fs::read(file_path(artwork.uri())).unwrap())
+                .unwrap();
+        });
+        // A broken nonblocking-open contract must fail rather than hang the suite.
+        let bytes = completed.recv_timeout(Duration::from_secs(2)).unwrap();
+        worker.join().unwrap();
+        assert_eq!(bytes, DEFAULT_IMAGE);
+    }
+
+    fn directory_image(path: &Path, marker: u8) -> Vec<u8> {
+        let mut bytes = DEFAULT_IMAGE.to_vec();
+        bytes.push(marker);
+        fs::write(path, &bytes).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn directory_images_follow_embedded_covers_and_deterministic_filename_priority() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("track.wav");
+        let selected = track(source.clone());
+        let candidates = [
+            "cover.jpg",
+            "COVER.PNG",
+            "cover.png",
+            "Folder.PNG",
+            "front.webp",
+        ];
+        let images: Vec<_> = candidates
+            .iter()
+            .enumerate()
+            .map(|(index, name)| directory_image(&directory.path().join(name), index as u8))
+            .collect();
+        tagged_wav(&source);
+        let embedded = ArtworkManager::new(directory.path())
+            .load(&selected)
+            .unwrap();
+        assert_eq!(fs::read(file_path(embedded.uri())).unwrap(), DEFAULT_IMAGE);
+        write_test_wave(&mut File::create(&source).unwrap());
+        for (name, expected) in candidates.iter().zip(&images) {
+            // Each manager has a fresh session lookup; old immutable disk copies
+            // must not become candidates or affect the chosen source image.
+            let manager = ArtworkManager::new(directory.path());
+            let image = manager.load(&selected).unwrap();
+            assert_eq!(fs::read(file_path(image.uri())).unwrap(), *expected);
+            assert_eq!(file_path(image.uri()).extension().unwrap(), "png");
+            fs::remove_file(directory.path().join(name)).unwrap();
+        }
+        assert!(
+            ArtworkManager::new(directory.path())
+                .load(&selected)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn directory_images_require_exact_stems_and_supported_extensions() {
+        let directory = tempfile::tempdir().unwrap();
+        let selected = track(directory.path().join("missing.wav"));
+        for name in [
+            "other.png",
+            "cover.back.jpg",
+            "cover-small.png",
+            "cover.svg",
+            "folder.avif",
+            "front",
+            "cover.png.bak",
+        ] {
+            directory_image(&directory.path().join(name), 1);
+        }
+        assert!(
+            ArtworkManager::new(directory.path())
+                .load(&selected)
+                .is_none()
+        );
+        for extension in [
+            "PNG", "JpG", "JPEG", "GIF", "WebP", "BMP", "TIF", "TIFF", "ICO",
+        ] {
+            let path = directory.path().join(format!("FrOnT.{extension}"));
+            let expected = directory_image(&path, 2);
+            let image = ArtworkManager::new(directory.path())
+                .load(&selected)
+                .unwrap();
+            assert_eq!(fs::read(file_path(image.uri())).unwrap(), expected);
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn directory_fallback_skips_invalid_oversized_and_nested_images() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("track.wav");
+        write_test_wave(&mut File::create(&source).unwrap());
+        let cover = directory.path().join("cover.png");
+        fs::write(&cover, DEFAULT_IMAGE).unwrap();
+        File::options()
+            .write(true)
+            .open(&cover)
+            .unwrap()
+            .set_len(MAX_IMAGE_BYTES as u64 + 1)
+            .unwrap();
+        fs::write(directory.path().join("folder.png"), b"not an image").unwrap();
+        let nested = directory.path().join("front.png");
+        fs::create_dir(&nested).unwrap();
+        fs::write(nested.join("cover.png"), DEFAULT_IMAGE).unwrap();
+        let boundary = directory.path().join("front.TIFF");
+        fs::write(&boundary, DEFAULT_IMAGE).unwrap();
+        File::options()
+            .write(true)
+            .open(&boundary)
+            .unwrap()
+            .set_len(MAX_IMAGE_BYTES as u64)
+            .unwrap();
+        let selected = track(source);
+        let manager = ArtworkManager::new(directory.path()).with_max_image_bytes(MAX_IMAGE_BYTES);
+        let accepted = manager.load(&selected).unwrap();
+        assert_eq!(
+            fs::metadata(file_path(accepted.uri())).unwrap().len(),
+            MAX_IMAGE_BYTES as u64
+        );
+        fs::remove_file(boundary).unwrap();
+        assert!(
+            ArtworkManager::new(directory.path())
+                .with_max_image_bytes(MAX_IMAGE_BYTES)
+                .load(&selected)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn directory_images_are_path_bound_and_cached_as_immutable_content() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = directory.path().join("first");
+        let second = directory.path().join("second");
+        fs::create_dir(&first).unwrap();
+        fs::create_dir(&second).unwrap();
+        let old_bytes = directory_image(&first.join("cover.png"), 1);
+        let new_bytes = directory_image(&second.join("cover.png"), 2);
+        let mut selected = track(first.join("missing.wav"));
+        let manager = ArtworkManager::new(directory.path());
+        let original_identity = ArtworkIdentity::for_track(&selected);
+        // A missing or unprobeable audio file does not hide its directory cover.
+        let old = manager.load(&selected).unwrap();
+        fs::remove_file(first.join("cover.png")).unwrap();
+        assert_eq!(fs::read(file_path(old.uri())).unwrap(), old_bytes);
+        selected.path = second.join("unprobeable.wav");
+        fs::write(&selected.path, b"not audio").unwrap();
+        assert!(!original_identity.matches(&selected));
+        assert!(!manager.is_loaded(&selected));
+        assert!(manager.cached(&selected).is_none());
+        let new = manager.load(&selected).unwrap();
+        assert_ne!(new.uri(), old.uri());
+        assert_eq!(fs::read(file_path(new.uri())).unwrap(), new_bytes);
+        assert_eq!(fs::read(file_path(old.uri())).unwrap(), old_bytes);
+        selected.title = "Metadata edit".into();
+        assert_eq!(
+            manager.load_with(&selected, || panic!("metadata edit reprobed")),
+            Some(new)
+        );
+    }
+
+    #[test]
+    fn unfinished_directory_lookup_cannot_complete_a_relocated_request() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = directory.path().join("first");
+        let second = directory.path().join("second");
+        fs::create_dir(&first).unwrap();
+        fs::create_dir(&second).unwrap();
+        let old_bytes = directory_image(&first.join("cover.png"), 1);
+        let new_bytes = directory_image(&second.join("cover.png"), 2);
+        let original = track(first.join("track.wav"));
+        let mut relocated = original.clone();
+        relocated.path = second.join("track.wav");
+        let manager = ArtworkManager::new(directory.path());
+        let (started, loading) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let manager = &manager;
+            let original = &original;
+            let old = scope.spawn(move || {
+                manager.load_with(original, || {
+                    started.send(()).unwrap();
+                    released.recv().unwrap();
+                    manager.source_uri(&original.path, manager.max_image_bytes)
+                })
+            });
+            loading.recv().unwrap();
+            assert!(!manager.is_loaded(&relocated));
+            assert!(manager.cached(&relocated).is_none());
+            let new = scope.spawn(|| manager.load(&relocated).unwrap());
+            release.send(()).unwrap();
+            let old = old.join().unwrap().unwrap();
+            let new = new.join().unwrap();
+            assert_eq!(fs::read(file_path(old.uri())).unwrap(), old_bytes);
+            assert_eq!(fs::read(file_path(new.uri())).unwrap(), new_bytes);
+            assert_eq!(manager.cached(&relocated), Some(new));
+        });
     }
 
     #[test]
@@ -1104,7 +1538,7 @@ pub(crate) mod tests {
                         manager
                             .load_with(&selected, || {
                                 probes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                manager.embedded_uri(&selected.path)
+                                manager.source_uri(&selected.path, manager.max_image_bytes)
                             })
                             .unwrap()
                     })
@@ -1130,7 +1564,6 @@ pub(crate) mod tests {
         let alias = directory.path().join("linked.wav");
         std::os::unix::fs::symlink(&source, &alias).unwrap();
         let manager = ArtworkManager::new(directory.path());
-        let fallback = result_uri(manager.default.clone());
         let cache = directory.path().join("artwork/cache");
         fs::create_dir_all(&cache).unwrap();
         let expired = cache.join(format!("{}.png", "1".repeat(64)));
@@ -1152,8 +1585,8 @@ pub(crate) mod tests {
         // Do not join on failure: a regression must fail rather than hang the suite.
         let (direct, linked, removed) = completed.recv_timeout(Duration::from_secs(2)).unwrap();
         worker.join().unwrap();
-        assert_eq!(direct, fallback);
-        assert_eq!(linked, fallback);
+        assert!(direct.is_none());
+        assert!(linked.is_none());
         assert_eq!(removed, 1);
         assert!(!expired.exists());
     }
@@ -1173,7 +1606,7 @@ pub(crate) mod tests {
                 manager.load_with(selected, || {
                     started.send(()).unwrap();
                     released.recv().unwrap();
-                    Ok(None)
+                    ArtworkSource::Directory(None)
                 })
             });
             loading.recv().unwrap();
@@ -1183,15 +1616,12 @@ pub(crate) mod tests {
             });
             let observed = reads.recv_timeout(Duration::from_secs(2));
             release.send(()).unwrap();
-            assert_eq!(observed.unwrap(), (manager.default.clone(), false));
+            assert_eq!(observed.unwrap(), (None, false));
             loader.join().unwrap();
         });
         let _cleaning = manager.maintenance.write();
         assert!(manager.is_loaded(&selected));
-        assert_eq!(
-            result_uri(manager.cached(&selected)),
-            result_uri(manager.default.clone())
-        );
+        assert!(manager.cached(&selected).is_none());
     }
 
     #[test]
@@ -1213,7 +1643,7 @@ pub(crate) mod tests {
                 manager.load_with(old_track, || {
                     started.send(()).unwrap();
                     released.recv().unwrap();
-                    manager.embedded_uri(source)
+                    manager.source_uri(source, manager.max_image_bytes)
                 })
             });
             loading.recv().unwrap();
@@ -1238,7 +1668,9 @@ pub(crate) mod tests {
     fn held_results_can_exceed_target_and_idle_results_are_evicted() {
         let directory = tempfile::tempdir().unwrap();
         let manager = ArtworkManager::new(directory.path());
-        let mut selected = track(directory.path().join("missing"));
+        let source = directory.path().join("track.wav");
+        tagged_wav(&source);
+        let mut selected = track(source);
         let mut held = Vec::new();
         for id in 1..=MAX_ARTWORK_ENTRIES + 2 {
             selected.id = id as i64;
@@ -1342,7 +1774,7 @@ pub(crate) mod tests {
                 manager.load_with(selected, || {
                     started.send(()).unwrap();
                     released.recv().unwrap();
-                    manager.embedded_uri(&selected.path)
+                    manager.source_uri(&selected.path, manager.max_image_bytes)
                 })
             });
             loading.recv().unwrap();
@@ -1367,15 +1799,15 @@ pub(crate) mod tests {
         let directory = tempfile::tempdir().unwrap();
         let manager = ArtworkManager::new(directory.path());
         let missing = track(directory.path().join("missing"));
-        assert_eq!(
-            result_uri(manager.load(&missing)),
-            result_uri(manager.default.clone())
+        assert!(manager.load(&missing).is_none());
+        assert!(
+            manager
+                .load_with(&missing, || panic!("cached failure reprobed"))
+                .is_none()
         );
-        assert_eq!(
-            result_uri(manager.load_with(&missing, || panic!("cached failure reprobed"))),
-            result_uri(manager.default.clone())
-        );
+        assert!(manager.is_loaded(&missing));
         assert_eq!(manager.maintain(Duration::ZERO, false).unwrap().files, 0);
+        fs::create_dir_all(directory.path().join("artwork")).unwrap();
         fs::write(directory.path().join("artwork/cache"), b"blocked").unwrap();
         assert!(manager.maintain(Duration::ZERO, false).is_err());
         let blocked = directory.path().join("blocked");

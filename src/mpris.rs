@@ -782,7 +782,7 @@ impl TrackMetadata {
             artist: track.artist.clone(),
             album: track.album.clone(),
             url: url::Url::from_file_path(&track.path).ok()?.into(),
-            art_url: artwork.cached(track),
+            art_url: artwork.cached(track).or_else(|| artwork.cached_default()),
             length: state
                 .playback
                 .duration
@@ -878,7 +878,7 @@ async fn publish_artwork(
     let track = track.clone();
     let result = handle
         .workers()
-        .execute(move || manager.load(&track))
+        .execute(move || manager.load(&track).or_else(|| manager.export_default()))
         .await
         .map_err(|error| zbus::Error::Failure(format!("Loading MPRIS artwork: {error:#}")))?;
     let current = handle.mpris_snapshot();
@@ -1383,6 +1383,18 @@ mod tests {
             artwork.cached(current)
         );
         assert!(!artwork.is_loaded(current));
+        assert!(!directory.path().join("artwork").exists());
+        assert!(
+            !metadata_map(TrackMetadata::from_snapshot(&state, &artwork).as_ref())
+                .contains_key("mpris:artUrl")
+        );
+        let default = artwork.export_default().unwrap();
+        assert_eq!(
+            TrackMetadata::from_snapshot(&state, &artwork)
+                .unwrap()
+                .art_url,
+            Some(default)
+        );
         artwork.load(current);
         assert!(artwork.is_loaded(current));
         let mut replacement = current.clone();
@@ -1390,6 +1402,34 @@ mod tests {
         state.current_track = Some(Arc::new(replacement));
         assert!(TrackMetadata::from_snapshot(&state, &artwork).is_some());
         assert!(!artwork.is_loaded(state.current_track().unwrap()));
+    }
+
+    #[test]
+    fn failed_default_export_omits_art_url_without_retrying_from_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let blocked = directory.path().join("blocked");
+        std::fs::write(&blocked, b"not a directory").unwrap();
+        let artwork = ArtworkManager::new(&blocked);
+        assert!(artwork.export_default().is_none());
+        std::fs::remove_file(&blocked).unwrap();
+        std::fs::create_dir(&blocked).unwrap();
+        let state = MprisSnapshot {
+            queue: QueueState {
+                total: 1,
+                current_id: Some(1),
+                current_position: Some(0),
+                revision: 0,
+            },
+            current_track: Some(Arc::new(track(1))),
+            playback: PlaybackState::default(),
+            shutting_down: false,
+        };
+        assert!(
+            !metadata_map(TrackMetadata::from_snapshot(&state, &artwork).as_ref())
+                .contains_key("mpris:artUrl")
+        );
+        assert!(!blocked.join("artwork").exists());
+        assert!(artwork.cached_default().is_none());
     }
 
     #[test]
@@ -1520,7 +1560,7 @@ mod tests {
     fn metadata_has_dbus_types_and_queue_occurrence_identity() {
         let directory = tempfile::tempdir().unwrap();
         let artwork = ArtworkManager::new(directory.path());
-        let art = artwork.cached(&self::track(1)).unwrap();
+        let art = artwork.export_default().unwrap();
         let expected_uri = art.uri().to_owned();
         let track = TrackMetadata {
             queue_id: 42,

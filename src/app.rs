@@ -251,6 +251,7 @@ impl App {
         let signals =
             Signals::new([Signal::Int, Signal::Term]).context("Registering shutdown signals")?;
         let config = Runtime::load_startup_config(&config_path)?;
+        let artwork_limit_bytes = config.artwork_file_limit_mb as usize * 1024 * 1024;
         let i18n = Arc::new(crate::i18n::Localizer::new(if graphical {
             &config.ui_language
         } else {
@@ -262,7 +263,8 @@ impl App {
         let handle = AppHandle::new(&runtime, graphical);
         let signals = ShutdownSignals::start(signals, handle.clone());
         let server = ipc::Server::start(&socket_owner, runtime.handle.clone(), handle.clone())?;
-        let artwork = Arc::new(ArtworkManager::new(&data_dir));
+        let artwork =
+            Arc::new(ArtworkManager::new(&data_dir).with_max_image_bytes(artwork_limit_bytes));
         let mut app = Self {
             handle,
             runtime,

@@ -372,6 +372,12 @@ Interface → Layout includes Layout snapping and Layout grid spacing. These sav
 `interface.layout_snap_enabled` (default `true`) and `interface.layout_snap_grid_px` (default `16`,
 integer `1`–`64` logical pixels before interface scaling) in `config.toml`.
 
+Library → Covers & cache includes Encoded cover file limit (MiB), saved as
+`interface.artwork_file_limit_mb`: an integer from `1` to `64`, default `16`.
+It limits each encoded embedded or directory image, not its decoded memory.
+Apply saves the value; restart the entire application, including its core, to use
+the new limit. Closing and reopening only the window does not apply it.
+
 Library → Covers & cache includes Cover decode budget (MiB per cover).
 It saves `interface.artwork_decode_budget_mb`: an integer from `1` to `1024`,
 default `64`. The limit includes all retained decoded frames and frame overhead

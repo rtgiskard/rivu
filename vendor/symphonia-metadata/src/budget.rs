@@ -11,8 +11,8 @@
 //! tiny values cannot evade the input's aggregate byte or object limits. Limits
 //! apply before payload allocation. Text reserves four bytes per encoded byte
 //! for decoding/owned copies, plus 256 bytes per item for collection overhead.
-//! Visual payloads have separate 8 MiB per-image / 16 MiB aggregate limits.
-//! Even `Limit::None` is clamped to these finite safety ceilings.
+//! Ordinary metadata uses 8 MiB per-image / 16 MiB aggregate visual limits.
+//! Artwork callers may opt into a bounded larger visual budget explicitly.
 
 use std::cell::Cell;
 use symphonia_core::{common::Limit, meta::MetadataOptions};
@@ -61,6 +61,19 @@ impl MetadataBudget {
             encoded_left: 24 * 1024 * 1024,
             items_left: MAX_ITEMS,
             depth: 0,
+        }
+    }
+
+    /// Dedicated artwork acquisition; ordinary playback/scanning keeps its
+    /// existing limits. The caller's configured encoded-image limit is bounded
+    /// to 64 MiB, with room for two images and encoded transport overhead.
+    pub fn for_artwork(max_image_bytes: usize) -> Self {
+        let visual_limit = max_image_bytes.min(64 * 1024 * 1024);
+        Self {
+            visual_limit,
+            visual_left: visual_limit.saturating_mul(2),
+            encoded_left: visual_limit.saturating_add(VISUAL_HEADER_BYTES).saturating_mul(3),
+            ..Self::default()
         }
     }
 
@@ -128,6 +141,11 @@ pub fn visual_allowed(bytes: usize) -> bool {
     reserve(|budget| bytes <= budget.visual_limit)
 }
 
+pub(crate) fn visual_frame_allowed(bytes: usize) -> bool {
+    reserve(|budget| budget.visual_limit != 0
+        && bytes <= budget.visual_limit.saturating_add(VISUAL_HEADER_BYTES))
+}
+
 // Base64 requires a bounded encoded buffer and a decoded buffer before the
 // format-specific image parser can reserve the retained visual itself.
 pub(crate) fn encoded_visual(bytes: usize) -> bool {
@@ -153,11 +171,20 @@ pub(crate) fn unsynchronised_visual(bytes: usize) -> bool {
     })
 }
 
+/// Packet assembly ceiling for the active input. Artwork probing explicitly
+/// opts into larger encoded pictures; ordinary inputs retain the 12 MiB bound.
+pub fn metadata_packet_limit() -> usize {
+    ACTIVE.with(|active| active.get().map_or(12 * 1024 * 1024, |budget| {
+        if budget.visual_limit == 0 { MAX_TEXT_BYTES }
+        else { (12 * 1024 * 1024).max((budget.visual_limit + VISUAL_HEADER_BYTES).div_ceil(3) * 4 + 32) }
+    }))
+}
+
 /// Reserve incremental container metadata packet assembly, before a demuxer
 /// creates its full buffer. Embedded readers reserve retained values separately.
 pub fn metadata_packet(assembled_bytes: usize, new_bytes: usize) -> bool {
     reserve(|budget| {
-        let maximum = if budget.visual_limit == 0 { MAX_TEXT_BYTES } else { 12 * 1024 * 1024 };
+        let maximum = metadata_packet_limit();
         if assembled_bytes.saturating_add(new_bytes) > maximum || new_bytes > budget.encoded_left
             || budget.items_left == 0 { return false; }
         budget.encoded_left -= new_bytes;
@@ -176,4 +203,47 @@ impl Depth {
 }
 impl Drop for Depth {
     fn drop(&mut self) { reserve(|budget| { budget.depth -= 1; true }); }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn artwork_limits_are_scoped_and_preserve_ordinary_metadata_limits() {
+        for limit in [16 * 1024 * 1024, 64 * 1024 * 1024] {
+            let mut artwork = MetadataBudget::for_artwork(limit);
+            artwork.with(|| {
+                assert!(visual_allowed(limit));
+                assert!(!visual_allowed(limit + 1));
+                assert!(visual_frame_allowed(limit + VISUAL_HEADER_BYTES));
+                assert!(!visual_frame_allowed(limit + VISUAL_HEADER_BYTES + 1));
+                assert!(visual_frame(limit));
+                assert!(visual_frame(limit));
+                assert!(!visual_frame(1));
+            });
+            let mut ordinary = MetadataBudget::default();
+            ordinary.with(|| {
+                assert!(visual_allowed(MAX_VISUAL_BYTES));
+                assert!(!visual_allowed(MAX_VISUAL_BYTES + 1));
+                assert_eq!(metadata_packet_limit(), 12 * 1024 * 1024);
+            });
+        }
+    }
+
+    #[test]
+    fn artwork_budget_admits_packet_and_base64_staging_at_configured_boundary() {
+        for limit in [16 * 1024 * 1024, 64 * 1024 * 1024] {
+            let mut artwork = MetadataBudget::for_artwork(limit);
+            artwork.with(|| {
+                let encoded = (limit + VISUAL_HEADER_BYTES).div_ceil(3) * 4 + 32;
+                assert_eq!(metadata_packet_limit(), encoded);
+                assert!(metadata_packet(0, encoded));
+                assert!(!metadata_packet(encoded, 1));
+                assert!(encoded_visual(encoded));
+                assert!(visual_frame(limit));
+                assert!(!visual_allowed(limit + 1));
+            });
+        }
+    }
 }

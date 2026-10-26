@@ -1,7 +1,4 @@
-use std::{
-    cell::RefCell, collections::BTreeMap, ops::Range, path::PathBuf, rc::Rc, sync::Arc,
-    time::Instant,
-};
+use std::{cell::RefCell, collections::BTreeMap, ops::Range, rc::Rc, sync::Arc, time::Instant};
 
 use gpui::{prelude::*, *};
 
@@ -62,22 +59,11 @@ impl AlbumGridLayout {
     }
 }
 
-struct NegativeCover {
-    identity: ArtworkIdentity,
-    path: PathBuf,
-}
-
-impl NegativeCover {
-    fn matches(&self, track: &Track) -> bool {
-        self.identity.matches(track) && self.path == track.path
-    }
-}
-
 struct AlbumCover {
     view: ArtworkView,
     // Only explicit negative results outlive shared-cache eviction, and only
     // for this visibly demanded source. Positive results live in the view.
-    negative: Option<NegativeCover>,
+    negative: Option<ArtworkIdentity>,
 }
 
 impl AlbumCover {
@@ -110,11 +96,7 @@ impl AlbumCover {
         }) {
             return false;
         }
-        let loaded = loaded.filter(|artwork| !artwork.is_placeholder());
-        self.negative = loaded.is_none().then(|| NegativeCover {
-            identity: ArtworkIdentity::for_track(source),
-            path: source.path.clone(),
-        });
+        self.negative = loaded.is_none().then(|| ArtworkIdentity::for_track(source));
         self.view.replace(loaded.cloned(), cx)
     }
 }
@@ -609,12 +591,9 @@ impl AlbumBrowser {
             {
                 cover.negative = None;
             }
-            changed |= cover.view.replace(
-                self.manager
-                    .cached(&album.representative)
-                    .filter(|artwork| !artwork.is_placeholder()),
-                cx,
-            );
+            changed |= cover
+                .view
+                .replace(self.manager.cached(&album.representative), cx);
         }
         let next = self.demand.clone().find_map(|index| {
             let track = &self.model.albums().get(index)?.representative;
@@ -1288,7 +1267,6 @@ mod tests {
         source.id = 65;
         // The worker's result must stay leased while the GUI callback is queued.
         let completed = manager.load(&source).unwrap();
-        assert!(!completed.is_placeholder());
         let mut pressure = source.clone();
         pressure.id = 66;
         drop(manager.load(&pressure));
@@ -1328,6 +1306,9 @@ mod tests {
         for (source, cover) in sources.iter().zip(&mut covers) {
             assert!(cover.needs_load(source, &manager));
             let completed = manager.load(source);
+            assert!(completed.is_none());
+            assert!(manager.is_loaded(source));
+            assert!(manager.cached(source).is_none());
             cx.update(|cx| {
                 cover.complete(source, Some(source), completed.as_ref(), cx);
                 assert!(cover.view.image(cx).is_none());
@@ -1348,6 +1329,8 @@ mod tests {
         let manager = ArtworkManager::new(directory.path());
         let source = track(directory.path().join("missing.wav"));
         let negative = manager.load(&source);
+        assert!(negative.is_none());
+        assert!(manager.is_loaded(&source));
         let mut current = source.clone();
         current.path = directory.path().join("available.wav");
         tagged_wav(&current.path);

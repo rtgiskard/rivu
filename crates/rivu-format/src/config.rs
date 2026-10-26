@@ -385,6 +385,8 @@ macro_rules! config_fields {
         pub log_retention_weeks: u32,
         /// Default number of rows fetched by GUI and TUI paginated views.
         pub page_size: u32,
+        /// Maximum encoded image bytes admitted per cover, in MiB.
+        pub artwork_file_limit_mb: u32,
         /// Retained decoded real-cover frames per cover, in MiB.
         pub artwork_decode_budget_mb: u32,
         /// Shared GPU material-buffer admission budget, applied at GUI startup.
@@ -519,6 +521,7 @@ impl Default for Config {
             log_to_file: false,
             log_retention_weeks: 4,
             page_size: DEFAULT_PAGE_SIZE,
+            artwork_file_limit_mb: 16,
             artwork_decode_budget_mb: 64,
             gpu_material_budget_mb: 64,
             library_columns: LibraryColumns::default(),
@@ -707,6 +710,11 @@ impl Config {
         ensure!(
             (16..=1024).contains(&self.gpu_material_budget_mb),
             "interface.gpu_material_budget_mb must be between 16 and 1024 MiB"
+        );
+        ensure!(
+            (1..=64).contains(&self.artwork_file_limit_mb),
+            "interface.artwork_file_limit_mb must be between 1 and 64 MiB; got {}",
+            self.artwork_file_limit_mb
         );
         ensure!(
             (1..=1024).contains(&self.artwork_decode_budget_mb),

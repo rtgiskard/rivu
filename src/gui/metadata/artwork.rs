@@ -16,8 +16,7 @@ impl Metadata {
         self.artwork_view.replace(
             self.metadata
                 .track()
-                .and_then(|track| self.artwork_manager.cached(track))
-                .filter(|artwork| !artwork.is_placeholder()),
+                .and_then(|track| self.artwork_manager.cached(track)),
             cx,
         );
         let current = self
@@ -45,8 +44,7 @@ impl Metadata {
                         .track()
                         .is_some_and(|track| identity.matches(track))
                 {
-                    this.artwork_view
-                        .replace(loaded.filter(|artwork| !artwork.is_placeholder()), cx);
+                    this.artwork_view.replace(loaded, cx);
                     cx.notify();
                 }
                 let current = this

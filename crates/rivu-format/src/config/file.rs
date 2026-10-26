@@ -112,6 +112,7 @@ file_group!(Interface, InterfaceView {
     mpris_enabled => mpris_enabled: bool,
     confirm_queue_replace => confirm_queue_replace: bool,
     page_size => page_size: u32,
+    artwork_file_limit_mb => artwork_file_limit_mb: u32,
     artwork_decode_budget_mb => artwork_decode_budget_mb: u32,
     gpu_material_budget_mb => gpu_material_budget_mb: u32,
     library_columns => library_columns: LibraryColumns,
