@@ -3,7 +3,7 @@ use crate::core::CoreHandle;
 use anyhow::{Context, Error, Result, bail};
 use async_channel::{Receiver, Sender};
 use async_io::Async;
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
 use futures::{
     FutureExt, StreamExt,
     io::{AsyncRead, AsyncReadExt},
@@ -11,11 +11,11 @@ use futures::{
 };
 use rand::RngExt;
 use rivu_protocol::protocol::{
-    HELLO_TIMEOUT, HelloResponse, MAX_CLIENTS, MAX_REQUEST, SessionState, UNKNOWN_INSTANCE,
-    WireRequest, WireResponse, wire_state,
+    HELLO_TIMEOUT, HelloResponse, MAX_CLIENTS, SessionState, UNKNOWN_INSTANCE, WireRequest,
+    WireResponse, wire_state,
 };
 use rivu_protocol::transport::{
-    bridge_timeout, decode_request_frame, read_frame, timeout, timeout_at, write_error_frame,
+    bridge_timeout, read_request_frame, timeout, timeout_at, write_error_frame,
     write_frame_buffered,
 };
 use rivu_protocol::{AppCommand, query_wait_timeout};
@@ -109,7 +109,7 @@ struct RequestReader {
 }
 
 impl RequestReader {
-    async fn read(&mut self, stream: &mut (impl AsyncRead + Unpin)) -> Result<Bytes> {
+    async fn read(&mut self, stream: &mut (impl AsyncRead + Unpin)) -> Result<Result<WireRequest>> {
         // Idle sessions have no expiry. Start one absolute deadline at the first
         // byte, retaining it when Watch updates cancel and resume this future.
         if self.pending.is_empty() {
@@ -124,8 +124,10 @@ impl RequestReader {
             self.deadline = Some(Instant::now() + FRAME_TIMEOUT);
             self.pending.extend_from_slice(&prefix[..read]);
         }
-        let deadline = self.deadline.expect("Started request frame has a deadline");
-        let frame = timeout_at(deadline, read_frame(stream, MAX_REQUEST, &mut self.pending))
+        let deadline = self
+            .deadline
+            .expect("started IPC frame must have a deadline");
+        let frame = timeout_at(deadline, read_request_frame(stream, &mut self.pending))
             .await
             .context("IPC request frame completion timed out")??;
         self.deadline = None;
@@ -135,12 +137,13 @@ impl RequestReader {
 
 enum WatchResult {
     Revisions(StateRevisions),
-    Request(Bytes),
+    Request,
 }
 
 async fn wait_for_revisions(
     stream: &mut UnixStream,
     reader: &mut RequestReader,
+    pending_request: &mut Option<Result<WireRequest>>,
     handle: &CoreHandle,
     expected: StateRevisions,
     updates: &Receiver<()>,
@@ -154,7 +157,10 @@ async fn wait_for_revisions(
         futures::select! {
             changed = updates.recv().fuse() => { if changed.is_err() { return Ok(None); } }
             _ = shutdown.recv().fuse() => return Ok(None),
-            frame = reader.read(stream).fuse() => return Ok(Some(WatchResult::Request(frame?))),
+            frame = reader.read(stream).fuse() => {
+                *pending_request = Some(frame?);
+                return Ok(Some(WatchResult::Request));
+            },
         }
     }
 }
@@ -177,7 +183,7 @@ async fn serve_connection(
         if shutdown.is_closed() {
             return Ok(());
         }
-        let bytes = if let Some(frame) = pending_request.take() {
+        let decoded = if let Some(frame) = pending_request.take() {
             frame
         } else if session.is_bound() {
             futures::select! {
@@ -198,7 +204,7 @@ async fn serve_connection(
                 _ = shutdown.recv().fuse() => return Ok(()),
             }
         };
-        let request = match decode_request_frame(&bytes) {
+        let request = match decoded {
             Ok(request) => request,
             Err(error) => {
                 tracing::warn!(error = %error, "ipc_invalid_request");
@@ -306,6 +312,7 @@ async fn serve_connection(
                 let Some(result) = wait_for_revisions(
                     &mut stream,
                     &mut reader,
+                    &mut pending_request,
                     &handle,
                     expected,
                     &updates,
@@ -316,10 +323,7 @@ async fn serve_connection(
                     return Ok(());
                 };
                 let revisions = match result {
-                    WatchResult::Request(frame) => {
-                        pending_request = Some(frame);
-                        continue;
-                    }
+                    WatchResult::Request => continue,
                     WatchResult::Revisions(revisions) => revisions,
                 };
                 let response = WireResponse::Watch(revisions);
@@ -457,6 +461,7 @@ pub fn is_no_instance(error: &Error) -> bool {
 mod tests {
     use super::*;
     use futures::io::AsyncWriteExt;
+    use rivu_protocol::{response::StateSections, transport::encode_request_frame_into};
     use std::{
         future::Future,
         task::{Context as TaskContext, Waker},
@@ -475,10 +480,16 @@ mod tests {
             let receive = reader.read(&mut stream);
             let send = async {
                 async_io::Timer::after(FRAME_TIMEOUT * 2).await;
-                writer.write_all(&[2, 0, 0, 0, 14, 1]).await.unwrap();
+                let mut encoded = Vec::new();
+                encode_request_frame_into(&WireRequest::Hello(StateSections::ALL), &mut encoded)
+                    .unwrap();
+                writer.write_all(&encoded).await.unwrap();
             };
             let (frame, _) = futures::join!(receive, send);
-            assert_eq!(frame.unwrap().as_ref(), &[14, 1]);
+            assert!(matches!(
+                frame.unwrap().unwrap(),
+                WireRequest::Hello(sections) if sections == StateSections::ALL
+            ));
         });
     }
 
@@ -487,7 +498,10 @@ mod tests {
         async_io::block_on(async {
             let (mut writer, mut stream) = socket_pair();
             let mut reader = RequestReader::default();
-            writer.write_all(&[2]).await.unwrap();
+            let mut encoded = Vec::new();
+            encode_request_frame_into(&WireRequest::Hello(StateSections::ALL), &mut encoded)
+                .unwrap();
+            writer.write_all(&encoded[..1]).await.unwrap();
             {
                 let mut reading = std::pin::pin!(reader.read(&mut stream));
                 let mut context = TaskContext::from_waker(Waker::noop());
@@ -496,12 +510,16 @@ mod tests {
             // Resume a partially read frame whose original deadline expired.
             // Additional bytes must not start a fresh completion interval.
             reader.deadline = Some(Instant::now() - FRAME_TIMEOUT);
-            writer.write_all(&[0, 0, 0, 14]).await.unwrap();
+            writer
+                .write_all(&encoded[1..encoded.len() - 1])
+                .await
+                .unwrap();
             assert!(
                 reader
                     .read(&mut stream)
                     .await
-                    .unwrap_err()
+                    .err()
+                    .unwrap()
                     .to_string()
                     .contains("completion timed out")
             );
@@ -513,11 +531,22 @@ mod tests {
         async_io::block_on(async {
             let (mut writer, mut stream) = socket_pair();
             let mut reader = RequestReader::default();
-            writer.write_all(&[2, 0, 0, 0, 14, 1]).await.unwrap();
-            assert_eq!(reader.read(&mut stream).await.unwrap().as_ref(), &[14, 1]);
+            let mut encoded = Vec::new();
+            encode_request_frame_into(&WireRequest::Hello(StateSections::ALL), &mut encoded)
+                .unwrap();
+            writer.write_all(&encoded).await.unwrap();
+            assert!(matches!(
+                reader.read(&mut stream).await.unwrap().unwrap(),
+                WireRequest::Hello(sections) if sections == StateSections::ALL
+            ));
             async_io::Timer::after(FRAME_TIMEOUT * 2).await;
-            writer.write_all(&[2, 0, 0, 0, 14, 2]).await.unwrap();
-            assert_eq!(reader.read(&mut stream).await.unwrap().as_ref(), &[14, 2]);
+            encode_request_frame_into(&WireRequest::State(StateSections::ALL), &mut encoded)
+                .unwrap();
+            writer.write_all(&encoded).await.unwrap();
+            assert!(matches!(
+                reader.read(&mut stream).await.unwrap().unwrap(),
+                WireRequest::State(sections) if sections == StateSections::ALL
+            ));
         });
     }
 }

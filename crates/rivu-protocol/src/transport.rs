@@ -3,7 +3,7 @@ use super::protocol::{
     UNKNOWN_INSTANCE, WireRequest, WireResponse,
 };
 use anyhow::{Context, Result, bail, ensure};
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, BytesMut};
 use futures_lite::{
     future,
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -196,14 +196,40 @@ pub fn encode_response_frame_into(response: &WireResponse, bytes: &mut Vec<u8>) 
         WireResponse::Error(value) => writer.encode(ResponseType::Error as u8, value),
     }
 }
-pub async fn read_frame<S: AsyncRead + Unpin>(
+/// Read and consume one request, retaining only reusable receive storage.
+///
+/// The outer error reports framing or I/O failure before a complete frame was
+/// available. The inner error reports decoding of a completed, consumed frame,
+/// allowing the server to reply with an invalid-request error.
+pub async fn read_request_frame<S: AsyncRead + Unpin>(
+    stream: &mut S,
+    pending: &mut BytesMut,
+) -> Result<Result<WireRequest>> {
+    read_decoded_frame(stream, MAX_REQUEST, pending, decode_request_frame).await
+}
+
+async fn read_decoded_frame<S: AsyncRead + Unpin, T>(
     stream: &mut S,
     limit: usize,
     pending: &mut BytesMut,
-) -> Result<Bytes> {
+    decode: impl FnOnce(&[u8]) -> Result<T>,
+) -> Result<Result<T>> {
     let length = fill_frame(stream, limit, pending).await?;
-    pending.advance(4);
-    Ok(pending.split_to(length).freeze())
+    let consumed = 4 + length;
+    let result = decode(&pending[4..consumed]);
+    if pending.len() == consumed {
+        // Decode into owned data before consuming; no frame allocation escapes.
+        pending.clear();
+        // Earlier pipelined frames may have advanced the visible start. Reclaim
+        // that prefix without allocating to inspect the actual backing capacity.
+        let _ = pending.try_reclaim(RETAINED_BUFFER_LIMIT + 1);
+        if pending.capacity() > RETAINED_BUFFER_LIMIT {
+            *pending = BytesMut::new();
+        }
+    } else {
+        pending.advance(consumed);
+    }
+    Ok(result)
 }
 
 async fn fill_frame<S: AsyncRead + Unpin>(
@@ -320,23 +346,7 @@ pub async fn read_response_frame<S: AsyncRead + Unpin>(
     stream: &mut S,
     pending: &mut BytesMut,
 ) -> Result<WireResponse> {
-    let length = fill_frame(stream, MAX_RESPONSE, pending).await?;
-    let consumed = 4 + length;
-    let result = decode_response_frame(&pending[4..consumed]);
-    if pending.len() == consumed {
-        // Decode before consuming so capacity still covers the whole allocation,
-        // rather than just an empty split tail. No frame ownership escapes here.
-        pending.clear();
-        // A caller may have prebuffered multiple frames; reclaim any prefix
-        // advanced past on earlier calls without allocating or copying payload.
-        let _ = pending.try_reclaim(RETAINED_BUFFER_LIMIT + 1);
-        if pending.capacity() > RETAINED_BUFFER_LIMIT {
-            *pending = BytesMut::new();
-        }
-    } else {
-        pending.advance(consumed);
-    }
-    result
+    read_decoded_frame(stream, MAX_RESPONSE, pending, decode_response_frame).await?
 }
 
 pub fn error_frame(error: impl Into<String>) -> WireResponse {
@@ -643,6 +653,231 @@ mod tests {
         });
     }
 
+    fn payload_request(payload: String) -> WireRequest {
+        WireRequest::Query(super::super::protocol::WireQuery::PlaylistSummaries {
+            query: Some(payload),
+            offset: 0,
+            limit: 1,
+        })
+    }
+
+    fn request_payload(request: WireRequest) -> String {
+        let WireRequest::Query(super::super::protocol::WireQuery::PlaylistSummaries {
+            query: Some(payload),
+            ..
+        }) = request
+        else {
+            panic!("query request with a payload")
+        };
+        payload
+    }
+
+    #[test]
+    fn warmed_small_requests_reuse_receive_storage() {
+        async_io::block_on(async {
+            let first_payload = "X".repeat(1024);
+            let mut encoded = Vec::new();
+            encode_request_frame_into(&payload_request(first_payload.clone()), &mut encoded)
+                .unwrap();
+            let mut pending = BytesMut::new();
+            let first = read_request_frame(&mut encoded.as_slice(), &mut pending)
+                .await
+                .unwrap()
+                .unwrap();
+            let pointer = pending.as_ptr();
+            let capacity = pending.capacity();
+            assert!(capacity >= encoded.len());
+            assert!(capacity <= RETAINED_BUFFER_LIMIT);
+            for payload in ["Y".repeat(1024), "Z".repeat(128)] {
+                encode_request_frame_into(&payload_request(payload.clone()), &mut encoded).unwrap();
+                let request = read_request_frame(&mut encoded.as_slice(), &mut pending)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(request_payload(request), payload);
+                assert!(pending.is_empty());
+                assert_eq!(pending.as_ptr(), pointer);
+                assert_eq!(pending.capacity(), capacity);
+            }
+            assert_eq!(request_payload(first), first_payload);
+        });
+    }
+
+    #[test]
+    fn warmed_small_responses_reuse_receive_storage() {
+        async_io::block_on(async {
+            let first_payload = "X".repeat(1024);
+            let mut encoded = Vec::new();
+            encode_response_frame_into(&WireResponse::Error(first_payload.clone()), &mut encoded)
+                .unwrap();
+            let mut pending = BytesMut::new();
+            let first = read_response_frame(&mut encoded.as_slice(), &mut pending)
+                .await
+                .unwrap();
+            let pointer = pending.as_ptr();
+            let capacity = pending.capacity();
+            assert!(capacity >= encoded.len());
+            assert!(capacity <= RETAINED_BUFFER_LIMIT);
+            for payload in ["Y".repeat(1024), "Z".repeat(128)] {
+                encode_response_frame_into(&WireResponse::Error(payload.clone()), &mut encoded)
+                    .unwrap();
+                assert!(matches!(
+                    read_response_frame(&mut encoded.as_slice(), &mut pending)
+                        .await
+                        .unwrap(),
+                    WireResponse::Error(actual) if actual == payload
+                ));
+                assert!(pending.is_empty());
+                assert_eq!(pending.as_ptr(), pointer);
+                assert_eq!(pending.capacity(), capacity);
+            }
+            assert!(matches!(first, WireResponse::Error(actual) if actual == first_payload));
+        });
+    }
+
+    #[test]
+    fn requests_release_bulk_and_subthreshold_growth_before_idle() {
+        async_io::block_on(async {
+            let mut pending = BytesMut::new();
+            let mut encoded = Vec::new();
+            for (index, size) in [RETAINED_BUFFER_LIMIT + 1024, 150 * 1024, 230 * 1024]
+                .into_iter()
+                .enumerate()
+            {
+                let payload = "X".repeat(size);
+                encode_request_frame_into(&payload_request(payload.clone()), &mut encoded).unwrap();
+                let mut stream = encoded.as_slice();
+                fill_frame(&mut stream, MAX_REQUEST, &mut pending)
+                    .await
+                    .unwrap();
+                if index != 1 {
+                    // The last frame fits the limit, but growth doubles the
+                    // preceding small allocation beyond the retention bound.
+                    assert!(pending.capacity() > RETAINED_BUFFER_LIMIT);
+                }
+                if index > 0 {
+                    assert!(encoded.len() < RETAINED_BUFFER_LIMIT);
+                }
+                let request = read_request_frame(&mut stream, &mut pending)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(request_payload(request), payload);
+                assert!(stream.is_empty());
+                assert!(pending.is_empty());
+                let _ = pending.try_reclaim(RETAINED_BUFFER_LIMIT + 1);
+                assert!(pending.capacity() <= RETAINED_BUFFER_LIMIT);
+            }
+        });
+    }
+
+    #[test]
+    fn pipelined_requests_preserve_payloads_and_release_advanced_backing() {
+        async_io::block_on(async {
+            for invalid in [false, true] {
+                let first_payload = "X".repeat(160 * 1024);
+                let next_payload = "Y".repeat(16 * 1024);
+                let mut encoded = Vec::new();
+                encode_request_frame_into(&payload_request(first_payload.clone()), &mut encoded)
+                    .unwrap();
+                if invalid {
+                    encoded[4] = PROTOCOL_VERSION.wrapping_add(1);
+                }
+                let mut pending = BytesMut::with_capacity(300 * 1024);
+                pending.extend_from_slice(&encoded);
+                encode_request_frame_into(&payload_request(next_payload.clone()), &mut encoded)
+                    .unwrap();
+                pending.extend_from_slice(&encoded);
+                assert!(pending.capacity() > RETAINED_BUFFER_LIMIT);
+                let mut stream = &[][..];
+                let first = read_request_frame(&mut stream, &mut pending).await.unwrap();
+                assert_eq!(first.is_err(), invalid);
+                assert_eq!(pending.as_ref(), encoded.as_slice());
+                // Advancing the first frame hides the oversized allocation.
+                assert!(pending.capacity() <= RETAINED_BUFFER_LIMIT);
+                let next = read_request_frame(&mut stream, &mut pending)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(request_payload(next), next_payload);
+                assert!(pending.is_empty());
+                assert!(!pending.try_reclaim(RETAINED_BUFFER_LIMIT + 1));
+                assert_eq!(pending.capacity(), 0);
+                if !invalid {
+                    assert_eq!(request_payload(first.unwrap()), first_payload);
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn pipelined_responses_preserve_payloads_and_release_advanced_backing() {
+        async_io::block_on(async {
+            for invalid in [false, true] {
+                let first_payload = "X".repeat(160 * 1024);
+                let next_payload = "Y".repeat(16 * 1024);
+                let mut encoded = Vec::new();
+                encode_response_frame_into(
+                    &WireResponse::Error(first_payload.clone()),
+                    &mut encoded,
+                )
+                .unwrap();
+                if invalid {
+                    encoded[4] = PROTOCOL_VERSION.wrapping_add(1);
+                }
+                let mut pending = BytesMut::with_capacity(300 * 1024);
+                pending.extend_from_slice(&encoded);
+                encode_response_frame_into(
+                    &WireResponse::Error(next_payload.clone()),
+                    &mut encoded,
+                )
+                .unwrap();
+                pending.extend_from_slice(&encoded);
+                assert!(pending.capacity() > RETAINED_BUFFER_LIMIT);
+                let mut stream = &[][..];
+                let first = read_response_frame(&mut stream, &mut pending).await;
+                assert_eq!(first.is_err(), invalid);
+                assert_eq!(pending.as_ref(), encoded.as_slice());
+                assert!(pending.capacity() <= RETAINED_BUFFER_LIMIT);
+                assert!(matches!(
+                    read_response_frame(&mut stream, &mut pending).await.unwrap(),
+                    WireResponse::Error(actual) if actual == next_payload
+                ));
+                assert!(pending.is_empty());
+                assert!(!pending.try_reclaim(RETAINED_BUFFER_LIMIT + 1));
+                assert_eq!(pending.capacity(), 0);
+                if !invalid {
+                    assert!(
+                        matches!(first.unwrap(), WireResponse::Error(actual) if actual == first_payload)
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn request_reader_distinguishes_framing_and_decoding_errors() {
+        async_io::block_on(async {
+            let mut pending = BytesMut::new();
+            let oversized = ((MAX_REQUEST + 1) as u32).to_le_bytes();
+            assert!(
+                read_request_frame(&mut oversized.as_slice(), &mut pending)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(pending.as_ref(), oversized.as_slice());
+            pending.clear();
+            let invalid = [1, 0, 0, 0, PROTOCOL_VERSION];
+            assert!(
+                read_request_frame(&mut invalid.as_slice(), &mut pending)
+                    .await
+                    .unwrap()
+                    .is_err()
+            );
+            assert!(pending.is_empty());
+        });
+    }
+
     #[test]
     fn cancelling_a_partial_read_preserves_only_received_bytes() {
         struct PartialRead<'a>(&'a [u8]);
@@ -670,16 +905,15 @@ mod tests {
             let mut stream = PartialRead(&encoded[..7]);
             let mut pending = BytesMut::new();
             assert!(
-                future::poll_once(read_frame(&mut stream, MAX_RESPONSE, &mut pending))
+                future::poll_once(read_response_frame(&mut stream, &mut pending))
                     .await
                     .is_none()
             );
             assert_eq!(pending.as_ref(), &encoded[..7]);
             let mut rest = &encoded[7..];
-            let frame = read_frame(&mut rest, MAX_RESPONSE, &mut pending)
-                .await
-                .unwrap();
-            assert_eq!(frame.as_ref(), &encoded[4..]);
+            let response = read_response_frame(&mut rest, &mut pending).await.unwrap();
+            assert!(matches!(response, WireResponse::Error(actual) if actual == "response"));
+            assert!(pending.is_empty());
         });
     }
 

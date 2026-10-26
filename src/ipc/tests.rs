@@ -55,6 +55,75 @@ fn app_commands_route_over_ipc_without_changing_business_state() {
 }
 
 #[test]
+fn malformed_request_during_watch_receives_invalid_request_response() {
+    use std::io::{Read, Write};
+
+    fn read_response(stream: &mut std::os::unix::net::UnixStream) -> WireResponse {
+        let mut prefix = [0; 4];
+        stream.read_exact(&mut prefix).unwrap();
+        let length = u32::from_le_bytes(prefix) as usize;
+        assert!(length <= MAX_RESPONSE);
+        let mut frame = vec![0; length];
+        stream.read_exact(&mut frame).unwrap();
+        decode_response_frame(&frame).unwrap()
+    }
+
+    let directory = socket_test_directory();
+    let config_path = directory.path().join("config.toml");
+    crate::config::Config {
+        media_read_buffer_mb: 1,
+        ffmpeg_enabled: false,
+        ..Default::default()
+    }
+    .save(&config_path)
+    .unwrap();
+    let owner = SocketOwner::acquire(directory.path()).unwrap();
+    let mut runtime = crate::core::Runtime::start(directory.path(), &config_path).unwrap();
+    let app = AppHandle::new(&runtime, false);
+    let server = Server::start(&owner, runtime.handle.clone(), app).unwrap();
+    let mut control = client_session(directory.path()).unwrap();
+    control.query(Query::ScanTask { id: 0 }).unwrap();
+    let address = rivu_protocol::protocol::address(directory.path()).unwrap();
+    let mut stream = std::os::unix::net::UnixStream::connect_addr(&address).unwrap();
+    let timeout = Some(std::time::Duration::from_secs(5));
+    stream.set_read_timeout(timeout).unwrap();
+    stream.set_write_timeout(timeout).unwrap();
+    let mut encoded = Vec::new();
+    encode_request_frame_into(&WireRequest::Hello(StateSections::ALL), &mut encoded).unwrap();
+    stream.write_all(&encoded).unwrap();
+    assert!(matches!(read_response(&mut stream), WireResponse::Hello(_)));
+
+    encode_request_frame_into(
+        &WireRequest::Watch(runtime.handle.state_revisions()),
+        &mut encoded,
+    )
+    .unwrap();
+    // A complete frame with an unknown request type is a decoding failure, not
+    // a framing failure: Watch must hand it back to the normal error responder.
+    encoded.extend_from_slice(&[2, 0, 0, 0, PROTOCOL_VERSION, 99]);
+    stream.write_all(&encoded).unwrap();
+    let response = match read_response(&mut stream) {
+        // Startup publication may race the Watch baseline.
+        WireResponse::Watch(_) => read_response(&mut stream),
+        response => response,
+    };
+    assert!(matches!(
+        response,
+        WireResponse::Error(error) if error.starts_with("Invalid IPC request:")
+    ));
+    assert_eq!(stream.read(&mut [0; 1]).unwrap(), 0);
+    drop(stream);
+    assert!(
+        control
+            .request_ack(AppCommand::Shutdown)
+            .unwrap()
+            .is_success()
+    );
+    runtime.join().unwrap();
+    drop(server);
+}
+
+#[test]
 fn scan_task_query_and_cancel_wire_round_trip_preserve_id() {
     for id in [0, 42, u64::MAX] {
         let mut encoded = Vec::new();
@@ -1815,7 +1884,15 @@ fn oversized_frame_is_rejected_before_consuming_or_reserving_its_body() {
                 encoded.push(0xaa);
                 let mut stream = encoded.as_slice();
                 let mut pending = bytes::BytesMut::new();
-                assert!(read_frame(&mut stream, limit, &mut pending).await.is_err());
+                if limit == MAX_REQUEST {
+                    assert!(read_request_frame(&mut stream, &mut pending).await.is_err());
+                } else {
+                    assert!(
+                        read_response_frame(&mut stream, &mut pending)
+                            .await
+                            .is_err()
+                    );
+                }
                 assert_eq!(stream, &[0xaa]);
                 assert_eq!(pending.len(), 4);
                 assert!(pending.capacity() < limit);
@@ -1883,10 +1960,10 @@ fn segmented_frame_reads_preserve_payload_and_leave_the_next_frame_unread() {
         for split in [1, 2, 3, 4, 5, 8191, 8192, 8193, first_length - 1] {
             let mut stream = (&encoded[..split]).chain(&encoded[split..]);
             let mut pending = bytes::BytesMut::new();
-            let frame = read_frame(&mut stream, MAX_RESPONSE, &mut pending)
-                .await
-                .unwrap();
-            assert_eq!(frame.as_ref(), &encoded[4..first_length]);
+            assert!(matches!(
+                read_response_frame(&mut stream, &mut pending).await.unwrap(),
+                WireResponse::Error(message) if message == "segmented response".repeat(1024)
+            ));
             assert!(pending.is_empty());
             let mut unread = Vec::new();
             stream.read_to_end(&mut unread).await.unwrap();

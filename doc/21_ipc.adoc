@@ -148,7 +148,7 @@ The frame header is six bytes. `body_length` excludes the four-byte length field
 and includes the version, message type, and serialized body.
 
 Bodies use Postcard serialization without COBS framing. The current protocol
-version is `9`; clients and servers must use matching wire schemas. The four-byte
+version is `10`; clients and servers must use matching wire schemas. The four-byte
 frame length remains little-endian; body integers follow Postcard's encoding.
 Restart clients and hosts together after upgrading: incompatible versions are
 rejected before decoding the body. There is no compatibility alias or schema
@@ -215,13 +215,16 @@ Sessions reuse encoding buffers up to 256 KiB capacity. Larger send buffers are
 released after the write and flush, before an idle request or Watch wait; repeated
 bulk transfers therefore allocate again. Above 64 KiB, encoding capacity grows
 geometrically or directly to the required size, capped at the frame boundary.
-Client responses decode directly from the receive buffer without splitting or
-copying the payload. Once decoding finishes and no pending frame bytes remain,
-backing allocations above 256 KiB are released, including growth caused by several
-individually smaller frames. Disconnects discard partial input and release
-oversized client buffers. These bounds concern framing
-storage, not decoded response objects or allocator-resident pages; releasing a
-buffer does not guarantee an immediate RSS decrease.
+Requests and responses share one receive path: complete frames decode directly
+from the buffer into owned messages, without splitting or copying the frame payload.
+After decoding, small receive buffers remain reusable; once no pending frame bytes
+remain, backing allocations above 256 KiB are released, including growth caused by
+several individually smaller frames. Pipelined tails and cancelled partial reads
+retain their bytes. Complete malformed requests still receive an Error response;
+framing and I/O failures remain distinct from decoding errors. Disconnects discard
+partial input and release oversized client buffers. These bounds concern framing
+storage, not decoded messages or allocator-resident pages; releasing a buffer does
+not guarantee an immediate RSS decrease.
 
 === Session handshake
 
