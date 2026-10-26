@@ -570,6 +570,172 @@ mod tests {
         )
     }
 
+    fn summary(id: i64) -> AlbumSummary {
+        AlbumSummary {
+            key: key("A"),
+            artist: "artist".into(),
+            track_count: 3,
+            representative: rivu_protocol::model::Track {
+                id,
+                path: "/music/a.flac".into(),
+                fingerprint: None,
+                cue: None,
+                title: "title".into(),
+                artist: "artist".into(),
+                album: "A".into(),
+                duration: Some(10.),
+                codec: "flac".into(),
+                channels: 2,
+                sample_rate: 44100,
+                bitrate_bps: None,
+                bitrate_exact: false,
+                track_number: None,
+                disc_number: None,
+                bits_per_sample: None,
+                release_date: None,
+                favorite: false,
+                decoder_hint: Default::default(),
+                missing: false,
+                play_count: 0,
+                last_played: None,
+            },
+        }
+    }
+
+    #[test]
+    fn bitrate_revision_reloads_both_listings_preserving_selection_queries_and_geometry() {
+        let mut model = AlbumModel::default();
+        model.sync(true, QueryRevisions::default(), 3);
+        model.set_query(Some("album search".into()));
+        model.toggle_sort();
+        model.select(Some(key("A")));
+        model.set_tracks_query(Some("track search".into()));
+        model.albums.begin(0, ALBUM_PAGE);
+        model.albums.accept(Page {
+            total: 100,
+            rows: vec![summary(1)],
+        });
+        model.albums.demand(72..80, ALBUM_PAGE);
+        model.tracks.begin(0, 3);
+        model.tracks.accept(Page {
+            total: 30,
+            rows: vec![row(1), row(2), row(1)],
+        });
+        model.tracks.demand(24..27, 3);
+        let selected = model.selected.clone();
+        let sort = model.sort();
+        let generation = model.generation();
+        let revisions = QueryRevisions {
+            bitrate: 1,
+            ..model.revisions
+        };
+        let change = model.sync(true, revisions, 3);
+        assert!(change.data.albums && change.data.tracks);
+        assert!(model.albums.get(0).is_none());
+        assert!(model.tracks.get(0).is_none());
+        assert_eq!(model.albums.len(), 100);
+        assert_eq!(model.tracks.len(), 30);
+        assert_eq!(model.albums.visible(), 72..80);
+        assert_eq!(model.tracks.visible(), 24..27);
+        assert_eq!(model.selected, selected);
+        assert_eq!(model.query(), Some("album search"));
+        assert_eq!(model.tracks_query(), Some("track search"));
+        assert_eq!(model.sort(), sort);
+        assert_ne!(model.generation(), generation);
+    }
+
+    #[test]
+    fn stale_bitrate_delivery_rejects_rows_and_counts_then_requests_current_payload() {
+        for tracks in [false, true] {
+            let mut model = AlbumModel::default();
+            model.sync(true, QueryRevisions::default(), 2);
+            if tracks {
+                model.select(Some(key("A")));
+                model.set_tracks_query(Some("needle".into()));
+            } else {
+                model.set_query(Some("needle".into()));
+            }
+            let old = model.prepare().unwrap();
+            let previous = model.revisions;
+            let revisions = QueryRevisions {
+                bitrate: 1,
+                ..previous
+            };
+            let count_query = old.count_query.clone().unwrap();
+            let completion = model.complete(
+                &old.query,
+                old.generation,
+                response(&old, 10, previous),
+                Some((count_query, response(&old, 100, previous))),
+                revisions,
+                "wrong response",
+            );
+            assert_eq!(completion.published, Published::None);
+            assert_eq!(completion.counts, None);
+            assert!(model.total().is_none());
+            assert!(model.albums.get(0).is_none());
+            assert!(model.tracks.get(0).is_none());
+            let fresh = model.prepare().unwrap();
+            assert!(fresh.count_query.is_some());
+            assert_eq!(
+                finish(&mut model, fresh, 2).published,
+                if tracks {
+                    Published::Tracks
+                } else {
+                    Published::Albums
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn hidden_bitrate_revision_preserves_viewport_and_physical_slot_until_delivery() {
+        for tracks in [false, true] {
+            let mut model = AlbumModel::default();
+            model.sync(true, QueryRevisions::default(), 2);
+            if tracks {
+                model.select(Some(key("A")));
+            }
+            let first = model.prepare().unwrap();
+            finish(&mut model, first, 100);
+            if tracks {
+                assert!(model.demand_tracks(80..82, model.generation()));
+            } else {
+                model.demand_albums(80..82);
+            }
+            let pending = model.prepare().unwrap();
+            let selected = model.selected.clone();
+            model.sync(false, model.revisions, 2);
+            let revisions = QueryRevisions {
+                bitrate: 1,
+                ..model.revisions
+            };
+            model.sync(false, revisions, 2);
+            assert!(model.prepare().is_none());
+            let pages_len = if tracks {
+                model.tracks.len()
+            } else {
+                model.albums.len()
+            };
+            let visible = if tracks {
+                model.tracks.visible()
+            } else {
+                model.albums.visible()
+            };
+            assert_eq!(pages_len, 100);
+            assert_eq!(visible, 80..82);
+            assert_eq!(model.selected, selected);
+            model.sync(true, revisions, 2);
+            assert!(model.prepare().is_none());
+            assert_eq!(finish(&mut model, pending, 100).published, Published::None);
+            let fresh = model.prepare().unwrap();
+            assert!(matches!(
+                fresh.query,
+                Query::AlbumTracks { offset: 80, .. } | Query::Albums { offset: 72, .. }
+            ));
+        }
+    }
+
     #[test]
     fn timed_out_page_keeps_slot_and_never_publishes_late_rows_or_counts() {
         for replacement in [false, true] {

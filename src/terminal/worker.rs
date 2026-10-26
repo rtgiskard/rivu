@@ -357,6 +357,20 @@ impl QueryKind {
         query.stamp(previous.query_revisions(playlist_id))
             != query.stamp(next.query_revisions(playlist_id))
     }
+
+    pub(super) fn changed_without_bitrate(
+        self,
+        previous: &TuiSnapshot,
+        next: &TuiSnapshot,
+    ) -> bool {
+        let playlist_id = self.playlist_id();
+        let query = self.into_query(0, 0);
+        query.stamp(
+            previous
+                .query_revisions(playlist_id)
+                .with_bitrate_revision(0),
+        ) != query.stamp(next.query_revisions(playlist_id).with_bitrate_revision(0))
+    }
 }
 
 impl QueryRequest {

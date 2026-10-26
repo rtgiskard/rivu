@@ -707,6 +707,91 @@ mod tests {
         ReadQueries::execute(path, reader, &core.shared, fence, &request)
     }
 
+    #[test]
+    fn bitrate_commits_refresh_payload_stamps_without_changing_query_shape() {
+        let (directory, mut core) = super::super::tests::fixture_with_database(Some(10.0));
+        core.publish();
+        let path = directory.path().join("library.db");
+        let query = Query::Track { track_id: 1 };
+        let before = core.shared.read().clone();
+        let store = Store::open_reader(&path).unwrap();
+        let mut reader = Some(ReadConnection {
+            store,
+            library_revision: before.library.revision,
+            duplicate_groups_revision: before.library.duplicate_groups_revision,
+            scalar_revisions: (
+                before.library.structure_revision,
+                before.library.album_revision,
+                before.queue.revision,
+            ),
+            scalar_playlist_revisions: Arc::clone(&before.library.playlist_entry_revisions),
+        });
+        let fence = Arc::new(ReadFence::default());
+        let old_response = execute_read(&core, &path, &mut reader, &fence, query.clone());
+        assert!(
+            matches!(&old_response.result, Ok(ViewResponse::Track(Some(track))) if track.bitrate_bps.is_none())
+        );
+        let source = core
+            .store
+            .playback_source(&core.store.track(1).unwrap().unwrap())
+            .unwrap()
+            .unwrap();
+        for (bps, exact) in [(96_000, false), (192_000, true)] {
+            assert!(core.store.upgrade_bitrate(&source, bps, exact).unwrap());
+            core.state.library.bitrate_revision =
+                core.state.library.bitrate_revision.wrapping_add(1);
+            core.publish();
+        }
+        let (reply, _receiver) = oneshot::channel();
+        let stale = ReadRequest {
+            state: ReadState::capture(&before, &query),
+            query: query.clone(),
+            ticket: None,
+            reply,
+        };
+        assert!(matches!(
+            ReadQueries::execute(&path, &mut reader, &core.shared, &fence, &stale).result,
+            Err(QueryError::RevisionChanged)
+        ));
+        let statistics = Query::LibraryStats;
+        let (reply, _receiver) = oneshot::channel();
+        let scalar = ReadRequest {
+            state: ReadState::capture(&before, &statistics),
+            query: statistics,
+            ticket: None,
+            reply,
+        };
+        assert!(matches!(
+            ReadQueries::execute(&path, &mut reader, &core.shared, &fence, &scalar).result,
+            Ok(ViewResponse::LibraryStats(_))
+        ));
+        // Background readers retain no Track payloads between accepted snapshots.
+        let current = execute_read(&core, &path, &mut reader, &fence, query.clone());
+        assert_ne!(
+            query.stamp(old_response.revisions),
+            query.stamp(current.revisions)
+        );
+        assert_eq!(
+            current.revisions.bitrate,
+            old_response.revisions.bitrate.wrapping_add(2)
+        );
+        assert!(
+            matches!(current.result, Ok(ViewResponse::Track(Some(track))) if (track.bitrate_bps, track.bitrate_exact) == (Some(192_000), true))
+        );
+        let state = core.shared.read();
+        assert_eq!(state.library.revision, before.library.revision);
+        assert_eq!(
+            state.library.structure_revision,
+            before.library.structure_revision
+        );
+        assert_eq!(state.library.album_revision, before.library.album_revision);
+        assert_eq!(state.queue, before.queue);
+        assert_ne!(
+            query.stamp(old_response.revisions),
+            query.stamp(state.query_revisions_for(&query))
+        );
+    }
+
     fn favorite_query() -> Query {
         Query::LibraryPage {
             query: None,

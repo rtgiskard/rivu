@@ -297,9 +297,9 @@ impl Store {
         source: &PlaybackSource,
         bitrate_bps: u64,
         bitrate_exact: bool,
-    ) -> Result<TrackEditImpact> {
+    ) -> Result<bool> {
         if bitrate_bps == 0 {
-            return Ok(TrackEditImpact::default());
+            return Ok(false);
         }
         let bitrate = i64::try_from(bitrate_bps).context("Audio bitrate exceeds database range")?;
         let cue = source.cue.as_ref();
@@ -331,23 +331,14 @@ impl Store {
                 bitrate_exact,
             ],
         )?;
-        let (queue, albums) = if updated != 0 {
-            tx.query_row(&format!("SELECT EXISTS(SELECT 1 FROM queue_entries WHERE track_id=t.id),{} FROM tracks AS t WHERE id=?1", super::albums::eligible_member("t")), [source.id], |row| Ok((row.get(0)?, row.get(1)?)))?
-        } else {
-            (false, false)
-        };
         tx.commit()?;
-        if updated != 0 {
-            self.track_cache.borrow_mut().entries.remove(&source.id);
+        if updated != 0
+            && let Some((track, _)) = self.track_cache.borrow_mut().entries.get_mut(&source.id)
+        {
+            track.bitrate_bps = Some(bitrate_bps);
+            track.bitrate_exact = bitrate_exact;
         }
-        Ok(TrackEditImpact {
-            changed: updated != 0,
-            library: updated != 0,
-            queue,
-            albums,
-            playlists: Some(Vec::new()),
-            ..Default::default()
-        })
+        Ok(updated != 0)
     }
 
     pub fn set_favorite(&self, ids: &[i64], favorite: bool) -> Result<FavoriteImpact> {

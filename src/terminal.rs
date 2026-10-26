@@ -349,6 +349,7 @@ impl TuiState {
         if let Some(playlists) = &mut self.ui.cached_playlists {
             playlists.sync_snapshot(&self.snapshot, &next, page_size_changed);
         }
+        self.ui.sync_details(&next);
         if active_changed || page_size_changed {
             self.ui.cancel_query();
         }
@@ -477,6 +478,9 @@ impl View {
         let rows_changed = self
             .query_kind(false)
             .is_some_and(|kind| kind.changed(previous, next));
+        let coordinates_changed = self
+            .query_kind(false)
+            .is_some_and(|kind| kind.changed_without_bitrate(previous, next));
         let query_changed = if matches!(self, Self::PlaylistDetail { detail, .. } if detail.entry_anchor.is_some())
         {
             self.query_kind(true)
@@ -515,7 +519,9 @@ impl View {
                 return true;
             }
         }
-        if rows_changed || page_size_changed {
+        if rows_changed && !coordinates_changed && !page_size_changed {
+            self.invalidate_payload();
+        } else if rows_changed || page_size_changed {
             match self {
                 Self::Search(search) => search.results.clear(),
                 Self::Tree(tree) => {
@@ -547,6 +553,21 @@ impl View {
             }
         }
         query_changed && !matches!(self, Self::Queue)
+    }
+
+    // Payload-only changes keep membership, counts and navigation coordinates.
+    fn invalidate_payload(&mut self) {
+        match self {
+            Self::Search(search) => search.results.pages.clear(),
+            Self::Tree(tree) => {
+                tree.entries.pages.retain(|_, rows| {
+                    !rows.iter().any(|row| matches!(row, DirectoryRow::Track(_)))
+                });
+            }
+            Self::PlaylistDetail { detail, .. } => detail.entries.pages.clear(),
+            Self::Queue => {}
+            Self::Playlists(_) => {}
+        }
     }
 }
 
@@ -968,8 +989,39 @@ impl UiState {
         false
     }
 
+    fn sync_details(&mut self, next: &TuiSnapshot) {
+        let Some(track_id) = self.details.target else {
+            return;
+        };
+        let query = Query::Track { track_id };
+        let revisions = next.query_revisions(None).for_query(
+            &query,
+            &next.library.playlist_entry_revisions,
+            &next.library.metadata_revisions,
+        );
+        if self
+            .details
+            .stamp
+            .is_some_and(|stamp| stamp != query.stamp(revisions))
+        {
+            self.details.state = DetailState::Loading;
+            self.details.stamp = None;
+            if self.details_active {
+                self.cancel_query();
+            }
+            self.mark_local_change();
+        }
+    }
+
     fn sync_queue(&mut self, previous: &TuiSnapshot, next: &TuiSnapshot) {
         if !QueryKind::Queue.changed(previous, next) {
+            return;
+        }
+        if !QueryKind::Queue.changed_without_bitrate(previous, next) {
+            self.queue.pages.clear();
+            if matches!(self.view, View::Queue) {
+                self.cancel_query();
+            }
             return;
         }
         self.queue_anchor = self

@@ -319,11 +319,22 @@ impl LibraryBrowser {
     }
 
     pub(super) fn sync_projection(&mut self, revisions: QueryRevisions) -> bool {
-        if !self.projection.sync(&self.projection_query(), revisions) {
+        let query = self.projection_query();
+        let payload_only = self.projection.stamp().is_some_and(|stamp| {
+            let mut previous = stamp.revisions();
+            previous.bitrate = revisions.bitrate;
+            self.projection.matches_identity(&query)
+                && query.stamp(previous) == query.stamp(revisions)
+        });
+        if !self.projection.sync(&query, revisions) {
             return false;
         }
-        self.invalidate_projection();
-        self.tree.invalidate();
+        if payload_only {
+            self.tree.invalidate_payloads();
+        } else {
+            self.invalidate_projection();
+            self.tree.invalidate();
+        }
         true
     }
     pub(super) fn sync_root_counts(

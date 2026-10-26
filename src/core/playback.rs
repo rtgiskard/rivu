@@ -141,20 +141,18 @@ impl Core {
         if !std::fs::metadata(&source.path).is_ok_and(|after| same_source_file(before, &after)) {
             return false;
         }
-        let impact = match self.store.upgrade_bitrate(source, bitrate, exact) {
-            Ok(impact) => impact,
+        let changed = match self.store.upgrade_bitrate(source, bitrate, exact) {
+            Ok(changed) => changed,
             Err(error) => {
                 tracing::warn!(error = ?error, "playback_bitrate_not_saved");
                 return false;
             }
         };
-        if !impact.changed {
+        if !changed {
             return false;
         }
-        self.invalidate_collection_impacts(impact.queue, impact.albums);
-        self.state
-            .library
-            .change_metadata(Some(&[track_id]), impact.playlists.as_deref());
+        let library = &mut self.state.library;
+        library.bitrate_revision = library.bitrate_revision.wrapping_add(1);
         if let Some(current) = self.state.current_track.as_mut()
             && current.id == track_id
         {
@@ -304,11 +302,6 @@ impl Core {
                 }
             }
         };
-        // Coalesce this content change with the existing start bookkeeping's
-        // queue projection and library revision; unknown/no-op results add none.
-        if let Some(bitrate) = info.bitrate_bps.filter(|bitrate| *bitrate > 0) {
-            self.persist_playback_bitrate(bitrate, info.bitrate_exact);
-        }
         let playback = self.playback.as_mut().expect("playback was checked above");
         playback.started = true;
         playback.last_heard_at = Some(played_at);
@@ -324,14 +317,22 @@ impl Core {
                 .playback
                 .duration
                 .filter(|duration| duration.is_finite() && *duration > 0.0));
-        if let Some(stats) = stats {
-            self.playback_history_pending |= stats.changed;
-            self.update_track_stats(track_id, stats)?;
-            self.refresh_playback_history().context(
-                "Playback start committed, but refreshing history failed; previous history retained",
-            )?;
+        let result = (|| -> Result<()> {
+            if let Some(stats) = stats {
+                self.playback_history_pending |= stats.changed;
+                self.update_track_stats(track_id, stats)?;
+                self.refresh_playback_history().context(
+                    "Playback start committed, but refreshing history failed; previous history retained",
+                )?;
+            }
+            self.count_play()
+        })();
+        // Persist bitrate independently even if a projection refresh failed
+        // after the playback statistics committed.
+        if let Some(bitrate) = info.bitrate_bps.filter(|bitrate| *bitrate > 0) {
+            self.persist_playback_bitrate(bitrate, info.bitrate_exact);
         }
-        self.count_play()
+        result
     }
     pub(in crate::core) fn playback_progress(&mut self, position: f64, heard: f64) -> Result<()> {
         if let Some(playback) = &mut self.playback
@@ -630,9 +631,6 @@ impl Core {
             if !std::mem::take(&mut self.playback_write_deferred) && retired_duration.is_none() {
                 return Ok(());
             }
-            if let Some((bitrate, exact)) = self.pending_bitrate.take() {
-                self.persist_playback_bitrate(bitrate, exact);
-            }
             // The count's committed bit precedes projection reads. Attempt both
             // producer facts even if one projection fails; never count twice.
             let count = self.count_play();
@@ -652,6 +650,9 @@ impl Core {
             } else {
                 Ok(())
             };
+            if let Some((bitrate, exact)) = self.pending_bitrate.take() {
+                self.persist_playback_bitrate(bitrate, exact);
+            }
             count.and(activity)
         })();
         if retired_duration.is_some() {

@@ -36,6 +36,7 @@ pub struct GuiLibrarySnapshot {
     pub playlist_revision: u64,
     pub playlist_entry_revisions: Arc<BTreeMap<i64, u64>>,
     pub metadata_revisions: Arc<rivu_protocol::model::MetadataRevisions>,
+    pub bitrate_revision: u64,
     pub duplicate_groups_revision: u64,
     pub duplicate_members_revision: u64,
     pub history: Arc<Vec<HistoryEntry>>,
@@ -89,6 +90,7 @@ impl GuiSnapshot {
                 playlist_revision: state.library.playlist_revision,
                 playlist_entry_revisions: Arc::clone(&state.library.playlist_entry_revisions),
                 metadata_revisions: Arc::clone(&state.library.metadata_revisions),
+                bitrate_revision: state.library.bitrate_revision,
                 duplicate_groups_revision: state.library.duplicate_groups_revision,
                 duplicate_members_revision: state.library.duplicate_members_revision,
                 history: Arc::clone(&state.library.history),
@@ -140,6 +142,7 @@ pub struct TuiLibrarySnapshot {
     pub playlist_revision: u64,
     pub playlist_entry_revisions: Arc<BTreeMap<i64, u64>>,
     pub metadata_revisions: Arc<rivu_protocol::model::MetadataRevisions>,
+    pub bitrate_revision: u64,
     pub duplicate_groups_revision: u64,
     pub duplicate_members_revision: u64,
 }
@@ -185,6 +188,7 @@ impl TuiSnapshot {
                 playlist_revision: state.library.playlist_revision,
                 playlist_entry_revisions: Arc::clone(&state.library.playlist_entry_revisions),
                 metadata_revisions: Arc::clone(&state.library.metadata_revisions),
+                bitrate_revision: state.library.bitrate_revision,
                 duplicate_groups_revision: state.library.duplicate_groups_revision,
                 duplicate_members_revision: state.library.duplicate_members_revision,
             },
@@ -286,7 +290,7 @@ impl GuiLibrarySnapshot {
         &self,
         playlist_id: Option<i64>,
     ) -> rivu_protocol::response::QueryRevisions {
-        rivu_protocol::response::QueryRevisions::from_library(
+        let mut revisions = rivu_protocol::response::QueryRevisions::from_library(
             self.revision,
             self.structure_revision,
             self.playlist_revision,
@@ -299,7 +303,9 @@ impl GuiLibrarySnapshot {
             playlist_id,
             &self.playlist_entry_revisions,
             &self.metadata_revisions,
-        )
+        );
+        revisions.bitrate = self.bitrate_revision;
+        revisions
     }
 }
 
@@ -330,7 +336,7 @@ impl TuiSnapshot {
         &self,
         playlist_id: Option<i64>,
     ) -> rivu_protocol::response::QueryRevisions {
-        rivu_protocol::response::QueryRevisions::from_library(
+        let mut revisions = rivu_protocol::response::QueryRevisions::from_library(
             self.library.revision,
             self.library.structure_revision,
             self.library.playlist_revision,
@@ -343,7 +349,9 @@ impl TuiSnapshot {
             playlist_id,
             &self.library.playlist_entry_revisions,
             &self.library.metadata_revisions,
-        )
+        );
+        revisions.bitrate = self.library.bitrate_revision;
+        revisions
     }
 }
 

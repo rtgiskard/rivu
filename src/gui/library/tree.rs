@@ -154,6 +154,8 @@ impl Default for Branch {
 struct CachedPage {
     rows: Vec<DirectoryRow>,
     failed: bool,
+    // Directory identities remain usable while gap-retired tracks reload.
+    stale_tracks: bool,
     touched: u64,
 }
 
@@ -392,6 +394,7 @@ impl DirectoryTree {
             CachedPage {
                 rows: page.rows,
                 failed: false,
+                stale_tracks: false,
                 touched: self.clock,
             },
         );
@@ -421,6 +424,7 @@ impl DirectoryTree {
             .or_insert(CachedPage {
                 rows: Vec::new(),
                 failed: true,
+                stale_tracks: false,
                 touched: self.clock,
             });
         self.evict();
@@ -498,6 +502,24 @@ impl DirectoryTree {
         self.grouped_roots.clear();
         self.selected_locations.clear();
         self.invalidate();
+    }
+
+    /// Retire track payloads, never counts, ancestry or selection.
+    pub(super) fn invalidate_payloads(&mut self) -> bool {
+        let mut changed = false;
+        for page in self.pages.values_mut() {
+            if !page.stale_tracks
+                && page
+                    .rows
+                    .iter()
+                    .any(|row| matches!(row, DirectoryRow::Track(_)))
+            {
+                page.stale_tracks = true;
+                page.failed = false;
+                changed = true;
+            }
+        }
+        changed
     }
 
     /// Release revision-specific payloads and tokens, retaining nonempty geometry.
@@ -753,7 +775,10 @@ impl DirectoryTree {
     ) -> Option<&[DirectoryRow]> {
         self.pages.iter().find_map(|((candidate, start), page)| {
             if candidate == branch && range.start >= *start {
-                page.rows.get(range.start - start..range.end - start)
+                let rows = page.rows.get(range.start - start..range.end - start)?;
+                (!page.stale_tracks
+                    || !rows.iter().any(|row| matches!(row, DirectoryRow::Track(_))))
+                .then_some(rows)
             } else {
                 None
             }
@@ -766,7 +791,11 @@ impl DirectoryTree {
         let offset = child_index / self.page_size * self.page_size;
         let cached = self.pages.get(&(segment.branch.clone(), offset));
         let row = cached
-            .and_then(|page| page.rows.get(child_index - offset))
+            .and_then(|page| {
+                page.rows
+                    .get(child_index - offset)
+                    .filter(|row| !page.stale_tracks || !matches!(row, DirectoryRow::Track(_)))
+            })
             .cloned()
             .or_else(|| {
                 let branch = self.branches.get(&segment.branch)?;
@@ -930,7 +959,9 @@ impl DirectoryTree {
             .filter(|(key, offset)| {
                 if let Some(page) = self.pages.get_mut(&(key.clone(), *offset)) {
                     page.touched = self.clock;
-                    return false;
+                    if !page.stale_tracks || page.failed {
+                        return false;
+                    }
                 }
                 !self
                     .branches
@@ -1134,6 +1165,85 @@ impl DirectoryTree {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn bitrate_track(id: i64) -> DirectoryRow {
+        DirectoryRow::Track(rivu_protocol::model::LibraryRow {
+            id,
+            path: format!("/a/{id}.flac").into(),
+            title: format!("Track {id}"),
+            artist: String::new(),
+            album: String::new(),
+            duration: None,
+            codec: "flac".into(),
+            bitrate_bps: None,
+            bitrate_exact: false,
+            channels: 2,
+            sample_rate: 44_100,
+            bits_per_sample: None,
+            cue_number: None,
+            favorite: false,
+            missing: false,
+            play_count: 0,
+        })
+    }
+
+    #[test]
+    fn bitrate_change_reloads_track_pages_preserving_mixed_rows_and_geometry() {
+        let mut tree = DirectoryTree::default();
+        tree.configure_page_size(2);
+        let forest = branch("");
+        let root = branch("/a");
+        accept(&mut tree, &forest, 0, 1, &["/a"], 1);
+        tree.expand(&root);
+        tree.begin(root.clone(), 0, 2);
+        assert!(tree.accept(
+            &root,
+            2,
+            Page {
+                total: 2,
+                rows: vec![
+                    DirectoryRow::Directory {
+                        path: "/a/child".into()
+                    },
+                    bitrate_track(7)
+                ],
+            }
+        ));
+        let selected = super::super::LibraryNode::Track(7);
+        tree.focus_selection(&selected, 2);
+        let projection = tree.projection_revision();
+        assert!(tree.invalidate_payloads());
+        assert!(!tree.invalidate_payloads());
+        assert_eq!(tree.root_total(), Some(1));
+        assert_eq!(tree.branches[&root].total, Some(2));
+        assert_eq!(tree.row_count(), 3);
+        assert_eq!(tree.projection_revision(), projection);
+        assert!(tree.expanded(&root));
+        assert_eq!(tree.selected_index(), Some(2));
+        assert!(matches!(tree.item(0), Some(TreeItem::Entry(_))));
+        assert!(matches!(tree.item(1), Some(TreeItem::Entry(_))));
+        assert!(matches!(tree.item(2), Some(TreeItem::Placeholder { .. })));
+        assert!(tree.cached_row(&root, 0).is_some());
+        assert!(tree.cached_row(&root, 1).is_none());
+        assert_eq!(tree.requests_for_range(0..3), vec![(root.clone(), 0)]);
+        tree.begin(root.clone(), 0, 3);
+        assert!(tree.requests_for_range(0..3).is_empty());
+        assert!(tree.accept(
+            &root,
+            3,
+            Page {
+                total: 2,
+                rows: vec![
+                    DirectoryRow::Directory {
+                        path: "/a/child".into()
+                    },
+                    bitrate_track(7)
+                ],
+            }
+        ));
+        assert!(tree.cached_row(&root, 1).is_some());
+        assert_eq!(tree.selected_index(), Some(2));
+        assert!(tree.requests_for_range(0..3).is_empty());
+    }
 
     #[test]
     fn reveal_uses_zero_based_roots_and_keeps_other_at_the_optional_tail() {

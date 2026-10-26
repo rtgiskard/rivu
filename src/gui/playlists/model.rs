@@ -40,6 +40,7 @@ impl Default for PlaylistEntriesBuffer {
 pub(in crate::gui) struct PlaylistRefresh {
     pub(in crate::gui) summaries: bool,
     pub(in crate::gui) entries: bool,
+    pub(in crate::gui) entry_payload_only: bool,
 }
 
 #[derive(Default)]
@@ -85,17 +86,30 @@ impl PlaylistBrowser {
         };
         let summaries = summaries_query.stamp(previous.query_revisions(None))
             != summaries_query.stamp(next.query_revisions(None));
-        let entries = self.entries.playlist_id.is_some_and(|playlist_id| {
-            let query = Query::PlaylistEntries {
-                query: self.entries.query.clone(),
-                playlist_id,
-                offset: 0,
-                limit: 1,
-            };
-            query.stamp(previous.query_revisions(Some(playlist_id)))
-                != query.stamp(next.query_revisions(Some(playlist_id)))
-        });
-        PlaylistRefresh { summaries, entries }
+        let (entries, entry_payload_only) =
+            self.entries
+                .playlist_id
+                .map_or((false, false), |playlist_id| {
+                    let query = Query::PlaylistEntries {
+                        query: self.entries.query.clone(),
+                        playlist_id,
+                        offset: 0,
+                        limit: 1,
+                    };
+                    let mut previous = previous.query_revisions(Some(playlist_id));
+                    let next = next.query_revisions(Some(playlist_id));
+                    let changed = query.stamp(previous) != query.stamp(next);
+                    previous.bitrate = next.bitrate;
+                    (
+                        changed,
+                        changed && query.stamp(previous) == query.stamp(next),
+                    )
+                });
+        PlaylistRefresh {
+            summaries,
+            entries,
+            entry_payload_only,
+        }
     }
 
     pub(in crate::gui) fn summaries(&self) -> &PlaylistSummaryBuffer {
@@ -106,6 +120,9 @@ impl PlaylistBrowser {
         &self.entries
     }
 
+    pub(super) fn invalidate_entry_payload(&mut self) {
+        self.entries.rows.invalidate_payload();
+    }
     pub(super) fn invalidate_summaries(&mut self) {
         self.summaries.rows.invalidate();
         self.selected_total = None;
@@ -505,6 +522,7 @@ mod tests {
             PlaylistRefresh {
                 summaries: false,
                 entries: false,
+                entry_payload_only: false,
             }
         );
         Arc::make_mut(&mut next.playlist_entry_revisions).insert(1, 1);
@@ -513,7 +531,8 @@ mod tests {
             refresh,
             PlaylistRefresh {
                 summaries: false,
-                entries: true
+                entries: true,
+                entry_payload_only: false,
             }
         );
         if refresh.entries {
@@ -530,6 +549,7 @@ mod tests {
             PlaylistRefresh {
                 summaries: false,
                 entries: false,
+                entry_payload_only: false,
             }
         );
         next.playlist_revision += 1;
@@ -539,6 +559,7 @@ mod tests {
             PlaylistRefresh {
                 summaries: true,
                 entries: true,
+                entry_payload_only: false,
             }
         );
         let before_metadata = next.clone();
@@ -548,6 +569,7 @@ mod tests {
             PlaylistRefresh {
                 summaries: false,
                 entries: true,
+                entry_payload_only: false,
             }
         );
     }

@@ -107,7 +107,8 @@ impl Queue {
         // library metadata. Playback clocks do not invalidate rows or demand.
         let projection_changed = self.state.queue.revision != state.queue.revision
             || (self.model.query.is_some()
-                && self.state.library.revision != state.library.revision);
+                && self.state.library.revision != state.library.revision)
+            || self.state.library.bitrate_revision != state.library.bitrate_revision;
         let total_changed = self.state.queue.total != state.queue.total;
         let page_size_changed = self.state.system.config.page_size != state.system.config.page_size;
         let current_changed = self.state.queue.current_id != state.queue.current_id

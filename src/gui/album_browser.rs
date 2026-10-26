@@ -390,6 +390,9 @@ impl AlbumBrowser {
                         this.loading_text
                             .schedule(cx, |this| &mut this.loading_text);
                         let revisions = this.snapshots.read().query_revisions(None);
+                        if this.model.albums_need_refresh(revisions) {
+                            this.capture_grid_anchor();
+                        }
                         let data = this.model.timeout(&query, generation, response, revisions);
                         this.apply_data_change(data, cx);
                         cx.notify();
@@ -401,7 +404,8 @@ impl AlbumBrowser {
                 this.loading_text.finish(&(), generation);
                 this.loading_text
                     .schedule(cx, |this| &mut this.loading_text);
-                let revisions = this.snapshots.read().query_revisions(None);
+                let state = this.snapshots.read();
+                let revisions = state.query_revisions(None);
                 if this.model.albums_need_refresh(revisions) {
                     this.capture_grid_anchor();
                 }

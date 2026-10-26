@@ -80,6 +80,8 @@ pub struct TrackRevision {
 pub struct QueryRevisions {
     pub library: u64,
     pub structure: u64,
+    /// Payload freshness token, selected only by bitrate-bearing queries.
+    pub bitrate: u64,
     /// Core-owned album collection token captured with the serialized query.
     pub album: u64,
     pub playlist: u64,
@@ -94,6 +96,11 @@ pub struct QueryRevisions {
 impl QueryRevisions {
     pub fn with_album_revision(mut self, revision: u64) -> Self {
         self.album = revision;
+        self
+    }
+
+    pub fn with_bitrate_revision(mut self, revision: u64) -> Self {
+        self.bitrate = revision;
         self
     }
 

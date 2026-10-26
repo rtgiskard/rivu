@@ -383,6 +383,12 @@ Bitrate measurement does not load FFmpeg or change decoder selection. It only
 reuses the decoder selected by the existing enable setting, Decoder hint, and
 Auto fallback rules.
 
+Committed bitrate enrichment updates the existing Core Track cache as one
+value/certainty pair and advances the display payload revision. Open views reload
+on demand without changing membership or counts; hidden views wait until needed.
+Older in-flight payloads are rejected rather than patched. See
+link:21_ipc.adoc#_query_results_and_pagination[query result continuity].
+
 
 == Terminal client
 

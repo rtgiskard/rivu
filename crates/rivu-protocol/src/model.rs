@@ -267,7 +267,7 @@ pub struct DatabaseOptimization {
 pub struct LibrarySnapshot {
     pub track_total: usize,
     pub playlist_total: usize,
-    /// Changes whenever the effective Track projection changes.
+    /// Changes whenever non-bitrate Track metadata changes.
     pub revision: u64,
     /// Changes only when the library tree or visible row ordering may change.
     pub structure_revision: u64,
@@ -278,6 +278,8 @@ pub struct LibrarySnapshot {
     /// Content/lifetime tokens for every extant playlist; absence means deletion.
     pub playlist_entry_revisions: Arc<BTreeMap<i64, u64>>,
     pub metadata_revisions: Arc<MetadataRevisions>,
+    /// Changes only after a committed bitrate pair actually changes.
+    pub bitrate_revision: u64,
     pub duplicate_groups_revision: u64,
     pub duplicate_members_revision: u64,
     pub history: Arc<Vec<HistoryEntry>>,
@@ -488,6 +490,7 @@ impl Default for LibrarySnapshot {
             playlist_revision: 0,
             playlist_entry_revisions: Arc::default(),
             metadata_revisions: Arc::default(),
+            bitrate_revision: 0,
             duplicate_groups_revision: 0,
             duplicate_members_revision: 0,
             history: Arc::new(Vec::new()),
@@ -557,6 +560,7 @@ impl LibrarySnapshot {
             self.duplicate_members_revision,
         )
         .with_album_revision(self.album_revision)
+        .with_bitrate_revision(self.bitrate_revision)
         .with_playlist_scope(
             playlist_id,
             &self.playlist_entry_revisions,
@@ -1094,5 +1098,222 @@ mod tests {
             query.stamp(library.query_revisions_for(&query, 0)),
             overflow
         );
+    }
+
+    #[test]
+    fn bitrate_revision_changes_only_payload_query_stamps() {
+        let before = crate::response::QueryRevisions::default();
+        let after = crate::response::QueryRevisions {
+            bitrate: 1,
+            ..before
+        };
+        let key = AlbumKey {
+            directory: "/music".into(),
+            title: "Album".into(),
+        };
+        let payloads = [
+            Query::LibraryPage {
+                query: None,
+                favorite: None,
+                missing: None,
+                sort: LibrarySort::Id,
+                offset: 0,
+                limit: 1,
+            },
+            Query::TrackPage {
+                query: None,
+                favorite: None,
+                missing: None,
+                offset: 0,
+                limit: 1,
+            },
+            Query::TrackBatch {
+                query: None,
+                favorite: None,
+                missing: None,
+                after: None,
+                limit: 1,
+                expected: None,
+            },
+            Query::Track { track_id: 1 },
+            Query::Albums {
+                query: None,
+                sort: AlbumSort::default(),
+                offset: 0,
+                limit: 1,
+            },
+            Query::AlbumTracks {
+                key,
+                query: None,
+                offset: 0,
+                limit: 1,
+            },
+            Query::DirectoryPage {
+                path: "/music".into(),
+                query: None,
+                favorite: None,
+                missing: None,
+                offset: 0,
+                limit: 1,
+            },
+            Query::OtherTracksPage {
+                query: None,
+                favorite: None,
+                missing: None,
+                sort: LibrarySort::Id,
+                offset: 0,
+                limit: 1,
+            },
+            Query::LibraryRootPage {
+                path: "/music".into(),
+                query: None,
+                favorite: None,
+                missing: None,
+                sort: LibrarySort::Id,
+                offset: 0,
+                limit: 1,
+            },
+            Query::PlaylistEntries {
+                playlist_id: 1,
+                query: None,
+                offset: 0,
+                limit: 1,
+            },
+            Query::PlaylistEntryBatch {
+                playlist_id: 1,
+                query: None,
+                after: None,
+                limit: 1,
+                expected: None,
+            },
+            Query::QueuePage {
+                query: None,
+                offset: 0,
+                limit: 1,
+            },
+            Query::QueueBatch {
+                query: None,
+                after: None,
+                limit: 1,
+                expected: None,
+            },
+            Query::QueueEntries {
+                query: None,
+                queue_ids: vec![1],
+            },
+            Query::DuplicateMembers {
+                fingerprint: "fingerprint".into(),
+                offset: 0,
+                limit: 1,
+            },
+            Query::DuplicateMemberSelection {
+                fingerprint: "fingerprint".into(),
+                track_ids: vec![1],
+            },
+        ];
+        for query in payloads {
+            assert_ne!(query.stamp(before), query.stamp(after), "{query:?}");
+        }
+        let identities_and_scalars = [
+            Query::LibraryStats,
+            Query::OtherTracksCount,
+            Query::LibraryRootCounts {
+                roots: vec!["/music".into()],
+            },
+            Query::PlaylistSummaries {
+                query: None,
+                offset: 0,
+                limit: 1,
+            },
+            Query::PlaylistSummaryBatch {
+                query: None,
+                after: None,
+                limit: 1,
+                expected: None,
+            },
+            Query::PlaylistEntry { entry_id: 1 },
+            Query::PlaylistEntryLocations {
+                playlist_id: 1,
+                query: Some("needle".into()),
+                entry_ids: vec![1],
+            },
+            Query::LibraryLocate {
+                track_id: 1,
+                path: "/music".into(),
+                tree: true,
+                query: None,
+                favorite: None,
+                missing: None,
+                sort: LibrarySort::Id,
+            },
+            Query::OtherTracksLocate {
+                track_id: 1,
+                query: None,
+                favorite: None,
+                missing: None,
+                sort: LibrarySort::Id,
+            },
+            Query::DuplicateGroups {
+                offset: 0,
+                limit: 1,
+            },
+            Query::ScanTask { id: 1 },
+            Query::RelocationTask { id: 1 },
+            Query::ProcessingTask { id: 1 },
+        ];
+        for query in identities_and_scalars {
+            assert_eq!(query.stamp(before), query.stamp(after), "{query:?}");
+        }
+    }
+
+    #[test]
+    fn occurrence_continuations_include_bitrate_payload_freshness() {
+        let before = crate::response::QueryRevisions::default();
+        let after = crate::response::QueryRevisions {
+            bitrate: 1,
+            ..before
+        };
+        for (query, playlist_id) in [
+            (
+                Query::QueueBatch {
+                    query: None,
+                    after: None,
+                    limit: 1,
+                    expected: None,
+                },
+                None,
+            ),
+            (
+                Query::PlaylistEntryBatch {
+                    playlist_id: 1,
+                    query: None,
+                    after: None,
+                    limit: 1,
+                    expected: None,
+                },
+                Some(1),
+            ),
+        ] {
+            assert_ne!(
+                query.stamp(before).continuation_scope(None, playlist_id),
+                query.stamp(after).continuation_scope(None, playlist_id)
+            );
+        }
+    }
+
+    #[test]
+    fn statistics_change_detail_freshness_without_changing_bitrate_revision() {
+        let mut library = LibrarySnapshot {
+            bitrate_revision: 7,
+            ..LibrarySnapshot::default()
+        };
+        let detail = Query::Track { track_id: 1 };
+        let before = detail.stamp(library.query_revisions_for(&detail, 0));
+        library.change_metadata(Some(&[1]), Some(&[]));
+        assert_ne!(
+            before,
+            detail.stamp(library.query_revisions_for(&detail, 0))
+        );
+        assert_eq!(library.bitrate_revision, 7);
     }
 }

@@ -382,6 +382,7 @@ fn playlist_group_requests_and_locations_round_trip_stable_identities() {
     let response = QueryResponse {
         revisions: rivu_protocol::response::QueryRevisions {
             library: 5,
+            bitrate: 15,
             structure: 6,
             album: 14,
             playlist: 7,

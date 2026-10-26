@@ -9,7 +9,7 @@ use super::session::{LoadToken, MetadataDraft, MetadataSession, MetadataValues};
 use crate::{core::QueryTicket, projection::QueryProjection};
 use rivu_protocol::{
     model::Query,
-    response::{QueryResponse, QueryRevisions, ViewResponse},
+    response::{QueryError, QueryResponse, QueryRevisions, ViewResponse},
 };
 use std::time::{Duration, Instant};
 
@@ -215,8 +215,14 @@ impl MetadataReadCoordinator {
             return ReadCompletion::Retired;
         }
         self.worker = None;
+        // Transport failures have no payload stamp: Core may report unscoped
+        // revisions. Identity and current environment were already admitted above.
         let result = match response.result {
             Ok(result) => result,
+            Err(QueryError::RevisionChanged) => {
+                self.retire();
+                return ReadCompletion::Retired;
+            }
             Err(error) => {
                 session.fail_load(read.token, error.to_string());
                 return ReadCompletion::Failed;
@@ -242,6 +248,46 @@ impl MetadataReadCoordinator {
 mod tests {
     use super::*;
     use rivu_protocol::response::QueryError;
+
+    #[test]
+    fn bitrate_change_rejects_reply_and_preserves_worker_until_completion() {
+        let now = Instant::now();
+        let mut owner = MetadataReadCoordinator::default();
+        let mut session = MetadataSession::default();
+        request(&mut owner, &mut session, 1, now);
+        let first = owner.prepare(&mut session, true, now).unwrap();
+        assert!(owner.submit(first.read, &session, environment(true)));
+        let revisions = QueryRevisions {
+            bitrate: 1,
+            ..QueryRevisions::default()
+        };
+        owner.sync(Some(1), revisions, now);
+        assert!(owner.prepare(&mut session, true, now).is_none());
+        assert!(matches!(
+            owner.finish(
+                first.read,
+                &mut session,
+                ReadEnvironment {
+                    visible: true,
+                    revisions
+                },
+                response(),
+                MetadataValues::default().as_draft(),
+                || "wrong response".into(),
+            ),
+            ReadCompletion::Retired
+        ));
+        assert!(session.track().is_none());
+        let retry = owner.prepare(&mut session, true, now).unwrap();
+        assert!(owner.submit(
+            retry.read,
+            &session,
+            ReadEnvironment {
+                visible: true,
+                revisions
+            }
+        ));
+    }
 
     fn environment(visible: bool) -> ReadEnvironment {
         ReadEnvironment {
@@ -511,6 +557,59 @@ mod tests {
             ReadCompletion::Loaded(_)
         ));
         assert!(owner.prepare(&mut session, true, now).is_none());
+    }
+
+    #[test]
+    fn current_transport_error_with_unscoped_revisions_fails_without_retry() {
+        use super::super::session::MetadataReadState;
+
+        let now = Instant::now();
+        let mut owner = MetadataReadCoordinator::default();
+        let mut session = MetadataSession::default();
+        session.select(1);
+        let scoped = QueryRevisions {
+            library: 7,
+            track: Some(rivu_protocol::response::TrackRevision {
+                track_id: 1,
+                revision: 7,
+            }),
+            ..Default::default()
+        };
+        owner.request(1, scoped, now);
+        let first = owner.prepare(&mut session, true, now).unwrap();
+        assert!(owner.submit(
+            first.read,
+            &session,
+            ReadEnvironment {
+                visible: true,
+                revisions: scoped,
+            },
+        ));
+        let completion = owner.finish(
+            first.read,
+            &mut session,
+            ReadEnvironment {
+                visible: true,
+                revisions: scoped,
+            },
+            QueryResponse {
+                revisions: QueryRevisions {
+                    library: 9,
+                    ..Default::default()
+                },
+                result: Err(QueryError::Message("Core unavailable".into())),
+            },
+            MetadataValues::default().as_draft(),
+            || "wrong response".into(),
+        );
+        assert!(matches!(completion, ReadCompletion::Failed));
+        assert_eq!(
+            session.read_state(),
+            &MetadataReadState::Failed("Core unavailable".into())
+        );
+        assert!(owner.prepare(&mut session, true, now).is_none());
+        owner.request(1, scoped, now);
+        assert!(owner.prepare(&mut session, true, now).is_some());
     }
 
     #[test]

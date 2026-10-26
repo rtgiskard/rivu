@@ -322,7 +322,9 @@ impl PlaylistState {
         }
         if refresh.entries {
             self.cancel_playlist_read(ViewRequestKind::Entries);
-            if let Some(id) = self.playlists.entries().playlist_id {
+            if refresh.entry_payload_only {
+                self.playlists.invalidate_entry_payload();
+            } else if let Some(id) = self.playlists.entries().playlist_id {
                 self.playlists.prepare_entries(id);
             }
         }
@@ -706,6 +708,180 @@ mod tests {
         }
     }
 
+    fn entry(id: i64, position: usize) -> rivu_protocol::model::PlaylistEntryRow {
+        rivu_protocol::model::PlaylistEntryRow {
+            id,
+            track_id: 1,
+            position,
+            offset: position,
+            title: format!("entry {id}"),
+            path: Default::default(),
+            channels: 0,
+            sample_rate: 0,
+            bits_per_sample: None,
+            bitrate_bps: None,
+            bitrate_exact: false,
+            cue_number: None,
+            artist: String::new(),
+            album: String::new(),
+            duration: None,
+            codec: String::new(),
+            missing: false,
+            favorite: false,
+        }
+    }
+
+    #[test]
+    fn bitrate_revision_retains_identity_counts_viewport_catalog_and_worker() {
+        let mut browser = PlaylistState::default();
+        let previous = GuiLibrarySnapshot::default();
+        let latest = GuiLibrarySnapshot {
+            bitrate_revision: 1,
+            ..previous.clone()
+        };
+        let revisions = previous.query_revisions(Some(1));
+        let current = latest.query_revisions(Some(1));
+        browser.select_playlist(1, "one".into(), 0);
+        browser.playlists.prepare_page(false, 0, 20);
+        browser.playlists.accept_summaries(Page {
+            total: 1,
+            rows: vec![summary(1, 100)],
+        });
+        browser.playlists.prepare_page(true, 0, 20);
+        browser.playlists.accept_entries(Page {
+            total: 100,
+            rows: vec![entry(10, 0), entry(11, 1)],
+        });
+        browser.sync_entry_projection(revisions);
+        browser.playlists.select_entry(10, 0);
+        let (old, _) = browser
+            .demand_playlist_entries(40..50, 20, revisions)
+            .into_read()
+            .unwrap();
+        let generation = browser.playlists.selection_generation();
+        let changes = browser.playlists.refresh_changes(&previous, &latest);
+        assert!(!changes.summaries);
+        assert!(changes.entries);
+        assert!(changes.entry_payload_only);
+        assert!(!browser.sync_entry_projection(current));
+        browser.refresh_playlists(changes);
+        assert_eq!(browser.playlists.selected_entry(), Some(10));
+        assert_eq!(browser.playlists.selection_generation(), generation);
+        assert!(browser.playlists.entry_ready());
+        assert_eq!(browser.playlists.entries().rows.total(), Some(100));
+        assert_eq!(browser.playlists.entries().rows.visible(), 40..50);
+        assert_eq!(browser.playlists.selected_total(), Some(100));
+        assert!(browser.playlists.summaries().rows.get(0).is_some());
+        assert!(browser.playlists.entries().rows.get(0).is_none());
+        assert!(browser.requests.workers.contains(&ViewRequestKind::Entries));
+        assert!(
+            !browser
+                .requests
+                .queued
+                .contains_key(&ViewRequestKind::Entries)
+        );
+        assert!(
+            browser
+                .demand_playlist_entries(40..50, 20, current)
+                .into_read()
+                .is_none()
+        );
+        browser.complete_playlist_read(
+            &old,
+            current,
+            QueryResponse {
+                revisions,
+                result: Ok(ViewResponse::PlaylistEntries(Page {
+                    total: 100,
+                    rows: vec![entry(12, 40)],
+                })),
+            },
+        );
+        assert!(browser.playlists.entries().rows.get(40).is_none());
+        let (replacement, _) = browser
+            .queued_playlist_read(ViewRequestKind::Entries, true, current)
+            .into_read()
+            .unwrap();
+        assert_ne!(replacement.generation, old.generation);
+    }
+
+    #[test]
+    fn playlist_payload_rejects_stale_bitrate_and_accepts_current_reply() {
+        let mut browser = PlaylistState::default();
+        browser.select_playlist(1, "one".into(), 0);
+        let revisions = QueryRevisions {
+            bitrate: 1,
+            ..QueryRevisions::default()
+        };
+        let (read, _) = browser
+            .request_playlist_entries(1, 0, 20, revisions)
+            .into_read()
+            .unwrap();
+        browser.complete_playlist_read(
+            &read,
+            revisions,
+            QueryResponse {
+                revisions: QueryRevisions::default(),
+                result: Ok(ViewResponse::PlaylistEntries(Page {
+                    total: 100,
+                    rows: vec![entry(10, 0)],
+                })),
+            },
+        );
+        assert!(browser.playlists.entries().rows.get(0).is_none());
+        assert!(!browser.requests.workers.contains(&ViewRequestKind::Entries));
+        let (read, _) = browser
+            .demand_playlist_entries(0..1, 20, revisions)
+            .into_read()
+            .unwrap();
+        let mut row = entry(10, 0);
+        row.bitrate_bps = Some(192_000);
+        row.bitrate_exact = true;
+        browser.complete_playlist_read(
+            &read,
+            revisions,
+            QueryResponse {
+                revisions,
+                result: Ok(ViewResponse::PlaylistEntries(Page {
+                    total: 100,
+                    rows: vec![row],
+                })),
+            },
+        );
+        let loaded = browser.playlists.entries().rows.get(0).unwrap();
+        assert_eq!(loaded.bitrate_bps, Some(192_000));
+        assert!(loaded.bitrate_exact);
+    }
+
+    #[test]
+    fn stale_playlist_source_completion_is_not_published() {
+        let mut browser = PlaylistState::default();
+        let revisions = QueryRevisions::default();
+        browser.select_playlist(1, "one".into(), 0);
+        let (read, _) = browser
+            .request_playlist_entries(1, 0, 20, revisions)
+            .into_read()
+            .unwrap();
+        let current = QueryRevisions {
+            library: 1,
+            bitrate: 1,
+            ..revisions
+        };
+        browser.complete_playlist_read(
+            &read,
+            current,
+            QueryResponse {
+                revisions,
+                result: Ok(ViewResponse::PlaylistEntries(Page {
+                    total: 100,
+                    rows: vec![entry(10, 0)],
+                })),
+            },
+        );
+        assert!(browser.playlists.entries().rows.get(0).is_none());
+        assert!(!browser.requests.workers.contains(&ViewRequestKind::Entries));
+    }
+
     fn lookup_error(revisions: QueryRevisions, message: &str) -> QueryResponse {
         QueryResponse {
             revisions,
@@ -840,6 +1016,7 @@ mod tests {
         browser.refresh_playlists(PlaylistRefresh {
             summaries: true,
             entries: false,
+            entry_payload_only: false,
         });
         assert_eq!(browser.playlist_lookup_failure(), None);
         let obsolete_retry = browser.retry_playlist_lookup(old_key, current);
@@ -938,6 +1115,7 @@ mod tests {
         browser.refresh_playlists(PlaylistRefresh {
             summaries: true,
             entries: false,
+            entry_payload_only: false,
         });
         assert_eq!(browser.playlists.selected_total(), None);
         browser.playlists.prepare_page(false, 0, 20);
@@ -1511,6 +1689,7 @@ mod tests {
         browser.refresh_playlists(PlaylistRefresh {
             summaries: false,
             entries: true,
+            entry_payload_only: false,
         });
         let (read, _) = browser
             .demand_playlist_entries(0..1, 20, revisions)

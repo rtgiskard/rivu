@@ -4,6 +4,40 @@ use ratatui::backend::TestBackend;
 use rivu_protocol::response::QueryRevisions;
 
 #[test]
+fn details_loading_and_errors_preserve_scroll_until_fresh_track_is_rendered() {
+    let i18n = Localizer::new("en-US");
+    let colors = TerminalColors::new(crate::theme::Theme::default());
+    let mut details = Details {
+        target: Some(2),
+        source_label: "terminal-queue",
+        state: DetailState::Ready(Box::new(full_track(2))),
+        scroll: 4,
+        ..Details::default()
+    };
+    let mut terminal = Terminal::new(TestBackend::new(80, 8)).unwrap();
+    terminal
+        .draw(|frame| draw_details(frame, frame.area(), &mut details, &i18n, colors))
+        .unwrap();
+    let position = (details.scroll, details.max_scroll);
+    assert_eq!(position.0, 4);
+    for state in [
+        DetailState::Loading,
+        DetailState::Error("retry failed".into()),
+    ] {
+        details.state = state;
+        terminal
+            .draw(|frame| draw_details(frame, frame.area(), &mut details, &i18n, colors))
+            .unwrap();
+        assert_eq!((details.scroll, details.max_scroll), position);
+    }
+    details.state = DetailState::Ready(Box::new(full_track(2)));
+    terminal
+        .draw(|frame| draw_details(frame, frame.area(), &mut details, &i18n, colors))
+        .unwrap();
+    assert_eq!((details.scroll, details.max_scroll), position);
+}
+
+#[test]
 fn snapshot_theme_changes_recolor_main_help_and_details_without_changing_content() {
     for overlay in 0..3 {
         let mut tui = TuiState::new(TuiSnapshot::default(), Arc::new(Localizer::new("en-US")));

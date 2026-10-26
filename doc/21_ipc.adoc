@@ -289,8 +289,8 @@ in Artist, Album, Duration, Codec, and Bitrate order; all false means no columns
 Library, Queue, album-member, and playlist-entry rows carry source paths, CUE
 track numbers, and cached audio specifications, including bitrate certainty.
 These fields let frontends format complete hover information without a separate
-track lookup. Display revisions cover changes to these facts as well as labels;
-metadata updates invalidate affected Queue and album-member projections.
+track lookup. Query revisions cover labels and other query-dependent metadata;
+bitrate-bearing payload queries also depend on the committed bitrate revision.
 
 The codec and positional payload schema are not negotiated. Changes require
 coordinated client and server updates, preserving configuration semantics such
@@ -462,11 +462,12 @@ serialized query; the save gate prevents reads before background commit facts
 have been applied. Publication sequence, four state-section tokens, query-data
 tokens, and consumer request generations have distinct responsibilities.
 
-`Query::stamp` is the sole query dependency contract for scheduling, projection
+`Query::stamp` selects query-dependent freshness for scheduling, projection
 identity, result acceptance, and batch validation. Library pages use library
 content; directory/location projections also use structure. Album projections use
-only the Core-owned `album` collection token, so unrelated library changes do not
-invalidate them. A single Track query uses `track = {track_id, revision}`.
+the Core-owned `album` collection token rather than the global library token.
+A single Track query uses `track = {track_id, revision}`. Bitrate-bearing payloads
+also select the bitrate revision described below.
 Root counts use structure only.
 Playlist summaries use the summary catalog only; full entry rows use
 `playlist_metadata = {playlist_id, revision}` plus their scoped content/lifetime
@@ -484,9 +485,9 @@ and task IDs are scoped to the running instance, not a persistent job database.
 
 Track and playlist metadata scopes share a bounded index of at most 256 entries.
 Committed title/artist/album/favorite changes identify affected tracks and playlist
-rows inside the write transaction. Decoder hints, playback statistics, and bitrate
-changes affect Track details without invalidating playlist display rows. Unknown
-bulk effects or index overflow conservatively invalidate all metadata scopes;
+rows inside the write transaction. Decoder hints and playback statistics affect
+Track details without invalidating playlist display rows.
+Unknown bulk effects or index overflow conservatively invalidate all metadata scopes;
 there is no whole-library track-to-playlist reverse cache. Missing targeted
 metadata scopes use the global library token conservatively. A non-scoped
 baseline can bootstrap an entry traversal only while its library token is current.
@@ -495,6 +496,35 @@ scopes. Playlist presence is authoritative: retained metadata cannot resurrect a
 deleted collection's scope. If the retained metadata index does not match the
 current library token, selection falls back to that library token rather than
 reusing an unrelated scoped revision.
+
+`LibrarySnapshot.bitrate_revision` advances only after a source-conditional
+commit actually changes the `bitrate_bps`/`bitrate_exact` pair.
+`QueryRevisions.bitrate` participates in stamps for payloads containing bitrate:
+Track, library/directory rows, album representatives and members, Queue rows,
+playlist entries, and duplicate members. Counts, statistics, summaries without
+Track payloads, and ID/location-only queries do not depend on this revision.
+Bitrate-only publication does not advance structure, collection membership, or
+count revisions, and does not query Queue, album, or playlist membership.
+
+The existing playback/queue/library/system publication partitions remain intact.
+Consumers invalidate stale payloads and reload only when demanded; hidden views
+wait until revealed. Selection, navigation coordinates, counts and metadata drafts
+survive payload invalidation. In-flight results with an old stamp are rejected,
+not repaired; their physical reader slot remains owned until actual completion,
+after which the latest eligible demand runs. Watch coalescing needs only the
+latest scalar revision, not an update history. A bitrate change can invalidate
+unrelated bitrate-bearing payloads conservatively because this revision is global.
+Hover uses retained page data and never initiates a Track lookup.
+
+Range-selection anchors ignore bitrate-only payload freshness, but range responses
+still require their complete query stamp. Metadata reads synchronize playback-follow
+identity before preparing demand. Current transport failures are displayed without
+automatic retry; only stale work or revision-change responses retire for fresh demand.
+
+Playback statistics retain their existing scoped metadata semantics and do not
+advance the bitrate revision. No historical guard carry-forward is needed when
+EOF and final statistics share a publication. The positional wire payload uses
+protocol 10; clients and servers must be upgraded together.
 
 Whole-collection transfers carry an album key plus its `album` revision, or a
 playlist ID plus its content/lifetime revision. Destination playlists carry their

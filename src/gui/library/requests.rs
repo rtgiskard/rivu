@@ -323,7 +323,10 @@ mod tests {
     use super::*;
     use gpui::AppContext;
 
-    fn with_library(cx: &mut gpui::TestAppContext, run: impl FnOnce(&mut Library)) {
+    fn with_library(
+        cx: &mut gpui::TestAppContext,
+        run: impl FnOnce(&mut Library, &mut gpui::Context<Library>),
+    ) {
         let directory = tempfile::tempdir().unwrap();
         let config_path = directory.path().join("config.toml");
         crate::config::Config {
@@ -350,14 +353,14 @@ mod tests {
             scroll: Default::default(),
         };
         let owner = cx.new(|cx| Library::new(context, cx));
-        owner.update(cx, |owner, _| run(owner));
+        owner.update(cx, |owner, cx| run(owner, cx));
     }
 
     #[gpui::test]
     fn other_collection_is_present_while_total_unknown_and_uses_its_own_query(
         cx: &mut gpui::TestAppContext,
     ) {
-        with_library(cx, |browser| {
+        with_library(cx, |browser, _| {
             let revisions = QueryRevisions::default();
             let forest = browser.prepare_directory_read(
                 library::TreeBranch::default(),
@@ -395,7 +398,7 @@ mod tests {
 
     #[gpui::test]
     fn forest_pages_keep_configured_root_order_and_append_other(cx: &mut gpui::TestAppContext) {
-        with_library(cx, |browser| {
+        with_library(cx, |browser, _| {
             let roots = vec!["/b".into(), "/a".into(), "/b/child".into()];
             let forest = library::TreeBranch::default();
             for offset in [0, 2] {
@@ -447,11 +450,213 @@ mod tests {
             })
             .collect()
     }
+
+    fn track_response(revisions: QueryRevisions, flat: bool) -> QueryResponse {
+        let track = rivu_protocol::model::LibraryRow {
+            id: 7,
+            path: "/music/track.flac".into(),
+            title: "Track".into(),
+            artist: String::new(),
+            album: String::new(),
+            duration: None,
+            codec: "flac".into(),
+            bitrate_bps: None,
+            bitrate_exact: false,
+            channels: 2,
+            sample_rate: 44_100,
+            bits_per_sample: None,
+            cue_number: None,
+            favorite: false,
+            missing: false,
+            play_count: 0,
+        };
+        QueryResponse {
+            revisions,
+            result: Ok(if flat {
+                ViewResponse::LibraryPage(rivu_protocol::model::Page {
+                    total: 1,
+                    rows: vec![track],
+                })
+            } else {
+                ViewResponse::DirectoryPage(rivu_protocol::model::Page {
+                    total: 1,
+                    rows: vec![rivu_protocol::model::DirectoryRow::Track(track)],
+                })
+            }),
+        }
+    }
+
+    #[gpui::test]
+    fn directory_and_flat_completions_reject_stale_bitrate(cx: &mut gpui::TestAppContext) {
+        with_library(cx, |browser, _| {
+            for flat in [false, true] {
+                if flat {
+                    browser.library.toggle_view();
+                }
+                let roots = vec!["/music".into()];
+                let branch = root_branches(browser, &roots).remove(0);
+                let baseline = browser.state.query_revisions(None);
+                let read = browser
+                    .prepare_directory_read(branch.clone(), 0, 20, &roots, baseline)
+                    .read
+                    .unwrap();
+                let state = std::rc::Rc::make_mut(&mut browser.state);
+                state.library.bitrate_revision += 1;
+                let latest = browser.state.query_revisions(None);
+                assert!(browser.library.sync_projection(latest));
+                assert!(
+                    browser
+                        .complete_directory_read(&read, latest, track_response(baseline, flat))
+                        .is_none()
+                );
+                assert!(browser.library.tree().cached_row(&branch, 0).is_none());
+                assert!(browser.requests.directory_workers.is_empty());
+                assert!(browser.next_directory_demand(true).is_none());
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn bitrate_change_retries_only_after_physical_worker_retires(cx: &mut gpui::TestAppContext) {
+        with_library(cx, |browser, _| {
+            let roots = vec!["/music".into()];
+            let branch = root_branches(browser, &roots).remove(0);
+            let baseline = browser.state.query_revisions(None);
+            let read = browser
+                .prepare_directory_read(branch.clone(), 0, 20, &roots, baseline)
+                .read
+                .unwrap();
+            let state = std::rc::Rc::make_mut(&mut browser.state);
+            state.library.bitrate_revision += 1;
+            let latest = browser.state.query_revisions(None);
+            assert!(
+                browser
+                    .publish_directory_read(&read, latest, track_response(baseline, false))
+                    .is_none()
+            );
+            assert!(
+                !browser
+                    .library
+                    .tree()
+                    .request_pending(&branch, read.generation)
+            );
+            assert!(browser.library.tree().cached_row(&branch, 0).is_none());
+            assert!(browser.requests.directory_workers.contains(&branch));
+            assert!(
+                browser
+                    .prepare_directory_read(branch.clone(), 0, 20, &roots, latest)
+                    .read
+                    .is_none()
+            );
+            assert_eq!(browser.requests.directory_queued.len(), 1);
+            browser.abandon_directory_read(&read);
+            let (retry_branch, offset) = browser.next_directory_demand(true).unwrap();
+            assert_eq!(retry_branch, branch);
+            let retry = browser
+                .prepare_directory_read(retry_branch, offset, 20, &roots, latest)
+                .read
+                .unwrap();
+            assert!(
+                browser
+                    .complete_directory_read(&retry, latest, track_response(latest, false))
+                    .is_none()
+            );
+            assert!(browser.library.tree().cached_row(&branch, 0).is_some());
+            assert!(browser.requests.directory_workers.is_empty());
+            assert!(browser.next_directory_demand(true).is_none());
+        });
+    }
+    #[gpui::test]
+    fn snapshot_bitrate_reconciliation_preserves_counts_selection_and_geometry(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        with_library(cx, |browser, cx| {
+            let roots = vec![std::path::PathBuf::from("/music")];
+            let mut state = (*browser.state).clone();
+            let config = std::sync::Arc::make_mut(&mut state.system.config);
+            config.library_roots = roots.clone();
+            config.page_size = 20;
+            browser.visible = true;
+            browser.reconcile(std::rc::Rc::new(state), cx);
+            let branch = root_branches(browser, &roots).remove(0);
+            browser.library.expand_directory(&branch, true);
+            let baseline = browser.state.query_revisions(None);
+            let count = browser
+                .prepare_root_count_read(&roots, baseline.structure)
+                .unwrap();
+            browser.complete_root_count_read(
+                count,
+                &roots,
+                baseline,
+                QueryResponse {
+                    revisions: baseline,
+                    result: Ok(ViewResponse::LibraryRootCounts(vec![
+                        rivu_protocol::model::LibraryRootCount {
+                            path: roots[0].clone(),
+                            total: 1,
+                        },
+                    ])),
+                },
+            );
+            let read = browser
+                .prepare_directory_read(branch.clone(), 0, 20, &roots, baseline)
+                .read
+                .unwrap();
+            browser.complete_directory_read(&read, baseline, track_response(baseline, false));
+            browser.library.selected.insert(7);
+            let geometry = browser.library.tree().row_count();
+            let projection = browser.library.tree().projection_revision();
+            let mut next = (*browser.state).clone();
+            next.library.bitrate_revision += 1;
+            browser.reconcile(std::rc::Rc::new(next), cx);
+            assert!(browser.library.tree().cached_row(&branch, 0).is_none());
+            assert_eq!(browser.library.root_count(&roots[0]), Some(1));
+            assert!(
+                browser
+                    .prepare_root_count_read(&roots, baseline.structure)
+                    .is_none()
+            );
+            assert!(browser.library.selected.contains(&7));
+            assert_eq!(browser.library.tree().row_count(), geometry);
+            assert_eq!(browser.library.tree().projection_revision(), projection);
+            assert_eq!(
+                browser.library.tree.requests_for_range(0..geometry),
+                vec![(branch, 0)]
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn source_revision_changes_reject_old_completions(cx: &mut gpui::TestAppContext) {
+        with_library(cx, |browser, _| {
+            let roots = vec!["/music".into()];
+            let branch = root_branches(browser, &roots).remove(0);
+            let baseline = browser.state.query_revisions(None);
+            let read = browser
+                .prepare_directory_read(branch.clone(), 0, 20, &roots, baseline)
+                .read
+                .unwrap();
+            let state = std::rc::Rc::make_mut(&mut browser.state);
+            state.library.revision += 1;
+            state.library.bitrate_revision += 1;
+            let latest = browser.state.query_revisions(None);
+            assert!(browser.library.sync_projection(latest));
+            assert!(
+                browser
+                    .complete_directory_read(&read, latest, track_response(baseline, false))
+                    .is_none()
+            );
+            assert!(browser.library.tree().cached_row(&branch, 0).is_none());
+            assert!(browser.requests.directory_workers.is_empty());
+            assert!(browser.next_directory_demand(true).is_none());
+        });
+    }
+
     #[gpui::test]
     fn directory_filters_reject_stale_rows_without_releasing_physical_workers(
         cx: &mut gpui::TestAppContext,
     ) {
-        with_library(cx, |browser| {
+        with_library(cx, |browser, _| {
             let roots = vec!["/music".into()];
             let branch = root_branches(browser, &roots).remove(0);
             let revisions = QueryRevisions::default();
@@ -516,7 +721,7 @@ mod tests {
     fn cancelled_directory_and_count_reads_hold_their_worker_gates_until_completion(
         cx: &mut gpui::TestAppContext,
     ) {
-        with_library(cx, |browser| {
+        with_library(cx, |browser, _| {
             let roots: Vec<_> = (0..5)
                 .map(|index| std::path::PathBuf::from(format!("/music/{index}")))
                 .collect();

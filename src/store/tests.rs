@@ -1572,17 +1572,11 @@ fn playback_precision_upgrade_is_source_conditional_and_idempotent() {
     let track = all_tracks(&store).remove(0);
     store.enqueue_tracks(&[track.id]).unwrap();
     let source = store.playback_source(&track).unwrap().unwrap();
-    assert!(
-        !store
-            .upgrade_bitrate(&source, 192_000, false)
-            .unwrap()
-            .changed
-    );
-    assert!(!store.upgrade_bitrate(&source, 0, true).unwrap().changed);
+    assert!(!store.upgrade_bitrate(&source, 192_000, false).unwrap());
+    assert!(!store.upgrade_bitrate(&source, 0, true).unwrap());
     let before = store.queue_state().unwrap();
     // Precision itself is content, even when the numerical value is unchanged.
-    let impact = store.upgrade_bitrate(&source, 128_000, true).unwrap();
-    assert!(impact.changed && impact.library && impact.queue && !impact.albums);
+    assert!(store.upgrade_bitrate(&source, 128_000, true).unwrap());
     let exact = store.track(track.id).unwrap().unwrap();
     assert!(exact.bitrate_exact);
     assert!(
@@ -1615,18 +1609,8 @@ fn playback_precision_upgrade_is_source_conditional_and_idempotent() {
     );
     let revision = store.queue_state().unwrap();
     assert_eq!(revision, before);
-    assert!(
-        !store
-            .upgrade_bitrate(&source, 256_000, true)
-            .unwrap()
-            .changed
-    );
-    assert!(
-        !store
-            .upgrade_bitrate(&source, 256_000, false)
-            .unwrap()
-            .changed
-    );
+    assert!(!store.upgrade_bitrate(&source, 256_000, true).unwrap());
+    assert!(!store.upgrade_bitrate(&source, 256_000, false).unwrap());
     assert_eq!(store.queue_state().unwrap(), revision);
     assert!(store.playback_source(&exact).unwrap().is_none());
 
@@ -1657,15 +1641,98 @@ fn playback_precision_upgrade_is_source_conditional_and_idempotent() {
     let replacement = store.track(track.id).unwrap().unwrap();
     assert_eq!(replacement.bitrate_bps, Some(64_000));
     assert!(!replacement.bitrate_exact);
-    assert!(
-        !store
-            .upgrade_bitrate(&source, 128_000, true)
-            .unwrap()
-            .changed
-    );
+    assert!(!store.upgrade_bitrate(&source, 128_000, true).unwrap());
     record.media.bitrate_exact = true;
     assert!(store.apply_scan(&scan(vec![record])).unwrap().changed);
     assert!(store.track(track.id).unwrap().unwrap().bitrate_exact);
+}
+
+#[test]
+fn playback_precision_commit_does_not_read_collection_membership() {
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    store
+        .apply_scan(&scan(vec![rec(
+            "/music/source.flac",
+            "source",
+            "Source",
+            10.0,
+        )]))
+        .unwrap();
+    let track = all_tracks(&store).remove(0);
+    let source = store.playback_source(&track).unwrap().unwrap();
+    // Collection query targets are unavailable, but a source-conditional
+    // enrichment still has all the information needed for its guarded UPDATE.
+    store
+        .conn
+        .execute_batch("DROP TABLE queue_entries; DROP TABLE playlist_entries;")
+        .unwrap();
+    assert!(store.upgrade_bitrate(&source, 192_000, true).unwrap());
+    let current = store.track(track.id).unwrap().unwrap();
+    assert_eq!(
+        (current.bitrate_bps, current.bitrate_exact),
+        (Some(192_000), true)
+    );
+}
+
+#[test]
+fn bitrate_reader_fresh_payloads_preserve_owned_count_caches() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("bitrate-counts.db");
+    let writer = Store::open(&path).unwrap();
+    writer
+        .apply_scan(&scan(vec![rec(
+            "/music/source.flac",
+            "source",
+            "Source",
+            10.0,
+        )]))
+        .unwrap();
+    let track = all_tracks(&writer).remove(0);
+    let source = writer.playback_source(&track).unwrap().unwrap();
+    let reader = Store::open_reader(&path).unwrap();
+    assert!(
+        reader
+            .track(track.id)
+            .unwrap()
+            .unwrap()
+            .bitrate_bps
+            .is_none()
+    );
+    assert_eq!(
+        reader
+            .library_page(Some("Source"), None, None, 0, 0)
+            .unwrap()
+            .total,
+        1
+    );
+    assert!(reader.count_cache.borrow().is_some());
+    assert_eq!(
+        reader
+            .cached_count(
+                super::CountDomain::Queue,
+                &["retained bitrate count"],
+                || Ok(7)
+            )
+            .unwrap(),
+        7
+    );
+    assert!(writer.upgrade_bitrate(&source, 192_000, true).unwrap());
+    assert!(reader.count_cache.borrow().is_some());
+    assert_eq!(
+        reader
+            .cached_count(
+                super::CountDomain::Queue,
+                &["retained bitrate count"],
+                || panic!("bitrate invalidated a scalar count")
+            )
+            .unwrap(),
+        7
+    );
+    let current = reader.track(track.id).unwrap().unwrap();
+    assert_eq!(
+        (current.bitrate_bps, current.bitrate_exact),
+        (Some(192_000), true)
+    );
 }
 
 #[test]
@@ -1676,24 +1743,9 @@ fn playback_precision_fill_and_cue_guard_preserve_source_identity() {
     store.apply_scan(&scan(vec![record.clone()])).unwrap();
     let track = all_tracks(&store).remove(0);
     let source = store.playback_source(&track).unwrap().unwrap();
-    assert!(
-        store
-            .upgrade_bitrate(&source, 128_000, false)
-            .unwrap()
-            .changed
-    );
-    assert!(
-        !store
-            .upgrade_bitrate(&source, 192_000, false)
-            .unwrap()
-            .changed
-    );
-    assert!(
-        store
-            .upgrade_bitrate(&source, 192_000, true)
-            .unwrap()
-            .changed
-    );
+    assert!(store.upgrade_bitrate(&source, 128_000, false).unwrap());
+    assert!(!store.upgrade_bitrate(&source, 192_000, false).unwrap());
+    assert!(store.upgrade_bitrate(&source, 192_000, true).unwrap());
     assert!(
         !store
             .apply_scan(&scan(vec![record.clone()]))
@@ -1703,12 +1755,7 @@ fn playback_precision_fill_and_cue_guard_preserve_source_identity() {
     record.modified_ns += 1;
     store.apply_scan(&scan(vec![record])).unwrap();
     assert_eq!(store.track(track.id).unwrap().unwrap().bitrate_bps, None);
-    assert!(
-        !store
-            .upgrade_bitrate(&source, 192_000, true)
-            .unwrap()
-            .changed
-    );
+    assert!(!store.upgrade_bitrate(&source, 192_000, true).unwrap());
 
     let mut cue = rec("/music/cue.flac", "cue", "Cue", 10.0);
     cue.cue = Some(CueSegment {
@@ -1726,21 +1773,11 @@ fn playback_precision_fill_and_cue_guard_preserve_source_identity() {
         .playback_source(&store.track(id).unwrap().unwrap())
         .unwrap()
         .unwrap();
-    assert!(
-        store
-            .upgrade_bitrate(&source, 128_000, true)
-            .unwrap()
-            .changed
-    );
+    assert!(store.upgrade_bitrate(&source, 128_000, true).unwrap());
     cue.cue.as_mut().unwrap().end_frame = Some(700);
     store.apply_scan(&scan(vec![cue])).unwrap();
     assert!(!store.track(id).unwrap().unwrap().bitrate_exact);
-    assert!(
-        !store
-            .upgrade_bitrate(&source, 192_000, true)
-            .unwrap()
-            .changed
-    );
+    assert!(!store.upgrade_bitrate(&source, 192_000, true).unwrap());
 }
 
 #[test]
@@ -4933,5 +4970,109 @@ fn reader_snapshots_refresh_counts_after_domain_invalidation_and_rollback() {
             .unwrap()
             .total,
         1
+    );
+}
+
+#[test]
+fn bitrate_commit_patches_only_cached_pair_after_commit() {
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    store
+        .apply_scan(&scan(vec![rec(
+            "/music/cache.flac",
+            "cache",
+            "Cache",
+            10.0,
+        )]))
+        .unwrap();
+    store.set_track_cache_page_size(2);
+    let track = all_tracks(&store).remove(0);
+    let source = store.playback_source(&track).unwrap().unwrap();
+    assert_eq!(store.track(track.id).unwrap().unwrap(), track);
+    let (before, age) = store.track_cache.borrow().entries[&track.id].clone();
+    let clock = store.track_cache.borrow().clock;
+    assert!(store.upgrade_bitrate(&source, 96_000, false).unwrap());
+    let mut expected = before;
+    expected.bitrate_bps = Some(96_000);
+    assert_eq!(
+        store.track_cache.borrow().entries[&track.id],
+        (expected.clone(), age)
+    );
+    assert_eq!(store.track_cache.borrow().clock, clock);
+    assert!(!store.upgrade_bitrate(&source, 128_000, false).unwrap());
+    assert!(!store.upgrade_bitrate(&source, 0, true).unwrap());
+    assert!(store.upgrade_bitrate(&source, u64::MAX, true).is_err());
+    assert_eq!(
+        store.track_cache.borrow().entries[&track.id],
+        (expected.clone(), age)
+    );
+    store
+        .conn
+        .execute_batch(
+            "CREATE TRIGGER reject_bitrate BEFORE UPDATE OF bitrate_bps,bitrate_exact ON tracks
+         BEGIN SELECT RAISE(ABORT,'reject bitrate'); END;",
+        )
+        .unwrap();
+    assert!(store.upgrade_bitrate(&source, 192_000, true).is_err());
+    assert_eq!(
+        store.track_cache.borrow().entries[&track.id],
+        (expected.clone(), age)
+    );
+    store
+        .conn
+        .execute_batch("DROP TRIGGER reject_bitrate")
+        .unwrap();
+    store.conn.execute_batch(
+        "CREATE TABLE bitrate_commit_guard(track_id INTEGER REFERENCES tracks(id) DEFERRABLE INITIALLY DEFERRED);
+         CREATE TRIGGER reject_bitrate_commit AFTER UPDATE OF bitrate_bps,bitrate_exact ON tracks
+         BEGIN INSERT INTO bitrate_commit_guard VALUES(-1); END;"
+    ).unwrap();
+    assert!(store.upgrade_bitrate(&source, 192_000, true).is_err());
+    assert_eq!(
+        store.track_cache.borrow().entries[&track.id],
+        (expected.clone(), age)
+    );
+    assert_eq!(
+        store
+            .known_source(&source.path)
+            .unwrap()
+            .unwrap()
+            .media
+            .unwrap()
+            .bitrate_bps,
+        Some(96_000)
+    );
+    store
+        .conn
+        .execute_batch("DROP TRIGGER reject_bitrate_commit; DROP TABLE bitrate_commit_guard;")
+        .unwrap();
+    assert!(store.upgrade_bitrate(&source, 192_000, true).unwrap());
+    expected.bitrate_bps = Some(192_000);
+    expected.bitrate_exact = true;
+    assert_eq!(
+        store.track_cache.borrow().entries[&track.id],
+        (expected, age)
+    );
+    assert_eq!(store.track_cache.borrow().clock, clock);
+}
+
+#[test]
+fn bitrate_commit_does_not_insert_absent_cached_tracks() {
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    store
+        .apply_scan(&scan(vec![rec(
+            "/music/uncached.flac",
+            "uncached",
+            "Uncached",
+            10.0,
+        )]))
+        .unwrap();
+    let track = all_tracks(&store).remove(0);
+    let source = store.playback_source(&track).unwrap().unwrap();
+    store.track_cache.borrow_mut().entries.clear();
+    assert!(store.upgrade_bitrate(&source, 192_000, true).unwrap());
+    assert!(store.track_cache.borrow().entries.is_empty());
+    assert_eq!(
+        store.track(track.id).unwrap().unwrap().bitrate_bps,
+        Some(192_000)
     );
 }

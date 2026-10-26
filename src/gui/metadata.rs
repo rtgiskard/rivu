@@ -143,7 +143,7 @@ impl Metadata {
             (None, None) => false,
             _ => true,
         };
-        let query_changed = self.metadata.selected().is_some_and(|track_id| {
+        let query_changed = self.metadata.identity().is_some_and(|track_id| {
             let query = Query::Track { track_id };
             query.stamp(self.state.query_revisions_for(&query))
                 != query.stamp(state.query_revisions_for(&query))
@@ -154,12 +154,11 @@ impl Metadata {
             || self.state.playback.status != state.playback.status
             || self.state.playback.last_heard_at != state.playback.last_heard_at;
         self.state = state;
-        if query_changed {
-            self.sync_metadata_query();
-            self.demand_metadata(cx);
-        }
         if current_changed {
             self.sync_metadata_default(cx);
+        }
+        if query_changed {
+            self.demand_metadata(cx);
         }
         if display_changed {
             cx.notify();
@@ -311,7 +310,7 @@ impl Metadata {
     }
 
     fn sync_metadata_query(&mut self) {
-        let selected = self.metadata.selected();
+        let selected = self.metadata.identity();
         let revisions = selected.map_or_else(Default::default, |track_id| {
             self.state.query_revisions_for(&Query::Track { track_id })
         });
@@ -324,6 +323,7 @@ impl Metadata {
     }
 
     fn demand_metadata(&mut self, cx: &mut Context<Self>) {
+        self.sync_metadata_query();
         let Some(task) =
             self.metadata_read
                 .prepare(&mut self.metadata, self.visible, Instant::now())
@@ -663,7 +663,6 @@ impl Metadata {
         let owner = cx.weak_entity();
         window.defer(cx, move |_, cx| {
             let _ = owner.update(cx, |this, cx| {
-                this.sync_metadata_query();
                 this.demand_metadata(cx);
             });
         });

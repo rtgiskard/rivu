@@ -84,6 +84,10 @@ impl<T> PagedRows<T> {
         self.pending = None;
         self.failures.clear();
     }
+    /// Discard stale technical fields without changing list identity or geometry.
+    pub(super) fn invalidate_payload(&mut self) {
+        self.clear_pages();
+    }
     /// Change batch boundaries without invalidating current counts or selection position.
     pub(super) fn configure_page_size(&mut self, page_size: usize) {
         if self.page_size != page_size {

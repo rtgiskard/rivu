@@ -386,6 +386,11 @@ impl QueueSelection {
     pub(super) fn sync(&mut self, revisions: QueryRevisions, total: usize) -> bool {
         let query = self.query();
         let identity_changed = !self.page_projection.matches_identity(&query);
+        let content_changed = self.page_projection.stamp().is_none_or(|stamp| {
+            let previous = stamp.revisions();
+            previous.queue != revisions.queue
+                || (self.query.is_some() && previous.library != revisions.library)
+        });
         let changed = self.page_projection.sync(&query, revisions);
         self.projection.sync(&query, revisions);
         if changed {
@@ -393,11 +398,22 @@ impl QueueSelection {
             self.locate_filtered = None;
             if identity_changed {
                 self.rows.clear();
-            } else {
+            } else if content_changed {
                 self.rows.invalidate();
+            } else {
+                self.rows.invalidate_payload();
             }
-            self.cancel();
-            self.schedule_reconcile(revisions);
+            if content_changed || identity_changed {
+                self.cancel();
+                self.schedule_reconcile(revisions);
+            } else {
+                self.cancel_manual();
+                if self.positions_stale && self.selection_error.is_none() {
+                    self.reconcile_projection.cancel();
+                    self.reconcile_pending = None;
+                    self.schedule_reconcile(revisions);
+                }
+            }
         }
         if self.query.is_none() {
             // The snapshot count is authoritative even when DATA invalidation retired the pages.
@@ -673,6 +689,121 @@ mod tests {
             offset: position,
         }
     }
+    #[test]
+    fn bitrate_revision_retires_payload_preserving_identity_geometry_and_worker() {
+        let mut queue = queue(7);
+        queue.rows.begin(0, 20);
+        queue.rows.accept(Page {
+            total: 200_000,
+            rows: vec![row(10, 0), row(11, 1)],
+        });
+        queue.select(identity(11, 1), false);
+        let (old_query, old_generation) = queue.demand_page(40..50, 20).unwrap();
+        let mut latest = revisions(7);
+        latest.bitrate = 1;
+        assert!(queue.sync(latest, 200_000));
+        assert_eq!(queue.rows.total(), Some(200_000));
+        assert_eq!(queue.rows.visible(), 40..50);
+        assert_eq!(queue.ordered_ids(), vec![11]);
+        assert_eq!(queue.anchor, Some(identity(11, 1)));
+        assert!(queue.ready());
+        assert!(queue.rows.get(0).is_none());
+        assert!(queue.page_worker);
+        assert!(queue.demand_page(40..50, 20).is_none());
+        queue.retire_page_worker();
+        queue.accept_page(
+            &old_query,
+            old_generation,
+            rivu_protocol::response::QueryResponse {
+                revisions: revisions(7),
+                result: Ok(rivu_protocol::response::ViewResponse::QueuePage(Page {
+                    total: 200_000,
+                    rows: vec![row(12, 40)],
+                })),
+            },
+            || unreachable!(),
+        );
+        assert!(queue.rows.get(40).is_none());
+        assert!(queue.demand_page(40..50, 20).is_some());
+    }
+
+    #[test]
+    fn queue_page_rejects_stale_bitrate_and_accepts_current_payload_unchanged() {
+        let mut queue = queue(7);
+        let mut latest = revisions(7);
+        latest.bitrate = 1;
+        queue.sync(latest, 200_000);
+        let (query, generation) = queue.demand_page(0..2, 20).unwrap();
+        let response = |revisions, row| rivu_protocol::response::QueryResponse {
+            revisions,
+            result: Ok(rivu_protocol::response::ViewResponse::QueuePage(Page {
+                total: 200_000,
+                rows: vec![row],
+            })),
+        };
+        queue.accept_page(
+            &query,
+            generation,
+            response(revisions(7), row(10, 0)),
+            || unreachable!(),
+        );
+        assert!(queue.rows.get(0).is_none());
+        let mut current = row(10, 0);
+        current.track.bitrate_bps = Some(192_000);
+        current.track.bitrate_exact = true;
+        queue.retire_page_worker();
+        queue.accept_page(
+            &query,
+            generation,
+            response(latest, current),
+            || unreachable!(),
+        );
+        let loaded = queue.rows.get(0).unwrap();
+        assert_eq!(loaded.track.bitrate_bps, Some(192_000));
+        assert!(loaded.track.bitrate_exact);
+    }
+
+    #[test]
+    fn unfiltered_queue_keeps_payload_across_unrelated_library_revisions() {
+        let mut queue = queue(7);
+        queue.rows.begin(0, 20);
+        queue.rows.accept(Page {
+            total: 200_000,
+            rows: vec![row(10, 0)],
+        });
+        queue.select(identity(10, 0), false);
+        let generation = queue.page_projection.generation();
+        let mut latest = revisions(7);
+        latest.library = 1;
+        assert!(!queue.sync(latest, 200_000));
+        assert_eq!(queue.page_projection.generation(), generation);
+        assert!(queue.rows.get(0).is_some());
+        assert_eq!(queue.ordered_ids(), vec![10]);
+    }
+
+    #[test]
+    fn hidden_filtered_bitrate_reload_keeps_count_and_demand_without_starting_worker() {
+        let mut queue = queue(7);
+        queue.change_search(Some("needle".into()));
+        queue.sync(revisions(7), 200_000);
+        queue.rows.demand(40..50, 20);
+        queue.rows.begin(40, 20);
+        queue.rows.accept(Page {
+            total: 100,
+            rows: vec![row(10, 40)],
+        });
+        queue.select(identity(10, 40), false);
+        let mut latest = revisions(7);
+        latest.bitrate = 1;
+        queue.sync(latest, 200_000);
+        assert_eq!(queue.rows.total(), Some(100));
+        assert_eq!(queue.rows.visible(), 40..50);
+        assert!(queue.rows.get(40).is_none());
+        assert_eq!(queue.ordered_ids(), vec![10]);
+        assert!(queue.ready());
+        assert!(!queue.page_worker);
+    }
+
     #[test]
     fn timeout_page_publishes_failure_without_releasing_replacement_gate() {
         let mut queue = queue(7);

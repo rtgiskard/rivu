@@ -327,6 +327,9 @@ impl MetadataSession {
         if matches!(self.availability, MetadataAvailability::Unavailable(_)) {
             return None;
         }
+        if matches!(self.availability, MetadataAvailability::Unknown) && self.baseline.is_some() {
+            return None;
+        }
         if self.track() == track {
             return None;
         }
@@ -401,6 +404,55 @@ impl MetadataSession {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn bitrate_reload_preserves_shared_snapshot_draft_baseline_and_save() {
+        let mut session = MetadataSession::default();
+        let baseline = load(&mut session, 1, "original");
+        let draft = values("local edit");
+        let (save, _) = session.begin_save(draft.as_draft()).unwrap();
+        let original = session.track_snapshot().unwrap();
+        let token = session.begin_load(1);
+        let mut refreshed = track(1, "original");
+        refreshed.bitrate_bps = Some(192_000);
+        refreshed.bitrate_exact = true;
+        session.accept_load(token, Some(refreshed), draft.as_draft());
+        assert_eq!(session.track().unwrap().bitrate_bps, Some(192_000));
+        assert!(session.track().unwrap().bitrate_exact);
+        assert_eq!(original.bitrate_bps, None);
+        assert_eq!(session.baseline, Some(baseline));
+        assert!(session.dirty(draft.as_draft()));
+        assert!(session.complete_save(save, draft, true));
+    }
+
+    #[test]
+    fn bitrate_reload_keeps_identity_and_draft() {
+        let mut session = MetadataSession::default();
+        load(&mut session, 1, "original");
+        let identity = session.editor_identity();
+        let draft = values("local edit");
+        assert_eq!(session.editor_identity(), identity);
+        assert!(session.track_snapshot().is_some());
+        assert!(session.dirty(draft.as_draft()));
+        session.selected = None;
+        assert!(
+            session
+                .sync_playback(Some(&track(1, "stale")), draft.as_draft())
+                .is_none()
+        );
+        let token = session.begin_load(1);
+        let mut refreshed = track(1, "remote");
+        refreshed.bitrate_bps = Some(192_000);
+        refreshed.bitrate_exact = true;
+        assert!(
+            session
+                .accept_load(token, Some(refreshed), draft.as_draft())
+                .is_none()
+        );
+        assert_eq!(session.track().unwrap().bitrate_bps, Some(192_000));
+        assert_eq!(session.baseline, Some(values("original")));
+        assert!(session.dirty(draft.as_draft()));
+    }
+
     #[test]
     fn decoder_hint_draft_refresh_and_save_lifecycle() {
         let mut session = MetadataSession::default();

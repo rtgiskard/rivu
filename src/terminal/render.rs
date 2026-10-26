@@ -417,13 +417,19 @@ fn draw_details(
             );
         }
     }
-    details.max_scroll = lines.len().saturating_sub(area.height as usize);
-    details.scroll = details.scroll.min(details.max_scroll);
+    // Loading and transient failures must not erase the retained track position.
+    let scroll = if matches!(details.state, DetailState::Loading | DetailState::Error(_)) {
+        0
+    } else {
+        details.max_scroll = lines.len().saturating_sub(area.height as usize);
+        details.scroll = details.scroll.min(details.max_scroll);
+        details.scroll
+    };
     frame.render_widget(
         Paragraph::new(
             lines
                 .into_iter()
-                .skip(details.scroll)
+                .skip(scroll)
                 .take(area.height as usize)
                 .collect::<Vec<_>>(),
         ),

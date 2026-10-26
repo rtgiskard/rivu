@@ -175,12 +175,13 @@ impl QueryStamp {
 
     pub fn continuation_scope(self, query: Option<&str>, playlist_id: Option<i64>) -> [u8; 32] {
         let mut hash = blake3::Hasher::new();
-        hash.update(b"rivu occurrence continuation v1");
+        hash.update(b"rivu occurrence continuation v2");
         hash.update(&[u8::from(playlist_id.is_some())]);
         hash.update(&playlist_id.unwrap_or_default().to_le_bytes());
         // Callers supply the same normalized search text used by SQL.
         hash.update(query.unwrap_or_default().as_bytes());
         hash.update(&self.0.library.to_le_bytes());
+        hash.update(&self.0.bitrate.to_le_bytes());
         hash.update(&self.0.queue.to_le_bytes());
         for scope in [self.0.playlist_entries, self.0.playlist_metadata] {
             hash.update(&[u8::from(scope.is_some())]);
@@ -326,6 +327,27 @@ impl Query {
                 stamp.queue = revisions.queue;
             }
             Self::ScanTask { .. } | Self::RelocationTask { .. } | Self::ProcessingTask { .. } => {}
+        }
+        if matches!(
+            self,
+            Self::LibraryPage { .. }
+                | Self::TrackPage { .. }
+                | Self::TrackBatch { .. }
+                | Self::Track { .. }
+                | Self::Albums { .. }
+                | Self::AlbumTracks { .. }
+                | Self::DirectoryPage { .. }
+                | Self::OtherTracksPage { .. }
+                | Self::LibraryRootPage { .. }
+                | Self::PlaylistEntries { .. }
+                | Self::PlaylistEntryBatch { .. }
+                | Self::QueuePage { .. }
+                | Self::QueueBatch { .. }
+                | Self::QueueEntries { .. }
+                | Self::DuplicateMembers { .. }
+                | Self::DuplicateMemberSelection { .. }
+        ) {
+            stamp.bitrate = revisions.bitrate;
         }
         QueryStamp(stamp)
     }

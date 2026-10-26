@@ -100,6 +100,7 @@ struct DuplicateReview {
     members_timed_out: bool,
     source: Option<DuplicateMember>,
     target: Option<DuplicateMember>,
+    retired_selection: Option<(Option<i64>, Option<i64>)>,
     confirming: bool,
     busy: Option<Busy>,
     task_query_pending: bool,
@@ -393,12 +394,8 @@ impl DuplicateReview {
         self.members_loading = true;
         self.members_pending = true;
         self.members_timed_out = false;
-        let selected = self
-            .source
-            .iter()
-            .chain(self.target.iter())
-            .map(|member| member.track.id)
-            .collect();
+        let (source, target) = self.selection_ids();
+        let selected = source.into_iter().chain(target).collect();
         Some((
             ReviewRead {
                 epoch: self.epoch,
@@ -585,10 +582,19 @@ impl DuplicateReview {
             self.groups_dirty = true;
             self.groups_failed = false;
         }
+        let bitrate_changed = self
+            .members_projection
+            .stamp()
+            .is_some_and(|stamp| stamp.revisions().bitrate != revisions.bitrate);
         let members_changed = self
             .members_query()
             .is_some_and(|query| self.members_projection.sync(&query, revisions));
         if members_changed {
+            if bitrate_changed {
+                self.retired_selection = Some(self.selection_ids());
+                self.source = None;
+                self.target = None;
+            }
             self.members.clear();
             self.members_current = false;
             self.members_dirty = true;
@@ -626,9 +632,19 @@ impl DuplicateReview {
             && matches!(query, Query::DuplicateMembers { offset, .. } if *offset == self.members_offset)
     }
 
+    fn selection_ids(&self) -> (Option<i64>, Option<i64>) {
+        self.retired_selection.unwrap_or_else(|| {
+            (
+                self.source.as_ref().map(|member| member.track.id),
+                self.target.as_ref().map(|member| member.track.id),
+            )
+        })
+    }
+
     fn clear_selection(&mut self) {
         self.source = None;
         self.target = None;
+        self.retired_selection = None;
         self.confirming = false;
     }
 
@@ -648,24 +664,26 @@ impl DuplicateReview {
     }
 
     fn reconcile_selection(&mut self, selected: &[Member]) {
-        let source = self.source.as_ref().and_then(|source| {
+        let (source_id, target_id) = self.selection_ids();
+        let source = source_id.and_then(|source_id| {
             self.members
                 .iter()
                 .chain(selected)
-                .find(|member| member.value.track.id == source.track.id)
+                .find(|member| member.value.track.id == source_id)
                 .filter(|member| selectable_source(member))
                 .map(|member| member.value.clone())
         });
-        let target = self.target.as_ref().and_then(|target| {
+        let target = target_id.and_then(|target_id| {
             self.members
                 .iter()
                 .chain(selected)
-                .find(|member| member.value.track.id == target.track.id)
+                .find(|member| member.value.track.id == target_id)
                 .filter(|member| selectable_target(member))
                 .map(|member| member.value.clone())
         });
         self.source = source;
         self.target = target;
+        self.retired_selection = None;
         if self.source.is_none() || self.target.as_ref().is_none_or(has_target_state) {
             self.confirming = false;
         }
@@ -1842,6 +1860,78 @@ mod tests {
     };
 
     #[test]
+    fn bitrate_change_reloads_only_members_preserving_choices_counts_and_worker_gates() {
+        let mut review = ready_review();
+        review.request_groups(12, QueryRevisions::default());
+        review.request_members("fingerprint".into(), 8, QueryRevisions::default());
+        review.groups = Some(Page {
+            total: 24,
+            rows: Vec::new(),
+        });
+        review.members_total = 32;
+        let groups = review.begin_groups().unwrap();
+        let (members, _) = review.begin_members().unwrap();
+        let revisions = QueryRevisions {
+            bitrate: 1,
+            ..Default::default()
+        };
+        review.sync_queries(revisions);
+        review.sync_queries(revisions);
+        assert!(review.members.is_empty());
+        assert!(review.source.is_none());
+        assert!(review.target.is_none());
+        assert_eq!(review.selection_ids(), (Some(1), Some(2)));
+        assert_eq!(review.groups.as_ref().unwrap().total, 24);
+        assert_eq!(review.groups_offset, 12);
+        assert_eq!(review.members_offset, 8);
+        assert_eq!(review.members_total, 32);
+        assert_eq!(review.groups_projection.generation(), groups.generation);
+        assert!(!review.groups_dirty);
+        assert!(review.groups_pending);
+        assert!(review.begin_members().is_none());
+        assert!(!review.can_relocate());
+        assert!(!review.members_worker_finished());
+        let (retry, ids) = review.begin_members().unwrap();
+        assert_ne!(retry.generation, members.generation);
+        assert_eq!(ids, vec![1, 2]);
+        assert!(review.groups_pending);
+    }
+
+    #[test]
+    fn bitrate_change_rejects_old_member_reply_and_reloads_saved_selection() {
+        let mut review = ready_review();
+        review.request_members("fingerprint".into(), 8, QueryRevisions::default());
+        let (read, _) = review.begin_members().unwrap();
+        let current = QueryRevisions {
+            bitrate: 1,
+            ..Default::default()
+        };
+        review.sync_queries(current);
+        assert!(review.members_pending);
+        assert!(review.begin_members().is_none());
+        let response = QueryResponse {
+            revisions: QueryRevisions::default(),
+            result: Ok(ViewResponse::DuplicateMembers(Page {
+                total: 32,
+                rows: vec![member(1, true).value],
+            })),
+        };
+        review.members_worker_finished();
+        assert!(!review.accept_members(
+            read.epoch,
+            &read.query,
+            read.generation,
+            (response, vec![Some(false)], None),
+            current,
+        ));
+        assert!(review.members.is_empty());
+        assert_eq!(review.selection_ids(), (Some(1), Some(2)));
+        let (retry, selected) = review.begin_members().unwrap();
+        assert_ne!(retry.generation, read.generation);
+        assert_eq!(selected, vec![1, 2]);
+    }
+
+    #[test]
     fn duplicate_selection_timeout_disables_actions_and_cannot_restore_old_selection() {
         let revisions = QueryRevisions::default();
         let mut review = ready_review();
@@ -2615,7 +2705,7 @@ mod tests {
                 vec![Some(false)],
                 Some((selected, vec![Some(true)]))
             ),
-            revisions
+            revisions,
         ));
         assert!(!review.members_current);
         assert!(review.members.is_empty());
@@ -2661,7 +2751,7 @@ mod tests {
             &read.query,
             read.generation,
             (response, vec![Some(false), Some(true)], None),
-            revisions
+            revisions,
         ));
         assert_eq!(review.members_total, 2);
         assert!(review.can_relocate());

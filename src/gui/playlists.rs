@@ -213,6 +213,10 @@ impl Playlists {
                 .query_revisions(self.browser.playlists().selected()),
         );
         self.browser.refresh_playlists(changes);
+        if changes.entries {
+            let range = self.browser.playlists().entries().rows.visible();
+            self.ensure_entry_range(range, cx);
+        }
         if (refresh_selection || selected != self.browser.playlists().selected())
             && let Some(intent) = self.intent
         {

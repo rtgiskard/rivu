@@ -248,7 +248,7 @@ fn replacing_queries_keeps_one_stalled_socket_until_worker_shutdown() {
 }
 
 #[test]
-fn replaced_queries_drain_then_send_only_latest_on_the_same_session() {
+fn replaced_bitrate_queries_drain_then_send_only_latest_on_the_same_session() {
     use ipc::tests::{complete_test_handshake, read_test_query, reply_test_query};
     use std::os::unix::net::UnixListener;
 
@@ -277,7 +277,7 @@ fn replaced_queries_drain_then_send_only_latest_on_the_same_session() {
             reply_test_query(
                 &mut stream,
                 rivu_protocol::response::QueryResponse {
-                    revisions: QueryRevisions::default(),
+                    revisions: QueryRevisions::default().with_bitrate_revision(offset as u64),
                     result: Ok(ViewResponse::QueuePage(rivu_protocol::model::Page {
                         total: 100,
                         rows: Vec::new(),
@@ -304,6 +304,10 @@ fn replaced_queries_drain_then_send_only_latest_on_the_same_session() {
     for offset in 1..100 {
         worker.request(QueryRequest {
             offset,
+            generation: offset as u64,
+            stamp: request
+                .query()
+                .stamp(QueryRevisions::default().with_bitrate_revision(offset as u64)),
             ..request.clone()
         });
     }
@@ -315,6 +319,8 @@ fn replaced_queries_drain_then_send_only_latest_on_the_same_session() {
     worker.worker.take().unwrap().join().unwrap();
     let (request, result) = worker.latest.lock().take().unwrap();
     assert_eq!(request.offset, 99);
+    assert_eq!(request.stamp.revisions().bitrate, 99);
+    assert_eq!(result.as_ref().unwrap().revisions.bitrate, 99);
     assert!(matches!(result.unwrap().view, ViewResponse::QueuePage(page) if page.total == 100));
     server.join().unwrap();
 }

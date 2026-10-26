@@ -91,13 +91,12 @@ fn audio_progress_publishes_committed_statistics_without_rereading_queue_project
 }
 
 #[test]
-fn audio_bitrate_commit_publishes_tokens_without_rereading_queue_projection() {
+fn audio_start_publishes_bitrate_revision_without_extra_shape_invalidation() {
     let (directory, mut core) = fixture_with_database(Some(10.0));
     add_test_album(&mut core);
     precision_pending(&mut core);
     core.publish();
-    let before = core.shared.read().library.album_revision;
-    let queue_before = core.shared.read().queue.revision;
+    let before = core.shared.read().clone();
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     // Removing an unrelated query target proves that publishing known metadata
     // facts needs no structural queue read.
@@ -117,8 +116,18 @@ fn audio_bitrate_commit_publishes_tokens_without_rereading_queue_projection() {
         stored.bitrate_bps
     );
     assert!(state.current_track().unwrap().bitrate_exact);
-    assert_ne!(state.library.album_revision, before);
-    assert!(state.queue.revision > queue_before);
+    // The start independently changes last-played statistics exactly once;
+    // bitrate precision contributes only its payload freshness revision.
+    assert_eq!(
+        state.library.revision,
+        before.library.revision.wrapping_add(1)
+    );
+    assert_ne!(state.library.album_revision, before.library.album_revision);
+    assert_eq!(state.queue.revision, before.queue.revision);
+    assert_eq!(
+        state.library.bitrate_revision,
+        before.library.bitrate_revision.wrapping_add(1)
+    );
     assert!(state.system.last_error.is_none());
 }
 
@@ -160,26 +169,153 @@ fn terminal_audio_events_publish_metadata_committed_by_retiring_started() {
 }
 
 #[test]
-fn deferred_bitrate_flush_after_audio_publication_refreshes_album_token() {
+fn deferred_bitrate_flush_refreshes_payload_without_shape_invalidation() {
     let (_directory, mut core) = fixture();
     add_test_album(&mut core);
     precision_pending(&mut core);
     started(&mut core, Some(10.0)).unwrap();
     core.publish();
-    let before = core.shared.read().library.album_revision;
+    let before = core.shared.read().clone();
     core.pending_bitrate = Some((192_000, true));
     core.playback_write_deferred = true;
-    let event = AudioEvent::Progress {
-        generation: core.generation,
-        position_seconds: 1.0,
-        listened_seconds: 1.0,
-    };
-    assert!(core.business_event(BusinessEvent::Audio(event)));
+    core.flush_deferred_playback().unwrap();
+    core.publish();
     let state = core.shared.read();
     assert!(state.current_track().unwrap().bitrate_exact);
     assert_eq!(state.current_track().unwrap().bitrate_bps, Some(192_000));
-    assert_ne!(state.library.album_revision, before);
+    assert_eq!(state.library.revision, before.library.revision);
+    assert_eq!(
+        state.library.structure_revision,
+        before.library.structure_revision
+    );
+    assert_eq!(state.library.album_revision, before.library.album_revision);
+    assert_eq!(
+        state.library.playlist_revision,
+        before.library.playlist_revision
+    );
+    assert_eq!(state.queue, before.queue);
+    assert!(Arc::ptr_eq(
+        &state.library.metadata_revisions,
+        &before.library.metadata_revisions
+    ));
+    assert!(Arc::ptr_eq(
+        &state.library.playlist_entry_revisions,
+        &before.library.playlist_entry_revisions
+    ));
+    assert_eq!(
+        state.revisions.changed_since(before.revisions),
+        StateSections {
+            playback: true,
+            library: true,
+            ..StateSections::default()
+        }
+    );
+    assert_eq!(state.library.track_total, before.library.track_total);
+    assert_eq!(state.library.playlist_total, before.library.playlist_total);
+    assert_eq!(
+        state.library.duplicate_groups_revision,
+        before.library.duplicate_groups_revision
+    );
+    assert_eq!(
+        state.library.duplicate_members_revision,
+        before.library.duplicate_members_revision
+    );
+    assert_eq!(
+        state.library.bitrate_revision,
+        before.library.bitrate_revision.wrapping_add(1)
+    );
     assert!(!core.playback_write_deferred);
+}
+
+#[test]
+fn bitrate_commit_rejects_payload_batch_baselines_and_occurrence_continuations() {
+    let (_directory, mut core) = fixture();
+    precision_pending(&mut core);
+    core.enqueue(&[2]).unwrap();
+    started(&mut core, Some(10.0)).unwrap();
+    let playlist_id = core.store.create_playlist("Bitrate continuation").unwrap();
+    core.advance_playlist_entry_revision(playlist_id);
+    core.command(Command::AddPlaylist {
+        playlist_id,
+        track_ids: vec![1, 2],
+    })
+    .unwrap();
+    let queue_query = Query::QueueBatch {
+        query: None,
+        after: None,
+        limit: 1,
+        expected: None,
+    };
+    let playlist_query = Query::PlaylistEntryBatch {
+        playlist_id,
+        query: None,
+        after: None,
+        limit: 1,
+        expected: None,
+    };
+    let tracks_query = Query::TrackBatch {
+        query: None,
+        favorite: None,
+        missing: None,
+        after: None,
+        limit: 1,
+        expected: None,
+    };
+    let queue_before = core.query_response(&queue_query);
+    let playlist_before = core.query_response(&playlist_query);
+    let tracks_before = core.query_response(&tracks_query);
+    let Ok(ViewResponse::QueueBatch(queue_batch)) = queue_before.result else {
+        panic!("queue batch failed")
+    };
+    let Ok(ViewResponse::PlaylistEntryBatch(playlist_batch)) = playlist_before.result else {
+        panic!("playlist batch failed")
+    };
+    assert!(queue_batch.next.is_some());
+    assert!(playlist_batch.next.is_some());
+    core.pending_bitrate = Some((192_000, true));
+    core.playback_write_deferred = true;
+    core.flush_deferred_playback().unwrap();
+    for query in [
+        Query::QueueBatch {
+            query: None,
+            after: queue_batch.next,
+            limit: 1,
+            expected: None,
+        },
+        Query::PlaylistEntryBatch {
+            playlist_id,
+            query: None,
+            after: playlist_batch.next,
+            limit: 1,
+            expected: None,
+        },
+        Query::QueueBatch {
+            query: None,
+            after: None,
+            limit: 1,
+            expected: Some(queue_before.revisions),
+        },
+        Query::PlaylistEntryBatch {
+            playlist_id,
+            query: None,
+            after: None,
+            limit: 1,
+            expected: Some(playlist_before.revisions),
+        },
+        Query::TrackBatch {
+            query: None,
+            favorite: None,
+            missing: None,
+            after: None,
+            limit: 1,
+            expected: Some(tracks_before.revisions),
+        },
+    ] {
+        assert!(
+            matches!(core.view(&query), Err(QueryError::RevisionChanged)),
+            "{query:?}"
+        );
+    }
 }
 
 #[test]
@@ -519,17 +655,19 @@ fn playback_started_upgrades_estimate_and_duplicate_cannot_downgrade() {
             .track
             .bitrate_exact
     );
-    assert_eq!(
+    assert_ne!(
         query.stamp(core.query_response(&query).revisions),
         playlist_stamp
     );
     let revision = core.state.library.revision;
+    let bitrate_revision = core.state.library.bitrate_revision;
     let mut duplicate = started_event(&core, Some(10.0));
     if let AudioEvent::Started { info, .. } = &mut duplicate {
         info.bitrate_bps = Some(64_000);
     }
     core.audio_event(duplicate).unwrap();
     assert_eq!(core.state.library.revision, revision);
+    assert_eq!(core.state.library.bitrate_revision, bitrate_revision);
     assert_eq!(
         core.store.track(1).unwrap().unwrap().bitrate_bps,
         Some(128_000)
@@ -541,6 +679,7 @@ fn stale_playback_start_cannot_upgrade_precision() {
     let (_directory, mut core) = fixture();
     precision_pending(&mut core);
     let revision = core.state.library.revision;
+    let bitrate_revision = core.state.library.bitrate_revision;
     let mut event = started_event(&core, Some(10.0));
     if let AudioEvent::Started { generation, info } = &mut event {
         *generation = generation.wrapping_sub(1);
@@ -549,6 +688,7 @@ fn stale_playback_start_cannot_upgrade_precision() {
     }
     core.audio_event(event).unwrap();
     assert_eq!(core.state.library.revision, revision);
+    assert_eq!(core.state.library.bitrate_revision, bitrate_revision);
     assert!(!core.playback.as_ref().unwrap().started);
     assert!(!core.store.track(1).unwrap().unwrap().bitrate_exact);
     assert_eq!(
@@ -612,6 +752,40 @@ fn full_eof_upgrades_estimate_but_stale_and_stopped_events_do_not() {
 }
 
 #[test]
+fn retiring_eof_bitrate_remains_fresh_after_final_statistics() {
+    let (_directory, mut core) = fixture();
+    precision_pending(&mut core);
+    started(&mut core, Some(10.0)).unwrap();
+    let generation = core.generation;
+    let baseline = core.state.library.bitrate_revision;
+    let (send, receive) = async_channel::bounded(1);
+    core.engine.events = Some(receive);
+    send.try_send(AudioEvent::Ended {
+        generation,
+        bitrate_bps: Some(192_000),
+    })
+    .unwrap();
+    core.finish_playback(
+        Ok(Some(audio::AudioSnapshot {
+            generation,
+            position_seconds: 10.0,
+            listened_seconds: 3.0,
+        })),
+        true,
+        Ok(()),
+    )
+    .unwrap();
+    assert_eq!(play_count(&core, 1), 1);
+    let library = &core.state.library;
+    assert_eq!(library.bitrate_revision, baseline.wrapping_add(1));
+    let track = core.store.track(1).unwrap().unwrap();
+    assert_eq!(
+        (track.bitrate_bps, track.bitrate_exact),
+        (Some(192_000), true)
+    );
+}
+
+#[test]
 fn same_track_restart_retains_queued_started_and_eof_bitrate_upgrades() {
     for eof in [false, true] {
         let (_directory, mut core) = fixture();
@@ -671,6 +845,7 @@ fn playback_bitrate_runtime_replacement_and_optional_failure_do_not_interrupt_st
     for replace in [false, true] {
         let (_directory, mut core) = fixture();
         precision_pending(&mut core);
+        let bitrate_revision = core.state.library.bitrate_revision;
         if replace {
             let path = core.state.current_track().unwrap().path.clone();
             std::fs::write(path, b"different encoded source with different size").unwrap();
@@ -681,12 +856,62 @@ fn playback_bitrate_runtime_replacement_and_optional_failure_do_not_interrupt_st
             info.bitrate_exact = true;
         }
         core.audio_event(event).unwrap();
+        assert_eq!(core.state.library.bitrate_revision, bitrate_revision);
         assert!(core.playback.as_ref().unwrap().started);
         assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
         let track = core.store.track(1).unwrap().unwrap();
         assert_eq!(track.bitrate_bps, Some(128_000));
         assert!(!track.bitrate_exact);
     }
+}
+
+#[test]
+fn failed_bitrate_transaction_does_not_publish_an_update() {
+    let (directory, mut core) = fixture();
+    precision_pending(&mut core);
+    let before = core.state.library.bitrate_revision;
+    let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER reject_bitrate BEFORE UPDATE OF bitrate_bps,bitrate_exact ON tracks
+         BEGIN SELECT RAISE(ABORT,'reject bitrate enrichment'); END;",
+        )
+        .unwrap();
+    let mut event = started_event(&core, Some(10.0));
+    if let AudioEvent::Started { info, .. } = &mut event {
+        info.bitrate_bps = Some(192_000);
+        info.bitrate_exact = true;
+    }
+    core.audio_event(event).unwrap();
+    assert_eq!(core.state.library.bitrate_revision, before);
+    assert!(core.playback.as_ref().unwrap().started);
+    let stored = core.store.track(1).unwrap().unwrap();
+    assert_eq!(
+        (stored.bitrate_bps, stored.bitrate_exact),
+        (Some(128_000), false)
+    );
+    let current = core.state.current_track().unwrap();
+    assert_eq!(
+        (current.bitrate_bps, current.bitrate_exact),
+        (Some(128_000), false)
+    );
+}
+
+#[test]
+fn unchanged_bitrate_enrichment_does_not_publish_an_update() {
+    let (_directory, mut core) = fixture();
+    precision_pending(&mut core);
+    started(&mut core, Some(10.0)).unwrap();
+    let before = core.state.library.bitrate_revision;
+    core.pending_bitrate = Some((128_000, false));
+    core.playback_write_deferred = true;
+    core.flush_deferred_playback().unwrap();
+    assert_eq!(core.state.library.bitrate_revision, before);
+    let stored = core.store.track(1).unwrap().unwrap();
+    assert_eq!(
+        (stored.bitrate_bps, stored.bitrate_exact),
+        (Some(128_000), false)
+    );
 }
 
 #[test]

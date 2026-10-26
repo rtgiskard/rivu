@@ -4,7 +4,7 @@ use crate::{config::Config, core::Runtime, i18n::Localizer};
 use gpui::{EntityInputHandler, TestAppContext};
 use rivu_protocol::response::Ack;
 
-fn track(id: i64, title: &str) -> Track {
+pub(super) fn track(id: i64, title: &str) -> Track {
     Track {
         id,
         title: title.into(),
@@ -96,6 +96,81 @@ fn playback(owner: &mut Metadata, track: Track, cx: &mut Context<Metadata>) {
     let mut state = (*owner.state).clone();
     state.current_track = Some(Arc::new(track));
     owner.reconcile(Rc::new(state), cx);
+}
+
+#[gpui::test]
+fn bitrate_revision_retains_hidden_draft_and_queues_reload(cx: &mut TestAppContext) {
+    let (_directory, _runtime, metadata) = fixture(cx);
+    metadata.update(cx, |this, cx| {
+        this.metadata.select(1);
+        let token = this.metadata.begin_load(1);
+        let draft = this.draft(cx);
+        let values = this
+            .metadata
+            .accept_load(token, Some(track(1, "original")), draft)
+            .unwrap();
+        this.set_metadata_values(values, cx);
+        this.inputs[&Field::Title].update(cx, |input, cx| input.set_text("local edit", cx));
+        let identity = this.metadata.editor_identity();
+        let original = this.track_snapshot().unwrap();
+        let mut state = (*this.state).clone();
+        state.library.bitrate_revision += 1;
+        this.reconcile(Rc::new(state), cx);
+        assert!(Arc::ptr_eq(&this.track_snapshot().unwrap(), &original));
+        assert_eq!(original.bitrate_bps, None);
+        assert_eq!(this.draft(cx).title, "local edit");
+        assert!(this.metadata.dirty(this.draft(cx)));
+        assert_eq!(this.metadata.read_state(), &MetadataReadState::Idle);
+        let mut state = (*this.state).clone();
+        state.library.bitrate_revision += 1;
+        this.reconcile(Rc::new(state), cx);
+        assert!(Arc::ptr_eq(&this.track_snapshot().unwrap(), &original));
+        assert_eq!(this.metadata.editor_identity(), identity);
+        assert_eq!(this.metadata.selected(), Some(1));
+        assert_eq!(this.draft(cx).title, "local edit");
+        assert!(this.metadata.dirty(this.draft(cx)));
+        assert!(
+            this.metadata_read
+                .prepare(&mut this.metadata, false, Instant::now())
+                .is_none()
+        );
+        assert!(
+            this.metadata_read
+                .prepare(&mut this.metadata, true, Instant::now())
+                .is_some()
+        );
+    });
+}
+
+#[gpui::test]
+fn hidden_playback_advance_with_bitrate_change_prepares_current_identity(cx: &mut TestAppContext) {
+    let (_directory, _runtime, metadata) = fixture(cx);
+    metadata.update(cx, |this, cx| {
+        assert_eq!(this.metadata.selected(), None);
+        assert_eq!(this.metadata.identity(), Some(1));
+        assert!(!this.visible);
+        let mut state = (*this.state).clone();
+        state.library.bitrate_revision += 1;
+        state.current_track = Some(Arc::new(track(2, "B")));
+        this.reconcile(Rc::new(state), cx);
+        assert_eq!(this.metadata.identity(), Some(2));
+        assert_eq!(this.draft(cx).title, "B");
+        assert!(!this.dirty(cx));
+        // Exercise reveal's demand preparation without a real Core read or timer.
+        let task = this
+            .metadata_read
+            .prepare(&mut this.metadata, true, Instant::now())
+            .unwrap();
+        assert_eq!(task.read.query(), Query::Track { track_id: 2 });
+        assert!(this.metadata_read.submit(
+            task.read,
+            &this.metadata,
+            ReadEnvironment {
+                visible: true,
+                revisions: this.state.query_revisions_for(&task.read.query()),
+            },
+        ));
+    });
 }
 
 fn edit_text(

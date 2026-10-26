@@ -21,9 +21,10 @@ those mechanisms.
 
 List/tree retention is independent of `visualizations.cache`. A projection key
 combines normalized query identity and its query-owned stamp, not page offsets,
-limits, cursors, or expected revisions. A matching stamp authorizes data reuse;
-a consumer generation separately decides whether the result still serves current
-intent. Neither can substitute for physical-worker completion.
+limits, cursors, or expected revisions. A matching stamp authorizes query reuse;
+bitrate-bearing payload stamps include the committed bitrate revision. A consumer
+generation decides whether the result still serves current intent. Neither check
+can substitute for physical-worker completion.
 
 === Core-owned lookup retention
 
@@ -31,9 +32,12 @@ The interactive Store keeps a track-ID LRU of at most twice
 `interface.page_size`: 128 tracks at the default 64, at most 512 at the supported
 maximum 256. Hits refresh age; misses are not cached. Reducing page size trims
 immediately. Core metadata changes invalidate affected entries; playback
-statistics patch cached scalars. Scan publication clears this cache only for
-library-display impacts; no-change scans and masked raw-metadata edits retain it. This bounds entries, not track-string bytes, and is neither
-a whole-library snapshot nor a GUI page cache. Read-only export does not use it.
+statistics patch cached scalars. A successful source-conditional bitrate commit
+patches an existing cached Track's value/certainty pair without inserting a miss.
+Scan publication clears this cache only for library-display impacts; no-change
+scans and masked raw-metadata edits retain it.
+This bounds entries, not track-string bytes, and is neither a whole-library
+snapshot nor a GUI page cache. Read-only export does not use it.
 
 Library track/display pages retain one latest exact filtered count, keyed by
 normalized filters and optional root. A separate scalar slot retains the
@@ -51,7 +55,8 @@ Queue/playlist changes and no-change scans retain library totals. There is no
 timer-based external-commit polling or collection-sized row cache.
 
 The background read owner leaves its Track-cache capacity at zero; it does not
-share the interactive Store's LRU. Single-Track reads and
+share the interactive Store's LRU. Bitrate revision changes retain count caches:
+bitrate is neither a filter nor an ordering/count input. Single-Track reads and
 page SQL remain separate paths; pages are not assembled through per-ID LRU reads.
 
 Root aggregation and directory child relations remain request-local; persistent
@@ -69,6 +74,12 @@ so another consumer's refresh cannot hide a change. Completion/timeout checks us
 current revisions, not a submission-time snapshot. A publication with unchanged
 state-section tokens does not invalidate the GUI root; audio frames still have
 their independent processing path.
+
+Bitrate revision changes retire retained display payloads for demand-driven
+reload while preserving selection, counts, and navigation geometry. There is no
+bitrate history, replay cache, or track-to-view reverse index. Old responses fail
+the same query-stamp admission as other stale data. See
+link:21_ipc.adoc#_query_results_and_pagination[IPC query results].
 
 ==== Demand, cancellation, and physical retirement
 

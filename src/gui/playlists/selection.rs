@@ -76,10 +76,12 @@ struct EntryNavigationScope {
     playlist_id: i64,
     revision: u64,
     metadata: u64,
+    bitrate: u64,
 }
 impl EntryNavigationScope {
     fn revisions(self) -> QueryRevisions {
         QueryRevisions {
+            bitrate: self.bitrate,
             playlist_metadata: Some(PlaylistEntryRevision {
                 playlist_id: self.playlist_id,
                 revision: self.metadata,
@@ -574,13 +576,7 @@ impl EntrySelection {
             return EntryNavigationEffect::None;
         }
         self.navigation = None;
-        let response = entry_query_result(
-            response,
-            job.scope.playlist_id,
-            job.scope.revision,
-            job.scope.metadata,
-            self.query.clone(),
-        );
+        let response = entry_query_result(response, job.scope, self.query.clone());
         match response {
             Ok(Some(ViewResponse::PlaylistEntries(page))) => {
                 let Some(row) = page.rows.first() else {
@@ -675,36 +671,24 @@ impl EntryRangePages {
 /// Transport failures have no playlist scope; only successful payloads can be revision-checked.
 fn entry_query_result(
     response: rivu_protocol::response::QueryResponse,
-    playlist_id: i64,
-    revision: u64,
-    metadata: u64,
+    scope: EntryNavigationScope,
     filter: Option<String>,
 ) -> Result<Option<ViewResponse>, rivu_protocol::response::QueryError> {
     let result = response.result?;
     let query = match &result {
         ViewResponse::PlaylistEntryLocations(_) => Query::PlaylistEntryLocations {
             query: filter,
-            playlist_id,
+            playlist_id: scope.playlist_id,
             entry_ids: Vec::new(),
         },
         _ => Query::PlaylistEntries {
             query: filter,
-            playlist_id,
+            playlist_id: scope.playlist_id,
             offset: 0,
             limit: 1,
         },
     };
-    let expected = QueryRevisions {
-        playlist_metadata: Some(PlaylistEntryRevision {
-            playlist_id,
-            revision: metadata,
-        }),
-        playlist_entries: Some(PlaylistEntryRevision {
-            playlist_id,
-            revision,
-        }),
-        ..Default::default()
-    };
+    let expected = scope.revisions();
     Ok((query.stamp(response.revisions) == query.stamp(expected)).then_some(result))
 }
 
@@ -985,9 +969,12 @@ impl Playlists {
                     .await;
                     let result = match entry_query_result(
                         response,
-                        playlist_id,
-                        revision,
-                        library,
+                        EntryNavigationScope {
+                            playlist_id,
+                            revision,
+                            metadata: library,
+                            bitrate: 0,
+                        },
                         filter.clone(),
                     ) {
                         Ok(result) => result,
@@ -1194,14 +1181,8 @@ impl Playlists {
                         },
                     )
                     .await;
-                    let result = entry_query_result(
-                        response,
-                        scope.playlist_id,
-                        scope.revision,
-                        scope.metadata,
-                        filter.clone(),
-                    )
-                    .map_err(|error| error.to_string())?;
+                    let result = entry_query_result(response, scope, filter.clone())
+                        .map_err(|error| error.to_string())?;
                     let Some(ViewResponse::PlaylistEntries(page)) = result else {
                         return Err(i18n.text("gl-playlist-range-changed").into());
                     };
@@ -1224,6 +1205,16 @@ impl Playlists {
                         .playlist_selection_mut()
                         .finish_read(job.intent, generation)
                 {
+                    if job.commit.scope.bitrate != this.state.library.bitrate_revision {
+                        job.commit.scope.bitrate = this.state.library.bitrate_revision;
+                        this.browser
+                            .playlist_selection_mut()
+                            .queue_range(job.intent, job.commit, job.start, job.end);
+                        this.dispatch_playlist_range(cx);
+                        this.dispatch_playlist_navigation(cx);
+                        cx.notify();
+                        return;
+                    }
                     match result {
                         Ok(Some(rows)) => {
                             job.commit.rows = Some(rows);
@@ -1260,6 +1251,7 @@ impl Playlists {
                     .library
                     .metadata_revisions
                     .playlist_revision(playlist_id, self.state.library.revision),
+                bitrate: self.state.library.bitrate_revision,
             }
         })
     }
@@ -1708,6 +1700,7 @@ mod tests {
             playlist_id: 9,
             revision: 12,
             metadata: 6,
+            bitrate: 0,
         }
     }
     fn navigation_response(job: EntryNavigationJob, total: usize) -> QueryResponse {
@@ -1721,6 +1714,43 @@ mod tests {
             revisions: QueryRevisions::default(),
             result: Err(QueryError::Message(message.into())),
         }
+    }
+
+    #[test]
+    fn bitrate_navigation_retries_latest_payload_without_losing_selection() {
+        let scope = navigation_scope();
+        let current = EntryNavigationScope {
+            bitrate: 1,
+            ..scope
+        };
+        let mut selection = EntrySelection::default();
+        selection.select(identity(0, 0), false);
+        assert!(navigate(&mut selection, scope, 20, true, false, false));
+        let old = selection.take_navigation().unwrap();
+        assert!(selection.take_navigation().is_none());
+        assert_eq!(
+            selection.finish_navigation(
+                "Unexpected playlist navigation response",
+                old,
+                Some(current),
+                navigation_response(old, 20),
+            ),
+            EntryNavigationEffect::None,
+        );
+        assert_eq!(selection.active, Some(identity(0, 0)));
+        assert!(selection.contains(0));
+        let retry = selection.take_navigation().unwrap();
+        assert_eq!(retry.scope, current);
+        assert!(selection.take_navigation().is_none());
+        assert!(matches!(
+            selection.finish_navigation(
+                "Unexpected playlist navigation response",
+                retry,
+                Some(current),
+                navigation_response(retry, 20),
+            ),
+            EntryNavigationEffect::Selected { target, .. } if target == identity(1, 1)
+        ));
     }
 
     #[test]
@@ -2544,7 +2574,7 @@ mod tests {
             revisions: QueryRevisions::default(),
             result: Err(QueryError::Message("core unavailable".into())),
         };
-        let error = super::entry_query_result(response, 9, 12, 6, None).unwrap_err();
+        let error = super::entry_query_result(response, navigation_scope(), None).unwrap_err();
         selection.fail(error.to_string());
         assert!(!selection.busy);
         assert!(selection.error.is_some());
@@ -2607,7 +2637,7 @@ mod tests {
                 result: Ok(ViewResponse::PlaylistEntries(page(0, 1, 1))),
             };
             assert!(
-                super::entry_query_result(response, 9, 12, 6, None)
+                super::entry_query_result(response, navigation_scope(), None)
                     .unwrap()
                     .is_none()
             );
@@ -2617,7 +2647,7 @@ mod tests {
             result: Ok(ViewResponse::PlaylistEntries(page(0, 1, 1))),
         };
         let Some(ViewResponse::PlaylistEntries(page)) =
-            super::entry_query_result(response, 9, 12, 6, None).unwrap()
+            super::entry_query_result(response, navigation_scope(), None).unwrap()
         else {
             panic!("current payload rejected");
         };
@@ -2636,9 +2666,7 @@ mod tests {
                         rows: Vec::new()
                     })),
                 },
-                9,
-                12,
-                6,
+                navigation_scope(),
                 None
             )
             .unwrap()
@@ -2655,9 +2683,7 @@ mod tests {
                     revisions: metadata_only,
                     result: Ok(ViewResponse::PlaylistEntryLocations(Vec::new())),
                 },
-                9,
-                12,
-                6,
+                navigation_scope(),
                 None
             )
             .unwrap()

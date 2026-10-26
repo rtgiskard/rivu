@@ -1921,3 +1921,424 @@ fn details_containers_are_not_tracks_and_query_editor_owns_i() {
     assert!(!ui.details_active);
     assert!(matches!(&ui.view, View::Search(search) if search.query == "i"));
 }
+
+fn bitrate_tui() -> TuiState {
+    let mut state = query_snapshot();
+    state.queue.total = 3;
+    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
+    tui.ui.queue.set_viewport(2);
+    tui.ui.queue.insert(
+        0,
+        3,
+        3,
+        (0..3)
+            .map(|position| queue_row(position, position as u64 + 1000))
+            .collect(),
+    );
+    tui.ui.queue.selection.select(Some(1));
+    *tui.ui.queue.selection.offset_mut() = 1;
+
+    let mut search = LibrarySearch {
+        query: "draft query".into(),
+        focus: SearchFocus::Results,
+        ..LibrarySearch::default()
+    };
+    search.results.set_viewport(2);
+    search
+        .results
+        .insert(0, 3, 12, vec![track(7), track(8), track(7)]);
+    search.results.selection.select(Some(1));
+    tui.ui.view = View::Search(search);
+
+    let mut tree = LibraryTree {
+        directory: "/music".into(),
+        other_count: Some(42),
+        ..LibraryTree::default()
+    };
+    tree.entries.set_viewport(2);
+    tree.entries.insert(
+        0,
+        3,
+        3,
+        vec![
+            DirectoryRow::Directory {
+                path: "/music/child".into(),
+            },
+            DirectoryRow::Track(track(7)),
+            DirectoryRow::Track(track(7)),
+        ],
+    );
+    tree.entries.selection.select(Some(2));
+    *tree.entries.selection.offset_mut() = 1;
+    tui.ui.cached_library = Some(View::Tree(tree));
+
+    let mut playlist = UiState {
+        view: playlist_view(1),
+        ..UiState::default()
+    };
+    let request = playlist.query_request(&state).unwrap();
+    assert!(playlist.apply_query(&state, &request, Ok(response(&request, 3))));
+    let View::PlaylistDetail { detail, .. } = &mut playlist.view else {
+        unreachable!()
+    };
+    for entry in detail.entries.pages.values_mut().flatten() {
+        entry.track_id = 7;
+    }
+    detail.entries.selection.select(Some(1));
+    detail.selected_entry_id = Some(1);
+    tui.ui.cached_playlists = Some(playlist.view);
+
+    let query = Query::Track { track_id: 7 };
+    let revisions = state.query_revisions(None).for_query(
+        &query,
+        &state.library.playlist_entry_revisions,
+        &state.library.metadata_revisions,
+    );
+    tui.ui.details = Details {
+        target: Some(7),
+        state: DetailState::Ready(Box::new(full_track(7))),
+        stamp: Some(query.stamp(revisions)),
+        scroll: 4,
+        max_scroll: 12,
+        ..Details::default()
+    };
+    tui
+}
+
+fn page_coordinates<T>(list: &PagedList<T>) -> (usize, bool, usize, Option<usize>, usize, usize) {
+    (
+        list.total,
+        list.loaded,
+        list.fetch_size,
+        list.selection.selected(),
+        list.selection.offset(),
+        list.viewport_rows,
+    )
+}
+
+#[test]
+fn bitrate_late_page_responses_are_rejected_and_retried_at_the_new_stamp() {
+    for view in [
+        View::Queue,
+        View::Search(LibrarySearch::default()),
+        View::Tree(LibraryTree {
+            directory: "/music".into(),
+            ..LibraryTree::default()
+        }),
+        View::Tree(LibraryTree {
+            other_tracks: true,
+            ..LibraryTree::default()
+        }),
+        playlist_view(1),
+    ] {
+        let state = query_snapshot();
+        let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
+        tui.ui.view = view;
+        let pending = tui.ui.query_request(&state).unwrap();
+        tui.ui.requested = Some(pending.clone());
+        let delayed = response(&pending, 12);
+        let mut next = state.clone();
+        next.library.bitrate_revision += 1;
+        tui.apply_snapshot(next.clone());
+        let retry = tui.ui.query_request(&next).unwrap();
+        assert_ne!(retry.stamp, pending.stamp);
+        assert_ne!(retry.generation, pending.generation);
+        tui.ui.requested = Some(retry.clone());
+        assert!(!tui.ui.apply_query(&next, &pending, Ok(delayed)));
+        assert_eq!(tui.ui.requested.as_ref(), Some(&retry));
+        let mut fresh = response(&retry, 12);
+        match &mut fresh.view {
+            ViewResponse::QueuePage(page) => {
+                for row in &mut page.rows {
+                    row.track.bitrate_bps = Some(1_536_000);
+                    row.track.bitrate_exact = true;
+                }
+            }
+            ViewResponse::LibraryPage(page) => {
+                for row in &mut page.rows {
+                    row.bitrate_bps = Some(1_536_000);
+                    row.bitrate_exact = true;
+                }
+            }
+            ViewResponse::DirectoryPage(page) => {
+                for row in &mut page.rows {
+                    if let DirectoryRow::Track(track) = row {
+                        track.bitrate_bps = Some(1_536_000);
+                        track.bitrate_exact = true;
+                    }
+                }
+            }
+            ViewResponse::PlaylistEntries(page) => {
+                for row in &mut page.rows {
+                    row.bitrate_bps = Some(1_536_000);
+                    row.bitrate_exact = true;
+                }
+            }
+            _ => unreachable!(),
+        }
+        assert!(tui.ui.apply_query(&next, &retry, Ok(fresh)));
+        let fields = match &tui.ui.view {
+            View::Queue => {
+                let row = &tui.ui.queue.get(0).unwrap().track;
+                (row.bitrate_bps, row.bitrate_exact)
+            }
+            View::Search(search) => {
+                let row = search.results.get(0).unwrap();
+                (row.bitrate_bps, row.bitrate_exact)
+            }
+            View::Tree(tree) => {
+                let Some(DirectoryRow::Track(row)) = tree.entries.get(0) else {
+                    unreachable!()
+                };
+                (row.bitrate_bps, row.bitrate_exact)
+            }
+            View::PlaylistDetail { detail, .. } => {
+                let row = detail.entries.get(0).unwrap();
+                (row.bitrate_bps, row.bitrate_exact)
+            }
+            View::Playlists(_) => unreachable!(),
+        };
+        assert_eq!(fields, (Some(1_536_000), true));
+    }
+}
+
+#[test]
+fn bitrate_changes_reload_retained_payloads_without_losing_coordinates_or_identity() {
+    let mut tui = bitrate_tui();
+    let queue_coordinates = page_coordinates(&tui.ui.queue);
+    let View::Search(search) = &tui.ui.view else {
+        unreachable!()
+    };
+    let search_coordinates = page_coordinates(&search.results);
+    let View::Tree(tree) = tui.ui.cached_library.as_ref().unwrap() else {
+        unreachable!()
+    };
+    let tree_coordinates = page_coordinates(&tree.entries);
+    let View::PlaylistDetail { detail, .. } = tui.ui.cached_playlists.as_ref().unwrap() else {
+        unreachable!()
+    };
+    let playlist_coordinates = page_coordinates(&detail.entries);
+    let pending = tui.ui.query_request(&tui.snapshot).unwrap();
+    tui.ui.requested = Some(pending.clone());
+    let mut next = tui.snapshot.clone();
+    next.library.bitrate_revision += 3;
+    tui.apply_snapshot(next.clone());
+    assert!(tui.ui.requested.is_none());
+    assert_ne!(tui.ui.projection.generation(), pending.generation);
+    assert_eq!(page_coordinates(&tui.ui.queue), queue_coordinates);
+    assert!(tui.ui.queue.pages.is_empty());
+    assert!(tui.ui.queue_anchor.is_none());
+    let View::Search(search) = &tui.ui.view else {
+        unreachable!()
+    };
+    assert_eq!(page_coordinates(&search.results), search_coordinates);
+    assert!(search.results.pages.is_empty());
+    assert_eq!(search.query, "draft query");
+    assert!(matches!(search.focus, SearchFocus::Results));
+    let View::Tree(tree) = tui.ui.cached_library.as_ref().unwrap() else {
+        unreachable!()
+    };
+    assert_eq!(page_coordinates(&tree.entries), tree_coordinates);
+    assert_eq!(tree.directory, Path::new("/music"));
+    assert_eq!(tree.other_count, Some(42));
+    assert!(tree.entries.pages.is_empty());
+    let View::PlaylistDetail { detail, .. } = tui.ui.cached_playlists.as_ref().unwrap() else {
+        unreachable!()
+    };
+    assert_eq!(page_coordinates(&detail.entries), playlist_coordinates);
+    assert_eq!(
+        (
+            detail.playlist_id,
+            detail.selected_entry_id,
+            detail.entry_anchor
+        ),
+        (1, Some(1), None)
+    );
+    assert!(detail.entries.pages.is_empty());
+    assert!(matches!(tui.ui.details.state, DetailState::Loading));
+    assert_eq!(tui.ui.details.target, Some(7));
+    assert_eq!((tui.ui.details.scroll, tui.ui.details.max_scroll), (4, 12));
+    assert!(tui.ui.details.stamp.is_none());
+    assert!(
+        !tui.ui
+            .apply_query(&next, &pending, Ok(response(&pending, 12)))
+    );
+    let retry = tui.ui.query_request(&next).unwrap();
+    let mut fresh = response(&retry, 12);
+    fresh.revisions.bitrate = next.library.bitrate_revision;
+    assert!(tui.ui.apply_query(&next, &retry, Ok(fresh)));
+    tui.ui.view = tui.ui.cached_library.take().unwrap();
+    tui.ui.cancel_query();
+    let hidden_tree = tui.ui.query_request(&next).unwrap();
+    assert_eq!(hidden_tree.kind, QueryKind::Directory("/music".into()));
+    assert_eq!(
+        hidden_tree.stamp.revisions().bitrate,
+        next.library.bitrate_revision
+    );
+    assert!(
+        tui.ui
+            .apply_query(&next, &hidden_tree, Ok(response(&hidden_tree, 3)))
+    );
+    tui.ui.view = tui.ui.cached_playlists.take().unwrap();
+    tui.ui.cancel_query();
+    let hidden_playlist = tui.ui.query_request(&next).unwrap();
+    assert_eq!(hidden_playlist.kind, QueryKind::Playlist(1));
+    assert_eq!(
+        hidden_playlist.stamp.revisions().bitrate,
+        next.library.bitrate_revision
+    );
+    assert!(
+        tui.ui
+            .apply_query(&next, &hidden_playlist, Ok(response(&hidden_playlist, 3)))
+    );
+}
+
+#[test]
+fn bitrate_stale_or_future_response_stamps_retire_and_retry() {
+    for baseline in [0, 2] {
+        let mut state = query_snapshot();
+        state.library.bitrate_revision = 1;
+        let mut ui = UiState::default();
+        let request = ui.query_request(&state).unwrap();
+        ui.requested = Some(request.clone());
+        let mut stale = response(&request, 12);
+        stale.revisions.bitrate = baseline;
+        assert!(!ui.apply_query(&state, &request, Ok(stale)));
+        assert!(ui.queue.pages.is_empty());
+        assert!(ui.requested.is_none());
+        assert!(ui.failed_request.is_none());
+        let retry = ui.query_request(&state).unwrap();
+        assert_eq!(retry.stamp, request.stamp);
+        assert_eq!(retry.generation, request.generation);
+        let mut fresh = response(&retry, 12);
+        fresh.revisions.bitrate = state.library.bitrate_revision;
+        assert!(ui.apply_query(&state, &retry, Ok(fresh)));
+    }
+}
+
+#[test]
+fn bitrate_changes_leave_summary_pages_and_count_requests_untouched() {
+    for root in [false, true] {
+        let state = query_snapshot();
+        let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
+        tui.ui.view = if root {
+            View::Tree(LibraryTree::new(&["/music".into()]))
+        } else {
+            View::Playlists(PagedList::default())
+        };
+        if root {
+            tui.ui.prepare_local_view(&state);
+        } else {
+            let first = tui.ui.query_request(&state).unwrap();
+            assert!(tui.ui.apply_query(&state, &first, Ok(response(&first, 12))));
+        }
+        let pending = tui.ui.query_request(&state).unwrap();
+        tui.ui.requested = Some(pending.clone());
+        let mut next = state.clone();
+        next.library.bitrate_revision += 1;
+        tui.apply_snapshot(next.clone());
+        assert_eq!(tui.ui.requested.as_ref(), Some(&pending));
+        assert_eq!(tui.ui.query_request(&next), Some(pending.clone()));
+        match &tui.ui.view {
+            View::Tree(tree) => assert!(matches!(
+                tree.entries.get(0),
+                Some(DirectoryRow::OtherTracks)
+            )),
+            View::Playlists(playlists) => assert_eq!(playlists.get(0).unwrap().name, "row-0"),
+            _ => unreachable!(),
+        }
+        assert!(
+            tui.ui
+                .apply_query(&next, &pending, Ok(response(&pending, 12)))
+        );
+    }
+}
+
+#[test]
+fn bitrate_details_reject_late_reads_and_preserve_scroll_during_retry() {
+    let mut tui = bitrate_tui();
+    tui.ui.details_active = true;
+    let old_stamp = tui.ui.details.stamp;
+    tui.ui.details.stamp = None;
+    let old = tui.ui.query_request(&tui.snapshot).unwrap();
+    let delayed = QueryResult {
+        revisions: tui.snapshot.query_revisions(None).for_query(
+            &old.query(),
+            &tui.snapshot.library.playlist_entry_revisions,
+            &tui.snapshot.library.metadata_revisions,
+        ),
+        view: ViewResponse::Track(Some(full_track(7))),
+    };
+    tui.ui.details.stamp = old_stamp;
+    tui.ui.details.state = DetailState::Ready(Box::new(full_track(7)));
+    let mut next = tui.snapshot.clone();
+    next.library.bitrate_revision += 1;
+    tui.apply_snapshot(next.clone());
+    assert!(matches!(tui.ui.details.state, DetailState::Loading));
+    assert_eq!((tui.ui.details.scroll, tui.ui.details.max_scroll), (4, 12));
+    assert!(!tui.ui.apply_query(&next, &old, Ok(delayed)));
+    let current = tui.ui.query_request(&next).unwrap();
+    assert_ne!(current.stamp, old.stamp);
+    let mut fresh_track = full_track(7);
+    fresh_track.bitrate_bps = Some(1_536_000);
+    fresh_track.bitrate_exact = true;
+    assert!(tui.ui.apply_query(
+        &next,
+        &current,
+        Ok(QueryResult {
+            revisions: next.query_revisions(None).for_query(
+                &current.query(),
+                &next.library.playlist_entry_revisions,
+                &next.library.metadata_revisions,
+            ),
+            view: ViewResponse::Track(Some(fresh_track)),
+        })
+    ));
+    let DetailState::Ready(track) = &tui.ui.details.state else {
+        unreachable!()
+    };
+    assert_eq!(
+        (track.bitrate_bps, track.bitrate_exact),
+        (Some(1_536_000), true)
+    );
+    assert_eq!((tui.ui.details.scroll, tui.ui.details.max_scroll), (4, 12));
+}
+
+#[test]
+fn bitrate_changes_do_not_retire_playlist_location_lookups() {
+    let state = query_snapshot();
+    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
+    tui.ui.view = playlist_view(1);
+    let View::PlaylistDetail { detail, .. } = &mut tui.ui.view else {
+        unreachable!()
+    };
+    detail.entry_anchor = Some(1);
+    let pending = tui.ui.query_request(&state).unwrap();
+    assert_eq!(
+        pending.kind,
+        QueryKind::PlaylistSelection {
+            playlist_id: 1,
+            entry_id: 1
+        }
+    );
+    tui.ui.requested = Some(pending.clone());
+    let mut next = state.clone();
+    next.library.bitrate_revision += 1;
+    tui.apply_snapshot(next.clone());
+    assert_eq!(tui.ui.requested.as_ref(), Some(&pending));
+    assert_eq!(tui.ui.query_request(&next), Some(pending.clone()));
+    assert!(
+        tui.ui
+            .apply_query(&next, &pending, Ok(response(&pending, 12)),)
+    );
+    let page = tui.ui.query_request(&next).unwrap();
+    assert_eq!(page.kind, QueryKind::Playlist(1));
+    assert_eq!(
+        page.stamp.revisions().bitrate,
+        next.library.bitrate_revision
+    );
+    let View::PlaylistDetail { detail, .. } = &tui.ui.view else {
+        unreachable!()
+    };
+    assert_eq!(detail.entries.selection.selected(), Some(1));
+}

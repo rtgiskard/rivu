@@ -115,6 +115,14 @@ impl Scope {
         *self == Self::capture(browser, revisions)
     }
 
+    fn same_coordinates(&self, other: &Self) -> bool {
+        // Bitrate refreshes payloads without changing row coordinates. Range
+        // jobs still use the full stamp through matches and response checks.
+        let mut revisions = self.stamp.revisions();
+        revisions.bitrate = other.stamp.revisions().bitrate;
+        revisions == other.stamp.revisions() && self.projection == other.projection
+    }
+
     fn total(&self) -> usize {
         match self.projection {
             Projection::Flat { total, .. } | Projection::Tree { total, .. } => total,
@@ -213,6 +221,7 @@ impl RangeJob {
                 let expected = self.scope.stamp.revisions();
                 if expected.library != response.revisions.library
                     || expected.structure != response.revisions.structure
+                    || expected.bitrate != response.revisions.bitrate
                 {
                     return Err(SelectionError::Message("gl-library-changed"));
                 }
@@ -349,7 +358,7 @@ impl LibrarySelection {
         let anchor = self
             .anchor
             .as_ref()
-            .filter(|anchor| anchor.scope == *scope)
+            .filter(|anchor| anchor.scope.same_coordinates(scope))
             .map(|anchor| anchor.index)
             .unwrap_or(endpoint);
         anchor.min(endpoint)..anchor.max(endpoint) + 1
@@ -378,7 +387,7 @@ impl LibraryBrowser {
                 .range_selection
                 .anchor
                 .as_ref()
-                .is_some_and(|anchor| anchor.scope == commit.scope)
+                .is_some_and(|anchor| anchor.scope.same_coordinates(&commit.scope))
             {
                 self.range_selection.anchor = Some(Anchor {
                     index: commit.index,
@@ -999,6 +1008,92 @@ mod tests {
                     .collect(),
             },
         );
+    }
+
+    #[test]
+    fn bitrate_refresh_keeps_click_anchor_for_fresh_range_rows() {
+        for flat in [false, true] {
+            let baseline = revisions(7, 3);
+            let mut library = LibraryBrowser::default();
+            if flat {
+                library.toggle_view();
+            }
+            assert!(library.sync_projection(baseline));
+            let roots = vec![std::path::PathBuf::from("/music")];
+            let forest = TreeBranch::default();
+            library.prepare_directory(forest.clone(), 0, 4, 1);
+            library.accept_directory(
+                &forest,
+                1,
+                Page {
+                    total: 1,
+                    rows: vec![DirectoryRow::Directory {
+                        path: roots[0].clone(),
+                    }],
+                },
+            );
+            let crate::gui::library::tree::TreeItem::Entry(entry) = library.tree.item(0).unwrap()
+            else {
+                panic!("root header");
+            };
+            let branch = entry.branch.unwrap();
+            if !flat {
+                library.expand_directory(&branch, true);
+            }
+            load_group(&mut library, &branch, 0, 4, 4, 2);
+            publish_row(&mut library, LibraryNode::Track(0), 1);
+            let old_scope = Scope::capture(&library, baseline);
+            let geometry = library.tree.row_count();
+            let projection = library.tree.projection_revision();
+            let latest = QueryRevisions {
+                bitrate: baseline.bitrate + 1,
+                ..baseline
+            };
+
+            assert!(library.sync_projection(latest));
+            assert_eq!(library.selected(), &HashSet::from([0]));
+            assert_eq!(library.tree.row_count(), geometry);
+            assert_eq!(library.tree.projection_revision(), projection);
+            assert!(library.tree.cached_row(&branch, 0).is_none());
+            assert!(!old_scope.matches(&library, latest));
+            load_group(&mut library, &branch, 0, 4, 4, 3);
+
+            for (id, expected) in [
+                (3, HashSet::from([0, 1, 2, 3])),
+                (2, HashSet::from([0, 1, 2])),
+            ] {
+                library
+                    .start_range_selection(
+                        &LibraryNode::Track(id),
+                        id as usize + 1,
+                        false,
+                        latest,
+                        4,
+                    )
+                    .unwrap();
+                let RangeStep::Selected(commit) = library.advance_range(latest, &roots).unwrap()
+                else {
+                    panic!("fresh cached rows complete the range");
+                };
+                library.publish_selection(commit);
+                assert_eq!(library.selected(), &expected, "flat={flat}");
+                assert_eq!(library.range_selection.anchor.as_ref().unwrap().index, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn coordinate_change_retires_click_anchor() {
+        let (mut library, branch, _) = grouped(4, 4);
+        publish_row(&mut library, LibraryNode::Track(0), 1);
+        let old_scope = Scope::capture(&library, revisions(7, 3));
+        let geometry = library.tree.row_count();
+        library.expand_directory(&branch, false);
+        assert_ne!(library.tree.row_count(), geometry);
+        assert!(!old_scope.matches(&library, revisions(7, 3)));
+        assert!(library.range_selection.anchor.is_none());
+        let scope = Scope::capture(&library, revisions(7, 3));
+        assert_eq!(library.range_selection.interval(&scope, 0), 0..1);
     }
 
     #[test]
