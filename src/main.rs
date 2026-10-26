@@ -1,8 +1,11 @@
 mod cli;
 
-fn main() {
-    if let Err(error) = cli::run() {
-        cli::print_error(&error);
-        std::process::exit(1);
+fn main() -> std::process::ExitCode {
+    match cli::run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            cli::print_error(&error);
+            std::process::ExitCode::FAILURE
+        }
     }
 }

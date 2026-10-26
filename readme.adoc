@@ -79,9 +79,11 @@ Ctrl-C and SIGTERM also request a clean shutdown.
 == CLI
 
 CLI and TUI controls require a running core; `library probe` and `playback devices`
-can run independently. Global options include `--data-dir DIRECTORY`, `--config FILE`,
-and `--json`. JSON reply shapes vary by command; use `rivu --help` or a subcommand's
-`--help` for exact arguments.
+can run independently. `--data-dir DIRECTORY` selects the instance. `--config FILE`
+selects startup/probe configuration, not settings in an already running core.
+`--json` writes one result to stdout and runtime diagnostics as JSON to stderr;
+it is not available for GUI, serve, or TUI. Usage errors retain ordinary diagnostics.
+Use `rivu --help` or a subcommand's `--help` for exact arguments.
 
 [source,sh]
 ----
@@ -94,9 +96,18 @@ rivu playback toggle
 rivu playback volume 50
 ----
 
-For scan/import/relocation commands, use `--wait` to wait for completion.
-A timeout can leave a mutation's result unknown; do not repeat it blindly.
-See link:doc/02_library.adoc#_cli_output[CLI output] for reply semantics and JSON output.
+Use `rivu status` for instance state and `rivu task status KIND ID` or
+`rivu task cancel KIND ID` for tasks (`KIND`: `scan`, `relocation`, `processing`).
+For scan/import/relocation/processing commands, `--wait` returns the terminal
+result rather than an acceptance acknowledgement. A timeout can leave a mutation's
+result unknown; do not repeat it blindly. See
+link:doc/02_library.adoc#_cli_output[CLI output] for result and failure semantics.
+
+Task queries and cancellation use `rivu task status KIND ID` and
+`rivu task cancel KIND ID`, where `KIND` is `scan`, `relocation`, or `processing`.
+Playlist commands separate summaries (`playlist list`) from entries (`playlist show ID`).
+CLI preset, playlist, and graph export paths resolve against the invoking client's
+working directory, not the host's; absolute paths are unchanged.
 
 == Files and data directories
 

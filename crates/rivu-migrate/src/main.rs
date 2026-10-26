@@ -11,9 +11,21 @@ use terminal::Terminal;
     about = "Validate current Rivu configuration and database formats without starting the player"
 )]
 struct Args {
-    #[arg(long, global = true, value_name = "DIRECTORY")]
+    /// Data directory to inspect; selects its config.toml unless --config is supplied.
+    #[arg(
+        long,
+        global = true,
+        value_name = "DIRECTORY",
+        help_heading = "Global options"
+    )]
     data_dir: Option<PathBuf>,
-    #[arg(long, global = true, value_name = "FILE")]
+    /// Configuration file to inspect without starting or reconfiguring a player.
+    #[arg(
+        long,
+        global = true,
+        value_name = "FILE",
+        help_heading = "Global options"
+    )]
     config: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
@@ -21,9 +33,9 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Inspect existing resources without reserving them; exit 2 on error.
+    /// Validate existing formats without reserving resources; exit 2 on error.
     Check,
-    /// Validate current resources under offline ownership.
+    /// Validate under offline ownership; the current baseline has no migration steps.
     Apply,
 }
 

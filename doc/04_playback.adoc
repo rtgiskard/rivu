@@ -111,7 +111,7 @@ rivu queue add-paths song.wav another.flac song.wav --wait
 ----
 
 For positional CLI insertion, supply both `--index` and `--expected-revision` from
-the observed queue state (`rivu --json library status`). `--wait` reports the
+the observed queue state (`rivu --json status`). `--wait` reports the
 operation's completion, including skipped-file errors even when valid files were
 saved. Registered tracks appear under their configured folder or in
 link:02_library.adoc#_other[Other]. Clearing Queue does not remove them from Library.

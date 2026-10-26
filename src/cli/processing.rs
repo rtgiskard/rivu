@@ -1,59 +1,145 @@
-use super::{
-    args::{
-        ProcessingAction, ProcessingAudition, ProcessingGraphAction, ProcessingGraphMode,
-        ProcessingKind,
-    },
-    output::Terminal,
+use super::args::{
+    ProcessingAction, ProcessingAudition, ProcessingGraphAction, ProcessingGraphMode,
+    ProcessingKind,
 };
-use anyhow::{Context, Result, bail};
-use rivu_protocol::{
-    model::*,
-    response::{StateSections, ViewResponse},
-};
-use std::{path::Path, thread, time::Duration};
+use anyhow::{Context, Result};
+use rivu::i18n::Localizer;
+use rivu_protocol::{model::*, response::StateSections};
+use std::path::Path;
 
-pub(super) fn run(data_dir: &Path, action: ProcessingAction, json: bool) -> Result<()> {
-    let result = execute(data_dir, action, json);
-    if let Err(error) = &result
-        && json
-    {
+fn show_settings(
+    i18n: &Localizer,
+    config: &rivu::config::Config,
+    task: Option<&ProcessingTaskStatus>,
+    graph_only: bool,
+) -> Result<()> {
+    if !graph_only {
         println!(
             "{}",
-            serde_json::json!({"type":"error","error":format!("{error:#}")})
+            i18n.format(
+                "core-processing-equalizer",
+                &[
+                    (
+                        "enabled",
+                        i18n.text(if config.equalizer.enabled {
+                            "core-yes"
+                        } else {
+                            "core-no"
+                        })
+                        .into()
+                    ),
+                    ("preamp", config.equalizer.preamp_db.to_string().into()),
+                    ("bands", config.equalizer.bands.len().to_string().into()),
+                ]
+            )
+        );
+        let mode = match config.denoise.mode {
+            rivu_dsp::denoise::DenoiseMode::Off => "processing-off",
+            rivu_dsp::denoise::DenoiseMode::Stationary => "processing-stationary",
+            rivu_dsp::denoise::DenoiseMode::Profile => "processing-profile",
+            rivu_dsp::denoise::DenoiseMode::Adaptive => "processing-adaptive",
+        };
+        println!(
+            "{}",
+            i18n.format(
+                "core-processing-denoise",
+                &[
+                    (
+                        "enabled",
+                        i18n.text(
+                            if config.denoise.wet > 0.0
+                                && (config.denoise.mode != rivu_dsp::denoise::DenoiseMode::Off
+                                    || config.denoise.hum.enabled
+                                    || config.denoise.impulse.enabled)
+                            {
+                                "core-yes"
+                            } else {
+                                "core-no"
+                            }
+                        )
+                        .into()
+                    ),
+                    ("mode", i18n.text(mode).into()),
+                ]
+            )
+        );
+        println!(
+            "{}",
+            i18n.format(
+                "core-processing-neural",
+                &[
+                    (
+                        "device",
+                        match config.neural.device {
+                            rivu::config::NeuralDevice::Cpu => "cpu",
+                            rivu::config::NeuralDevice::Cuda => "cuda",
+                        }
+                        .into()
+                    ),
+                    ("threads", config.neural.threads.to_string().into()),
+                ]
+            )
         );
     }
-    result
-}
-fn status(session: &mut rivu_client::ClientSession, id: u64) -> Result<ProcessingTaskStatus> {
-    let view = session
-        .query(Query::ProcessingTask { id })?
-        .result
-        .map_err(anyhow::Error::from)?;
-    let ViewResponse::ProcessingTask(task) = view else {
-        bail!("Unexpected processing task response")
-    };
-    task.map(|task| *task)
-        .context("Unknown or expired processing task")
-}
-fn emit(task: &ProcessingTaskStatus, json: bool) -> Result<()> {
-    if json {
-        println!(
-            "{}",
-            serde_json::json!({"type":if task.phase.is_terminal(){"result"}else{"progress"},"task":task})
-        );
-    } else {
-        println!(
-            "{}\t{:?}\t{} / {}",
-            task.id,
-            task.phase,
-            task.completed,
-            task.total.map_or_else(|| "?".into(), |v| v.to_string())
-        );
-        if let Some(error) = &task.error {
-            eprintln!("{}", Terminal(error));
+    let graph = &config.processing_graph;
+    println!(
+        "{}",
+        i18n.format(
+            "core-processing-graph",
+            &[
+                ("revision", graph.revision.to_string().into()),
+                ("nodes", graph.nodes.len().to_string().into()),
+                ("edges", graph.edges.len().to_string().into()),
+            ]
+        )
+    );
+    if graph_only {
+        for node in &graph.nodes {
+            let kind = match node.kind {
+                GraphNodeKind::Source => "processing-source",
+                GraphNodeKind::Equalizer { .. } => "processing-equalizer",
+                GraphNodeKind::Denoise { .. } => "processing-restoration",
+                GraphNodeKind::Speech { .. } => "processing-speech",
+                GraphNodeKind::Separate { .. } => "processing-separation",
+                GraphNodeKind::Mix { .. } => "processing-mix",
+                GraphNodeKind::Output => "processing-graph-output",
+            };
+            println!(
+                "{}",
+                i18n.format(
+                    "core-processing-node",
+                    &[
+                        ("id", node.id.to_string().into()),
+                        ("kind", i18n.text(kind).into()),
+                    ]
+                )
+            );
+        }
+        for edge in &graph.edges {
+            println!(
+                "{}:{} -> {}:{}",
+                edge.from.node, edge.from.port, edge.to.node, edge.to.port
+            );
         }
     }
+    if let Some(task) = task {
+        super::tasks::emit_processing(i18n, task, false)?;
+    } else {
+        println!("{}", i18n.text("core-processing-latest"));
+    }
     Ok(())
+}
+
+fn equalizer_command(edit: &str) -> Result<Command> {
+    let mut edit: EqualizerEdit =
+        serde_json::from_str(edit).context("Parsing EqualizerEdit JSON")?;
+    match &mut edit {
+        EqualizerEdit::ImportPreset { path, .. } | EqualizerEdit::ExportPreset { path, .. } => {
+            *path = super::client_path(std::mem::take(path))?;
+        }
+        _ => {}
+    }
+    Ok(Command::EqualizerEdit { edit })
 }
 
 fn graph_command(action: ProcessingGraphAction) -> Result<(Command, bool)> {
@@ -97,13 +183,7 @@ fn graph_command(action: ProcessingGraphAction) -> Result<(Command, bool)> {
             Command::ProcessingGraphExport {
                 id,
                 node: GraphPort { node, port },
-                path: if path.is_absolute() {
-                    path
-                } else {
-                    std::env::current_dir()
-                        .context("Resolving graph export path against client directory")?
-                        .join(path)
-                },
+                path: super::client_path(path)?,
             }
         }
         ProcessingGraphAction::Show => unreachable!("Graph show is a state query"),
@@ -111,7 +191,12 @@ fn graph_command(action: ProcessingGraphAction) -> Result<(Command, bool)> {
     Ok((command, wait))
 }
 
-fn execute(data_dir: &Path, action: ProcessingAction, json: bool) -> Result<()> {
+pub(super) fn run(
+    i18n: &Localizer,
+    data_dir: &Path,
+    action: ProcessingAction,
+    json: bool,
+) -> Result<()> {
     let graph_show = matches!(
         &action,
         ProcessingAction::Graph(ProcessingGraphAction::Show)
@@ -126,12 +211,16 @@ fn execute(data_dir: &Path, action: ProcessingAction, json: bool) -> Result<()> 
         )?
         .system
         .context("Missing system state")?;
-        let value = if graph_show {
-            serde_json::json!({"graph":state.config.processing_graph,"latest_task":state.processing})
+        if json {
+            let value = if graph_show {
+                serde_json::json!({"graph":state.config.processing_graph,"latest_task":state.processing})
+            } else {
+                serde_json::json!({"equalizer":state.config.equalizer,"presets":state.config.equalizer_presets,"equalizer_ab":state.config.equalizer_ab,"denoise":state.config.denoise,"neural":state.config.neural,"processing_graph":state.config.processing_graph,"processing":state.processing})
+            };
+            println!("{}", serde_json::to_string_pretty(&value)?);
         } else {
-            serde_json::json!({"equalizer":state.config.equalizer,"presets":state.config.equalizer_presets,"equalizer_ab":state.config.equalizer_ab,"denoise":state.config.denoise,"neural":state.config.neural,"processing_graph":state.config.processing_graph,"processing":state.processing})
-        };
-        println!("{}", serde_json::to_string_pretty(&value)?);
+            show_settings(i18n, &state.config, state.processing.as_ref(), graph_show)?;
+        }
         return Ok(());
     }
     let mut session = rivu_client::client_session(data_dir)?;
@@ -143,9 +232,7 @@ fn execute(data_dir: &Path, action: ProcessingAction, json: bool) -> Result<()> 
             wait = requested;
             command
         }
-        ProcessingAction::Eq { edit } => Command::EqualizerEdit {
-            edit: serde_json::from_str(&edit).context("Parsing EqualizerEdit JSON")?,
-        },
+        ProcessingAction::Eq { edit } => equalizer_command(&edit)?,
         ProcessingAction::Denoise { patch } => Command::DenoiseEdit {
             patch: serde_json::from_str(&patch).context("Parsing DenoisePatch JSON")?,
         },
@@ -165,24 +252,17 @@ fn execute(data_dir: &Path, action: ProcessingAction, json: bool) -> Result<()> 
                 ProcessingKind::Speech => ProcessingOperation::Speech,
                 ProcessingKind::Separate => ProcessingOperation::Separate,
             };
-            let profile = match (noise_start, noise_end) {
-                (Some(start_seconds), Some(end_seconds)) => Some(NoiseSelection {
+            let profile = noise_start
+                .zip(noise_end)
+                .map(|(start_seconds, end_seconds)| NoiseSelection {
                     start_seconds,
                     end_seconds,
-                }),
-                (None, None) => None,
-                _ => bail!("Both --noise-start and --noise-end are required"),
-            };
+                });
             Command::StartProcessing {
                 track_id,
                 operation,
                 profile,
             }
-        }
-        ProcessingAction::Cancel { id } => Command::CancelProcessing { id },
-        ProcessingAction::Status { id } => {
-            let task = status(&mut session, id)?;
-            return emit(&task, json);
         }
         ProcessingAction::Audition {
             id,
@@ -204,40 +284,13 @@ fn execute(data_dir: &Path, action: ProcessingAction, json: bool) -> Result<()> 
         ProcessingAction::Show => unreachable!(),
     };
     let ack = session.request_ack(command)?;
-    if !ack.is_success() {
-        bail!("{}", ack.error.as_deref().unwrap_or("Command rejected"));
-    }
-    if json {
-        println!("{}", serde_json::json!({"type":"accepted","ack":ack}));
-    } else {
-        println!(
-            "Accepted{}",
-            ack.processing_id
-                .map_or_else(String::new, |id| format!(" task {id}"))
-        );
-    }
-    if !wait {
-        return Ok(());
+    if !wait || !ack.is_success() {
+        return super::output::show_ack(i18n, &ack, json);
     }
     let id = ack
         .processing_id
         .context("Processing startup omitted task id")?;
-    let mut previous = None;
-    loop {
-        let task = status(&mut session, id)?;
-        if previous.as_ref() != Some(&task) {
-            emit(&task, json)?;
-            previous = Some(task.clone());
-        }
-        match task.phase {
-            ProcessingPhase::Complete => return Ok(()),
-            ProcessingPhase::Cancelled | ProcessingPhase::Failed => bail!(
-                "{}",
-                task.error.as_deref().unwrap_or("Processing cancelled")
-            ),
-            _ => thread::sleep(Duration::from_millis(150)),
-        }
-    }
+    super::tasks::wait_processing(i18n, &mut session, id, json)
 }
 
 #[cfg(test)]
@@ -246,6 +299,36 @@ mod tests {
     use crate::cli::args::{Action, Args};
     use clap::Parser;
     use std::path::PathBuf;
+
+    #[test]
+    fn preset_paths_are_anchored_to_client_without_expansion_or_existence() {
+        let cwd = std::env::current_dir().unwrap();
+        for variant in ["ImportPreset", "ExportPreset"] {
+            for input in [
+                PathBuf::from("~/missing preset.json"),
+                cwd.join("absent.json"),
+            ] {
+                let expected = if input.is_absolute() {
+                    input.clone()
+                } else {
+                    cwd.join(&input)
+                };
+                let json = serde_json::json!({(variant):{"path":input,"name":"Reference"}});
+                let Command::EqualizerEdit { edit } = equalizer_command(&json.to_string()).unwrap()
+                else {
+                    panic!("expected equalizer edit");
+                };
+                match edit {
+                    EqualizerEdit::ImportPreset { path, name }
+                    | EqualizerEdit::ExportPreset { path, name } => {
+                        assert_eq!(path, expected);
+                        assert_eq!(name, "Reference");
+                    }
+                    _ => panic!("expected preset edit"),
+                }
+            }
+        }
+    }
 
     fn parse_graph_command(arguments: &[&str]) -> (Command, bool) {
         let args = Args::try_parse_from(
@@ -263,7 +346,7 @@ mod tests {
     #[test]
     fn graph_edit_parses_typed_json_and_preserves_revision_and_signed_gains() {
         let edit = r#"{"Replace":{"id":3,"kind":{"mix":{"gains_db":[-6.0,-12.5],"muted":[false,false],"solo":[false,false]}}}}"#;
-        let (command, wait) = parse_graph_command(&["edit", edit, "--revision", "19"]);
+        let (command, wait) = parse_graph_command(&["edit", edit, "--expected-revision", "19"]);
         let Command::ProcessingGraphEdit { revision, edit } = command else {
             panic!("expected graph edit command");
         };

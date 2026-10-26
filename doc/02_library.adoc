@@ -393,8 +393,8 @@ controls such as volume remain available. Explicit playback transitions and
 orderly shutdown retry these facts without incrementing an already-committed
 count. This in-memory recovery does not survive process exit.
 
-`rivu library history --limit N` prints up to N retained rows in human mode.
-For the JSON history shape and `--limit` behavior, see <<_cli_output,CLI output>>.
+`rivu library history --limit N` returns up to N retained rows in both text and JSON
+output. See <<_cli_output,CLI output>> for result shapes.
 
 == Paged views
 
@@ -437,8 +437,8 @@ PageUp/PageDown moves the selection by one screen; returning from a directory or
 playlist detail restores the parent selection and viewport. Exiting the TUI
 does not have to wait for a stalled query.
 
-CLI `library list`, `queue list`, and `playlist list` include all matching rows,
-independently of `interface.page_size`. If relevant data changes while a listing
+CLI `library list`, `queue list`, `playlist list`, and `playlist show` include all
+matching rows, independently of `interface.page_size`. If relevant data changes while a listing
 is being read, the command stops, prints a `Listing incomplete` notice on stderr,
 and exits with status 1. Already emitted text may be incomplete, and JSON may be
 invalid; discard it and retry. GUI/TUI refresh stale query results automatically.
@@ -474,9 +474,9 @@ the current scanned metadata; that field then stays fixed across rescans.
 
 [source,sh]
 ----
-rivu library list --favorites
-rivu library list --missing
-rivu library favorite 12 34 --set on
+rivu library list --favorite true
+rivu library list --missing true
+rivu library favorite on 12 34
 rivu library edit 12 --title "New title" --artist "Artist" --album "Album"
 rivu library clean-missing
 ----
@@ -693,8 +693,8 @@ use `--wait` to wait for its result, or query and cancel that task explicitly:
 
 [source,sh]
 ----
-rivu library scan-status TASK_ID
-rivu library cancel-scan TASK_ID
+rivu task status scan TASK_ID
+rivu task cancel scan TASK_ID
 ----
 
 The running core retains the latest 32 media-task results, not persistent history.
@@ -775,8 +775,8 @@ retains the latest 32 task results, not persistent task history.
 rivu library duplicates
 rivu library duplicates --fingerprint FULL_BLAKE3 --offset 0 --limit 100
 rivu library relocate OLD_ID DESTINATION_ID --wait
-rivu library relocation-status TASK_ID
-rivu library cancel-relocation TASK_ID
+rivu task status relocation TASK_ID
+rivu task cancel relocation TASK_ID
 rivu library keep-independent DESTINATION_ID
 ----
 
@@ -868,8 +868,9 @@ the result, close blocking readers, and explicitly retry only when appropriate.
 
 == CLI output
 
-`library list --query TEXT` filters by the Library search fields described above;
-`--favorites` and `--missing` combine with it. For machine-readable records, use
+`library list --query TEXT` filters by the Library search fields described above.
+`--favorite true|false` and `--missing true|false` combine with it; omit either
+filter to include both states. For machine-readable records, use
 `rivu --json library list --query "Artist"`.
 
 Human-readable CLI output escapes terminal control characters in metadata,
@@ -879,49 +880,57 @@ as `\x1b` and `\u{009b}`. Ordinary Unicode and the command's own row/column
 separators are preserved. This display-only escaping does not modify stored
 values or JSON data.
 
-`--json` uses a command-specific shape rather than one universal response:
+`--json` writes one result value to stdout. Long-running commands with `--wait`
+write only their terminal task result, not acceptance/progress events. Runtime
+diagnostics are JSON objects on stderr with `error` and, for transport command
+failures, `status`. No Core revision or task ID is invented for an uncertain
+transport result. Argument/usage errors retain Clap diagnostics and exit status 2;
+runtime failures exit 1. A successful command exits 0.
 
-* `library list` streams an array of full track records. `playlist list` streams
-  an array of playlists with `id`, `name`, `entry_count`, and `entries`.
-  See <<_paged_views,Paged views>> before consuming streamed output.
-* `library status` returns a state object with `revisions`, `playback`, `queue`,
-  `library`, and `system`. `queue list` streams occurrence rows; `library history`
-  requests only `library`; `library optimize` requests only `system`.
-  Unrequested sections are `null`, not empty data.
-* Ordinary command acknowledgements contain `status`, `error`, `revision`,
+List results stream directly with bounded batches. A failed traversal can leave
+partial JSON on stdout; discard that output and check the exit status before
+consuming it. See <<_paged_views,Paged views>>.
+
+Result shapes follow the queried resource:
+
+* `library list` returns an array of full track records; `queue list` returns
+  occurrence rows. `playlist list` returns summaries with `id`, `name`, and
+  `entry_count`; `playlist show PLAYLIST_ID` returns that playlist's entry array.
+* `status` returns the instance state with `revisions`, `playback`, `queue`,
+  `library`, and `system`. `library history` returns a history array, limited by
+  `--limit` in the same retained order as text output.
+* Ordinary command acknowledgements, including `library optimize`, contain
+  `status`, `error`, `revision`,
   `scan_id`, `relocation_id`, and `processing_id`. Status is `Succeeded`, `Failed`,
-  `NotAdmitted`, or `Unknown`; `Failed` does not guarantee rollback, and `Unknown`
-  must not be automatically retried. `scan_id` is present only for accepted media-task startup
-  (scan, Other check, playlist import, or external-file queue addition);
-  `relocation_id` identifies relocation startup. Export replies after writing,
-  not at worker startup.
-  JSON prints failed acknowledgements too, with an unsuccessful exit status.
-  Transport command failures print only `status` and `error`, without invented
-  revisions or task IDs. Diagnostics also go to stderr.
-* Media tasks with `--wait`, and `library scan-status`, return the task's
-  `{id, progress, message, library_committed, playlist_id, error}` status, including
-  failed/cancelled terminal results in JSON. `--wait` exits unsuccessfully for a
-  failed or cancelled task; a successful status query only confirms retrieval.
-  Confirmed commits survive later refresh failures; a failed result with no
-  confirmation is not proof of zero effects after an uncertain worker failure.
-  Later tasks and unrelated command errors do not change that task result.
-* `library relocate` without `--wait` returns the acknowledgement; use its
-  `relocation_id` with `library relocation-status`. Successful relocation with
-  `--wait` and every successful `relocation-status` query return
-  `{id, source_id, target_id, phase, error}`. The phase is `verifying`, `completed`,
-  `cancelled`, or `failed`. A status query reports the retained task even when
-  cancelled or failed; its successful exit does not imply relocation succeeded.
-* `library other list` returns a single `{total, rows}` page, not a streamed array.
-  `library other count` returns a number; `library other locate` returns its tagged
-  location result. Filters, sorting, and pagination are described under <<_other,Other>>.
-* `library duplicates` returns `{"DuplicateGroups": {"total": ..., "rows": [...]}}`;
-  with `--fingerprint`, it returns the corresponding `DuplicateMembers` wrapper.
-  These are single pages controlled by `--offset` and `--limit`, not streamed
-  arrays or acknowledgements.
+  `NotAdmitted`, or `Unknown`. Failed authoritative acknowledgements are printed
+  before an unsuccessful exit. `Failed` does not guarantee rollback; `Unknown`
+  must not be automatically retried.
+  After optimization, use `rivu --json status` to read the size report from
+  `system.database_optimization`.
+* `scan_id` identifies media-task startup: scanning, Other checks, playlist import,
+  or external-file queue admission. `task status scan ID` and media commands with
+  `--wait` return `{id, progress, message, library_committed, playlist_id, error}`.
+  Confirmed commits survive later refresh failures; lack of confirmation after an
+  uncertain worker failure is not proof of zero effects.
+* `relocation_id` identifies relocation verification. `task status relocation ID`
+  and `library relocate --wait` return `{id, source_id, target_id, phase, error}`;
+  phases are `verifying`, `completed`, `cancelled`, or `failed`.
+* `processing_id` identifies audio-processing work. `task status processing ID`
+  and processing commands with `--wait` return the full processing task object,
+  including its phase, captured settings, outputs, and optional error.
+* A successful task-status query confirms retrieval, not task success. Inspect
+  its phase/error. By contrast, `--wait` exits unsuccessfully for failed or
+  cancelled tasks, while retaining the terminal result on stdout. Use
+  `task cancel scan|relocation|processing ID` to request cancellation; acceptance
+  is not proof that work has already retired and never undoes a committed result.
+* `library other list` and both `library duplicates` variants return one
+  `{total, rows}` page. `--fingerprint` selects duplicate members instead of group
+  summaries. Page size is `0..256`, default 100; `--offset` defaults to zero.
+  `library other count` returns a number; `library other locate` returns its
+  tagged location result.
 * `library stats` returns aggregate statistics; `library probe` returns metadata
   and decoder status; `playback devices` returns an array of device names.
 
-History state responses contain the requested Library section; read `library.history`.
-History's `--limit` affects human output only. Protocol and query contracts are
-described in link:21_ipc.adoc[IPC].
+Playlist export returns after writing the file, not after starting a background
+task. Protocol and query contracts are described in link:21_ipc.adoc[IPC].
 

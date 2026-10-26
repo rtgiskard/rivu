@@ -254,6 +254,9 @@ without replacing earlier edits. `AddBand` remains available for an explicit
 band configuration, as shown above; use it when exact frequency, gain or filter
 settings are already known. Both operations respect the 32-band bank limit.
 
+CLI preset import/export paths are relative to the invoking client's working
+directory, not the host's. Absolute paths are unchanged.
+
 === Restoration
 
 Stationary mode derives fixed white-noise power from the declared RMS level
@@ -437,8 +440,8 @@ Only one processing task runs at a time. `queued`, `rendering` and `processing`
 describe preparation/work; `complete`, `failed` and `cancelled` are terminal
 task states. Not every task visits every work phase: realtime preparation need
 not render a file. Start acceptance is not completion; `--wait` waits for that
-task and fails on cancellation/error. Use `processing status ID` and
-`processing cancel ID` for an asynchronous start. A cancellation acknowledgement
+task and fails on cancellation/error. Use `task status processing ID` and
+`task cancel processing ID` for an asynchronous start. A cancellation acknowledgement
 accepts the request, not proof that the worker has already retired. Cancellation
 invalidates publication, terminates/reaps neural workers and retires partial
 scratch; it does not publish a partial result. Source identity and job settings
@@ -465,7 +468,7 @@ Native source preparation checks cancellation between decoder calls; a backend
 call or filesystem operation has no hard cancellation-time guarantee. A retained
 audition or stem mix is rejected if the registered source's decoder hint changed,
 as well as when its media identity no longer matches.
-`processing cancel ID` also returns a matching selected audition to Original after
+`task cancel processing ID` also returns a matching selected audition to Original after
 its preparation task has completed. For realtime/hybrid graph runs it additionally
 marks the task `cancelled`; stopping a cached offline audition leaves its completed
 task status intact. Completion of preparation is not the lifetime of live audio.
@@ -508,7 +511,7 @@ rendering and retained-cache limits still apply.
 
 [source,shell]
 ----
-rivu processing status 1
+rivu task status processing 1
 rivu processing audition 1 denoised
 rivu processing audition 1 original
 rivu processing audition 2 vocals
@@ -531,16 +534,16 @@ link:21_ipc.adoc[IPC] and link:24_layout.adoc[Layouts].
 
 === Node graph CLI
 
-`processing graph show` prints `graph`, the core-owned persisted graph including
-its `revision`, nodes, positions and explicit port-to-port edges, and
-`latest_task`, the latest processing task (or null). The latest task may belong
-to an older graph revision or a legacy operation; it is not the current graph's
-execution state. `processing show` also includes the graph alongside the separate
-playback EQ and legacy task settings. Node-local graph processing does not replace
-the playback EQ controls.
+`processing graph show` prints a readable graph summary, node IDs, connections,
+and latest task. Add `--json` for the full `graph` object, including its `revision`,
+nodes, positions and explicit port-to-port edges, plus `latest_task` (or null).
+The latest task may belong to an older graph revision or a non-graph operation; it
+is not the current graph's execution state. `processing show` summarizes playback
+EQ, denoise, neural settings, graph and task; `--json` includes their complete
+settings and presets. Node-local graph processing does not replace playback EQ.
 
 Every `graph edit` takes one externally tagged `GraphEdit` JSON value and a
-required `--revision` matching the graph currently held by Core. Refresh after
+required `--expected-revision` matching the graph currently held by Core. Refresh after
 each accepted edit or concurrent change; a stale revision is rejected rather
 than overwriting another client's edits. Edits include `Add`, `Remove`, `Replace`,
 `Move`, `Connect`, `Disconnect`, `Duplicate` and `ReplaceGraph`. Node kinds use
@@ -556,12 +559,12 @@ first instead of replaying these edits blindly.
 
 [source,shell]
 ----
-rivu processing graph show
-rivu processing graph edit --revision 0 '{"Add":{"kind":{"mix":{"gains_db":[-6.0,-12.5],"muted":[false,false],"solo":[false,false]}},"position":[200.0,120.0]}}'
-rivu processing graph edit --revision 1 '{"Connect":{"from":{"node":1,"port":0},"to":{"node":3,"port":0}}}'
-rivu processing graph edit --revision 2 '{"Connect":{"from":{"node":1,"port":0},"to":{"node":3,"port":1}}}'
-rivu processing graph edit --revision 3 '{"Disconnect":{"to":{"node":2,"port":0}}}'
-rivu processing graph edit --revision 4 '{"Connect":{"from":{"node":3,"port":0},"to":{"node":2,"port":0}}}'
+rivu --json processing graph show
+rivu processing graph edit --expected-revision 0 '{"Add":{"kind":{"mix":{"gains_db":[-6.0,-12.5],"muted":[false,false],"solo":[false,false]}},"position":[200.0,120.0]}}'
+rivu processing graph edit --expected-revision 1 '{"Connect":{"from":{"node":1,"port":0},"to":{"node":3,"port":0}}}'
+rivu processing graph edit --expected-revision 2 '{"Connect":{"from":{"node":1,"port":0},"to":{"node":3,"port":1}}}'
+rivu processing graph edit --expected-revision 3 '{"Disconnect":{"to":{"node":2,"port":0}}}'
+rivu processing graph edit --expected-revision 4 '{"Connect":{"from":{"node":3,"port":0},"to":{"node":2,"port":0}}}'
 rivu --json processing graph run 42 2 --port 0 --mode offline --wait
 ----
 
@@ -592,10 +595,10 @@ Hybrid uses a single cached output port as its boundary: every path into the
 live target must cross that exact port. A separate uncached source branch or
 another separation output cannot be substituted by the same cached stream.
 Planning and FFT preparation run on the processing worker, not Core dispatch or
-the device callback. `--wait` uses
-the existing task progress/result reporting and returns failure for failed or
-cancelled jobs; without it, an accepted acknowledgement is not proof of completion.
-Use `processing status RUN_ID` and `processing cancel RUN_ID` for the same task.
+the device callback. `--wait` prints one terminal task result and returns failure
+for failed or cancelled jobs; without it, an accepted acknowledgement is not proof
+of completion. Use `task status processing RUN_ID` and
+`task cancel processing RUN_ID` for the same task.
 
 A realtime task reaching `complete` means its immutable live plan is prepared,
 not that an offline file was rendered: `graph_outputs` is empty. Automatic
@@ -608,7 +611,7 @@ use `graph export` with the actual run ID and node/port from that snapshot:
 
 [source,shell]
 ----
-rivu processing status 7
+rivu task status processing 7
 rivu processing graph audition 7 3 --port 0
 rivu processing graph export 7 3 'rendered outputs/mix -6 dB.wav' --port 0 --wait
 ----
@@ -623,8 +626,8 @@ result does not make it independent of the original source.
 Export starts a new task: it copies an already cached node output when available,
 otherwise it renders the requested output offline from the retained graph and
 source. Neither path uses the subsequently edited graph. The acknowledgement
-supplies a new `processing_id`; `--wait` tracks that export task through the
-existing progress/result flow. Without `--wait`, query the new task ID, not the
+supplies a new `processing_id`; `--wait` returns that export's terminal task result.
+Without `--wait`, query the new task ID, not the
 original run, to determine completion.
 `settings.graph_export_path` records the requested destination;
 `graph_exported_path` is populated only after the completed export is published.

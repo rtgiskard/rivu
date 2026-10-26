@@ -1,6 +1,7 @@
 mod args;
 mod output;
 mod processing;
+mod tasks;
 
 use self::{
     args::{
@@ -8,8 +9,7 @@ use self::{
         QueueAction, Repeat, Switch, localize_help, terminal_cli_error,
     },
     output::{
-        Terminal, command_ack, list_library, list_playlists, list_queue, show_ack, show_scan,
-        show_state, terminal_text,
+        Terminal, list_library, list_playlists, list_queue, show_ack, show_state, terminal_text,
     },
 };
 use anyhow::{Context, Result, bail};
@@ -21,13 +21,18 @@ use rivu_protocol::{
     model::{Command, Query, RepeatMode},
     response::{StateSections, ViewResponse},
 };
-use std::{path::PathBuf, thread, time::Duration};
+use std::path::PathBuf;
 
-pub(super) fn print_error(error: &anyhow::Error) {
-    eprintln!("rivu: {:#}", Terminal(error));
+pub(super) struct RuntimeError {
+    error: anyhow::Error,
+    json: bool,
 }
 
-pub(super) fn run() -> Result<()> {
+pub(super) fn print_error(error: &RuntimeError) {
+    let _ = output::write_error(&mut std::io::stderr().lock(), &error.error, error.json);
+}
+
+pub(super) fn run() -> std::result::Result<(), RuntimeError> {
     // Command-line surfaces use the process locale, independently of GUI settings.
     let language = "auto";
     let i18n = Localizer::new(language);
@@ -37,16 +42,22 @@ pub(super) fn run() -> Result<()> {
     let matches = command
         .try_get_matches()
         .unwrap_or_else(|error| terminal_cli_error(error).exit());
-    let args = Args::from_arg_matches(&matches)?;
+    let args =
+        Args::from_arg_matches(&matches).unwrap_or_else(|error| terminal_cli_error(error).exit());
+    args.validate(&matches)
+        .unwrap_or_else(|error| terminal_cli_error(error).exit());
+    let json = args.json;
+    execute(args, i18n).map_err(|error| RuntimeError { error, json })
+}
+
+fn execute(args: Args, i18n: Localizer) -> Result<()> {
     let config::paths::Paths {
         config: config_path,
         data_dir,
     } = config::paths::Paths::resolve(args.data_dir, args.config);
     let action = args.action.unwrap_or(Action::Gui { paths: Vec::new() });
-    if let Action::Processing(action) = action {
-        return processing::run(&data_dir, action, args.json);
-    }
     match action {
+        Action::Processing(action) => processing::run(&i18n, &data_dir, action, args.json),
         Action::Gui { paths } => App::open_gui(
             data_dir,
             config_path,
@@ -59,7 +70,7 @@ pub(super) fn run() -> Result<()> {
             false,
         )?
         .run(),
-        Action::Tui => terminal::run(&data_dir, language),
+        Action::Tui => terminal::run(&data_dir, "auto"),
         Action::Library(LibraryAction::Probe { path, enhanced }) => {
             let probe_config = config::Config::load(&config_path)?;
             let ffmpeg_enabled = probe_config.ffmpeg_enabled || enhanced;
@@ -160,15 +171,15 @@ pub(super) fn run() -> Result<()> {
             }
             Ok(())
         }
-        Action::Library(LibraryAction::Status) => {
+        Action::Status => {
             let response = rivu_client::get_state(&data_dir, StateSections::ALL)?;
             show_state(&i18n, &response, args.json)
         }
         Action::Library(LibraryAction::List {
             query,
-            favorites,
+            favorite,
             missing,
-        }) => list_library(&i18n, &data_dir, args.json, query, favorites, missing),
+        }) => list_library(&i18n, &data_dir, args.json, query, favorite, missing),
         Action::Library(LibraryAction::Other(
             action @ (OtherTracksAction::List { .. }
             | OtherTracksAction::Count
@@ -180,26 +191,7 @@ pub(super) fn run() -> Result<()> {
                 .map_err(anyhow::Error::from)?;
             output::show_other_tracks(&i18n, view, args.json)
         }
-        Action::Library(LibraryAction::ScanStatus { id }) => {
-            let view = rivu_client::query(&data_dir, Query::ScanTask { id })?
-                .result
-                .map_err(anyhow::Error::from)?;
-            let ViewResponse::ScanTask(task) = view else {
-                bail!("Scan task query returned an unexpected response");
-            };
-            if task.id != id {
-                bail!("Scan task query returned a different task ID");
-            }
-            if args.json {
-                println!("{}", serde_json::to_string_pretty(&task)?);
-            } else {
-                show_scan(&i18n, &task.progress);
-                if let Some(error) = task.error {
-                    eprintln!("{}", Terminal(error));
-                }
-            }
-            Ok(())
-        }
+        Action::Task(action) => tasks::run(&i18n, &data_dir, action, args.json),
         Action::Library(LibraryAction::Stats) => {
             let response = rivu_client::query(&data_dir, Query::LibraryStats)?;
             let ViewResponse::LibraryStats(stats) = response.result.map_err(anyhow::Error::from)?
@@ -230,13 +222,13 @@ pub(super) fn run() -> Result<()> {
                     ..StateSections::default()
                 },
             )?;
-            if args.json {
-                return show_state(&i18n, &response, true);
-            }
             let state = response
                 .library
                 .as_ref()
                 .context("State omitted library section")?;
+            if args.json {
+                return output::show_history(&mut std::io::stdout().lock(), &state.history, limit);
+            }
             for entry in state.history.iter().take(limit) {
                 println!(
                     "{}\t{}\t{}",
@@ -249,6 +241,9 @@ pub(super) fn run() -> Result<()> {
         }
         Action::Queue(QueueAction::List) => list_queue(&i18n, &data_dir, args.json),
         Action::Playlist(PlaylistAction::List) => list_playlists(&i18n, &data_dir, args.json),
+        Action::Playlist(PlaylistAction::Show { playlist_id }) => {
+            output::show_playlist(&i18n, &data_dir, playlist_id, args.json)
+        }
         Action::Library(LibraryAction::Edit {
             track_id,
             title,
@@ -262,7 +257,7 @@ pub(super) fn run() -> Result<()> {
                 album,
                 decoder_hint: None,
             };
-            let ack = command_ack(rivu_client::request_ack(&data_dir, command), args.json)?;
+            let ack = rivu_client::request_ack(&data_dir, command)?;
             show_ack(&i18n, &ack, args.json)
         }
         Action::Library(LibraryAction::Duplicates {
@@ -282,7 +277,7 @@ pub(super) fn run() -> Result<()> {
                 .result
                 .map_err(anyhow::Error::from)?;
             if args.json {
-                println!("{}", serde_json::to_string_pretty(&view)?);
+                output::show_duplicates(&mut std::io::stdout().lock(), &view)?;
             } else {
                 match view {
                     ViewResponse::DuplicateGroups(page) => {
@@ -381,114 +376,34 @@ pub(super) fn run() -> Result<()> {
             }
             Ok(())
         }
-        Action::Library(LibraryAction::RelocationStatus { id }) => {
-            let view = rivu_client::query(&data_dir, Query::RelocationTask { id })?
-                .result
-                .map_err(anyhow::Error::from)?;
-            let ViewResponse::RelocationTask(task) = view else {
-                bail!("Unexpected relocation status response");
-            };
-            if args.json {
-                println!("{}", serde_json::to_string_pretty(&task)?);
-            } else {
-                let phase = i18n.text(match task.phase {
-                    rivu_protocol::model::RelocationPhase::Verifying => "core-verifying",
-                    rivu_protocol::model::RelocationPhase::Completed => "core-completed",
-                    rivu_protocol::model::RelocationPhase::Cancelled => "core-cancelled",
-                    rivu_protocol::model::RelocationPhase::Failed => "core-failed",
-                });
-                println!(
-                    "{}",
-                    i18n.format(
-                        "core-relocation-status",
-                        &[
-                            ("id", task.id.to_string().into()),
-                            ("source", task.source_id.to_string().into()),
-                            ("target", task.target_id.to_string().into()),
-                            ("phase", phase.into()),
-                        ]
-                    )
-                );
-                if let Some(error) = task.error {
-                    eprintln!("{}", Terminal(error));
-                }
-            }
-            Ok(())
-        }
         Action::Library(LibraryAction::Relocate {
             source_id,
             target_id,
             wait,
         }) => {
             let mut session = rivu_client::client_session(&data_dir)?;
-            let ack = command_ack(
-                session.request_ack(Command::RelocateTrack {
-                    source_id,
-                    target_id,
-                }),
-                args.json,
-            )?;
-            if !ack.is_success() {
+            let ack = session.request_ack(Command::RelocateTrack {
+                source_id,
+                target_id,
+            })?;
+            if !ack.is_success() || (!wait && args.json) {
                 return show_ack(&i18n, &ack, args.json);
             }
             let id = ack
                 .relocation_id
                 .context("Relocation startup omitted task ID")?;
             if !wait {
-                if args.json {
-                    println!("{}", serde_json::to_string_pretty(&ack)?);
-                } else {
-                    println!(
-                        "{}",
-                        i18n.format("core-relocation-accepted", &[("id", id.to_string().into())])
-                    );
-                }
+                println!(
+                    "{}",
+                    i18n.format("core-relocation-accepted", &[("id", id.to_string().into())])
+                );
                 return Ok(());
             }
-            loop {
-                thread::sleep(Duration::from_millis(200));
-                let view = session
-                    .query(Query::RelocationTask { id })?
-                    .result
-                    .map_err(anyhow::Error::from)?;
-                let ViewResponse::RelocationTask(task) = view else {
-                    bail!("Unexpected relocation status response");
-                };
-                match task.phase {
-                    rivu_protocol::model::RelocationPhase::Verifying => continue,
-                    rivu_protocol::model::RelocationPhase::Completed => {
-                        if args.json {
-                            println!("{}", serde_json::to_string_pretty(&task)?);
-                        } else {
-                            println!(
-                                "{}",
-                                i18n.format(
-                                    "core-relocation-completed",
-                                    &[
-                                        ("source", source_id.to_string().into()),
-                                        ("target", target_id.to_string().into())
-                                    ]
-                                )
-                            );
-                            if let Some(error) = task.error {
-                                eprintln!("Warning: {}", Terminal(error));
-                            }
-                        }
-                        return Ok(());
-                    }
-                    _ => bail!(
-                        "{}",
-                        task.error.as_deref().unwrap_or("Relocation cancelled")
-                    ),
-                }
-            }
+            tasks::wait_relocation(&i18n, &mut session, id, args.json)
         }
         Action::Library(LibraryAction::Optimize) => {
-            let ack = command_ack(
-                rivu_client::request_ack(&data_dir, Command::OptimizeDatabase),
-                args.json,
-            )?;
-            if !ack.is_success() {
+            let ack = rivu_client::request_ack(&data_dir, Command::OptimizeDatabase)?;
+            if args.json || !ack.is_success() {
                 return show_ack(&i18n, &ack, args.json);
             }
             let response = rivu_client::get_state(
@@ -498,9 +413,6 @@ pub(super) fn run() -> Result<()> {
                     ..StateSections::default()
                 },
             )?;
-            if args.json {
-                return show_state(&i18n, &response, true);
-            }
             let report = response
                 .system
                 .as_ref()
@@ -528,64 +440,21 @@ pub(super) fn run() -> Result<()> {
             Ok(())
         }
         Action::Quit => {
-            let ack = command_ack(
-                rivu_client::request_ack(&data_dir, rivu_protocol::AppCommand::Shutdown),
-                args.json,
-            )?;
+            let ack = rivu_client::request_ack(&data_dir, rivu_protocol::AppCommand::Shutdown)?;
             show_ack(&i18n, &ack, args.json)
         }
         action => {
             let (command, wait_scan) = translate(action)?;
             let mut session = rivu_client::client_session(&data_dir)?;
-            let ack = command_ack(session.request_ack(command), args.json)?;
+            let ack = session.request_ack(command)?;
             if !ack.is_success() {
                 return show_ack(&i18n, &ack, args.json);
             }
             if wait_scan {
                 let id = ack.scan_id.context("Scan startup omitted task ID")?;
-                loop {
-                    thread::sleep(Duration::from_millis(200));
-                    let response = session.query(Query::ScanTask { id })?;
-                    let ViewResponse::ScanTask(task) =
-                        response.result.map_err(anyhow::Error::from)?
-                    else {
-                        bail!("Scan task query returned an unexpected response");
-                    };
-                    if task.id != id {
-                        bail!("Scan task query returned a different task ID");
-                    }
-                    match task.progress.phase {
-                        rivu_protocol::model::ScanPhase::Completed => {
-                            if args.json {
-                                println!("{}", serde_json::to_string_pretty(&task)?);
-                            } else {
-                                show_scan(&i18n, &task.progress);
-                            }
-                            return Ok(());
-                        }
-                        rivu_protocol::model::ScanPhase::Failed
-                        | rivu_protocol::model::ScanPhase::Cancelled => {
-                            if args.json {
-                                println!("{}", serde_json::to_string_pretty(&task)?);
-                            }
-                            bail!("{}", task.error.as_deref().unwrap_or(&task.message));
-                        }
-                        _ => {}
-                    }
-                }
+                return tasks::wait_scan(&i18n, &mut session, id, args.json);
             }
-            if args.json {
-                println!("{}", serde_json::to_string_pretty(&ack)?);
-            } else {
-                println!(
-                    "{}",
-                    i18n.format(
-                        "core-command-accepted",
-                        &[("revision", ack.revision.to_string().into())]
-                    )
-                );
-            }
-            Ok(())
+            show_ack(&i18n, &ack, args.json)
         }
     }
 }
@@ -650,7 +519,6 @@ fn translate(action: Action) -> Result<(Command, bool)> {
             wait = should_wait;
             Command::CheckOtherTracks { force }
         }
-        Action::Library(LibraryAction::CancelScan { id }) => Command::CancelScan { id },
         Action::Playback(PlaybackAction::Play { track_id }) => {
             track_id.map_or(Command::Resume, |track_id| Command::Play { track_id })
         }
@@ -660,14 +528,9 @@ fn translate(action: Action) -> Result<(Command, bool)> {
         Action::Playback(PlaybackAction::Next) => Command::Next,
         Action::Playback(PlaybackAction::Previous) => Command::Previous,
         Action::Playback(PlaybackAction::Seek { seconds }) => Command::Seek { seconds },
-        Action::Playback(PlaybackAction::Volume { percent }) => {
-            if percent > 100 {
-                bail!("Volume must be an integer between 0 and 100");
-            }
-            Command::Volume {
-                value: f32::from(percent) / 100.0,
-            }
-        }
+        Action::Playback(PlaybackAction::Volume { percent }) => Command::Volume {
+            value: f32::from(percent) / 100.0,
+        },
         Action::Playback(PlaybackAction::Shuffle { mode }) => Command::Shuffle {
             enabled: matches!(mode, Switch::On),
         },
@@ -691,9 +554,6 @@ fn translate(action: Action) -> Result<(Command, bool)> {
                 expected_revision,
                 wait: should_wait,
             } => {
-                if index.is_some() != expected_revision.is_some() {
-                    bail!("Queue insertion requires both an index and an expected revision");
-                }
                 wait = should_wait;
                 Command::QueueExternalPaths {
                     paths: paths.into_iter().map(client_path).collect::<Result<_>>()?,
@@ -708,7 +568,7 @@ fn translate(action: Action) -> Result<(Command, bool)> {
             QueueAction::List => unreachable!(),
         },
         Action::Playlist(action) => match action {
-            PlaylistAction::New { name } => Command::CreatePlaylist { name },
+            PlaylistAction::Create { name } => Command::CreatePlaylist { name },
             PlaylistAction::Rename { playlist_id, name } => {
                 Command::RenamePlaylist { playlist_id, name }
             }
@@ -740,7 +600,7 @@ fn translate(action: Action) -> Result<(Command, bool)> {
                 playlist_id,
                 path: client_path(path)?,
             },
-            PlaylistAction::List => unreachable!(),
+            PlaylistAction::List | PlaylistAction::Show { .. } => unreachable!(),
         },
         Action::Library(LibraryAction::Remove { track_ids }) => Command::RemoveTracks { track_ids },
         Action::Library(LibraryAction::Favorite { track_ids, set }) => Command::SetFavorite {
@@ -748,7 +608,6 @@ fn translate(action: Action) -> Result<(Command, bool)> {
             favorite: matches!(set, Switch::On),
         },
         Action::Library(LibraryAction::CleanMissing) => Command::RemoveMissingTracks,
-        Action::Library(LibraryAction::CancelRelocation { id }) => Command::CancelRelocation { id },
         Action::Library(LibraryAction::KeepIndependent { track_id }) => {
             Command::KeepTrackIndependent { track_id }
         }
@@ -757,20 +616,19 @@ fn translate(action: Action) -> Result<(Command, bool)> {
         | Action::Serve { .. }
         | Action::Tui
         | Action::Quit
+        | Action::Status
+        | Action::Task(_)
         | Action::Playback(PlaybackAction::Devices)
         | Action::Processing(_)
         | Action::Library(
             LibraryAction::List { .. }
             | LibraryAction::Other(_)
-            | LibraryAction::ScanStatus { .. }
             | LibraryAction::Edit { .. }
-            | LibraryAction::Status
             | LibraryAction::Stats
             | LibraryAction::History { .. }
             | LibraryAction::Probe { .. }
             | LibraryAction::Duplicates { .. }
-            | LibraryAction::Relocate { .. }
-            | LibraryAction::RelocationStatus { .. },
+            | LibraryAction::Relocate { .. },
         ) => bail!("This action is not a playback command"),
     };
     Ok((command, wait))
@@ -963,13 +821,6 @@ mod other_tracks_tests {
             translate(action(&["library", "other", "check", "--force", "--wait"]))?;
         assert!(matches!(command, Command::CheckOtherTracks { force: true }));
         assert!(wait);
-        let (command, wait) = translate(action(&["library", "cancel-scan", "17"]))?;
-        assert!(matches!(command, Command::CancelScan { id: 17 }));
-        assert!(!wait);
-        assert!(matches!(
-            action(&["library", "scan-status", "17"]),
-            Action::Library(LibraryAction::ScanStatus { id: 17 }),
-        ));
         Ok(())
     }
 

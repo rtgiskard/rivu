@@ -125,8 +125,8 @@ pub(super) fn list_library(
     data_dir: &Path,
     json: bool,
     query: Option<String>,
-    favorites: bool,
-    missing: bool,
+    favorite: Option<bool>,
+    missing: Option<bool>,
 ) -> Result<()> {
     let mut session = rivu_client::client_session(data_dir)?;
     let _ = session.get_state(StateSections::default())?;
@@ -141,8 +141,8 @@ pub(super) fn list_library(
     loop {
         let response = session.query(Query::TrackBatch {
             query: query.clone(),
-            favorite: favorites.then_some(true),
-            missing: missing.then_some(true),
+            favorite,
+            missing,
             after,
             limit: MAX_QUERY_ROWS,
             expected,
@@ -267,7 +267,7 @@ pub(super) fn list_playlists(i18n: &Localizer, data_dir: &Path, json: bool) -> R
     if json {
         write!(output, "[")?;
     }
-    let mut first_playlist = true;
+    let mut first = true;
     loop {
         let response = session.query(Query::PlaylistSummaryBatch {
             query: None,
@@ -282,16 +282,11 @@ pub(super) fn list_playlists(i18n: &Localizer, data_dir: &Path, json: bool) -> R
         };
         for playlist in &batch.rows {
             if json {
-                if !first_playlist {
+                if !first {
                     write!(output, ",")?;
                 }
-                write!(output, "{{\"id\":{},\"name\":", playlist.id)?;
-                serde_json::to_writer(&mut output, &playlist.name)?;
-                write!(
-                    output,
-                    ",\"entry_count\":{},\"entries\":[",
-                    playlist.entry_count
-                )?;
+                serde_json::to_writer(&mut output, playlist)?;
+                first = false;
             } else {
                 writeln!(
                     output,
@@ -306,61 +301,86 @@ pub(super) fn list_playlists(i18n: &Localizer, data_dir: &Path, json: bool) -> R
                     )
                 )?;
             }
-            let mut entry_after = None;
-            // Catalog validity spans the listing; entry order is scoped to this
-            // playlist and captured by its first batch.
-            let mut entry_expected = expected;
-            let mut entry_index = 0usize;
-            let mut first_entry = true;
-            loop {
-                let response = session.query(Query::PlaylistEntryBatch {
-                    query: None,
-                    playlist_id: playlist.id,
-                    after: entry_after,
-                    limit: MAX_QUERY_ROWS,
-                    expected: entry_expected,
-                })?;
-                entry_expected = Some(response.revisions);
-                let view = listing_result(i18n, response.result)?;
-                let ViewResponse::PlaylistEntryBatch(entries) = view else {
-                    bail!("Playlist entries query returned an unexpected response");
-                };
-                for entry in &entries.rows {
-                    if json {
-                        if !first_entry {
-                            write!(output, ",")?;
-                        }
-                        serde_json::to_writer(&mut output, entry)?;
-                        first_entry = false;
-                    } else {
-                        writeln!(
-                            output,
-                            "  {}",
-                            i18n.format(
-                                "core-playlist-entry",
-                                &[
-                                    ("index", entry_index.to_string().into()),
-                                    ("entry", entry.id.to_string().into()),
-                                    ("track", entry.track_id.to_string().into()),
-                                ]
-                            )
-                        )?;
-                    }
-                    entry_index += 1;
-                }
-                let Some(next) = entries.next else {
-                    break;
-                };
-                entry_after = Some(next);
-            }
-            if json {
-                write!(output, "]}}")?;
-                first_playlist = false;
-            }
+        }
+        if batch.rows.is_empty() && batch.next.is_some() {
+            bail!("Playlist query returned an empty batch with a continuation cursor");
         }
         let Some(next) = batch.next else {
             break;
         };
+        if after == Some(next) {
+            bail!("Playlist query returned a non-progressing cursor");
+        }
+        after = Some(next);
+    }
+    if json {
+        writeln!(output, "]")?;
+    }
+    Ok(())
+}
+
+pub(super) fn show_playlist(
+    i18n: &Localizer,
+    data_dir: &Path,
+    playlist_id: i64,
+    json: bool,
+) -> Result<()> {
+    let mut session = rivu_client::client_session(data_dir)?;
+    let _ = session.get_state(StateSections::default())?;
+    let mut expected = None;
+    let mut after = None;
+    let stdout = io::stdout();
+    let mut output = stdout.lock();
+    if json {
+        write!(output, "[")?;
+    }
+    let mut index = 0usize;
+    let mut first = true;
+    loop {
+        let response = session.query(Query::PlaylistEntryBatch {
+            query: None,
+            playlist_id,
+            after,
+            limit: MAX_QUERY_ROWS,
+            expected,
+        })?;
+        expected.get_or_insert(response.revisions);
+        let view = listing_result(i18n, response.result)?;
+        let ViewResponse::PlaylistEntryBatch(batch) = view else {
+            bail!("Playlist entries query returned an unexpected response");
+        };
+        for entry in &batch.rows {
+            if json {
+                if !first {
+                    write!(output, ",")?;
+                }
+                serde_json::to_writer(&mut output, entry)?;
+                first = false;
+            } else {
+                writeln!(
+                    output,
+                    "{}",
+                    i18n.format(
+                        "core-playlist-entry",
+                        &[
+                            ("index", index.to_string().into()),
+                            ("entry", entry.id.to_string().into()),
+                            ("track", entry.track_id.to_string().into()),
+                        ]
+                    )
+                )?;
+            }
+            index += 1;
+        }
+        if batch.rows.is_empty() && batch.next.is_some() {
+            bail!("Playlist entries query returned an empty batch with a continuation cursor");
+        }
+        let Some(next) = batch.next else {
+            break;
+        };
+        if after == Some(next) {
+            bail!("Playlist entries query returned a non-progressing cursor");
+        }
         after = Some(next);
     }
     if json {
@@ -377,24 +397,42 @@ fn listing_result<T>(i18n: &Localizer, result: std::result::Result<T, QueryError
     }
 }
 
-pub(super) fn command_ack(
-    result: Result<rivu_protocol::response::Ack>,
+pub(super) fn write_error(
+    output: &mut impl Write,
+    error: &anyhow::Error,
     json: bool,
-) -> Result<rivu_protocol::response::Ack> {
-    if json
-        && let Err(error) = &result
-        && let Some(failure) = error.downcast_ref::<rivu_client::CommandFailure>()
-    {
-        // Transport evidence has no authoritative Core revision or task IDs.
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "status": failure.status,
-                "error": format!("{error:#}"),
-            }))?
-        );
+) -> Result<()> {
+    if json {
+        let mut value = serde_json::json!({"error": format!("{error:#}")});
+        if let Some(failure) = error.downcast_ref::<rivu_client::CommandFailure>() {
+            value["status"] = serde_json::to_value(failure.status)?;
+        }
+        serde_json::to_writer(&mut *output, &value)?;
+        writeln!(output)?;
+    } else {
+        writeln!(output, "rivu: {:#}", Terminal(error))?;
     }
-    result
+    Ok(())
+}
+
+pub(super) fn show_history(
+    output: &mut impl Write,
+    entries: &[rivu_protocol::model::HistoryEntry],
+    limit: usize,
+) -> Result<()> {
+    serde_json::to_writer(&mut *output, &entries[..entries.len().min(limit)])?;
+    writeln!(output)?;
+    Ok(())
+}
+
+pub(super) fn show_duplicates(output: &mut impl Write, view: &ViewResponse) -> Result<()> {
+    match view {
+        ViewResponse::DuplicateGroups(page) => serde_json::to_writer(&mut *output, page)?,
+        ViewResponse::DuplicateMembers(page) => serde_json::to_writer(&mut *output, page)?,
+        _ => bail!("Duplicate query returned an unexpected response"),
+    }
+    writeln!(output)?;
+    Ok(())
 }
 
 pub(super) fn show_ack(
@@ -536,7 +574,7 @@ pub(super) fn show_scan(i18n: &Localizer, progress: &rivu_protocol::model::ScanP
 
 #[cfg(test)]
 mod tests {
-    use super::Terminal;
+    use super::{Terminal, show_history, write_error};
     use std::path::Path;
 
     #[test]
@@ -572,9 +610,55 @@ mod tests {
     #[test]
     fn terminal_display_preserves_alternate_error_chain_and_escapes_details() {
         let error = anyhow::anyhow!("bad path 音楽/\x1b[31m\n.flac").context("load\tfailed");
+        let mut output = Vec::new();
+        write_error(&mut output, &error, false).unwrap();
         assert_eq!(
-            format!("rivu: {:#}\n", Terminal(&error)),
+            String::from_utf8(output).unwrap(),
             "rivu: load\\tfailed: bad path 音楽/\\x1b[31m\\n.flac\n"
         );
+    }
+
+    #[test]
+    fn json_runtime_errors_preserve_transport_certainty_without_fabricated_fields() {
+        use rivu_protocol::response::AckStatus;
+        for status in [AckStatus::Unknown, AckStatus::NotAdmitted] {
+            let error = anyhow::Error::new(rivu_client::CommandFailure { status })
+                .context("send\tfailed\n");
+            let mut output = Vec::new();
+            write_error(&mut output, &error, true).unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+            assert_eq!(value["status"], serde_json::to_value(status).unwrap());
+            assert_eq!(value["error"], format!("{error:#}"));
+            assert_eq!(value.as_object().unwrap().len(), 2);
+            assert_eq!(output.iter().filter(|byte| **byte == b'\n').count(), 1);
+        }
+        let mut output = Vec::new();
+        write_error(&mut output, &anyhow::anyhow!("query failed"), true).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(value, serde_json::json!({"error": "query failed"}));
+    }
+
+    #[test]
+    fn history_json_is_a_bounded_array_in_retained_order() {
+        use rivu_protocol::model::HistoryEntry;
+        let entries = (0..3)
+            .map(|id| HistoryEntry {
+                track_id: id,
+                title: format!("Track {id}"),
+                play_count: 1,
+                played_at: 100 - id,
+                favorite: false,
+            })
+            .collect::<Vec<_>>();
+        for (limit, count) in [(0, 0), (2, 2), (usize::MAX, 3)] {
+            let mut output = Vec::new();
+            show_history(&mut output, &entries, limit).unwrap();
+            let rows: Vec<HistoryEntry> = serde_json::from_slice(&output).unwrap();
+            assert_eq!(rows.len(), count);
+            for (index, row) in rows.iter().enumerate() {
+                assert_eq!(row.track_id, entries[index].track_id);
+                assert_eq!(row.played_at, entries[index].played_at);
+            }
+        }
     }
 }

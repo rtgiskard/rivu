@@ -48,6 +48,10 @@ serialization pass. The GUI still calls Core directly,
 and GUI-only projections and admitted processing-audition state remain in the
 application.
 
+CLI task queries, cancellation, terminal waiting, and task rendering share
+link:../src/cli/tasks.rs[one task-handling module] for scans, relocation, and audio
+processing. Processing settings reads and command translation remain separate.
+
 === Consumer and application lifetimes
 
 The GUI, tray, and MPRIS service use `CoreHandle` for business commands and

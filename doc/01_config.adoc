@@ -75,7 +75,7 @@ since the last successful save. Database and layout persistence are independent.
 
 Apply rejects a candidate that cannot be saved and retains the settings draft;
 earlier runtime changes remain active. Saving errors are logged and exposed in
-library status and the desktop error notice. A successful retry clears its own
+`rivu status` and the desktop error notice. A successful retry clears its own
 error, not an unrelated error reported later. Exit makes one final save attempt;
 a failure is reported but does not prevent exit. Writes atomically replace the
 file without forcing a storage flush, so success is not a power-loss guarantee.
