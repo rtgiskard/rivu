@@ -40,6 +40,7 @@ CORE_SECONDS = 24
 CONTEXT_SECONDS = 8
 MAX_SECONDS = 4 * 60 * 60
 MAX_OUTPUT_BYTES = 8 * 1024**3
+MAX_REPORT_BYTES = 8 * 1024**2
 RUNTIME_FILES = ("worker.py", "mossformer.py", "nsnet2.py", "request.schema.json", "event.schema.json")
 
 class WorkerError(Exception):
@@ -361,7 +362,14 @@ def process(request, emit):
                     "block_seconds":block_times,"peak_rss_kib":resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
                     "output_peaks":peaks,"input_rms":math.sqrt(input_energy/(info.frames*info.channels)),
                     "target_rms":math.sqrt(output_energy/(info.frames*info.channels))}}
-        (destination / "result.json").write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
+        with (destination / "result.json").open("wb") as output:
+            report_bytes = 1  # Final newline is included in the disk allowance.
+            for text in json.JSONEncoder(indent=2, allow_nan=False).iterencode(report):
+                chunk = text.encode("utf-8")
+                report_bytes += len(chunk)
+                require(report_bytes <= MAX_REPORT_BYTES, "report_capacity", "result report exceeds 8 MiB")
+                output.write(chunk)
+            output.write(b"\n")
         emit("complete", outputs={stem: stem + ".wav" for stem in stems},
              sample_rate=info.samplerate, channels=info.channels, frames=info.frames,
              model={"id":manifest["id"], "sha256":report["model"]["sha256"]})

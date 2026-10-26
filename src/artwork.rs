@@ -525,7 +525,7 @@ pub(crate) mod tests {
     use std::fs::File;
 
     fn assert_budget_audio(path: &Path) {
-        use rivu_audio::{ProbeBackend, render_source};
+        use rivu_audio::{ProbeBackend, SourceRenderer};
         use rivu_format::media::DecoderHint;
         use std::sync::atomic::AtomicBool;
 
@@ -534,15 +534,16 @@ pub(crate) mod tests {
         assert_eq!(details.info.sample_rate, 8_000);
         let directory = tempfile::tempdir().unwrap();
         let output = directory.path().join("decoded.wav");
-        let rendered = render_source(
+        let rendered = SourceRenderer::open(
             path,
             None,
             DecoderHint::Native,
             2,
             false,
-            &output,
             &AtomicBool::new(false),
         )
+        .unwrap()
+        .render(&output, u64::MAX, &AtomicBool::new(false))
         .unwrap();
         assert_eq!(rendered.frames, 1);
         let samples = hound::WavReader::open(output)

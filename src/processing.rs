@@ -469,20 +469,40 @@ fn run(
     cancel: &AtomicBool,
     tx: &Sender<Event>,
 ) -> Result<ProcessingResult> {
+    let renderer = audio::SourceRenderer::open(
+        &track.path,
+        track.cue.as_ref().map(|cue| audio::PlaybackRange {
+            start_seconds: cue.start_seconds(),
+            end_seconds: cue.end_seconds(),
+        }),
+        track.decoder_hint,
+        config.media_read_buffer_mb,
+        config.ffmpeg_enabled,
+        cancel,
+    )?;
+    let native = renderer.format().clone();
+    stamp.validate_rendered(native.source_identity)?;
+    ensure!(
+        status.operation != ProcessingOperation::Separate || native.channels == 2,
+        "Vocal separation requires a stereo source; no implicit channel conversion is performed"
+    );
+    ensure!(
+        status.operation != ProcessingOperation::Speech || (1..=2).contains(&native.channels),
+        "Speech enhancement supports mono/stereo only"
+    );
+    status.sample_rate = Some(native.sample_rate);
+    status.channels = Some(native.channels);
+    if status.operation == ProcessingOperation::Denoise {
+        config
+            .denoise
+            .validate_for_format(native.sample_rate, usize::from(native.channels))?;
+    }
     let mut runner = None;
     if let Some(mode) = status
         .settings
         .graph_mode
         .filter(|mode| *mode != GraphExecutionMode::Offline)
     {
-        let native = audio::probe_with_cancel(&track.path, config.ffmpeg_enabled, cancel)?;
-        check_cancel(cancel)?;
-        ensure!(
-            SourceStamp::read(&track.path)? == stamp,
-            "Source changed during graph admission"
-        );
-        status.sample_rate = Some(native.sample_rate);
-        status.channels = Some(native.channels);
         let snapshot = status
             .settings
             .graph
@@ -541,31 +561,13 @@ fn run(
     }
     report(tx, status.id, ProcessingPhase::Rendering, 0, None);
     let input = directory.path().join("input.wav");
-    let info = audio::render_source(
-        &track.path,
-        track.cue.as_ref().map(|cue| audio::PlaybackRange {
-            start_seconds: cue.start_seconds(),
-            end_seconds: cue.end_seconds(),
-        }),
-        track.decoder_hint,
-        config.media_read_buffer_mb,
-        config.ffmpeg_enabled,
-        &input,
-        cancel,
-    )?;
+    let render_budget = if status.operation == ProcessingOperation::Graph {
+        graph::render_budget(&status, &native)?
+    } else {
+        MAX_OUTPUT_BYTES
+    };
+    let info = renderer.render(&input, render_budget, cancel)?;
     stamp.validate_rendered(info.source_identity)?;
-    ensure!(
-        fs::metadata(&input)?.len() <= MAX_OUTPUT_BYTES,
-        "Rendered source exceeds 16 GiB processing limit"
-    );
-    ensure!(
-        status.operation != ProcessingOperation::Separate || info.channels == 2,
-        "Vocal separation requires a stereo source; no implicit channel conversion is performed"
-    );
-    ensure!(
-        status.operation != ProcessingOperation::Speech || (1..=2).contains(&info.channels),
-        "Speech enhancement supports mono/stereo only"
-    );
     status.sample_rate = Some(info.sample_rate);
     status.channels = Some(info.channels);
     status.frames = Some(info.frames);
@@ -647,24 +649,30 @@ fn run(
         Some(info.frames),
     );
     let outputs = if status.operation == ProcessingOperation::Denoise {
-        let destination = directory.path().join("denoised.wav");
-        classical(
-            &input,
-            &destination,
-            &config.denoise,
-            status.settings.profile,
-            0,
-            cancel,
-            |n| {
-                report(
-                    tx,
-                    status.id,
-                    ProcessingPhase::Processing,
-                    n,
-                    Some(info.frames),
-                )
-            },
-        )?;
+        let destination = if graph::denoise_bypassed(&config.denoise) {
+            prepare_classical(&input, &config.denoise, status.settings.profile, 0, cancel)?;
+            input.clone()
+        } else {
+            let destination = directory.path().join("denoised.wav");
+            classical(
+                &input,
+                &destination,
+                &config.denoise,
+                status.settings.profile,
+                0,
+                cancel,
+                |n| {
+                    report(
+                        tx,
+                        status.id,
+                        ProcessingPhase::Processing,
+                        n,
+                        Some(info.frames),
+                    )
+                },
+            )?;
+            destination
+        };
         ProcessingOutputs {
             denoised: Some(destination),
             ..Default::default()
@@ -777,15 +785,13 @@ fn validate_output(
     }
     Ok(())
 }
-fn classical(
+fn prepare_classical(
     input: &Path,
-    output: &Path,
     config: &rivu_dsp::denoise::DenoiseConfig,
     selection: Option<NoiseSelection>,
     selection_offset_frames: u64,
     cancel: &AtomicBool,
-    mut progress: impl FnMut(u64),
-) -> Result<u64> {
+) -> Result<(rivu_dsp::denoise::Denoiser, hound::WavSpec)> {
     use rivu_dsp::denoise::{DenoiseMode, Denoiser, ProfileCollector};
     let reader = hound::WavReader::open(input)?;
     let spec = reader.spec();
@@ -830,12 +836,27 @@ fn classical(
     } else {
         None
     };
-    let mut denoiser = Denoiser::new(
+    let denoiser = Denoiser::new(
         spec.sample_rate,
         usize::from(spec.channels),
         config.clone(),
         profile,
     )?;
+    Ok((denoiser, spec))
+}
+
+fn classical(
+    input: &Path,
+    output: &Path,
+    config: &rivu_dsp::denoise::DenoiseConfig,
+    selection: Option<NoiseSelection>,
+    selection_offset_frames: u64,
+    cancel: &AtomicBool,
+    mut progress: impl FnMut(u64),
+) -> Result<u64> {
+    let (mut denoiser, spec) =
+        prepare_classical(input, config, selection, selection_offset_frames, cancel)?;
+    let mut cancelled = || cancel.load(Ordering::Acquire);
     let latency = denoiser.lookahead_frames() as u64;
     let file = fs::OpenOptions::new()
         .write(true)
@@ -903,7 +924,9 @@ fn neural(
         parameters["post_filter"] = serde_json::Value::Bool(true);
     }
     let request = serde_json::json!({"version":1,"task_id":task_id,"operation":if operation==ProcessingOperation::Speech {"speech"}else{"separate"},"input_path":input,"output_dir":output_dir,"model_manifest":manifest,"device":if neural.device==rivu_format::config::NeuralDevice::Cpu {"cpu"}else{"cuda"},"threads":neural.threads,"parameters":parameters});
-    fs::write(&request_path, serde_json::to_vec(&request)?)?;
+    let request = serde_json::to_vec(&request)?;
+    ensure!(request.len() <= 1024 * 1024, "Neural request exceeds 1 MiB");
+    fs::write(&request_path, request)?;
     let stderr = fs::OpenOptions::new()
         .write(true)
         .create_new(true)

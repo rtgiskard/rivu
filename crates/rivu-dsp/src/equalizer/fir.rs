@@ -15,7 +15,8 @@ use rustfft::{Fft, FftPlanner, num_complex::Complex};
 use super::config::{EqualizerConfig, MAX_CHANNELS, validate_taps};
 use anyhow::{Result, ensure};
 
-const PARTITION: usize = 256;
+/// Causal block buffering included in FIR latency and tail lengths.
+pub const PARTITION: usize = 256;
 const FFT_SIZE: usize = PARTITION * 2;
 
 pub struct FirEqualizer {

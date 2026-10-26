@@ -297,6 +297,26 @@ class OutputContainerTests(unittest.TestCase):
                 for metric in ("load_seconds", "inference_seconds", "resampling_seconds"):
                     self.assertEqual(report["metrics"][metric], 0)
 
+    def test_report_capacity_failure_removes_completed_pcm(self):
+        import numpy as np
+        import soundfile as sf
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            bundle_fixture(base)
+            source = base / "input.wav"
+            sf.write(source, np.array([0.25, -0.25], dtype="float32"), 8000, subtype="FLOAT")
+            destination = base / "result"
+            request = {**ProtocolTests().request(), "input_path":str(source),
+                       "output_dir":str(destination), "model_manifest":str(base / "manifest.json"),
+                       "parameters":{"wet_mix":0}}
+            events = []
+            with patch("worker.MAX_REPORT_BYTES", 1), patch("worker.deny_network"), patch.dict(os.environ):
+                with self.assertRaises(WorkerError) as error:
+                    process(request, lambda kind, **fields: events.append((kind, fields)))
+            self.assertEqual(error.exception.code, "report_capacity")
+            self.assertFalse(destination.exists())
+            self.assertNotIn("complete", [kind for kind, _ in events])
+
     def test_dry_speech_still_rejects_model_controls_artifacts_and_bad_samples(self):
         import numpy as np
         import soundfile as sf

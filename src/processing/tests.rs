@@ -86,6 +86,216 @@ fn fixture() -> (tempfile::TempDir, Service, Track, Arc<Config>) {
     (directory, service, track, config)
 }
 
+fn graph_config(kinds: Vec<GraphNodeKind>) -> Arc<Config> {
+    let mut config = Config::default();
+    let graph = &mut config.processing_graph;
+    graph.edges.clear();
+    let mut from = GraphPort { node: 1, port: 0 };
+    for (index, kind) in kinds.into_iter().enumerate() {
+        let id = index as u64 + 3;
+        graph.nodes.push(GraphNode {
+            id,
+            kind,
+            position: [0.0; 2],
+        });
+        let to = GraphPort { node: id, port: 0 };
+        graph.edges.push(GraphEdge { from, to });
+        from = to;
+        graph.next_id = id + 1;
+    }
+    graph.edges.push(GraphEdge {
+        from,
+        to: GraphPort { node: 2, port: 0 },
+    });
+    Arc::new(config)
+}
+
+fn completed_graph(
+    service: &mut Service,
+    track: &Track,
+    config: Arc<Config>,
+) -> Result<ProcessingResult> {
+    service.start_graph(
+        track.clone(),
+        config,
+        GraphRequest {
+            target: GraphPort { node: 2, port: 0 },
+            mode: GraphExecutionMode::Offline,
+            export_path: None,
+            cached_output: None,
+        },
+    )?;
+    loop {
+        match next_event(service) {
+            Event::Progress { .. } | Event::GraphNode { .. } => {}
+            Event::Finished { result, .. } => {
+                service.active.take().unwrap().worker.join().unwrap();
+                return result.map(|result| *result);
+            }
+            _ => panic!("unexpected graph event"),
+        }
+    }
+}
+
+#[test]
+fn offline_bypass_preserves_shared_causal_pcm_and_publication() {
+    let (_directory, mut service, track, _) = fixture();
+    let config = graph_config(vec![
+        GraphNodeKind::Equalizer {
+            config: rivu_dsp::equalizer::config::EqualizerConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            implementation: EqImplementation::LinearPhase { taps: 65 },
+        },
+        GraphNodeKind::Equalizer {
+            config: Default::default(),
+            implementation: EqImplementation::Iir,
+        },
+        GraphNodeKind::Denoise {
+            config: Default::default(),
+            profile: None,
+        },
+    ]);
+    let result = completed_graph(&mut service, &track, config).unwrap();
+    let output = |node| {
+        result
+            .status
+            .graph_outputs
+            .iter()
+            .find(|output| output.port.node == node)
+            .unwrap()
+    };
+    let processed = output(3);
+    let context = processed.context.as_ref().unwrap();
+    assert!(context.start_frame < 0);
+    assert_eq!(
+        hound::WavReader::open(&processed.path).unwrap().duration(),
+        PCM.len() as u32
+    );
+    for node in [4, 5, 2] {
+        assert_eq!(output(node).path, processed.path);
+        assert_eq!(output(node).context.as_ref().unwrap().path, context.path);
+        assert_eq!(
+            output(node).context.as_ref().unwrap().start_frame,
+            context.start_frame
+        );
+    }
+    assert!(!result.directory.path().join("node-4").exists());
+    assert!(!result.directory.path().join("node-5").exists());
+}
+
+#[test]
+fn offline_off_denoise_keeps_hum_and_impulse_active_but_wet_zero_shares_input() {
+    for mode in 0..3 {
+        let (_directory, mut service, track, _) = fixture();
+        let mut denoise = rivu_dsp::denoise::DenoiseConfig::default();
+        match mode {
+            0 => denoise.hum.enabled = true,
+            1 => denoise.impulse.enabled = true,
+            _ => {
+                denoise.hum.enabled = true;
+                denoise.impulse.enabled = true;
+                denoise.wet = 0.0;
+            }
+        }
+        let result = completed_graph(
+            &mut service,
+            &track,
+            graph_config(vec![GraphNodeKind::Denoise {
+                config: denoise,
+                profile: None,
+            }]),
+        )
+        .unwrap();
+        let source = result
+            .status
+            .graph_outputs
+            .iter()
+            .find(|output| output.port.node == 1)
+            .unwrap();
+        let denoised = result
+            .status
+            .graph_outputs
+            .iter()
+            .find(|output| output.port.node == 3)
+            .unwrap();
+        assert_eq!(denoised.path == source.path, mode == 2);
+        assert_eq!(result.directory.path().join("node-3").exists(), mode != 2);
+    }
+}
+
+#[test]
+fn offline_wet_zero_profile_still_rejects_out_of_source_selection() {
+    let (_directory, mut service, track, _) = fixture();
+    let config = graph_config(vec![GraphNodeKind::Denoise {
+        config: rivu_dsp::denoise::DenoiseConfig {
+            mode: rivu_dsp::denoise::DenoiseMode::Profile,
+            wet: 0.0,
+            fft_size: 256,
+            ..Default::default()
+        },
+        profile: Some(NoiseSelection {
+            start_seconds: 0.0,
+            end_seconds: 1.0,
+        }),
+    }]);
+    let error = completed_graph(&mut service, &track, config).err().unwrap();
+    assert!(format!("{error:#}").contains("outside the source"));
+}
+
+#[test]
+fn neural_channel_rejection_uses_actual_decoder_not_stale_track_fields() {
+    let (directory, mut service, mut track, mut config) = fixture();
+    let manifest = directory.path().join("manifest.json");
+    fs::write(&manifest, b"{}").unwrap();
+    let settings = Arc::make_mut(&mut config);
+    settings.neural.speech_manifest = Some(manifest.clone());
+    settings.neural.separation_manifest = Some(manifest.clone());
+    // Format rejection must precede interpreting either admitted file.
+    settings.neural.worker = manifest;
+    let mut writer = hound::WavWriter::create(
+        &track.path,
+        hound::WavSpec {
+            channels: 3,
+            sample_rate: 8000,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        },
+    )
+    .unwrap();
+    for _ in 0..16 {
+        for sample in [0.1_f32, 0.2, 0.3] {
+            writer.write_sample(sample).unwrap();
+        }
+    }
+    writer.finalize().unwrap();
+    track.channels = 2;
+    for operation in [ProcessingOperation::Speech, ProcessingOperation::Separate] {
+        service
+            .start(track.clone(), config.clone(), operation, None)
+            .unwrap();
+        loop {
+            if let Event::Finished { result, .. } = next_event(&mut service) {
+                service.active.take().unwrap().worker.join().unwrap();
+                let error = format!("{:#}", result.err().unwrap());
+                assert!(error.contains("mono/stereo") || error.contains("stereo source"));
+                break;
+            }
+        }
+    }
+    let error = completed_graph(
+        &mut service,
+        &track,
+        graph_config(vec![GraphNodeKind::Speech {
+            config: Default::default(),
+        }]),
+    )
+    .err()
+    .unwrap();
+    assert!(format!("{error:#}").contains("source channel format is unsupported"));
+}
+
 fn block_reclamation(service: &mut Service, track: &Track, config: &Arc<Config>) {
     let result = completed(service, track, config);
     for _ in 0..service.sender.capacity().unwrap() {

@@ -130,7 +130,7 @@ mod worker;
 use channels::Channel;
 pub use graph::GraphRunner;
 pub use output::devices;
-pub use render::{RenderInfo, render_source};
+pub use render::{RenderFormat, RenderInfo, SourceRenderer};
 pub use source::{
     ProbeBackend, ProbeResult, SourceIdentity, metadata_budget, probe, probe_details, probe_file,
     probe_with_cancel,

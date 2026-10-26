@@ -853,13 +853,18 @@ fn rendered_descriptor_rejects_symlink_target_round_trip() {
     let admitted = crate::processing::SourceStamp::read(&alias).unwrap();
     std::fs::remove_file(&alias).unwrap();
     symlink(&alternate, &alias).unwrap();
-    let rendered = audio::render_source(
+    let rendered = audio::SourceRenderer::open(
         &alias,
         None,
         DecoderHint::Native,
         1,
         false,
+        &AtomicBool::new(false),
+    )
+    .unwrap()
+    .render(
         &directory.path().join("render.wav"),
+        u64::MAX,
         &AtomicBool::new(false),
     )
     .unwrap();

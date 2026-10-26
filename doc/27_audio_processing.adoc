@@ -481,15 +481,27 @@ preserving retained outputs until playback has retired; final service destructio
 removes those temporary results, never original media or exported files.
 
 Input files are bounded to 8 GiB; source rendering has the float WAV RIFF limit
-(under 4 GiB). Offline/hybrid graph execution additionally limits its per-run PCM
-cache to 2 GiB, including intermediate outputs and causal guards. Neural jobs
-require nonempty input of at most four hours and total stem output at most 8 GiB;
-the worker also checks free space for its predicted outputs plus 256 MiB. These
-checks do not reserve disk space or supersede the retained-cache limit. The
-limits apply at different stages and are not a combined scratch or RAM budget.
-Leave room for rendered input, stems, graph intermediates and an optional remix;
-an input within the worker's duration/size limits can still exceed graph or
-retention capacity.
+(under 4 GiB). Admission opens the selected decoder once and validates its actual
+format and source identity before creating PCM output. Known duration is checked
+against the render allowance up front; unknown or understated duration is still
+bounded while writing, and failure removes partial output.
+
+Offline/hybrid graph execution limits its per-run cache to 2 GiB. Admission counts
+unique PCM files, propagated causal guards, public crops and transient denoise
+copies, plus each neural node's request (1 MiB), report (8 MiB) and retained stderr
+(64 KiB) allowances. Disabled EQ and true denoise bypass share their input PCM and
+timeline instead of writing another file. Off denoise with active hum/impulse
+processing is not a bypass; wet-zero Profile mode still validates/captures its
+selected noise range.
+
+Neural jobs require nonempty input of at most four hours and total stem output at
+most 8 GiB; the worker also checks free space for its predicted outputs plus
+256 MiB. Its report is written within the 8 MiB allowance; overflow fails and
+removes that task's outputs. These checks do not reserve disk space or supersede
+the retained-cache limit. The limits apply at different stages and are not a
+combined scratch or RAM budget. Leave room for rendered input, stems, graph
+intermediates and an optional remix; an input within worker duration/size limits
+can still exceed graph or retention capacity.
 The neural worker chooses RIFF or RF64 independently for each output stem;
 combined stem size does not force individually small files into RF64. Application
 rendering and retained-cache limits still apply.
