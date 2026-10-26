@@ -58,6 +58,26 @@ fn scan_paths(
     )
 }
 
+async fn scan_uncached_paths(
+    workers: &crate::execution::BlockingPool,
+    paths: &[PathBuf],
+    roots: &[PathBuf],
+) -> Result<ScanResult> {
+    super::scan_paths_with_cues(
+        workers,
+        paths,
+        |paths| std::future::ready(Ok(vec![None; paths.len()])),
+        super::ScanSettings {
+            ffmpeg_enabled: false,
+            library_roots: roots,
+            max_depth: crate::config::Config::default().scan_max_depth,
+        },
+        (&ScanCancellation::default(), None),
+        |_, _, _, _, _| {},
+    )
+    .await
+}
+
 #[test]
 fn source_lookup_batches_are_bounded_and_cover_only_encountered_sources() -> Result<()> {
     let directory = tempfile::tempdir()?;
@@ -89,7 +109,7 @@ fn source_lookup_batches_are_bounded_and_cover_only_encountered_sources() -> Res
         |_, _, _, _, _| {},
     )?;
     assert!(result.errors.is_empty(), "{:?}", result.errors);
-    assert_eq!(result.records.len(), count);
+    assert_eq!(result.track_count(), count);
     assert_eq!(seen.len(), count);
     assert_eq!(
         batches,
@@ -141,14 +161,20 @@ fn cue_lookup_batches_share_sources_across_sheet_batches() -> Result<()> {
     assert!(result.errors.is_empty(), "{:?}", result.errors);
     assert_eq!(batches, [super::source::SOURCE_BATCH_SIZE, 1]);
     assert_eq!(seen.len(), count);
-    assert_eq!(result.records.len(), count + 1);
-    assert!(result.records.iter().all(|record| record.cue.is_some()));
-    assert_eq!(result.suppressed_sources.len(), count);
+    assert_eq!(result.track_count(), 2 * count + 1);
+    assert_eq!(
+        result
+            .tracks()
+            .filter(|record| record.cue.is_none())
+            .count(),
+        count
+    );
+    assert!(result.tracks().all(|record| record.duration_filter_exempt));
     Ok(())
 }
 
 #[test]
-fn duration_admission_uses_cue_segments_without_whole_source_fallback() -> Result<()> {
+fn successful_cue_sources_and_segments_bypass_duration_admission() -> Result<()> {
     for frames in [150, 225] {
         let directory = tempfile::tempdir()?;
         let root = directory.path().to_path_buf();
@@ -158,39 +184,132 @@ fn duration_admission_uses_cue_segments_without_whole_source_fallback() -> Resul
         two_track_sheet(&sheet)?;
         let store = crate::store::Store::open(Path::new(":memory:"))?;
         let mut result = scan_paths(std::slice::from_ref(&root), &[], false)?;
-        result.min_duration_secs = 2;
+        result.min_duration_secs = 10;
         assert!(result.errors.is_empty(), "{:?}", result.errors);
-        assert_eq!(result.records.len(), 2);
-        assert_eq!(result.suppressed_sources, std::slice::from_ref(&audio));
+        assert_eq!(result.track_count(), 3);
+        assert!(result.tracks().all(|track| track.duration_filter_exempt));
         let impacts = store.apply_scan(&result)?;
-        let skipped = if frames == 150 { 2 } else { 1 };
-        assert_eq!(impacts.skipped_short_tracks, skipped);
-        assert_eq!(store.track_count()?, if frames == 150 { 0 } else { 1 });
-        assert!(store.track_id_for_source(&audio, None)?.is_none());
-        assert!(store.track_id_for_source(&sheet, Some(1))?.is_none());
-        let second = store.track_id_for_source(&sheet, Some(2))?;
-        if frames == 225 {
-            let id = second.context("Boundary-duration CUE track must be admitted")?;
-            assert_eq!(store.track(id)?.unwrap().duration, Some(2.0));
-            // Fresh probing models a forced rescan. The sheet still establishes
-            // every identity even when the raised threshold rejects all new ones.
-            fs::write(
-                &sheet,
-                "TITLE \"Refreshed album\"\nFILE \"audio.wav\" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n  TRACK 02 AUDIO\n    TITLE \"Refreshed second\"\n    INDEX 01 00:01:00\n",
-            )?;
-            let mut rescanned = scan_paths(std::slice::from_ref(&root), &[], false)?;
-            rescanned.min_duration_secs = 10;
-            let impacts = store.apply_scan(&rescanned)?;
-            assert_eq!(impacts.skipped_short_tracks, 1);
-            assert_eq!(store.track_id_for_source(&sheet, Some(2))?, Some(id));
-            let track = store.track(id)?.unwrap();
-            assert!(!track.missing);
-            assert_eq!(track.title, "Refreshed second");
-            assert_eq!(track.album, "Refreshed album");
-            assert_eq!(track.duration, Some(2.0));
+        assert_eq!(impacts.skipped_short_tracks, 0);
+        assert_eq!(store.track_count()?, 3);
+        let whole = store
+            .track_id_for_identity(crate::store::TrackIdentity::File(&audio))?
+            .context("CUE-referenced whole source must be admitted")?;
+        let first = store
+            .track_id_for_identity(crate::store::TrackIdentity::Cue(&sheet, 1))?
+            .context("Short CUE segment must be admitted")?;
+        let second = store
+            .track_id_for_identity(crate::store::TrackIdentity::Cue(&sheet, 2))?
+            .context("Final CUE segment must be admitted")?;
+        assert_eq!(
+            store.track(whole)?.unwrap().duration,
+            Some(f64::from(frames) / 75.0)
+        );
+        assert_eq!(store.track(first)?.unwrap().duration, Some(1.0));
+        fs::write(
+            &sheet,
+            "TITLE \"Refreshed album\"\nFILE \"audio.wav\" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n  TRACK 02 AUDIO\n    TITLE \"Refreshed second\"\n    INDEX 01 00:01:00\n",
+        )?;
+        let mut rescanned = scan_paths(std::slice::from_ref(&root), &[], false)?;
+        rescanned.min_duration_secs = 20;
+        let impacts = store.apply_scan(&rescanned)?;
+        assert_eq!(impacts.skipped_short_tracks, 0);
+        assert_eq!(
+            store.track_id_for_identity(crate::store::TrackIdentity::Cue(&sheet, 2))?,
+            Some(second)
+        );
+        let track = store.track(second)?.unwrap();
+        assert!(!track.missing);
+        assert_eq!(track.title, "Refreshed second");
+        assert_eq!(track.album, "Refreshed album");
+        assert_eq!(track.duration, Some(f64::from(frames) / 75.0 - 1.0));
+    }
+    Ok(())
+}
+
+#[test]
+fn cue_requests_publish_only_successful_sources_outside_the_request_scope() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().to_path_buf();
+    let sheets = root.join("sheets");
+    let sources = root.join("sources");
+    fs::create_dir(&sheets)?;
+    fs::create_dir(&sources)?;
+    let valid_audio = sources.join("valid.wav");
+    let failed_audio = sources.join("failed.wav");
+    wav(&valid_audio, 75)?;
+    wav(&failed_audio, 75)?;
+    let valid_sheet = sheets.join("valid.cue");
+    fs::write(
+        &valid_sheet,
+        "FILE \"../sources/valid.wav\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\n",
+    )?;
+    let failed_sheet = sheets.join("failed.cue");
+    fs::write(
+        &failed_sheet,
+        "FILE \"../sources/failed.wav\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nINDEX 01 00:02:00\n",
+    )?;
+    for (direct_sheets, discover_failed_audio) in
+        [(false, false), (true, false), (false, true), (true, true)]
+    {
+        let mut paths = if direct_sheets {
+            vec![valid_sheet.clone(), failed_sheet.clone()]
         } else {
-            assert!(second.is_none());
+            vec![sheets.clone()]
+        };
+        if discover_failed_audio {
+            paths.push(failed_audio.clone());
         }
+        let mut result = super::scan_paths(
+            &paths,
+            |paths| Ok(vec![None; paths.len()]),
+            false,
+            std::slice::from_ref(&root),
+            1,
+            &ScanCancellation::default(),
+            |_, _, _, _, _| {},
+        )?;
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(
+            result.track_count(),
+            if discover_failed_audio { 3 } else { 2 }
+        );
+        assert_eq!(
+            result
+                .tracks()
+                .filter(|track| track.duration_filter_exempt)
+                .count(),
+            2
+        );
+        assert_eq!(
+            result
+                .tracks()
+                .filter(|track| track.source.path == failed_audio)
+                .count(),
+            usize::from(discover_failed_audio)
+        );
+        result.min_duration_secs = 10;
+        let store = crate::store::Store::open(Path::new(":memory:"))?;
+        let impacts = store.apply_scan(&result)?;
+        assert_eq!(
+            impacts.skipped_short_tracks,
+            usize::from(discover_failed_audio)
+        );
+        assert_eq!(store.track_count()?, 2);
+        assert!(
+            store
+                .track_id_for_identity(crate::store::TrackIdentity::File(&valid_audio))?
+                .is_some()
+        );
+        assert!(
+            store
+                .track_id_for_identity(crate::store::TrackIdentity::Cue(&valid_sheet, 1))?
+                .is_some()
+        );
+        assert!(
+            store
+                .track_id_for_identity(crate::store::TrackIdentity::File(&failed_audio))?
+                .is_none()
+        );
     }
     Ok(())
 }
@@ -227,6 +346,7 @@ fn new_and_retargeted_cue_sheets_reuse_known_sources_outside_request_scope() -> 
     let mut baseline = scan_paths(&[first, second], &[], false)?;
     assert!(baseline.errors.is_empty(), "{:?}", baseline.errors);
     for record in &mut baseline.records {
+        let record = std::sync::Arc::get_mut(record).expect("unshared ordinary source");
         record.media.artist = format!(
             "Cached {}",
             record.path.file_stem().unwrap().to_str().unwrap()
@@ -264,14 +384,17 @@ fn new_and_retargeted_cue_sheets_reuse_known_sources_outside_request_scope() -> 
             |_, _, _, _, _| {},
         )?;
         assert!(scan.errors.is_empty(), "{:?}", scan.errors);
-        assert_eq!(scan.records.len(), 1);
-        assert_eq!(scan.records[0].media.artist, format!("Cached {name}"));
+        assert_eq!(scan.track_count(), 2);
         assert_eq!(
-            scan.records[0].fingerprint,
+            scan.tracks().next().unwrap().media.artist,
+            format!("Cached {name}")
+        );
+        assert_eq!(
+            scan.tracks().next().unwrap().source.fingerprint,
             baseline
                 .records
                 .iter()
-                .find(|record| record.path == scan.records[0].path)
+                .find(|record| record.path == scan.tracks().next().unwrap().source.path)
                 .unwrap()
                 .fingerprint,
         );
@@ -435,7 +558,7 @@ fn async_source_lookup_releases_the_only_blocking_slot() -> Result<()> {
         owner?;
         let result = result?;
         assert!(result.errors.is_empty(), "{:?}", result.errors);
-        assert_eq!(result.records.len(), 1);
+        assert_eq!(result.track_count(), 1);
         assert_eq!(result.records[0].path, audio);
         anyhow::Ok(())
     })
@@ -582,7 +705,7 @@ fn bounded_playlist_reads_enforce_capacity_and_cancellation_boundaries() -> Resu
                     workers,
                     &directory.path().join("absent.cue"),
                     MAX_CUE_BYTES,
-                    &cancellation
+                    &cancellation,
                 )
                 .await
                 .unwrap_err()
@@ -610,8 +733,12 @@ fn oversized_scan_cue_is_a_local_error_preserving_owned_tracks() -> Result<()> {
     let store = crate::store::Store::open(Path::new(":memory:"))?;
     store.apply_scan(&scan_paths(std::slice::from_ref(&root), &[], false)?)?;
     let ids = [
-        store.track_id_for_source(&sheet, Some(1))?.unwrap(),
-        store.track_id_for_source(&sheet, Some(2))?.unwrap(),
+        store
+            .track_id_for_identity(crate::store::TrackIdentity::Cue(&sheet, 1))?
+            .unwrap(),
+        store
+            .track_id_for_identity(crate::store::TrackIdentity::Cue(&sheet, 2))?
+            .unwrap(),
     ];
     store.set_favorite(&ids, true)?;
     store.edit_track(ids[0], Some("Owned title"), None, None, None)?;
@@ -623,9 +750,8 @@ fn oversized_scan_cue_is_a_local_error_preserving_owned_tracks() -> Result<()> {
     let result = scan_paths(&[root], &[], false)?;
     assert_eq!(result.errors.len(), 1);
     assert_eq!(result.uncertainties, [ScanUncertainty::CueSheet(sheet)]);
-    assert!(result.suppressed_sources.is_empty());
-    assert_eq!(result.records.len(), 1);
-    assert!(result.records[0].cue.is_none());
+    assert!(result.tracks().all(|track| !track.duration_filter_exempt));
+    assert_eq!(result.track_count(), 1);
     store.apply_scan(&result)?;
     store.remove_missing_tracks()?;
     for id in ids {
@@ -649,8 +775,12 @@ fn scan_rejects_fifo_sheets_before_or_after_discovery_without_losing_owned_track
         let store = crate::store::Store::open(Path::new(":memory:"))?;
         store.apply_scan(&scan_paths(std::slice::from_ref(&root), &[], false)?)?;
         let ids = [
-            store.track_id_for_source(&sheet, Some(1))?.unwrap(),
-            store.track_id_for_source(&sheet, Some(2))?.unwrap(),
+            store
+                .track_id_for_identity(crate::store::TrackIdentity::Cue(&sheet, 1))?
+                .unwrap(),
+            store
+                .track_id_for_identity(crate::store::TrackIdentity::Cue(&sheet, 2))?
+                .unwrap(),
         ];
         let replace = |sheet: &Path| {
             fs::remove_file(sheet).unwrap();
@@ -703,13 +833,17 @@ fn fifo_cue_sources_are_local_errors_and_allow_subsequent_scans() -> Result<()> 
             wav(&good, 150)?;
             two_track_sheet(&sheet)?;
             let full = scan_paths(&[audio.clone(), good.clone()], &[], enabled)?;
-            let mut known = known_records(&full.records);
+            let mut known = known_records(&full);
             let baseline = scan_paths(std::slice::from_ref(&root), &[], enabled)?;
             let store = crate::store::Store::open(Path::new(":memory:"))?;
             store.apply_scan(&baseline)?;
             let ids = [
-                store.track_id_for_source(&sheet, Some(1))?.unwrap(),
-                store.track_id_for_source(&sheet, Some(2))?.unwrap(),
+                store
+                    .track_id_for_identity(crate::store::TrackIdentity::Cue(&sheet, 1))?
+                    .unwrap(),
+                store
+                    .track_id_for_identity(crate::store::TrackIdentity::Cue(&sheet, 2))?
+                    .unwrap(),
             ];
             let replace = |path: &Path| {
                 fs::remove_file(path).unwrap();
@@ -766,9 +900,9 @@ fn fifo_cue_sources_are_local_errors_and_allow_subsequent_scans() -> Result<()> 
                     .iter()
                     .all(|error| error.contains("not an ordinary file"))
             );
-            assert_eq!(result.records.len(), 1);
+            assert_eq!(result.track_count(), 1);
             assert_eq!(result.records[0].path, good);
-            assert!(result.suppressed_sources.is_empty());
+            assert!(result.tracks().all(|track| !track.duration_filter_exempt));
             assert!(
                 result
                     .uncertainties
@@ -781,7 +915,7 @@ fn fifo_cue_sources_are_local_errors_and_allow_subsequent_scans() -> Result<()> 
                 assert!(!store.track(id)?.unwrap().missing);
             }
             assert!(next.errors.is_empty(), "{:?}", next.errors);
-            assert_eq!(next.records.len(), 3);
+            assert_eq!(next.track_count(), 4);
         }
     }
     Ok(())
@@ -804,14 +938,14 @@ fn regular_audio_symlink_is_scanned_hashed_and_used_by_cue() -> Result<()> {
             enabled,
         )?;
         assert!(result.errors.is_empty(), "{:?}", result.errors);
-        assert_eq!(result.records.len(), 3);
-        assert!(result.records.iter().all(|record| {
-            record.path == audio && record.fingerprint.as_deref() == Some(expected.as_str())
+        assert_eq!(result.track_count(), 3);
+        assert!(result.tracks().all(|record| {
+            record.source.path == audio
+                && record.source.fingerprint.as_deref() == Some(expected.as_str())
         }));
         assert_eq!(
             result
-                .records
-                .iter()
+                .tracks()
                 .filter(|record| record.cue.is_some())
                 .count(),
             2
@@ -861,19 +995,18 @@ fn opened_scan_source_keeps_metadata_and_hash_when_its_symlink_is_retargeted() -
             )?;
             assert_eq!(lookups, 1);
             assert!(result.errors.is_empty(), "{:?}", result.errors);
-            assert_eq!(result.records.len(), if cue { 2 } else { 1 });
-            assert!(result.records.iter().all(|record| {
-                record.path == audio
-                    && record.size == metadata.len()
-                    && record.modified_ns == cache_modified_ns(metadata.modified().ok())
-                    && record.fingerprint.as_deref() == Some(expected.as_str())
+            assert_eq!(result.track_count(), if cue { 3 } else { 1 });
+            assert!(result.tracks().all(|record| {
+                record.source.path == audio
+                    && record.source.size == metadata.len()
+                    && record.source.modified_ns == cache_modified_ns(metadata.modified().ok())
+                    && record.source.fingerprint.as_deref() == Some(expected.as_str())
             }));
             let duration: f64 = result
-                .records
-                .iter()
+                .tracks()
                 .map(|record| record.media.duration.unwrap())
                 .sum();
-            assert_eq!(duration, 3.0);
+            assert_eq!(duration, if cue { 6.0 } else { 3.0 });
             assert_ne!(blake3::hash(&fs::read(&audio)?).to_hex().as_str(), expected);
         }
     }
@@ -889,7 +1022,7 @@ fn in_place_source_changes_fail_scans_instead_of_mixing_versions() -> Result<()>
             let audio = root.join("audio.wav");
             wav(&audio, 225)?;
             let baseline = scan_paths(std::slice::from_ref(&audio), &[], enabled)?;
-            let (_, known) = known_records(&baseline.records).pop().unwrap();
+            let (_, known) = known_records(&baseline).pop().unwrap();
             let mut changed = false;
             let result = super::scan_paths(
                 std::slice::from_ref(&audio),
@@ -907,7 +1040,7 @@ fn in_place_source_changes_fail_scans_instead_of_mixing_versions() -> Result<()>
                 |_, _, _, _, _| {},
             )?;
             assert!(changed);
-            assert!(result.records.is_empty());
+            assert!(result.track_count() == 0);
             assert_eq!(result.errors.len(), 1);
             assert!(result.errors[0].contains("changed while scanning"));
             assert_eq!(result.uncertainties, [ScanUncertainty::File(audio.clone())]);
@@ -941,11 +1074,15 @@ fn nonregular_audio_is_a_local_error_preserving_only_its_existing_identity() -> 
                     wav(&audio, 150)?;
                     wav(&deleted, 100)?;
                     let baseline = scan_paths(std::slice::from_ref(&root), &[], enabled)?;
-                    let mut known = known_records(&baseline.records);
+                    let mut known = known_records(&baseline);
                     let store = crate::store::Store::open(Path::new(":memory:"))?;
                     store.apply_scan(&baseline)?;
-                    let id = store.track_id_for_source(&audio, None)?.unwrap();
-                    let deleted_id = store.track_id_for_source(&deleted, None)?.unwrap();
+                    let id = store
+                        .track_id_for_identity(crate::store::TrackIdentity::File(&audio))?
+                        .unwrap();
+                    let deleted_id = store
+                        .track_id_for_identity(crate::store::TrackIdentity::File(&deleted))?
+                        .unwrap();
                     store.set_favorite(&[id], true)?;
                     store.edit_track(id, Some("Kept title"), None, None, None)?;
                     fs::remove_file(&deleted)?;
@@ -1021,12 +1158,16 @@ fn nonregular_audio_is_a_local_error_preserving_only_its_existing_identity() -> 
                     );
                     assert_eq!(result.uncertainties, [ScanUncertainty::File(audio.clone())]);
                     assert!(!result.scan_incomplete);
-                    assert_eq!(result.records.len(), 1);
+                    assert_eq!(result.track_count(), 1);
                     assert_eq!(result.records[0].path, good);
                     store.apply_scan(&result)?;
                     assert!(!store.track(id)?.unwrap().missing);
                     assert!(store.track(deleted_id)?.unwrap().missing);
-                    assert!(store.track_id_for_source(&good, None)?.is_some());
+                    assert!(
+                        store
+                            .track_id_for_identity(crate::store::TrackIdentity::File(&good))?
+                            .is_some()
+                    );
                     store.remove_missing_tracks()?;
                     let preserved = store.track(id)?.unwrap();
                     assert!(preserved.favorite);
@@ -1060,7 +1201,9 @@ fn explicit_non_utf8_scopes_do_not_abort_valid_scan_reconciliation() -> Result<(
             wav(&deleted, 150)?;
             let store = crate::store::Store::open(Path::new(":memory:"))?;
             store.apply_scan(&scan_paths(std::slice::from_ref(&good_root), &[], false)?)?;
-            let deleted_id = store.track_id_for_source(&deleted, None)?.unwrap();
+            let deleted_id = store
+                .track_id_for_identity(crate::store::TrackIdentity::File(&deleted))?
+                .unwrap();
             fs::remove_file(&deleted)?;
             let good = good_root.join("good.wav");
             wav(&good, 75)?;
@@ -1116,7 +1259,7 @@ fn explicit_non_utf8_scopes_do_not_abort_valid_scan_reconciliation() -> Result<(
             );
             assert!(result.uncertainties.is_empty());
             assert!(!result.scan_incomplete);
-            assert_eq!(result.records.len(), 1);
+            assert_eq!(result.track_count(), 1);
             assert_eq!(result.records[0].path, good);
             for bad in &invalid {
                 let reports: Vec<_> = events
@@ -1133,7 +1276,9 @@ fn explicit_non_utf8_scopes_do_not_abort_valid_scan_reconciliation() -> Result<(
             assert!(events.windows(2).all(|pair| pair[0].3 <= pair[1].3));
             store.apply_scan(&result)?;
             assert!(store.track(deleted_id)?.unwrap().missing);
-            let good_id = store.track_id_for_source(&good, None)?.unwrap();
+            let good_id = store
+                .track_id_for_identity(crate::store::TrackIdentity::File(&good))?
+                .unwrap();
             assert!(!store.track(good_id)?.unwrap().missing);
             store.remove_missing_tracks()?;
             assert_eq!(store.track_count()?, 1);
@@ -1155,7 +1300,9 @@ fn invalid_only_scopes_finish_without_coverage_and_honor_cancellation() -> Resul
     wav(&good, 75)?;
     let store = crate::store::Store::open(Path::new(":memory:"))?;
     store.apply_scan(&scan_paths(std::slice::from_ref(&root), &[], false)?)?;
-    let id = store.track_id_for_source(&good, None)?.unwrap();
+    let id = store
+        .track_id_for_identity(crate::store::TrackIdentity::File(&good))?
+        .unwrap();
     let mut events = Vec::new();
     let result = super::scan_paths(
         std::slice::from_ref(&bad),
@@ -1169,7 +1316,7 @@ fn invalid_only_scopes_finish_without_coverage_and_honor_cancellation() -> Resul
         },
     )?;
     assert!(result.roots.is_empty());
-    assert!(result.records.is_empty());
+    assert!(result.track_count() == 0);
     assert!(result.uncertainties.is_empty());
     assert_eq!(result.errors.len(), 1);
     assert_eq!(
@@ -1217,8 +1364,12 @@ fn failed_audio_probe_is_not_missing_or_cleanable_but_true_deletion_is() -> Resu
     wav(&deleted, 150)?;
     let store = crate::store::Store::open(Path::new(":memory:"))?;
     store.apply_scan(&scan_paths(std::slice::from_ref(&root), &[], false)?)?;
-    let id = store.track_id_for_source(&audio, None)?.unwrap();
-    let deleted_id = store.track_id_for_source(&deleted, None)?.unwrap();
+    let id = store
+        .track_id_for_identity(crate::store::TrackIdentity::File(&audio))?
+        .unwrap();
+    let deleted_id = store
+        .track_id_for_identity(crate::store::TrackIdentity::File(&deleted))?
+        .unwrap();
     store.set_favorite(&[id], true)?;
     store.edit_track(id, Some("Kept title"), None, None, None)?;
     fs::write(&audio, b"not audio")?;
@@ -1249,7 +1400,9 @@ fn discovered_file_not_found_is_uncertain_until_a_later_explicit_request() -> Re
     wav(&audio, 150)?;
     let store = crate::store::Store::open(Path::new(":memory:"))?;
     store.apply_scan(&scan_paths(std::slice::from_ref(&root), &[], false)?)?;
-    let id = store.track_id_for_source(&audio, None)?.unwrap();
+    let id = store
+        .track_id_for_identity(crate::store::TrackIdentity::File(&audio))?
+        .unwrap();
     let failed = scan_paths_at_depth(
         std::slice::from_ref(&root),
         &[],
@@ -1270,7 +1423,7 @@ fn discovered_file_not_found_is_uncertain_until_a_later_explicit_request() -> Re
 }
 
 #[test]
-fn failed_cue_read_preserves_owned_tracks_without_suppressing_full_audio() -> Result<()> {
+fn failed_cue_read_preserves_owned_tracks_and_independent_whole_audio() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let root = directory.path().to_path_buf();
     let audio = root.join("audio.wav");
@@ -1279,8 +1432,12 @@ fn failed_cue_read_preserves_owned_tracks_without_suppressing_full_audio() -> Re
     two_track_sheet(&sheet)?;
     let store = crate::store::Store::open(Path::new(":memory:"))?;
     store.apply_scan(&scan_paths(std::slice::from_ref(&root), &[], false)?)?;
-    let first_id = store.track_id_for_source(&sheet, Some(1))?.unwrap();
-    let second_id = store.track_id_for_source(&sheet, Some(2))?.unwrap();
+    let first_id = store
+        .track_id_for_identity(crate::store::TrackIdentity::Cue(&sheet, 1))?
+        .unwrap();
+    let second_id = store
+        .track_id_for_identity(crate::store::TrackIdentity::Cue(&sheet, 2))?
+        .unwrap();
     store.set_favorite(&[first_id], true)?;
     let failed = scan_paths_at_depth(
         std::slice::from_ref(&root),
@@ -1297,10 +1454,9 @@ fn failed_cue_read_preserves_owned_tracks_without_suppressing_full_audio() -> Re
         failed.uncertainties,
         [ScanUncertainty::CueSheet(sheet.clone())]
     );
-    assert!(failed.suppressed_sources.is_empty());
-    assert_eq!(failed.records.len(), 1);
+    assert!(failed.tracks().all(|track| !track.duration_filter_exempt));
+    assert_eq!(failed.track_count(), 1);
     assert_eq!(failed.records[0].path, audio);
-    assert!(failed.records[0].cue.is_none());
     store.apply_scan(&failed)?;
     store.remove_missing_tracks()?;
     assert!(store.track(first_id)?.unwrap().favorite);
@@ -1331,12 +1487,14 @@ fn non_utf8_cue_name_does_not_prevent_valid_audio_from_being_saved() -> Result<(
     let scan = scan_paths(std::slice::from_ref(&root), &[], false)?;
     assert_eq!(scan.uncertainties, [ScanUncertainty::CueSheet(sheet)]);
     assert_eq!(scan.errors.len(), 1);
-    assert!(scan.suppressed_sources.is_empty());
+    assert!(scan.tracks().all(|track| !track.duration_filter_exempt));
     let store = crate::store::Store::open(Path::new(":memory:"))?;
     store.apply_scan(&scan)?;
     assert_eq!(store.track_count()?, 2);
     for path in [audio, unrelated] {
-        let id = store.track_id_for_source(&path, None)?.unwrap();
+        let id = store
+            .track_id_for_identity(crate::store::TrackIdentity::File(&path))?
+            .unwrap();
         assert!(!store.track(id)?.unwrap().missing);
     }
     Ok(())
@@ -1360,11 +1518,13 @@ fn forced_scan_isolates_non_utf8_audio_and_persists_valid_tracks() -> Result<()>
     assert_eq!(forced.errors.len(), 1);
     assert!(forced.errors[0].contains("not UTF-8"));
     assert_eq!(forced.uncertainties, [ScanUncertainty::File(bad)]);
-    assert_eq!(forced.records.len(), 1);
+    assert_eq!(forced.track_count(), 1);
     assert_eq!(forced.records[0].path, good);
     store.apply_scan(&forced)?;
     assert_eq!(store.track_count()?, 1);
-    let id = store.track_id_for_source(&good, None)?.unwrap();
+    let id = store
+        .track_id_for_identity(crate::store::TrackIdentity::File(&good))?
+        .unwrap();
     assert!(!store.track(id)?.unwrap().missing);
     Ok(())
 }
@@ -1378,10 +1538,12 @@ fn failed_cue_source_not_found_keeps_segments_until_the_sheet_is_deleted() -> Re
     two_track_sheet(&sheet)?;
     let store = crate::store::Store::open(Path::new(":memory:"))?;
     store.apply_scan(&scan_paths(std::slice::from_ref(&sheet), &[], false)?)?;
-    let id = store.track_id_for_source(&sheet, Some(1))?.unwrap();
+    let id = store
+        .track_id_for_identity(crate::store::TrackIdentity::Cue(&sheet, 1))?
+        .unwrap();
     fs::remove_file(&audio)?;
     let failed = scan_paths(std::slice::from_ref(&sheet), &[], false)?;
-    assert!(failed.records.is_empty());
+    assert!(failed.track_count() == 0);
     assert!(
         failed
             .uncertainties
@@ -1415,9 +1577,15 @@ fn traversal_not_found_preserves_the_failed_subtree_and_its_identities() -> Resu
     wav(&deleted, 150)?;
     let store = crate::store::Store::open(Path::new(":memory:"))?;
     store.apply_scan(&scan_paths(&[root.clone(), audio.clone()], &[], false)?)?;
-    let audio_id = store.track_id_for_source(&audio, None)?.unwrap();
-    let cue_id = store.track_id_for_source(&sheet, Some(1))?.unwrap();
-    let deleted_id = store.track_id_for_source(&deleted, None)?.unwrap();
+    let audio_id = store
+        .track_id_for_identity(crate::store::TrackIdentity::File(&audio))?
+        .unwrap();
+    let cue_id = store
+        .track_id_for_identity(crate::store::TrackIdentity::Cue(&sheet, 1))?
+        .unwrap();
+    let deleted_id = store
+        .track_id_for_identity(crate::store::TrackIdentity::File(&deleted))?
+        .unwrap();
     store.set_favorite(&[audio_id, cue_id], true)?;
     let copy = root.join("copy.wav");
     fs::copy(&audio, &copy)?;
@@ -1433,7 +1601,12 @@ fn traversal_not_found_preserves_the_failed_subtree_and_its_identities() -> Resu
     );
     assert!(!partial.scan_incomplete);
     store.apply_scan(&partial)?;
-    assert_ne!(store.track_id_for_source(&copy, None)?.unwrap(), audio_id);
+    assert_ne!(
+        store
+            .track_id_for_identity(crate::store::TrackIdentity::File(&copy))?
+            .unwrap(),
+        audio_id
+    );
     assert_eq!(store.track(audio_id)?.unwrap().path, audio);
     assert!(store.track(deleted_id)?.unwrap().missing);
     store.remove_missing_tracks()?;
@@ -1455,7 +1628,9 @@ fn failed_requested_root_metadata_is_uncertain_not_deleted() -> Result<()> {
     wav(&audio, 150)?;
     let store = crate::store::Store::open(Path::new(":memory:"))?;
     store.apply_scan(&scan_paths(std::slice::from_ref(&root), &[], false)?)?;
-    let id = store.track_id_for_source(&audio, None)?.unwrap();
+    let id = store
+        .track_id_for_identity(crate::store::TrackIdentity::File(&audio))?
+        .unwrap();
     fs::rename(&root, directory.path().join("moved"))?;
     std::os::unix::fs::symlink(&root, &root)?;
     let failed = scan_paths(std::slice::from_ref(&root), &[], false)?;
@@ -1483,7 +1658,7 @@ fn scan_uncertainty_metadata_is_bounded_with_an_incomplete_fallback() -> Result<
     let result = scan_paths(&[directory.path().to_path_buf()], &[], false)?;
     assert_eq!(result.uncertainties.len(), MAX_RECORDED_SCAN_UNCERTAINTIES);
     assert!(result.scan_incomplete);
-    assert!(result.records.is_empty());
+    assert!(result.track_count() == 0);
     Ok(())
 }
 
@@ -1554,7 +1729,7 @@ fn linked_root_keeps_alias_in_records_roots_and_progress() -> Result<()> {
     )?;
     assert!(result.errors.is_empty(), "{:?}", result.errors);
     assert_eq!(result.roots.as_slice(), std::slice::from_ref(&alias));
-    assert_eq!(result.records.len(), 1);
+    assert_eq!(result.track_count(), 1);
     assert_eq!(result.records[0].path, alias.join("audio.wav"));
     assert!(!progress_paths.is_empty());
     assert!(
@@ -1665,23 +1840,33 @@ fn cue_in_linked_tree_keeps_sheet_and_source_aliases_across_roots() -> Result<()
     )?;
     assert!(result.errors.is_empty(), "{:?}", result.errors);
     assert_eq!(result.roots, [root]);
-    assert_eq!(result.records.len(), 2);
-    assert_eq!(result.records[0].path, tree.join("audio.wav"));
-    assert_eq!(result.records[1].path, remote);
+    assert_eq!(result.track_count(), 4);
+    let segments: Vec<_> = result
+        .tracks()
+        .filter(|track| track.cue.is_some())
+        .collect();
+    assert_eq!(segments[0].source.path, tree.join("audio.wav"));
+    assert_eq!(segments[1].source.path, remote);
     assert!(
-        result
-            .records
+        segments
             .iter()
-            .all(|record| record.cue.as_ref().unwrap().sheet == sheet)
+            .all(|record| *record.cue.as_ref().unwrap().sheet == sheet)
     );
-    let mut suppressed = vec![tree.join("audio.wav"), remote];
-    suppressed.sort();
-    assert_eq!(result.suppressed_sources, suppressed);
+    let mut whole_paths: Vec<_> = result
+        .tracks()
+        .filter(|track| track.cue.is_none())
+        .map(|track| track.source.path.clone())
+        .collect();
+    whole_paths.sort();
+    let mut expected = vec![tree.join("audio.wav"), remote];
+    expected.sort();
+    assert_eq!(whole_paths, expected);
+    assert!(result.tracks().all(|track| track.duration_filter_exempt));
     Ok(())
 }
 
 #[test]
-fn scan_progress_reports_deduplicated_candidates_and_suppressed_tasks() -> Result<()> {
+fn scan_progress_reports_deduplicated_audio_and_sheet_candidates() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let audio = directory.path().join("audio.wav");
     let sheet = directory.path().join("album.cue");
@@ -1706,7 +1891,7 @@ fn scan_progress_reports_deduplicated_candidates_and_suppressed_tasks() -> Resul
         },
     )?;
     assert!(result.errors.is_empty(), "{:?}", result.errors);
-    assert_eq!(result.records.len(), 2);
+    assert_eq!(result.track_count(), 3);
     assert!(
         events
             .iter()
@@ -1760,9 +1945,8 @@ fn scan_depth_keeps_allowed_files_and_reports_skipped_branches() -> Result<()> {
         },
     )?;
     let mut records: Vec<_> = result
-        .records
-        .iter()
-        .map(|record| record.path.clone())
+        .tracks()
+        .map(|record| record.source.path.clone())
         .collect();
     records.sort();
     let mut expected = vec![allowed_file.clone(), sibling_file.clone()];
@@ -1790,7 +1974,7 @@ fn scan_depth_keeps_allowed_files_and_reports_skipped_branches() -> Result<()> {
         1,
         |_, _, _, _, _| {},
     )?;
-    assert_eq!(direct.records.len(), 1);
+    assert_eq!(direct.track_count(), 1);
     assert_eq!(direct.records[0].path, skipped_file);
     assert!(direct.skipped_directories.is_empty());
     Ok(())
@@ -1813,7 +1997,9 @@ fn nested_scan_keeps_its_own_excluded_identity_and_user_data() -> Result<()> {
     )?;
     let store = crate::store::Store::open(Path::new(":memory:"))?;
     store.apply_scan(&baseline)?;
-    let id = store.track_id_for_source(&deep, None)?.unwrap();
+    let id = store
+        .track_id_for_identity(crate::store::TrackIdentity::File(&deep))?
+        .unwrap();
     store.set_favorite(&[id], true)?;
     store.edit_track(id, Some("Kept title"), None, None, None)?;
     let copy = nested.join("copy.wav");
@@ -1825,7 +2011,12 @@ fn nested_scan_keeps_its_own_excluded_identity_and_user_data() -> Result<()> {
     assert!(!preserved.missing);
     assert!(preserved.favorite);
     assert_eq!(preserved.title, "Kept title");
-    assert_ne!(store.track_id_for_source(&copy, None)?.unwrap(), id);
+    assert_ne!(
+        store
+            .track_id_for_identity(crate::store::TrackIdentity::File(&copy))?
+            .unwrap(),
+        id
+    );
     Ok(())
 }
 
@@ -1961,8 +2152,14 @@ fn cue_sources_require_logical_membership_in_any_configured_root() -> Result<()>
         |_, _, _, _, _| {},
     )?;
     assert!(control.errors.is_empty(), "{:?}", control.errors);
-    assert_eq!(control.records[0].path, logical_path(&source)?);
-    assert!(control.records[0].cue.is_some());
+    assert_eq!(
+        control.tracks().next().unwrap().source.path,
+        logical_path(&source)?
+    );
+    assert_eq!(
+        control.tracks().filter(|track| track.cue.is_some()).count(),
+        1
+    );
     let mut events = Vec::new();
     let result = super::scan_paths(
         std::slice::from_ref(&sheet),
@@ -1975,9 +2172,9 @@ fn cue_sources_require_logical_membership_in_any_configured_root() -> Result<()>
             events.push((phase, processed, total, errors, path.map(Path::to_path_buf)));
         },
     )?;
-    assert!(result.records.is_empty());
+    assert!(result.track_count() == 0);
     assert_eq!(result.errors.len(), 1);
-    assert!(result.suppressed_sources.is_empty());
+    assert!(result.tracks().all(|track| !track.duration_filter_exempt));
     let metadata = events
         .iter()
         .rfind(|(phase, ..)| matches!(phase, &ScanPhase::ReadingMetadata))
@@ -1988,22 +2185,37 @@ fn cue_sources_require_logical_membership_in_any_configured_root() -> Result<()>
     Ok(())
 }
 
-fn known_records(records: &[ScanRecord]) -> Vec<(PathBuf, KnownFile)> {
-    records
-        .iter()
+fn known_records(result: &ScanResult) -> Vec<(PathBuf, KnownFile)> {
+    result
+        .tracks()
         .map(|record| {
+            let mut media = record.media.source.clone();
+            media.title = record.media.title.to_owned();
+            media.artist = record.media.artist.to_owned();
+            media.album = record.media.album.to_owned();
+            media.duration = record.media.duration;
+            media.track_number = record.media.track_number;
             (
-                record.path.clone(),
+                record.source.path.clone(),
                 KnownFile {
-                    size: record.size,
-                    modified_ns: record.modified_ns,
-                    fingerprint: record.fingerprint.clone(),
-                    media: Some(record.media.clone()),
-                    cue: record.cue.clone(),
+                    size: record.source.size,
+                    modified_ns: record.source.modified_ns,
+                    fingerprint: record.source.fingerprint.clone(),
+                    media: Some(media),
+                    cue: record.cue.map(cue_segment),
                 },
             )
         })
         .collect()
+}
+
+fn cue_segment(cue: CueView<'_>) -> CueSegment {
+    CueSegment {
+        sheet: cue.sheet.clone(),
+        number: cue.number,
+        start_frame: cue.start_frame,
+        end_frame: cue.end_frame,
+    }
 }
 
 #[test]
@@ -2059,7 +2271,9 @@ fn ordinary_scan_rehashes_same_size_wav_after_pre_epoch_mtime_change() -> Result
     assert_eq!(original.records[0].modified_ns, -2_000_000_000);
     let store = crate::store::Store::open(Path::new(":memory:"))?;
     store.apply_scan(&original)?;
-    let id = store.track_id_for_source(&audio, None)?.unwrap();
+    let id = store
+        .track_id_for_identity(crate::store::TrackIdentity::File(&audio))?
+        .unwrap();
     let known = vec![(audio.clone(), store.known_source(&audio)?.unwrap())];
     assert_eq!(known[0].1.modified_ns, -2_000_000_000);
 
@@ -2079,7 +2293,10 @@ fn ordinary_scan_rehashes_same_size_wav_after_pre_epoch_mtime_change() -> Result
         original.records[0].fingerprint
     );
     store.apply_scan(&rescanned)?;
-    assert_eq!(store.track_id_for_source(&audio, None)?, Some(id));
+    assert_eq!(
+        store.track_id_for_identity(crate::store::TrackIdentity::File(&audio))?,
+        Some(id)
+    );
     assert_eq!(
         store.track(id)?.unwrap().fingerprint,
         rescanned.records[0].fingerprint
@@ -2099,7 +2316,7 @@ fn epoch_zero_reuses_cache_while_forced_scan_rehashes() -> Result<()> {
     let original = scan_paths(std::slice::from_ref(&audio), &[], false)?;
     assert!(original.errors.is_empty(), "{:?}", original.errors);
     assert_eq!(original.records[0].modified_ns, 0);
-    let known = known_records(&original.records);
+    let known = known_records(&original);
 
     // Preserve size and the genuine epoch timestamp to exercise ordinary reuse.
     let mut contents = fs::read(&audio)?;
@@ -2129,27 +2346,27 @@ fn epoch_zero_reuses_cache_while_forced_scan_rehashes() -> Result<()> {
     Ok(())
 }
 
-fn track_from_record(id: i64, record: &ScanRecord) -> Track {
+fn track_from_record(id: i64, record: ScanTrack<'_>) -> Track {
     Track {
         id,
-        path: record.path.clone(),
-        fingerprint: record.fingerprint.clone(),
-        title: record.media.title.clone(),
-        artist: record.media.artist.clone(),
-        album: record.media.album.clone(),
+        path: record.source.path.clone(),
+        fingerprint: record.source.fingerprint.clone(),
+        title: record.media.title.to_owned(),
+        artist: record.media.artist.to_owned(),
+        album: record.media.album.to_owned(),
         duration: record.media.duration,
-        bitrate_bps: record.media.bitrate_bps,
-        bitrate_exact: record.media.bitrate_exact,
+        bitrate_bps: record.media.source.bitrate_bps,
+        bitrate_exact: record.media.source.bitrate_exact,
         track_number: record.media.track_number,
         disc_number: record.media.disc_number,
-        bits_per_sample: record.media.bits_per_sample,
-        release_date: record.media.release_date.clone(),
+        bits_per_sample: record.media.source.bits_per_sample,
+        release_date: record.media.release_date.map(str::to_owned),
         favorite: false,
         decoder_hint: Default::default(),
-        codec: record.media.codec.clone(),
-        channels: record.media.channels,
-        sample_rate: record.media.sample_rate,
-        cue: record.cue.clone(),
+        codec: record.media.source.codec.clone(),
+        channels: record.media.source.channels,
+        sample_rate: record.media.source.sample_rate,
+        cue: record.cue.map(cue_segment),
         missing: false,
         play_count: 0,
         last_played: None,
@@ -2165,11 +2382,17 @@ fn cue_single_source_tracks_have_relative_duration_and_metadata() -> Result<()> 
     two_track_sheet(&sheet)?;
     let result = scan_paths(std::slice::from_ref(&sheet), &[], false)?;
     assert!(result.errors.is_empty(), "{:?}", result.errors);
-    assert_eq!(result.records.len(), 2);
-    let first = &result.records[0];
-    let second = &result.records[1];
-    assert_eq!(first.path, logical_path(&audio)?);
-    assert_eq!(second.path, first.path);
+    assert_eq!(result.track_count(), 3);
+    let first = &result
+        .tracks()
+        .find(|track| track.cue.is_some_and(|cue| cue.number == 1))
+        .unwrap();
+    let second = &result
+        .tracks()
+        .find(|track| track.cue.is_some_and(|cue| cue.number == 2))
+        .unwrap();
+    assert_eq!(first.source.path, logical_path(&audio)?);
+    assert_eq!(second.source.path, first.source.path);
     assert_eq!(first.media.title, "First");
     assert_eq!(first.media.artist, "Track artist");
     assert_eq!(second.media.title, "Track 02");
@@ -2177,14 +2400,17 @@ fn cue_single_source_tracks_have_relative_duration_and_metadata() -> Result<()> 
     assert_eq!(first.media.album, "Album");
     assert_eq!(first.media.duration, Some(1.0));
     assert_eq!(second.media.duration, Some(2.0));
-    assert_eq!(first.media.bitrate_bps, Some(120_000));
-    assert_eq!(second.media.bitrate_bps, first.media.bitrate_bps);
-    assert_eq!(first.media.bits_per_sample, Some(16));
+    assert_eq!(first.media.source.bitrate_bps, Some(120_000));
+    assert_eq!(
+        second.media.source.bitrate_bps,
+        first.media.source.bitrate_bps
+    );
+    assert_eq!(first.media.source.bits_per_sample, Some(16));
     assert_eq!(first.media.track_number, Some(1));
     assert_eq!(second.media.track_number, Some(2));
     assert_eq!(
-        first.cue.as_ref().unwrap(),
-        &CueSegment {
+        cue_segment(first.cue.unwrap()),
+        CueSegment {
             sheet: logical_path(&sheet)?,
             number: 1,
             start_frame: 0,
@@ -2208,26 +2434,51 @@ fn cue_multiple_files_reset_indexes_and_keep_sheet_order() -> Result<()> {
     )?;
     let result = scan_paths(&[sheet], &[], false)?;
     assert!(result.errors.is_empty(), "{:?}", result.errors);
-    assert_eq!(result.records.len(), 4);
+    assert_eq!(result.track_count(), 6);
     assert_eq!(
         result
-            .records
-            .iter()
+            .tracks()
+            .filter(|track| track.cue.is_some())
             .map(|record| record.cue.as_ref().unwrap().number)
             .collect::<Vec<_>>(),
         [1, 2, 3, 4]
     );
     assert_eq!(
         result
-            .records
-            .iter()
+            .tracks()
+            .filter(|track| track.cue.is_some())
             .map(|record| record.media.duration)
             .collect::<Vec<_>>(),
         [Some(1.0), Some(1.0), Some(2.0), Some(1.0)]
     );
-    assert_eq!(result.records[1].cue.as_ref().unwrap().end_frame, None);
-    assert_eq!(result.records[2].cue.as_ref().unwrap().start_frame, 0);
-    assert_eq!(result.suppressed_sources.len(), 2);
+    assert_eq!(
+        result
+            .tracks()
+            .filter(|track| track.cue.is_some())
+            .nth(1)
+            .unwrap()
+            .cue
+            .as_ref()
+            .unwrap()
+            .end_frame,
+        None
+    );
+    assert_eq!(
+        result
+            .tracks()
+            .filter(|track| track.cue.is_some())
+            .nth(2)
+            .unwrap()
+            .cue
+            .as_ref()
+            .unwrap()
+            .start_frame,
+        0
+    );
+    assert_eq!(
+        result.tracks().filter(|track| track.cue.is_none()).count(),
+        2
+    );
     Ok(())
 }
 
@@ -2240,31 +2491,46 @@ fn cue_rescan_rereads_sheet_and_never_reuses_segment_as_full_media() -> Result<(
     two_track_sheet(&sheet)?;
     let original = scan_paths(std::slice::from_ref(&sheet), &[], false)?;
     assert!(original.errors.is_empty(), "{:?}", original.errors);
-    let known = known_records(&original.records);
+    let mut known: Vec<_> = known_records(&original)
+        .into_iter()
+        .filter(|(_, known)| known.cue.is_some())
+        .collect();
+    for (_, known) in &mut known {
+        known.fingerprint = Some("unchanged-cue-source-hash".into());
+    }
     let full = scan_paths(std::slice::from_ref(&audio), &known, false)?;
     assert!(full.errors.is_empty(), "{:?}", full.errors);
-    assert_eq!(full.records.len(), 1);
+    assert_eq!(full.track_count(), 1);
     assert_eq!(full.records[0].media.duration, Some(3.0));
-    assert!(full.records[0].cue.is_none());
+    assert_ne!(full.records[0].media.artist, "Sheet artist");
+    assert_eq!(
+        full.records[0].fingerprint.as_deref(),
+        Some("unchanged-cue-source-hash")
+    );
     fs::write(
         &sheet,
         "TITLE \"Edited album\"\nFILE \"audio.wav\" WAVE\nTRACK 01 AUDIO\nTITLE \"Renamed\"\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nINDEX 01 00:02:00\n",
     )?;
-    for cache in [&known, &known_records(&full.records)] {
+    for cache in [&known, &known_records(&full)] {
         let rescanned = scan_paths(std::slice::from_ref(&sheet), cache, false)?;
         assert!(rescanned.errors.is_empty(), "{:?}", rescanned.errors);
-        assert_eq!(rescanned.records.len(), 2);
-        assert_eq!(rescanned.records[0].media.title, "Renamed");
-        assert_eq!(rescanned.records[0].media.album, "Edited album");
+        assert_eq!(rescanned.track_count(), 3);
+        let first = rescanned
+            .tracks()
+            .find(|track| track.cue.is_some_and(|cue| cue.number == 1))
+            .unwrap();
+        let second = rescanned
+            .tracks()
+            .find(|track| track.cue.is_some_and(|cue| cue.number == 2))
+            .unwrap();
+        assert_eq!(first.media.title, "Renamed");
+        assert_eq!(first.media.album, "Edited album");
+        assert_eq!(first.media.artist, full.records[0].media.artist);
+        assert_eq!(first.media.duration, Some(2.0));
+        assert_eq!(second.media.duration, Some(1.0));
         assert_eq!(
-            rescanned.records[0].media.artist,
-            full.records[0].media.artist
-        );
-        assert_eq!(rescanned.records[0].media.duration, Some(2.0));
-        assert_eq!(rescanned.records[1].media.duration, Some(1.0));
-        assert_eq!(
-            rescanned.records[0].fingerprint,
-            original.records[0].fingerprint
+            rescanned.tracks().next().unwrap().source.fingerprint,
+            known[0].1.fingerprint
         );
     }
     Ok(())
@@ -2286,19 +2552,27 @@ fn cue_missing_source_and_out_of_bounds_fail_atomically() -> Result<()> {
             format!("FILE \"audio.wav\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\n{invalid}"),
         )?;
         let result = scan_paths(std::slice::from_ref(&sheet), &[], false)?;
-        assert!(result.records.is_empty());
+        assert!(result.track_count() == 0);
         assert_eq!(result.errors.len(), 1);
-        assert!(result.suppressed_sources.is_empty());
+        assert!(result.tracks().all(|track| !track.duration_filter_exempt));
         let directory_scan = scan_paths(&[directory.path().to_path_buf()], &[], false)?;
-        assert_eq!(directory_scan.records.len(), 1);
-        assert!(directory_scan.records[0].cue.is_none());
-        assert!(directory_scan.suppressed_sources.is_empty());
+        assert_eq!(directory_scan.track_count(), 1);
+        assert!(
+            directory_scan
+                .tracks()
+                .all(|track| !track.duration_filter_exempt)
+        );
+        let mut filtered = directory_scan;
+        filtered.min_duration_secs = 10;
+        let store = crate::store::Store::open(Path::new(":memory:"))?;
+        assert_eq!(store.apply_scan(&filtered)?.skipped_short_tracks, 1);
+        assert_eq!(store.track_count()?, 0);
     }
     Ok(())
 }
 
 #[test]
-fn cue_directory_suppresses_sources_but_explicit_audio_survives() -> Result<()> {
+fn cue_and_directory_requests_keep_visible_sources_without_duplicates() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let audio = directory.path().join("audio.wav");
     let sheet = directory.path().join("album.cue");
@@ -2307,32 +2581,42 @@ fn cue_directory_suppresses_sources_but_explicit_audio_survives() -> Result<()> 
     two_track_sheet(&sheet)?;
     let result = scan_paths(&[directory.path().to_path_buf(), sheet.clone()], &[], false)?;
     assert!(result.errors.is_empty(), "{:?}", result.errors);
-    assert_eq!(result.records.len(), 3);
+    assert_eq!(result.track_count(), 4);
     assert_eq!(
         result
-            .records
-            .iter()
+            .tracks()
             .filter(|record| record.cue.is_none())
             .count(),
-        1
+        2
     );
-    assert_eq!(result.suppressed_sources, [logical_path(&audio)?]);
+    assert_eq!(
+        result
+            .tracks()
+            .filter(|track| track.duration_filter_exempt)
+            .count(),
+        3
+    );
     let explicit = scan_paths(
         &[directory.path().to_path_buf(), audio.clone(), sheet, audio],
         &[],
         false,
     )?;
     assert!(explicit.errors.is_empty(), "{:?}", explicit.errors);
-    assert_eq!(explicit.records.len(), 4);
+    assert_eq!(explicit.track_count(), 4);
     assert_eq!(
         explicit
-            .records
-            .iter()
+            .tracks()
             .filter(|record| record.cue.is_none())
             .count(),
         2
     );
-    assert!(explicit.suppressed_sources.is_empty());
+    assert_eq!(
+        explicit
+            .tracks()
+            .filter(|track| track.duration_filter_exempt)
+            .count(),
+        3
+    );
     Ok(())
 }
 
@@ -2366,33 +2650,28 @@ fn cue_sheets_share_source_snapshot_with_explicit_full_audio() -> Result<()> {
     )?;
     assert!(removed_source);
     assert!(result.errors.is_empty(), "{:?}", result.errors);
-    assert_eq!(result.records.len(), 4);
-    assert!(result.suppressed_sources.is_empty());
-    let full = result
-        .records
-        .iter()
-        .find(|record| record.cue.is_none())
-        .unwrap();
-    assert_eq!(full.path, audio);
+    assert_eq!(result.track_count(), 4);
+    assert!(result.tracks().all(|track| track.duration_filter_exempt));
+    let full = result.tracks().find(|record| record.cue.is_none()).unwrap();
+    assert_eq!(full.source.path, audio);
     assert_eq!(full.media.duration, Some(3.0));
     assert_eq!(full.media.title, original.records[0].media.title);
-    assert_eq!(full.fingerprint, original.records[0].fingerprint);
+    assert_eq!(full.source.fingerprint, original.records[0].fingerprint);
     let segments: Vec<_> = result
-        .records
-        .iter()
+        .tracks()
         .filter(|record| record.cue.is_some())
         .collect();
-    assert_eq!(segments[0].cue.as_ref().unwrap().sheet, first_sheet);
+    assert_eq!(*segments[0].cue.as_ref().unwrap().sheet, first_sheet);
     assert_eq!(segments[0].media.duration, Some(1.0));
     assert_eq!(segments[1].media.duration, Some(2.0));
-    assert_eq!(segments[2].cue.as_ref().unwrap().sheet, second_sheet);
+    assert_eq!(*segments[2].cue.as_ref().unwrap().sheet, second_sheet);
     assert_eq!(segments[2].media.title, "Other track");
     assert_eq!(segments[2].media.album, "Other album");
     assert_eq!(segments[2].media.duration, Some(2.0));
     assert!(
         segments
             .iter()
-            .all(|record| record.fingerprint == full.fingerprint)
+            .all(|record| record.source.fingerprint == full.source.fingerprint)
     );
     Ok(())
 }
@@ -2421,8 +2700,8 @@ fn cue_source_errors_are_reused_for_later_sheets_and_ordinary_audio() -> Result<
         },
     )?;
     assert!(repaired_source);
-    assert!(result.records.is_empty());
-    assert!(result.suppressed_sources.is_empty());
+    assert!(result.track_count() == 0);
+    assert!(result.tracks().all(|track| !track.duration_filter_exempt));
     assert_eq!(result.errors.len(), 3);
     let details: Vec<_> = result
         .errors
@@ -2492,13 +2771,11 @@ fn logical_cue_alias_paths_roundtrip_complete_sheets() -> Result<()> {
     let scan = scan_paths(&[sheet.clone(), audio], &[], false)?;
     assert!(scan.errors.is_empty(), "{:?}", scan.errors);
     assert!(
-        scan.records
-            .iter()
-            .all(|record| record.path == alias.join("audio.wav"))
+        scan.tracks()
+            .all(|record| record.source.path == alias.join("audio.wav"))
     );
     let tracks: Vec<_> = scan
-        .records
-        .iter()
+        .tracks()
         .enumerate()
         .map(|(index, record)| track_from_record(index as i64 + 1, record))
         .collect();
@@ -2542,8 +2819,8 @@ fn unrepresentable_cue_exports_preserve_existing_destination() -> Result<()> {
     two_track_sheet(&sheet)?;
     let scan = scan_paths(std::slice::from_ref(&sheet), &[], false)?;
     let tracks: Vec<_> = scan
-        .records
-        .iter()
+        .tracks()
+        .filter(|track| track.cue.is_some())
         .enumerate()
         .map(|(index, record)| track_from_record(index as i64 + 1, record))
         .collect();
@@ -2587,8 +2864,8 @@ fn cue_export_rejects_fifo_and_oversized_sheets_without_replacing_destination() 
     two_track_sheet(&sheet)?;
     let scan = scan_paths(std::slice::from_ref(&sheet), &[], false)?;
     let tracks: Vec<_> = scan
-        .records
-        .iter()
+        .tracks()
+        .filter(|track| track.cue.is_some())
         .enumerate()
         .map(|(index, record)| track_from_record(index as i64 + 1, record))
         .collect();
@@ -2629,8 +2906,8 @@ fn cue_export_rejects_fifo_and_oversized_sheets_without_replacing_destination() 
         .open(&sheet)?
         .set_len(1024 * 1024 + 1)?;
     let tracks = scan
-        .records
-        .iter()
+        .tracks()
+        .filter(|track| track.cue.is_some())
         .enumerate()
         .map(|(index, record)| Ok(export_track(&track_from_record(index as i64 + 1, record))));
     assert!(export_m3u(&destination, tracks, &ScanCancellation::default()).is_err());
@@ -2713,10 +2990,9 @@ fn m3u_metadata_line_breaks_preserve_imported_path_sequence() -> Result<()> {
     }
     let scan = scan_paths(&paths, &[], false)?;
     assert!(scan.errors.is_empty(), "{:?}", scan.errors);
-    assert_eq!(scan.records.len(), 3);
+    assert_eq!(scan.track_count(), 3);
     let mut tracks: Vec<_> = scan
-        .records
-        .iter()
+        .tracks()
         .enumerate()
         .map(|(index, record)| track_from_record(index as i64 + 1, record))
         .collect();
@@ -2754,7 +3030,7 @@ fn m3u_path_line_breaks_preserve_existing_destination_bytes() -> Result<()> {
     wav(&audio, 75)?;
     let scan = scan_paths(std::slice::from_ref(&audio), &[], false)?;
     assert!(scan.errors.is_empty(), "{:?}", scan.errors);
-    let valid = track_from_record(1, &scan.records[0]);
+    let valid = track_from_record(1, scan.tracks().next().unwrap());
     let destination = directory.path().join("existing.m3u8");
     let original = b"original\0playlist\r\n\xff";
     fs::write(&destination, original)?;
@@ -2788,11 +3064,11 @@ fn m3u_cue_sheet_line_breaks_preserve_existing_destination_bytes() -> Result<()>
         two_track_sheet(&sheet)?;
         let scan = scan_paths(std::slice::from_ref(&sheet), &[], false)?;
         assert!(scan.errors.is_empty(), "{:?}", scan.errors);
-        assert_eq!(scan.records.len(), 2);
-        let tracks =
-            scan.records.iter().enumerate().map(|(index, record)| {
-                Ok(export_track(&track_from_record(index as i64 + 1, record)))
-            });
+        assert_eq!(scan.track_count(), 3);
+        let tracks = scan
+            .tracks()
+            .enumerate()
+            .map(|(index, record)| Ok(export_track(&track_from_record(index as i64 + 1, record))));
         let error = export_m3u(&destination, tracks, &ScanCancellation::default()).unwrap_err();
         assert!(error.to_string().contains("path containing CR or LF"));
         assert_eq!(fs::read(&destination)?, original);
@@ -2865,4 +3141,333 @@ fn m3u_roundtrip_preserves_ancestor_sibling_and_descendant_paths() -> Result<()>
         paths
     );
     Ok(())
+}
+
+#[test]
+fn playlist_import_never_traverses_directory_entries_or_type_changes() -> Result<()> {
+    futures::executor::block_on(async {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().to_path_buf();
+        let workers = &crate::execution::BlockingPool::new(4);
+        let good = root.join("good.wav");
+        let changed = root.join("changed.wav");
+        wav(&good, 75)?;
+        fs::create_dir(&changed)?;
+        wav(&changed.join("hidden.wav"), 75)?;
+        let playlist = root.join("list.m3u8");
+        fs::write(&playlist, "good.wav\nchanged.wav\n")?;
+        let cancellation = ScanCancellation::default();
+        assert!(
+            super::prepare_playlist_import(
+                workers,
+                &playlist,
+                &cancellation,
+                Some(std::slice::from_ref(&root))
+            )
+            .await
+            .is_err()
+        );
+        fs::remove_dir_all(&changed)?;
+        wav(&changed, 75)?;
+        let prepared = super::prepare_playlist_import(
+            workers,
+            &playlist,
+            &cancellation,
+            Some(std::slice::from_ref(&root)),
+        )
+        .await?;
+        fs::remove_file(&changed)?;
+        fs::create_dir(&changed)?;
+        wav(&changed.join("hidden.wav"), 75)?;
+        let paths: Vec<_> = prepared
+            .items
+            .iter()
+            .map(|item| item.path.clone())
+            .collect();
+        let mut looked_up = Vec::new();
+        let result = super::scan_paths_with_cues(
+            workers,
+            &paths,
+            |paths| {
+                looked_up.extend(paths.iter().cloned());
+                std::future::ready(Ok(vec![None; paths.len()]))
+            },
+            super::ScanSettings {
+                ffmpeg_enabled: false,
+                library_roots: std::slice::from_ref(&root),
+                max_depth: 4,
+            },
+            (&cancellation, Some(prepared.sheets)),
+            |_, _, _, _, _| {},
+        )
+        .await;
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("not a regular file")
+        );
+        assert!(
+            looked_up.is_empty(),
+            "all import scopes are admitted before probing"
+        );
+        let normal = scan_uncached_paths(
+            workers,
+            std::slice::from_ref(&root),
+            std::slice::from_ref(&root),
+        )
+        .await?;
+        assert_eq!(
+            normal.track_count(),
+            2,
+            "explicit library scans still recurse"
+        );
+        Ok(())
+    })
+}
+
+#[test]
+fn cue_import_rescan_relocation_and_copy_preserve_independent_user_state() -> Result<()> {
+    futures::executor::block_on(async {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().to_path_buf();
+        let old = root.join("old");
+        fs::create_dir(&old)?;
+        wav(&old.join("audio.wav"), 225)?;
+        two_track_sheet(&old.join("album.cue"))?;
+        let playlist = root.join("list.m3u8");
+        fs::write(&playlist, "old/album.cue\n")?;
+        let workers = &crate::execution::BlockingPool::new(4);
+        let cancellation = ScanCancellation::default();
+        let store = crate::store::Store::open(Path::new(":memory:"))?;
+        let prepared = super::prepare_playlist_import(
+            workers,
+            &playlist,
+            &cancellation,
+            Some(std::slice::from_ref(&root)),
+        )
+        .await?;
+        let paths: Vec<_> = prepared
+            .items
+            .iter()
+            .map(|item| item.path.clone())
+            .collect();
+        let imported = super::scan_paths_with_cues(
+            workers,
+            &paths,
+            |paths| std::future::ready(Ok(vec![None; paths.len()])),
+            super::ScanSettings {
+                ffmpeg_enabled: false,
+                library_roots: std::slice::from_ref(&root),
+                max_depth: 4,
+            },
+            (&cancellation, Some(prepared.sheets)),
+            |_, _, _, _, _| {},
+        )
+        .await?;
+        store.apply_scan(&imported)?;
+        let ids: Vec<_> = prepared
+            .items
+            .iter()
+            .map(|item| {
+                store
+                    .track_id_for_identity(match item.cue_track {
+                        Some(number) => crate::store::TrackIdentity::Cue(&item.path, number),
+                        None => crate::store::TrackIdentity::File(&item.path),
+                    })
+                    .map(Option::unwrap)
+            })
+            .collect::<Result<_>>()?;
+        store.set_favorite(&[ids[0]], true)?;
+        store.edit_track(ids[0], Some("Personal"), None, None, None)?;
+        store.enqueue_tracks(&ids)?;
+        let queue = store.queue_page(None, 0, 10)?;
+        let saved_playlist = store.create_playlist_with_tracks("Imported", &ids)?;
+        fs::write(
+            old.join("album.cue"),
+            "TITLE \"New album\"\nPERFORMER \"New artist\"\nFILE \"audio.wav\" WAVE\nTRACK 01 AUDIO\nTITLE \"New raw title\"\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nINDEX 01 00:01:00\n",
+        )?;
+        let rescanned = scan_uncached_paths(
+            workers,
+            &[old.join("album.cue")],
+            std::slice::from_ref(&root),
+        )
+        .await?;
+        store.apply_scan(&rescanned)?;
+        assert_eq!(store.track(ids[0])?.unwrap().title, "Personal");
+        assert_eq!(store.track(ids[1])?.unwrap().artist, "New artist");
+        let moved = root.join("moved");
+        fs::rename(&old, &moved)?;
+        let relocated = scan_uncached_paths(
+            workers,
+            &[moved.join("album.cue")],
+            std::slice::from_ref(&root),
+        )
+        .await?;
+        store.apply_scan(&relocated)?;
+        for (index, id) in ids.iter().copied().enumerate() {
+            assert_eq!(
+                store.track_id_for_identity(crate::store::TrackIdentity::Cue(
+                    &moved.join("album.cue"),
+                    index as u32 + 1
+                ))?,
+                Some(id)
+            );
+        }
+        let kept = store.track(ids[0])?.unwrap();
+        assert!(kept.favorite);
+        assert_eq!(kept.title, "Personal");
+        assert_eq!(kept.path, moved.join("audio.wav"));
+        let moved_queue = store.queue_page(None, 0, 10)?;
+        assert_eq!(
+            moved_queue
+                .rows
+                .iter()
+                .map(|row| (row.id, row.track_id))
+                .collect::<Vec<_>>(),
+            queue
+                .rows
+                .iter()
+                .map(|row| (row.id, row.track_id))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(store.playlist_track_ids(saved_playlist, 10)?, ids);
+        let copy = root.join("copy");
+        fs::create_dir(&copy)?;
+        fs::copy(moved.join("audio.wav"), copy.join("audio.wav"))?;
+        fs::copy(moved.join("album.cue"), copy.join("album.cue"))?;
+        store.apply_scan(
+            &scan_uncached_paths(
+                workers,
+                &[copy.join("album.cue")],
+                std::slice::from_ref(&root),
+            )
+            .await?,
+        )?;
+        let copy_id = store
+            .track_id_for_identity(crate::store::TrackIdentity::Cue(&copy.join("album.cue"), 1))?
+            .unwrap();
+        assert_ne!(copy_id, ids[0]);
+        assert!(!store.track(copy_id)?.unwrap().favorite);
+        assert_eq!(store.track(ids[0])?.unwrap().title, "Personal");
+        Ok(())
+    })
+}
+
+#[test]
+fn import_retained_overflow_after_a_valid_sheet_aborts_the_whole_scan() -> Result<()> {
+    futures::executor::block_on(async {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().to_path_buf();
+        wav(&root.join("audio.wav"), 225)?;
+        two_track_sheet(&root.join("a.cue"))?;
+        two_track_sheet(&root.join("b.cue"))?;
+        let playlist = root.join("list.m3u8");
+        fs::write(&playlist, "a.cue\nb.cue\n")?;
+        let workers = &crate::execution::BlockingPool::new(4);
+        let cancellation = ScanCancellation::default();
+        let prepared = super::prepare_playlist_import(
+            workers,
+            &playlist,
+            &cancellation,
+            Some(std::slice::from_ref(&root)),
+        )
+        .await?;
+        let budget = prepared.sheets.budget.clone();
+        let paths: Vec<_> = prepared
+            .items
+            .iter()
+            .map(|item| item.path.clone())
+            .collect();
+        let mut first_completed = false;
+        let result = super::scan_paths_with_cues(
+            workers,
+            &paths,
+            |paths| std::future::ready(Ok(vec![None; paths.len()])),
+            super::ScanSettings {
+                ffmpeg_enabled: false,
+                library_roots: std::slice::from_ref(&root),
+                max_depth: 4,
+            },
+            (&cancellation, Some(prepared.sheets)),
+            |phase, processed, _, _, _| {
+                if phase == ScanPhase::ReadingMetadata && processed == 1 && !first_completed {
+                    first_completed = true;
+                    budget.reserve(budget.remaining()).unwrap();
+                }
+            },
+        )
+        .await;
+        assert!(first_completed);
+        assert!(super::input::RetainedBudget::is_limit(&result.unwrap_err()));
+        assert_eq!(budget.remaining(), 0);
+        Ok(())
+    })
+}
+
+#[test]
+fn import_source_fifo_substitution_is_fatal_without_blocking_or_recursion() -> Result<()> {
+    futures::executor::block_on(async {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().to_path_buf();
+        let audio = root.join("audio.wav");
+        wav(&audio, 75)?;
+        let playlist = root.join("list.m3u8");
+        fs::write(&playlist, "audio.wav\n")?;
+        let workers = &crate::execution::BlockingPool::new(4);
+        let cancellation = ScanCancellation::default();
+        let prepared = super::prepare_playlist_import(
+            workers,
+            &playlist,
+            &cancellation,
+            Some(std::slice::from_ref(&root)),
+        )
+        .await?;
+        let paths: Vec<_> = prepared
+            .items
+            .iter()
+            .map(|item| item.path.clone())
+            .collect();
+        let mut replaced = false;
+        let result = super::scan_paths_with_cues(
+            workers,
+            &paths,
+            |paths| std::future::ready(Ok(vec![None; paths.len()])),
+            super::ScanSettings {
+                ffmpeg_enabled: false,
+                library_roots: std::slice::from_ref(&root),
+                max_depth: 4,
+            },
+            (&cancellation, Some(prepared.sheets)),
+            |phase, _, _, _, _| {
+                if phase == ScanPhase::ReadingMetadata && !replaced {
+                    replaced = true;
+                    fs::remove_file(&audio).unwrap();
+                    let name =
+                        std::ffi::CString::new(audio.as_os_str().as_encoded_bytes()).unwrap();
+                    // SAFETY: the live C string is terminated and mkfifo retains no pointer.
+                    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+                }
+            },
+        )
+        .await;
+        assert!(replaced);
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("not a regular file")
+        );
+        assert!(
+            super::prepare_playlist_import(
+                workers,
+                &playlist,
+                &cancellation,
+                Some(std::slice::from_ref(&root))
+            )
+            .await
+            .is_err()
+        );
+        Ok(())
+    })
 }

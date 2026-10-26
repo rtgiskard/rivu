@@ -376,12 +376,54 @@ fn draw_details(
             );
             group(&mut lines, "gl-file");
             lines.extend(detail_field(
+                i18n.text("gl-track-kind"),
+                i18n.text(if track.cue.is_some() {
+                    "gl-cue-segment"
+                } else {
+                    "gl-whole-file"
+                }),
+                width,
+                colors,
+            ));
+            lines.push(Line::default());
+            lines.extend(detail_field(
                 i18n.text("gl-file-path"),
                 &track.path.to_string_lossy(),
                 width,
                 colors,
             ));
             lines.push(Line::default());
+            if let Some(cue) = &track.cue {
+                let position = |frame: u64| {
+                    let seconds = frame / 75;
+                    format!("{:02}:{:02}:{:02}", seconds / 60, seconds % 60, frame % 75)
+                };
+                detail_fields(
+                    &mut lines,
+                    &[
+                        ("gl-cue-sheet", cue.sheet.to_string_lossy().into_owned()),
+                        ("gl-cue-number", cue.number.to_string()),
+                        ("gl-cue-start", position(cue.start_frame)),
+                        (
+                            "gl-cue-end",
+                            cue.end_frame
+                                .map(position)
+                                .unwrap_or_else(|| i18n.text("gl-file-end").to_owned()),
+                        ),
+                    ],
+                    width,
+                    i18n,
+                    colors,
+                );
+                lines.extend(
+                    wrap_details(i18n.text("gl-cue-range-note"), width)
+                        .into_iter()
+                        .map(|line| {
+                            Line::from(Span::styled(line, Style::default().fg(colors.secondary)))
+                        }),
+                );
+                lines.push(Line::default());
+            }
             let decoder = match track.decoder_hint {
                 rivu_format::media::DecoderHint::Auto => i18n.text("gl-auto"),
                 rivu_format::media::DecoderHint::Native => i18n.text("gl-native"),

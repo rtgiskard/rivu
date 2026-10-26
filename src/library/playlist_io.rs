@@ -19,7 +19,6 @@ pub struct M3uItem {
 pub(crate) const MAX_IMPORT_FILE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_IMPORT_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) const MAX_IMPORT_ENTRIES: usize = 100_000;
-const MAX_RETAINED_BYTES: usize = 64 * 1024 * 1024;
 
 const EXPORT_BUFFER_BYTES: usize = 256 * 1024;
 const COOPERATIVE_ROWS: usize = 256;
@@ -71,7 +70,15 @@ impl ExportWriter<'_> {
 
 pub(crate) struct PlaylistImport {
     pub items: Vec<M3uItem>,
+    pub sheets: ImportSheets,
+}
+
+pub(crate) struct ImportSheets {
     pub sheets: HashMap<PathBuf, super::cue::CueSheet>,
+    /// Shared immutable source payloads and lightweight segment storage (64 MiB).
+    pub budget: super::input::RetainedBudget,
+    /// Parsed sheet payloads (64 MiB), released by the final sheet owner.
+    pub parsed_budget: super::input::RetainedBudget,
 }
 
 /// Import a bounded CUE sheet in sheet order, or a UTF-8 M3U/M3U8 playlist.
@@ -118,8 +125,7 @@ pub(crate) async fn prepare_playlist_import(
 struct ImportBuilder {
     result: PlaylistImport,
     bytes_read: usize,
-    retained: usize,
-    expanded_bytes: usize,
+    budget: super::input::RetainedBudget,
 }
 
 impl ImportBuilder {
@@ -130,35 +136,18 @@ impl ImportBuilder {
         cancellation: &ScanCancellation,
     ) -> Result<()> {
         if let Some(sheet) = sheet {
-            self.retained += path.as_os_str().len()
-                + std::mem::size_of::<super::cue::CueSheet>()
-                + sheet.title.as_ref().map_or(0, String::len)
-                + sheet.performer.as_ref().map_or(0, String::len);
-            for track in &sheet.tracks {
-                cancellation.check()?;
-                self.retained += std::mem::size_of::<super::cue::CueTrack>()
-                    + track.file.as_os_str().len()
-                    + track.title.as_ref().map_or(0, String::len)
-                    + track.performer.as_ref().map_or(0, String::len);
-            }
-            ensure!(
-                self.retained <= MAX_RETAINED_BYTES,
-                "import CUE metadata exceeds retained data limit"
-            );
-            self.result.sheets.insert(path.clone(), sheet);
+            self.result.sheets.sheets.insert(path.clone(), sheet);
         }
-        let sheet = &self.result.sheets[&path];
+        let sheet = &self.result.sheets.sheets[&path];
         ensure!(
             self.result.items.len() + sheet.tracks.len() <= MAX_IMPORT_ENTRIES,
             "import expansion exceeds {MAX_IMPORT_ENTRIES} entries"
         );
+        self.budget
+            .reserve_vec(&mut self.result.items, sheet.tracks.len())?;
         for track in &sheet.tracks {
             cancellation.check()?;
-            self.expanded_bytes += std::mem::size_of::<M3uItem>() + path.as_os_str().len();
-            ensure!(
-                self.expanded_bytes <= MAX_RETAINED_BYTES,
-                "import expansion exceeds retained data limit"
-            );
+            self.budget.reserve(path.as_os_str().len())?;
             self.result.items.push(M3uItem {
                 path: path.clone(),
                 cue_track: Some(track.number),
@@ -177,73 +166,91 @@ async fn prepare_import(
 ) -> Result<PlaylistImport> {
     cancellation.check()?;
     let path = logical_path(path)?;
+    let budget = super::input::RetainedBudget::default();
     let mut builder = ImportBuilder {
         result: PlaylistImport {
             items: Vec::new(),
-            sheets: HashMap::new(),
+            sheets: ImportSheets {
+                sheets: HashMap::new(),
+                budget: Default::default(),
+                parsed_budget: Default::default(),
+            },
         },
         bytes_read: 0,
-        retained: 0,
-        expanded_bytes: 0,
+        budget: budget.clone(),
     };
-    let paths = if cue {
-        vec![path]
+    let (paths, mut path_charge) = if cue {
+        let mut charge = budget.scoped();
+        charge.reserve(std::mem::size_of::<PathBuf>() + path.as_os_str().len())?;
+        (vec![path], charge)
     } else {
         let bytes = read_input_async(workers, &path, MAX_IMPORT_FILE_BYTES, cancellation)
             .await
             .with_context(|| format!("Reading import playlist {}", path.display()))?;
         builder.bytes_read = bytes.len();
         let cancellation = cancellation.clone();
+        let mut roots_charge = budget.scoped();
+        if let Some(roots) = roots {
+            roots_charge.reserve(
+                roots
+                    .iter()
+                    .map(|root| std::mem::size_of::<PathBuf>() + root.as_os_str().len())
+                    .sum(),
+            )?;
+        }
         let roots = roots.map(<[PathBuf]>::to_vec);
+        let budget = budget.clone();
         // UTF-8 validation, line parsing and logical path expansion are bounded
         // CPU work, not filesystem I/O on the async driver.
         workers
-            .execute(move || -> Result<Vec<PathBuf>> {
-                let text =
-                    std::str::from_utf8(bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes))
-                        .with_context(|| {
-                            format!("Decoding import playlist {} as UTF-8", path.display())
-                        })?;
-                let parent = path.parent().unwrap_or_else(|| Path::new("."));
-                let mut paths = Vec::new();
-                let mut retained = 0;
-                for raw_line in text.lines() {
-                    cancellation.check()?;
-                    let line = raw_line.trim_end_matches('\r');
-                    if line.is_empty() || line.starts_with('#') {
-                        continue;
-                    }
-                    let item_path = PathBuf::from(line);
-                    let item_path = logical_path(&if item_path.is_absolute() {
-                        item_path
-                    } else {
-                        parent.join(item_path)
+            .execute(
+                move || -> Result<(Vec<PathBuf>, super::input::RetainedScope)> {
+                    let text = std::str::from_utf8(
+                        bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes),
+                    )
+                    .with_context(|| {
+                        format!("Decoding import playlist {} as UTF-8", path.display())
                     })?;
-                    if let Some(roots) = &roots {
+                    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+                    let mut paths = Vec::new();
+                    let mut charge = budget.scoped();
+                    for raw_line in text.lines() {
+                        cancellation.check()?;
+                        let line = raw_line.trim_end_matches('\r');
+                        if line.is_empty() || line.starts_with('#') {
+                            continue;
+                        }
+                        let item_path = PathBuf::from(line);
+                        let item_path = logical_path(&if item_path.is_absolute() {
+                            item_path
+                        } else {
+                            parent.join(item_path)
+                        })?;
+                        if let Some(roots) = &roots {
+                            ensure!(
+                                roots.iter().any(|root| item_path.starts_with(root)),
+                                "Import source is outside configured library roots: {}",
+                                item_path.display()
+                            );
+                        }
                         ensure!(
-                            roots.iter().any(|root| item_path.starts_with(root)),
-                            "Import source is outside configured library roots: {}",
-                            item_path.display()
+                            paths.len() < MAX_IMPORT_ENTRIES,
+                            "import expansion exceeds {MAX_IMPORT_ENTRIES} entries"
                         );
+                        charge.reserve(item_path.as_os_str().len())?;
+                        charge.reserve_vec(&mut paths, 1)?;
+                        paths.push(item_path);
                     }
-                    ensure!(
-                        paths.len() < MAX_IMPORT_ENTRIES,
-                        "import expansion exceeds {MAX_IMPORT_ENTRIES} entries"
-                    );
-                    retained += std::mem::size_of::<PathBuf>() + item_path.as_os_str().len();
-                    ensure!(
-                        retained <= MAX_RETAINED_BYTES,
-                        "import expansion exceeds retained data limit"
-                    );
-                    paths.push(item_path);
-                }
-                Ok(paths)
-            })
+                    drop(roots_charge);
+                    Ok((paths, charge))
+                },
+            )
             .await
             .context("Playlist import parser panicked")??
     };
     for (index, path) in paths.into_iter().enumerate() {
         cancellation.check()?;
+        let path_bytes = path.as_os_str().len();
         if is_cue_path(&path) {
             if let Some(roots) = roots {
                 ensure!(
@@ -252,7 +259,7 @@ async fn prepare_import(
                     path.display()
                 );
             }
-            let bytes = if builder.result.sheets.contains_key(&path) {
+            let bytes = if builder.result.sheets.sheets.contains_key(&path) {
                 None
             } else {
                 let bytes = read_input_async(
@@ -270,23 +277,43 @@ async fn prepare_import(
             builder = workers
                 .execute(move || -> Result<ImportBuilder> {
                     let sheet = bytes
-                        .map(|bytes| super::cue::parse_input(&bytes, &path, &cancellation))
+                        .map(|bytes| {
+                            super::cue::parse_import_input(
+                                &bytes,
+                                &path,
+                                &cancellation,
+                                &builder.result.sheets.parsed_budget,
+                            )
+                        })
                         .transpose()?;
                     builder.add_sheet(path, sheet, &cancellation)?;
                     Ok(builder)
                 })
                 .await
                 .context("Playlist import CUE parser panicked")??;
+            path_charge.release(path_bytes);
         } else {
+            let inspected = workers
+                .execute({
+                    let path = path.clone();
+                    move || std::fs::metadata(path)
+                })
+                .await
+                .context("Import source inspection worker panicked")?;
+            if let Ok(metadata) = inspected {
+                ensure!(
+                    metadata.is_file(),
+                    "Import source is not a regular file: {}",
+                    path.display()
+                );
+            }
             ensure!(
                 builder.result.items.len() < MAX_IMPORT_ENTRIES,
                 "import expansion exceeds {MAX_IMPORT_ENTRIES} entries"
             );
-            builder.expanded_bytes += std::mem::size_of::<M3uItem>() + path.as_os_str().len();
-            ensure!(
-                builder.expanded_bytes <= MAX_RETAINED_BYTES,
-                "import expansion exceeds retained data limit"
-            );
+            path_charge.release(path_bytes);
+            builder.budget.reserve(path_bytes)?;
+            builder.budget.reserve_vec(&mut builder.result.items, 1)?;
             builder.result.items.push(M3uItem {
                 path,
                 cue_track: None,

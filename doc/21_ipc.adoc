@@ -834,7 +834,9 @@ equal to the raw value still records editing intent; an omitted field continues
 to follow rescans. No-op edits succeed for existing tracks and reject unknown IDs.
 The new-track minimum-duration policy is captured when a scan/import starts and
 applied after exact-identity and relocation matching, never to previously stored
-identities; see link:02_library.adoc#_minimum_duration_for_new_tracks[Library].
+identities. Successfully validated CUE sheets exempt their subtracks and referenced
+whole-file identities; failed sheets grant no exemption. See
+link:02_library.adoc#_minimum_duration_for_new_tracks[Library].
 
 Raw source reuse requires the current probe version (`1`), independently of schema
 and protocol versions; a mismatch reprobes metadata without invalidating the
@@ -846,6 +848,12 @@ reuse; CUE identities can supply fingerprints. New/retargeted CUE sheets may use
 sources outside the scanned subtree but within configured roots. Up to 32 sheets
 are prepared together, and shared sources reuse one result or error per scan.
 Force scans bypass reuse.
+
+Preparation keeps whole-file source snapshots separate from CUE subtracks.
+Both sheet scans and Other checks stage subtracks through the same borrowed
+metadata view, sharing source facts instead of copying them per subtrack.
+Sheet scans retain parsed-sheet metadata; Other checks retain registered raw
+labels, track/disc numbers, release dates and bounds without reopening the sheet.
 
 Task identity and cancellation are checked before each batch. Submission and
 reply waits wake on cancellation without polling or holding a blocking-pool slot;

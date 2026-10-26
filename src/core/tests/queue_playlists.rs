@@ -1152,7 +1152,6 @@ fn album_commands_resolve_all_members_and_reject_stale_keys_before_stop() {
     let records = (0..MAX_QUERY_ROWS + 3)
         .map(|number| ScanRecord {
             path: directory.path().join(format!("album-{number}.wav")),
-            cue: None,
             size: 1,
             modified_ns: 1,
             fingerprint: None,
@@ -1172,12 +1171,12 @@ fn album_commands_resolve_all_members_and_reject_stale_keys_before_stop() {
                 release_date: None,
             },
         })
-        .collect();
+        .collect::<Vec<_>>();
     let impacts = core
         .store
         .apply_scan(&ScanResult {
             roots: vec![directory.path().into()],
-            records,
+            records: records.into_iter().map(std::sync::Arc::new).collect(),
             ..ScanResult::default()
         })
         .unwrap();

@@ -307,11 +307,10 @@ fn playlist_entries(store: &Store, playlist_id: i64) -> Vec<PlaylistEntryRow> {
         }
     }
 }
-use crate::library::{ScanRecord, ScanResult, ScanUncertainty};
+use crate::library::{CueRecord, RegisteredCueMetadata, ScanRecord, ScanResult, ScanUncertainty};
 fn rec(path: &str, hash: &str, title: &str, dur: f64) -> ScanRecord {
     ScanRecord {
         path: path.into(),
-        cue: None,
         size: 1,
         modified_ns: 1,
         fingerprint: Some(blake3::hash(hash.as_bytes()).to_hex().to_string()),
@@ -335,14 +334,14 @@ fn rec(path: &str, hash: &str, title: &str, dur: f64) -> ScanRecord {
 fn scan(records: Vec<ScanRecord>) -> ScanResult {
     ScanResult {
         roots: vec![PathBuf::from("/music")],
-        records,
+        records: records.into_iter().map(std::sync::Arc::new).collect(),
         min_duration_secs: 0,
         errors: vec![],
-        suppressed_sources: Vec::new(),
         skipped_directories: Vec::new(),
         skipped_directories_truncated: false,
         scan_incomplete: false,
         uncertainties: Vec::new(),
+        ..Default::default()
     }
 }
 fn db() -> (tempfile::TempDir, Store) {
@@ -1416,15 +1415,17 @@ fn album_summaries_follow_scan_edits_removals_and_relocation_rollback() {
         .apply_scan(&scan(vec![source, target.clone(), peer.clone()]))
         .unwrap();
     let source_id = store
-        .track_id_for_source(Path::new("/music/old/source.flac"), None)
+        .track_id_for_identity(crate::store::TrackIdentity::File(Path::new(
+            "/music/old/source.flac",
+        )))
         .unwrap()
         .unwrap();
     let target_id = store
-        .track_id_for_source(&target.path, None)
+        .track_id_for_identity(crate::store::TrackIdentity::File(&target.path))
         .unwrap()
         .unwrap();
     let peer_id = store
-        .track_id_for_source(&peer.path, None)
+        .track_id_for_identity(crate::store::TrackIdentity::File(&peer.path))
         .unwrap()
         .unwrap();
     store
@@ -1757,16 +1758,20 @@ fn playback_precision_fill_and_cue_guard_preserve_source_identity() {
     assert_eq!(store.track(track.id).unwrap().unwrap().bitrate_bps, None);
     assert!(!store.upgrade_bitrate(&source, 192_000, true).unwrap());
 
-    let mut cue = rec("/music/cue.flac", "cue", "Cue", 10.0);
-    cue.cue = Some(CueSegment {
-        sheet: "/music/album.cue".into(),
-        number: 1,
-        start_frame: 0,
-        end_frame: Some(750),
-    });
-    store.apply_scan(&scan(vec![cue.clone()])).unwrap();
+    let mut cue = segment("/music/album.cue", 1, 0, Some(750));
+    cue.source = std::sync::Arc::new(rec("/music/cue.flac", "cue", "Cue", 10.0));
+    cue.duration = Some(10.0);
+    store
+        .apply_scan(&ScanResult {
+            segments: vec![cue.clone()],
+            ..scan(Vec::new())
+        })
+        .unwrap();
     let id = store
-        .track_id_for_source(Path::new("/music/album.cue"), Some(1))
+        .track_id_for_identity(crate::store::TrackIdentity::Cue(
+            Path::new("/music/album.cue"),
+            1,
+        ))
         .unwrap()
         .unwrap();
     let source = store
@@ -1774,8 +1779,15 @@ fn playback_precision_fill_and_cue_guard_preserve_source_identity() {
         .unwrap()
         .unwrap();
     assert!(store.upgrade_bitrate(&source, 128_000, true).unwrap());
-    cue.cue.as_mut().unwrap().end_frame = Some(700);
-    store.apply_scan(&scan(vec![cue])).unwrap();
+    let mut changed = segment("/music/album.cue", 1, 0, Some(700));
+    changed.source = cue.source;
+    changed.duration = cue.duration;
+    store
+        .apply_scan(&ScanResult {
+            segments: vec![changed],
+            ..scan(Vec::new())
+        })
+        .unwrap();
     assert!(!store.track(id).unwrap().unwrap().bitrate_exact);
     assert!(!store.upgrade_bitrate(&source, 192_000, true).unwrap());
 }
@@ -2363,20 +2375,25 @@ fn playlist_addition_with_missing_track_rolls_back_new_entries() {
     );
 }
 
-fn segment(sheet: &str, number: u32, start: u64, end: Option<u64>) -> ScanRecord {
-    let mut record = rec(
-        "/music/shared.wav",
-        "shared",
-        &format!("Track {number}"),
-        60.0,
-    );
-    record.cue = Some(CueSegment {
-        sheet: sheet.into(),
-        number,
-        start_frame: start,
-        end_frame: end,
-    });
-    record
+fn segment(sheet: &str, number: u32, start: u64, end: Option<u64>) -> CueRecord {
+    CueRecord::registered(
+        std::sync::Arc::new(rec("/music/shared.wav", "shared", "Source", 180.0)),
+        CueSegment {
+            sheet: sheet.into(),
+            number,
+            start_frame: start,
+            end_frame: end,
+        },
+        RegisteredCueMetadata {
+            title: format!("Track {number}"),
+            artist: String::new(),
+            album: String::new(),
+            track_number: None,
+            disc_number: None,
+            release_date: None,
+        },
+        Some(60.0),
+    )
 }
 
 #[test]
@@ -2387,7 +2404,10 @@ fn shared_source_segments_keep_independent_ids_overrides_stats_and_missing_state
     let second = segment("/music/a.cue", 2, 4500, Some(9000));
     let other = segment("/music/b.cue", 1, 0, Some(4500));
     store
-        .apply_scan(&scan(vec![whole, first.clone(), second.clone(), other]))
+        .apply_scan(&ScanResult {
+            segments: vec![first.clone(), second.clone(), other],
+            ..scan(vec![whole])
+        })
         .unwrap();
     let tracks = all_tracks(&store);
     let ids: Vec<_> = tracks.iter().map(|t| t.id).collect();
@@ -2407,20 +2427,38 @@ fn shared_source_segments_keep_independent_ids_overrides_stats_and_missing_state
     store
         .edit_track(ids[2], None, None, None, Some(DecoderHint::Ffmpeg))
         .unwrap();
-    let mut changed = first;
-    changed.path = "/music/replaced.wav".into();
-    changed.media.title = "New raw title".into();
-    changed.media.duration = Some(59.0);
-    changed.cue.as_mut().unwrap().start_frame = 75;
-    changed.cue.as_mut().unwrap().end_frame = Some(4500);
-    let mut rescan = scan(vec![changed.clone(), second.clone()]);
+    let mut changed_source = rec("/music/replaced.wav", "shared", "Source", 180.0);
+    changed_source.media.title = "Source title, not segment title".into();
+    let changed_cue = CueSegment {
+        sheet: "/music/a.cue".into(),
+        number: 1,
+        start_frame: 75,
+        end_frame: Some(4500),
+    };
+    let changed = CueRecord::registered(
+        std::sync::Arc::new(changed_source),
+        changed_cue.clone(),
+        RegisteredCueMetadata {
+            title: "New raw title".into(),
+            artist: String::new(),
+            album: String::new(),
+            track_number: None,
+            disc_number: None,
+            release_date: None,
+        },
+        Some(59.0),
+    );
+    let mut rescan = ScanResult {
+        segments: vec![changed.clone(), second.clone()],
+        ..scan(Vec::new())
+    };
     rescan.roots = vec!["/music/a.cue".into()];
     store.apply_scan(&rescan).unwrap();
     let after = all_tracks(&store);
     assert_eq!(after.iter().map(|t| t.id).collect::<Vec<_>>(), ids);
     assert_eq!(after[1].title, "Custom");
-    assert_eq!(after[1].cue, changed.cue);
-    assert_eq!(after[1].path, changed.path);
+    assert_eq!(after[1].cue, Some(changed_cue.clone()));
+    assert_eq!(after[1].path, changed.source.path);
     assert_eq!(after[1].duration, Some(59.0));
     assert_eq!((after[1].play_count, after[1].last_played), (1, Some(10)));
     assert_eq!(after[0].decoder_hint, DecoderHint::Auto);
@@ -2436,9 +2474,9 @@ fn shared_source_segments_keep_independent_ids_overrides_stats_and_missing_state
     }
     let known = store.stored_scan_files(&[PathBuf::from("/")]).unwrap();
     let known = known.iter().find(|r| r.track_id == ids[1]).unwrap();
-    assert_eq!(known.cue, changed.cue);
+    assert_eq!(known.cue, Some(changed_cue));
     assert_eq!(known.media.as_ref().unwrap().title, "New raw title");
-    rescan.records = vec![second];
+    rescan.segments = vec![second];
     store.apply_scan(&rescan).unwrap();
     let after = all_tracks(&store);
     assert!(after[1].missing);
@@ -2446,7 +2484,7 @@ fn shared_source_segments_keep_independent_ids_overrides_stats_and_missing_state
         assert!(!after[index].missing);
     }
     assert_eq!(playlist_entries(&store, playlist).len(), 3);
-    rescan.records.push(changed);
+    rescan.segments.push(changed);
     store.apply_scan(&rescan).unwrap();
     assert!(!all_tracks(&store)[1].missing);
     store.remove_tracks(&[ids[1]]).unwrap();
@@ -2465,20 +2503,24 @@ fn shared_source_segments_keep_independent_ids_overrides_stats_and_missing_state
 }
 
 #[test]
-fn directory_suppression_preserves_whole_source_but_missing_sheets_mark_segments() {
+fn whole_source_and_cue_segments_reconcile_independently() {
     let store = Store::open(Path::new(":memory:")).unwrap();
+    let whole = rec("/music/shared.wav", "shared", "Whole", 180.0);
     let first = segment("/music/a.cue", 1, 0, Some(4500));
     store
-        .apply_scan(&scan(vec![
-            rec("/music/shared.wav", "shared", "Whole", 180.0),
-            first.clone(),
-        ]))
+        .apply_scan(&ScanResult {
+            segments: vec![first.clone()],
+            ..scan(vec![whole.clone()])
+        })
         .unwrap();
-    let mut result = scan(vec![first]);
-    result.suppressed_sources.push("/music/shared.wav".into());
+    let mut result = ScanResult {
+        segments: vec![first],
+        ..scan(vec![whole.clone()])
+    };
     store.apply_scan(&result).unwrap();
-    assert!(all_tracks(&store).iter().all(|t| !t.missing));
-    result.records.clear();
+    assert!(all_tracks(&store).iter().all(|track| !track.missing));
+    result.records = vec![std::sync::Arc::new(whole)];
+    result.segments.clear();
     store.apply_scan(&result).unwrap();
     let tracks = all_tracks(&store);
     assert!(!tracks[0].missing);
@@ -2497,23 +2539,25 @@ fn depth_excluded_tracks_keep_missing_state_and_are_not_relocation_candidates() 
         10.0,
     );
     store
-        .apply_scan(&scan(vec![
-            whole.clone(),
-            cue.clone(),
-            already_missing.clone(),
-            rec("/music/deeper/absent.wav", "prefix", "Other branch", 10.0),
-        ]))
+        .apply_scan(&ScanResult {
+            segments: vec![cue.clone()],
+            ..scan(vec![
+                whole.clone(),
+                already_missing.clone(),
+                rec("/music/deeper/absent.wav", "prefix", "Other branch", 10.0),
+            ])
+        })
         .unwrap();
     let whole_id = store
-        .track_id_for_source(&whole.path, None)
+        .track_id_for_identity(crate::store::TrackIdentity::File(&whole.path))
         .unwrap()
         .unwrap();
     let cue_id = store
-        .track_id_for_source(&cue.cue.as_ref().unwrap().sheet, Some(1))
+        .track_id_for_identity(crate::store::TrackIdentity::Cue(cue.cue().sheet, 1))
         .unwrap()
         .unwrap();
     let missing_id = store
-        .track_id_for_source(&already_missing.path, None)
+        .track_id_for_identity(crate::store::TrackIdentity::File(&already_missing.path))
         .unwrap()
         .unwrap();
     store.set_favorite(&[whole_id, cue_id], true).unwrap();
@@ -2546,7 +2590,7 @@ fn depth_excluded_tracks_keep_missing_state_and_are_not_relocation_candidates() 
     );
     assert!(store.track(missing_id).unwrap().unwrap().missing);
     let copy_id = store
-        .track_id_for_source(&copy.path, None)
+        .track_id_for_identity(crate::store::TrackIdentity::File(&copy.path))
         .unwrap()
         .unwrap();
     assert_ne!(copy_id, whole_id);
@@ -2604,7 +2648,7 @@ fn outer_exclusions_do_not_hide_a_completed_nested_scan() {
     let deep = rec("/music/nested/covered/deep.wav", "deep", "Deep", 10.0);
     store.apply_scan(&scan(vec![deep.clone()])).unwrap();
     let id = store
-        .track_id_for_source(&deep.path, None)
+        .track_id_for_identity(crate::store::TrackIdentity::File(&deep.path))
         .unwrap()
         .unwrap();
     let mut partial = scan(Vec::new());
@@ -2624,7 +2668,10 @@ fn incomplete_scan_preserves_absent_identities_and_avoids_relocation() {
     let store = Store::open(Path::new(":memory:")).unwrap();
     let old = rec("/music/old.wav", "same", "Original", 10.0);
     store.apply_scan(&scan(vec![old.clone()])).unwrap();
-    let id = store.track_id_for_source(&old.path, None).unwrap().unwrap();
+    let id = store
+        .track_id_for_identity(crate::store::TrackIdentity::File(&old.path))
+        .unwrap()
+        .unwrap();
     store.set_favorite(&[id], true).unwrap();
     let copy = rec("/music/copy.wav", "same", "Copy", 10.0);
     let mut incomplete = scan(vec![copy.clone()]);
@@ -2636,7 +2683,7 @@ fn incomplete_scan_preserves_absent_identities_and_avoids_relocation() {
     assert!(!preserved.missing);
     assert_ne!(
         store
-            .track_id_for_source(&copy.path, None)
+            .track_id_for_identity(crate::store::TrackIdentity::File(&copy.path))
             .unwrap()
             .unwrap(),
         id
@@ -2652,7 +2699,7 @@ fn invalid_fingerprints_roll_back_complete_and_incomplete_scans() {
         let mut original = rec("/music/old.wav", "old", "Original", 10.0);
         store.apply_scan(&scan(vec![original.clone()])).unwrap();
         let id = store
-            .track_id_for_source(&original.path, None)
+            .track_id_for_identity(crate::store::TrackIdentity::File(&original.path))
             .unwrap()
             .unwrap();
         store.set_favorite(&[id], true).unwrap();
@@ -2694,18 +2741,27 @@ fn uncertain_scopes_preserve_owned_rows_and_reject_relocation_candidates() {
         let store = Store::open(Path::new(":memory:")).unwrap();
         let old_file = rec(old_path.to_str().unwrap(), "whole", "Original", 10.0);
         let old_cue = segment(old_sheet.to_str().unwrap(), 1, 0, Some(4500));
-        let mut baseline = scan(vec![old_file.clone(), old_cue.clone()]);
+        let mut baseline = ScanResult {
+            segments: vec![old_cue.clone()],
+            ..scan(vec![old_file.clone()])
+        };
         baseline.roots = vec![root.clone()];
         store.apply_scan(&baseline).unwrap();
-        let file_id = store.track_id_for_source(&old_path, None).unwrap().unwrap();
+        let file_id = store
+            .track_id_for_identity(crate::store::TrackIdentity::File(&old_path))
+            .unwrap()
+            .unwrap();
         let cue_id = store
-            .track_id_for_source(&old_sheet, Some(1))
+            .track_id_for_identity(crate::store::TrackIdentity::Cue(&old_sheet, 1))
             .unwrap()
             .unwrap();
         store.set_favorite(&[file_id, cue_id], true).unwrap();
         let copy = rec(copy_path.to_str().unwrap(), "whole", "Copy", 10.0);
         let new_cue = segment(new_sheet.to_str().unwrap(), 1, 0, Some(4500));
-        let mut partial = scan(vec![copy, new_cue]);
+        let mut partial = ScanResult {
+            segments: vec![new_cue],
+            ..scan(vec![copy])
+        };
         partial.roots = vec![root.clone()];
         partial.uncertainties.push(uncertainty);
         store.apply_scan(&partial).unwrap();
@@ -2716,7 +2772,7 @@ fn uncertain_scopes_preserve_owned_rows_and_reject_relocation_candidates() {
             assert!(preserved.favorite);
             assert_ne!(
                 store
-                    .track_id_for_source(&copy_path, None)
+                    .track_id_for_identity(crate::store::TrackIdentity::File(&copy_path))
                     .unwrap()
                     .unwrap(),
                 file_id
@@ -2724,12 +2780,20 @@ fn uncertain_scopes_preserve_owned_rows_and_reject_relocation_candidates() {
         }
         if protect_cue {
             let preserved = store.track(cue_id).unwrap().unwrap();
-            assert_eq!(preserved.cue, old_cue.cue);
+            assert_eq!(
+                preserved.cue,
+                Some(CueSegment {
+                    sheet: old_cue.cue().sheet.clone(),
+                    number: 1,
+                    start_frame: 0,
+                    end_frame: Some(4500),
+                })
+            );
             assert!(!preserved.missing);
             assert!(preserved.favorite);
             assert_ne!(
                 store
-                    .track_id_for_source(&new_sheet, Some(1))
+                    .track_id_for_identity(crate::store::TrackIdentity::Cue(&new_sheet, 1))
                     .unwrap()
                     .unwrap(),
                 cue_id
@@ -2748,18 +2812,21 @@ fn nearest_explicit_root_owns_uncertain_directory_coverage() {
     let nested = rec("/music/deep/nested/absent.wav", "nested", "Nested", 10.0);
     let beyond = segment("/music/deep/nested/beyond/hidden.cue", 1, 0, Some(4500));
     store
-        .apply_scan(&scan(vec![sibling.clone(), nested.clone(), beyond.clone()]))
+        .apply_scan(&ScanResult {
+            segments: vec![beyond.clone()],
+            ..scan(vec![sibling.clone(), nested.clone()])
+        })
         .unwrap();
     let sibling_id = store
-        .track_id_for_source(&sibling.path, None)
+        .track_id_for_identity(crate::store::TrackIdentity::File(&sibling.path))
         .unwrap()
         .unwrap();
     let nested_id = store
-        .track_id_for_source(&nested.path, None)
+        .track_id_for_identity(crate::store::TrackIdentity::File(&nested.path))
         .unwrap()
         .unwrap();
     let beyond_id = store
-        .track_id_for_source(&beyond.cue.as_ref().unwrap().sheet, Some(1))
+        .track_id_for_identity(crate::store::TrackIdentity::Cue(beyond.cue().sheet, 1))
         .unwrap()
         .unwrap();
     let mut partial = scan(Vec::new());
@@ -2796,7 +2863,10 @@ fn incomplete_scan_does_not_relocate_unknown_sources_outside_requested_roots() {
             10.0,
         )]))
         .unwrap();
-    let id = store.track_id_for_source(&old_path, None).unwrap().unwrap();
+    let id = store
+        .track_id_for_identity(crate::store::TrackIdentity::File(&old_path))
+        .unwrap()
+        .unwrap();
     let mut partial = scan(vec![rec(copy_path.to_str().unwrap(), "same", "Copy", 10.0)]);
     partial.roots = vec![requested];
     partial.scan_incomplete = true;
@@ -2804,7 +2874,7 @@ fn incomplete_scan_does_not_relocate_unknown_sources_outside_requested_roots() {
     assert_eq!(store.track(id).unwrap().unwrap().path, old_path);
     assert_ne!(
         store
-            .track_id_for_source(&copy_path, None)
+            .track_id_for_identity(crate::store::TrackIdentity::File(&copy_path))
             .unwrap()
             .unwrap(),
         id
@@ -2825,25 +2895,39 @@ fn fingerprints_never_merge_full_files_or_different_cue_segments() {
     ];
     for (index, (before, after, same_id)) in cases.into_iter().enumerate() {
         let store = Store::open(Path::new(":memory:")).unwrap();
-        let make_cue = |value: Option<(u32, u64, Option<u64>)>, name: &str| {
-            value.map(|(number, start_frame, end_frame)| CueSegment {
-                sheet: root.join(format!("{index}-{name}.cue")),
-                number,
-                start_frame,
-                end_frame,
-            })
+        let make_scan = |value: Option<(u32, u64, Option<u64>)>, name: &str, title: &str| {
+            let mut source = rec("", "same-hash", title, 60.0);
+            source.path = root.join(format!("{index}-{name}.wav"));
+            let mut result = scan(Vec::new());
+            result.roots = vec![root.clone()];
+            if let Some((number, start_frame, end_frame)) = value {
+                result.segments.push(CueRecord::registered(
+                    std::sync::Arc::new(source),
+                    CueSegment {
+                        sheet: root.join(format!("{index}-{name}.cue")),
+                        number,
+                        start_frame,
+                        end_frame,
+                    },
+                    RegisteredCueMetadata {
+                        title: title.into(),
+                        artist: String::new(),
+                        album: String::new(),
+                        track_number: None,
+                        disc_number: None,
+                        release_date: None,
+                    },
+                    Some(60.0),
+                ));
+            } else {
+                result.records.push(std::sync::Arc::new(source));
+            }
+            result
         };
-        let mut old = rec("", "same-hash", "Old", 60.0);
-        old.path = root.join(format!("{index}-old.wav"));
-        old.cue = make_cue(before, "old");
-        let mut new = rec("", "same-hash", "New", 60.0);
-        new.path = root.join(format!("{index}-new.wav"));
-        new.cue = make_cue(after, "new");
-        let mut result = scan(vec![old]);
-        result.roots = vec![root.clone()];
+        let mut result = make_scan(before, "old", "Old");
         store.apply_scan(&result).unwrap();
         let old_id = all_tracks(&store)[0].id;
-        result.records = vec![new];
+        result = make_scan(after, "new", "New");
         store.apply_scan(&result).unwrap();
         let tracks = all_tracks(&store);
         let new_track = tracks.iter().find(|t| t.title == "New").unwrap();
@@ -2866,12 +2950,15 @@ fn cue_relocation_requires_absent_sheet_not_absent_shared_source() {
     fs::write(&sheet, b"sheet").unwrap();
     fs::write(&source, b"source").unwrap();
     let mut old = segment(sheet.to_str().unwrap(), 1, 0, Some(4500));
-    old.path = source.clone();
-    let mut moved = old.clone();
-    moved.cue.as_mut().unwrap().sheet = root.join("new.cue");
+    std::sync::Arc::make_mut(&mut old.source).path = source.clone();
+    let mut moved = segment(root.join("new.cue").to_str().unwrap(), 1, 0, Some(4500));
+    moved.source = old.source.clone();
     for sheet_exists in [true, false] {
         let store = Store::open(Path::new(":memory:")).unwrap();
-        let mut result = scan(vec![old.clone()]);
+        let mut result = ScanResult {
+            segments: vec![old.clone()],
+            ..scan(Vec::new())
+        };
         result.roots = vec![root.clone()];
         store.apply_scan(&result).unwrap();
         let id = all_tracks(&store)[0].id;
@@ -2881,10 +2968,16 @@ fn cue_relocation_requires_absent_sheet_not_absent_shared_source() {
         if !sheet_exists {
             fs::remove_file(&sheet).unwrap();
         }
-        result.records = vec![moved.clone()];
+        result.segments = vec![moved.clone()];
         store.apply_scan(&result).unwrap();
         let tracks = all_tracks(&store);
-        let new = tracks.iter().find(|t| t.cue == moved.cue).unwrap();
+        let expected_cue = Some(CueSegment {
+            sheet: moved.cue().sheet.clone(),
+            number: 1,
+            start_frame: 0,
+            end_frame: Some(4500),
+        });
+        let new = tracks.iter().find(|t| t.cue == expected_cue).unwrap();
         assert_eq!(new.id == id, !sheet_exists);
         if !sheet_exists {
             assert_eq!(new.title, "Override");
@@ -2911,7 +3004,10 @@ fn ambiguous_cue_relocation_preserves_ids_and_user_data_on_both_sides() {
                     Some(4500),
                 )
             };
-            let mut result = scan((0..old_count).map(|index| make("old", index)).collect());
+            let mut result = ScanResult {
+                segments: (0..old_count).map(|index| make("old", index)).collect(),
+                ..scan(Vec::new())
+            };
             result.roots = vec![directory.path().to_path_buf()];
             store.apply_scan(&result).unwrap();
             let old_ids: Vec<_> = all_tracks(&store).iter().map(|track| track.id).collect();
@@ -2923,9 +3019,9 @@ fn ambiguous_cue_relocation_preserves_ids_and_user_data_on_both_sides() {
             }
             let playlist = store.create_playlist("Owned references").unwrap();
             store.add_playlist(playlist, &old_ids).unwrap();
-            result.records = (0..new_count).map(|index| make("new", index)).collect();
+            result.segments = (0..new_count).map(|index| make("new", index)).collect();
             if reverse {
-                result.records.reverse();
+                result.segments.reverse();
             }
             store.apply_scan(&result).unwrap();
             let tracks = all_tracks(&store);
@@ -2965,15 +3061,18 @@ fn exact_cue_identities_do_not_count_as_new_relocation_destinations() {
         };
         let old = make("old.cue");
         let exact = make("existing.cue");
-        let mut result = scan(vec![old.clone(), exact.clone()]);
+        let mut result = ScanResult {
+            segments: vec![old.clone(), exact.clone()],
+            ..scan(Vec::new())
+        };
         result.roots = vec![directory.path().to_path_buf()];
         store.apply_scan(&result).unwrap();
         let old_id = store
-            .track_id_for_source(&old.cue.as_ref().unwrap().sheet, Some(1))
+            .track_id_for_identity(crate::store::TrackIdentity::Cue(old.cue().sheet, 1))
             .unwrap()
             .unwrap();
         let exact_id = store
-            .track_id_for_source(&exact.cue.as_ref().unwrap().sheet, Some(1))
+            .track_id_for_identity(crate::store::TrackIdentity::Cue(exact.cue().sheet, 1))
             .unwrap()
             .unwrap();
         store
@@ -2983,18 +3082,34 @@ fn exact_cue_identities_do_not_count_as_new_relocation_destinations() {
             .edit_track(exact_id, Some("Exact title"), None, None, None)
             .unwrap();
         let destination = make("new.cue");
-        result.records = vec![destination.clone(), exact.clone()];
+        result.segments = vec![destination.clone(), exact.clone()];
         if reverse {
-            result.records.reverse();
+            result.segments.reverse();
         }
         store.apply_scan(&result).unwrap();
         assert_eq!(all_tracks(&store).len(), 2);
         let migrated = store.track(old_id).unwrap().unwrap();
-        assert_eq!(migrated.cue, destination.cue);
+        assert_eq!(
+            migrated.cue,
+            Some(CueSegment {
+                sheet: destination.cue().sheet.clone(),
+                number: 1,
+                start_frame: 0,
+                end_frame: Some(4500),
+            })
+        );
         assert_eq!(migrated.title, "Migrated title");
         assert!(!migrated.missing);
         let preserved = store.track(exact_id).unwrap().unwrap();
-        assert_eq!(preserved.cue, exact.cue);
+        assert_eq!(
+            preserved.cue,
+            Some(CueSegment {
+                sheet: exact.cue().sheet.clone(),
+                number: 1,
+                start_frame: 0,
+                end_frame: Some(4500),
+            })
+        );
         assert_eq!(preserved.title, "Exact title");
         assert!(!preserved.missing);
     }
@@ -3015,9 +3130,12 @@ fn cue_relocation_keeps_unique_segments_when_another_segment_is_ambiguous() {
             (number < 3).then_some(u64::from(number) * 4500),
         )
     };
-    let mut original = scan((1..=3).map(|number| make(&old_sheet, number)).collect());
+    let mut original = ScanResult {
+        segments: (1..=3).map(|number| make(&old_sheet, number)).collect(),
+        ..scan(Vec::new())
+    };
     original.roots = vec![directory.path().to_path_buf()];
-    original.records.push(make(&duplicate_sheet, 2));
+    original.segments.push(make(&duplicate_sheet, 2));
     store.apply_scan(&original).unwrap();
     let ids: Vec<_> = (1..=3)
         .map(|number| {
@@ -3036,12 +3154,13 @@ fn cue_relocation_keeps_unique_segments_when_another_segment_is_ambiguous() {
     store.set_favorite(&ids, true).unwrap();
     let playlist = store.create_playlist("Saved segments").unwrap();
     store.add_playlist(playlist, &ids).unwrap();
-    let mut moved = scan(
-        (1..=3)
+    let mut moved = ScanResult {
+        segments: (1..=3)
             .rev()
             .map(|number| make(&new_sheet, number))
             .collect(),
-    );
+        ..scan(Vec::new())
+    };
     moved.roots = original.roots;
     store.apply_scan(&moved).unwrap();
     let tracks = all_tracks(&store);
@@ -3089,10 +3208,10 @@ fn invalid_cue_database_range_leaves_entire_scan_unchanged() {
     let invalid = segment("/music/a.cue", 1, u64::MAX, None);
     assert!(
         store
-            .apply_scan(&scan(vec![
-                rec("/music/new.wav", "new", "New", 60.0),
-                invalid
-            ]))
+            .apply_scan(&ScanResult {
+                segments: vec![invalid],
+                ..scan(vec![rec("/music/new.wav", "new", "New", 60.0)])
+            })
             .is_err()
     );
     let tracks = all_tracks(&store);
@@ -3137,21 +3256,25 @@ fn playlist_pages_and_batches_preserve_effective_audio_metadata() {
     let mut whole = rec("/music/shared.wav", "shared", "Whole", 180.0);
     whole.media.codec = "pcm".into();
     let mut bounded = segment("/music/a.cue", 1, 1500, Some(3750));
-    bounded.media.duration = Some(30.0);
-    bounded.media.codec = "pcm".into();
+    bounded.duration = Some(30.0);
+    std::sync::Arc::make_mut(&mut bounded.source).media.codec = "pcm".into();
     let mut tail = segment("/music/a.cue", 2, 3750, None);
-    tail.media.duration = Some(130.0);
-    tail.media.codec = "pcm".into();
-    tail.media.channels = 6;
-    tail.media.sample_rate = 96_000;
-    tail.media.bits_per_sample = Some(24);
-    tail.media.bitrate_bps = Some(13_824_000);
-    tail.media.bitrate_exact = true;
+    tail.duration = Some(130.0);
+    let tail_media = &mut std::sync::Arc::make_mut(&mut tail.source).media;
+    tail_media.codec = "pcm".into();
+    tail_media.channels = 6;
+    tail_media.sample_rate = 96_000;
+    tail_media.bits_per_sample = Some(24);
+    tail_media.bitrate_bps = Some(13_824_000);
+    tail_media.bitrate_exact = true;
     let mut unknown = rec("/music/unknown.opus", "unknown", "Unknown", 1.0);
     unknown.media.duration = None;
     unknown.media.codec = "opus".into();
     store
-        .apply_scan(&scan(vec![whole, bounded, tail, unknown]))
+        .apply_scan(&ScanResult {
+            segments: vec![bounded, tail],
+            ..scan(vec![whole, unknown])
+        })
         .unwrap();
     let tracks = all_tracks(&store);
     let ids: Vec<_> = ["Track 2", "Unknown", "Track 1", "Whole"]
@@ -3341,26 +3464,37 @@ fn directory_favorites_filter_before_grouping_and_paging() {
     use rivu_protocol::model::DirectoryRow;
     let store = Store::open(Path::new(":memory:")).unwrap();
     store
-        .apply_scan(&scan(vec![
-            rec("/music/mixed/deep/yes.wav", "yes", "Yes", 60.0),
-            rec("/music/mixed/no.wav", "no", "No", 60.0),
-            rec("/music/empty/deep/no.wav", "empty", "Empty", 60.0),
-            rec("/music/direct.wav", "direct", "Direct", 60.0),
-            segment("/music/cue/sheet.cue", 1, 0, Some(750)),
-            segment("/music/cue/sheet.cue", 2, 750, None),
-        ]))
+        .apply_scan(&ScanResult {
+            segments: vec![
+                segment("/music/cue/sheet.cue", 1, 0, Some(750)),
+                segment("/music/cue/sheet.cue", 2, 750, None),
+            ],
+            ..scan(vec![
+                rec("/music/mixed/deep/yes.wav", "yes", "Yes", 60.0),
+                rec("/music/mixed/no.wav", "no", "No", 60.0),
+                rec("/music/empty/deep/no.wav", "empty", "Empty", 60.0),
+                rec("/music/direct.wav", "direct", "Direct", 60.0),
+            ])
+        })
         .unwrap();
     let ids = [
         store
-            .track_id_for_source(Path::new("/music/mixed/deep/yes.wav"), None)
+            .track_id_for_identity(crate::store::TrackIdentity::File(Path::new(
+                "/music/mixed/deep/yes.wav",
+            )))
             .unwrap()
             .unwrap(),
         store
-            .track_id_for_source(Path::new("/music/direct.wav"), None)
+            .track_id_for_identity(crate::store::TrackIdentity::File(Path::new(
+                "/music/direct.wav",
+            )))
             .unwrap()
             .unwrap(),
         store
-            .track_id_for_source(Path::new("/music/cue/sheet.cue"), Some(1))
+            .track_id_for_identity(crate::store::TrackIdentity::Cue(
+                Path::new("/music/cue/sheet.cue"),
+                1,
+            ))
             .unwrap()
             .unwrap(),
     ];
@@ -3454,11 +3588,15 @@ fn directory_search_preserves_matching_ancestors_and_combines_favorites() {
         ]))
         .unwrap();
     let favorite = store
-        .track_id_for_source(Path::new("/music/a/deep/one.wav"), None)
+        .track_id_for_identity(crate::store::TrackIdentity::File(Path::new(
+            "/music/a/deep/one.wav",
+        )))
         .unwrap()
         .unwrap();
     let other = store
-        .track_id_for_source(Path::new("/music/b/other.wav"), None)
+        .track_id_for_identity(crate::store::TrackIdentity::File(Path::new(
+            "/music/b/other.wav",
+        )))
         .unwrap()
         .unwrap();
     store.set_favorite(&[favorite, other], true).unwrap();
@@ -4022,9 +4160,15 @@ fn directory_pages_preserve_boundaries_and_duplicate_cue_sources() {
         })
         .collect::<Vec<_>>();
     records.push(rec("/music/AlbumExtra/other.wav", "other", "Other", 60.0));
-    records.push(segment("/music/Album/sheet.cue", 1, 0, Some(750)));
-    records.push(segment("/music/Album/sheet.cue", 2, 750, None));
-    store.apply_scan(&scan(records)).unwrap();
+    store
+        .apply_scan(&ScanResult {
+            segments: vec![
+                segment("/music/Album/sheet.cue", 1, 0, Some(750)),
+                segment("/music/Album/sheet.cue", 2, 750, None),
+            ],
+            ..scan(records)
+        })
+        .unwrap();
     let root = store
         .directory_page(Path::new(""), None, None, None, 0, MAX_QUERY_ROWS)
         .unwrap();
@@ -4119,18 +4263,25 @@ fn directory_pages_preserve_boundaries_and_duplicate_cue_sources() {
     assert_eq!(cue_match.total, 2);
     assert!(matches!(&cue_match.rows[..], [DirectoryRow::Track(row)] if row.title == "Track 2"));
     let tail_id = store
-        .track_id_for_source(Path::new("/music/Album/299.wav"), None)
+        .track_id_for_identity(crate::store::TrackIdentity::File(Path::new(
+            "/music/Album/299.wav",
+        )))
         .unwrap()
         .unwrap();
     assert_eq!(store.track(tail_id).unwrap().unwrap().title, "Track 299");
     let cue_id = store
-        .track_id_for_source(Path::new("/music/Album/sheet.cue"), Some(2))
+        .track_id_for_identity(crate::store::TrackIdentity::Cue(
+            Path::new("/music/Album/sheet.cue"),
+            2,
+        ))
         .unwrap()
         .unwrap();
     assert_eq!(store.track(cue_id).unwrap().unwrap().cue.unwrap().number, 2);
     assert!(
         store
-            .track_id_for_source(Path::new("/music/shared.wav"), None)
+            .track_id_for_identity(crate::store::TrackIdentity::File(Path::new(
+                "/music/shared.wav"
+            )))
             .unwrap()
             .is_none()
     );

@@ -91,14 +91,16 @@ fn scan_count_failure_preserves_playlist_domains_and_still_refreshes_queue() {
     let mut impacts = core
         .store
         .apply_scan(&ScanResult {
-            records: vec![ScanRecord {
+            records: (vec![ScanRecord {
                 path: directory.path().join("committed.wav"),
-                cue: None,
                 size: 1,
                 modified_ns: 1,
                 fingerprint: Some(blake3::hash(b"committed fingerprint").to_hex().to_string()),
                 media,
-            }],
+            }])
+            .into_iter()
+            .map(std::sync::Arc::new)
+            .collect(),
             ..ScanResult::default()
         })
         .unwrap();
@@ -153,16 +155,18 @@ fn startup_and_catalog_refresh_retain_the_same_recent_history() {
         .unwrap();
     let result = ScanResult {
         roots: vec![directory.path().to_path_buf()],
-        records: (1..=MAX_QUERY_ROWS + 1)
+        records: ((1..=MAX_QUERY_ROWS + 1)
             .map(|id| ScanRecord {
                 path: directory.path().join(format!("history-{id}.wav")),
-                cue: None,
                 size: 1,
                 modified_ns: 1,
                 fingerprint: None,
                 media: media.clone(),
             })
-            .collect(),
+            .collect::<Vec<_>>())
+        .into_iter()
+        .map(std::sync::Arc::new)
+        .collect(),
         ..ScanResult::default()
     };
     let impacts = core.store.apply_scan(&result).unwrap();
@@ -219,20 +223,22 @@ fn unchanged_scans_keep_query_results_valid_and_still_import_playlists() {
     let retained = core.state.playlist_query_revisions(1);
     let result = ScanResult {
         roots: vec![directory.path().to_path_buf()],
-        records: core
+        records: (core
             .store
             .stored_scan_files(&[directory.path().to_path_buf()])
             .unwrap()
             .into_iter()
             .map(|known| ScanRecord {
                 path: known.path,
-                cue: known.cue,
                 size: known.size,
                 modified_ns: known.modified_ns,
                 fingerprint: known.fingerprint,
                 media: known.media.unwrap(),
             })
-            .collect(),
+            .collect::<Vec<_>>())
+        .into_iter()
+        .map(std::sync::Arc::new)
+        .collect(),
         ..ScanResult::default()
     };
     let before = core.state.query_revisions();
@@ -347,7 +353,7 @@ fn invalid_import_names_are_rejected_before_scan_acceptance() {
     assert_eq!(core.store.track_count().unwrap(), 4);
     assert!(
         core.store
-            .track_id_for_source(&source, None)
+            .track_id_for_identity(crate::store::TrackIdentity::File(&source))
             .unwrap()
             .is_none()
     );
@@ -420,7 +426,7 @@ fn import_task_errors_distinguish_scan_save_from_playlist_creation_failure() {
         }
         assert_eq!(
             core.store
-                .track_id_for_source(&source, None)
+                .track_id_for_identity(crate::store::TrackIdentity::File(&source))
                 .unwrap()
                 .is_some(),
             scan_saved
@@ -530,14 +536,16 @@ fn failed_playlist_import_keeps_committed_scan_visible() {
         other_tracks_check: false,
         id: 0,
         result: Ok(ScanResult {
-            records: vec![ScanRecord {
+            records: (vec![ScanRecord {
                 path: directory.path().join("1.wav"),
                 size: 1,
                 modified_ns: 2,
                 fingerprint: None,
-                cue: None,
                 media,
-            }],
+            }])
+            .into_iter()
+            .map(std::sync::Arc::new)
+            .collect(),
             ..ScanResult::default()
         }),
         import: Some(("empty".into(), vec![])),
@@ -595,25 +603,37 @@ fn failed_cue_import_never_reuses_old_entries_but_keeps_readable_items() {
             size: 1,
             modified_ns: 1,
             fingerprint: None,
-            cue: Some(rivu_protocol::model::CueSegment {
+            media: media.clone(),
+        };
+        let old = library::CueRecord::registered(
+            Arc::new(old),
+            CueSegment {
                 sheet: sheet.clone(),
                 number: 1,
                 start_frame: 0,
                 end_frame: Some(75),
-            }),
-            media: media.clone(),
-        };
+            },
+            library::RegisteredCueMetadata {
+                title: media.title.clone(),
+                artist: media.artist.clone(),
+                album: media.album.clone(),
+                track_number: media.track_number,
+                disc_number: media.disc_number,
+                release_date: media.release_date.clone(),
+            },
+            media.duration,
+        );
         let impacts = core
             .store
             .apply_scan(&ScanResult {
-                records: vec![old],
+                segments: vec![old],
                 ..ScanResult::default()
             })
             .unwrap();
         core.apply_scan_impacts(impacts).unwrap();
         let old_id = core
             .store
-            .track_id_for_source(&sheet, Some(1))
+            .track_id_for_identity(crate::store::TrackIdentity::Cue(&sheet, 1))
             .unwrap()
             .unwrap();
         let path = directory.path().join("2.wav");
@@ -621,18 +641,20 @@ fn failed_cue_import_never_reuses_old_entries_but_keeps_readable_items() {
             other_tracks_check: false,
             id: 0,
             result: Ok(ScanResult {
-                records: if readable {
+                records: (if readable {
                     vec![ScanRecord {
                         path: path.clone(),
                         size: 1,
                         modified_ns: 1,
                         fingerprint: None,
-                        cue: None,
                         media,
                     }]
                 } else {
                     vec![]
-                },
+                })
+                .into_iter()
+                .map(std::sync::Arc::new)
+                .collect(),
                 errors: vec!["CUE sheet could not be read".into()],
                 ..ScanResult::default()
             }),
@@ -836,7 +858,9 @@ fn duration_threshold_is_snapshotted_for_file_directory_and_forced_scans() {
                 assert_eq!(status.progress.errors, 0);
                 assert!(status.error.is_none());
                 assert_eq!(
-                    core.store.track_id_for_source(&existing, None).unwrap(),
+                    core.store
+                        .track_id_for_identity(crate::store::TrackIdentity::File(&existing))
+                        .unwrap(),
                     Some(1)
                 );
                 let refreshed = core.store.track(1).unwrap().unwrap();
@@ -849,7 +873,7 @@ fn duration_threshold_is_snapshotted_for_file_directory_and_forced_scans() {
                 assert_ne!(refreshed.title, "Track 1");
                 assert_eq!(
                     core.store
-                        .track_id_for_source(&new, None)
+                        .track_id_for_identity(crate::store::TrackIdentity::File(&new))
                         .unwrap()
                         .is_some(),
                     threshold == 0
@@ -872,7 +896,7 @@ fn duration_only_exclusions_complete_successfully_without_errors() {
     assert!(task.error.is_none());
     assert!(
         core.store
-            .track_id_for_source(&path, None)
+            .track_id_for_identity(crate::store::TrackIdentity::File(&path))
             .unwrap()
             .is_none()
     );
@@ -891,14 +915,16 @@ fn forced_duration_scan_refreshes_cached_short_existing_tracks() {
     media.duration = Some(99.0);
     core.store
         .apply_scan(&ScanResult {
-            records: vec![ScanRecord {
+            records: (vec![ScanRecord {
                 path: path.clone(),
                 size: known.size,
                 modified_ns: known.modified_ns,
                 fingerprint: known.fingerprint,
                 media,
-                cue: None,
-            }],
+            }])
+            .into_iter()
+            .map(std::sync::Arc::new)
+            .collect(),
             ..ScanResult::default()
         })
         .unwrap();
@@ -940,7 +966,7 @@ fn duration_threshold_playlist_import_keeps_existing_tracks_and_uses_accepted_sn
         }
         let expected = if extension == "cue" {
             core.store
-                .track_id_for_source(&path, Some(1))
+                .track_id_for_identity(crate::store::TrackIdentity::Cue(&path, 1))
                 .unwrap()
                 .unwrap()
         } else {
@@ -958,29 +984,35 @@ fn duration_threshold_playlist_import_keeps_existing_tracks_and_uses_accepted_sn
         assert_eq!(task.progress.errors, 0);
         assert!(task.error.is_none());
         let playlist = core.store.playlist_summary_page(None, 0, 10).unwrap().rows[0].id;
+        let second = if extension == "cue" {
+            Some(
+                core.store
+                    .track_id_for_identity(crate::store::TrackIdentity::Cue(&path, 2))
+                    .unwrap()
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+        let expected_ids = second.map_or_else(|| vec![expected], |id| vec![expected, id]);
         assert_eq!(
             core.store.playlist_track_ids(playlist, 10).unwrap(),
-            [expected]
+            expected_ids
         );
         let track = core.store.track(expected).unwrap().unwrap();
         assert!(!track.missing);
         if extension == "cue" {
             assert_eq!(track.duration, Some(1.0));
             assert_eq!(track.title, "Updated segment");
-            assert!(
-                core.store
-                    .track_id_for_source(&path, Some(2))
-                    .unwrap()
-                    .is_none()
-            );
         } else {
             assert_eq!(track.duration, Some(2.0));
         }
-        assert!(
+        assert_eq!(
             core.store
-                .track_id_for_source(&new, None)
+                .track_id_for_identity(crate::store::TrackIdentity::File(&new))
                 .unwrap()
-                .is_none()
+                .is_some(),
+            extension == "cue"
         );
     }
 }
@@ -1127,7 +1159,6 @@ fn verification_only_scan_invalidates_member_facts_not_display_or_playlist_pages
     let known = core.store.known_source(&path).unwrap().unwrap();
     let mut record = ScanRecord {
         path,
-        cue: known.cue,
         size: known.size,
         modified_ns: known.modified_ns,
         fingerprint: Some(blake3::hash(b"same encoded audio").to_hex().to_string()),
@@ -1136,7 +1167,10 @@ fn verification_only_scan_invalidates_member_facts_not_display_or_playlist_pages
     let impacts = core
         .store
         .apply_scan(&ScanResult {
-            records: vec![record.clone()],
+            records: (vec![record.clone()])
+                .into_iter()
+                .map(std::sync::Arc::new)
+                .collect(),
             ..Default::default()
         })
         .unwrap();
@@ -1158,7 +1192,10 @@ fn verification_only_scan_invalidates_member_facts_not_display_or_playlist_pages
             other_tracks_check: false,
             id: 1,
             result: Ok(ScanResult {
-                records: vec![record],
+                records: (vec![record])
+                    .into_iter()
+                    .map(std::sync::Arc::new)
+                    .collect(),
                 ..Default::default()
             }),
             import: None,
@@ -1407,7 +1444,7 @@ fn lowering_scan_depth_preserves_excluded_tracks_until_they_are_scanned() {
     assert!(settle_scan(&mut core));
     let hidden_id = core
         .store
-        .track_id_for_source(&hidden, None)
+        .track_id_for_identity(crate::store::TrackIdentity::File(&hidden))
         .unwrap()
         .unwrap();
     core.store.set_favorite(&[hidden_id], true).unwrap();
@@ -1448,7 +1485,7 @@ fn lowering_scan_depth_preserves_excluded_tracks_until_they_are_scanned() {
     assert_eq!(preserved.title, "Kept title");
     let visible_id = core
         .store
-        .track_id_for_source(&visible, None)
+        .track_id_for_identity(crate::store::TrackIdentity::File(&visible))
         .unwrap()
         .unwrap();
     assert!(!core.track(visible_id).unwrap().missing);
@@ -1537,13 +1574,13 @@ fn scan_accepts_symlinks_to_outside_a_configured_root() {
     assert!(settle_scan(&mut core));
     let id = core
         .store
-        .track_id_for_source(&logical, None)
+        .track_id_for_identity(crate::store::TrackIdentity::File(&logical))
         .unwrap()
         .unwrap();
     assert_eq!(core.track(id).unwrap().path, logical);
     assert!(
         core.store
-            .track_id_for_source(&source, None)
+            .track_id_for_identity(crate::store::TrackIdentity::File(&source))
             .unwrap()
             .is_none()
     );
@@ -1581,7 +1618,7 @@ fn scan_keeps_distinct_configured_aliases_of_the_same_directory() {
         let path = alias.join("source.wav");
         let id = core
             .store
-            .track_id_for_source(&path, None)
+            .track_id_for_identity(crate::store::TrackIdentity::File(&path))
             .unwrap()
             .unwrap();
         assert_eq!(core.track(id).unwrap().path, path);
@@ -1639,7 +1676,7 @@ fn cue_scan_can_reference_another_configured_root() {
     assert!(settle_scan(&mut core));
     let id = core
         .store
-        .track_id_for_source(&sheet, Some(1))
+        .track_id_for_identity(crate::store::TrackIdentity::Cue(&sheet, 1))
         .unwrap()
         .unwrap();
     let track = core.track(id).unwrap();
@@ -1721,7 +1758,7 @@ fn playlist_import_and_directory_queries_preserve_configured_aliases() {
     assert!(settle_scan(&mut core));
     let physical_id = core
         .store
-        .track_id_for_source(&source, None)
+        .track_id_for_identity(crate::store::TrackIdentity::File(&source))
         .unwrap()
         .unwrap();
     core.command(Command::ImportPlaylist {
@@ -1733,7 +1770,7 @@ fn playlist_import_and_directory_queries_preserve_configured_aliases() {
     let logical = alias.join("source.wav");
     let logical_id = core
         .store
-        .track_id_for_source(&logical, None)
+        .track_id_for_identity(crate::store::TrackIdentity::File(&logical))
         .unwrap()
         .unwrap();
     assert_ne!(logical_id, physical_id);
@@ -1812,20 +1849,22 @@ fn committed_impacts_refresh_current_track_activity_and_probe_metadata() {
         .apply_scan(&ScanResult {
             roots: vec![directory.path().to_path_buf()],
             min_duration_secs: 0,
-            suppressed_sources: Vec::new(),
             skipped_directories: Vec::new(),
             skipped_directories_truncated: false,
             scan_incomplete: true,
             uncertainties: Vec::new(),
-            records: vec![ScanRecord {
+            records: (vec![ScanRecord {
                 path: known.path,
-                cue: known.cue,
                 size: known.size,
                 modified_ns: known.modified_ns + 1,
                 fingerprint: known.fingerprint,
                 media,
-            }],
+            }])
+            .into_iter()
+            .map(std::sync::Arc::new)
+            .collect(),
             errors: Vec::new(),
+            ..Default::default()
         })
         .unwrap();
     core.apply_scan_impacts(impacts).unwrap();
@@ -1877,7 +1916,9 @@ fn forced_scan_reprobes_unchanged_files_instead_of_reusing_cached_metadata() {
     )
     .unwrap();
     let probed_title = scanned.records[0].media.title.clone();
-    scanned.records[0].media.title = "Cached metadata".into();
+    std::sync::Arc::make_mut(&mut scanned.records[0])
+        .media
+        .title = "Cached metadata".into();
     let impacts = core.store.apply_scan(&scanned).unwrap();
     core.apply_scan_impacts(impacts).unwrap();
     for (force, expected) in [(false, "Cached metadata"), (true, probed_title.as_str())] {
@@ -1938,33 +1979,47 @@ fn cue_playlist_import_deduplicates_segments_in_first_occurrence_order() {
     let sheet = directory.path().join("album.cue");
     std::fs::write(&sheet, "FILE album.wav WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nINDEX 01 00:05:00\n").unwrap();
     let items = library::import_playlist(&sheet).unwrap();
-    let records = (1..=2)
-        .map(|number| ScanRecord {
-            path: directory.path().join("album.wav"),
-            cue: Some(CueSegment {
-                sheet: sheet.clone(),
-                number,
-                start_frame: u64::from(number - 1) * 375,
-                end_frame: if number == 1 { Some(375) } else { None },
-            }),
-            size: 1,
-            modified_ns: 1,
-            fingerprint: None,
-            media: MediaInfo {
-                title: format!("Part {number}"),
-                artist: String::new(),
-                album: "Album".into(),
-                duration: Some(5.0),
-                codec: "pcm".into(),
-                channels: 2,
-                sample_rate: 48_000,
-                bitrate_bps: None,
-                bitrate_exact: false,
-                track_number: None,
-                disc_number: None,
-                bits_per_sample: None,
-                release_date: None,
-            },
+    let source = Arc::new(ScanRecord {
+        path: directory.path().join("album.wav"),
+        size: 1,
+        modified_ns: 1,
+        fingerprint: None,
+        media: MediaInfo {
+            title: "Album source".into(),
+            artist: String::new(),
+            album: "Album".into(),
+            duration: Some(10.0),
+            codec: "pcm".into(),
+            channels: 2,
+            sample_rate: 48_000,
+            bitrate_bps: None,
+            bitrate_exact: false,
+            track_number: None,
+            disc_number: None,
+            bits_per_sample: None,
+            release_date: None,
+        },
+    });
+    let segments = (1..=2)
+        .map(|number| {
+            library::CueRecord::registered(
+                Arc::clone(&source),
+                CueSegment {
+                    sheet: sheet.clone(),
+                    number,
+                    start_frame: u64::from(number - 1) * 375,
+                    end_frame: if number == 1 { Some(375) } else { None },
+                },
+                library::RegisteredCueMetadata {
+                    title: format!("Part {number}"),
+                    artist: String::new(),
+                    album: "Album".into(),
+                    track_number: Some(number),
+                    disc_number: None,
+                    release_date: None,
+                },
+                Some(5.0),
+            )
         })
         .collect();
     let status = save_prepared_scan(
@@ -1974,7 +2029,7 @@ fn cue_playlist_import_deduplicates_segments_in_first_occurrence_order() {
             id: 0,
             result: Ok(ScanResult {
                 roots: vec![sheet],
-                records,
+                segments,
                 ..ScanResult::default()
             }),
             import: Some((
@@ -2227,7 +2282,9 @@ fn other_check_empty_roots_rechecks_only_registered_sources_without_duration_fil
         assert!(core.store.track(id).unwrap().unwrap().missing);
     }
     assert_eq!(
-        core.store.track_id_for_source(&unregistered, None).unwrap(),
+        core.store
+            .track_id_for_identity(crate::store::TrackIdentity::File(&unregistered))
+            .unwrap(),
         None
     );
     assert_eq!(core.store.track_count().unwrap(), 4);

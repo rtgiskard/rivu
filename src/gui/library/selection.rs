@@ -1411,13 +1411,12 @@ mod tests {
         store
             .apply_scan(&ScanResult {
                 roots: vec!["/music".into()],
-                records: (0..6)
+                records: ((0..6)
                     .map(|index| ScanRecord {
                         path: format!("/music/{index}.wav").into(),
                         size: 1,
                         modified_ns: 0,
                         fingerprint: None,
-                        cue: None,
                         media: MediaInfo {
                             title: index.to_string(),
                             artist: String::new(),
@@ -1434,7 +1433,10 @@ mod tests {
                             sample_rate: 8000,
                         },
                     })
-                    .collect(),
+                    .collect::<Vec<_>>())
+                .into_iter()
+                .map(std::sync::Arc::new)
+                .collect(),
                 ..Default::default()
             })
             .unwrap();
@@ -1442,7 +1444,9 @@ mod tests {
             .into_iter()
             .map(|index| {
                 store
-                    .track_id_for_source(Path::new(&format!("/music/{index}.wav")), None)
+                    .track_id_for_identity(crate::store::TrackIdentity::File(Path::new(&format!(
+                        "/music/{index}.wav"
+                    ))))
                     .unwrap()
                     .unwrap()
             })

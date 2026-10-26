@@ -9,6 +9,7 @@ mod scan;
 mod source;
 
 pub(crate) use admission::{ExternalAdmission, prepare_external_admission};
+pub(crate) use input::{RetainedBudget, RetainedScope};
 pub(crate) use paths::{logical_path, normalize_roots};
 pub use playlist_io::M3uItem;
 pub(crate) use playlist_io::export_m3u;
@@ -23,6 +24,7 @@ pub use source::KnownFile;
 pub(crate) use source::SOURCE_BATCH_SIZE;
 #[cfg(test)]
 pub use source::ScanRecord;
+pub(crate) use source::{CueRecord, CueView, RegisteredCueMetadata, ScanTrack};
 
 #[cfg(test)]
 mod tests;

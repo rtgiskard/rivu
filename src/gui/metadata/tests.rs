@@ -480,3 +480,15 @@ fn hidden_artwork_completion_retires_without_loading_replacement(cx: &mut TestAp
         assert_eq!(this.metadata.identity(), Some(8));
     });
 }
+
+#[test]
+fn cue_positions_preserve_frames_across_second_and_minute_boundaries() {
+    for (frame, expected) in [
+        (74, "00:00:74"),
+        (75, "00:01:00"),
+        (4_499, "00:59:74"),
+        (4_500, "01:00:00"),
+    ] {
+        assert_eq!(super::format_cue_frame(frame), expected);
+    }
+}

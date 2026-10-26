@@ -23,7 +23,7 @@ pub(crate) use cache::CountDomain;
 pub(crate) use duplicates::PreparedRelocation;
 #[cfg(test)]
 pub(crate) use duplicates::RelocationIdentity;
-pub(crate) use scan::ScanImpacts;
+pub(crate) use scan::{ScanImpacts, TrackIdentity};
 pub(crate) use tracks::PlaybackSource;
 
 pub(crate) struct Store {

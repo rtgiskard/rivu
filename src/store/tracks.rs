@@ -806,22 +806,21 @@ impl Store {
         Ok(encoded)
     }
 
-    pub fn track_id_for_source(&self, path: &Path, cue_number: Option<u32>) -> Result<Option<i64>> {
-        let path = path.to_string_lossy();
-        let id = match cue_number {
-            None => self
+    pub fn track_id_for_identity(&self, identity: super::TrackIdentity<'_>) -> Result<Option<i64>> {
+        let id = match identity {
+            super::TrackIdentity::File(path) => self
                 .conn
                 .query_row(
                     "SELECT id FROM tracks WHERE path=?1 AND cue_sheet IS NULL AND missing=0",
-                    [path.as_ref()],
+                    [path.to_string_lossy().as_ref()],
                     |row| row.get(0),
                 )
                 .optional()?,
-            Some(number) => self
+            super::TrackIdentity::Cue(path, number) => self
                 .conn
                 .query_row(
                     "SELECT id FROM tracks WHERE cue_sheet=?1 AND cue_number=?2 AND missing=0",
-                    params![path.as_ref(), number],
+                    params![path.to_string_lossy().as_ref(), number],
                     |row| row.get(0),
                 )
                 .optional()?,

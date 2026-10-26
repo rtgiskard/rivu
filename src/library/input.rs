@@ -7,6 +7,100 @@ use std::path::Path;
 pub(super) const MAX_CUE_BYTES: usize = 1024 * 1024;
 const INPUT_CHUNK_BYTES: usize = 256 * 1024;
 
+/// Independent retained-data domains use checked reservations. Raw input limits
+/// remain separate; scoped workspace releases its charge with its owner.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RetainedBudget(std::sync::Arc<std::sync::Mutex<usize>>);
+
+pub(crate) const MAX_IMPORT_RETAINED_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Debug)]
+struct RetainedLimit;
+
+impl std::fmt::Display for RetainedLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("import exceeds retained data limit")
+    }
+}
+impl std::error::Error for RetainedLimit {}
+
+impl RetainedBudget {
+    pub(crate) fn reserve(&self, bytes: usize) -> Result<()> {
+        let mut used = self.0.lock().unwrap();
+        let next = used
+            .checked_add(bytes)
+            .filter(|next| *next <= MAX_IMPORT_RETAINED_BYTES)
+            .ok_or(RetainedLimit)?;
+        *used = next;
+        Ok(())
+    }
+
+    pub(crate) fn release(&self, bytes: usize) {
+        let mut used = self.0.lock().unwrap();
+        *used = used
+            .checked_sub(bytes)
+            .expect("retained reservation ownership");
+    }
+
+    pub(crate) fn scoped(&self) -> RetainedScope {
+        RetainedScope {
+            budget: self.clone(),
+            bytes: 0,
+        }
+    }
+
+    pub(crate) fn reserve_vec<T>(&self, values: &mut Vec<T>, additional: usize) -> Result<usize> {
+        let required = values.len().checked_add(additional).ok_or(RetainedLimit)?;
+        if required <= values.capacity() {
+            return Ok(0);
+        }
+        let capacity = required.max(values.capacity().saturating_mul(2)).max(4);
+        let bytes = (capacity - values.capacity())
+            .checked_mul(std::mem::size_of::<T>())
+            .ok_or(RetainedLimit)?;
+        self.reserve(bytes)?;
+        values.reserve_exact(capacity - values.len());
+        Ok(bytes)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn remaining(&self) -> usize {
+        MAX_IMPORT_RETAINED_BYTES - *self.0.lock().unwrap()
+    }
+
+    pub(super) fn is_limit(error: &anyhow::Error) -> bool {
+        error.downcast_ref::<RetainedLimit>().is_some()
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct RetainedScope {
+    budget: RetainedBudget,
+    bytes: usize,
+}
+
+impl RetainedScope {
+    pub(crate) fn reserve(&mut self, bytes: usize) -> Result<()> {
+        self.budget.reserve(bytes)?;
+        self.bytes += bytes;
+        Ok(())
+    }
+    pub(crate) fn release(&mut self, bytes: usize) {
+        self.budget.release(bytes);
+        self.bytes -= bytes;
+    }
+    pub(crate) fn reserve_vec<T>(&mut self, values: &mut Vec<T>, additional: usize) -> Result<()> {
+        self.bytes += self.budget.reserve_vec(values, additional)?;
+        Ok(())
+    }
+}
+
+impl Drop for RetainedScope {
+    fn drop(&mut self) {
+        self.budget.release(self.bytes);
+    }
+}
+
 pub(super) async fn read_input_async(
     workers: &BlockingPool,
     path: &Path,
@@ -68,7 +162,8 @@ pub(super) async fn read_chunks_async<R: Read + Send + 'static>(
                     let count = read(&mut extra)?;
                     ensure!(start + count <= limit, "input exceeds {limit} bytes");
                     if count != 0 {
-                        bytes.reserve_exact(INPUT_CHUNK_BYTES.min(limit - start));
+                        let growth = INPUT_CHUNK_BYTES.min(limit - start);
+                        bytes.reserve_exact(growth);
                         bytes.push(extra[0]);
                     }
                     count
@@ -215,5 +310,24 @@ mod tests {
             }
             Ok(())
         })
+    }
+
+    #[test]
+    fn retained_scopes_release_workspace_and_overflow_does_not_change_accounting() {
+        let budget = RetainedBudget::default();
+        budget.reserve(100).unwrap();
+        let remaining = budget.remaining();
+        assert!(budget.reserve(usize::MAX).is_err());
+        assert_eq!(budget.remaining(), remaining);
+        {
+            let mut workspace = budget.scoped();
+            let mut values = Vec::<u64>::new();
+            workspace.reserve_vec(&mut values, 7).unwrap();
+            assert_eq!(budget.remaining(), remaining - values.capacity() * 8);
+            workspace.reserve(300).unwrap();
+            workspace.release(100);
+            assert_eq!(budget.remaining(), remaining - values.capacity() * 8 - 200);
+        }
+        assert_eq!(budget.remaining(), remaining);
     }
 }

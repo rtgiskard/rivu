@@ -11,6 +11,7 @@ pub struct CueSheet {
     pub title: Option<String>,
     pub performer: Option<String>,
     pub tracks: Vec<CueTrack>,
+    pub(super) retained: Option<super::input::RetainedScope>,
 }
 
 #[derive(Debug)]
@@ -46,6 +47,26 @@ pub(super) fn parse_input(
         &text,
         path.parent().unwrap_or_else(|| Path::new(".")),
         || cancellation.check(),
+        None,
+        0,
+    )
+    .with_context(|| format!("Parsing CUE {}", path.display()))
+}
+
+pub(super) fn parse_import_input(
+    bytes: &[u8],
+    path: &Path,
+    cancellation: &super::ScanCancellation,
+    budget: &super::input::RetainedBudget,
+) -> Result<CueSheet> {
+    cancellation.check()?;
+    let text = decode(bytes).with_context(|| format!("Decoding CUE {}", path.display()))?;
+    parse_checked(
+        &text,
+        path.parent().unwrap_or_else(|| Path::new(".")),
+        || cancellation.check(),
+        Some(budget),
+        path.as_os_str().len() + std::mem::size_of::<PathBuf>(),
     )
     .with_context(|| format!("Parsing CUE {}", path.display()))
 }
@@ -134,18 +155,27 @@ fn timestamp(value: &str) -> Result<u64> {
 
 #[cfg(test)]
 fn parse(text: &str, parent: &Path) -> Result<CueSheet> {
-    parse_checked(text, parent, || Ok(()))
+    parse_checked(text, parent, || Ok(()), None, 0)
 }
 
 fn parse_checked(
     text: &str,
     parent: &Path,
     mut check: impl FnMut() -> Result<()>,
+    budget: Option<&super::input::RetainedBudget>,
+    sheet_path_bytes: usize,
 ) -> Result<CueSheet> {
+    let mut retained = budget.map(super::input::RetainedBudget::scoped);
+    if let Some(retained) = &mut retained {
+        retained.reserve(std::mem::size_of::<CueSheet>() + sheet_path_bytes)?;
+    }
+    let mut workspace = budget.map(super::input::RetainedBudget::scoped);
+    let mut file_bytes = 0;
     let mut sheet = CueSheet {
         title: None,
         performer: None,
         tracks: Vec::new(),
+        retained: None,
     };
     let mut pending: Vec<PendingTrack> = Vec::new();
     let mut file = None;
@@ -166,6 +196,15 @@ fn parse_checked(
                     } else {
                         split_word(rest)
                     };
+                    let next_file_bytes = name.len()
+                        + if Path::new(name).is_absolute() {
+                            0
+                        } else {
+                            parent.as_os_str().len() + 1
+                        };
+                    if let Some(workspace) = &mut workspace {
+                        workspace.reserve(next_file_bytes)?;
+                    }
                     if name.is_empty() || kind.is_empty() || kind.split_whitespace().count() != 1 {
                         bail!("FILE requires a filename and a file type");
                     }
@@ -176,6 +215,10 @@ fn parse_checked(
                     } else {
                         parent.join(name)
                     });
+                    if let Some(workspace) = &mut workspace {
+                        workspace.release(file_bytes);
+                    }
+                    file_bytes = next_file_bytes;
                     file_group += 1;
                 }
                 word if word.eq_ignore_ascii_case("TRACK") => {
@@ -188,6 +231,12 @@ fn parse_checked(
                     }
                     if !kind.eq_ignore_ascii_case("AUDIO") {
                         bail!("Only AUDIO CUE tracks are supported");
+                    }
+                    if let Some(retained) = &mut retained {
+                        retained.reserve(file.as_ref().map_or(0, |path| path.as_os_str().len()))?;
+                    }
+                    if let Some(workspace) = &mut workspace {
+                        workspace.reserve_vec(&mut pending, 1)?;
                     }
                     pending.push(PendingTrack {
                         number,
@@ -202,18 +251,25 @@ fn parse_checked(
                 word if word.eq_ignore_ascii_case("TITLE")
                     || word.eq_ignore_ascii_case("PERFORMER") =>
                 {
-                    let value = string_value(rest)?.to_owned();
+                    let value = string_value(rest)?;
+                    if let Some(retained) = &mut retained {
+                        retained.reserve(value.len())?;
+                    }
                     let title = word.eq_ignore_ascii_case("TITLE");
-                    if let Some(track) = pending.last_mut() {
+                    let slot = if let Some(track) = pending.last_mut() {
                         if title {
-                            track.title = Some(value);
+                            &mut track.title
                         } else {
-                            track.performer = Some(value);
+                            &mut track.performer
                         }
                     } else if title {
-                        sheet.title = Some(value);
+                        &mut sheet.title
                     } else {
-                        sheet.performer = Some(value);
+                        &mut sheet.performer
+                    };
+                    let old = slot.replace(value.to_owned());
+                    if let (Some(retained), Some(old)) = (&mut retained, old) {
+                        retained.release(old.len());
                     }
                 }
                 word if word.eq_ignore_ascii_case("INDEX") => {
@@ -284,6 +340,9 @@ fn parse_checked(
         if end.is_some_and(|end| end <= start) {
             bail!("Track times must increase within each FILE");
         }
+        if let Some(retained) = &mut retained {
+            retained.reserve_vec(&mut sheet.tracks, 1)?;
+        }
         sheet.tracks.push(CueTrack {
             number: track.number,
             file: track.file,
@@ -293,6 +352,7 @@ fn parse_checked(
             end_frame: end,
         });
     }
+    sheet.retained = retained;
     Ok(sheet)
 }
 
@@ -385,9 +445,35 @@ FILE "disc two.wav" WAVE
                     }
                     cancellation.check()
                 },
+                None,
+                0,
             );
             assert!(result.is_err());
             assert_eq!(checks, cancel_at);
         }
+    }
+
+    #[test]
+    fn parsed_sheet_budget_tracks_live_metadata_not_replaced_titles_or_workspace() {
+        let budget = crate::library::input::RetainedBudget::default();
+        budget
+            .reserve(crate::library::input::MAX_IMPORT_RETAINED_BYTES - 8192)
+            .unwrap();
+        let mut text = String::new();
+        for _ in 0..99 {
+            text.push_str(&format!("TITLE \"{}\"\n", "x".repeat(1024)));
+        }
+        text.push_str("FILE album.wav WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\n");
+        let sheet = parse_import_input(
+            text.as_bytes(),
+            Path::new("/music/album.cue"),
+            &crate::library::ScanCancellation::default(),
+            &budget,
+        )
+        .unwrap();
+        assert_eq!(sheet.title.as_ref().unwrap().len(), 1024);
+        assert!(budget.remaining() > 5000);
+        drop(sheet);
+        assert_eq!(budget.remaining(), 8192);
     }
 }

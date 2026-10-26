@@ -185,7 +185,7 @@ fn revision_changed_during_probe_rejects_entire_batch_without_registration_or_ap
     assert_eq!(core.store.track_count().unwrap(), before_total);
     assert!(
         core.store
-            .track_id_for_source(&path, None)
+            .track_id_for_identity(crate::store::TrackIdentity::File(&path))
             .unwrap()
             .is_none()
     );
@@ -230,7 +230,7 @@ fn cancel_scan_is_intent_until_preparation_joins_and_leaves_no_residue() {
     assert_eq!(core.store.track_count().unwrap(), total);
     assert!(
         core.store
-            .track_id_for_source(&path, None)
+            .track_id_for_identity(crate::store::TrackIdentity::File(&path))
             .unwrap()
             .is_none()
     );
@@ -276,7 +276,7 @@ fn admission_owns_media_slot_and_requires_versioned_positions() {
     core.shutdown_external_admission();
     assert!(
         core.store
-            .track_id_for_source(&path, None)
+            .track_id_for_identity(crate::store::TrackIdentity::File(&path))
             .unwrap()
             .is_none()
     );
@@ -319,7 +319,7 @@ fn immediate_ack_exposes_task_id_before_background_saving_finishes() {
     };
     assert_eq!(
         core.store
-            .track_id_for_source(&path, None)
+            .track_id_for_identity(crate::store::TrackIdentity::File(&path))
             .unwrap()
             .is_some(),
         status.library_committed
@@ -348,7 +348,7 @@ fn saving_rejects_cancel_and_shutdown_joins_then_applies_committed_queue_facts()
     assert_eq!(core.state.playback.volume, 0.42);
     assert!(
         core.store
-            .track_id_for_source(&path, None)
+            .track_id_for_identity(crate::store::TrackIdentity::File(&path))
             .unwrap()
             .is_none()
     );

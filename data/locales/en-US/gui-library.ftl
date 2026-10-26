@@ -188,7 +188,16 @@ gl-unsaved = Unsaved changes
 gl-track-details = Track details
 gl-copy-value = Copy value
 
-gl-file-path = Path
+gl-file-path = Source path
+gl-track-kind = Type
+gl-whole-file = Whole file
+gl-cue-segment = CUE track
+gl-cue-sheet = CUE sheet
+gl-cue-number = CUE number
+gl-cue-start = Start in source
+gl-cue-end = End in source
+gl-file-end = End of file
+gl-cue-range-note = Source positions use MM:SS:FF (75 frames/s); the end is exclusive.
 
 gl-missing = Missing
 

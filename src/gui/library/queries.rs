@@ -428,7 +428,6 @@ mod tests {
                     size: 1,
                     modified_ns: 0,
                     fingerprint: None,
-                    cue: None,
                     media: MediaInfo {
                         title: title.into(),
                         artist: String::new(),
@@ -445,6 +444,7 @@ mod tests {
                         sample_rate: 8000,
                     },
                 })
+                .map(std::sync::Arc::new)
                 .collect(),
                 ..Default::default()
             })

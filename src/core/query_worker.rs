@@ -829,18 +829,17 @@ mod tests {
                 let known = core.store.known_source(&track.path).unwrap().unwrap();
                 library::ScanRecord {
                     path: track.path,
-                    cue: known.cue,
                     size: known.size,
                     modified_ns: known.modified_ns,
                     fingerprint: fingerprint.map(str::to_owned),
                     media: known.media.unwrap(),
                 }
             })
-            .collect();
+            .collect::<Vec<_>>();
         let impacts = core
             .store
             .apply_scan(&ScanResult {
-                records,
+                records: records.into_iter().map(std::sync::Arc::new).collect(),
                 ..Default::default()
             })
             .unwrap();

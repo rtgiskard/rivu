@@ -600,9 +600,8 @@ fn precision_pending(core: &mut Core) {
     let impacts = core
         .store
         .apply_scan(&ScanResult {
-            records: vec![ScanRecord {
+            records: (vec![ScanRecord {
                 path: track.path,
-                cue: None,
                 size: metadata.len(),
                 modified_ns: metadata
                     .modified()
@@ -612,7 +611,10 @@ fn precision_pending(core: &mut Core) {
                     .as_nanos() as i64,
                 fingerprint: None,
                 media,
-            }],
+            }])
+            .into_iter()
+            .map(std::sync::Arc::new)
+            .collect(),
             ..ScanResult::default()
         })
         .unwrap();

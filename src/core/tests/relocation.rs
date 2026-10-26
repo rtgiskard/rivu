@@ -17,7 +17,6 @@ fn relocation_fixture() -> (tempfile::TempDir, Core, i64, i64) {
             let metadata = std::fs::metadata(path).unwrap();
             ScanRecord {
                 path: path.clone(),
-                cue: None,
                 size: metadata.len(),
                 modified_ns: i64::try_from(
                     metadata
@@ -32,11 +31,11 @@ fn relocation_fixture() -> (tempfile::TempDir, Core, i64, i64) {
                 media: media.clone(),
             }
         })
-        .collect();
+        .collect::<Vec<_>>();
     let impacts = core
         .store
         .apply_scan(&ScanResult {
-            records,
+            records: records.into_iter().map(std::sync::Arc::new).collect(),
             ..ScanResult::default()
         })
         .unwrap();
@@ -261,9 +260,8 @@ fn relocation_rejects_database_identity_drift_after_fresh_verification() {
         let impacts = core
             .store
             .apply_scan(&ScanResult {
-                records: vec![ScanRecord {
+                records: (vec![ScanRecord {
                     path: known.path,
-                    cue: None,
                     size: known.size,
                     modified_ns: known.modified_ns,
                     fingerprint: Some(
@@ -272,7 +270,10 @@ fn relocation_rejects_database_identity_drift_after_fresh_verification() {
                             .to_string(),
                     ),
                     media: known.media.unwrap(),
-                }],
+                }])
+                .into_iter()
+                .map(std::sync::Arc::new)
+                .collect(),
                 ..ScanResult::default()
             })
             .unwrap();

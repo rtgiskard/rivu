@@ -158,7 +158,7 @@ fn shutdown_drains_scan_saving_and_preserves_committed_facts() {
     assert!(status.error.is_none());
     assert!(
         core.store
-            .track_id_for_source(&source, None)
+            .track_id_for_identity(crate::store::TrackIdentity::File(&source))
             .unwrap()
             .is_some()
     );

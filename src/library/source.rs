@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Seek};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // Reserved in modified_ns for unavailable/out-of-range mtimes, including the
@@ -57,7 +58,195 @@ pub struct ScanRecord {
     pub modified_ns: i64,
     pub fingerprint: Option<String>,
     pub media: MediaInfo,
-    pub cue: Option<CueSegment>,
+}
+
+/// A subtrack borrows source facts and keeps metadata in its original owner:
+/// either one shared parsed sheet or the registered identity's stored labels.
+#[derive(Clone, Debug)]
+pub struct CueRecord {
+    pub source: Arc<ScanRecord>,
+    origin: CueOrigin,
+    pub duration: Option<f64>,
+}
+
+#[derive(Clone, Debug)]
+enum CueOrigin {
+    Parsed {
+        sheet: Arc<super::cue::CueSheet>,
+        path: Arc<PathBuf>,
+        track: usize,
+    },
+    // Other checks pay one allocation per registered subtrack so ordinary scans
+    // do not carry the stored-label payload inline for every parsed segment.
+    Registered(Box<RegisteredCue>),
+}
+
+#[derive(Clone, Debug)]
+struct RegisteredCue {
+    cue: CueSegment,
+    metadata: RegisteredCueMetadata,
+}
+
+#[derive(Clone, Debug)]
+pub struct RegisteredCueMetadata {
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub track_number: Option<u32>,
+    pub disc_number: Option<u32>,
+    pub release_date: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CueView<'a> {
+    pub sheet: &'a PathBuf,
+    pub number: u32,
+    pub start_frame: u64,
+    pub end_frame: Option<u64>,
+}
+
+impl<'a> From<&'a CueSegment> for CueView<'a> {
+    fn from(cue: &'a CueSegment) -> Self {
+        Self {
+            sheet: &cue.sheet,
+            number: cue.number,
+            start_frame: cue.start_frame,
+            end_frame: cue.end_frame,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct ScanTrack<'a> {
+    pub source: &'a ScanRecord,
+    pub media: MediaView<'a>,
+    pub cue: Option<CueView<'a>>,
+    /// A successful CUE establishes this segment or its referenced whole source.
+    pub duration_filter_exempt: bool,
+}
+
+#[derive(Debug)]
+pub struct MediaView<'a> {
+    pub title: &'a str,
+    pub artist: &'a str,
+    pub album: &'a str,
+    pub duration: Option<f64>,
+    pub track_number: Option<u32>,
+    pub disc_number: Option<u32>,
+    pub release_date: Option<&'a str>,
+    pub source: &'a MediaInfo,
+}
+
+impl ScanRecord {
+    pub fn view(&self) -> ScanTrack<'_> {
+        ScanTrack {
+            source: self,
+            media: MediaView {
+                title: &self.media.title,
+                artist: &self.media.artist,
+                album: &self.media.album,
+                duration: self.media.duration,
+                track_number: self.media.track_number,
+                disc_number: self.media.disc_number,
+                release_date: self.media.release_date.as_deref(),
+                source: &self.media,
+            },
+            cue: None,
+            duration_filter_exempt: false,
+        }
+    }
+
+    pub(super) fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.path.as_os_str().len()
+            + self.fingerprint.as_ref().map_or(0, String::len)
+            + media_retained_bytes(&self.media)
+    }
+}
+
+fn media_retained_bytes(media: &MediaInfo) -> usize {
+    media.title.capacity()
+        + media.artist.capacity()
+        + media.album.capacity()
+        + media.codec.capacity()
+        + media.release_date.as_ref().map_or(0, String::capacity)
+}
+
+impl CueRecord {
+    pub(super) fn parsed(
+        source: Arc<ScanRecord>,
+        sheet: Arc<super::cue::CueSheet>,
+        path: Arc<PathBuf>,
+        track: usize,
+        duration: Option<f64>,
+    ) -> Self {
+        Self {
+            source,
+            origin: CueOrigin::Parsed { sheet, path, track },
+            duration,
+        }
+    }
+
+    pub fn registered(
+        source: Arc<ScanRecord>,
+        cue: CueSegment,
+        metadata: RegisteredCueMetadata,
+        duration: Option<f64>,
+    ) -> Self {
+        Self {
+            source,
+            origin: CueOrigin::Registered(Box::new(RegisteredCue { cue, metadata })),
+            duration,
+        }
+    }
+
+    pub fn cue(&self) -> CueView<'_> {
+        match &self.origin {
+            CueOrigin::Parsed { sheet, path, track } => {
+                let track = &sheet.tracks[*track];
+                CueView {
+                    sheet: path,
+                    number: track.number,
+                    start_frame: track.start_frame,
+                    end_frame: track.end_frame,
+                }
+            }
+            CueOrigin::Registered(registered) => (&registered.cue).into(),
+        }
+    }
+
+    pub fn view(&self) -> ScanTrack<'_> {
+        let mut view = self.source.view();
+        match &self.origin {
+            CueOrigin::Parsed { sheet, track, .. } => {
+                let track = &sheet.tracks[*track];
+                view.media.title = track
+                    .title
+                    .as_deref()
+                    .expect("CUE title resolved during preparation");
+                view.media.artist = track
+                    .performer
+                    .as_deref()
+                    .or(sheet.performer.as_deref())
+                    .unwrap_or(&self.source.media.artist);
+                view.media.album = sheet.title.as_deref().unwrap_or(&self.source.media.album);
+                view.media.track_number = Some(track.number);
+            }
+            CueOrigin::Registered(registered) => {
+                let metadata = &registered.metadata;
+                view.media.title = &metadata.title;
+                view.media.artist = &metadata.artist;
+                view.media.album = &metadata.album;
+                view.media.track_number = metadata.track_number;
+                view.media.disc_number = metadata.disc_number;
+                view.media.release_date = metadata.release_date.as_deref();
+            }
+        }
+        view.media.duration = self.duration;
+        view.cue = Some(self.cue());
+        view.duration_filter_exempt = true;
+        view
+    }
 }
 
 pub(crate) const SOURCE_BATCH_SIZE: usize = 32;
@@ -85,6 +274,7 @@ impl PendingSource {
         ffmpeg_enabled: bool,
         cancellation: &ScanCancellation,
         scratch: &mut [u8],
+        budget: Option<&super::input::RetainedBudget>,
     ) -> Result<Option<ScanRecord>> {
         cancellation.check()?;
         let size = self.size;
@@ -96,15 +286,22 @@ impl PendingSource {
                 .filter(|known| known.matches_metadata(size, modified_ns));
             if let Some(mut known) = unchanged {
                 self.fingerprint = known.fingerprint.take();
-                self.media = known.media.take().filter(|media| {
+                let media = known.media.take().filter(|media| {
                     known.cue.is_none()
                         && (!ffmpeg_enabled || (media.channels != 0 && media.sample_rate != 0))
                 });
+                if let (Some(budget), Some(media)) = (budget, &media) {
+                    budget.reserve(media_retained_bytes(media))?;
+                }
+                self.media = media;
             }
             if self.media.is_none() {
                 let file = self.file.try_clone()?;
-                let media = probe_file(&self.path, file, ffmpeg_enabled).context("probe audio");
-                self.media = Some(media?);
+                let media = probe_file(&self.path, file, ffmpeg_enabled).context("probe audio")?;
+                if let Some(budget) = budget {
+                    budget.reserve(media_retained_bytes(&media))?;
+                }
+                self.media = Some(media);
                 cancellation.check()?;
             }
             if self.fingerprint.is_none() {
@@ -142,6 +339,14 @@ impl PendingSource {
             );
         }
         cancellation.check()?;
+        if let Some(budget) = budget {
+            budget.reserve(
+                std::mem::size_of::<ScanRecord>()
+                    + 2 * std::mem::size_of::<usize>()
+                    + self.path.as_os_str().len()
+                    + 64,
+            )?;
+        }
         let fingerprint = match self.fingerprint.take() {
             Some(fingerprint) => fingerprint,
             None => self
@@ -158,7 +363,6 @@ impl PendingSource {
             modified_ns,
             fingerprint: Some(fingerprint),
             media: self.media.take().context("Audio probe returned no media")?,
-            cue: None,
         }))
     }
 }
@@ -167,9 +371,9 @@ pub(super) async fn prepare_sources<Fut>(
     workers: &BlockingPool,
     paths: Vec<PathBuf>,
     known_sources: &mut impl FnMut(Vec<PathBuf>) -> Fut,
-    sources: &mut HashMap<PathBuf, std::result::Result<ScanRecord, String>>,
+    sources: &mut HashMap<PathBuf, std::result::Result<Arc<ScanRecord>, String>>,
     ffmpeg_enabled: bool,
-    cancellation: &ScanCancellation,
+    (cancellation, budget): (&ScanCancellation, Option<&super::input::RetainedBudget>),
     scratch: &mut Vec<u8>,
 ) -> Result<()>
 where
@@ -211,7 +415,15 @@ where
                     opened.push((path, file, metadata));
                 }
                 Err(error) => {
-                    sources.insert(path, Err(format!("{error:#}")));
+                    if budget.is_some()
+                        && error
+                            .downcast_ref::<std::io::Error>()
+                            .is_some_and(|error| error.kind() == std::io::ErrorKind::InvalidInput)
+                    {
+                        return Err(error.context("Import source is not a regular file"));
+                    }
+                    let error = format!("{error:#}");
+                    sources.insert(path, Err(error));
                 }
             }
         }
@@ -256,6 +468,7 @@ where
             cancellation.check()?;
             let token = cancellation.clone();
             let mut buffer = std::mem::take(scratch);
+            let retained_budget = budget.cloned();
             let (remaining, completed, buffer) = workers
                 .execute(move || {
                     let mut completed = Vec::new();
@@ -264,7 +477,12 @@ where
                         let Some(source) = pending.front_mut() else {
                             break;
                         };
-                        match source.step(ffmpeg_enabled, &token, &mut buffer) {
+                        match source.step(
+                            ffmpeg_enabled,
+                            &token,
+                            &mut buffer,
+                            retained_budget.as_ref(),
+                        ) {
                             Ok(Some(record)) => {
                                 pending.pop_front();
                                 completed.push((record.path.clone(), Ok(record)));
@@ -272,7 +490,15 @@ where
                             Ok(None) => {}
                             Err(error) => {
                                 token.check()?;
+                                if super::input::RetainedBudget::is_limit(&error) {
+                                    return Err(error);
+                                }
                                 let source = pending.pop_front().expect("front source is present");
+                                if let (Some(budget), Some(media)) =
+                                    (retained_budget.as_ref(), &source.media)
+                                {
+                                    budget.release(media_retained_bytes(media));
+                                }
                                 completed.push((source.path, Err(format!("{error:#}"))));
                             }
                         }
@@ -285,7 +511,9 @@ where
             *scratch = buffer;
             pending = remaining;
             cancellation.check()?;
-            sources.extend(completed);
+            for (path, record) in completed {
+                sources.insert(path, record.map(Arc::new));
+            }
         }
     }
 }

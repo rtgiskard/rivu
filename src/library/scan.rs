@@ -1,8 +1,11 @@
 use super::paths::{is_audio_path, is_cue_path, logical_path};
-use super::source::{HASH_CHUNK_BYTES, KnownFile, SOURCE_BATCH_SIZE, ScanRecord, prepare_sources};
+use super::source::{
+    CueRecord, HASH_CHUNK_BYTES, KnownFile, SOURCE_BATCH_SIZE, ScanRecord, ScanTrack,
+    prepare_sources,
+};
 use crate::execution::BlockingPool;
 use anyhow::{Context, Result, anyhow, bail};
-use rivu_protocol::model::{CueSegment, ScanPhase};
+use rivu_protocol::model::ScanPhase;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -79,9 +82,13 @@ pub enum ScanUncertainty {
 pub struct ScanResult {
     /// Normalized, absolute UTF-8 scopes accepted for reconciliation coverage.
     pub roots: Vec<PathBuf>,
-    pub records: Vec<ScanRecord>,
+    /// Visible whole-file identities, shared with any CUE segments.
+    pub records: Vec<Arc<ScanRecord>>,
+    pub segments: Vec<CueRecord>,
+    /// Import-only source/segment payload budget; transaction workspace is scoped.
+    pub(crate) retained_budget: Option<super::input::RetainedBudget>,
     /// Admission threshold captured when the scan starts; zero disables filtering.
-    /// Keep all probed records here so storage can resolve existing identities first.
+    /// Keep admitted records so storage can resolve existing identities first.
     pub min_duration_secs: u32,
     pub errors: Vec<String>,
     /// Directories excluded because they exceed the configured scan depth.
@@ -92,11 +99,29 @@ pub struct ScanResult {
     pub uncertainties: Vec<ScanUncertainty>,
     /// Bounded metadata omitted details: preserve absent identities and disable relocation.
     pub scan_incomplete: bool,
-    /// Whole sources represented by successfully scanned CUE sheets.
-    pub suppressed_sources: Vec<PathBuf>,
+    /// Sorted sources referenced by at least one successfully prepared sheet.
+    pub(crate) duration_exempt_sources: Vec<PathBuf>,
 }
 
 impl ScanResult {
+    pub fn track_count(&self) -> usize {
+        self.records.len() + self.segments.len()
+    }
+
+    pub fn tracks(&self) -> impl Iterator<Item = ScanTrack<'_>> {
+        self.records
+            .iter()
+            .map(|source| {
+                let mut track = source.view();
+                track.duration_filter_exempt |= self
+                    .duration_exempt_sources
+                    .binary_search(&source.path)
+                    .is_ok();
+                track
+            })
+            .chain(self.segments.iter().map(CueRecord::view))
+    }
+
     fn push_error(&mut self, error: impl FnOnce() -> String) {
         if self.errors.len() < MAX_REPORTED_SCAN_ERRORS - 1 {
             self.errors.push(error());
@@ -146,7 +171,7 @@ impl ScanResult {
     }
 
     pub fn summary(&self, skipped_short_tracks: usize) -> String {
-        let records = self.records.len().saturating_sub(skipped_short_tracks);
+        let records = self.track_count().saturating_sub(skipped_short_tracks);
         match (skipped_short_tracks, self.errors.len()) {
             (0, 0) => format!("Found {records} audio files"),
             (0, errors) => format!("Found {records} audio files ({errors} errors)"),
@@ -232,7 +257,7 @@ where
             &mut known_sources,
             &mut sources,
             ffmpeg_enabled,
-            cancellation,
+            (cancellation, None),
             &mut scratch,
         )
         .await?;
@@ -260,7 +285,7 @@ where
 
 /// Scan directories, audio files and CUE sheets without touching audio output.
 /// CUE metadata is always reread; only unchanged full-source probe results may
-/// be reused. Failed sheets contribute no partial tracks or source suppression.
+/// be reused. Failed sheets contribute no partial tracks or source exemptions.
 /// `known_sources` looks up only the admitted sources in a bounded batch.
 /// `library_roots` are normalized absolute logical paths, as published by the core.
 /// `max_depth` is relative to each requested directory, which is itself depth 0.
@@ -308,22 +333,23 @@ pub(crate) async fn scan_paths_with_cues<Fut>(
         library_roots,
         max_depth,
     }: ScanSettings<'_>,
-    (cancellation, mut sheets): (
-        &ScanCancellation,
-        Option<HashMap<PathBuf, super::cue::CueSheet>>,
-    ),
+    (cancellation, mut sheets): (&ScanCancellation, Option<super::playlist_io::ImportSheets>),
     mut progress: impl FnMut(ScanPhase, usize, Option<usize>, usize, Option<&Path>),
 ) -> Result<ScanResult>
 where
     Fut: Future<Output = Result<Vec<Option<KnownFile>>>>,
 {
     cancellation.check()?;
+    let budget = sheets.as_ref().map(|sheets| sheets.budget.clone());
+    let importing = sheets.is_some();
     if max_depth == 0 {
         bail!("scan max depth must be at least 1");
     }
     let mut files = HashSet::new();
-    let mut explicit_audio = HashSet::new();
-    let mut result = ScanResult::default();
+    let mut result = ScanResult {
+        retained_budget: budget.clone(),
+        ..Default::default()
+    };
     let mut seen_requests = HashSet::with_capacity(paths.len());
     for requested in paths {
         cancellation.check()?;
@@ -388,19 +414,11 @@ where
             }
         };
         cancellation.check()?;
+        if importing && !metadata.is_file() {
+            bail!("Import source is not a regular file: {}", root.display());
+        }
         if !metadata.is_dir() {
-            if is_audio_path(&root) {
-                explicit_audio.insert(root.clone());
-                if files.insert(root.clone()) {
-                    progress(
-                        ScanPhase::Discovering,
-                        files.len(),
-                        None,
-                        result.errors.len(),
-                        Some(root.as_path()),
-                    );
-                }
-            } else if is_cue_path(&root) {
+            if is_audio_path(&root) || is_cue_path(&root) {
                 if files.insert(root.clone()) {
                     progress(
                         ScanPhase::Discovering,
@@ -465,7 +483,7 @@ where
         None,
     );
     let mut sources = HashMap::new();
-    let mut suppressed = HashSet::new();
+    let mut cue_sources = HashSet::new();
     let mut scratch = vec![0; HASH_CHUNK_BYTES];
     let mut cue_paths = files.iter().filter(|path| is_cue_path(path));
     loop {
@@ -476,7 +494,7 @@ where
             let sheet = read_cue(workers, path, library_roots, cancellation, sheets.as_mut()).await;
             if let Ok(sheet) = &sheet {
                 for track in &sheet.tracks {
-                    if !sources.contains_key(&track.file) {
+                    if !sources.contains_key(&track.file) && !pending.contains(&track.file) {
                         pending.insert(track.file.clone());
                     }
                 }
@@ -494,19 +512,31 @@ where
             &mut known_sources,
             &mut sources,
             ffmpeg_enabled,
-            cancellation,
+            (cancellation, budget.as_ref()),
             &mut scratch,
         )
         .await?;
         for (path, sheet) in prepared {
             cancellation.check()?;
-            match sheet.and_then(|sheet| cue_records(path, sheet, &sources, cancellation)) {
-                Ok(records) => {
-                    suppressed.extend(records.iter().map(|record| record.path.clone()));
-                    result.records.extend(records);
+            match sheet
+                .and_then(|sheet| cue_records(path, sheet, &sources, cancellation, budget.as_ref()))
+            {
+                Ok((records, _workspace)) => {
+                    for record in &records {
+                        if !cue_sources.contains(&record.source.path) {
+                            cue_sources.insert(record.source.path.clone());
+                        }
+                    }
+                    if let Some(budget) = &budget {
+                        budget.reserve_vec(&mut result.segments, records.len())?;
+                    }
+                    result.segments.extend(records);
                 }
                 Err(error) => {
                     cancellation.check()?;
+                    if super::input::RetainedBudget::is_limit(&error) {
+                        return Err(error);
+                    }
                     result.push_uncertainty(ScanUncertainty::CueSheet(path.clone()));
                     result.push_error(|| format!("{}: {error:#}", path.display()));
                 }
@@ -529,11 +559,7 @@ where
     for chunk in files.chunks(SOURCE_BATCH_SIZE) {
         let pending = chunk
             .iter()
-            .filter(|path| {
-                is_audio_path(path)
-                    && (!suppressed.contains(*path) || explicit_audio.contains(*path))
-                    && !sources.contains_key(*path)
-            })
+            .filter(|path| is_audio_path(path) && !sources.contains_key(*path))
             .cloned()
             .collect();
         prepare_sources(
@@ -542,22 +568,25 @@ where
             &mut known_sources,
             &mut sources,
             ffmpeg_enabled,
-            cancellation,
+            (cancellation, budget.as_ref()),
             &mut scratch,
         )
         .await?;
         for path in chunk.iter().filter(|path| is_audio_path(path)) {
             cancellation.check()?;
-            if !suppressed.contains(path) || explicit_audio.contains(path) {
-                let record = sources
-                    .remove(path)
-                    .context("Audio source was not prepared")?;
-                match record {
-                    Ok(record) => result.records.push(record),
-                    Err(error) => {
-                        result.push_uncertainty(ScanUncertainty::File(path.clone()));
-                        result.push_error(|| format!("{}: {error}", path.display()));
+            let record = sources
+                .remove(path)
+                .context("Audio source was not prepared")?;
+            match record {
+                Ok(record) => {
+                    if let Some(budget) = &budget {
+                        budget.reserve_vec(&mut result.records, 1)?;
                     }
+                    result.records.push(record);
+                }
+                Err(error) => {
+                    result.push_uncertainty(ScanUncertainty::File(path.clone()));
+                    result.push_error(|| format!("{}: {error}", path.display()));
                 }
             }
             processed += 1;
@@ -570,25 +599,50 @@ where
             );
         }
     }
+    // Only successful sheets may publish sources not independently discovered.
+    // Failed-sheet cache entries stay private and release their retained payload.
+    for path in cue_sources {
+        cancellation.check()?;
+        if let Some(Ok(source)) = sources.remove(&path) {
+            if let Some(budget) = &budget {
+                budget.reserve_vec(&mut result.records, 1)?;
+            }
+            result.records.push(source);
+        }
+        if let Some(budget) = &budget {
+            budget.reserve_vec(&mut result.duration_exempt_sources, 1)?;
+            budget.reserve(path.as_os_str().len())?;
+        }
+        result.duration_exempt_sources.push(path);
+    }
+    let unused_source_bytes = if budget.is_some() {
+        sources
+            .values()
+            .filter_map(|source| source.as_ref().ok())
+            .filter(|source| Arc::strong_count(source) == 1)
+            .map(|source| source.retained_bytes() + 2 * std::mem::size_of::<usize>())
+            .sum()
+    } else {
+        0
+    };
+    drop(sources);
+    if let Some(budget) = &budget {
+        budget.release(unused_source_bytes);
+    }
     cancellation.check()?;
     let result = workers
         .execute(move || {
-            suppressed.retain(|path| !explicit_audio.contains(path));
-            result.suppressed_sources = suppressed.into_iter().collect();
-            result.suppressed_sources.sort();
+            result.duration_exempt_sources.sort_unstable();
             result.skipped_directories.sort_unstable_by(|a, b| {
                 a.path
                     .cmp(&b.path)
                     .then_with(|| a.root_index.cmp(&b.root_index))
             });
-            result.records.sort_by(|a, b| {
-                let identity =
-                    |record: &ScanRecord| record.cue.as_ref().map(|cue| cue.number).unwrap_or(0);
-                let a_path = a.cue.as_ref().map_or(&a.path, |cue| &cue.sheet);
-                let b_path = b.cue.as_ref().map_or(&b.path, |cue| &cue.sheet);
-                a_path
-                    .cmp(b_path)
-                    .then_with(|| identity(a).cmp(&identity(b)))
+            result.records.sort_by(|a, b| a.path.cmp(&b.path));
+            result.segments.sort_by(|a, b| {
+                let a = a.cue();
+                let b = b.cue();
+                a.sheet.cmp(b.sheet).then_with(|| a.number.cmp(&b.number))
             });
             result
         })
@@ -792,12 +846,13 @@ async fn read_cue(
     path: &Path,
     library_roots: &[PathBuf],
     cancellation: &ScanCancellation,
-    sheets: Option<&mut HashMap<PathBuf, super::cue::CueSheet>>,
+    sheets: Option<&mut super::playlist_io::ImportSheets>,
 ) -> Result<super::cue::CueSheet> {
     cancellation.check()?;
     path.to_str().context("CUE sheet path is not UTF-8")?;
     let sheet = match sheets {
         Some(sheets) => sheets
+            .sheets
             .remove(path)
             .context("Import CUE sheet was not prepared"),
         None => {
@@ -821,8 +876,16 @@ async fn read_cue(
     let mut sheet = sheet?;
     for track in &mut sheet.tracks {
         cancellation.check()?;
+        let old_bytes = track.file.as_os_str().len();
+        if let Some(retained) = &mut sheet.retained {
+            retained.reserve(old_bytes)?;
+        }
         track.file = logical_path(&track.file)
             .with_context(|| format!("resolve CUE source {}", track.file.display()))?;
+        if let Some(retained) = &mut sheet.retained {
+            // Prepared FILE paths are absolute: normalization cannot grow them.
+            retained.release(old_bytes + old_bytes.saturating_sub(track.file.as_os_str().len()));
+        }
         if !library_roots
             .iter()
             .any(|root| track.file.starts_with(root))
@@ -838,12 +901,18 @@ async fn read_cue(
 
 fn cue_records(
     path: &Path,
-    sheet: super::cue::CueSheet,
-    sources: &HashMap<PathBuf, std::result::Result<ScanRecord, String>>,
+    mut sheet: super::cue::CueSheet,
+    sources: &HashMap<PathBuf, std::result::Result<Arc<ScanRecord>, String>>,
     cancellation: &ScanCancellation,
-) -> Result<Vec<ScanRecord>> {
-    let mut records = Vec::with_capacity(sheet.tracks.len());
-    for track in sheet.tracks {
+    budget: Option<&super::input::RetainedBudget>,
+) -> Result<(Vec<CueRecord>, Option<super::input::RetainedScope>)> {
+    let mut workspace = budget.map(super::input::RetainedBudget::scoped);
+    if let Some(workspace) = &mut workspace {
+        workspace.reserve(sheet.tracks.len() * std::mem::size_of::<CueRecord>())?;
+    }
+    // Validate the complete sheet before publishing segments or source exemptions.
+    let mut durations = Vec::with_capacity(sheet.tracks.len());
+    for track in &mut sheet.tracks {
         cancellation.check()?;
         let source = sources
             .get(&track.file)
@@ -870,28 +939,35 @@ fn cue_records(
                 track.number
             );
         }
-        let mut record = source.clone();
-        record.media.duration = Some(end.min(duration) - start);
-        record.media.track_number = Some(track.number);
-        record.media.title = track
-            .title
-            .unwrap_or_else(|| format!("Track {:02}", track.number));
-        if let Some(artist) = track.performer.as_ref().or(sheet.performer.as_ref()) {
-            record.media.artist.clone_from(artist);
+        if track.title.is_none() {
+            if let Some(retained) = &mut sheet.retained {
+                retained.reserve(8)?;
+            }
+            track.title = Some(format!("Track {:02}", track.number));
         }
-        if let Some(album) = &sheet.title {
-            record.media.album.clone_from(album);
-        }
-        record.cue = Some(CueSegment {
-            sheet: path.to_path_buf(),
-            number: track.number,
-            start_frame: track.start_frame,
-            end_frame: track.end_frame,
-        });
-        records.push(record);
+        durations.push(Some(end.min(duration) - start));
+    }
+    if let Some(retained) = &mut sheet.retained {
+        retained.reserve(4 * std::mem::size_of::<usize>())?;
+    }
+    let sheet = Arc::new(sheet);
+    let path = Arc::new(path.to_path_buf());
+    let mut records = Vec::with_capacity(sheet.tracks.len());
+    for (track, duration) in durations.into_iter().enumerate() {
+        records.push(CueRecord::parsed(
+            Arc::clone(
+                sources[&sheet.tracks[track].file]
+                    .as_ref()
+                    .expect("validated source"),
+            ),
+            Arc::clone(&sheet),
+            Arc::clone(&path),
+            track,
+            duration,
+        ));
     }
     cancellation.check()?;
-    Ok(records)
+    Ok((records, workspace))
 }
 
 const DIRECTORY_BATCH_SIZE: usize = 64;

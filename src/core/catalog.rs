@@ -180,20 +180,23 @@ fn save_scan(
     if let Some((name, items)) = scan.import {
         let playlist = (|| -> Result<i64> {
             let accessible: HashSet<_> = result
-                .records
-                .iter()
+                .tracks()
                 .map(|record| match &record.cue {
-                    Some(cue) => (cue.sheet.as_path(), Some(cue.number)),
-                    None => (record.path.as_path(), None),
+                    Some(cue) => crate::store::TrackIdentity::Cue(cue.sheet, cue.number),
+                    None => crate::store::TrackIdentity::File(&record.source.path),
                 })
                 .collect();
             let mut ids = Vec::with_capacity(items.len());
             for item in items {
                 let path = library::logical_path(&item.path)?;
-                if !accessible.contains(&(path.as_path(), item.cue_track)) {
+                let identity = match item.cue_track {
+                    Some(number) => crate::store::TrackIdentity::Cue(&path, number),
+                    None => crate::store::TrackIdentity::File(&path),
+                };
+                if !accessible.contains(&identity) {
                     continue;
                 }
-                if let Some(id) = store.track_id_for_source(&path, item.cue_track)? {
+                if let Some(id) = store.track_id_for_identity(identity)? {
                     ids.push(id);
                 }
             }
@@ -439,7 +442,7 @@ impl Core {
             );
             match &result {
                 Ok(result) => tracing::info!(
-                    records = result.records.len(),
+                    records = result.track_count(),
                     errors = result.errors.len(),
                     "library_scan_finished"
                 ),

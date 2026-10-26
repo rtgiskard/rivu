@@ -583,6 +583,11 @@ impl Metadata {
     }
 }
 
+fn format_cue_frame(frame: u64) -> String {
+    let seconds = frame / 75;
+    format!("{:02}:{:02}:{:02}", seconds / 60, seconds % 60, frame % 75)
+}
+
 fn metadata_copy(
     label: SharedString,
     value: SharedString,
@@ -766,13 +771,7 @@ impl Metadata {
                 self.tr("gl-file-path"),
                 track.map_or_else(
                     || placeholder.clone(),
-                    |track| {
-                        if track.missing {
-                            self.tr("gl-missing")
-                        } else {
-                            track.path.to_string_lossy().into_owned().into()
-                        }
-                    },
+                    |track| track.path.to_string_lossy().into_owned().into(),
                 ),
             ),
             (
@@ -789,6 +788,56 @@ impl Metadata {
                 ),
             ),
         ]];
+        let track_kind: (SharedString, SharedString) = (
+            self.tr("gl-track-kind"),
+            track.map_or_else(
+                || placeholder.clone(),
+                |track| {
+                    self.tr(if track.cue.is_some() {
+                        "gl-cue-segment"
+                    } else {
+                        "gl-whole-file"
+                    })
+                },
+            ),
+        );
+        let cue = track.and_then(|track| track.cue.as_ref());
+        let cue_fields: [[(SharedString, SharedString); 2]; 2] = [
+            [
+                (
+                    self.tr("gl-cue-sheet"),
+                    cue.map_or_else(
+                        || placeholder.clone(),
+                        |cue| cue.sheet.to_string_lossy().into_owned().into(),
+                    ),
+                ),
+                (
+                    self.tr("gl-cue-number"),
+                    cue.map_or_else(|| placeholder.clone(), |cue| cue.number.to_string().into()),
+                ),
+            ],
+            [
+                (
+                    self.tr("gl-cue-start"),
+                    cue.map_or_else(
+                        || placeholder.clone(),
+                        |cue| format_cue_frame(cue.start_frame).into(),
+                    ),
+                ),
+                (
+                    self.tr("gl-cue-end"),
+                    cue.map_or_else(
+                        || placeholder.clone(),
+                        |cue| {
+                            cue.end_frame.map_or_else(
+                                || self.tr("gl-file-end"),
+                                |frame| format_cue_frame(frame).into(),
+                            )
+                        },
+                    ),
+                ),
+            ],
+        ];
         let metadata: [[(SharedString, SharedString); 2]; 3] = [
             [
                 (
@@ -936,9 +985,11 @@ impl Metadata {
             let width = file
                 .iter()
                 .chain(&metadata)
+                .chain(&cue_fields)
                 .chain(&tags)
                 .map(|fields| &fields[index].0)
                 .chain((index == 1).then_some(&disc.0))
+                .chain((index == 0).then_some(&track_kind.0))
                 .map(|label| {
                     let run = gpui::TextRun {
                         len: label.len(),
@@ -964,10 +1015,6 @@ impl Metadata {
             let scale = window.scale_factor();
             px((f32::from(width) * scale).ceil() / scale)
         });
-        let path_tooltip: SharedString = track
-            .filter(|track| track.missing)
-            .map(|track| track.path.to_string_lossy().into_owned().into())
-            .unwrap_or_else(|| file[0][0].1.clone());
         let scroll = self
             .context
             .scroll
@@ -1059,36 +1106,55 @@ impl Metadata {
                     .child(metadata_group(
                         theme,
                         self.tr("gl-file"),
-                        metadata_row(
-                            div().flex_1().min_w_0().child(
+                        column()
+                            .gap_1()
+                            .child(metadata_row(
+                                div().flex_1().min_w_0().child(
+                                    label_value_row(
+                                        theme,
+                                        file[0][0].0.clone(),
+                                        file[0][0].1.clone(),
+                                        label_widths[0],
+                                        metadata_copy(
+                                            file[0][0].0.clone(),
+                                            file[0][0].1.clone(),
+                                            copy_hint.clone(),
+                                            cx,
+                                        ),
+                                    )
+                                    .id(("metadata-path", panel_id))
+                                    .tooltip(rivu_ui::text_tooltip(file[0][0].1.clone())),
+                                ),
                                 label_value_row(
                                     theme,
-                                    file[0][0].0.clone(),
-                                    file[0][0].1.clone(),
-                                    label_widths[0],
+                                    file[0][1].0.clone(),
+                                    file[0][1].1.clone(),
+                                    label_widths[1],
                                     metadata_copy(
-                                        file[0][0].0.clone(),
-                                        path_tooltip.clone(),
+                                        file[0][1].0.clone(),
+                                        file[0][1].1.clone(),
                                         copy_hint.clone(),
                                         cx,
                                     ),
-                                )
-                                .id(("metadata-path", panel_id))
-                                .tooltip(rivu_ui::text_tooltip(path_tooltip)),
-                            ),
-                            label_value_row(
+                                ),
+                            ))
+                            .child(label_value_row(
                                 theme,
-                                file[0][1].0.clone(),
-                                file[0][1].1.clone(),
-                                label_widths[1],
-                                metadata_copy(
-                                    file[0][1].0.clone(),
-                                    file[0][1].1.clone(),
+                                track_kind.0.clone(),
+                                track_kind.1.clone(),
+                                label_widths[0],
+                                metadata_copy(track_kind.0, track_kind.1, copy_hint.clone(), cx),
+                            ))
+                            .when(cue.is_some(), |file| {
+                                file.child(metadata_rows(
+                                    theme,
+                                    cue_fields,
+                                    label_widths,
                                     copy_hint.clone(),
                                     cx,
-                                ),
-                            ),
-                        ),
+                                ))
+                                .child(caption(theme, self.tr("gl-cue-range-note")))
+                            }),
                     ))
                     .child(metadata_group(
                         theme,

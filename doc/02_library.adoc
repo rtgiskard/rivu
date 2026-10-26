@@ -33,6 +33,9 @@ not. Restoring a file clears its missing state on the next successful check.
 `Force reread` refreshes unchanged audio metadata too. Both operations preserve
 track identities, user edits, favorites, listening history, and queue/playlist
 references; neither relocates or deletes tracks. Checking does not reimport CUE sheets.
+CUE subtracks keep their registered labels, track/disc numbers, release dates and
+source bounds while sharing refreshed audio properties; their durations are
+recalculated from those bounds and the source duration.
 
 [source,sh]
 ----
@@ -102,11 +105,12 @@ link:03_playlist.adoc#_import_and_export[playlist import and export] choosers.
 
 == CUE library tracks
 
-`rivu library scan album.cue --wait` creates one library track per audio entry,
-with its own metadata, history, and statistics. Invalid sheets are rejected as
-a whole. Directory scans omit sources represented by valid sheets; failed sheets
-may still leave their whole audio sources eligible for import. Explicitly
-scanning a source imports it as a whole track.
+`rivu library scan album.cue --wait` creates one library track per audio entry
+and one ordinary whole-file track per referenced source. Both are independently
+visible and playable, with their own metadata, history, and statistics. Shared
+sources have only one whole-file identity per logical audio path, even when
+referenced by several sheets. Invalid sheets are rejected as a whole; readable
+audio discovered independently remains eligible for ordinary import.
 
 CUE titles use each entry's `TITLE`, or `Track NN` when absent. The entry's
 `PERFORMER` takes precedence over the sheet's performer; without either, the
@@ -114,9 +118,18 @@ source artist is kept. The sheet's `TITLE` supplies the album when present;
 otherwise the source album is kept. Technical metadata comes from the source,
 while duration is the individual segment's length.
 
-Within one scan, CUE sheets sharing a source and an explicitly requested whole
-source reuse the same source probe result or error. Changes to that source
-during the scan are picked up by a subsequent scan.
+Within one scan, CUE sheets and ordinary audio requests sharing a source
+reuse the same source probe result or error. Segment records share source
+and sheet metadata and retain an entry index and duration rather than copying
+effective metadata strings into every segment.
+Database tracks, user overrides, history and playlist references remain independent.
+Changes to a source during the scan are picked up by a subsequent scan.
+
+Track details distinguish whole-file tracks from CUE subtracks and show the audio
+source path. CUE details also show the sheet, track number, and source-relative
+start and exclusive end as `MM:SS:FF` at 75 frames per second. A segment without
+an explicit end is labeled as ending at the file's end. Removing either library
+identity does not remove the other or delete the audio file.
 
 Supported formats and playlist exchange: link:03_playlist.adoc#_cue_import[CUE import].
 
@@ -583,19 +596,20 @@ nested scan has its own boundary, even when an enclosing walk skipped it.
 === Minimum duration for new tracks
 
 `library.scan_min_duration_secs` is a new-track admission policy, not a constraint
-on library contents. It applies uniformly to every scan workflow, including
-directory, direct audio/CUE, forced scans, and playlist imports. `0` disables it;
-otherwise only new tracks with a known, finite, positive duration strictly less
-than the configured seconds are excluded. A duration equal to the threshold is
-accepted; unknown, unavailable, zero, or invalid duration is not treated as a
-short track. Existing tracks, including recognized relocations, are retained and
-their metadata is updated normally, even when short. `--force` rereads metadata
-but does not bypass this admission policy for new tracks.
+on library contents. It applies to ordinary audio discovered by directory scans,
+direct requests, forced scans, and playlist imports. `0` disables it; otherwise
+only new tracks with a known, finite, positive duration strictly less than the
+configured seconds are excluded. A duration equal to the threshold is accepted;
+unknown, unavailable, zero, or invalid duration is not treated as a short track.
+Existing tracks, including recognized relocations, are retained and their metadata
+is updated normally, even when short. `--force` rereads metadata but does not
+bypass ordinary new-track admission.
 
-CUE tracks use each segment's duration, not the full source duration. Skipping
-segments never admits their source as a fallback full-file track. Existing probe
-failures remain scan errors; duration exclusions are counted separately from
-errors in the completion summary.
+Successfully validated CUE sheets exempt both their subtracks and referenced
+whole-file tracks from this duration filter. The exemption also applies when the
+same source is discovered independently in that scan. Failed sheets grant no
+exemption. File, path, probe, and segment-boundary checks still apply; probe errors
+remain scan errors. Duration exclusions are counted separately from errors.
 
 Each scan or playlist import captures the threshold at startup and keeps it for
 the entire task; saving a setting during a task affects only later tasks.
@@ -640,9 +654,12 @@ link:21_ipc.adoc#_scanning_and_metadata_ownership[Scanning and metadata ownershi
 
 ==== Metadata reuse
 Ordinary scans reuse valid full-source metadata and fingerprints when file size
-and modification time match. Metadata also requires the current probe version;
-CUE segment metadata cannot substitute for a full-source probe. Force scans
-reprobe and reread source content. Neither resets user edits.
+and modification time match. Metadata also requires the current probe version.
+CUE imports retain a whole-file track for each source, whose raw metadata supports
+later reuse independently of subtrack labels, durations, and user edits. If that
+record is absent, segment metadata cannot substitute for a full-source probe,
+though a matching source fingerprint can still be reused. Force scans reprobe
+and reread source content. Neither resets user edits.
 An unchanged scan still completes and reports errors, but leaves existing views
 valid. Playlist import still creates its requested playlist when all sources are
 unchanged. The lookup and merge rules belong to

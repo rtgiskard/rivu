@@ -188,7 +188,16 @@ gl-unsaved = 有未保存的更改
 gl-track-details = 曲目详情
 gl-copy-value = 复制值
 
-gl-file-path = 路径
+gl-file-path = 源路径
+gl-track-kind = 类型
+gl-whole-file = 整轨文件
+gl-cue-segment = CUE 单曲
+gl-cue-sheet = CUE 文件
+gl-cue-number = CUE 编号
+gl-cue-start = 源文件起点
+gl-cue-end = 源文件终点
+gl-file-end = 文件结束
+gl-cue-range-note = 源文件位置按「分:秒:帧」显示（每秒 75 帧）；不包含终点。
 
 gl-missing = 缺失
 

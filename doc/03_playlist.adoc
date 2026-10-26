@@ -164,7 +164,8 @@ partial playlists: `--wait` reports scan errors even when readable tracks were
 saved. Only identities successfully read or validly reused by that import's scan
 can enter its playlist; an old library row does not make a failed source eligible.
 The link:02_library.adoc#_minimum_duration_for_new_tracks[minimum-duration admission policy]
-also applies; excluded new tracks do not enter the playlist.
+applies to ordinary audio entries not referenced by a successfully validated CUE
+sheet in the same import; excluded new tracks do not enter the playlist.
 Import fails if no entries resolve successfully. Without `--name`, the playlist
 name comes from the imported file's name without its extension. Both explicit
 and default names are validated before a scan starts or any scan data is saved.
@@ -186,15 +187,23 @@ the commits below must finish.
 === Input limits and cancellation
 
 Import inputs must be ordinary files, including CUE sheets referenced by M3U;
-directories, devices, and FIFOs are rejected without waiting for a writer. M3U
-input is limited to 16 MiB, each CUE sheet to 1 MiB, and aggregate input to 64 MiB
-(each distinct CUE sheet is read once). Expansion is limited to 100,000 entries,
-before first-occurrence deduplication. Expanded entry data and retained parsed CUE
-data each have a 64 MiB accounting limit, including paths, names, and record
-storage. These limits allow large collections while bounding repeated-sheet
-expansion and long-metadata costs; the aggregate and expansion limits apply to
-imports, not playlist sizes for other operations. Input errors identify
-preparation/read/decode/parse stages and occur before any scan or playlist commit.
+directories, devices, and FIFOs are rejected without waiting for a writer.
+Referenced directories are never recursively imported; directory discovery belongs
+to `rivu library scan`. M3U input is limited to 16 MiB, each CUE sheet to 1 MiB,
+and aggregate input to 64 MiB (each distinct CUE sheet is read once). Expansion is
+limited to 100,000 entries before first-occurrence deduplication.
+
+Expanded entries, parsed sheets, and shared source/segment data each have an
+independent 64 MiB accounting limit, including retained paths, names and vector
+capacity. Shared source and sheet payloads are charged once. Replaced or discarded
+metadata and temporary parsing/staging workspaces release their reservations with
+their owners; raw input is not permanently charged against later retained data.
+Staging charges scope indexes, owned path prefixes, and serialized query buffers
+to the source/segment domain, including JSON escaping and buffer capacity. This
+cost depends on requested scopes, not only on successfully probed tracks.
+These are bounded-data limits, not a combined process-RSS limit. They apply to
+imports, not playlist sizes for other operations. Preparation or retention-limit
+failures abort before any scan or playlist commit instead of saving partial results.
 Prepared CUE data is reused by scanning so the import keeps the sheet version and
 track order it read. Cancellation is checked during reads and parsing; the reader
 does not reopen an admitted path. Internal scheduling and ownership are described
@@ -251,6 +260,10 @@ with `./` so they are not interpreted as M3U directives.
 === CUE import
 
 Direct CUE import, or a CUE path in M3U, expands every track in sheet order.
+Referenced whole-file tracks are also registered in the library, but are not
+inserted into the imported playlist unless separately requested as audio entries.
+CUE subtracks and their whole-file sources bypass the scan minimum-duration
+filter; all other validation remains in force.
 Single-file and multi-file audio sheets are supported, using UTF-8 (with or
 without BOM) or BOM-marked UTF-16. `FILE` paths are relative to the sheet;
 Windows separators are accepted. Sources must be supported audio with readable,

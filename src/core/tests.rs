@@ -53,15 +53,13 @@ pub(super) fn fixture_with_database(duration: Option<f64>) -> (tempfile::TempDir
         .apply_scan(&ScanResult {
             roots: vec![directory.path().to_path_buf()],
             min_duration_secs: 0,
-            suppressed_sources: Vec::new(),
             skipped_directories: Vec::new(),
             skipped_directories_truncated: false,
             scan_incomplete: false,
             uncertainties: Vec::new(),
-            records: (1..=4)
+            records: ((1..=4)
                 .map(|id| ScanRecord {
                     path: directory.path().join(format!("{id}.wav")),
-                    cue: None,
                     size: 1,
                     modified_ns: 1,
                     fingerprint: None,
@@ -81,8 +79,12 @@ pub(super) fn fixture_with_database(duration: Option<f64>) -> (tempfile::TempDir
                         release_date: None,
                     },
                 })
-                .collect(),
+                .collect::<Vec<_>>())
+            .into_iter()
+            .map(std::sync::Arc::new)
+            .collect(),
             errors: Vec::new(),
+            ..Default::default()
         })
         .unwrap();
     let mut state = CoreState::default();

@@ -42,10 +42,6 @@ impl Store {
             let mut stage = tx.prepare("INSERT INTO external_sources VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)")?;
             for (ordinal, record) in admission.records.iter().enumerate() {
                 ensure!(
-                    record.cue.is_none(),
-                    "External admission accepts only ordinary audio sources"
-                );
-                ensure!(
                     crate::library::logical_path(&record.path)? == record.path,
                     "External source path is not normalized"
                 );
@@ -189,7 +185,7 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::library::{ScanRecord, ScanResult};
+    use crate::library::{CueRecord, RegisteredCueMetadata, ScanRecord, ScanResult};
     use rivu_audio::MediaInfo;
     use rivu_protocol::model::CueSegment;
     use std::path::Path;
@@ -200,7 +196,6 @@ mod tests {
             size: 1,
             modified_ns: 2,
             fingerprint: Some(blake3::hash(path.as_bytes()).to_hex().to_string()),
-            cue: None,
             media: MediaInfo {
                 title: path.into(),
                 artist: String::new(),
@@ -279,7 +274,9 @@ mod tests {
         assert!(store.admit_external_queue(&next, Some(2), None).is_err());
         assert!(
             store
-                .track_id_for_source(Path::new("/outside/two.wav"), None)
+                .track_id_for_identity(crate::store::TrackIdentity::File(Path::new(
+                    "/outside/two.wav"
+                )))
                 .unwrap()
                 .is_none()
         );
@@ -288,7 +285,9 @@ mod tests {
         assert!(store.admit_external_queue(&next, None, None).is_err());
         assert!(
             store
-                .track_id_for_source(Path::new("/outside/two.wav"), None)
+                .track_id_for_identity(crate::store::TrackIdentity::File(Path::new(
+                    "/outside/two.wav"
+                )))
                 .unwrap()
                 .is_none()
         );
@@ -320,23 +319,40 @@ mod tests {
     #[test]
     fn ordinary_identity_is_reused_without_cue_reconciliation_or_relocation() {
         let store = Store::open(Path::new(":memory:")).unwrap();
-        let mut cue = record("/outside/shared.wav");
-        cue.cue = Some(CueSegment {
-            sheet: "/outside/shared.cue".into(),
-            number: 1,
-            start_frame: 0,
-            end_frame: None,
-        });
+        let cue = CueRecord::registered(
+            std::sync::Arc::new(record("/outside/shared.wav")),
+            CueSegment {
+                sheet: "/outside/shared.cue".into(),
+                number: 1,
+                start_frame: 0,
+                end_frame: None,
+            },
+            RegisteredCueMetadata {
+                title: "Registered segment".into(),
+                artist: String::new(),
+                album: String::new(),
+                track_number: None,
+                disc_number: None,
+                release_date: None,
+            },
+            Some(0.01),
+        );
         let ordinary = record("/outside/existing.wav");
         let absent = record("/outside/absent.wav");
         store
             .apply_scan(&ScanResult {
-                records: vec![cue, ordinary, absent],
+                segments: vec![cue],
+                records: (vec![ordinary, absent])
+                    .into_iter()
+                    .map(std::sync::Arc::new)
+                    .collect(),
                 ..ScanResult::default()
             })
             .unwrap();
         let ordinary_id = store
-            .track_id_for_source(Path::new("/outside/existing.wav"), None)
+            .track_id_for_identity(crate::store::TrackIdentity::File(Path::new(
+                "/outside/existing.wav",
+            )))
             .unwrap()
             .unwrap();
         store.conn.execute("UPDATE tracks SET title_override='Keep title',favorite=1,play_count=7,missing=1 WHERE id=?1", [ordinary_id]).unwrap();
@@ -358,19 +374,26 @@ mod tests {
         assert!(!track.missing);
         assert!(
             store
-                .track_id_for_source(Path::new("/outside/shared.cue"), Some(1))
+                .track_id_for_identity(crate::store::TrackIdentity::Cue(
+                    Path::new("/outside/shared.cue"),
+                    1
+                ))
                 .unwrap()
                 .is_some()
         );
         assert!(
             store
-                .track_id_for_source(Path::new("/outside/shared.wav"), None)
+                .track_id_for_identity(crate::store::TrackIdentity::File(Path::new(
+                    "/outside/shared.wav"
+                )))
                 .unwrap()
                 .is_some()
         );
         assert!(
             store
-                .track_id_for_source(Path::new("/outside/absent.wav"), None)
+                .track_id_for_identity(crate::store::TrackIdentity::File(Path::new(
+                    "/outside/absent.wav"
+                )))
                 .unwrap()
                 .is_some()
         );

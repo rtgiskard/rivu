@@ -125,7 +125,7 @@ where
             &mut known_sources,
             &mut sources,
             ffmpeg_enabled,
-            cancellation,
+            (cancellation, None),
             &mut scratch,
         )
         .await?;
@@ -142,7 +142,7 @@ where
         match outcome.context("External file preparation omitted a source")? {
             Ok(record) => {
                 records.push(Some(result.records.len()));
-                result.records.push(record);
+                result.records.push(std::sync::Arc::unwrap_or_clone(record));
             }
             Err(error) => {
                 records.push(None);
