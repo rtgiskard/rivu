@@ -18,9 +18,8 @@ use super::{
     artwork::{Artwork, ArtworkImages, ArtworkLoader, ArtworkView},
     components::{
         search::{SearchScope, new_search, set_search_counts},
-        track::track_list_row,
+        track::{TrackText, track_list_row, track_title},
     },
-    format_time,
     list_interaction::{ContentDrag, ContentMenuRequest, TrackSource},
     scrolling::ScrollViews,
 };
@@ -1042,25 +1041,24 @@ impl Render for AlbumBrowser {
                                         .into_any_element();
                                 };
                                 let id = track.id;
-                                let drag_label: SharedString = track.title.clone().into();
+                                let drag_label: SharedString =
+                                    track_title(&track.title, &track.path, track.cue_number)
+                                        .into_owned()
+                                        .into();
                                 let marker =
                                     track_marker(this.current_track, this.playback_status, id);
                                 track_list_row(
                                     theme,
                                     ("album-track", id as u64),
-                                    ("album-track-text", id as u64),
-                                    (
-                                        track.title.clone(),
-                                        if track.artist.trim().is_empty() {
-                                            "-".to_owned()
-                                        } else {
-                                            track.artist.clone()
-                                        },
-                                    ),
+                                    TrackText {
+                                        album: None,
+                                        ..TrackText::from(track)
+                                    },
                                     index,
                                     marker.is_some()
                                         && this.playback_status == PlaybackStatus::Playing,
                                     false,
+                                    &this.i18n,
                                 )
                                 .h(rivu_ui::list_row_height(window, cx))
                                 .group("album-track-row")
@@ -1097,16 +1095,6 @@ impl Render for AlbumBrowser {
                                 .when_some(marker, |row, marker| {
                                     row.child(caption(theme, this.tr(marker)))
                                 })
-                                .child(
-                                    caption(
-                                        theme,
-                                        track.duration.map_or_else(|| "—".into(), format_time),
-                                    )
-                                    .font_features(super::appearance::fonts::tabular_numbers())
-                                    .w_16()
-                                    .flex_shrink_0()
-                                    .text_right(),
-                                )
                                 .child(
                                     rivu_ui::hover_actions(
                                         theme,

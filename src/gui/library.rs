@@ -6,12 +6,13 @@ mod requests;
 pub(in crate::gui) mod selection;
 pub(super) mod tree;
 
+use super::components::track::{AudioSpecs, audio_specs, track_title};
 use super::feature::FeatureContext;
 use crate::config::{LibraryColumn, LibraryColumns};
 use gpui::{AnyElement, Context, Div, Render, SharedString, Window, div, prelude::*, px, rgb};
 use rivu_protocol::model::{Command, DirectoryRow, LibraryRow};
 use rivu_ui::{
-    IconButton, IconButtonDensity, IconButtonStyle, VirtualList, button, caption,
+    IconButton, IconButtonDensity, IconButtonStyle, VirtualList, button, caption, lazy_row_tooltip,
     list_panel_header, list_viewport, panel_surface, row,
 };
 use std::{path::Path, sync::Arc};
@@ -69,38 +70,13 @@ pub(super) fn track_detail(
     i18n: &crate::i18n::Localizer,
     track: &rivu_protocol::model::LibraryRow,
 ) -> String {
-    let mut detail = track.artist.clone();
-    if !track.album.is_empty() {
-        if !detail.is_empty() {
-            detail.push_str(" / ");
-        }
-        detail.push_str(&track.album);
-    }
-    if !detail.is_empty() {
+    let mut detail = track
+        .duration
+        .map_or_else(|| "—".to_owned(), super::format_time);
+    let specs = audio_specs(AudioSpecs::from(track));
+    if !specs.is_empty() {
         detail.push_str(" · ");
-    }
-    match track.duration {
-        Some(duration) => detail.push_str(&super::format_time(duration)),
-        None => detail.push('-'),
-    }
-    detail.push_str(" · ");
-    if track.codec.is_empty() {
-        detail.push('-');
-    } else {
-        detail.extend(track.codec.chars().map(|ch| ch.to_ascii_lowercase()));
-    }
-    detail.push_str(" · ");
-    match track.bitrate_bps {
-        Some(value) => {
-            use std::fmt::Write;
-            let _ = write!(
-                detail,
-                "{}{:.0} kbps",
-                if track.bitrate_exact { "" } else { "≈" },
-                value as f64 / 1000.0
-            );
-        }
-        None => detail.push('-'),
+        detail.push_str(&specs);
     }
     if let Some(parent) = track.path.parent() {
         detail.push_str(" · ");
@@ -654,7 +630,7 @@ impl Library {
                             }
                             DirectoryRow::Track(track) => (
                                 LibraryNode::Track(track.id),
-                                track.title.clone(),
+                                track_title(&track.title, &track.path, track.cue_number).into_owned(),
                                 String::new(),
                                 None,
                             ),
@@ -713,13 +689,6 @@ impl Library {
                                 .when(retry_counts, |view| view.text_color(gpui::rgb(theme.error)))
                         }));
                         let title = gpui::SharedString::from(title);
-                        let tooltip_title = path.as_ref().map_or_else(
-                            || match entry {
-                                DirectoryRow::Track(track) if visible.other_tracks => format!("{}\n{}", track.title, track.path.display()).into(),
-                                _ => title.clone(),
-                            },
-                            |path| path.display().to_string().into(),
-                        );
                         let name_content = row()
                             .w_full()
                             .h_full()
@@ -819,7 +788,7 @@ impl Library {
                             });
                         let menu_node = id.clone();
                         let menu_root = path.clone().filter(|path| this.state.system.config.library_roots.contains(path));
-                        let row_view = rivu_ui::lazy_row_tooltip(
+                        let row_view = lazy_row_tooltip(
                             rivu_ui::tree_row(
                                 theme,
                                 row_id,
@@ -882,13 +851,31 @@ impl Library {
                                     )
                                 },
                             ),
-                            tooltip_title,
                             {
                                 let entry = visible.row;
                                 let i18n = Arc::clone(&this.i18n);
+                                let other_tracks = visible.other_tracks;
+                                let title = title.clone();
                                 move || match &entry {
-                                    DirectoryRow::Track(track) => track_detail(&i18n, track).into(),
-                                    DirectoryRow::Directory { .. } | DirectoryRow::OtherTracks => detail.clone().into(),
+                                    DirectoryRow::Track(track) => {
+                                        let mut heading = track_title(&track.title, &track.path, track.cue_number).into_owned();
+                                        if !track.artist.trim().is_empty() {
+                                            heading.push_str(" · ");
+                                            heading.push_str(&track.artist);
+                                        }
+                                        if !track.album.trim().is_empty() {
+                                            heading.push_str(if track.artist.trim().is_empty() { " · " } else { " / " });
+                                            heading.push_str(&track.album);
+                                        }
+                                        let mut detail = track_detail(&i18n, track);
+                                        if other_tracks {
+                                            detail.push('\n');
+                                            detail.push_str(&track.path.to_string_lossy());
+                                        }
+                                        (heading.into(), detail.into())
+                                    }
+                                    DirectoryRow::Directory { path } => (path.display().to_string().into(), detail.clone().into()),
+                                    DirectoryRow::OtherTracks => (title.clone(), detail.clone().into()),
                                 }
                             },
                         )

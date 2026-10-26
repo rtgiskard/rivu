@@ -184,18 +184,13 @@ pub fn row_tooltip(
     })
 }
 
-/// Build row detail only when the tooltip opens.
+/// Build both row-information lines only when the tooltip opens.
 pub fn lazy_row_tooltip(
     view: Stateful<Div>,
-    title: impl Into<SharedString>,
-    detail: impl Fn() -> SharedString + 'static,
+    content: impl Fn() -> (SharedString, SharedString) + 'static,
 ) -> Stateful<Div> {
-    let title = title.into();
     view.tooltip(move |_, cx| {
-        cx.new(|_| RowTooltip {
-            title: title.clone(),
-            detail: detail(),
-        })
-        .into()
+        let (title, detail) = content();
+        cx.new(|_| RowTooltip { title, detail }).into()
     })
 }

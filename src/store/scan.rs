@@ -44,25 +44,30 @@ pub(super) fn staged_projection_columns(cue: bool) -> String {
         OR COALESCE(t.artist_override,t.raw_artist) IS NOT COALESCE(t.artist_override,s.raw_artist)
         OR COALESCE(t.album_override,t.raw_album) IS NOT COALESCE(t.album_override,s.raw_album)
         OR t.duration IS NOT s.duration OR t.codec IS NOT s.codec OR t.missing IS NOT 0
-        OR t.bitrate_bps IS NOT s.bitrate_bps OR t.bitrate_exact IS NOT s.bitrate_exact";
+        OR t.bitrate_bps IS NOT s.bitrate_bps OR t.bitrate_exact IS NOT s.bitrate_exact
+        OR t.channels IS NOT s.channels OR t.sample_rate IS NOT s.sample_rate
+        OR t.bits_per_sample IS NOT s.bits_per_sample";
     let cue_values = if cue {
         "OR t.cue_sheet IS NOT s.cue_sheet OR t.cue_number IS NOT s.cue_number
          OR t.cue_start_frame IS NOT s.cue_start_frame OR t.cue_end_frame IS NOT s.cue_end_frame"
     } else {
         ""
     };
+    let cue_number = if cue {
+        "OR t.cue_number IS NOT s.cue_number"
+    } else {
+        ""
+    };
     let full = format!(
         "{visible} OR t.fingerprint IS NOT s.fingerprint
-        OR t.channels IS NOT s.channels OR t.sample_rate IS NOT s.sample_rate
-        OR t.bits_per_sample IS NOT s.bits_per_sample OR t.release_date IS NOT s.release_date
-        {cue_values}"
+        OR t.release_date IS NOT s.release_date {cue_values}"
     );
     let old_album = super::albums::eligible_member("t");
     let new_album = rivu_format::database::eligible_title("COALESCE(t.album_override,s.raw_album)");
     let representative = super::albums::representative("t");
     format!(
-        "COALESCE(MAX(({visible}) AND EXISTS(SELECT 1 FROM queue_entries WHERE track_id=t.id)),0),
-        COALESCE(MAX(((t.id IS NULL OR {visible}
+        "COALESCE(MAX(({visible} {cue_number}) AND EXISTS(SELECT 1 FROM queue_entries WHERE track_id=t.id)),0),
+        COALESCE(MAX(((t.id IS NULL OR {visible} {cue_number}
             OR t.track_number IS NOT s.track_number OR t.disc_number IS NOT s.disc_number)
             AND ({old_album} OR {new_album})) OR (({full}) AND {representative})),0)"
     )
@@ -1083,7 +1088,7 @@ mod tests {
             .unwrap();
         store.enqueue_tracks(&[id]).unwrap();
 
-        scan.records[1].media.sample_rate += 1;
+        scan.records[1].media.release_date = Some("2042-01".into());
         let member = store.apply_scan(&scan).unwrap();
         assert!(member.changed && member.library && !member.queue && !member.albums);
         scan.records[2].media.title = "Retitled plain track".into();
@@ -1092,7 +1097,7 @@ mod tests {
         scan.records[1].media.title = "Retitled album member".into();
         let member = store.apply_scan(&scan).unwrap();
         assert!(member.changed && member.library && !member.queue && member.albums);
-        scan.records[0].media.sample_rate += 1;
+        scan.records[0].media.release_date = Some("2042-01".into());
         let representative = store.apply_scan(&scan).unwrap();
         assert!(
             representative.changed
@@ -1340,11 +1345,8 @@ mod tests {
         record.fingerprint = None;
         record.size += 1;
         record.modified_ns += 1;
-        record.media.channels = 1;
-        record.media.sample_rate = 44100;
         record.media.track_number = None;
         record.media.disc_number = None;
-        record.media.bits_per_sample = None;
         record.media.release_date = None;
         let cue = record.cue.as_mut().unwrap();
         cue.start_frame = 75;
@@ -1364,11 +1366,7 @@ mod tests {
         assert_eq!(track.path, scan.records[0].path);
         assert_eq!(track.fingerprint, None);
         assert_eq!(track.cue, scan.records[0].cue);
-        assert_eq!((track.channels, track.sample_rate), (1, 44100));
-        assert_eq!(
-            (track.track_number, track.disc_number, track.bits_per_sample),
-            (None, None, None)
-        );
+        assert_eq!((track.track_number, track.disc_number), (None, None));
         assert_eq!(track.release_date, None);
         let known = store.stored_scan_files(&scan.roots).unwrap().remove(0);
         assert_eq!(known.size, scan.records[0].size);

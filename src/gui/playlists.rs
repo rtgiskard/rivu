@@ -10,7 +10,7 @@ pub(super) use selection::EntryCommit;
 
 use super::{
     ListFocus,
-    components::track::{favorite_button, row_text, track_list_row},
+    components::track::{TrackText, favorite_button, row_text, track_list_row},
     library::LibraryDrag,
 };
 use crate::gui::queue::QueueDrag;
@@ -1407,7 +1407,6 @@ impl Playlists {
                             let id = e.id;
                             let track_id = e.track_id;
                             let position = e.position;
-                            let title = e.title.clone();
                             let favorite = e.favorite;
                             let revision = this.playlist_revision(playlist_id);
                             let stamp = this.playlist_occurrence_stamp(playlist_id);
@@ -1424,28 +1423,21 @@ impl Playlists {
                                 stamp,
                                 selection_generation,
                             };
-                            let detail = format!(
-                                "{}{}{}",
-                                e.artist,
-                                if e.artist.is_empty() || e.album.is_empty() {
-                                    ""
-                                } else {
-                                    " / "
-                                },
-                                e.album
-                            );
                             track_list_row(
                                 theme,
                                 ("playlist-entry", id as u64),
-                                ("playlist-entry-text", id as u64),
-                                (title, detail),
+                                TrackText::from(e),
                                 e.position,
                                 this.state
                                     .current_track()
                                     .is_some_and(|track| track.id == track_id),
                                 this.browser.playlists().track_selection.contains(id),
+                                &this.i18n,
                             )
                             .h(list_row_height(window, cx))
+                            .when(e.missing, |row| {
+                                row.child(caption(theme, this.tr("gl-missing")))
+                            })
                             .when(
                                 (this.focused && this.layout_focus.is_focused(window))
                                     && this.browser.focus()

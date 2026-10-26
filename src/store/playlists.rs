@@ -225,7 +225,7 @@ impl Store {
             after.map_or((-1, 0), |after| (after.cursor.position, after.cursor.id));
         let start = after.map_or(0, |after| after.offset);
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT e.position,e.id,e.track_id,COALESCE(t.title_override,t.raw_title),COALESCE(t.artist_override,t.raw_artist),COALESCE(t.album_override,t.raw_album),COALESCE(t.missing,1),t.favorite,t.duration,COALESCE(t.codec,'') FROM playlist_entries e LEFT JOIN tracks t ON t.id=e.track_id WHERE e.playlist_id=?1 AND {filter} AND (e.position,e.id)>(?3,?4) ORDER BY e.position,e.id LIMIT ?5"
+            "SELECT e.position,e.id,e.track_id,COALESCE(t.title_override,t.raw_title),COALESCE(t.artist_override,t.raw_artist),COALESCE(t.album_override,t.raw_album),COALESCE(t.missing,1),t.favorite,t.duration,COALESCE(t.codec,''),COALESCE(t.path,''),COALESCE(t.channels,0),COALESCE(t.sample_rate,0),t.bits_per_sample,t.bitrate_bps,COALESCE(t.bitrate_exact,0),t.cue_number FROM playlist_entries e LEFT JOIN tracks t ON t.id=e.track_id WHERE e.playlist_id=?1 AND {filter} AND (e.position,e.id)>(?3,?4) ORDER BY e.position,e.id LIMIT ?5"
         ))?;
         let mut db_rows = stmt.query(params![playlist_id, query, position, id, limit + 1])?;
         let mut rows = Vec::with_capacity(limit as usize);
@@ -256,6 +256,13 @@ impl Store {
                 album: row.get(5)?,
                 duration: row.get(8)?,
                 codec: row.get(9)?,
+                path: PathBuf::from(row.get::<_, String>(10)?),
+                channels: row.get::<_, i64>(11)? as u16,
+                sample_rate: row.get::<_, i64>(12)? as u32,
+                bits_per_sample: row.get(13)?,
+                bitrate_bps: row.get::<_, Option<i64>>(14)?.map(|value| value as u64),
+                bitrate_exact: row.get(15)?,
+                cue_number: row.get(16)?,
                 missing: row.get::<_, i64>(6)? != 0,
                 favorite: row.get(7)?,
             });
@@ -347,7 +354,7 @@ impl Store {
         } else {
             "AND e.position>=?3 ORDER BY e.position,e.id LIMIT ?4"
         };
-        let mut stmt = self.conn.prepare(&format!("SELECT e.id,e.track_id,COALESCE(t.title_override,t.raw_title),COALESCE(t.artist_override,t.raw_artist),COALESCE(t.album_override,t.raw_album),COALESCE(t.missing,1),t.favorite,e.position,t.duration,COALESCE(t.codec,'') FROM playlist_entries e LEFT JOIN tracks t ON t.id=e.track_id WHERE e.playlist_id=?1 AND {filter} {paging}"))?;
+        let mut stmt = self.conn.prepare(&format!("SELECT e.id,e.track_id,COALESCE(t.title_override,t.raw_title),COALESCE(t.artist_override,t.raw_artist),COALESCE(t.album_override,t.raw_album),COALESCE(t.missing,1),t.favorite,e.position,t.duration,COALESCE(t.codec,''),COALESCE(t.path,''),COALESCE(t.channels,0),COALESCE(t.sample_rate,0),t.bits_per_sample,t.bitrate_bps,COALESCE(t.bitrate_exact,0),t.cue_number FROM playlist_entries e LEFT JOIN tracks t ON t.id=e.track_id WHERE e.playlist_id=?1 AND {filter} {paging}"))?;
         let limit = limit.min(rivu_protocol::model::MAX_QUERY_ROWS) as i64;
         let offset = offset.min(i64::MAX as usize) as i64;
         let mut rows = stmt
@@ -362,6 +369,13 @@ impl Store {
                     album: r.get(4)?,
                     duration: r.get(8)?,
                     codec: r.get(9)?,
+                    path: PathBuf::from(r.get::<_, String>(10)?),
+                    channels: r.get::<_, i64>(11)? as u16,
+                    sample_rate: r.get::<_, i64>(12)? as u32,
+                    bits_per_sample: r.get(13)?,
+                    bitrate_bps: r.get::<_, Option<i64>>(14)?.map(|value| value as u64),
+                    bitrate_exact: r.get(15)?,
+                    cue_number: r.get(16)?,
                     missing: r.get::<_, i64>(5)? != 0,
                     favorite: r.get(6)?,
                 })

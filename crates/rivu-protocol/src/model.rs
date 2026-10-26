@@ -93,6 +93,10 @@ pub struct LibraryRow {
     pub album: String,
     pub duration: Option<f64>,
     pub codec: String,
+    pub channels: u16,
+    pub sample_rate: u32,
+    pub bits_per_sample: Option<u32>,
+    pub cue_number: Option<u32>,
     pub bitrate_bps: Option<u64>,
     pub bitrate_exact: bool,
     pub favorite: bool,
@@ -165,6 +169,7 @@ pub struct PlaylistSummary {
 pub struct PlaylistEntryRow {
     pub id: i64,
     pub track_id: i64,
+    pub path: PathBuf,
     /// Original occurrence position, never a filtered row index.
     pub position: usize,
     /// Zero-based index among the current query's matches.
@@ -174,6 +179,12 @@ pub struct PlaylistEntryRow {
     pub album: String,
     pub duration: Option<f64>,
     pub codec: String,
+    pub channels: u16,
+    pub sample_rate: u32,
+    pub bits_per_sample: Option<u32>,
+    pub bitrate_bps: Option<u64>,
+    pub bitrate_exact: bool,
+    pub cue_number: Option<u32>,
     pub favorite: bool,
     pub missing: bool,
 }

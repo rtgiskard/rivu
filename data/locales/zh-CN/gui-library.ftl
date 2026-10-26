@@ -244,6 +244,10 @@ gl-artist = 艺人
 
 gl-album = 专辑
 
+gl-artist-missing = 艺人信息缺失
+
+gl-album-missing = 专辑信息缺失
+
 gl-recent-tracks = 最近播放
 
 gl-untitled = 无标题

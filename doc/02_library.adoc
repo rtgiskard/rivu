@@ -245,6 +245,24 @@ Tracks outside configured folders are located in Other. A track no longer in the
 library is reported rather than substituted with a different row. Location queries run in the
 background; changed tracks, views, roots, or library revisions discard stale results.
 
+== Track information
+
+Playlist, Queue, and album track rows show the title above the artist and album,
+with duration aligned at the right. Album track rows omit the repeated album name.
+Missing artists and albums use compact person and disc symbols; hover a symbol
+for its meaning. Unknown duration is `-`, not a zero-length recording.
+A missing or whitespace-only title falls back to the source filename without its
+extension; untitled CUE entries also include their track number.
+
+Hover the text to see the full title and cached audio specifications: codec,
+sample rate, source bit depth, channels, and bitrate. Unknown specifications are
+omitted, estimated bitrate uses `≈`, and lossy decoding does not invent source
+bit depth. Library tree hover instead puts title, artist, and album on the first
+line, then duration and specifications on the second. Directory hover shows its
+complete path. Hover formatting uses already loaded page data, without opening
+the media or submitting another metadata query.
+
+
 == Albums
 
 Add the dockable `Albums` panel to browse a continuously scrolling cover grid.
@@ -265,8 +283,9 @@ track individually; a single click does not start playback. Track rows also
 offer individual playback and queue actions. Album actions include tracks beyond
 the currently loaded rows.
 
-Missing artists are shown as `-` in album cards and album track rows. Album query
-results preserve a missing artist as an empty value rather than a display label.
+Missing artists are shown as `-` in album cards and as the shared person symbol
+in album track rows. Album query results preserve a missing artist as an empty
+value rather than a display label.
 
 Right-click an album card for actions on the complete album, including adding it
 to a playlist and setting or clearing favorites. Drag a card to Queue or a named

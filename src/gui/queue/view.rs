@@ -3,9 +3,8 @@ use crate::gui::{
     DragDestination,
     components::{
         search::set_search_counts,
-        track::{favorite_button, track_list_row},
+        track::{TrackText, favorite_button, track_list_row},
     },
-    format_time,
     library::{LibraryDrag, LibraryNode},
     list_interaction::{ContentDrag, ContentMenuRequest, TrackSource},
     playlists::PlaylistDrag,
@@ -364,7 +363,6 @@ impl Queue {
                                 let position = entry.position;
                                 let can_move_down = position + 1 < this.state.queue.total;
                                 let revision = this.state.queue.revision;
-                                let (title, detail) = this.panel_track_text(&entry.track);
                                 let playing = this.state.queue.current_id == Some(id);
                                 let drag_owner = cx.entity().downgrade();
                                 let drag_i18n = std::sync::Arc::clone(&this.context.i18n);
@@ -377,13 +375,16 @@ impl Queue {
                                 track_list_row(
                                     theme,
                                     ("queue-entry", id),
-                                    ("queue-entry-text", id),
-                                    (title, detail),
+                                    TrackText::from(&entry.track),
                                     position,
                                     playing,
                                     this.model.contains(&id),
+                                    &this.context.i18n,
                                 )
                                 .h(rivu_ui::list_row_height(window, cx))
+                                .when(entry.track.missing, |row| {
+                                    row.child(caption(theme, this.tr("gl-missing")))
+                                })
                                 .when(this.queue_locate_emphasized(id), |row| {
                                     row.border_1()
                                         .border_color(rgb(theme.accent))
@@ -861,29 +862,6 @@ impl Queue {
                 destination,
             ));
         }
-    }
-
-    pub(super) fn panel_track_text(
-        &self,
-        track: &rivu_protocol::model::LibraryRow,
-    ) -> (String, String) {
-        let detail = format!(
-            "{}{}{} · {}{}",
-            track.artist,
-            if track.artist.is_empty() || track.album.is_empty() {
-                ""
-            } else {
-                " / "
-            },
-            track.album,
-            format_time(track.duration.unwrap_or(0.)),
-            if track.missing {
-                self.context.i18n.text("gl-file-missing-suffix")
-            } else {
-                ""
-            }
-        );
-        (track.title.clone(), detail)
     }
 
     pub(super) fn paged_loading_row(

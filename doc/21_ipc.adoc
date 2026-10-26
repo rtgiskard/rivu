@@ -148,7 +148,7 @@ The frame header is six bytes. `body_length` excludes the four-byte length field
 and includes the version, message type, and serialized body.
 
 Bodies use Postcard serialization without COBS framing. The current protocol
-version is `7`; clients and servers must use matching wire schemas. The four-byte
+version is `8`; clients and servers must use matching wire schemas. The four-byte
 frame length remains little-endian; body integers follow Postcard's encoding.
 Restart clients and hosts together after upgrading: incompatible versions are
 rejected before decoding the body. There is no compatibility alias or schema
@@ -285,6 +285,12 @@ stable binary contract. Collection lengths and optional fields are encoded in
 the message body.
 Library information-column selection is encoded in WireConfig as five booleans
 in Artist, Album, Duration, Codec, and Bitrate order; all false means no columns.
+
+Library, Queue, album-member, and playlist-entry rows carry source paths, CUE
+track numbers, and cached audio specifications, including bitrate certainty.
+These fields let frontends format complete hover information without a separate
+track lookup. Display revisions cover changes to these facts as well as labels;
+metadata updates invalidate affected Queue and album-member projections.
 
 The codec and positional payload schema are not negotiated. Changes require
 coordinated client and server updates, preserving configuration semantics such

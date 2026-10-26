@@ -98,8 +98,8 @@ pub(super) fn track_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
     })
 }
 
-pub(super) const LIBRARY_ROW_COLUMNS: &str = "id,COALESCE(title_override,raw_title),COALESCE(artist_override,raw_artist),COALESCE(album_override,raw_album),duration,favorite,missing,play_count,codec,bitrate_bps,bitrate_exact,path";
-pub(super) const LIBRARY_ROW_COLUMNS_QUALIFIED: &str = "t.id,COALESCE(t.title_override,t.raw_title),COALESCE(t.artist_override,t.raw_artist),COALESCE(t.album_override,t.raw_album),t.duration,t.favorite,t.missing,t.play_count,t.codec,t.bitrate_bps,t.bitrate_exact,t.path";
+pub(super) const LIBRARY_ROW_COLUMNS: &str = "id,COALESCE(title_override,raw_title),COALESCE(artist_override,raw_artist),COALESCE(album_override,raw_album),duration,favorite,missing,play_count,codec,bitrate_bps,bitrate_exact,path,channels,sample_rate,bits_per_sample,cue_number";
+pub(super) const LIBRARY_ROW_COLUMNS_QUALIFIED: &str = "t.id,COALESCE(t.title_override,t.raw_title),COALESCE(t.artist_override,t.raw_artist),COALESCE(t.album_override,t.raw_album),t.duration,t.favorite,t.missing,t.play_count,t.codec,t.bitrate_bps,t.bitrate_exact,t.path,t.channels,t.sample_rate,t.bits_per_sample,t.cue_number";
 
 pub(super) fn library_row_at(
     row: &rusqlite::Row<'_>,
@@ -120,6 +120,10 @@ pub(super) fn library_row_at(
             .get::<_, Option<i64>>(offset + 9)?
             .map(|value| value as u64),
         bitrate_exact: row.get(offset + 10)?,
+        channels: row.get::<_, i64>(offset + 12)? as u16,
+        sample_rate: row.get::<_, i64>(offset + 13)? as u32,
+        bits_per_sample: row.get(offset + 14)?,
+        cue_number: row.get(offset + 15)?,
     })
 }
 

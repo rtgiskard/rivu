@@ -2953,59 +2953,34 @@ fn invalid_cue_database_range_leaves_entire_scan_unchanged() {
     assert!(!tracks[0].missing);
 }
 #[test]
-fn library_audio_metadata_survives_all_display_projections() {
-    use rivu_protocol::model::{DirectoryRow, LibrarySort};
+fn audio_spec_rescans_refresh_queued_projection_without_changing_occurrences() {
     let store = Store::open(Path::new(":memory:")).unwrap();
-    let mut known = rec("/music/known.flac", "known", "Known", 123.5);
-    known.media.codec = "flac".into();
-    known.media.bitrate_bps = Some(921_600);
-    known.media.artist = "Artist".into();
-    known.media.album = "Album".into();
-    let mut unknown = rec("/music/unknown.opus", "unknown", "Unknown", 1.0);
-    unknown.media.codec = "opus".into();
-    unknown.media.duration = None;
-    store.apply_scan(&scan(vec![known, unknown])).unwrap();
-    let library = store
-        .library_view_page(None, None, None, LibrarySort::Id, 0, 10)
-        .unwrap();
-    assert_eq!(library.total, 2);
-    let known = &library.rows[0];
-    assert_eq!(known.codec, "flac");
-    assert_eq!(known.bitrate_bps, Some(921_600));
-    assert_eq!(known.duration, Some(123.5));
-    assert_eq!((&*known.artist, &*known.album), ("Artist", "Album"));
-    let unknown = &library.rows[1];
-    assert_eq!(unknown.codec, "opus");
-    assert_eq!(unknown.bitrate_bps, None);
-    assert_eq!(unknown.duration, None);
-    store.increment_play_count(unknown.id).unwrap();
-    let ranking = store
-        .library_view_page(None, None, None, LibrarySort::MostPlayed, 0, 10)
-        .unwrap();
-    assert_eq!(ranking.rows[0].id, unknown.id);
-    assert_eq!(ranking.rows[0].codec, unknown.codec);
-    assert_eq!(ranking.rows[0].bitrate_bps, None);
-    assert_eq!(ranking.rows[1], *known);
-    let directory = store
-        .directory_page(Path::new("/music"), None, None, None, 0, 10)
-        .unwrap();
-    assert_eq!(directory.rows[0], DirectoryRow::Track(known.clone()));
-    assert_eq!(
-        directory.rows[1],
-        DirectoryRow::Track(ranking.rows[0].clone())
-    );
-    let ids = [known.id, unknown.id];
-    store.enqueue_tracks(&ids).unwrap();
-    assert_eq!(
-        store
-            .queue_page(None, 0, 2)
-            .unwrap()
-            .rows
-            .into_iter()
-            .map(|row| row.track)
-            .collect::<Vec<_>>(),
-        [known.clone(), ranking.rows[0].clone()]
-    );
+    let mut record = rec("/music/specs.flac", "specs", "Specs", 90.0);
+    store.apply_scan(&scan(vec![record.clone()])).unwrap();
+    let id = all_tracks(&store)[0].id;
+    store.enqueue_tracks(&[id, id]).unwrap();
+    let before = store.queue_page(None, 0, 2).unwrap();
+    for field in 0..3 {
+        match field {
+            0 => record.media.channels = 6,
+            1 => record.media.sample_rate = 96_000,
+            _ => record.media.bits_per_sample = Some(24),
+        }
+        let impacts = store.apply_scan(&scan(vec![record.clone()])).unwrap();
+        assert!(impacts.library && impacts.queue);
+        assert!(!impacts.structure);
+        let after = store.queue_page(None, 0, 2).unwrap();
+        for (old, new) in before.rows.iter().zip(&after.rows) {
+            assert_eq!(
+                (old.id, old.track_id, old.position),
+                (new.id, new.track_id, new.position)
+            );
+            assert_eq!(new.track.channels, record.media.channels);
+            assert_eq!(new.track.sample_rate, record.media.sample_rate);
+            assert_eq!(new.track.bits_per_sample, record.media.bits_per_sample);
+        }
+        assert!(!store.apply_scan(&scan(vec![record.clone()])).unwrap().queue);
+    }
 }
 
 #[test]
@@ -3019,6 +2994,11 @@ fn playlist_pages_and_batches_preserve_effective_audio_metadata() {
     let mut tail = segment("/music/a.cue", 2, 3750, None);
     tail.media.duration = Some(130.0);
     tail.media.codec = "pcm".into();
+    tail.media.channels = 6;
+    tail.media.sample_rate = 96_000;
+    tail.media.bits_per_sample = Some(24);
+    tail.media.bitrate_bps = Some(13_824_000);
+    tail.media.bitrate_exact = true;
     let mut unknown = rec("/music/unknown.opus", "unknown", "Unknown", 1.0);
     unknown.media.duration = None;
     unknown.media.codec = "opus".into();
@@ -3070,6 +3050,17 @@ fn playlist_pages_and_batches_preserve_effective_audio_metadata() {
             assert_eq!((row.duration, row.codec.as_str()), expected[position]);
             assert_eq!(row.favorite, position == 2);
             assert_eq!(row.missing, position == 2);
+            let source = tracks
+                .iter()
+                .find(|track| track.id == row.track_id)
+                .unwrap();
+            assert_eq!(row.path, source.path);
+            assert_eq!(row.channels, source.channels);
+            assert_eq!(row.sample_rate, source.sample_rate);
+            assert_eq!(row.bits_per_sample, source.bits_per_sample);
+            assert_eq!(row.bitrate_bps, source.bitrate_bps);
+            assert_eq!(row.bitrate_exact, source.bitrate_exact);
+            assert_eq!(row.cue_number, source.cue.as_ref().map(|cue| cue.number));
             let batch = store
                 .playlist_entry_batch(playlist, query, after, 1, QueryStamp::default())
                 .unwrap();

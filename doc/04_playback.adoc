@@ -79,6 +79,9 @@ clearing the queue does not reuse occurrence IDs. Later scans do not automatical
 append newly discovered tracks. Removing library tracks removes their queue and
 playlist references in the same database transaction.
 
+Desktop Queue rows use the shared
+link:02_library.adoc#_track_information[track information and hover rules].
+
 Use `rivu queue list` to find occurrence IDs for `queue play`, `queue remove`,
 and `queue move`. Move positions start at zero. `queue add TRACK_ID...` appends
 occurrences; `queue clear` empties the queue and stops playback. `queue list --json`

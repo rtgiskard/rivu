@@ -244,6 +244,10 @@ gl-artist = Artist
 
 gl-album = Album
 
+gl-artist-missing = Artist unavailable
+
+gl-album-missing = Album unavailable
+
 gl-recent-tracks = Recent tracks
 
 gl-untitled = Untitled
