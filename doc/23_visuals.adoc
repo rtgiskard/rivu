@@ -534,7 +534,10 @@ displayed source frames rather than slowing the source timeline. Cursor catch-up
 is bounded by frame count even after a long delay; all-zero-delay sources advance
 one frame per redraw. Each element retains its own cursor over shared decoded data.
 Pausing or static mode stops rotation, but a visible animated source can continue.
-Hiding, window deactivation, or reduced motion cancels pending animation work.
+Hiding or reduced motion cancels pending animation work. Focus loss alone does
+not stop rotation; the artwork FPS cap and native frame delivery still limit it.
+Animated source images retain GPUI's focus-based playback policy; source animation
+alone does not keep the artwork owner ticking while the window is inactive.
 Resuming rotation does not replay suspended time. Still Mode affects only audio
 visualizations, not artwork. Styles introduce neither per-frame CPU geometry
 rotation nor a new application cache system.

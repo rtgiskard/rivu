@@ -1490,10 +1490,27 @@ mod tests {
         draw(window);
         assert_eq!(
             window.update(|window, cx| window.simulate_next_frame(cx)),
-            0
+            1
+        );
+        draw(window);
+        sync(
+            AlbumArtworkMode::Static,
+            PlaybackStatus::Paused,
+            0,
+            true,
+            &mut window.cx,
+        );
+        draw(window);
+        window.update(|window, cx| window.simulate_next_frame(cx));
+        draw(window);
+        assert_eq!(
+            window.update(|window, cx| window.simulate_next_frame(cx)),
+            0,
+            "source animation alone stays suspended while unfocused",
         );
         window.update(|window, _| window.activate_window());
         window.run_until_parked();
+        draw(window);
         assert_eq!(
             window.update(|window, cx| window.simulate_next_frame(cx)),
             1
@@ -1516,10 +1533,7 @@ mod tests {
             false,
             &mut window.cx,
         );
-        assert_eq!(
-            window.update(|window, cx| window.simulate_next_frame(cx)),
-            1
-        );
+        window.update(|window, cx| window.simulate_next_frame(cx));
         assert_eq!(
             window.update(|window, cx| window.simulate_next_frame(cx)),
             0

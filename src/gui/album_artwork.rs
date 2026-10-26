@@ -439,7 +439,7 @@ impl AlbumArtwork {
                     cx.notify();
                 }));
         }
-        if !self.running(cx) || !window.is_window_active() || cx.reduce_motion() {
+        if !self.running(window, cx) || cx.reduce_motion() {
             if self.frame_pending || self.frame_timer.is_some() {
                 self.cancel_frame();
             }
@@ -475,7 +475,7 @@ impl AlbumArtwork {
                 if generation != this.frame_generation {
                     return;
                 }
-                if !this.running(cx) || !window.is_window_active() || cx.reduce_motion() {
+                if !this.running(window, cx) || cx.reduce_motion() {
                     this.cancel_frame();
                     for instance in this.instances.values_mut() {
                         instance.rotation.last_tick = None;
@@ -509,13 +509,13 @@ impl AlbumArtwork {
         }
     }
 
-    fn running(&self, cx: &App) -> bool {
+    fn running(&self, window: &Window, cx: &App) -> bool {
         self.visible
             && (self
                 .instances
                 .values()
                 .any(|instance| instance.rotation.running)
-                || self.view.is_animated(cx))
+                || (window.is_window_active() && self.view.is_animated(cx)))
     }
 }
 
