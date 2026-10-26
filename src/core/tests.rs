@@ -185,7 +185,7 @@ fn recording_audio(core: &mut Core) -> Receiver<AudioCommand> {
                         listened_seconds: *listened_seconds,
                     };
                 }
-                AudioCommand::Seek(position) => final_snapshot.position_seconds = *position,
+                AudioCommand::Seek { seconds, .. } => final_snapshot.position_seconds = *seconds,
                 _ => {}
             }
             match command {

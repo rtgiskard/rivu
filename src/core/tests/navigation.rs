@@ -169,6 +169,148 @@ fn seek_uses_explicit_cue_end_not_estimated_whole_track_duration() {
 }
 
 #[test]
+fn invalid_seek_ack_preserves_paused_playback_and_valid_seek_stays_paused() {
+    let (_directory, mut core) = navigation_fixture(PlaybackStatus::Paused);
+    core.state.playback.position = 0.25;
+    let revision = core.state.playback.seek_revision;
+    let commands = recording_audio(&mut core);
+    let (handle, control, worker, _) = navigation_runtime(core);
+    for seconds in [f64::NAN, f64::INFINITY, -1.0, 1e300, i64::MAX as f64] {
+        let ack = futures::executor::block_on(handle.request_ack(Command::Seek { seconds }));
+        assert!(!ack.is_success());
+        let snapshot = handle.mpris_snapshot();
+        assert_eq!(snapshot.playback.status, PlaybackStatus::Paused);
+        assert_eq!(snapshot.playback.position, 0.25);
+        assert_eq!(snapshot.playback.seek_revision, revision);
+        assert!(commands.try_recv().is_err());
+    }
+    let ack = futures::executor::block_on(handle.request_ack(Command::Seek { seconds: 0.5 }));
+    assert!(ack.is_success());
+    let snapshot = handle.mpris_snapshot();
+    assert_eq!(snapshot.playback.status, PlaybackStatus::Paused);
+    assert_eq!(snapshot.playback.position, 0.5);
+    assert_eq!(snapshot.playback.seek_revision, revision.wrapping_add(1));
+    assert!(matches!(
+        commands.recv_timeout(Duration::from_secs(2)).unwrap(),
+        AudioCommand::Seek { seconds: 0.5, revision: actual } if actual == revision.wrapping_add(1)
+    ));
+    assert!(commands.try_recv().is_err());
+    control.request_shutdown().unwrap();
+    worker.join().unwrap();
+}
+
+#[test]
+fn backend_seek_rejection_restores_paused_position_without_stopping() {
+    for opened in [false, true] {
+        let (_directory, mut core) = navigation_fixture(PlaybackStatus::Paused);
+        let commands = recording_audio(&mut core);
+        if opened {
+            started(&mut core, Some(20.0)).unwrap();
+        }
+        core.state.playback.position = 0.25;
+        core.command(Command::Seek { seconds: 1e16 }).unwrap();
+        let revision = core.state.playback.seek_revision;
+        assert!(matches!(
+            commands.recv_timeout(Duration::from_secs(2)).unwrap(),
+            AudioCommand::Seek { seconds: 1e16, revision: actual } if actual == revision
+        ));
+        assert_eq!(core.state.playback.position, 1e16);
+        core.audio_event(AudioEvent::SeekRejected {
+            revision,
+            snapshot: audio::AudioSnapshot {
+                generation: core.generation,
+                position_seconds: 0.25,
+                listened_seconds: 0.0,
+            },
+            message: "Target exceeds the opened backend timebase".into(),
+        })
+        .unwrap();
+        assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
+        assert_eq!(core.state.playback.position, 0.25);
+        assert_eq!(core.state.playback.seek_revision, revision.wrapping_add(1));
+        assert_eq!(
+            core.state.system.last_error.as_deref(),
+            Some("Target exceeds the opened backend timebase")
+        );
+        assert!(core.playback.is_some());
+        assert!(
+            commands.try_recv().is_err(),
+            "rejection must not stop output"
+        );
+    }
+}
+
+#[test]
+fn old_seek_rejections_cannot_roll_back_newer_seek_or_generation() {
+    let (_directory, mut core) = navigation_fixture(PlaybackStatus::Paused);
+    let commands = recording_audio(&mut core);
+    core.command(Command::Seek { seconds: 1e16 }).unwrap();
+    let rejected_revision = core.state.playback.seek_revision;
+    core.command(Command::Seek { seconds: 0.5 }).unwrap();
+    let current_revision = core.state.playback.seek_revision;
+    for (generation, revision) in [
+        (core.generation, rejected_revision),
+        (core.generation.wrapping_sub(1), current_revision),
+    ] {
+        core.audio_event(AudioEvent::SeekRejected {
+            revision,
+            snapshot: audio::AudioSnapshot {
+                generation,
+                position_seconds: 0.25,
+                listened_seconds: 9.0,
+            },
+            message: "Obsolete rejection must not be published".into(),
+        })
+        .unwrap();
+        assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
+        assert_eq!(core.state.playback.position, 0.5);
+        assert_eq!(core.state.playback.seek_revision, current_revision);
+        assert!(core.state.system.last_error.is_none());
+        assert_eq!(core.playback.as_ref().unwrap().heard, 0.0);
+    }
+    assert!(matches!(
+        commands.recv_timeout(Duration::from_secs(2)).unwrap(),
+        AudioCommand::Seek { revision, .. } if revision == rejected_revision
+    ));
+    assert!(matches!(
+        commands.recv_timeout(Duration::from_secs(2)).unwrap(),
+        AudioCommand::Seek { seconds: 0.5, revision } if revision == current_revision
+    ));
+    core.command(Command::Seek { seconds: 1e16 }).unwrap();
+    let newest_revision = core.state.playback.seek_revision;
+    assert!(matches!(
+        commands.recv_timeout(Duration::from_secs(2)).unwrap(),
+        AudioCommand::Seek { revision, .. } if revision == newest_revision
+    ));
+    for (revision, position_seconds, message) in [
+        (newest_revision, 0.5, "Current backend rejection"),
+        (rejected_revision, 0.25, "Obsolete backend rejection"),
+    ] {
+        core.audio_event(AudioEvent::SeekRejected {
+            revision,
+            snapshot: audio::AudioSnapshot {
+                generation: core.generation,
+                position_seconds,
+                listened_seconds: 0.0,
+            },
+            message: message.into(),
+        })
+        .unwrap();
+        assert_eq!(core.state.playback.position, 0.5);
+        assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
+        assert_eq!(
+            core.state.playback.seek_revision,
+            newest_revision.wrapping_add(1)
+        );
+        assert_eq!(
+            core.state.system.last_error.as_deref(),
+            Some("Current backend rejection")
+        );
+    }
+    assert!(commands.try_recv().is_err());
+}
+
+#[test]
 fn queued_pause_is_authoritative_for_navigation_not_the_callers_snapshot() {
     let (_directory, mut core) = navigation_fixture(PlaybackStatus::Playing);
     let expected = core.queue_ids[2];
@@ -232,7 +374,7 @@ fn previous_resets_position_without_loading_or_changing_status() {
         );
         assert!(matches!(
             commands.recv_timeout(Duration::from_secs(2)).unwrap(),
-            AudioCommand::Seek(0.0)
+            AudioCommand::Seek { seconds: 0.0, .. }
         ));
         assert!(commands.try_recv().is_err());
         control.request_shutdown().unwrap();

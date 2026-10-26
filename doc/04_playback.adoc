@@ -56,11 +56,22 @@ synthesize silence absent from the source.
 Ordinary audio plays to actual decoder EOF; an estimated metadata duration is
 not a playback cutoff. An explicit CUE subtrack end remains a hard playback bound.
 
-Seek targets must be finite and non-negative. Ordinary file seeks are not clamped
-by estimated metadata duration; completion requires actual decoder EOF. Only an
-explicit CUE end bounds the seek target. Seeking while paused keeps playback
-paused. If Pause is accepted before a queued notification of actual EOF, Rivu
-still settles that EOF and selects the next occurrence, but keeps it paused;
+Seek targets must be finite, non-negative and representable on the source's
+timeline. Invalid or unrepresentable targets are rejected before changing the
+decoder, queued audio or analysis epoch; opening or existing playback, including
+its paused state, is retained. A real decoder seek or output restart failure
+still stops playback and reports the error: the decoder may already have moved.
+Targets that fail the shared time-representation check fail the command
+acknowledgement immediately. A check requiring the opened decoder's timebase can
+reject an already acknowledged, queued seek. That nonfatal rejection reports an
+error and restores the confirmed position, even while paused. The correction is
+applied only if both playback generation and seek revision still match, so a late
+rejection cannot undo a newer seek or replace the error for a different source.
+Ordinary file seeks are not clamped by estimated metadata duration; completion
+requires actual decoder EOF. Only an explicit CUE end bounds the seek target.
+Seeking while paused keeps playback paused. If Pause is accepted before a queued
+notification of actual EOF, Rivu still settles that EOF and selects the next
+occurrence, but keeps it paused;
 Repeat One instead reloads the current occurrence from its start, also paused.
 At the queue end with Repeat Off, playback stops. An EOF from an older playback
 generation cannot advance the queue again. Pause also pauses live analysis.

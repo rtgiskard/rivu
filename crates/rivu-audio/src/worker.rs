@@ -46,14 +46,22 @@ impl CommandInbox {
             self.receiver.try_recv()?
         };
         *remaining -= 1;
-        let AudioCommand::Seek(mut seconds) = command else {
+        let AudioCommand::Seek {
+            mut seconds,
+            mut revision,
+        } = command
+        else {
             return Ok(command);
         };
         while *remaining > 0 {
             match self.receiver.try_recv() {
-                Ok(AudioCommand::Seek(target)) => {
+                Ok(AudioCommand::Seek {
+                    seconds: target,
+                    revision: target_revision,
+                }) => {
                     *remaining -= 1;
                     seconds = target;
+                    revision = target_revision;
                 }
                 Ok(barrier) => {
                     *remaining -= 1;
@@ -63,7 +71,7 @@ impl CommandInbox {
                 Err(_) => break,
             }
         }
-        Ok(AudioCommand::Seek(seconds))
+        Ok(AudioCommand::Seek { seconds, revision })
     }
 }
 
@@ -76,6 +84,8 @@ struct Opening {
     generation: u64,
     metadata: Arc<PlaybackMetadata>,
     start: f64,
+    // Defer source-specific validation until its actual backend/timebase is known.
+    pending_seek: Option<(f64, u64)>,
     paused: bool,
     source: Option<Source>,
     source_info: Option<super::MediaInfo>,
@@ -102,6 +112,11 @@ impl Opening {
             {
                 anyhow::bail!("Opened source differs from the source admitted for graph audition");
             }
+        }
+        if let Some((seconds, _)) = self.pending_seek {
+            self.source.as_mut().unwrap().seek(seconds)?;
+            self.start = seconds;
+            self.pending_seek = None;
         }
         self.source.as_mut().unwrap().poll_open()
     }
@@ -323,6 +338,7 @@ impl Worker {
                     generation,
                     metadata,
                     start: start_seconds,
+                    pending_seek: None,
                     paused,
                     source: None,
                     source_info,
@@ -352,6 +368,7 @@ impl Worker {
                     generation,
                     metadata,
                     start: start_seconds,
+                    pending_seek: None,
                     paused,
                     source: None,
                     source_info,
@@ -377,6 +394,7 @@ impl Worker {
                     generation,
                     metadata,
                     start: start_seconds,
+                    pending_seek: None,
                     paused,
                     source: None,
                     source_info: None,
@@ -409,18 +427,33 @@ impl Worker {
                 }
                 self.refresh_analysis();
             }
-            AudioCommand::Seek(seconds) => {
+            AudioCommand::Seek { seconds, revision } => {
                 let result = if let Some(opening) = self.opening.as_mut() {
-                    opening.start = seconds.max(0.0);
-                    opening
-                        .source
-                        .as_mut()
-                        .map_or(Ok(()), |source| source.seek(opening.start))
+                    super::validate_seek_position(seconds)
+                        .and_then(|()| {
+                            super::validate_seek_position(
+                                opening.range.map_or(0.0, |range| range.start_seconds) + seconds,
+                            )
+                        })
+                        .map_err(anyhow::Error::from)
+                        .and_then(|()| {
+                            if let Some(source) = opening.source.as_mut() {
+                                source.seek(seconds)?;
+                                opening.start = seconds;
+                            } else {
+                                opening.pending_seek = Some((seconds, revision));
+                            }
+                            Ok(())
+                        })
                 } else {
                     self.reopen(Some(seconds))
                 };
                 if let Err(error) = result {
-                    self.fail(error);
+                    if error.is::<super::SeekRejected>() {
+                        self.reject_seek(revision, error);
+                    } else {
+                        self.fail(error);
+                    }
                 }
             }
             AudioCommand::OutputSettings {
@@ -475,6 +508,29 @@ impl Worker {
         }
         Ok(())
     }
+    fn reject_seek(&self, revision: u64, error: anyhow::Error) {
+        let snapshot = if let Some(opening) = &self.opening {
+            AudioSnapshot {
+                generation: opening.generation,
+                position_seconds: opening.start,
+                listened_seconds: opening.listened_seconds,
+            }
+        } else if let Some(playback) = &self.playback {
+            AudioSnapshot {
+                generation: playback.generation(),
+                position_seconds: playback.position(),
+                listened_seconds: playback.heard(),
+            }
+        } else {
+            return;
+        };
+        self.event(AudioEvent::SeekRejected {
+            revision,
+            snapshot,
+            message: format!("{error:#}"),
+        });
+    }
+
     fn fail(&mut self, error: anyhow::Error) {
         let generation = self.stop().generation;
         self.event(AudioEvent::Failed {
@@ -546,6 +602,13 @@ impl Worker {
                         message: format!("{error:#}"),
                     }),
                 }
+            }
+            Err(error)
+                if error.is::<super::SeekRejected>()
+                    && self.opening.as_ref().unwrap().pending_seek.is_some() =>
+            {
+                let (_, revision) = self.opening.as_mut().unwrap().pending_seek.take().unwrap();
+                self.reject_seek(revision, error);
             }
             Err(error) => {
                 self.opening = None;
@@ -819,6 +882,183 @@ mod tests {
     }
 
     #[test]
+    fn rejected_seeks_preserve_opening_before_and_after_source_creation() {
+        for hint in opening_hints() {
+            let file = crate::source::opening_prefix_file(1024, true);
+            let (mut worker, _commands, events, _shutdown) = opening_worker();
+            load_prefix(&mut worker, file.path(), hint, 41);
+            worker.command(AudioCommand::Pause(true));
+            for create_source in [false, true] {
+                if create_source {
+                    worker.poll_opening();
+                }
+                for target in [f64::NAN, f64::INFINITY, -1.0, 1e300, i64::MAX as f64] {
+                    worker.command(AudioCommand::Seek {
+                        seconds: target,
+                        revision: 0,
+                    });
+                    let opening = worker
+                        .opening
+                        .as_ref()
+                        .expect("rejection must retain opening");
+                    assert_eq!(opening.start, 0.0);
+                    assert!(opening.paused);
+                    assert_eq!(opening.source.is_some(), create_source);
+                    assert!(matches!(
+                        events.try_recv(),
+                        Ok(AudioEvent::SeekRejected { revision: 0, snapshot, message })
+                            if snapshot.generation == 41
+                                && snapshot.position_seconds == 0.0
+                                && snapshot.listened_seconds == 0.0
+                                && !message.is_empty()
+                    ));
+                    assert!(events.is_empty());
+                }
+            }
+            let target = 1.0 / 8000.0;
+            worker.command(AudioCommand::Seek {
+                seconds: target,
+                revision: 0,
+            });
+            let opening = worker.opening.as_mut().unwrap();
+            assert_eq!(opening.start, target);
+            assert!(opening.paused);
+            let mut opened = false;
+            for _ in 0..64 {
+                if opening.poll(65_536, hint == DecoderHint::Ffmpeg).unwrap() {
+                    opened = true;
+                    break;
+                }
+            }
+            assert!(opened, "finite fixture must finish opening");
+            let mut budget = crate::source::DECODE_WORK_BUDGET;
+            let crate::source::DecodeStep::Frames(span) = opening
+                .source
+                .as_mut()
+                .unwrap()
+                .next_frames_with_budget(&mut budget)
+                .unwrap()
+            else {
+                panic!("opened source must retain its first selected span");
+            };
+            assert!((span.media_start - target).abs() < 1e-9);
+            assert_eq!(span.samples, [-0.5]);
+            assert!(events.is_empty());
+        }
+    }
+
+    #[test]
+    fn backend_seek_rejection_during_opening_reports_original_snapshot() {
+        for hint in opening_hints() {
+            for create_source in [false, true] {
+                let file = crate::source::opening_prefix_file(1024, true);
+                let (mut worker, _commands, events, _shutdown) = opening_worker();
+                load_prefix(&mut worker, file.path(), hint, 41);
+                worker.command(AudioCommand::Pause(true));
+                if create_source {
+                    worker.poll_opening();
+                }
+                worker.command(AudioCommand::Seek {
+                    seconds: 1e16,
+                    revision: 19,
+                });
+                if !create_source {
+                    assert!(events.is_empty());
+                    assert_eq!(worker.opening.as_ref().unwrap().start, 0.0);
+                    worker.poll_opening();
+                }
+                let opening = worker
+                    .opening
+                    .as_ref()
+                    .expect("backend rejection is nonfatal");
+                assert_eq!(opening.start, 0.0);
+                assert!(opening.paused);
+                assert!(opening.source.is_some());
+                assert!(opening.pending_seek.is_none());
+                assert!(matches!(
+                    events.try_recv(),
+                    Ok(AudioEvent::SeekRejected { revision: 19, snapshot, message })
+                        if snapshot.generation == 41
+                            && snapshot.position_seconds == 0.0
+                            && snapshot.listened_seconds == 0.0
+                            && !message.is_empty()
+                ));
+                assert!(events.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn rejected_seeks_preserve_paused_playback_and_queued_pcm() {
+        let file = crate::playback::tests::pcm();
+        let (mut playback, mut render) =
+            crate::playback::tests::test_playback_with_waveform(file.path(), None, Arc::default());
+        playback.fill().unwrap();
+        playback.pause(true);
+        let (mut worker, _commands, events, _shutdown) = opening_worker();
+        worker.playback = Some(playback);
+        let before = worker.playback.as_ref().unwrap().position();
+        for target in [f64::NAN, f64::INFINITY, -1.0, 1e300, i64::MAX as f64, 1e16] {
+            worker.command(AudioCommand::Seek {
+                seconds: target,
+                revision: 0,
+            });
+            let playback = worker
+                .playback
+                .as_ref()
+                .expect("rejection must retain playback");
+            assert!(playback.paused());
+            assert_eq!(playback.position(), before);
+            assert_eq!(playback.heard(), 0.0);
+            assert!(matches!(
+                events.try_recv(),
+                Ok(AudioEvent::SeekRejected { revision: 0, snapshot, message })
+                    if snapshot.generation == 1
+                        && snapshot.position_seconds == before
+                        && snapshot.listened_seconds == 0.0
+                        && !message.is_empty()
+            ));
+            assert!(events.is_empty());
+        }
+        worker.command(AudioCommand::Pause(false));
+        let mut samples = [0.0; 73];
+        render(&mut samples, 0);
+        for (index, actual) in samples.iter().enumerate() {
+            assert!((*actual - index as f32 / 32768.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn decoder_seek_execution_failure_stops_opening_and_playback() {
+        for during_opening in [true, false] {
+            // The advertised final sample is absent: this target is representable,
+            // but the real native FLAC demuxer cannot execute the seek.
+            let file = crate::source::tests::constant_flac_file(96_000, 11);
+            let (mut worker, _commands, events, _shutdown) = opening_worker();
+            if during_opening {
+                load_prefix(&mut worker, file.path(), DecoderHint::Native, 41);
+                worker.opening.as_mut().unwrap().source =
+                    Some(Source::open(file.path(), 65_536, DecoderHint::Native, false).unwrap());
+            } else {
+                let (playback, _render) = crate::playback::tests::test_playback_with_waveform(
+                    file.path(),
+                    None,
+                    Arc::default(),
+                );
+                worker.playback = Some(playback);
+            }
+            worker.command(AudioCommand::Seek {
+                seconds: 12.0,
+                revision: 0,
+            });
+            assert!(worker.opening.is_none());
+            assert!(worker.playback.is_none());
+            assert!(matches!(events.try_recv(), Ok(AudioEvent::Failed { .. })));
+            assert!(events.is_empty());
+        }
+    }
+
+    #[test]
     fn seeking_during_opening_changes_the_first_published_pcm() {
         for hint in opening_hints() {
             let file = crate::source::opening_prefix_file(1024, true);
@@ -827,7 +1067,10 @@ mod tests {
             worker.poll_opening();
             assert!(events.is_empty());
             let target = 1.0 / 8000.0;
-            worker.command(AudioCommand::Seek(target));
+            worker.command(AudioCommand::Seek {
+                seconds: target,
+                revision: 0,
+            });
             assert!(worker.opening.is_some(), "{:?}", events.try_recv());
             let opening = worker.opening.as_mut().unwrap();
             let mut opened = false;
@@ -876,7 +1119,10 @@ mod tests {
                 generation: 41,
                 metadata: Arc::clone(&edited),
             },
-            AudioCommand::Seek(target),
+            AudioCommand::Seek {
+                seconds: target,
+                revision: 0,
+            },
             AudioCommand::Metadata {
                 generation: 40,
                 metadata: Arc::default(),
@@ -1363,7 +1609,10 @@ mod tests {
         assert!(revision > completed.revision);
         for command in [
             AudioCommand::StillMode(true),
-            AudioCommand::Seek(0.5),
+            AudioCommand::Seek {
+                seconds: 0.5,
+                revision: 0,
+            },
             AudioCommand::Pause(true),
             AudioCommand::AnalysisSettings(crate::analysis::AnalysisSettings::from(
                 &rivu_format::config::Config::default(),
@@ -1421,10 +1670,19 @@ mod tests {
             let kind = std::mem::discriminant(&barrier);
             let (send, receiver) = async_channel::bounded(4);
             for command in [
-                AudioCommand::Seek(10.0),
-                AudioCommand::Seek(20.0),
+                AudioCommand::Seek {
+                    seconds: 10.0,
+                    revision: 1,
+                },
+                AudioCommand::Seek {
+                    seconds: 20.0,
+                    revision: 2,
+                },
                 barrier,
-                AudioCommand::Seek(30.0),
+                AudioCommand::Seek {
+                    seconds: 30.0,
+                    revision: 3,
+                },
             ] {
                 send.try_send(command).unwrap();
             }
@@ -1435,7 +1693,10 @@ mod tests {
             let mut remaining = MAX_COMMANDS_PER_ROUND;
             assert!(matches!(
                 inbox.try_recv_round(&mut remaining).unwrap(),
-                AudioCommand::Seek(20.0)
+                AudioCommand::Seek {
+                    seconds: 20.0,
+                    revision: 2
+                }
             ));
             assert_eq!(
                 std::mem::discriminant(&inbox.try_recv_round(&mut remaining).unwrap()),
@@ -1443,7 +1704,10 @@ mod tests {
             );
             assert!(matches!(
                 inbox.try_recv_round(&mut remaining).unwrap(),
-                AudioCommand::Seek(30.0)
+                AudioCommand::Seek {
+                    seconds: 30.0,
+                    revision: 3
+                }
             ));
             assert!(matches!(
                 inbox.try_recv_round(&mut remaining),
@@ -1456,7 +1720,11 @@ mod tests {
     fn seek_batches_are_bounded_and_keep_the_remaining_targets() {
         let (send, receiver) = async_channel::bounded(MAX_COMMANDS_PER_ROUND + 2);
         for target in 1..=MAX_COMMANDS_PER_ROUND + 2 {
-            send.try_send(AudioCommand::Seek(target as f64)).unwrap();
+            send.try_send(AudioCommand::Seek {
+                seconds: target as f64,
+                revision: target as u64,
+            })
+            .unwrap();
         }
         drop(send);
         let mut inbox = CommandInbox {
@@ -1466,7 +1734,9 @@ mod tests {
         let mut remaining = MAX_COMMANDS_PER_ROUND;
         assert!(matches!(
             inbox.try_recv_round(&mut remaining).unwrap(),
-            AudioCommand::Seek(target) if target == MAX_COMMANDS_PER_ROUND as f64
+            AudioCommand::Seek { seconds: target, revision }
+                if target == MAX_COMMANDS_PER_ROUND as f64
+                    && revision == MAX_COMMANDS_PER_ROUND as u64
         ));
         assert_eq!(remaining, 0);
         assert!(inbox.has_ready());
@@ -1477,7 +1747,9 @@ mod tests {
         remaining = MAX_COMMANDS_PER_ROUND;
         assert!(matches!(
             inbox.try_recv_round(&mut remaining).unwrap(),
-            AudioCommand::Seek(target) if target == (MAX_COMMANDS_PER_ROUND + 2) as f64
+            AudioCommand::Seek { seconds: target, revision }
+                if target == (MAX_COMMANDS_PER_ROUND + 2) as f64
+                    && revision == (MAX_COMMANDS_PER_ROUND + 2) as u64
         ));
         assert!(matches!(
             inbox.try_recv_round(&mut remaining),
@@ -1516,10 +1788,18 @@ mod tests {
     fn round_boundary_keeps_a_seek_read_ahead_barrier_before_later_seeks() {
         let (send, receiver) = async_channel::bounded(MAX_COMMANDS_PER_ROUND + 1);
         for target in 1..MAX_COMMANDS_PER_ROUND {
-            send.try_send(AudioCommand::Seek(target as f64)).unwrap();
+            send.try_send(AudioCommand::Seek {
+                seconds: target as f64,
+                revision: target as u64,
+            })
+            .unwrap();
         }
         send.try_send(AudioCommand::Pause(true)).unwrap();
-        send.try_send(AudioCommand::Seek(100.0)).unwrap();
+        send.try_send(AudioCommand::Seek {
+            seconds: 100.0,
+            revision: 100,
+        })
+        .unwrap();
         let mut inbox = CommandInbox {
             receiver,
             pending: None,
@@ -1527,7 +1807,7 @@ mod tests {
         let mut remaining = MAX_COMMANDS_PER_ROUND;
         assert!(matches!(
             inbox.try_recv_round(&mut remaining).unwrap(),
-            AudioCommand::Seek(value) if value == (MAX_COMMANDS_PER_ROUND - 1) as f64
+            AudioCommand::Seek { seconds: value, .. } if value == (MAX_COMMANDS_PER_ROUND - 1) as f64
         ));
         assert_eq!(remaining, 0);
         assert!(inbox.has_ready());
@@ -1540,7 +1820,7 @@ mod tests {
         remaining = MAX_COMMANDS_PER_ROUND;
         assert!(matches!(
             inbox.try_recv_round(&mut remaining).unwrap(),
-            AudioCommand::Seek(100.0)
+            AudioCommand::Seek { seconds: 100.0, .. }
         ));
         assert!(!inbox.has_ready());
     }
@@ -1548,7 +1828,11 @@ mod tests {
     #[test]
     fn single_seek_does_not_wait_for_more_input() {
         let (send, receiver) = async_channel::bounded(1);
-        send.try_send(AudioCommand::Seek(7.0)).unwrap();
+        send.try_send(AudioCommand::Seek {
+            seconds: 7.0,
+            revision: 7,
+        })
+        .unwrap();
         let (done, completed) = bounded(1);
         let worker = std::thread::spawn(move || {
             let mut inbox = CommandInbox {
@@ -1561,7 +1845,7 @@ mod tests {
         });
         assert!(matches!(
             completed.recv_timeout(Duration::from_secs(2)).unwrap(),
-            AudioCommand::Seek(7.0)
+            AudioCommand::Seek { seconds: 7.0, .. }
         ));
         drop(send);
         worker.join().unwrap();
@@ -1766,7 +2050,10 @@ mod tests {
         assert!(worker.opening.is_some(), "{:?}", events.try_recv());
         // Cancel an actual retained decoder after an in-range seek, before the
         // next opening poll can publish playback/output.
-        worker.command(AudioCommand::Seek(target));
+        worker.command(AudioCommand::Seek {
+            seconds: target,
+            revision: 0,
+        });
         assert!(worker.opening.is_some(), "{:?}", events.try_recv());
         let opening = worker.opening.as_ref().unwrap();
         assert_eq!(opening.start, target);

@@ -63,8 +63,14 @@ admitted sample counts; neither tap nor Before FIFO alignment compares media
 PTS to infer continuity. The source normalizes timestamp semantics and owns
 container-gap detection. Successful seek/source replacement, confirmed source
 gaps and dropped analysis samples start a new analysis segment; ordinary media
-clock corrections do not. A rejected source seek does not itself retire the
-current output or analysis epoch. Seek priming samples are discarded before the first new span.
+clock corrections do not. Invalid or unrepresentable seek targets are rejected
+before changing decoder state, queued output or the current analysis epoch,
+including while the source is opening. An asynchronous rejection corrects the
+matching transport intent's displayed position without resetting output or
+analysis; obsolete rejection events cannot roll back a newer seek or playback
+generation. Decoder seek execution failures remain fatal and stop playback;
+they do not resume a potentially changed decoder under the old epoch. Seek
+priming samples are discarded before the first new span.
 With a realtime graph, explicit boundaries map into latency-trimmed output
 frame coordinates, excluding source preguard; a boundary
 at or before the preguard end does not publish a gap. Output admission splits at

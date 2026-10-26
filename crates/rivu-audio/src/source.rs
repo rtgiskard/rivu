@@ -873,9 +873,7 @@ impl Source {
     }
     fn select(&mut self, selection: SourceSelection, cancelled: Option<&AtomicBool>) -> Result<()> {
         check_cancelled(cancelled)?;
-        if !selection.start.is_finite() {
-            bail!("Invalid seek position");
-        }
+        super::validate_seek_position(selection.start)?;
         if let Some(range) = selection.range {
             if !range.start_seconds.is_finite()
                 || range.start_seconds < 0.0
@@ -897,7 +895,8 @@ impl Source {
         if let Some((_, _, opening_selection)) = &mut self.opening_fallback {
             *opening_selection = selection;
         }
-        let target = self.range_start + selection.start.max(0.0);
+        let target = self.range_start + selection.start;
+        self.validate_seek(selection.start)?;
         if target > self.seek_preroll() {
             self.seek_with_cancel(selection.start, cancelled)?;
         } else if selection.range.is_some() || target > 0.0 {
@@ -924,18 +923,34 @@ impl Source {
         }
     }
 
+    fn validate_seek(&self, target: f64) -> Result<()> {
+        super::validate_seek_position(target)?;
+        let absolute = self.range_start + target;
+        super::validate_seek_position(absolute)?;
+        match &self.decode {
+            #[cfg(feature = "ffmpeg")]
+            Decode::Ffmpeg(decoder) => decoder.validate_seek(absolute)?,
+            #[cfg(not(feature = "ffmpeg"))]
+            Decode::Ffmpeg(_) => unreachable!("FFmpeg decoder is not compiled"),
+            _ => {
+                let time = Time::try_from_secs_f64(absolute).ok_or(super::SeekRejected)?;
+                self.time_base
+                    .calc_timestamp(time)
+                    .ok_or(super::SeekRejected)?;
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn seek(&mut self, target: f64) -> Result<()> {
         self.seek_with_cancel(target, None)
     }
 
     fn seek_with_cancel(&mut self, target: f64, cancelled: Option<&AtomicBool>) -> Result<()> {
         check_cancelled(cancelled)?;
-        if !target.is_finite() {
-            bail!("Invalid seek position");
-        }
+        self.validate_seek(target)?;
         self.complete_stream = false;
         self.packet_stats.invalidate();
-        let target = target.max(0.0);
         if let Some((_, _, selection)) = &mut self.opening_fallback {
             selection.start = target;
         }
@@ -1959,7 +1974,7 @@ pub(super) fn opening_prefix_file(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use std::io::Write;
     use symphonia::core::{checksum::Crc32, io::Monitor};
@@ -2567,7 +2582,7 @@ mod tests {
     // Real fixed-block FLAC frames, without an encoder process or binary fixture.
     // Each one-second mono block has its own constant value so seek alignment is
     // visible. The declared sample count can deliberately underestimate the data.
-    fn constant_flac_file(reported_samples: u64, blocks: u8) -> tempfile::NamedTempFile {
+    pub(crate) fn constant_flac_file(reported_samples: u64, blocks: u8) -> tempfile::NamedTempFile {
         use symphonia::core::checksum::{Crc8Ccitt, Crc16Ansi};
 
         let mut file = tempfile::NamedTempFile::new().unwrap();
@@ -2655,6 +2670,28 @@ mod tests {
             Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
         // The advertised final sample is absent, not merely an exclusive endpoint.
         assert!(source.seek(12.0).is_err());
+    }
+
+    #[test]
+    fn rejected_seek_preserves_decoder_traversal_and_completion_statistics() {
+        let file = constant_flac_file(96_000, 12);
+        for hint in [DecoderHint::Native, DecoderHint::Ffmpeg] {
+            if hint == DecoderHint::Ffmpeg && !cfg!(feature = "ffmpeg") {
+                continue;
+            }
+            let mut reference = Source::open(file.path(), PROBE_BUFFER_LEN, hint, true).unwrap();
+            let expected = decode_remaining(&mut reference);
+            let expected_bitrate = reference.completed_bitrate();
+            let mut source = Source::open(file.path(), PROBE_BUFFER_LEN, hint, true).unwrap();
+            for target in [f64::NAN, f64::INFINITY, -1.0, 1e300, i64::MAX as f64, 1e16] {
+                assert!(source.seek(target).unwrap_err().is::<crate::SeekRejected>());
+                assert!(source.complete_stream);
+                assert!(source.pending_seek.is_none());
+                assert!(source.seek_target.is_none());
+            }
+            assert_eq!(decode_remaining(&mut source), expected);
+            assert_eq!(source.completed_bitrate(), expected_bitrate);
+        }
     }
 
     #[cfg(feature = "ffmpeg")]

@@ -233,6 +233,27 @@ pub struct AudioSnapshot {
     pub listened_seconds: f64,
 }
 
+/// A seek rejected before decoder, output or analysis state can change.
+#[derive(Clone, Copy, Debug)]
+pub struct SeekRejected;
+
+impl std::fmt::Display for SeekRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Seek must be a finite, nonnegative, representable time")
+    }
+}
+
+impl std::error::Error for SeekRejected {}
+
+/// Validate the shared time representation before enqueueing a seek.
+/// The opened source also validates its absolute timeline and backend timebase.
+pub fn validate_seek_position(seconds: f64) -> Result<(), SeekRejected> {
+    if !seconds.is_finite() || seconds < 0.0 || seconds >= i64::MAX as f64 {
+        return Err(SeekRejected);
+    }
+    Ok(())
+}
+
 pub enum AudioCommand {
     Load {
         path: PathBuf,
@@ -280,7 +301,10 @@ pub enum AudioCommand {
     },
     Pause(bool),
     Stop,
-    Seek(f64),
+    Seek {
+        seconds: f64,
+        revision: u64,
+    },
     Volume(f32),
     /// Prepared and applied on the audio worker, never in the device callback.
     Equalizer(Arc<rivu_dsp::equalizer::config::EqualizerConfig>),
@@ -318,6 +342,12 @@ pub enum AudioEvent {
     },
     DecoderStopped {
         generation: u64,
+    },
+    /// A rejected input leaves playback active; only its matching intent may roll back.
+    SeekRejected {
+        revision: u64,
+        snapshot: AudioSnapshot,
+        message: String,
     },
     Failed {
         generation: u64,

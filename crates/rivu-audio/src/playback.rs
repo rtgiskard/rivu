@@ -371,8 +371,8 @@ impl Playback {
             scan_source,
         })
     }
-    // Rebuild output only after the source accepts the seek. A failed seek
-    // must not discard queued PCM or retire the current analysis epoch.
+    // Input rejection leaves the source and current output/analysis epoch intact.
+    // Decoder execution errors may have changed state and remain fatal.
     pub(super) fn restart_output(
         &mut self,
         target: Option<f64>,
@@ -403,7 +403,7 @@ impl Playback {
         target: Option<f64>,
         create: impl FnOnce(&Source, bool) -> Result<Output>,
     ) -> Result<()> {
-        let position = target.unwrap_or_else(|| self.position()).max(0.0);
+        let position = target.unwrap_or_else(|| self.position());
         self.source.seek(position)?;
         let heard = self.prior_heard + self.output.close();
         self.equalizer.reset();
@@ -868,7 +868,7 @@ impl Playback {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use std::io::{Seek, SeekFrom, Write};
 
@@ -931,7 +931,7 @@ mod tests {
         }
     }
 
-    fn pcm() -> tempfile::NamedTempFile {
+    pub(crate) fn pcm() -> tempfile::NamedTempFile {
         pcm_samples(16_000)
     }
 
@@ -1016,7 +1016,7 @@ mod tests {
         )
     }
 
-    fn test_playback_with_waveform(
+    pub(crate) fn test_playback_with_waveform(
         path: &std::path::Path,
         range: Option<PlaybackRange>,
         waveform: Arc<RwLock<WaveformFrame>>,
@@ -2290,10 +2290,12 @@ mod tests {
             let first: Vec<_> = captured.pop_iter().collect();
             assert_eq!(first.len(), 73);
             assert_eq!(first.iter().filter(|frame| frame.gap).count(), 1);
-            let rejected = playback.restart_output_with(Some(f64::INFINITY), |_, _| {
-                panic!("a rejected seek must not replace output")
-            });
-            assert!(rejected.is_err());
+            for target in [f64::NAN, f64::INFINITY, -1.0, 1e300, i64::MAX as f64, 1e16] {
+                let rejected = playback.restart_output_with(Some(target), |_, _| {
+                    panic!("a rejected seek must not replace output")
+                });
+                assert!(rejected.unwrap_err().is::<crate::SeekRejected>());
+            }
             let mut old = [0.0; 73];
             old_render(&mut old, 0);
             for (index, actual) in old.iter().enumerate() {

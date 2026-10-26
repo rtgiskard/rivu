@@ -64,6 +64,19 @@ impl Core {
                 self.stop_playback(true)?;
                 self.advance_with_status(true, status)?;
             }
+            AudioEvent::SeekRejected {
+                revision,
+                snapshot,
+                message,
+            } if snapshot.generation == self.generation
+                && revision == self.state.playback.seek_revision =>
+            {
+                self.state.playback.position = snapshot.position_seconds;
+                // Publish the correction to clock consumers without reusing an intent ID.
+                self.state.playback.seek_revision = revision.wrapping_add(1);
+                self.state.system.last_error = Some(message);
+                self.playback_progress(snapshot.position_seconds, snapshot.listened_seconds)?;
+            }
             AudioEvent::Failed {
                 generation,
                 message,
@@ -578,9 +591,7 @@ impl Core {
         bail!("Queue is empty")
     }
     pub(in crate::core) fn seek(&mut self, seconds: f64) -> Result<()> {
-        if !seconds.is_finite() || seconds < 0.0 {
-            bail!("Seek must be a finite nonnegative number");
-        }
+        audio::validate_seek_position(seconds)?;
         if self.state.playback.status == PlaybackStatus::Stopped {
             bail!("Nothing is playing");
         }
@@ -590,9 +601,10 @@ impl Core {
             .and_then(|track| track.cue.as_ref())
             .and_then(|cue| cue.end_seconds().map(|end| end - cue.start_seconds()));
         let seconds = end.map_or(seconds, |end| seconds.min(end));
-        self.engine.send(AudioCommand::Seek(seconds))?;
+        let revision = self.state.playback.seek_revision.wrapping_add(1);
+        self.engine.send(AudioCommand::Seek { seconds, revision })?;
         self.state.playback.position = seconds;
-        self.state.playback.seek_revision = self.state.playback.seek_revision.wrapping_add(1);
+        self.state.playback.seek_revision = revision;
         Ok(())
     }
 

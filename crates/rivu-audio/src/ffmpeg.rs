@@ -997,12 +997,31 @@ impl Decoder {
             (offset + count < frame.nb_samples as usize).then_some((offset + count, timing));
         Ok(FrameTiming { offset, ..timing })
     }
-    pub(super) fn seek(&mut self, seconds: f64, cancelled: Option<&AtomicBool>) -> Result<()> {
-        self.packet_stats.invalidate();
-        check_cancelled(cancelled)?;
-        if !seconds.is_finite() || seconds < 0.0 {
-            bail!("Invalid FFmpeg seek position");
+    pub(super) fn validate_seek(&self, seconds: f64) -> Result<()> {
+        self.seek_timestamp(seconds).map(|_| ())
+    }
+
+    fn seek_timestamp(&self, seconds: f64) -> Result<i64> {
+        super::validate_seek_position(seconds)?;
+        let ticks = ((seconds - SEEK_PREROLL_SECONDS).max(0.0) / self.time_base.num as f64
+            * self.time_base.den as f64)
+            .round();
+        if !ticks.is_finite() || ticks < 0.0 || ticks >= i64::MAX as f64 {
+            return Err(super::SeekRejected.into());
         }
+        let base = if self.start_time == NOPTS {
+            0
+        } else {
+            self.start_time
+        };
+        base.checked_add(ticks as i64)
+            .ok_or_else(|| super::SeekRejected.into())
+    }
+
+    pub(super) fn seek(&mut self, seconds: f64, cancelled: Option<&AtomicBool>) -> Result<()> {
+        check_cancelled(cancelled)?;
+        let target = self.seek_timestamp(seconds)?;
+        self.packet_stats.invalidate();
         // Origin-reaching preroll starts a fresh decoder traversal. Demuxer
         // seeks plus codec flush can lose overlap primers or initial skip data.
         // Reopen the held file object, never its potentially replaced path.
@@ -1017,16 +1036,6 @@ impl Decoder {
             *self = replacement;
             return Ok(());
         }
-        let preroll = seconds.min(SEEK_PREROLL_SECONDS);
-        let seek_seconds = seconds - preroll;
-        let base = if self.start_time == NOPTS {
-            0
-        } else {
-            self.start_time
-        };
-        let target = base.saturating_add(
-            (seek_seconds / self.time_base.num as f64 * self.time_base.den as f64).round() as i64,
-        );
         let ret =
             unsafe { (self.rt.f.seek_file)(self.format, self.stream, i64::MIN, target, target, 0) };
         check_cancelled(cancelled)?;
