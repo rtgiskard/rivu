@@ -1397,6 +1397,106 @@ mod tests {
     }
 
     #[test]
+    fn audio_source_rescans_refresh_ordinary_and_cue_row_projections() {
+        let changes: [fn(&mut MediaInfo); 5] = [
+            |media| media.channels = 1,
+            |media| media.sample_rate = 44_100,
+            |media| media.bits_per_sample = Some(24),
+            |media| media.bitrate_bps = Some(1_024_000),
+            |media| media.bitrate_exact = false,
+        ];
+        for cue in [false, true] {
+            let mut source = record();
+            source.fingerprint = None;
+            let source = std::sync::Arc::new(source);
+            let mut scan = ScanResult {
+                roots: vec!["/music".into()],
+                ..ScanResult::default()
+            };
+            if cue {
+                scan.segments.push(CueRecord::registered(
+                    source,
+                    CueSegment {
+                        sheet: "/music/album.cue".into(),
+                        number: 1,
+                        start_frame: 0,
+                        end_frame: Some(4500),
+                    },
+                    cue_metadata(),
+                    Some(60.0),
+                ));
+            } else {
+                scan.records.push(source);
+            }
+            let (store, mut scan, id) = queued_scan(scan);
+            let playlist = store
+                .create_playlist_with_tracks("Audio facts", &[id])
+                .unwrap();
+            for change in changes {
+                let source = if cue {
+                    std::sync::Arc::make_mut(&mut scan.segments[0].source)
+                } else {
+                    std::sync::Arc::make_mut(&mut scan.records[0])
+                };
+                change(&mut source.media);
+                source.modified_ns += 1;
+                let expected = source.media.clone();
+                let impacts = store.apply_scan(&scan).unwrap();
+                assert!(impacts.library && impacts.queue && impacts.albums);
+                assert!(!impacts.structure);
+                let track = store.track(id).unwrap().unwrap();
+                let queued = store.queue_page(None, 0, 10).unwrap().rows.remove(0).track;
+                let member = store
+                    .playlist_entries_page(playlist, None, 0, 10)
+                    .unwrap()
+                    .rows
+                    .remove(0);
+                for (channels, sample_rate, bits_per_sample, bitrate_bps, bitrate_exact) in [
+                    (
+                        track.channels,
+                        track.sample_rate,
+                        track.bits_per_sample,
+                        track.bitrate_bps,
+                        track.bitrate_exact,
+                    ),
+                    (
+                        queued.channels,
+                        queued.sample_rate,
+                        queued.bits_per_sample,
+                        queued.bitrate_bps,
+                        queued.bitrate_exact,
+                    ),
+                    (
+                        member.channels,
+                        member.sample_rate,
+                        member.bits_per_sample,
+                        member.bitrate_bps,
+                        member.bitrate_exact,
+                    ),
+                ] {
+                    assert_eq!(
+                        (
+                            channels,
+                            sample_rate,
+                            bits_per_sample,
+                            bitrate_bps,
+                            bitrate_exact
+                        ),
+                        (
+                            expected.channels,
+                            expected.sample_rate,
+                            expected.bits_per_sample,
+                            expected.bitrate_bps,
+                            expected.bitrate_exact
+                        )
+                    );
+                }
+                assert_eq!(store.apply_scan(&scan).unwrap(), ScanImpacts::default());
+            }
+        }
+    }
+
+    #[test]
     fn raw_metadata_changes_under_overrides_persist_without_invalidating_queue() {
         let (store, mut scan, id) = queued(record());
         store
