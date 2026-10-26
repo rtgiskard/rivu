@@ -259,6 +259,10 @@ failure. Clicking captures the selected signal, monitor EQ and actual active
 audition source/graph; later EQ or signal edits neither change nor cancel that
 request. Before playback, the explicit scan uses the selected original source
 and the latest saved decoder hint without activating a persisted graph.
+When the captured graph specifies a published frame count, the scan stops once
+that timeline is filled, without decoding or processing unrelated cached suffixes.
+Preguard and processing latency are discarded before counting published frames;
+real upstream EOF still drains necessary graph output if the timeline is not yet filled.
 
 Each progressive bin carries its last PCM revision. Installing a scan overlays
 only playback bins newer than the request; a late baseline cannot erase PCM

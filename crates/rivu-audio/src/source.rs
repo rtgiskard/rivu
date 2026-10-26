@@ -1299,7 +1299,8 @@ impl Source {
         // Match waveform placement: round timestamps to PCM frames before
         // adding decoded lengths, and convert to seconds only at EOF.
         let mut end_frames = 0_u64;
-        loop {
+        // Completing a captured timeline does not require upstream EOF or its tail.
+        while remaining != Some(0) {
             let mut budget = DECODE_WORK_BUDGET;
             let span = match self.next_frames_with_cancel(Some(cancelled), &mut budget)? {
                 DecodeStep::Frames(span) => span,
@@ -1316,6 +1317,9 @@ impl Source {
                 .chunks(super::graph::GRAPH_BLOCK_FRAMES * channels)
                 .enumerate()
             {
+                if remaining == Some(0) {
+                    break;
+                }
                 check_cancelled(Some(cancelled))?;
                 if graph.is_none()
                     && equalizer
