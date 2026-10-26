@@ -373,6 +373,11 @@ both bundles' assets as immutable, not independently editable copies. Use the
 emitted paths, and keep the separate environment installed. Absolute paths make
 inference independent of the application's working directory or repository.
 
+A bundle's runtime is a source snapshot. Updating the checkout does not update an
+already copied worker. To receive worker fixes, run the provisioning command above
+from the updated checkout into a new bundle and configure all three emitted paths;
+do not edit the old bundle's hashed files in place.
+
 The worker accepts request version 1 and emits event version 2. Completion is a
 bounded summary: source format/length, model ID and manifest hash, and fixed WAV
 basenames relative to that request's `output_dir`. Full provenance, absolute
@@ -416,6 +421,15 @@ independently, so stereo image can change. Rate conversion to 48 kHz speech /
 44.1 kHz separation is explicit; output is trimmed back to the original rate,
 channel count and exact frame count. No implicit downmix or duplicated mono
 separation is offered.
+
+With speech Wet set to zero, the worker copies dry float PCM in bounded blocks
+without loading the model, running inference, or resampling. Input, controls and
+the provisioned manifest and artifact hashes are still validated. This path needs
+NumPy and SoundFile for PCM I/O, but does not check or load model execution
+dependencies. The result report explicitly identifies bypass and records that
+the model was not executed.
+Dry statistics reuse the validated source blocks and their energy sum; peak
+statistics use scalar reductions without a full-block magnitude array.
 
 === Tasks, retention and audition
 

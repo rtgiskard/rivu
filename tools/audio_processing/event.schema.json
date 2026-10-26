@@ -15,7 +15,7 @@
       "required": ["stage", "completed", "total"],
       "properties": {
         "type": {"const": "progress"},
-        "stage": {"enum": ["inspect", "load", "inference"]},
+        "stage": {"enum": ["inspect", "load", "inference", "copy"]},
         "completed": {"type": "integer", "minimum": 0},
         "total": {"type": "integer", "minimum": 1}
       }

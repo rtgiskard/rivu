@@ -234,7 +234,9 @@ def process(request, emit):
     manifest = validate_manifest(manifest_path, request["operation"])
     controls = request.get("parameters", {})
     require("post_filter" not in controls or manifest["id"] == "DeepFilterNet3", "invalid_request", "post_filter is supported only by DeepFilterNet3")
-    check_packages(manifest)
+    dry = request["operation"] == "speech" and controls.get("wet_mix", 1.0) == 0.0
+    if not dry:
+        check_packages(manifest)
     import numpy as np
     import soundfile as sf
     info = sf.info(source)
@@ -253,14 +255,19 @@ def process(request, emit):
     for key in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
         os.environ[key] = str(request.get("threads", 4))
     deny_network()
-    emit("progress", stage="load", completed=0, total=1)
-    start = time.perf_counter()
-    with redirect_stdout(sys.stderr):
-        model_rate, infer = build_engine(manifest, manifest_path.parent, request.get("device", "cpu"), controls)
-    load_seconds = time.perf_counter() - start
+    model_rate = None
+    load_seconds = 0.0
+    if not dry:
+        emit("progress", stage="load", completed=0, total=1)
+        start = time.perf_counter()
+        with redirect_stdout(sys.stderr):
+            model_rate, infer = build_engine(manifest, manifest_path.parent, request.get("device", "cpu"), controls)
+        load_seconds = time.perf_counter() - start
     destination.mkdir(mode=0o700)
     outputs = {stem: str(destination / (stem + ".wav")) for stem in stems}
     core_seconds, context_seconds = (8, 2) if manifest["id"] == "MossFormer2_SE_48K" else (CORE_SECONDS, CONTEXT_SECONDS)
+    if dry:
+        core_seconds, context_seconds = CORE_SECONDS, 0
     block_times = []
     sample_io_seconds = resampling_seconds = inference_seconds = 0.0
     peaks = dict.fromkeys(stems, 0.0)
@@ -284,43 +291,47 @@ def process(request, emit):
                 sample_io_seconds += time.perf_counter()-io_start
                 require(audio.shape == (right-left, info.channels) and np.isfinite(audio).all(), "input_samples", "input changed/truncated or contains nonfinite samples")
                 block_start = time.perf_counter()
-                phase_start = time.perf_counter()
-                converted = resample_exact(audio, info.samplerate, model_rate)
-                resampling_seconds += time.perf_counter()-phase_start
-                phase_start = time.perf_counter()
-                with redirect_stdout(sys.stderr):
-                    inferred = infer(converted)
-                inference_seconds += time.perf_counter()-phase_start
-                require(inferred.shape == converted.shape and np.isfinite(inferred).all(), "inference_output", "model returned wrong length/channels or nonfinite samples")
-                phase_start = time.perf_counter()
-                restored = resample_exact(inferred, model_rate, info.samplerate)
-                resampling_seconds += time.perf_counter()-phase_start
-                require(len(restored) >= len(audio), "alignment", "resampler returned insufficient source frames")
-                restored = restored[:len(audio)]
                 offset = begin-left
-                result = restored[offset:offset+end-begin].astype("float32", copy=False)
                 original = audio[offset:offset+end-begin]
-                if request["operation"] == "speech":
-                    wet = controls.get("wet_mix", 1.0)
-                    if wet == 0.0:
-                        result = original
-                    elif wet != 1.0:
-                        result = original*(1.0-wet) + result*wet
+                if dry:
+                    result = original
+                else:
+                    phase_start = time.perf_counter()
+                    converted = resample_exact(audio, info.samplerate, model_rate)
+                    resampling_seconds += time.perf_counter()-phase_start
+                    phase_start = time.perf_counter()
+                    with redirect_stdout(sys.stderr):
+                        inferred = infer(converted)
+                    inference_seconds += time.perf_counter()-phase_start
+                    require(inferred.shape == converted.shape and np.isfinite(inferred).all(), "inference_output", "model returned wrong length/channels or nonfinite samples")
+                    phase_start = time.perf_counter()
+                    restored = resample_exact(inferred, model_rate, info.samplerate)
+                    resampling_seconds += time.perf_counter()-phase_start
+                    require(len(restored) >= len(audio), "alignment", "resampler returned insufficient source frames")
+                    restored = restored[:len(audio)]
+                    result = restored[offset:offset+end-begin].astype("float32", copy=False)
+                    if request["operation"] == "speech":
+                        wet = controls.get("wet_mix", 1.0)
+                        if wet != 1.0:
+                            result = original*(1.0-wet) + result*wet
+                    del converted, inferred, restored
                 chunks = {"vocals": result, "accompaniment": original-result} if len(stems) == 2 else {"speech":result}
                 for stem, chunk in chunks.items():
-                    require(np.isfinite(chunk).all(), "inference_output", "nonfinite output; refusing sanitization")
+                    if not dry:
+                        require(np.isfinite(chunk).all(), "inference_output", "nonfinite output; refusing sanitization")
                     io_start = time.perf_counter()
                     writers[stem].write(chunk)
                     sample_io_seconds += time.perf_counter()-io_start
-                    peaks[stem] = max(peaks[stem], float(np.max(np.abs(chunk))))
+                    peaks[stem] = max(peaks[stem], abs(float(np.min(chunk))), abs(float(np.max(chunk))))
                 # Accumulate in float64 without two full-size float64 temporaries.
-                input_energy += float(np.einsum("ij,ij->", original, original, dtype=np.float64, optimize=False))
-                output_energy += float(np.einsum("ij,ij->", result, result, dtype=np.float64, optimize=False))
+                block_energy = float(np.einsum("ij,ij->", original, original, dtype=np.float64, optimize=False))
+                input_energy += block_energy
+                output_energy += block_energy if dry else float(np.einsum("ij,ij->", result, result, dtype=np.float64, optimize=False))
                 block_times.append(time.perf_counter()-block_start)
                 # Views in result/original/chunks otherwise retain the previous
                 # context buffers while the next inference allocates its output.
-                del audio, converted, inferred, restored, result, original, chunks, chunk
-                emit("progress", stage="inference", completed=end, total=info.frames)
+                del audio, result, original, chunks, chunk
+                emit("progress", stage="copy" if dry else "inference", completed=end, total=info.frames)
         require(digest(source) == source_hash, "source_changed", "source changed during processing")
         for path in outputs.values():
             output_info = sf.info(path)
@@ -333,14 +344,14 @@ def process(request, emit):
                   "worker_sha256":digest(__file__), "python":sys.version, "packages":manifest["packages"],
                   "implementation_sha256":{path.name:digest(path) for path in sorted(Path(__file__).parent.glob("*.py"))},
                   "interpreter":{"path":sys.executable,"sha256":digest(sys.executable)},
-                  "installed_packages":{name:importlib.metadata.version(name) for name in manifest["packages"]},
-                  "device":request.get("device", "cpu"), "threads":request.get("threads", 4),
+                  "installed_packages":{} if dry else {name:importlib.metadata.version(name) for name in manifest["packages"]},
+                  "device":"cpu" if dry else request.get("device", "cpu"), "threads":request.get("threads", 4),
                   "processing":{"core_seconds":core_seconds,"context_seconds":context_seconds,
                     "inner_overlap":controls.get("overlap",0.75) if len(stems)==2 else None,"shifts":0,"precision":"float32",
-                    "parameters":controls,
-                    "resampling":"scipy zero-phase resample_poly; ceil-length final trim",
+                    "parameters":controls,"bypass":dry,"model_executed":not dry,
+                    "resampling":None if dry else "scipy zero-phase resample_poly; ceil-length final trim",
                     "accompaniment":"source mixture minus source-rate vocals" if len(stems)==2 else None,
-                    "speech_channels":"independent; stereo image may change" if len(stems)==1 else None},
+                    "speech_channels":("unchanged dry source" if dry else "independent; stereo image may change") if len(stems)==1 else None},
                   "metrics":{"load_seconds":load_seconds,"processing_wall_seconds":wall,
                     "processing_cpu_seconds":time.process_time()-cpu_start,"real_time_factor":wall/(info.frames/info.samplerate),
                     "inference_seconds":inference_seconds,"resampling_seconds":resampling_seconds,

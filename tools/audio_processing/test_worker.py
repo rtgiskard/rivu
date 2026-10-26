@@ -196,6 +196,132 @@ class SignalTests(unittest.TestCase):
 @unittest.skipUnless(importlib.util.find_spec("numpy") and importlib.util.find_spec("soundfile"),
                      "NumPy and soundfile required for real WAV container behavior")
 class OutputContainerTests(unittest.TestCase):
+    @unittest.skipUnless(importlib.util.find_spec("jsonschema"), "jsonschema required for event protocol validation")
+    def test_actual_dry_worker_events_validate_against_protocol_schema(self):
+        import subprocess
+        import sys
+        import jsonschema
+        import numpy as np
+        import soundfile as sf
+        schema = json.loads((Path(__file__).parent / "event.schema.json").read_text())
+        validator = jsonschema.Draft202012Validator(schema)
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            bundle_fixture(base)
+            source = base / "input.wav"
+            sf.write(source, np.array([[0.125, -0.25], [1.25, -1.25]], dtype="float32"), 44100, subtype="FLOAT")
+            request = {**ProtocolTests().request(), "input_path":str(source),
+                       "output_dir":str(base / "result"), "model_manifest":str(base / "manifest.json"),
+                       "parameters":{"wet_mix":0}}
+            request_path = base / "request.json"
+            request_path.write_text(json.dumps(request))
+            result = subprocess.run([sys.executable, str(Path(__file__).parent / "worker.py"),
+                                     "--request", str(request_path)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            events = [json.loads(line) for line in result.stdout.splitlines()]
+            self.assertEqual(events[-1]["type"], "complete")
+            self.assertEqual((events[-1]["frames"], events[-1]["sample_rate"], events[-1]["channels"]), (2, 44100, 2))
+            self.assertIn("copy", [event.get("stage") for event in events])
+            for event in events:
+                validator.validate(event)
+
+    def test_fractional_speech_blends_source_with_transformed_model_output(self):
+        import numpy as np
+        import soundfile as sf
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            bundle_fixture(base)
+            audio = np.linspace(-0.8, 0.8, 16014, dtype="float32").reshape(-1, 2)
+            source = base / "input.wav"
+            sf.write(source, audio, 8000, subtype="FLOAT")
+            request = {**ProtocolTests().request(), "input_path":str(source),
+                       "output_dir":str(base / "result"), "model_manifest":str(base / "manifest.json"),
+                       "parameters":{"wet_mix":0.25}}
+            calls = []
+            def infer(samples):
+                calls.append(samples.shape)
+                return samples * -0.5 + np.float32(0.125)
+            with patch("worker.build_engine", return_value=(8000, infer)), \
+                 patch("worker.importlib.metadata.version", return_value="1"), \
+                 patch("worker.deny_network"), patch("worker.CORE_SECONDS", 1), patch.dict(os.environ):
+                process(request, lambda *args, **kwargs: None)
+            output, rate = sf.read(base / "result/speech.wav", dtype="float32", always_2d=True)
+            np.testing.assert_array_equal(output, audio * 0.75 + (audio * -0.5 + np.float32(0.125)) * 0.25)
+            self.assertEqual(rate, 8000)
+            self.assertEqual(len(calls), 2)
+            report = json.loads((base / "result/result.json").read_text())
+            self.assertFalse(report["processing"]["bypass"])
+            self.assertTrue(report["processing"]["model_executed"])
+
+    def test_dry_speech_copies_bounded_pcm_without_model_dependencies(self):
+        import numpy as np
+        import soundfile as sf
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            bundle_fixture(base)
+            source = base / "input.wav"
+            for channels, rate in ((1, 8000), (2, 44100)):
+                audio = np.linspace(-1.25, 1.25, (rate + 7) * channels, dtype="float32").reshape(-1, channels)
+                audio[1, 0] = np.float32(-0.0)
+                sf.write(source, audio, rate, subtype="FLOAT")
+                destination = base / str(channels)
+                request = {**ProtocolTests().request(), "input_path":str(source),
+                           "output_dir":str(destination), "model_manifest":str(base / "manifest.json"),
+                           "device":"cuda", "parameters":{"wet_mix":0}}
+                events = []
+                with patch("worker.check_packages", side_effect=AssertionError("packages loaded")), \
+                     patch("worker.build_engine", side_effect=AssertionError("model loaded")), \
+                     patch("worker.resample_exact", side_effect=AssertionError("resampled")), \
+                     patch("worker.importlib.metadata.version", side_effect=AssertionError("dependency queried")), \
+                     patch("worker.deny_network"), patch("worker.CORE_SECONDS", 1), patch.dict(os.environ), \
+                     patch.object(sf.SoundFile, "read", autospec=True, side_effect=sf.SoundFile.read) as reads:
+                    process(request, lambda kind, **fields: events.append((kind, fields)))
+                output, output_rate = sf.read(destination / "speech.wav", dtype="float32", always_2d=True)
+                np.testing.assert_array_equal(output.view("uint32"), audio.view("uint32"))
+                self.assertEqual([call.args[1] for call in reads.call_args_list], [rate, 7])
+                self.assertEqual(output_rate, rate)
+                self.assertEqual(events[-1][0], "complete")
+                self.assertEqual(events[-1][1]["frames"], len(audio))
+                self.assertNotIn("load", [fields.get("stage") for _, fields in events])
+                report = json.loads((destination / "result.json").read_text())
+                self.assertTrue(report["processing"]["bypass"])
+                self.assertFalse(report["processing"]["model_executed"])
+                self.assertIsNone(report["processing"]["resampling"])
+                self.assertEqual(report["processing"]["context_seconds"], 0)
+                self.assertEqual(len(report["metrics"]["block_seconds"]), 2)
+                self.assertEqual(report["frames"], len(audio))
+                self.assertEqual(report["metrics"]["output_peaks"]["speech"], 1.25)
+                expected_rms = float(np.sqrt(np.mean(np.square(audio.astype("float64")))))
+                self.assertAlmostEqual(report["metrics"]["input_rms"], expected_rms, places=12)
+                self.assertEqual(report["metrics"]["input_rms"], report["metrics"]["target_rms"])
+                for metric in ("load_seconds", "inference_seconds", "resampling_seconds"):
+                    self.assertEqual(report["metrics"][metric], 0)
+
+    def test_dry_speech_still_rejects_model_controls_artifacts_and_bad_samples(self):
+        import numpy as np
+        import soundfile as sf
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            bundle_fixture(base)
+            source = base / "input.wav"
+            sf.write(source, np.zeros((8, 1), dtype="float32"), 8000, subtype="FLOAT")
+            destination = base / "result"
+            request = {**ProtocolTests().request(), "input_path":str(source),
+                       "output_dir":str(destination), "model_manifest":str(base / "manifest.json"),
+                       "parameters":{"wet_mix":0, "post_filter":False}}
+            with self.assertRaisesRegex(WorkerError, "post_filter"):
+                process(request, lambda *args, **kwargs: None)
+            request["parameters"] = {"wet_mix":0}
+            sf.write(source, np.full((8, 1), np.nan, dtype="float32"), 8000, subtype="FLOAT")
+            with patch("worker.deny_network"), patch.dict(os.environ):
+                with self.assertRaisesRegex(WorkerError, "nonfinite"):
+                    process(request, lambda *args, **kwargs: None)
+            self.assertFalse(destination.exists())
+            (base / "weight-license.txt").write_text("tampered")
+            with self.assertRaisesRegex(WorkerError, "SHA256 mismatch"):
+                process(request, lambda *args, **kwargs: None)
+            self.assertFalse(destination.exists())
+
     def test_separation_uses_riff_when_each_stem_fits_even_if_total_exceeds_four_gib(self):
         import numpy as np
         import soundfile as sf
