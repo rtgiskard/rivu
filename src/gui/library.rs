@@ -440,6 +440,8 @@ impl Library {
         if self.library.expand_directory(branch, expanded) {
             self.request_directory_page(branch.clone(), 0, cx);
         }
+        self.prune_directory_demand();
+        self.sync_loading_text(cx);
         cx.notify();
     }
 
@@ -506,10 +508,16 @@ impl Library {
                 if let Some(branch) = &visible.branch {
                     if !visible.expanded {
                         self.set_directory_expanded(branch, true, cx);
-                    } else if matches!(&self.library.tree().item(index + 1),
-                        Some(TreeItem::Entry(next)) if next.depth > depth)
-                        || matches!(&self.library.tree().item(index + 1),
-                            Some(TreeItem::Placeholder { depth: next_depth, .. }) if *next_depth > depth)
+                    } else if self
+                        .library
+                        .tree()
+                        .item(index + 1)
+                        .is_some_and(|next| match next {
+                            TreeItem::Entry(next) => next.depth > depth,
+                            TreeItem::Placeholder {
+                                depth: next_depth, ..
+                            } => next_depth > depth,
+                        })
                     {
                         self.select_tree_row(index + 1, cx);
                     }
@@ -530,7 +538,7 @@ impl Library {
         let row_count = self.library.tree().row_count();
         let scroll = &self.library.tree().scroll;
         // Local forest acceptance must notify after prepaint to redraw the loaded rows.
-        let demand_owner = cx.entity().downgrade();
+        let demand_owner = cx.weak_entity();
         let view = list_viewport(
             VirtualList::new(("library-directory-tree", panel_id), row_count, scroll, cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
                 let row_height = rivu_ui::tree_row_height(window, cx);
@@ -625,7 +633,7 @@ impl Library {
                                     LibraryNode::Directory(Arc::from(path.as_path())),
                                     title,
                                     detail,
-                                    Some(path.clone()),
+                                    Some(path),
                                 )
                             }
                             DirectoryRow::Track(track) => (
@@ -641,13 +649,14 @@ impl Library {
                             LibraryNode::Directory(path) => gpui::ElementId::Path(Arc::clone(path)),
                         };
                         let selected = this.directory_row_selected(entry);
-                        let id = node.clone();
+                        let id = node;
                         let retry_counts = match entry {
                             DirectoryRow::OtherTracks => this.library.other_count_failed(),
                             DirectoryRow::Directory { path } => this.library.root_count_failed(path),
                             DirectoryRow::Track(_) => false,
                         };
-                        let scan = path.clone().map(|scan_path| {
+                        let scan = path.map(|scan_path| {
+                            let scan_path = scan_path.clone();
                             let hint = if retry_counts {
                                 this.i18n.format("gl-retry-root-counts", &[("path", scan_path.display().to_string().into())])
                             } else {
@@ -700,8 +709,8 @@ impl Library {
                                     .text_sm()
                                     .font_family(super::appearance::fonts::SYMBOLS_FAMILY)
                                     .font_size_scale(1.)
-                                    .child(if matches!(entry, DirectoryRow::OtherTracks) { "󰀻" } else if let Some(branch) = &visible.branch {
-                                        if this.library.tree().expanded(branch) {
+                                    .child(if matches!(entry, DirectoryRow::OtherTracks) { "󰀻" } else if visible.branch.is_some() {
+                                        if visible.expanded {
                                             "󰝰"
                                         } else {
                                             "󰉋"
@@ -749,7 +758,7 @@ impl Library {
                                     }),
                             )
                             .when(visible.depth == 0 && path.is_some(), |view| {
-                                let count = this.library.root_count_label(path.as_deref().expect("root path"));
+                                let count = this.library.root_count_label(path.expect("root path"));
                                 view.child(
                                     row()
                                         .gap_1()
@@ -787,7 +796,7 @@ impl Library {
                                 )
                             });
                         let menu_node = id.clone();
-                        let menu_root = path.clone().filter(|path| this.state.system.config.library_roots.contains(path));
+                        let menu_root = path.filter(|path| this.state.system.config.library_roots.contains(path)).cloned();
                         let row_view = lazy_row_tooltip(
                             rivu_ui::tree_row(
                                 theme,
@@ -880,7 +889,8 @@ impl Library {
                             },
                         )
                         .when(!this.library_range_pending(), |view| {
-                            let app = cx.entity();
+                            let drag_owner = cx.weak_entity();
+                            let drag_i18n = Arc::clone(&this.i18n);
                             view.on_drag(
                                 LibraryDrag {
                                     source: id.clone(),
@@ -888,13 +898,13 @@ impl Library {
                                 },
                                 move |drag, _, window, cx| {
                                     rivu_ui::begin_list_drag(window, cx);
-                                    app.update(cx, |this, cx| {
-                                        let nodes = drag.nodes.get_or_init(|| {
-                                            this.library.drag_nodes(&drag.source)
-                                        });
-                                        cx.new(|_| {
-                                            LibraryDragPreview::new(&this.i18n, nodes, title.clone())
-                                        })
+                                    let nodes = drag.nodes.get_or_init(|| {
+                                        drag_owner
+                                            .update(cx, |this, _| this.library.drag_nodes(&drag.source))
+                                            .unwrap_or_default()
+                                    });
+                                    cx.new(|_| {
+                                        LibraryDragPreview::new(&drag_i18n, nodes, title.clone())
                                     })
                                 },
                             )

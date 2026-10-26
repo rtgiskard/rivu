@@ -75,7 +75,9 @@ impl Library {
 
     pub(in crate::gui) fn reconcile(&mut self, state: Rc<GuiSnapshot>, cx: &mut Context<Self>) {
         let display_changed = display_changed(&self.state, &state);
-        if self.state.system.config.library_roots != state.system.config.library_roots {
+        let roots_changed =
+            self.state.system.config.library_roots != state.system.config.library_roots;
+        if roots_changed {
             self.library.roots_changed();
         }
         self.library
@@ -141,9 +143,9 @@ impl Library {
     }
 
     pub(in crate::gui) fn cancel_reads(&mut self) {
+        self.requests.cancel_directory_demand();
         if self.requests.reads_pending() || self.library.search_counts_pending() {
             self.library.cancel_pending_reads();
-            self.requests.cancel_directory_demand();
         }
     }
 

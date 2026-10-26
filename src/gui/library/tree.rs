@@ -151,6 +151,15 @@ impl Default for Branch {
     }
 }
 
+impl Branch {
+    fn reclaim_stale_capacity(&mut self) {
+        if self.stale_children.capacity() > 64.max(self.stale_children.len().saturating_mul(4)) {
+            self.stale_children
+                .shrink_to(self.stale_children.len().saturating_mul(2));
+        }
+    }
+}
+
 struct CachedPage {
     rows: Vec<DirectoryRow>,
     failed: bool,
@@ -261,10 +270,10 @@ impl DirectoryTree {
             .collect();
         self.grouped = grouped;
         self.branches.clear();
-        self.selected_locations.clear();
-        for key in &self.saved_expansions[grouped as usize] {
+        self.selected_locations = HashMap::new();
+        for key in std::mem::take(&mut self.saved_expansions[grouped as usize]) {
             self.branches.insert(
-                key.clone(),
+                key,
                 Branch {
                     expanded: true,
                     ..Default::default()
@@ -297,6 +306,7 @@ impl DirectoryTree {
     pub(in crate::gui) fn retry(&mut self, key: &TreeBranch) {
         self.pages
             .retain(|(candidate, _), page| candidate != key || !page.failed);
+        self.reclaim_branches();
     }
 
     pub(in crate::gui) fn request_pending(&self, key: &TreeBranch, generation: u64) -> bool {
@@ -310,6 +320,7 @@ impl DirectoryTree {
             && branch.pending.is_some_and(|(_, token)| token == generation)
         {
             branch.pending = None;
+            self.reclaim_branches();
         }
     }
 
@@ -317,6 +328,7 @@ impl DirectoryTree {
         for branch in self.branches.values_mut() {
             branch.pending = None;
         }
+        self.reclaim_branches();
     }
 
     pub(in crate::gui) fn accept(
@@ -353,6 +365,7 @@ impl DirectoryTree {
         branch
             .stale_children
             .retain(|index| children.contains_key(index));
+        branch.reclaim_stale_capacity();
         branch.children = children;
         for (index, row) in page.rows.iter().enumerate() {
             if offset + index >= page.total {
@@ -431,6 +444,7 @@ impl DirectoryTree {
     }
 
     fn evict(&mut self) {
+        let mut removed = false;
         while self.pages.len() > MAX_CACHED_PAGES.max(self.demanded.len()) {
             let key = self
                 .pages
@@ -441,7 +455,73 @@ impl DirectoryTree {
                 .map(|(key, _)| key.clone());
             if let Some(key) = key {
                 self.pages.remove(&key);
+                removed = true;
             }
+        }
+        if removed {
+            self.reclaim_branches();
+        }
+    }
+
+    /// Bookkeeping follows live state and the bounded page cache, not visit history.
+    /// Hidden expanded descendants retain their ancestry for collapse/reopen.
+    fn reclaim_branches(&mut self) {
+        // Borrow live identities; clone only the branches that will be removed.
+        let mut retained = HashSet::new();
+        let mut retain_ancestry = |mut key| {
+            while retained.insert(key) {
+                let Some((parent, _)) = self
+                    .branches
+                    .get(key)
+                    .and_then(|branch| branch.parent.as_ref())
+                else {
+                    break;
+                };
+                key = parent;
+            }
+        };
+        for (key, branch) in &self.branches {
+            if key.is_forest() || branch.expanded || branch.pending.is_some() {
+                retain_ancestry(key);
+            }
+        }
+        for (key, _) in self.pages.keys() {
+            retain_ancestry(key);
+        }
+        for (key, _) in &self.demanded {
+            retain_ancestry(key);
+        }
+        for (_, key) in self.selected_locations.keys() {
+            retain_ancestry(key);
+        }
+        if let Some((_, key)) = &self.focused {
+            retain_ancestry(key);
+        }
+        if let Some((key, _)) = &self.navigation_target {
+            retain_ancestry(key);
+        }
+        let removed = self
+            .branches
+            .keys()
+            .filter(|key| !retained.contains(key))
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in removed {
+            self.detach(&key);
+            self.branches.remove(&key);
+        }
+        if self.branches.capacity() > 64.max(self.branches.len().saturating_mul(4)) {
+            self.branches
+                .shrink_to(self.branches.len().saturating_mul(2));
+        }
+        if self.pages.capacity() > MAX_CACHED_PAGES.max(self.pages.len().saturating_mul(4)) {
+            self.pages.shrink_to(self.pages.len().saturating_mul(2));
+        }
+        if self.selected_locations.capacity()
+            > 64.max(self.selected_locations.len().saturating_mul(4))
+        {
+            self.selected_locations
+                .shrink_to(self.selected_locations.len().saturating_mul(2));
         }
     }
 
@@ -499,8 +579,8 @@ impl DirectoryTree {
     pub(in crate::gui) fn clear(&mut self) {
         self.branches.clear();
         self.saved_expansions = Default::default();
-        self.grouped_roots.clear();
-        self.selected_locations.clear();
+        self.grouped_roots = HashSet::new();
+        self.selected_locations = HashMap::new();
         self.invalidate();
     }
 
@@ -526,7 +606,7 @@ impl DirectoryTree {
     pub(in crate::gui) fn invalidate(&mut self) {
         self.projection_revision = self.projection_revision.wrapping_add(1);
         self.pages.clear();
-        self.demanded.clear();
+        self.demanded = HashSet::new();
         self.navigation_target = None;
         self.focused = None;
         for branch in self.branches.values_mut() {
@@ -535,6 +615,7 @@ impl DirectoryTree {
             branch.layout_len = branch.layout_len.max(1);
             branch.stale_children = branch.children.keys().copied().collect();
         }
+        self.reclaim_branches();
         self.refresh_visible();
     }
 
@@ -548,6 +629,7 @@ impl DirectoryTree {
         {
             branch.children.remove(&index);
             branch.stale_children.remove(&index);
+            branch.reclaim_stale_capacity();
         }
     }
 
@@ -564,6 +646,7 @@ impl DirectoryTree {
         let branch = self.branches.entry(parent.clone()).or_default();
         branch.children.insert(index, child.clone());
         branch.stale_children.remove(&index);
+        branch.reclaim_stale_capacity();
         self.branches.entry(child.clone()).or_default().parent = Some((parent.clone(), index));
     }
 
@@ -613,6 +696,7 @@ impl DirectoryTree {
         {
             self.focused = None;
         }
+        self.reclaim_branches();
         self.refresh_visible();
     }
 
@@ -950,10 +1034,11 @@ impl DirectoryTree {
                 demanded.insert((parent.clone(), offset));
             });
         }
+        let demand_changed = self.demanded != demanded;
         self.demanded = demanded;
-        let mut keys = self.demanded.iter().cloned().collect::<Vec<_>>();
+        let mut keys = self.demanded.iter().collect::<Vec<_>>();
         keys.sort();
-        let mut requested = HashSet::new();
+        let mut requested = None;
         let requests = keys
             .into_iter()
             .filter(|(key, offset)| {
@@ -963,14 +1048,23 @@ impl DirectoryTree {
                         return false;
                     }
                 }
-                !self
-                    .branches
-                    .get(key)
-                    .is_some_and(|branch| branch.pending.is_some())
-                    && requested.insert(key.clone())
+                if requested == Some(key)
+                    || self
+                        .branches
+                        .get(key)
+                        .is_some_and(|branch| branch.pending.is_some())
+                {
+                    return false;
+                }
+                requested = Some(key);
+                true
             })
+            .cloned()
             .collect();
         self.evict();
+        if demand_changed {
+            self.reclaim_branches();
+        }
         requests
     }
 
@@ -1016,6 +1110,7 @@ impl DirectoryTree {
                 }
             }
         }
+        self.reclaim_branches();
     }
 
     /// Install query-verified positional anchors without touching selection/focus.
@@ -1058,19 +1153,11 @@ impl DirectoryTree {
         }
         self.refresh_visible();
         let offset = locations.last()?.offset;
-        self.visible_index(&branch, offset)?;
+        self.location_index(&branch, offset)?;
         Some((branch, offset))
     }
 
-    pub(in crate::gui) fn location_index(
-        &self,
-        branch: &TreeBranch,
-        offset: usize,
-    ) -> Option<usize> {
-        self.visible_index(branch, offset)
-    }
-
-    fn visible_index(&self, key: &TreeBranch, index: usize) -> Option<usize> {
+    pub(in crate::gui) fn location_index(&self, key: &TreeBranch, index: usize) -> Option<usize> {
         self.segments
             .iter()
             .find(|segment| {
@@ -1088,13 +1175,13 @@ impl DirectoryTree {
             .and_then(|key| {
                 self.selected_locations
                     .get(key)
-                    .and_then(|index| self.visible_index(&key.1, *index))
+                    .and_then(|index| self.location_index(&key.1, *index))
             })
             .or_else(|| {
                 self.selected_locations
                     .iter()
                     .filter(|((candidate, _), _)| candidate == node)
-                    .filter_map(|((_, key), index)| self.visible_index(key, *index))
+                    .filter_map(|((_, key), index)| self.location_index(key, *index))
                     .min()
             })
     }
@@ -1118,12 +1205,12 @@ impl DirectoryTree {
             .and_then(|key| {
                 self.selected_locations
                     .get(key)
-                    .and_then(|index| self.visible_index(&key.1, *index))
+                    .and_then(|index| self.location_index(&key.1, *index))
             })
             .or_else(|| {
                 self.selected_locations
                     .iter()
-                    .filter_map(|((_, key), index)| self.visible_index(key, *index))
+                    .filter_map(|((_, key), index)| self.location_index(key, *index))
                     .min()
             })
     }
@@ -1138,7 +1225,9 @@ impl DirectoryTree {
     }
 
     pub(in crate::gui) fn cancel_navigation(&mut self) {
-        self.navigation_target = None;
+        if self.navigation_target.take().is_some() {
+            self.reclaim_branches();
+        }
     }
 
     pub(in crate::gui) fn defer_selection(&mut self, index: usize) {
@@ -1152,9 +1241,10 @@ impl DirectoryTree {
 
     pub(in crate::gui) fn ready_selection(&mut self) -> Option<usize> {
         let (key, child_index) = self.navigation_target.as_ref()?;
-        let index = self.visible_index(key, *child_index)?;
+        let index = self.location_index(key, *child_index)?;
         if matches!(self.item(index), Some(TreeItem::Entry(_))) {
             self.navigation_target = None;
+            self.reclaim_branches();
             Some(index)
         } else {
             None
@@ -1681,6 +1771,9 @@ mod tests {
         assert_eq!(tree.row_count(), 4);
         accept(&mut tree, &branch("/a"), 1, 6, &["/a/b"], 3);
         tree.expand(&branch("/a/b"));
+        assert_eq!(tree.status(&branch("/a/b")), BranchStatus::Unloaded);
+        assert_eq!(tree.row_count(), 5);
+        accept(&mut tree, &branch("/a/b"), 0, 8, &["/a/b/leaf"], 2);
         assert_eq!(tree.row_count(), 6);
         accept(&mut tree, &branch("/a"), 0, 7, &["/a/other"], 1);
         tree.invalidate();
@@ -1704,7 +1797,14 @@ mod tests {
             }
 
             assert!(tree.configure_page_size(1));
-            assert_eq!(tree.status(&root), BranchStatus::Empty);
+            assert_eq!(
+                tree.status(&root),
+                if collapsed {
+                    BranchStatus::Unloaded
+                } else {
+                    BranchStatus::Empty
+                }
+            );
             assert_eq!(tree.row_count(), 1);
             assert_eq!(tree.requests_for_range(0..1), vec![(forest.clone(), 0)]);
 
@@ -2248,5 +2348,246 @@ mod tests {
         assert_eq!(tree.selected_index(), Some(1));
         tree.remember_selection(&HashSet::new(), &HashSet::new());
         assert_eq!(tree.selected_index(), None);
+    }
+
+    #[test]
+    fn branch_lifecycle_collapsed_visits_release_bookkeeping_and_reject_late_responses() {
+        let mut tree = DirectoryTree::default();
+        tree.configure_page_size(1);
+        let forest = branch("");
+        let root = branch("/a");
+        accept(&mut tree, &forest, 0, 1, &["/a"], 1);
+        tree.expand(&root);
+        for index in 0..128 {
+            let path = format!("/a/visited-{index}");
+            let child = branch(&path);
+            let generation = 10 + index as u64 * 3;
+            accept(&mut tree, &root, index, generation, &[&path], 128);
+            tree.expand(&child);
+            accept(&mut tree, &child, 0, generation + 1, &[], 0);
+            tree.begin(child.clone(), 0, generation + 2);
+            tree.collapse(&child);
+
+            assert!(!tree.branches.contains_key(&child));
+            assert_eq!(tree.branches.len(), 2);
+            assert!(!tree.request_pending(&child, generation + 2));
+            assert!(!tree.accept(&child, generation + 2, page(&["/stale"], 1)));
+            tree.fail(&child, generation + 2);
+            assert!(!tree.branches.contains_key(&child));
+            assert!(tree.pages.len() <= MAX_CACHED_PAGES);
+            assert_eq!(tree.row_count(), 129);
+        }
+
+        let child = branch("/a/visited-127");
+        tree.expand(&child);
+        tree.begin(child.clone(), 0, 1_000);
+        assert!(!tree.accept(&child, 393, page(&["/stale"], 1)));
+        tree.fail(&child, 393);
+        tree.cancel_request(&child, 393);
+        assert!(tree.request_pending(&child, 1_000));
+        assert!(tree.accept(&child, 1_000, page(&["/a/visited-127/current"], 1)));
+        assert!(matches!(tree.item(129), Some(TreeItem::Entry(row))
+            if matches!(row.row, DirectoryRow::Directory { ref path }
+                if path == Path::new("/a/visited-127/current"))));
+    }
+
+    #[test]
+    fn branch_lifecycle_pending_and_cached_results_outlive_viewport_but_not_their_owners() {
+        let mut tree = DirectoryTree::default();
+        let pending = branch("/pending");
+        tree.begin(pending.clone(), 0, 1);
+        assert!(tree.requests_for_range(0..0).is_empty());
+        assert!(tree.request_pending(&pending, 1));
+
+        for index in 0..40 {
+            let key = branch(&format!("/visited-{index}"));
+            tree.begin(key.clone(), 0, index + 10);
+            if index % 2 == 0 {
+                tree.fail(&key, index + 10);
+            } else {
+                assert!(tree.accept(&key, index + 10, page(&[], 0)));
+            }
+            assert!(tree.request_pending(&pending, 1));
+            assert!(tree.branches.len() <= MAX_CACHED_PAGES + 1);
+        }
+        let evicted = branch("/visited-0");
+        assert!(!tree.branches.contains_key(&evicted));
+        assert!(!tree.accept(&evicted, 10, page(&["/stale"], 1)));
+        tree.fail(&evicted, 10);
+        assert!(!tree.branches.contains_key(&evicted));
+        assert!(tree.accept(&pending, 1, page(&[], 0)));
+
+        let failed = branch("/failed");
+        tree.begin(failed.clone(), 0, 100);
+        tree.fail(&failed, 100);
+        assert_eq!(tree.status(&failed), BranchStatus::Error);
+        tree.retry(&failed);
+        assert!(!tree.branches.contains_key(&failed));
+        tree.begin(failed.clone(), 0, 101);
+        tree.cancel_request(&failed, 100);
+        assert!(tree.request_pending(&failed, 101));
+        tree.cancel_request(&failed, 101);
+        assert!(!tree.branches.contains_key(&failed));
+
+        tree.invalidate();
+        assert!(tree.branches.is_empty());
+        for index in 0..512 {
+            tree.begin(branch(&format!("/pending-{index}")), 0, index + 1_000);
+        }
+        tree.cancel_pending();
+        assert!(tree.branches.is_empty());
+        assert!(tree.branches.capacity() <= 64);
+        assert!(!tree.accept(&branch("/pending-0"), 1_000, page(&[], 0)));
+    }
+
+    #[test]
+    fn branch_lifecycle_hidden_expansions_keep_ancestors_and_restore_after_eviction() {
+        let mut tree = DirectoryTree::default();
+        tree.configure_page_size(1);
+        let forest = branch("");
+        let root = branch("/a");
+        let nested = branch("/a/nested");
+        let other = branch("/b");
+        accept(&mut tree, &forest, 0, 1, &["/a"], 40);
+        accept(&mut tree, &forest, 1, 2, &["/b"], 40);
+        tree.expand(&root);
+        accept(&mut tree, &root, 0, 3, &["/a/nested"], 1);
+        tree.expand(&nested);
+        accept(&mut tree, &nested, 0, 4, &["/a/nested/leaf"], 2);
+        tree.expand(&other);
+        accept(&mut tree, &other, 0, 5, &["/b/selected"], 1);
+        let selected =
+            super::super::LibraryNode::Directory(std::sync::Arc::from(Path::new("/b/selected")));
+        tree.focus_selection(&selected, 5);
+        tree.begin(nested.clone(), 1, 6);
+        tree.collapse(&root);
+        assert!(!tree.request_pending(&nested, 6));
+        assert!(!tree.accept(&nested, 6, page(&["/stale"], 2)));
+        for index in 2..40 {
+            accept(
+                &mut tree,
+                &forest,
+                index,
+                index as u64 + 10,
+                &[&format!("/other-{index}")],
+                40,
+            );
+        }
+        assert_eq!(tree.branches.len(), 4);
+        assert!(tree.branches.contains_key(&root));
+        assert!(!tree.expanded(&root));
+        assert!(tree.expanded(&nested));
+        assert_eq!(tree.selected_index(), Some(2));
+        assert_eq!(tree.parent_index(2), Some(1));
+        assert!(tree.focused.is_some());
+
+        tree.invalidate();
+        accept(&mut tree, &forest, 0, 100, &["/a"], 40);
+        tree.expand(&root);
+        assert!(tree.expanded(&nested));
+        assert_eq!(tree.row_count(), 44);
+        assert_eq!(tree.selected_index(), Some(5));
+        assert_eq!(tree.parent_index(2), Some(1));
+        tree.collapse(&nested);
+        tree.collapse(&root);
+        assert!(!tree.branches.contains_key(&nested));
+        assert!(!tree.branches.contains_key(&root));
+        assert_eq!(tree.selected_index(), Some(2));
+    }
+
+    #[test]
+    fn branch_lifecycle_selection_owns_hidden_geometry_until_deselected() {
+        let mut tree = DirectoryTree::default();
+        let forest = branch("");
+        let root = branch("/a");
+        let other = branch("/b");
+        accept(&mut tree, &forest, 0, 1, &["/a", "/b"], 2);
+        tree.expand(&root);
+        accept(&mut tree, &root, 0, 2, &["/a/selected"], 1);
+        tree.expand(&other);
+        accept(&mut tree, &other, 0, 3, &["/b/focused"], 1);
+        let selected =
+            super::super::LibraryNode::Directory(std::sync::Arc::from(Path::new("/a/selected")));
+        let focused =
+            super::super::LibraryNode::Directory(std::sync::Arc::from(Path::new("/b/focused")));
+        tree.remember_selection(
+            &HashSet::from([selected.clone(), focused.clone()]),
+            &HashSet::new(),
+        );
+        tree.focus_selection(&focused, 3);
+        tree.collapse(&root);
+        assert!(tree.branches.contains_key(&root));
+        assert_eq!(tree.index_of(&selected), None);
+        assert_eq!(tree.selected_index(), Some(2));
+        assert!(tree.focused.is_some());
+        tree.expand(&root);
+        assert_eq!(tree.index_of(&selected), Some(1));
+        assert_eq!(tree.selected_index(), Some(3));
+        tree.collapse(&root);
+        tree.remember_selection(&HashSet::from([focused]), &HashSet::new());
+        assert!(!tree.branches.contains_key(&root));
+        assert_eq!(tree.selected_index(), Some(2));
+        assert!(tree.focused.is_some());
+    }
+    #[test]
+    fn viewport_and_selection_peaks_release_sparse_capacity() {
+        let mut tree = DirectoryTree::default();
+        tree.configure_page_size(1);
+        let forest = branch("");
+        accept(&mut tree, &forest, 0, 1, &["/root-0"], 128);
+        tree.requests_for_range(0..128);
+        for index in 0..128 {
+            let path = format!("/root-{index}");
+            accept(&mut tree, &forest, index, index as u64 + 2, &[&path], 128);
+            let node = super::super::LibraryNode::Directory(std::sync::Arc::from(Path::new(&path)));
+            tree.focus_selection(&node, index);
+        }
+        assert_eq!(tree.pages.len(), 128);
+        assert_eq!(tree.selected_locations.len(), 128);
+        tree.remember_selection(&HashSet::new(), &HashSet::new());
+        assert_eq!(tree.selected_index(), None);
+        assert!(tree.selected_locations.capacity() <= 64);
+        tree.requests_for_range(0..1);
+        assert_eq!(tree.pages.len(), MAX_CACHED_PAGES);
+        assert!(tree.pages.capacity() <= MAX_CACHED_PAGES * 4);
+        assert!(matches!(tree.item(0), Some(TreeItem::Entry(_))));
+        tree.invalidate();
+        assert!(tree.pages.is_empty());
+        assert!(tree.pages.capacity() <= MAX_CACHED_PAGES);
+        assert_eq!(tree.demanded.capacity(), 0);
+        assert_eq!(tree.row_count(), 128);
+        assert_eq!(tree.requests_for_range(127..128), vec![(forest, 127)]);
+    }
+
+    #[test]
+    fn verified_or_collapsed_ancestry_releases_stale_position_capacity() {
+        for collapse in [false, true] {
+            let mut tree = DirectoryTree::default();
+            let forest = branch("");
+            let root = branch("/a");
+            accept(&mut tree, &forest, 0, 1, &["/a"], 1);
+            tree.expand(&root);
+            let paths = (0..128)
+                .map(|index| format!("/a/{index}"))
+                .collect::<Vec<_>>();
+            let rows = paths.iter().map(String::as_str).collect::<Vec<_>>();
+            accept(&mut tree, &root, 0, 2, &rows, 128);
+            for path in &paths {
+                tree.expand(&branch(path));
+            }
+            tree.invalidate();
+            assert_eq!(tree.branches[&root].stale_children.len(), 128);
+            if collapse {
+                for path in &paths {
+                    tree.collapse(&branch(path));
+                }
+            } else {
+                accept(&mut tree, &root, 0, 3, &[], 0);
+            }
+            assert!(tree.branches[&root].stale_children.is_empty());
+            assert!(tree.branches[&root].stale_children.capacity() <= 64);
+            assert!(tree.branches[&root].children.is_empty());
+            assert_eq!(tree.row_count(), if collapse { 129 } else { 1 });
+        }
     }
 }

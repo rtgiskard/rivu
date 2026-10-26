@@ -269,7 +269,15 @@ impl Library {
         offset: usize,
         cx: &mut Context<Self>,
     ) {
-        if !self.demanded() {
+        let page_size = self.view_page_size();
+        if !self.demanded()
+            || (!branch.is_forest()
+                && self
+                    .library
+                    .tree()
+                    .location_index(&branch, offset / page_size * page_size)
+                    .is_none())
+        {
             return;
         }
         self.request_library_search_counts(cx);
@@ -277,7 +285,7 @@ impl Library {
         let request = self.prepare_directory_read(
             branch,
             offset,
-            self.view_page_size(),
+            page_size,
             &state.system.config.library_roots,
             state.query_revisions(None),
         );

@@ -115,12 +115,13 @@ current data and intent.
 |One root/search-count worker. Counts, totals, failures, configured roots, and
 filtered query identity are reconciled together. The forest page is local
 configuration data, not a database read; unavailable counts do not unmount roots.
-Duplicate/nested configured roots count once in the aggregate.
+Root aggregates count each track once.
 |Library tree
 |At most four physical reads and four coalesced latest pending branch demands.
-Unscheduled demand owns no loading token; discarded offscreen demand does not
-become a visited-branch backlog. Local forest publication and worker progress,
-not queued demand alone, notify rendering.
+Repeated demand for the current in-flight page does not queue a second read or
+implicitly retry a failure. Unscheduled demand owns no loading token; collapsing
+an ancestor discards its queued subtree demand without releasing physical slots.
+Local forest publication and worker progress, not queued demand alone, notify rendering.
 |Playlists and Queue
 |Page/request lifecycle stays with the feature owner. Other consumers borrow
 read-only buffers and request explicit catalog/entry operations. Selection-
@@ -165,6 +166,20 @@ same separate bound.
 |One shared LRU bound: the larger of sixteen pages or current demand, including
 unverified ancestry. Expansion/selection identities are separate from payloads.
 |===
+
+Tree branch bookkeeping follows live ownership: cached pages, demand, pending
+requests, expanded descendants and their ancestors, selection, focus, and
+navigation. Otherwise-unowned collapsed branches are reclaimed rather than kept
+for every directory ever visited. Reopening one loads its count again; hidden
+descendant expansion choices and selected anchors remain intact.
+
+Expansion snapshots belong only to the inactive view; switching consumes the
+destination snapshot rather than retaining a duplicate of its active branches.
+Sparse branch, page, stale-ancestry, selection-anchor and selected-identity hash
+tables shed high-water capacity when their live contents shrink substantially,
+retaining bounded reuse slack instead of reallocating on every deselection or collapse.
+Branch collection borrows live identities and runs when ownership changes, not
+for unchanged viewport demand alone.
 
 A data revision forgets counts and drops obsolete pages, failures, and positional
 pins, but retains nonempty scroll geometry until a current result supplies its

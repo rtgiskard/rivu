@@ -7,13 +7,13 @@ use rivu_protocol::{
     model::Query,
     response::{QueryResponse, QueryRevisions, ViewResponse},
 };
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 pub(super) const DIRECTORY_WORKERS: usize = 4;
 #[derive(Default)]
 pub(super) struct LibraryRequests {
     generation: u64,
-    directory_workers: HashSet<library::TreeBranch>,
+    directory_workers: HashMap<library::TreeBranch, (usize, u64)>,
     directory_queued: VecDeque<(library::TreeBranch, usize)>,
     root_count_workers: HashSet<usize>,
 }
@@ -81,8 +81,23 @@ impl Library {
         if self.library.sync_projection(revisions) {
             self.requests.cancel_directory_demand();
         }
+        let offset = offset / page_size * page_size;
+        if self.requests.directory_workers.get(&branch).is_some_and(
+            |(worker_offset, generation)| {
+                *worker_offset == offset
+                    && self.library.tree().request_pending(&branch, *generation)
+            },
+        ) {
+            self.requests
+                .directory_queued
+                .retain(|(queued, _)| queued != &branch);
+            return DirectoryRequest {
+                published: false,
+                read: None,
+            };
+        }
         if !branch.is_forest()
-            && (self.requests.directory_workers.contains(&branch)
+            && (self.requests.directory_workers.contains_key(&branch)
                 || self.requests.directory_workers.len() >= DIRECTORY_WORKERS)
         {
             self.requests.queue_directory(branch, offset);
@@ -91,6 +106,9 @@ impl Library {
                 read: None,
             };
         }
+        self.requests
+            .directory_queued
+            .retain(|(queued, _)| queued != &branch);
         let generation = self.requests.next_generation();
         let offset = self
             .library
@@ -133,7 +151,9 @@ impl Library {
                 limit: page_size,
             }
         };
-        self.requests.directory_workers.insert(branch.clone());
+        self.requests
+            .directory_workers
+            .insert(branch.clone(), (offset, generation));
         DirectoryRequest {
             published: false,
             read: Some(DirectoryRead {
@@ -228,6 +248,17 @@ impl Library {
         None
     }
 
+    pub(super) fn prune_directory_demand(&mut self) {
+        self.requests.directory_queued.retain(|(branch, offset)| {
+            branch.is_forest()
+                || self
+                    .library
+                    .tree()
+                    .location_index(branch, *offset)
+                    .is_some()
+        });
+    }
+
     pub(in crate::gui) fn next_directory_demand(
         &mut self,
         demanded: bool,
@@ -236,6 +267,7 @@ impl Library {
             self.requests.cancel_directory_demand();
             return None;
         }
+        self.prune_directory_demand();
         if self.requests.directory_workers.len() >= DIRECTORY_WORKERS {
             return None;
         }
@@ -243,7 +275,7 @@ impl Library {
             .requests
             .directory_queued
             .iter()
-            .position(|(branch, _)| !self.requests.directory_workers.contains(branch))?;
+            .position(|(branch, _)| !self.requests.directory_workers.contains_key(branch))?;
         self.requests.directory_queued.remove(index)
     }
 
@@ -521,6 +553,7 @@ mod tests {
         with_library(cx, |browser, _| {
             let roots = vec!["/music".into()];
             let branch = root_branches(browser, &roots).remove(0);
+            browser.library.expand_directory(&branch, true);
             let baseline = browser.state.query_revisions(None);
             let read = browser
                 .prepare_directory_read(branch.clone(), 0, 20, &roots, baseline)
@@ -541,7 +574,7 @@ mod tests {
                     .request_pending(&branch, read.generation)
             );
             assert!(browser.library.tree().cached_row(&branch, 0).is_none());
-            assert!(browser.requests.directory_workers.contains(&branch));
+            assert!(browser.requests.directory_workers.contains_key(&branch));
             assert!(
                 browser
                     .prepare_directory_read(branch.clone(), 0, 20, &roots, latest)
@@ -659,6 +692,7 @@ mod tests {
         with_library(cx, |browser, _| {
             let roots = vec!["/music".into()];
             let branch = root_branches(browser, &roots).remove(0);
+            browser.library.expand_directory(&branch, true);
             let revisions = QueryRevisions::default();
             let old = browser
                 .prepare_directory_read(branch.clone(), 0, 20, &roots, revisions)
@@ -726,6 +760,9 @@ mod tests {
                 .map(|index| std::path::PathBuf::from(format!("/music/{index}")))
                 .collect();
             let branches = root_branches(browser, &roots);
+            for branch in &branches {
+                browser.library.expand_directory(branch, true);
+            }
             let revisions = QueryRevisions::default();
             let reads: Vec<_> = branches
                 .iter()
@@ -775,11 +812,227 @@ mod tests {
             assert!(browser.prepare_root_count_read(&roots, 0).is_some());
         });
     }
+
+    #[gpui::test]
+    fn current_directory_page_demand_does_not_queue_a_duplicate(cx: &mut gpui::TestAppContext) {
+        with_library(cx, |browser, _| {
+            let roots = vec!["/music".into()];
+            let branch = root_branches(browser, &roots).remove(0);
+            browser.library.expand_directory(&branch, true);
+            let revisions = QueryRevisions::default();
+            let read = browser
+                .prepare_directory_read(branch.clone(), 0, 20, &roots, revisions)
+                .read
+                .unwrap();
+            assert!(
+                browser
+                    .prepare_directory_read(branch.clone(), 19, 20, &roots, revisions)
+                    .read
+                    .is_none()
+            );
+            assert!(browser.requests.directory_queued.is_empty());
+            browser.prepare_directory_read(branch.clone(), 40, 20, &roots, revisions);
+            assert_eq!(
+                browser.requests.directory_queued.front(),
+                Some(&(branch.clone(), 40))
+            );
+            browser.prepare_directory_read(branch.clone(), 7, 20, &roots, revisions);
+            assert!(browser.requests.directory_queued.is_empty());
+            browser.complete_directory_read(&read, revisions, track_response(revisions, false));
+            assert!(browser.requests.directory_workers.is_empty());
+            assert!(browser.next_directory_demand(true).is_none());
+            assert!(browser.library.tree().cached_row(&branch, 0).is_some());
+        });
+    }
+
+    #[gpui::test]
+    fn timeout_holds_worker_until_retirement_and_only_explicit_retry_requeues(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        with_library(cx, |browser, _| {
+            let roots = vec!["/music".into()];
+            let branch = root_branches(browser, &roots).remove(0);
+            browser.library.expand_directory(&branch, true);
+            let revisions = QueryRevisions::default();
+            let read = browser
+                .prepare_directory_read(branch.clone(), 0, 20, &roots, revisions)
+                .read
+                .unwrap();
+            browser.prepare_directory_read(branch.clone(), 0, 20, &roots, revisions);
+            assert_eq!(
+                browser.publish_directory_read(
+                    &read,
+                    revisions,
+                    QueryResponse {
+                        revisions,
+                        result: Err(rivu_protocol::response::QueryError::Message(
+                            "timeout".into()
+                        )),
+                    },
+                ),
+                Some("timeout".into())
+            );
+            assert_eq!(
+                browser.library.tree().status(&branch),
+                library::BranchStatus::Error
+            );
+            assert!(browser.requests.directory_workers.contains_key(&branch));
+            assert!(browser.next_directory_demand(true).is_none());
+            browser.library.retry_directory(&branch);
+            assert!(
+                browser
+                    .prepare_directory_read(branch.clone(), 0, 20, &roots, revisions)
+                    .read
+                    .is_none()
+            );
+            assert_eq!(browser.requests.directory_queued.len(), 1);
+            browser.abandon_directory_read(&read);
+            let (retry_branch, offset) = browser.next_directory_demand(true).unwrap();
+            let retry = browser
+                .prepare_directory_read(retry_branch, offset, 20, &roots, revisions)
+                .read
+                .unwrap();
+            browser.publish_directory_read(&read, revisions, track_response(revisions, false));
+            assert!(
+                browser
+                    .library
+                    .tree()
+                    .request_pending(&branch, retry.generation)
+            );
+            browser.complete_directory_read(&retry, revisions, track_response(revisions, false));
+            assert!(browser.requests.directory_workers.is_empty());
+            assert_eq!(
+                browser.library.tree().status(&branch),
+                library::BranchStatus::Ready
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn collapse_discards_queued_descendants_and_rejects_late_callbacks(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        with_library(cx, |browser, cx| {
+            let roots = vec![
+                "/music".into(),
+                "/busy-1".into(),
+                "/busy-2".into(),
+                "/busy-3".into(),
+                "/busy-4".into(),
+            ];
+            let branches = root_branches(browser, &roots);
+            let root = &branches[0];
+            browser.library.expand_directory(root, true);
+            let revisions = QueryRevisions::default();
+            let read = browser
+                .prepare_directory_read(root.clone(), 0, 20, &roots, revisions)
+                .read
+                .unwrap();
+            browser.complete_directory_read(
+                &read,
+                revisions,
+                QueryResponse {
+                    revisions,
+                    result: Ok(ViewResponse::DirectoryPage(rivu_protocol::model::Page {
+                        total: 1,
+                        rows: vec![rivu_protocol::model::DirectoryRow::Directory {
+                            path: "/music/album".into(),
+                        }],
+                    })),
+                },
+            );
+            let library::tree::TreeItem::Entry(entry) = browser.library.tree().item(1).unwrap()
+            else {
+                panic!("album directory");
+            };
+            let child = entry.branch.unwrap();
+            browser.library.expand_directory(&child, true);
+            let reads: Vec<_> = branches
+                .iter()
+                .skip(1)
+                .map(|branch| {
+                    browser.library.expand_directory(branch, true);
+                    browser
+                        .prepare_directory_read(branch.clone(), 0, 20, &roots, revisions)
+                        .read
+                        .unwrap()
+                })
+                .collect();
+            assert!(
+                browser
+                    .prepare_directory_read(child.clone(), 7, 20, &roots, revisions)
+                    .read
+                    .is_none()
+            );
+            assert_eq!(
+                browser.requests.directory_queued.front(),
+                Some(&(child.clone(), 0))
+            );
+            browser.library.expand_directory(root, false);
+            browser.prune_directory_demand();
+            assert!(browser.requests.directory_queued.is_empty());
+            assert!(browser.library.tree().expanded(&child));
+            browser.visible = true;
+            browser.request_directory_page(child.clone(), 0, cx);
+            assert_eq!(browser.requests.directory_workers.len(), DIRECTORY_WORKERS);
+            assert!(browser.requests.directory_queued.is_empty());
+            browser.abandon_directory_read(&reads[0]);
+            assert!(browser.next_directory_demand(true).is_none());
+            browser.library.expand_directory(root, true);
+            let count = browser.library.tree().row_count();
+            assert!(
+                browser
+                    .library
+                    .demand_directories(0..count)
+                    .contains(&(child.clone(), 0))
+            );
+            let reopened = browser
+                .prepare_directory_read(child.clone(), 0, 20, &roots, revisions)
+                .read
+                .expect("current visible demand can read after reopening");
+            browser.library.expand_directory(root, false);
+            browser.prune_directory_demand();
+            browser.complete_directory_read(&reopened, revisions, track_response(revisions, false));
+            assert!(browser.library.tree().cached_row(&child, 0).is_none());
+            assert!(
+                !browser
+                    .library
+                    .tree()
+                    .request_pending(&child, reopened.generation)
+            );
+            assert!(browser.library.tree().expanded(&child));
+            for read in reads.iter().skip(1) {
+                browser.abandon_directory_read(read);
+            }
+            assert!(browser.requests.directory_workers.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn cancellation_releases_bounded_queue_even_without_physical_workers(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        with_library(cx, |browser, _| {
+            let roots: Vec<_> = (0..12)
+                .map(|index| format!("/music/{index}").into())
+                .collect();
+            let branches = root_branches(browser, &roots);
+            for branch in branches {
+                browser.requests.queue_directory(branch, 0);
+                assert!(browser.requests.directory_queued.len() <= DIRECTORY_WORKERS);
+            }
+            assert_eq!(browser.requests.directory_queued.len(), DIRECTORY_WORKERS);
+            assert!(!browser.requests.reads_pending());
+            browser.cancel_reads();
+            assert!(browser.requests.directory_queued.is_empty());
+        });
+    }
+
     #[test]
     fn queued_directory_demand_coalesces_without_releasing_a_worker() {
         let mut requests = LibraryRequests::default();
         let branch = super::library::TreeBranch::default();
-        requests.directory_workers.insert(branch.clone());
+        requests.directory_workers.insert(branch.clone(), (0, 1));
         requests.queue_directory(branch.clone(), 0);
         requests.queue_directory(branch.clone(), 40);
         assert_eq!(requests.directory_queued.len(), 1);
@@ -789,6 +1042,6 @@ mod tests {
         );
         requests.cancel_directory_demand();
         assert!(requests.directory_queued.is_empty());
-        assert!(requests.directory_workers.contains(&branch));
+        assert!(requests.directory_workers.contains_key(&branch));
     }
 }

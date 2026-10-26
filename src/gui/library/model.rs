@@ -722,6 +722,14 @@ impl LibraryBrowser {
     pub(super) fn remember_selection(&mut self) {
         self.tree
             .remember_selection(&self.selected_nodes, &self.selected);
+        if self.selected.capacity() > 64.max(self.selected.len().saturating_mul(4)) {
+            self.selected
+                .shrink_to(self.selected.len().saturating_mul(2));
+        }
+        if self.selected_nodes.capacity() > 64.max(self.selected_nodes.len().saturating_mul(4)) {
+            self.selected_nodes
+                .shrink_to(self.selected_nodes.len().saturating_mul(2));
+        }
     }
 
     pub(super) fn roots_changed(&mut self) {
@@ -729,7 +737,7 @@ impl LibraryBrowser {
         self.tree.clear();
         self.counts.invalidate();
         self.search_counts.other_total = None;
-        self.selected_nodes.clear();
+        self.selected_nodes = HashSet::new();
     }
 
     pub(super) fn toggle_view(&mut self) {
@@ -1681,5 +1689,40 @@ mod tests {
         assert!(library.begin_root_counts(&roots, 8).1.is_empty());
         assert!(library.demand_directories(0..1).is_empty());
         assert!(!library.directory_request_pending(&branch, 2, None, None, false, None));
+    }
+
+    #[test]
+    fn replacing_large_selection_releases_capacity_and_preserves_additive_semantics() {
+        let mut library = LibraryBrowser::default();
+        let range = (0..512)
+            .flat_map(|id| {
+                [
+                    LibraryNode::Track(id),
+                    LibraryNode::Directory(std::sync::Arc::from(std::path::Path::new(&format!(
+                        "/music/{id}"
+                    )))),
+                ]
+            })
+            .collect();
+        library.apply_range(range, false);
+        assert_eq!(library.selected.len(), 512);
+        assert_eq!(library.selected_nodes.len(), 512);
+        library.select_node(&LibraryNode::Track(7), false);
+        assert_eq!(library.selected, HashSet::from([7]));
+        assert!(library.selected_nodes.is_empty());
+        assert!(library.selected.capacity() <= 64);
+        assert!(library.selected_nodes.capacity() <= 64);
+        library.select_node(&LibraryNode::OtherTracks, true);
+        library.select_node(&LibraryNode::Track(8), true);
+        assert_eq!(library.selected, HashSet::from([7, 8]));
+        assert_eq!(
+            library.selected_nodes,
+            HashSet::from([LibraryNode::OtherTracks])
+        );
+        library.select_node(&LibraryNode::Track(7), true);
+        assert_eq!(library.selected, HashSet::from([8]));
+        library.clear_selection();
+        assert!(library.selected.is_empty());
+        assert!(library.selected_nodes.is_empty());
     }
 }
