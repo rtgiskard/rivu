@@ -137,14 +137,13 @@ impl Store {
     ) -> Result<Page<QueueRow>> {
         let query = search_query(query);
         let filter = search_filter("t", "?1");
-        let total = if query.is_some() {
-            self.conn.query_row(&format!("SELECT COUNT(*) FROM queue_entries q JOIN tracks t ON t.id=q.track_id WHERE {filter}"), [query.as_deref()], |row| integer(row, 0))?
-        } else {
-            self.conn
-                .query_row("SELECT COUNT(*) FROM queue_entries", [], |row| {
-                    integer(row, 0)
-                })?
-        };
+        let total = self.cached_count(super::CountDomain::Queue, &[query.as_deref().unwrap_or("")], || {
+            if query.is_some() {
+                Ok(self.conn.query_row(&format!("SELECT COUNT(*) FROM queue_entries q JOIN tracks t ON t.id=q.track_id WHERE {filter}"), [query.as_deref()], |row| integer(row, 0))?)
+            } else {
+                Ok(self.conn.query_row("SELECT COUNT(*) FROM queue_entries", [], |row| integer(row, 0))?)
+            }
+        })?;
         if limit == 0 {
             return Ok(Page {
                 total,

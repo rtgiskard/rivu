@@ -812,8 +812,9 @@ impl Core {
         if let Some(error) = saved.error {
             errors.push(error);
         }
-        if saved.library_committed {
-            self.store.invalidate_caches();
+        if let Some(impacts) = saved.impacts {
+            self.store
+                .invalidate_scan_caches(impacts, saved.playlist_id.is_some());
         }
         let impacts = saved.impacts;
         if let Some(impacts) = impacts {
@@ -1041,6 +1042,67 @@ mod tests {
                 store.playlist_summary_page(None, 0, 0).unwrap().total,
                 usize::from(committed)
             );
+        }
+    }
+
+    #[test]
+    fn completed_scan_without_display_impacts_keeps_core_track_cache_and_revisions() {
+        for hidden_raw_write in [false, true] {
+            let (directory, mut core) = super::super::tests::fixture_with_database(Some(10.0));
+            let cached = core.track(1).unwrap();
+            let before = core.state.query_revisions();
+            let history = Arc::clone(&core.state.library.history);
+            // An uncached decode now fails. A no-impact completion must retain
+            // the accepted cached Track rather than reloading unrelated rows.
+            let writer = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+            writer
+                .execute("UPDATE tracks SET channels='unreadable' WHERE id=1", [])
+                .unwrap();
+            let progress = ScanProgress {
+                phase: ScanPhase::Saving,
+                processed: 1,
+                total: Some(1),
+                errors: 0,
+                path: None,
+            };
+            core.active_scan = Some(ScanTask {
+                status: ScanTaskStatus {
+                    id: 1,
+                    progress: progress.clone(),
+                    message: String::new(),
+                    library_committed: false,
+                    playlist_id: None,
+                    error: None,
+                },
+                owner: crate::projection::MediaTaskOwner::Library,
+                cancellation: library::ScanCancellation::default(),
+                worker: core.executor.spawn(async {}),
+                pending_save: None,
+            });
+            core.complete_saved_scan(ScanSaved {
+                id: 1,
+                progress,
+                library_committed: true,
+                playlist_id: None,
+                outcome_uncertain: false,
+                impacts: Some(crate::store::ScanImpacts {
+                    changed: hidden_raw_write,
+                    ..Default::default()
+                }),
+                summary: "Found 1 audio files".into(),
+                scan_errors: None,
+                error: None,
+                library_total: None,
+                history: None,
+                playlist_total: None,
+            });
+            assert_eq!(
+                core.scan_results.back().unwrap().progress.phase,
+                ScanPhase::Completed
+            );
+            assert_eq!(core.state.query_revisions(), before);
+            assert!(Arc::ptr_eq(&core.state.library.history, &history));
+            assert_eq!(core.track(1).unwrap(), cached);
         }
     }
 }

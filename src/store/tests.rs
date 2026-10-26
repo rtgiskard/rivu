@@ -58,6 +58,117 @@ impl Drop for SqlVmSteps<'_> {
     }
 }
 
+#[test]
+fn projection_totals_and_rows_follow_filters_and_writer_changes() {
+    use rivu_protocol::model::LibrarySort;
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    store
+        .conn
+        .execute_batch(
+            "WITH RECURSIVE ids(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM ids WHERE id<1024)
+         INSERT INTO tracks(id,path,raw_title,raw_album) SELECT id,'/outside/'||id||'.wav',
+             CASE WHEN id%7=0 THEN 'needle' ELSE 'other' END,'Collection' FROM ids;
+         INSERT INTO queue_entries(track_id,position) SELECT id,id-1 FROM tracks;
+         INSERT INTO playlists(id,name) VALUES(1,'Count fixture');
+         INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT 1,id,id-1 FROM tracks;",
+        )
+        .unwrap();
+    let roots = vec![PathBuf::from("/inside")];
+    let album = rivu_protocol::model::AlbumKey {
+        directory: "/outside".into(),
+        title: "Collection".into(),
+    };
+    let counts: [&dyn Fn() -> usize; 6] = [
+        &|| {
+            store
+                .other_tracks_page(&roots, Some("needle"), None, None, LibrarySort::Id, 0, 0)
+                .unwrap()
+                .total
+        },
+        &|| {
+            store
+                .directory_page(Path::new("/outside"), Some("needle"), None, None, 0, 0)
+                .unwrap()
+                .total
+        },
+        &|| {
+            store
+                .albums_page(Some("Collection"), AlbumSort::Title, 0, 0)
+                .unwrap()
+                .total
+        },
+        &|| {
+            store
+                .album_tracks_page(&album, Some("needle"), 0, 0)
+                .unwrap()
+                .total
+        },
+        &|| store.queue_page(Some("needle"), 0, 0).unwrap().total,
+        &|| {
+            store
+                .playlist_entries_page(1, Some("needle"), 0, 0)
+                .unwrap()
+                .total
+        },
+    ];
+    for (count, expected) in counts.into_iter().zip([146, 146, 1, 146, 146, 146]) {
+        assert_eq!(count(), expected);
+        assert_eq!(count(), expected);
+    }
+    let other = store
+        .other_tracks_page(&roots, Some("needle"), None, None, LibrarySort::Id, 1, 2)
+        .unwrap();
+    assert_eq!(other.total, 146);
+    assert_eq!(other.rows.len(), 2);
+    let queue = store.queue_page(Some("needle"), 1, 2).unwrap();
+    assert_eq!(queue.total, 146);
+    assert_eq!(
+        queue
+            .rows
+            .iter()
+            .map(|row| row.track_id)
+            .collect::<Vec<_>>(),
+        [14, 21]
+    );
+    let playlist = store
+        .playlist_entries_page(1, Some("needle"), 1, 2)
+        .unwrap();
+    assert_eq!(playlist.total, 146);
+    assert_eq!(
+        playlist
+            .rows
+            .iter()
+            .map(|row| row.track_id)
+            .collect::<Vec<_>>(),
+        [14, 21]
+    );
+    assert_eq!(counts[0](), 146);
+    assert_eq!(counts[1](), 146);
+    assert_eq!(counts[3](), 146);
+    assert_eq!(
+        store
+            .other_tracks_count(&[PathBuf::from("/outside")])
+            .unwrap(),
+        0
+    );
+    store
+        .conn
+        .execute("UPDATE tracks SET raw_title='needle' WHERE id=1", [])
+        .unwrap();
+    for index in [0, 1, 3, 4, 5] {
+        assert_eq!(counts[index](), 147);
+    }
+    assert_eq!(store.queue_page(Some("absent"), 0, 0).unwrap().total, 0);
+    // A count read inside an aborted writer transaction must not escape rollback.
+    store
+        .conn
+        .execute_batch("BEGIN; UPDATE tracks SET raw_title='needle' WHERE id=2;")
+        .unwrap();
+    assert_eq!(counts[4](), 148);
+    store.conn.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(counts[4](), 147);
+}
+
 fn filtered_traversal_steps(total: usize) -> (u64, u64) {
     let store = Store::open(Path::new(":memory:")).unwrap();
     store

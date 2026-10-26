@@ -19,6 +19,14 @@ const DIRECTORY_SCOPE: &str = " AND tracks.path>=?4 AND tracks.path<(rtrim(?4,'/
 const OTHER_SCOPE: &str = " AND NOT EXISTS(SELECT 1 FROM json_each(?4) AS root WHERE tracks.path>=root.value AND tracks.path<(rtrim(root.value,'/')||'0'))";
 const DIRECTORY_CHILDREN: &str = "(SELECT 0 AS kind,CASE WHEN ?4='' AND instr(rest,'/')=1 THEN '/' ELSE ?4||substr(rest,1,instr(rest,'/')-1) END AS child,MIN(id) AS track_id FROM sources WHERE instr(rest,'/')>0 GROUP BY child UNION ALL SELECT 1,path,id FROM sources WHERE instr(rest,'/')=0)";
 
+fn bool_key(value: Option<bool>) -> &'static str {
+    match value {
+        None => "",
+        Some(false) => "0",
+        Some(true) => "1",
+    }
+}
+
 /// SQL literal substring matching, shared by occurrence and album projections.
 /// Query normalization follows library search; '%' and '_' are not wildcards.
 pub(super) fn search_query(query: Option<&str>) -> Option<String> {
@@ -133,14 +141,16 @@ impl Store {
 
     pub(crate) fn other_tracks_count(&self, roots: &[PathBuf]) -> Result<usize> {
         let roots = serde_json::to_string(&other_root_prefixes(roots)?)?;
-        Ok(self.conn.query_row(
-            &format!(
-                "SELECT COUNT(*) FROM tracks WHERE 1=1{}",
-                OTHER_SCOPE.replace("?4", "?1")
-            ),
-            [roots],
-            |row| row.get::<_, i64>(0),
-        )? as usize)
+        self.cached_count(super::CountDomain::Other, &[&roots, "", "", ""], || {
+            Ok(self.conn.query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM tracks WHERE 1=1{}",
+                    OTHER_SCOPE.replace("?4", "?1")
+                ),
+                [&roots],
+                |row| row.get::<_, i64>(0),
+            )? as usize)
+        })
     }
 
     #[expect(
@@ -159,11 +169,22 @@ impl Store {
     ) -> Result<Page<rivu_protocol::model::LibraryRow>> {
         let roots = serde_json::to_string(&other_root_prefixes(roots)?)?;
         let query = search_query(query);
-        let total = self.conn.query_row(
-            &format!("SELECT COUNT(*) FROM tracks {TRACK_SEARCH_FILTER}{OTHER_SCOPE}"),
-            params![query, favorite, missing, roots],
-            |row| row.get::<_, i64>(0),
-        )? as usize;
+        let total = self.cached_count(
+            super::CountDomain::Other,
+            &[
+                &roots,
+                query.as_deref().unwrap_or(""),
+                bool_key(favorite),
+                bool_key(missing),
+            ],
+            || {
+                Ok(self.conn.query_row(
+                    &format!("SELECT COUNT(*) FROM tracks {TRACK_SEARCH_FILTER}{OTHER_SCOPE}"),
+                    params![query, favorite, missing, roots],
+                    |row| row.get::<_, i64>(0),
+                )? as usize)
+            },
+        )?;
         let mut rows = Vec::new();
         if limit != 0 && offset < total {
             let mut statement = self.conn.prepare(&format!(
@@ -697,52 +718,36 @@ impl Store {
         } else {
             DIRECTORY_SCOPE
         };
-        // Materialize narrow children once for both the exact total and the page.
-        // Group directories but preserve distinct CUE tracks sharing a source path.
-        let sources =
-            "WITH sources AS (SELECT id,path,substr(path,length(?4)+1) AS rest FROM tracks ";
-        let children_prefix = "), children AS ";
-        let children = DIRECTORY_CHILDREN;
-        let page_columns = ", page AS MATERIALIZED (SELECT kind,child,track_id FROM children ORDER BY kind,child,track_id LIMIT ?5 OFFSET ?6) SELECT total.total,p.kind,p.child,";
-        // Join payload only after pagination; empty pages retain the total row.
-        let page_tail = " FROM (SELECT COUNT(*) AS total FROM children) total LEFT JOIN page p ON 1 LEFT JOIN tracks t ON p.kind=1 AND t.id=p.track_id ORDER BY p.kind,p.child,p.track_id";
-        let count_tail = " SELECT COUNT(*) FROM children";
-        let materialized = if limit == 0 { "" } else { "MATERIALIZED " };
-        let mut sql = String::with_capacity(
-            sources.len()
-                + TRACK_SEARCH_FILTER.len()
-                + scope.len()
-                + children_prefix.len()
-                + materialized.len()
-                + children.len()
-                + if limit == 0 {
-                    count_tail.len()
-                } else {
-                    page_columns.len() + LIBRARY_ROW_COLUMNS_QUALIFIED.len() + page_tail.len()
-                },
+        // Group narrow children, preserving CUE identity; only the bounded page
+        // joins track payloads. The exact scalar total survives page changes.
+        let children = format!(
+            "WITH sources AS (SELECT id,path,substr(path,length(?4)+1) AS rest FROM tracks {TRACK_SEARCH_FILTER}{scope}), children AS {DIRECTORY_CHILDREN}"
         );
-        sql.push_str(sources);
-        sql.push_str(TRACK_SEARCH_FILTER);
-        sql.push_str(scope);
-        sql.push_str(children_prefix);
-        sql.push_str(materialized);
-        sql.push_str(children);
-        if limit == 0 {
-            // A single consumer needs no materialized children or page machinery.
-            sql.push_str(count_tail);
-            let total =
-                self.conn
-                    .query_row(&sql, params![query, favorite, missing, prefix], |row| {
-                        row.get::<_, i64>(0)
-                    })? as usize;
+        let total = self.cached_count(
+            super::CountDomain::Directory,
+            &[
+                &prefix,
+                query.as_deref().unwrap_or(""),
+                bool_key(favorite),
+                bool_key(missing),
+            ],
+            || {
+                Ok(self.conn.query_row(
+                    &format!("{children} SELECT COUNT(*) FROM children"),
+                    params![query, favorite, missing, prefix],
+                    |row| row.get::<_, i64>(0),
+                )? as usize)
+            },
+        )?;
+        if limit == 0 || offset >= total {
             return Ok(Page {
                 total,
                 rows: Vec::new(),
             });
         }
-        sql.push_str(page_columns);
-        sql.push_str(LIBRARY_ROW_COLUMNS_QUALIFIED);
-        sql.push_str(page_tail);
+        let sql = format!(
+            "{children}, page AS MATERIALIZED (SELECT kind,child,track_id FROM children ORDER BY kind,child,track_id LIMIT ?5 OFFSET ?6) SELECT p.kind,p.child,{LIBRARY_ROW_COLUMNS_QUALIFIED} FROM page p LEFT JOIN tracks t ON p.kind=1 AND t.id=p.track_id ORDER BY p.kind,p.child,p.track_id"
+        );
         let mut stmt = self.conn.prepare(&sql)?;
         let mut result = stmt.query(params![
             query,
@@ -753,20 +758,17 @@ impl Store {
             offset.min(i64::MAX as usize) as i64
         ])?;
         let mut page = Page {
-            total: 0,
+            total,
             rows: Vec::new(),
         };
         while let Some(row) = result.next()? {
-            page.total = row.get::<_, i64>(0)? as usize;
-            let Some(kind) = row.get::<_, Option<i64>>(1)? else {
-                continue;
-            };
+            let kind = row.get::<_, i64>(0)?;
             page.rows.push(if kind == 0 {
                 DirectoryRow::Directory {
-                    path: PathBuf::from(row.get::<_, String>(2)?),
+                    path: PathBuf::from(row.get::<_, String>(1)?),
                 }
             } else {
-                DirectoryRow::Track(library_row_at(row, 3)?)
+                DirectoryRow::Track(library_row_at(row, 2)?)
             });
         }
         Ok(page)

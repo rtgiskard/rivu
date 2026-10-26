@@ -31,24 +31,32 @@ The interactive Store keeps a track-ID LRU of at most twice
 `interface.page_size`: 128 tracks at the default 64, at most 512 at the supported
 maximum 256. Hits refresh age; misses are not cached. Reducing page size trims
 immediately. Core metadata changes invalidate affected entries; playback
-statistics patch cached scalars. Background commits invalidate owner caches
-before reads resume. This bounds entries, not track-string bytes, and is neither
+statistics patch cached scalars. Scan publication clears this cache only for
+library-display impacts; no-change scans and masked raw-metadata edits retain it. This bounds entries, not track-string bytes, and is neither
 a whole-library snapshot nor a GUI page cache. Read-only export does not use it.
 
 Library track/display pages retain one latest exact filtered count, keyed by
 normalized filters and optional root. A separate scalar slot retains the
-duplicate-group total, so unchanged-data pagination does not repeat its full
-grouped count. The read-query owner reuses both across pinned read snapshots.
-It separately tracks the existing track-content and duplicate-group revisions,
-invalidating only the corresponding count slot when its domain changes. Playlist
-metadata changes alone do not invalidate either slot. Cache ownership advances
-only after the pinned snapshot passes publication validation. Read-only mode
-alone is not an invalidation rule. Writable Store connections use SQLite's local-change
-counter; their explicit transactions neither read nor populate counts, avoiding
-rollback leakage. Core explicitly clears caches after background commits.
-No external-commit polling, rows or multi-query map are retained. Root aggregation
-and directory child relations are request-local; persistent album summaries are
-transactionally maintained database projections, not an evictable page cache.
+duplicate-group total. A sixteen-entry LRU of scalar totals covers Other,
+directory children, albums and album members, Queue, and playlist entries; keys
+include the relevant filters and collection identity, never page offsets or rows.
+The read-query owner reuses counts across pinned snapshots while the owning
+data-domain revisions remain valid. Cache ownership advances only after the
+pinned snapshot passes publication validation. Read-only mode alone is not an
+invalidation rule. Writable scalar-count caches check SQLite's local-change
+counter and on-demand `PRAGMA data_version` so independent commits cannot leave
+stale totals. Explicit writer transactions bypass count caches, avoiding rollback
+leakage. Read-query caches invalidate only their affected data domains; unrelated
+Queue/playlist changes and no-change scans retain library totals. There is no
+timer-based external-commit polling or collection-sized row cache.
+
+The background read owner leaves its Track-cache capacity at zero; it does not
+share the interactive Store's LRU. Single-Track reads and
+page SQL remain separate paths; pages are not assembled through per-ID LRU reads.
+
+Root aggregation and directory child relations remain request-local; persistent
+album summaries are transactionally maintained database projections, not an
+evictable page cache.
 Their query costs and invariants are in
 link:21_ipc.adoc#_transactional_inputs_and_bounded_storage_queries[IPC storage queries].
 

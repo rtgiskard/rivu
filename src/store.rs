@@ -19,6 +19,7 @@ use anyhow::{Result, bail};
 use rusqlite::Connection;
 use std::cell::RefCell;
 
+pub(crate) use cache::CountDomain;
 pub(crate) use duplicates::PreparedRelocation;
 #[cfg(test)]
 pub(crate) use duplicates::RelocationIdentity;
@@ -32,6 +33,7 @@ pub(crate) struct Store {
     track_cache: RefCell<cache::TrackCache>,
     count_cache: RefCell<Option<tracks::TrackCount>>,
     duplicate_group_count_cache: RefCell<Option<duplicates::DuplicateGroupCount>>,
+    scalar_counts: RefCell<cache::ScalarCounts>,
 }
 
 /// A borrowed SQLite snapshot. Query workers explicitly finish it before
@@ -129,6 +131,7 @@ impl Store {
             }),
             count_cache: RefCell::new(None),
             duplicate_group_count_cache: RefCell::new(None),
+            scalar_counts: RefCell::new(cache::ScalarCounts::default()),
         })
     }
 
@@ -175,10 +178,33 @@ impl Store {
         *self.duplicate_group_count_cache.borrow_mut() = None;
     }
 
+    pub(crate) fn invalidate_scan_caches(&self, impacts: ScanImpacts, playlist_created: bool) {
+        if impacts.library {
+            self.track_cache.borrow_mut().entries.clear();
+            self.invalidate_filtered_track_count();
+        }
+        if impacts.library || impacts.structure {
+            self.invalidate_scalar_count_domains(&[CountDomain::Other, CountDomain::Directory]);
+        }
+        if impacts.library || impacts.queue {
+            self.invalidate_scalar_count_domains(&[CountDomain::Queue]);
+        }
+        if impacts.library || playlist_created {
+            self.invalidate_scalar_count_domains(&[CountDomain::PlaylistEntries]);
+        }
+        if impacts.albums {
+            self.invalidate_scalar_count_domains(&[CountDomain::Albums, CountDomain::AlbumTracks]);
+        }
+        if impacts.duplicate_groups {
+            self.invalidate_duplicate_group_count();
+        }
+    }
+
     /// A background commit invalidates both cached tracks and cached counts.
     pub(crate) fn invalidate_caches(&self) {
         self.track_cache.borrow_mut().entries.clear();
         self.invalidate_filtered_track_count();
+        self.invalidate_scalar_counts();
         self.invalidate_duplicate_group_count();
     }
 }

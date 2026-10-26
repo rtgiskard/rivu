@@ -40,6 +40,7 @@ impl Store {
             }),
             count_cache: RefCell::new(None),
             duplicate_group_count_cache: RefCell::new(None),
+            scalar_counts: RefCell::new(super::cache::ScalarCounts::default()),
         };
         Ok(store)
     }

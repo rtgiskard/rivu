@@ -1,4 +1,5 @@
 use super::*;
+use crate::store::CountDomain;
 
 struct ReadState {
     config: Arc<Config>,
@@ -440,6 +441,9 @@ struct ReadConnection {
     store: Store,
     library_revision: u64,
     duplicate_groups_revision: u64,
+    // Structure, album, queue; library already owns the filtered count above.
+    scalar_revisions: (u64, u64, u64),
+    scalar_playlist_revisions: Arc<std::collections::BTreeMap<i64, u64>>,
 }
 
 /// One independent SQLite owner, with bounded admission and one live snapshot.
@@ -517,6 +521,14 @@ impl ReadQueries {
                         store,
                         library_revision: request.state.revisions.library,
                         duplicate_groups_revision: request.state.revisions.duplicate_groups,
+                        scalar_revisions: (
+                            request.state.revisions.structure,
+                            request.state.revisions.album,
+                            request.state.revisions.queue,
+                        ),
+                        scalar_playlist_revisions: Arc::clone(
+                            &request.state.playlist_entry_revisions,
+                        ),
                     })
                 }
                 Err(error) => {
@@ -584,11 +596,40 @@ impl ReadQueries {
             // version cannot tag old cached totals as belonging to a newer one.
             if connection.library_revision != revisions.library {
                 snapshot.invalidate_filtered_track_count();
+                snapshot.invalidate_scalar_count_domains(&[
+                    CountDomain::Other,
+                    CountDomain::Directory,
+                    CountDomain::Queue,
+                    CountDomain::PlaylistEntries,
+                ]);
                 connection.library_revision = revisions.library;
             }
             if connection.duplicate_groups_revision != revisions.duplicate_groups {
                 snapshot.invalidate_duplicate_group_count();
                 connection.duplicate_groups_revision = revisions.duplicate_groups;
+            }
+            let scalar_revisions = (revisions.structure, revisions.album, revisions.queue);
+            if connection.scalar_revisions.0 != scalar_revisions.0 {
+                snapshot
+                    .invalidate_scalar_count_domains(&[CountDomain::Other, CountDomain::Directory]);
+            }
+            if connection.scalar_revisions.1 != scalar_revisions.1 {
+                snapshot.invalidate_scalar_count_domains(&[
+                    CountDomain::Albums,
+                    CountDomain::AlbumTracks,
+                ]);
+            }
+            if connection.scalar_revisions.2 != scalar_revisions.2 {
+                snapshot.invalidate_scalar_count_domains(&[CountDomain::Queue]);
+            }
+            connection.scalar_revisions = scalar_revisions;
+            if !Arc::ptr_eq(
+                &connection.scalar_playlist_revisions,
+                &request.state.playlist_entry_revisions,
+            ) {
+                snapshot.invalidate_scalar_count_domains(&[CountDomain::PlaylistEntries]);
+                connection.scalar_playlist_revisions =
+                    Arc::clone(&request.state.playlist_entry_revisions);
             }
             // Later writes cannot change this accepted WAL snapshot/version.
             request.state.read(&snapshot, &request.query, false)
@@ -828,6 +869,12 @@ mod tests {
             store: Store::open_reader(&path).unwrap(),
             library_revision: before.library.revision,
             duplicate_groups_revision: before.library.duplicate_groups_revision,
+            scalar_revisions: (
+                before.library.structure_revision,
+                before.library.album_revision,
+                before.queue.revision,
+            ),
+            scalar_playlist_revisions: Arc::clone(&before.library.playlist_entry_revisions),
         };
         let snapshot = connection.store.read_snapshot().unwrap();
         core.command(Command::SetFavorite {
@@ -878,6 +925,126 @@ mod tests {
         assert_counts(&core, &path, &mut reader, &fence, 0, 1);
         set_fingerprints(&mut core, &[2], None);
         assert_counts(&core, &path, &mut reader, &fence, 0, 0);
+    }
+
+    #[test]
+    fn scalar_totals_follow_metadata_membership_and_playlist_lifetime_revisions() {
+        let (directory, mut core) = super::super::tests::fixture_with_database(Some(10.0));
+        let path = directory.path().join("library.db");
+        core.command(Command::CreatePlaylistWithTracks {
+            name: "Scalar totals".into(),
+            track_ids: vec![1],
+        })
+        .unwrap();
+        core.publish();
+        let fence = Arc::new(ReadFence::default());
+        let mut reader = None;
+        let queries = [
+            Query::QueuePage {
+                query: Some("scalar needle".into()),
+                offset: 0,
+                limit: 0,
+            },
+            Query::PlaylistEntries {
+                playlist_id: 1,
+                query: Some("scalar needle".into()),
+                offset: 0,
+                limit: 0,
+            },
+        ];
+        let total = |response: QueryResponse| match response.result.unwrap() {
+            ViewResponse::QueuePage(page) => page.total,
+            ViewResponse::PlaylistEntries(page) => page.total,
+            other => panic!("unexpected response: {other:?}"),
+        };
+        for query in &queries {
+            assert_eq!(
+                total(execute_read(
+                    &core,
+                    &path,
+                    &mut reader,
+                    &fence,
+                    query.clone()
+                )),
+                0
+            );
+        }
+        let old = core.shared.read().clone();
+        core.command(Command::EditTrack {
+            track_id: 1,
+            title: Some("scalar needle".into()),
+            artist: None,
+            album: None,
+            decoder_hint: None,
+        })
+        .unwrap();
+        core.publish();
+        // Rejection must not move count ownership to an unaccepted request.
+        let (reply, _receiver) = oneshot::channel();
+        let stale = ReadRequest {
+            state: ReadState::capture(&old, &queries[1]),
+            query: queries[1].clone(),
+            ticket: None,
+            reply,
+        };
+        assert!(matches!(
+            ReadQueries::execute(&path, &mut reader, &core.shared, &fence, &stale).result,
+            Err(QueryError::RevisionChanged)
+        ));
+        for query in &queries {
+            assert_eq!(
+                total(execute_read(
+                    &core,
+                    &path,
+                    &mut reader,
+                    &fence,
+                    query.clone()
+                )),
+                1
+            );
+        }
+        core.command(Command::EditTrack {
+            track_id: 2,
+            title: Some("scalar needle".into()),
+            artist: None,
+            album: None,
+            decoder_hint: None,
+        })
+        .unwrap();
+        core.command(Command::AddPlaylist {
+            playlist_id: 1,
+            track_ids: vec![2],
+        })
+        .unwrap();
+        core.publish();
+        assert_eq!(
+            total(execute_read(
+                &core,
+                &path,
+                &mut reader,
+                &fence,
+                queries[0].clone()
+            )),
+            3
+        );
+        assert_eq!(
+            total(execute_read(
+                &core,
+                &path,
+                &mut reader,
+                &fence,
+                queries[1].clone()
+            )),
+            2
+        );
+        core.command(Command::DeletePlaylist { playlist_id: 1 })
+            .unwrap();
+        core.publish();
+        assert!(
+            execute_read(&core, &path, &mut reader, &fence, queries[1].clone())
+                .result
+                .is_err()
+        );
     }
 
     #[test]
@@ -990,6 +1157,12 @@ mod tests {
             store: reader,
             library_revision: core.state.library.revision,
             duplicate_groups_revision: core.state.library.duplicate_groups_revision,
+            scalar_revisions: (
+                core.state.library.structure_revision,
+                core.state.library.album_revision,
+                core.state.queue.revision,
+            ),
+            scalar_playlist_revisions: Arc::clone(&core.state.library.playlist_entry_revisions),
         });
         let rejected = ReadQueries::execute(&path, &mut reader, &core.shared, &fence, &request);
         assert!(

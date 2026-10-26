@@ -122,11 +122,14 @@ impl Store {
         limit: usize,
     ) -> Result<Page<AlbumSummary>> {
         let filter = "?1 IS NULL OR instr(lower(title),lower(COALESCE(?1,'')))>0 OR EXISTS(SELECT 1 FROM album_artists WHERE directory=albums.directory AND title=albums.title AND instr(lower(artist),lower(COALESCE(?1,'')))>0)";
-        let total = self.conn.query_row(
-            &format!("SELECT COUNT(*) FROM albums WHERE {filter}"),
-            [query],
-            |row| row.get::<_, i64>(0),
-        )? as usize;
+        let total =
+            self.cached_count(super::CountDomain::Albums, &[query.unwrap_or("")], || {
+                Ok(self.conn.query_row(
+                    &format!("SELECT COUNT(*) FROM albums WHERE {filter}"),
+                    [query],
+                    |row| row.get::<_, i64>(0),
+                )? as usize)
+            })?;
         let order = match sort {
             AlbumSort::Title => "title,directory",
             AlbumSort::Artist => "COALESCE(artist,'Unknown artist'),title,directory",
@@ -178,11 +181,19 @@ impl Store {
             .context("Album directory is not UTF-8")?;
         let query = search_query(query);
         let filter = format!("{} AND {}", album_filter(), search_filter("tracks", "?3"));
-        let total = self.conn.query_row(
-            &format!("SELECT COUNT(*) FROM tracks INDEXED BY tracks_album_members WHERE {filter}"),
-            params![directory, key.title, query],
-            |row| row.get::<_, i64>(0),
-        )? as usize;
+        let total = self.cached_count(
+            super::CountDomain::AlbumTracks,
+            &[directory, &key.title, query.as_deref().unwrap_or("")],
+            || {
+                Ok(self.conn.query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM tracks INDEXED BY tracks_album_members WHERE {filter}"
+                    ),
+                    params![directory, key.title, query],
+                    |row| row.get::<_, i64>(0),
+                )? as usize)
+            },
+        )?;
         let mut statement = self.conn.prepare(&format!("SELECT {LIBRARY_ROW_COLUMNS} FROM tracks INDEXED BY tracks_album_members WHERE {filter} ORDER BY {ORDER} LIMIT ?4 OFFSET ?5"))?;
         let rows = statement
             .query_map(

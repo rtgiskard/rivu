@@ -86,13 +86,20 @@ impl Store {
         } else {
             "SELECT (SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=?1) FROM playlists WHERE id=?1 AND ?2 IS NULL".into()
         };
-        Ok(self
-            .conn
-            .query_row(&sql, params![playlist_id, query], |row| {
-                row.get::<_, i64>(0)
-            })
-            .optional()?
-            .context("Playlist not found")? as usize)
+        self.cached_count_for_id(
+            super::CountDomain::PlaylistEntries,
+            playlist_id,
+            &[query.unwrap_or("")],
+            || {
+                Ok(self
+                    .conn
+                    .query_row(&sql, params![playlist_id, query], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .optional()?
+                    .context("Playlist not found")? as usize)
+            },
+        )
     }
 
     pub fn playlist_summary_page(
