@@ -372,25 +372,33 @@ impl Store {
             selected.insert(row.id, row);
         }
         drop(q);
-        let candidate_hashes: HashSet<&str> = if exact_sources {
+        // Exact identities never relocate. Only genuinely new destinations need
+        // global same-fingerprint rows, even on unchanged duplicate-heavy scans.
+        let existing_identities: HashSet<_> = selected
+            .values()
+            .map(|record| identity(&record.path, record.cue.as_ref()))
+            .collect();
+        let unresolved = || {
+            result.records.iter().filter(|record| {
+                !existing_identities.contains(&identity(&record.path, record.cue.as_ref()))
+            })
+        };
+        let candidate_hashes: HashSet<&str> = if exact_sources || result.scan_incomplete {
             HashSet::new()
         } else {
-            result
-                .records
-                .iter()
+            unresolved()
                 .filter_map(|record| record.fingerprint.as_deref())
                 .collect()
         };
-        let ordinary_candidate_hashes: HashSet<&str> = if exact_sources {
+        let ordinary_candidate_hashes: HashSet<&str> = if exact_sources || result.scan_incomplete {
             HashSet::new()
         } else {
-            result
-                .records
-                .iter()
+            unresolved()
                 .filter(|record| record.cue.is_none())
                 .filter_map(|record| record.fingerprint.as_deref())
                 .collect()
         };
+        drop(existing_identities);
         // Incomplete scans cannot relocate or mark missing. Exact record identities
         // are already in scope, so global same-content rows cannot affect this commit.
         if !exact_sources && !result.scan_incomplete {
