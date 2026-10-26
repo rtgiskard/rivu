@@ -1171,6 +1171,45 @@ fn duplicate_queue_entries_count_as_separate_plays_but_share_recent_history() {
 }
 
 #[test]
+fn unchanged_activity_skips_history_but_failed_real_refresh_retries() {
+    let (directory, mut core) = fixture_with_database(Some(10.0));
+    pending(&mut core, 1);
+    core.playback.as_mut().unwrap().paused_at = Some(10);
+    core.store.mark_played(1, 10).unwrap();
+    core.replace_history(core.store.history(MAX_QUERY_ROWS).unwrap());
+    let history = Arc::clone(&core.state.library.history);
+    let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+    // An unrelated unreadable history row proves no history SELECT occurs on
+    // either the immediate or deferred no-op activity path.
+    connection
+        .execute("UPDATE tracks SET last_played='unreadable' WHERE id=4", [])
+        .unwrap();
+    started(&mut core, Some(10.0)).unwrap();
+    assert!(Arc::ptr_eq(&history, &core.state.library.history));
+    core.playback_write_deferred = true;
+    core.flush_deferred_playback().unwrap();
+    assert!(Arc::ptr_eq(&history, &core.state.library.history));
+    assert!(!core.playback_history_pending);
+
+    core.playback.as_mut().unwrap().last_heard_at = Some(11);
+    core.playback_write_deferred = true;
+    assert!(core.flush_deferred_playback().is_err());
+    assert_eq!(core.store.track(1).unwrap().unwrap().last_played, Some(11));
+    assert!(core.playback_history_pending);
+    assert!(Arc::ptr_eq(&history, &core.state.library.history));
+    connection
+        .execute("UPDATE tracks SET last_played=NULL WHERE id=4", [])
+        .unwrap();
+    // The retry's mark_played is now unchanged, but the failed projection fact
+    // remains pending until an authoritative history read succeeds.
+    core.playback_write_deferred = true;
+    core.flush_deferred_playback().unwrap();
+    assert!(!core.playback_history_pending);
+    assert!(!Arc::ptr_eq(&history, &core.state.library.history));
+    assert_eq!(core.state.library.history[0].played_at, 11);
+}
+
+#[test]
 fn crossing_play_threshold_refreshes_published_history_count_during_playback() {
     let (_directory, mut core) = fixture();
     playing(&mut core, 1);

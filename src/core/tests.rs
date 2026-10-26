@@ -113,6 +113,7 @@ pub(super) fn fixture_with_database(duration: Option<f64>) -> (tempfile::TempDir
         playback: None,
         retired_playback: None,
         playback_write_deferred: false,
+        playback_history_pending: false,
         pending_bitrate: None,
         pending_navigation: None,
         active_export: None,

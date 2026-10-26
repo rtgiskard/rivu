@@ -367,7 +367,7 @@ impl Core {
         let history = if impacts.library {
             self.store
                 .history(MAX_QUERY_ROWS)
-                .map(|history| self.state.library.history = Arc::new(history))
+                .map(|history| self.replace_history(history))
                 .context("Refreshing history failed; previous history retained")
         } else {
             Ok(())

@@ -482,7 +482,7 @@ impl Core {
         }
         if let Some(history) = saved.history {
             match history {
-                Ok(history) => self.state.library.history = Arc::new(history),
+                Ok(history) => self.replace_history(history),
                 Err(error) => errors.push(format!("Refreshing library history failed: {error:#}")),
             }
         }

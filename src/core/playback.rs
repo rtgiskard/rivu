@@ -325,10 +325,11 @@ impl Core {
                 .duration
                 .filter(|duration| duration.is_finite() && *duration > 0.0));
         if let Some(stats) = stats {
+            self.playback_history_pending |= stats.changed;
             self.update_track_stats(track_id, stats)?;
-            self.state.library.history = Arc::new(self.store.history(MAX_QUERY_ROWS).context(
+            self.refresh_playback_history().context(
                 "Playback start committed, but refreshing history failed; previous history retained",
-            )?);
+            )?;
         }
         self.count_play()
     }
@@ -594,6 +595,22 @@ impl Core {
         Ok(())
     }
 
+    pub(in crate::core) fn replace_history(
+        &mut self,
+        history: Vec<rivu_protocol::model::HistoryEntry>,
+    ) {
+        self.state.library.history = Arc::new(history);
+        self.playback_history_pending = false;
+    }
+
+    fn refresh_playback_history(&mut self) -> Result<()> {
+        if self.playback_history_pending {
+            let history = self.store.history(MAX_QUERY_ROWS)?;
+            self.replace_history(history);
+        }
+        Ok(())
+    }
+
     /// Replay only retained producer facts, never timed-out user commands.
     pub(in crate::core) fn flush_deferred_playback(&mut self) -> Result<()> {
         if self.database_maintenance_active() {
@@ -627,10 +644,9 @@ impl Core {
                         .and_then(|(id, at)| at.map(|at| (id, at)))
                 }) {
                 self.store.mark_played(track_id, at).and_then(|stats| {
+                    self.playback_history_pending |= stats.changed;
                     let projection = self.update_track_stats(track_id, stats);
-                    let history = self.store.history(MAX_QUERY_ROWS).map(|history| {
-                        self.state.library.history = Arc::new(history);
-                    });
+                    let history = self.refresh_playback_history();
                     projection.and(history)
                 })
             } else {

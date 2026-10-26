@@ -693,6 +693,7 @@ impl Runtime {
             playback: None,
             retired_playback: None,
             playback_write_deferred: false,
+            playback_history_pending: false,
             pending_bitrate: None,
             pending_navigation: None,
             active_export: None,
@@ -855,6 +856,7 @@ struct Core {
     // At most one playback can retire while database writes are excluded.
     retired_playback: Option<RetiredPlayback>,
     playback_write_deferred: bool,
+    playback_history_pending: bool,
     pending_bitrate: Option<(u64, bool)>,
     pending_navigation: Option<PlaybackStatus>,
     active_export: Option<export::ExportTask>,
@@ -917,7 +919,7 @@ impl Core {
         for playlist_id in self.store.playlist_ids()? {
             self.advance_playlist_entry_revision(playlist_id);
         }
-        self.state.library.history = Arc::new(self.store.history(MAX_QUERY_ROWS)?);
+        self.replace_history(self.store.history(MAX_QUERY_ROWS)?);
         self.state.system.devices = Arc::new(audio::devices().unwrap_or_default());
         self.state.system.ffmpeg_status = if self.state.system.config.ffmpeg_enabled {
             audio::ffmpeg_status().unwrap_or_else(|error| format!("unavailable: {error:#}"))
