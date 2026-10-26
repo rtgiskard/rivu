@@ -2,7 +2,7 @@
 
 use super::{
     PlaybackRange, SourceIdentity,
-    source::{DECODE_WORK_BUDGET, DecodeStep, Source, check_cancelled},
+    source::{DECODE_WORK_BUDGET, DecodeStep, Source, SourceSelection, check_cancelled},
 };
 use anyhow::{Context, Result, bail};
 use rivu_format::input::open_regular_file;
@@ -51,11 +51,9 @@ pub fn render_source(
         buffer_len,
         decoder_hint,
         ffmpeg_enabled,
+        SourceSelection { range, start: 0.0 },
         Some(cancelled),
     )?;
-    if let Some(range) = range {
-        source.restrict_with_cancel(range, Some(cancelled))?;
-    }
     let sample_rate = source.info().sample_rate;
     let channels =
         u16::try_from(source.layout().len()).context("Audio render channel count overflows")?;

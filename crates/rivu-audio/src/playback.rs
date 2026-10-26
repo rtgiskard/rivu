@@ -241,7 +241,7 @@ impl Drop for VisualizationCapture {
 }
 impl Playback {
     pub(super) fn from_source(
-        mut source: Source,
+        source: Source,
         options: PlaybackOptions,
         analyzer: &AnalysisWorker,
         waveform: Arc<RwLock<WaveformFrame>>,
@@ -263,12 +263,6 @@ impl Playback {
             listened_seconds,
             graph,
         } = options;
-        if let Some(range) = range {
-            source.restrict(range)?;
-        }
-        if start > 0.0 {
-            source.seek(start)?;
-        }
         let channels = source.layout().len();
         if let Some(info) = &source_info
             && (info.sample_rate != source.info().sample_rate
@@ -1027,10 +1021,15 @@ mod tests {
         range: Option<PlaybackRange>,
         waveform: Arc<RwLock<WaveformFrame>>,
     ) -> (Playback, impl FnMut(&mut [f32], u64) + use<>) {
-        let mut source = Source::open(path, 64 * 1024, DecoderHint::Auto, false).unwrap();
-        if let Some(range) = range {
-            source.restrict(range).unwrap();
-        }
+        let mut source = Source::begin_open(
+            path,
+            64 * 1024,
+            DecoderHint::Auto,
+            false,
+            crate::source::SourceSelection { range, start: 0.0 },
+        )
+        .unwrap();
+        while !source.poll_open().unwrap() {}
         waveform
             .write()
             .select_source(path, range, DecoderHint::Auto, &source);

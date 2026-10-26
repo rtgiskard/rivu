@@ -41,6 +41,7 @@ use abi::*;
 const NOPTS: i64 = i64::MIN;
 const ERR_EAGAIN: c_int = -11;
 const ERR_EOF: c_int = -541_478_725;
+pub(super) const SEEK_PREROLL_SECONDS: f64 = 2.0;
 
 const MAX_PACKET_SIDE_DATA: i32 = 64;
 
@@ -1005,7 +1006,7 @@ impl Decoder {
         // Origin-reaching preroll starts a fresh decoder traversal. Demuxer
         // seeks plus codec flush can lose overlap primers or initial skip data.
         // Reopen the held file object, never its potentially replaced path.
-        if seconds <= 2.0 {
+        if seconds <= SEEK_PREROLL_SECONDS {
             let file = self
                 ._file
                 .try_clone()
@@ -1016,7 +1017,7 @@ impl Decoder {
             *self = replacement;
             return Ok(());
         }
-        let preroll = seconds.min(2.0);
+        let preroll = seconds.min(SEEK_PREROLL_SECONDS);
         let seek_seconds = seconds - preroll;
         let base = if self.start_time == NOPTS {
             0
@@ -1029,6 +1030,11 @@ impl Decoder {
         let ret =
             unsafe { (self.rt.f.seek_file)(self.format, self.stream, i64::MIN, target, target, 0) };
         check_cancelled(cancelled)?;
+        if ret == -libc::EPERM || ret == -libc::ENOSYS {
+            // No usable demuxer seek: reopen the same object at origin once.
+            // Source retains the requested target and discards toward it.
+            return self.seek(0.0, cancelled);
+        }
         if ret < 0 {
             return Err(error_text(self.rt, ret, "seek audio stream"));
         }

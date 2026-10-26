@@ -290,6 +290,10 @@ it requires two timestamp transitions that distinguish the conventions within
 the container's timestamp precision. The initial discarded overlap packet can
 anchor a transition but cannot select a convention alone. Conflicting evidence,
 an exhausted probe budget or early EOF retains start-stamp semantics.
+Initial selections beyond preroll resolve this same bounded probe at the stream
+origin before seeking, so a steady-size late packet region cannot change the
+chosen convention. Probe PCM is not published for that deferred selection;
+opening controls can replace the pending seek or cancel the opening.
 End stamps are converted using the represented sample count before codec trims,
 then leading trim is applied. The selected convention survives seeks; buffered
 startup audio does not. Later gaps and overlaps remain discontinuities, including
@@ -310,6 +314,16 @@ an upper bound on `DiscardPadding` and is not trimmed a second time.
 FFmpeg receives the stream packet timebase so automatic codec trims also move
 decoded-frame timestamps. Preroll that reaches the origin reopens the held file
 object to restore initial codec skip/overlap state rather than synthesizing PCM.
+
+Before a duration-guided initial FFmpeg seek, opening validates real origin PCM
+without publishing it as selection audio. The whole-source duration is only a
+soft seek anchor, not an EOF boundary or the CUE segment duration. Unknown-duration
+selections decode forward from origin. If the demuxer refuses seeking with
+`EPERM` or `ENOSYS`, Rivu reopens the held file object and decodes forward instead;
+other seek errors propagate. Opening work remains bounded per round and
+cancellable, but reaching a distant target may require reading to real EOF.
+A valid source exhausted by its selection returns EOF; a source with no
+decodable PCM still fails opening.
 
 Seekable native Matroska sources support backward seeks with or without Cues,
 including after EOF. A successful seek discards queued old packets; a rejected

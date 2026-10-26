@@ -95,7 +95,7 @@ impl VorbisTiming {
                     }
                 }
                 // At stream start the discarded Vorbis priming packet supplies
-                // the zero-output anchor. Seek never starts another probe.
+                // the zero-output anchor; an initial seek uses later transitions.
                 probe.previous = Some((pts, represented));
                 return None;
             }
@@ -192,6 +192,10 @@ impl VorbisTiming {
         Ok(Some(start))
     }
 
+    pub(super) fn is_resolved(&self) -> bool {
+        self.convention.is_some()
+    }
+
     pub(super) fn ready(&self) -> bool {
         self.convention.is_some()
             && self
@@ -205,8 +209,9 @@ impl VorbisTiming {
     }
 
     pub(super) fn seek(&mut self) {
-        self.finish();
-        self.probe = None;
+        // Positioning starts only after the bounded origin probe; retain its
+        // convention across all later traversals.
+        self.probe = self.convention.is_none().then(Probe::default);
     }
 }
 

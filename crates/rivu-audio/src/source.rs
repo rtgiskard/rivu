@@ -186,6 +186,7 @@ pub fn probe_with_cancel(
         PROBE_BUFFER_LEN,
         DecoderHint::Auto,
         ffmpeg_enabled,
+        SourceSelection::default(),
         Some(cancelled),
     )?
     .info)
@@ -202,6 +203,7 @@ pub fn probe_file(path: &Path, mut file: File, ffmpeg_enabled: bool) -> Result<M
         PROBE_BUFFER_LEN,
         DecoderHint::Auto,
         ffmpeg_enabled,
+        SourceSelection::default(),
         None,
     )?
     .info)
@@ -429,6 +431,13 @@ struct NativePcm {
     offset: usize,
 }
 
+/// Configure the selected timeline before the first finite decoding round.
+#[derive(Clone, Copy, Default)]
+pub(super) struct SourceSelection {
+    pub(super) range: Option<super::PlaybackRange>,
+    pub(super) start: f64,
+}
+
 pub(super) struct Source {
     identity: SourceIdentity,
     format: Option<Box<dyn FormatReader>>,
@@ -452,13 +461,16 @@ pub(super) struct Source {
     range_start: f64,
     range_end: Option<f64>,
     seek_target: Option<f64>,
+    // Relative target waiting for origin PCM/timing validation.
+    pending_seek: Option<f64>,
     ready: bool,
     exhausted: bool,
+    decoded_pcm: bool,
     packet_stats: PacketStats,
     complete_stream: bool,
     expected_samples: Option<u64>,
     mpeg_packets: bool,
-    opening_fallback: Option<(PathBuf, File)>,
+    opening_fallback: Option<(PathBuf, File, SourceSelection)>,
 }
 impl Source {
     pub(super) fn open(
@@ -467,25 +479,35 @@ impl Source {
         decoder_hint: DecoderHint,
         ffmpeg_enabled: bool,
     ) -> Result<Self> {
-        Self::open_with_cancel(path, buffer_len, decoder_hint, ffmpeg_enabled, None)
+        Self::open_with_cancel(
+            path,
+            buffer_len,
+            decoder_hint,
+            ffmpeg_enabled,
+            SourceSelection::default(),
+            None,
+        )
     }
 
-    /// Open the container/codec without draining the first-frame packet prefix.
+    /// Begin opening the selection; origin validation may defer positioning.
     /// The worker retains this source between finite `poll_open` rounds.
     pub(super) fn begin_open(
         path: &Path,
         buffer_len: usize,
         decoder_hint: DecoderHint,
         ffmpeg_enabled: bool,
+        selection: SourceSelection,
     ) -> Result<Self> {
-        Self::open_file_unprimed(
+        let mut source = Self::open_file_unprimed(
             path,
             open_regular_file(path)?,
             buffer_len,
             decoder_hint,
             ffmpeg_enabled,
             None,
-        )
+        )?;
+        source.select(selection, None)?;
+        Ok(source)
     }
 
     fn open_with_cancel(
@@ -493,6 +515,7 @@ impl Source {
         buffer_len: usize,
         decoder_hint: DecoderHint,
         ffmpeg_enabled: bool,
+        selection: SourceSelection,
         cancelled: Option<&AtomicBool>,
     ) -> Result<Self> {
         check_cancelled(cancelled)?;
@@ -502,6 +525,7 @@ impl Source {
             buffer_len,
             decoder_hint,
             ffmpeg_enabled,
+            selection,
             cancelled,
         )
     }
@@ -512,6 +536,7 @@ impl Source {
         buffer_len: usize,
         decoder_hint: DecoderHint,
         ffmpeg_enabled: bool,
+        selection: SourceSelection,
         cancelled: Option<&AtomicBool>,
     ) -> Result<Self> {
         let mut source = Self::open_file_unprimed(
@@ -522,6 +547,7 @@ impl Source {
             ffmpeg_enabled,
             cancelled,
         )?;
+        source.select(selection, cancelled)?;
         while !source.poll_open_with_cancel(cancelled)? {}
         Ok(source)
     }
@@ -576,7 +602,8 @@ impl Source {
                 if input.is_some() {
                     source.probe_backend = ProbeBackend::Ffmpeg;
                 }
-                source.opening_fallback = fallback.map(|file| (path.to_owned(), file));
+                source.opening_fallback =
+                    fallback.map(|file| (path.to_owned(), file, SourceSelection::default()));
                 Ok(source)
             }
             Err(native_error)
@@ -624,8 +651,10 @@ impl Source {
             range_start: 0.0,
             range_end: None,
             seek_target: None,
+            pending_seek: None,
             ready: false,
             exhausted: false,
+            decoded_pcm: false,
             packet_stats: PacketStats::new(),
             complete_stream: true,
             expected_samples: None,
@@ -831,8 +860,10 @@ impl Source {
             range_start: 0.0,
             range_end: None,
             seek_target: None,
+            pending_seek: None,
             ready: false,
             exhausted: false,
+            decoded_pcm: false,
             packet_stats,
             complete_stream: true,
             expected_samples,
@@ -840,32 +871,57 @@ impl Source {
             opening_fallback: None,
         })
     }
-    pub(super) fn restrict(&mut self, range: super::PlaybackRange) -> Result<()> {
-        self.restrict_with_cancel(range, None)
+    fn select(&mut self, selection: SourceSelection, cancelled: Option<&AtomicBool>) -> Result<()> {
+        check_cancelled(cancelled)?;
+        if !selection.start.is_finite() {
+            bail!("Invalid seek position");
+        }
+        if let Some(range) = selection.range {
+            if !range.start_seconds.is_finite()
+                || range.start_seconds < 0.0
+                || range
+                    .end_seconds
+                    .is_some_and(|end| !end.is_finite() || end <= range.start_seconds)
+            {
+                bail!("Invalid audio segment bounds");
+            }
+            self.complete_stream = false;
+            self.packet_stats.invalidate();
+            self.range_start = range.start_seconds;
+            self.range_end = range.end_seconds;
+            self.info.duration = range
+                .end_seconds
+                .or(self.info.duration)
+                .map(|end| (end - range.start_seconds).max(0.0));
+        }
+        if let Some((_, _, opening_selection)) = &mut self.opening_fallback {
+            *opening_selection = selection;
+        }
+        let target = self.range_start + selection.start.max(0.0);
+        if target > self.seek_preroll() {
+            self.seek_with_cancel(selection.start, cancelled)?;
+        } else if selection.range.is_some() || target > 0.0 {
+            // Origin-reaching preroll uses this fresh traversal directly. Only
+            // sample admission needs the lower bound, not a seek/reset/reopen.
+            self.complete_stream = false;
+            self.packet_stats.invalidate();
+            self.seek_target = Some(target);
+        }
+        Ok(())
     }
 
-    pub(super) fn restrict_with_cancel(
-        &mut self,
-        range: super::PlaybackRange,
-        cancelled: Option<&AtomicBool>,
-    ) -> Result<()> {
-        check_cancelled(cancelled)?;
-        self.complete_stream = false;
-        self.packet_stats.invalidate();
-        if !range.start_seconds.is_finite()
-            || range.start_seconds < 0.0
-            || range
-                .end_seconds
-                .is_some_and(|end| !end.is_finite() || end <= range.start_seconds)
-        {
-            bail!("Invalid audio segment bounds");
+    fn seek_preroll(&self) -> f64 {
+        match self.decode {
+            #[cfg(feature = "ffmpeg")]
+            Decode::Ffmpeg(_) => super::ffmpeg::SEEK_PREROLL_SECONDS,
+            #[cfg(not(feature = "ffmpeg"))]
+            Decode::Ffmpeg(_) => {
+                unreachable!("FFmpeg decoder cannot be opened without the ffmpeg feature")
+            }
+            Decode::Opus(_) => 0.08,
+            Decode::Native(_) if self.vorbis_timing.is_some() => 2.0,
+            Decode::Native(_) => 0.0,
         }
-        let end = range.end_seconds;
-        let duration = end.or(self.info.duration);
-        self.range_start = range.start_seconds;
-        self.range_end = end;
-        self.info.duration = duration.map(|end| (end - range.start_seconds).max(0.0));
-        self.seek_with_cancel(0.0, cancelled)
     }
 
     pub(super) fn seek(&mut self, target: f64) -> Result<()> {
@@ -880,9 +936,30 @@ impl Source {
         self.complete_stream = false;
         self.packet_stats.invalidate();
         let target = target.max(0.0);
+        if let Some((_, _, selection)) = &mut self.opening_fallback {
+            selection.start = target;
+        }
+        let ffmpeg_duration = match &self.decode {
+            Decode::Ffmpeg(decoder) => decoder
+                .info()
+                .duration
+                .filter(|end| end.is_finite() && *end > 0.0),
+            _ => None,
+        };
+        if self
+            .vorbis_timing
+            .as_ref()
+            .is_some_and(|timing| !timing.is_resolved())
+            || (!self.decoded_pcm && ffmpeg_duration.is_some())
+        {
+            self.pending_seek = Some(target);
+            self.seek_target = None;
+            self.ready = false;
+            return Ok(());
+        }
         if self
             .range_end
-            .is_some_and(|end| self.range_start + target >= end)
+            .is_some_and(|end| self.range_start + target >= end && self.decoded_pcm)
         {
             self.reset_traversal();
             self.frames.clear();
@@ -891,9 +968,23 @@ impl Source {
             self.exhausted = true;
             return Ok(());
         }
+        let preroll = self.seek_preroll();
         let target = self.range_start + target;
+        // An opening at/beyond the segment end must still validate real PCM
+        // without exposing it. Anchor inside the segment once for either backend.
+        let anchor = self.range_end.map_or(target, |end| {
+            target.min((end - 1.0 / f64::from(self.info.sample_rate)).max(0.0))
+        });
         if let Decode::Ffmpeg(decoder) = &mut self.decode {
-            decoder.seek(target, cancelled)?;
+            // Use the whole-source hint only as a soft positioning anchor.
+            // Unknown durations start at origin; the original target still
+            // controls discard, so neither case can truncate later PCM.
+            let anchor = ffmpeg_duration.map_or(0.0, |end| {
+                anchor.min((end - 1.0 / f64::from(self.info.sample_rate.max(1))).max(0.0))
+            });
+            if ffmpeg_duration.is_some() || self.decoded_pcm {
+                decoder.seek(anchor, cancelled)?;
+            }
             self.reset_traversal();
             self.frames.clear();
             self.ready = false;
@@ -901,13 +992,7 @@ impl Source {
             self.exhausted = false;
             return Ok(());
         }
-        let preroll = if matches!(self.decode, Decode::Opus(_)) {
-            (target - 0.08).max(0.0)
-        } else if self.vorbis_timing.is_some() {
-            (target - 2.0).max(0.0)
-        } else {
-            target
-        };
+        let preroll = (anchor - preroll).max(0.0);
         let time = Time::try_from_secs_f64(preroll).context("Invalid seek time")?;
         let format = self
             .format
@@ -1041,8 +1126,8 @@ impl Source {
         Ok(Some((&self.frames, self.frame_start)))
     }
 
-    /// One finite first-frame round. A successful round preserves its PCM for
-    /// the first playback refill; EOF before that frame is an opening failure.
+    /// One finite opening round, preserving the first selected span for refill.
+    /// An exhausted selection succeeds only after the decoder has produced PCM.
     pub(super) fn poll_open(&mut self) -> Result<bool> {
         self.poll_open_with_cancel(None)
     }
@@ -1058,18 +1143,28 @@ impl Source {
         let mut budget = DECODE_WORK_BUDGET;
         let step = match self.read_next(cancelled, &mut budget) {
             Err(error) if error.is::<UnsupportedNative>() && self.opening_fallback.is_some() => {
-                let (path, file) = self.opening_fallback.take().unwrap();
-                *self =
+                let (path, file, selection) = self.opening_fallback.take().unwrap();
+                let mut source =
                     Self::from_ffmpeg(super::ffmpeg::Decoder::from_file(&path, file, cancelled)?)
                         .with_context(|| {
                         format!(
                             "Native decoder rejected the audio ({error:#}); FFmpeg extension failed"
                         )
                     })?;
+                source.select(selection, cancelled)?;
+                *self = source;
                 return Ok(false);
             }
             result => result?,
         };
+        // Establish real origin PCM (and any timing convention) before seeking,
+        // without publishing that prefix as part of the deferred selection.
+        if self.decoded_pcm
+            && let Some(target) = self.pending_seek.take()
+        {
+            self.seek_with_cancel(target, cancelled)?;
+            return Ok(false);
+        }
         match step {
             DecodeStep::Frames(()) => {
                 self.ready = true;
@@ -1077,6 +1172,12 @@ impl Source {
                 Ok(true)
             }
             DecodeStep::Yield => Ok(false),
+            // A valid source can have no remaining selected PCM, but container
+            // layout metadata alone must not admit an empty or invalid stream.
+            DecodeStep::Eof if !self.complete_stream && self.decoded_pcm => {
+                self.opening_fallback = None;
+                Ok(true)
+            }
             DecodeStep::Eof => bail!("Audio track contains no decodable samples"),
         }
     }
@@ -1114,6 +1215,10 @@ impl Source {
             buffer_len,
             snapshot.decoder_hint,
             ffmpeg_enabled,
+            SourceSelection {
+                range: snapshot.range,
+                start: 0.0,
+            },
             Some(cancelled),
         )?;
         check_cancelled(Some(cancelled))?;
@@ -1122,9 +1227,6 @@ impl Source {
             .is_some_and(|expected| expected != source.identity())
         {
             bail!("Waveform source differs from the captured active source");
-        }
-        if let Some(range) = snapshot.range {
-            source.restrict_with_cancel(range, Some(cancelled))?;
         }
         let context = snapshot
             .graph
@@ -1316,6 +1418,7 @@ impl Source {
         if self.frames.is_empty() {
             return false;
         }
+        self.decoded_pcm = true;
         // Normalize only timestamp rounding, never real missing/overlapping PCM.
         // Keep this judgement here for every backend and every consumer.
         if let Some(expected) = self.next_media_start {
@@ -1815,6 +1918,10 @@ pub(super) fn opening_prefix_file(
         entry.extend(element(&[0x83], &[2]));
         entry.extend(element(&[0x88], &[u8::from(number == 1)]));
         entry.extend(element(&[0x86], b"A_PCM/INT/LIT"));
+        // The seek tests address samples inside a block. Give the demuxer the
+        // real block span instead of an unknown (zero-duration) SimpleBlock.
+        let duration_ns: u32 = if number == 1 { 250_000 } else { 125_000 };
+        entry.extend(element(&[0x23, 0xe3, 0x83], &duration_ns.to_be_bytes()));
         let mut audio = element(&[0xb5], &8000_f64.to_be_bytes());
         audio.extend(element(&[0x9f], &[1]));
         audio.extend(element(&[0x62, 0x64], &[16]));
@@ -1853,6 +1960,24 @@ mod tests {
     use std::io::Write;
     use symphonia::core::{checksum::Crc32, io::Monitor};
 
+    #[track_caller]
+    fn open_selected(
+        path: &Path,
+        hint: DecoderHint,
+        ffmpeg_enabled: bool,
+        range: Option<crate::PlaybackRange>,
+    ) -> Source {
+        Source::open_with_cancel(
+            path,
+            PROBE_BUFFER_LEN,
+            hint,
+            ffmpeg_enabled,
+            SourceSelection { range, start: 0.0 },
+            None,
+        )
+        .unwrap()
+    }
+
     #[test]
     fn cancelled_probe_rejects_before_opening_and_can_be_retried() {
         let file = opening_prefix_file(DECODE_WORK_BUDGET * 3 + 1, true);
@@ -1870,8 +1995,14 @@ mod tests {
     #[test]
     fn opening_rounds_keep_real_packet_progress_and_the_first_pcm() {
         let file = opening_prefix_file(DECODE_WORK_BUDGET * 3 + 1, true);
-        let mut source =
-            Source::begin_open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
+        let mut source = Source::begin_open(
+            file.path(),
+            PROBE_BUFFER_LEN,
+            DecoderHint::Native,
+            false,
+            SourceSelection::default(),
+        )
+        .unwrap();
         for _ in 0..3 {
             assert!(!source.poll_open().unwrap());
         }
@@ -1888,8 +2019,14 @@ mod tests {
     #[test]
     fn opening_an_empty_selected_stream_fails_after_finite_prefix_rounds() {
         let file = opening_prefix_file(DECODE_WORK_BUDGET * 2, false);
-        let mut source =
-            Source::begin_open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
+        let mut source = Source::begin_open(
+            file.path(),
+            PROBE_BUFFER_LEN,
+            DecoderHint::Native,
+            false,
+            SourceSelection::default(),
+        )
+        .unwrap();
         assert!(!source.poll_open().unwrap());
         assert!(!source.poll_open().unwrap());
         assert!(source.poll_open().is_err());
@@ -1899,8 +2036,14 @@ mod tests {
     #[test]
     fn ffmpeg_opening_rounds_preserve_the_first_selected_pcm() {
         let file = opening_prefix_file(DECODE_WORK_BUDGET * 3 + 1, true);
-        let mut source =
-            Source::begin_open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Ffmpeg, true).unwrap();
+        let mut source = Source::begin_open(
+            file.path(),
+            PROBE_BUFFER_LEN,
+            DecoderHint::Ffmpeg,
+            true,
+            SourceSelection::default(),
+        )
+        .unwrap();
         let mut rounds = 0;
         while !source.poll_open().unwrap() {
             rounds += 1;
@@ -1992,6 +2135,10 @@ mod tests {
 
     // A real, seekable Ogg/Opus file without external tools or binary fixtures.
     fn opus_file() -> tempfile::NamedTempFile {
+        opus_file_with_mapping(false)
+    }
+
+    fn opus_file_with_mapping(mapped: bool) -> tempfile::NamedTempFile {
         fn page(file: &mut File, sequence: u32, flags: u8, granule: u64, packet: &[u8]) {
             let segments = packet.len() / 255 + 1;
             let mut page = Vec::with_capacity(27 + segments + packet.len());
@@ -2015,12 +2162,18 @@ mod tests {
         let mut encoder =
             opus::Encoder::new(48_000, opus::Channels::Mono, opus::Application::Audio).unwrap();
         let preskip = encoder.get_lookahead().unwrap() as u16;
-        let mut header = [0_u8; 19];
+        let mut header = vec![0_u8; 19];
         header[..8].copy_from_slice(b"OpusHead");
         header[8] = 1;
         header[9] = 1;
         header[10..12].copy_from_slice(&preskip.to_le_bytes());
         header[12..16].copy_from_slice(&48_000_u32.to_le_bytes());
+        if mapped {
+            // Family 1 with one uncoupled mono stream is valid Opus, but needs
+            // the FFmpeg backend rather than the native family-0 decoder.
+            header[18] = 1;
+            header.extend_from_slice(&[1, 0, 0]);
+        }
         page(file.as_file_mut(), 0, 2, 0, &header);
         page(file.as_file_mut(), 1, 0, 0, b"OpusTags\0\0\0\0\0\0\0\0");
         let total = 96_000 + usize::from(preskip);
@@ -2051,6 +2204,41 @@ mod tests {
             );
         }
         file
+    }
+
+    #[cfg(feature = "ffmpeg")]
+    #[test]
+    fn automatic_fallback_preserves_selected_pcm_and_initial_position() {
+        let file = opus_file_with_mapping(true);
+        let mut reference =
+            Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Ffmpeg, true).unwrap();
+        let expected = decode_remaining(&mut reference);
+        for start in [0.0, 0.125] {
+            let mut source = Source::begin_open(
+                file.path(),
+                PROBE_BUFFER_LEN,
+                DecoderHint::Auto,
+                true,
+                SourceSelection {
+                    range: Some(crate::PlaybackRange {
+                        start_seconds: 0.4,
+                        end_seconds: Some(1.6),
+                    }),
+                    start,
+                },
+            )
+            .unwrap();
+            while !source.poll_open().unwrap() {}
+            assert!(source.uses_ffmpeg());
+            assert!((source.info().duration.unwrap() - 1.2).abs() < 1e-9);
+            let (samples, timestamp) = source.next_frames().unwrap().unwrap();
+            assert!((timestamp - start).abs() < 1e-9);
+            let mut actual = samples.to_vec();
+            actual.extend(decode_remaining(&mut source));
+            let first = ((0.4 + start) * 48_000.0).round() as usize;
+            assert_eq!(actual, expected[first..76_800]);
+            assert_eq!(source.completed_bitrate(), None);
+        }
     }
 
     #[test]
@@ -2239,14 +2427,15 @@ mod tests {
             assert_eq!(source.completed_bitrate(), None);
         }
         for end in [None, Some(0.5)] {
-            let mut source =
-                Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
-            source
-                .restrict(crate::PlaybackRange {
+            let mut source = open_selected(
+                file.path(),
+                DecoderHint::Native,
+                false,
+                Some(crate::PlaybackRange {
                     start_seconds: 0.0,
                     end_seconds: end,
-                })
-                .unwrap();
+                }),
+            );
             decode_remaining(&mut source);
             assert_eq!(source.completed_bitrate(), None);
         }
@@ -2352,15 +2541,16 @@ mod tests {
     #[test]
     fn seek_to_explicit_segment_end_is_exhausted_and_can_seek_back() {
         let file = opus_file();
-        let mut source =
-            Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Auto, false).unwrap();
-        source
-            .restrict(crate::PlaybackRange {
+        let duration = probe(file.path(), false).unwrap().duration.unwrap();
+        let mut source = open_selected(
+            file.path(),
+            DecoderHint::Auto,
+            false,
+            Some(crate::PlaybackRange {
                 start_seconds: 0.0,
-                end_seconds: source.info().duration,
-            })
-            .unwrap();
-        let duration = source.info().duration.unwrap();
+                end_seconds: Some(duration),
+            }),
+        );
         for target in [duration, duration + 1.0] {
             source.seek(target).unwrap();
             assert!(source.next_frames().unwrap().is_none());
@@ -2436,14 +2626,15 @@ mod tests {
             assert_eq!(decode_remaining(&mut source), reference[offset..]);
         }
         for end_seconds in [Some(11.0), None] {
-            let mut source =
-                Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
-            source
-                .restrict(crate::PlaybackRange {
+            let mut source = open_selected(
+                file.path(),
+                DecoderHint::Native,
+                false,
+                Some(crate::PlaybackRange {
                     start_seconds: 9.0,
                     end_seconds,
-                })
-                .unwrap();
+                }),
+            );
             let end = (end_seconds.unwrap_or(12.0) * 8000.0) as usize;
             assert_eq!(decode_remaining(&mut source), reference[72_000..end]);
             source.seek(end_seconds.unwrap_or(12.0) - 9.0).unwrap();
@@ -2466,8 +2657,14 @@ mod tests {
     #[test]
     fn empty_ffmpeg_opening_fails_without_an_unbounded_prime() {
         let file = opening_prefix_file(DECODE_WORK_BUDGET * 3 + 1, false);
-        let mut source =
-            Source::begin_open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Ffmpeg, true).unwrap();
+        let mut source = Source::begin_open(
+            file.path(),
+            PROBE_BUFFER_LEN,
+            DecoderHint::Ffmpeg,
+            true,
+            SourceSelection::default(),
+        )
+        .unwrap();
         for _ in 0..8 {
             match source.poll_open() {
                 Ok(false) => {}
@@ -2476,6 +2673,78 @@ mod tests {
             }
         }
         panic!("finite packet input must reach its opening failure");
+    }
+
+    #[cfg(feature = "ffmpeg")]
+    #[test]
+    fn ffmpeg_exhausted_initial_selection_keeps_valid_source_and_seek_back() {
+        let file = pcm_file();
+        let mut reference =
+            Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Ffmpeg, true).unwrap();
+        let expected = decode_remaining(&mut reference);
+        for range in [
+            None,
+            Some(crate::PlaybackRange {
+                start_seconds: 0.5,
+                end_seconds: None,
+            }),
+            Some(crate::PlaybackRange {
+                start_seconds: 0.5,
+                end_seconds: Some(1.5),
+            }),
+        ] {
+            let mut source = Source::begin_open(
+                file.path(),
+                PROBE_BUFFER_LEN,
+                DecoderHint::Ffmpeg,
+                true,
+                SourceSelection {
+                    range,
+                    start: 100.0,
+                },
+            )
+            .unwrap();
+            while !source.poll_open().unwrap() {}
+            assert!(source.next_frames().unwrap().is_none());
+            assert_eq!(source.completed_bitrate(), None);
+            source.seek(0.25).unwrap();
+            let first = if range.is_some() { 33_075 } else { 11_025 };
+            let end = range
+                .and_then(|range| range.end_seconds)
+                .map_or(expected.len(), |end| (end * 44_100.0) as usize);
+            assert_eq!(decode_remaining(&mut source), expected[first..end]);
+        }
+    }
+
+    #[cfg(feature = "ffmpeg")]
+    #[test]
+    fn ffmpeg_initial_seek_preserves_unknown_and_underestimated_source_duration() {
+        for reported in [0, 64_000, 96_000] {
+            let file = constant_flac_file(reported, 12);
+            let mut reference =
+                Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Ffmpeg, true).unwrap();
+            let expected = decode_remaining(&mut reference);
+            assert_eq!(expected.len(), 96_000);
+            for start in [9.25, 100.0] {
+                let mut source = Source::begin_open(
+                    file.path(),
+                    PROBE_BUFFER_LEN,
+                    DecoderHint::Ffmpeg,
+                    true,
+                    SourceSelection { range: None, start },
+                )
+                .unwrap();
+                while !source
+                    .poll_open()
+                    .unwrap_or_else(|error| panic!("reported={reported}, start={start}: {error:#}"))
+                {
+                }
+                let offset = ((start * 8000.0) as usize).min(expected.len());
+                assert_eq!(decode_remaining(&mut source), expected[offset..]);
+                source.seek(0.0).unwrap();
+                assert_eq!(decode_remaining(&mut source), expected);
+            }
+        }
     }
 
     fn pcm_file() -> tempfile::NamedTempFile {
@@ -2503,8 +2772,14 @@ mod tests {
         let mut reference =
             Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
         let expected = decode_remaining(&mut reference);
-        let mut source =
-            Source::begin_open(file.path(), PROBE_BUFFER_LEN, hint, ffmpeg_enabled).unwrap();
+        let mut source = Source::begin_open(
+            file.path(),
+            PROBE_BUFFER_LEN,
+            hint,
+            ffmpeg_enabled,
+            SourceSelection::default(),
+        )
+        .unwrap();
         while !source.poll_open().unwrap() {}
         assert_eq!(
             decode_remaining(&mut source),
@@ -2512,21 +2787,39 @@ mod tests {
             "first-frame PCM must not be lost"
         );
 
-        let mut source =
-            Source::begin_open(file.path(), PROBE_BUFFER_LEN, hint, ffmpeg_enabled).unwrap();
-        while !source.poll_open().unwrap() {}
-        source
-            .restrict(crate::PlaybackRange {
-                start_seconds: 0.4,
-                end_seconds: Some(1.6),
-            })
+        for (range, start, first, end) in [
+            (None, 0.2, 8_820, 88_200),
+            (Some((0.0, 1.6)), 0.0, 0, 70_560),
+            (Some((0.4, 1.6)), 0.2, 26_460, 70_560),
+            (Some((0.4, 1.6)), 1.2, 70_560, 70_560),
+            (Some((0.4, 1.6)), 1.3, 70_560, 70_560),
+        ] {
+            let mut source = Source::begin_open(
+                file.path(),
+                PROBE_BUFFER_LEN,
+                hint,
+                ffmpeg_enabled,
+                SourceSelection {
+                    range: range.map(|(start_seconds, end_seconds)| crate::PlaybackRange {
+                        start_seconds,
+                        end_seconds: Some(end_seconds),
+                    }),
+                    start,
+                },
+            )
             .unwrap();
-        source.seek(0.2).unwrap();
-        let (first, timestamp) = source.next_frames().unwrap().unwrap();
-        assert!((timestamp - 0.2).abs() < 1e-9);
-        let mut actual = first.to_vec();
-        actual.extend(decode_remaining(&mut source));
-        assert_eq!(actual, expected[26_460..70_560]);
+            while !source.poll_open().unwrap() {}
+            if first != end {
+                let (samples, timestamp) = source.next_frames().unwrap().unwrap();
+                assert!((timestamp - start).abs() < 1e-9);
+                let mut actual = samples.to_vec();
+                actual.extend(decode_remaining(&mut source));
+                assert_eq!(actual, expected[first..end]);
+            } else {
+                assert!(source.next_frames().unwrap().is_none());
+            }
+            assert_eq!(source.completed_bitrate(), None);
+        }
     }
 
     #[test]
@@ -2566,13 +2859,15 @@ mod tests {
             DecoderHint::Ffmpeg,
         ] {
             for (start, end) in [(257, 6_147), (4_095, 4_096)] {
-                let mut source = Source::open(file.path(), PROBE_BUFFER_LEN, hint, true).unwrap();
-                source
-                    .restrict(crate::PlaybackRange {
+                let mut source = open_selected(
+                    file.path(),
+                    hint,
+                    true,
+                    Some(crate::PlaybackRange {
                         start_seconds: start as f64 / f64::from(rate),
                         end_seconds: Some(end as f64 / f64::from(rate)),
-                    })
-                    .unwrap();
+                    }),
+                );
                 for offset in [0, 1, end - start, 0] {
                     source.seek(offset as f64 / f64::from(rate)).unwrap();
                     let mut consumed = 0;
@@ -2711,13 +3006,29 @@ mod tests {
             assert!(frame.complete);
             assert_eq!(frame.duration, Some(2.0));
             assert!(frame.span_seconds >= 2.0);
+            let mut source = Source::open_file_unprimed(
+                file.path(),
+                open_regular_file(file.path()).unwrap(),
+                PROBE_BUFFER_LEN,
+                hint,
+                true,
+                None,
+            )
+            .unwrap();
             source.info.duration = Some(0.25);
             source
-                .restrict(crate::PlaybackRange {
-                    start_seconds: 0.5,
-                    end_seconds: Some(1.5),
-                })
+                .select(
+                    SourceSelection {
+                        range: Some(crate::PlaybackRange {
+                            start_seconds: 0.5,
+                            end_seconds: Some(1.5),
+                        }),
+                        start: 0.0,
+                    },
+                    None,
+                )
                 .unwrap();
+            while !source.poll_open().unwrap() {}
             assert_eq!(decode_remaining(&mut source).len(), 44_100);
         }
     }
@@ -2802,12 +3113,15 @@ mod tests {
         assert_eq!(waveform.duration, Some(actual_duration));
         assert!(waveform.span_seconds >= actual_duration);
         assert!(waveform.peaks.len() <= 1024);
-        source
-            .restrict(crate::PlaybackRange {
+        let mut source = open_selected(
+            file.path(),
+            DecoderHint::Native,
+            false,
+            Some(crate::PlaybackRange {
                 start_seconds: 3.0,
                 end_seconds: Some(4.0),
-            })
-            .unwrap();
+            }),
+        );
         assert_eq!(decode_remaining(&mut source).len(), 44_100);
         source.seek(0.5).unwrap();
         assert_eq!(decode_remaining(&mut source).len(), 22_050);
@@ -2836,6 +3150,7 @@ mod tests {
             PROBE_BUFFER_LEN,
             DecoderHint::Native,
             true,
+            SourceSelection::default(),
         )
         .unwrap();
         assert!(native.poll_open().unwrap_err().is::<UnsupportedNative>());
@@ -2845,6 +3160,13 @@ mod tests {
             PROBE_BUFFER_LEN,
             DecoderHint::Auto,
             true,
+            SourceSelection {
+                range: Some(crate::PlaybackRange {
+                    start_seconds: 0.0,
+                    end_seconds: Some(0.1),
+                }),
+                start: 0.0,
+            },
         )
         .unwrap();
         assert!(!automatic.uses_ffmpeg());
@@ -2852,6 +3174,7 @@ mod tests {
         {
             assert!(!automatic.poll_open().unwrap());
             assert!(automatic.uses_ffmpeg());
+            assert_eq!(automatic.info().duration, Some(0.1));
         }
         #[cfg(not(feature = "ffmpeg"))]
         {
@@ -2860,8 +3183,14 @@ mod tests {
         }
 
         let corrupt = aac_packet_file(0);
-        let mut source =
-            Source::begin_open(corrupt.path(), PROBE_BUFFER_LEN, DecoderHint::Auto, true).unwrap();
+        let mut source = Source::begin_open(
+            corrupt.path(),
+            PROBE_BUFFER_LEN,
+            DecoderHint::Auto,
+            true,
+            SourceSelection::default(),
+        )
+        .unwrap();
         assert!(!source.poll_open().unwrap_err().is::<UnsupportedNative>());
         assert!(!source.uses_ffmpeg());
 
@@ -2870,6 +3199,7 @@ mod tests {
             PROBE_BUFFER_LEN,
             DecoderHint::Auto,
             true,
+            SourceSelection::default(),
         )
         .unwrap();
         let cancelled = AtomicBool::new(true);
@@ -3169,15 +3499,16 @@ mod tests {
         {
             let start = start_frame * 588;
             let end = end_frame.map_or(reference.len(), |frame| frame * 588);
-            let mut source =
-                Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Ffmpeg, true).unwrap();
-            assert!(source.uses_ffmpeg());
-            source
-                .restrict(crate::PlaybackRange {
+            let mut source = open_selected(
+                file.path(),
+                DecoderHint::Ffmpeg,
+                true,
+                Some(crate::PlaybackRange {
                     start_seconds: start_frame as f64 / 75.0,
                     end_seconds: end_frame.map(|frame| frame as f64 / 75.0),
-                })
-                .unwrap();
+                }),
+            );
+            assert!(source.uses_ffmpeg());
             assert_ffmpeg_pcm(&mut source, &reference[start..end], 0.0);
             let offset = (end - start) / 2;
             let target = offset as f64 / 44_100.0;
@@ -3474,13 +3805,11 @@ mod tests {
     #[test]
     fn decoded_timestamps_place_cue_seeks_in_the_correct_preview_bins() {
         let file = pcm_file();
-        let mut source =
-            Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Auto, false).unwrap();
         let range = crate::PlaybackRange {
             start_seconds: 30.0 / 75.0,
             end_seconds: Some(80.0 / 75.0),
         };
-        source.restrict(range).unwrap();
+        let mut source = open_selected(file.path(), DecoderHint::Auto, false, Some(range));
         let rate = source.info.sample_rate;
         let channels = source.layout.len();
         let mut frame = crate::WaveformFrame::default();
@@ -3536,11 +3865,7 @@ mod tests {
         };
         for range in [None, Some(cue)] {
             for unknown in [false, true] {
-                let mut source =
-                    Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Auto, false).unwrap();
-                if let Some(range) = range {
-                    source.restrict(range).unwrap();
-                }
+                let mut source = open_selected(file.path(), DecoderHint::Auto, false, range);
                 let expected_duration = source.info.duration.unwrap();
                 if unknown {
                     source.info.duration = None;
@@ -3727,14 +4052,81 @@ mod tests {
                 assert_eq!(spans[0].position, 0);
                 assert!(spans[0].discontinuity);
                 assert!((spans[0].media_start - 0.05).abs() < 1e-9);
-                source
-                    .restrict(crate::PlaybackRange {
-                        start_seconds: 0.0,
-                        end_seconds: Some(0.1),
-                    })
-                    .unwrap();
-                assert_eq!(capture_spans(&mut source).0, original[..4800]);
+                for (start_seconds, first) in [(0.0, 0), (0.05, 2400)] {
+                    let mut source = open_selected(
+                        file.path(),
+                        hint,
+                        true,
+                        Some(crate::PlaybackRange {
+                            start_seconds,
+                            end_seconds: Some(0.1),
+                        }),
+                    );
+                    let (selected, spans) = capture_spans(&mut source);
+                    assert_eq!(selected, original[first..4800]);
+                    assert_eq!(spans[0].position, 0);
+                    assert!(spans[0].discontinuity);
+                    assert!(spans[0].media_start.abs() < 1e-9);
+                }
             }
+        }
+    }
+
+    #[test]
+    fn late_vorbis_opening_matches_origin_decode_and_latest_seek() {
+        // Existing end-stamped packets followed by repeated long blocks: late
+        // seeks cannot infer the convention from that steady-size tail alone.
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/vorbis-end-long.mka"))
+            .unwrap();
+        for &hint in TIMING_HINTS {
+            let mut reference = Source::open(file.path(), PROBE_BUFFER_LEN, hint, true).unwrap();
+            let original = decode_remaining(&mut reference);
+            for (range, start, end) in [
+                (None, 6.0, original.len()),
+                (
+                    Some(crate::PlaybackRange {
+                        start_seconds: 6.0,
+                        end_seconds: Some(6.05),
+                    }),
+                    0.0,
+                    290_400,
+                ),
+            ] {
+                let mut source = Source::begin_open(
+                    file.path(),
+                    PROBE_BUFFER_LEN,
+                    hint,
+                    true,
+                    SourceSelection { range, start },
+                )
+                .unwrap();
+                while !source.poll_open().unwrap() {}
+                let (actual, spans) = capture_spans(&mut source);
+                assert!(actual == original[288_000..end], "{hint:?}: {range:?}");
+                assert!((spans[0].media_start - start).abs() < 1e-8);
+            }
+
+            let mut source = Source::begin_open(
+                file.path(),
+                PROBE_BUFFER_LEN,
+                hint,
+                true,
+                SourceSelection {
+                    range: None,
+                    start: 6.0,
+                },
+            )
+            .unwrap();
+            source.seek(5.0).unwrap();
+            assert!(
+                source
+                    .poll_open_with_cancel(Some(&AtomicBool::new(true)))
+                    .is_err()
+            );
+            source.seek(7.0).unwrap();
+            while !source.poll_open().unwrap() {}
+            assert!(decode_remaining(&mut source) == original[336_000..]);
         }
     }
 
@@ -3931,14 +4323,15 @@ mod tests {
         for (start_frame, end_frame) in [(0_u64, Some(30_u64)), (30, Some(80)), (80, None)] {
             let start = (start_frame * 588) as usize;
             let end = end_frame.map_or(reference.len(), |frame| (frame * 588) as usize);
-            let mut source =
-                Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Auto, false).unwrap();
-            source
-                .restrict(crate::PlaybackRange {
+            let mut source = open_selected(
+                file.path(),
+                DecoderHint::Auto,
+                false,
+                Some(crate::PlaybackRange {
                     start_seconds: start_frame as f64 / 75.0,
                     end_seconds: end_frame.map(|frame| frame as f64 / 75.0),
-                })
-                .unwrap();
+                }),
+            );
             assert!(
                 (source.info().duration.unwrap() - (end - start) as f64 / 44_100.0).abs() < 1e-9
             );
@@ -3971,12 +4364,15 @@ mod tests {
                 4800,
                 "{hint:?} complete decode"
             );
-            source
-                .restrict(crate::PlaybackRange {
+            let mut source = open_selected(
+                file.path(),
+                hint,
+                true,
+                Some(crate::PlaybackRange {
                     start_seconds: 0.0,
                     end_seconds: Some(0.1),
-                })
-                .unwrap();
+                }),
+            );
             for target in [0.0, 0.05, 0.0] {
                 source.seek(target).unwrap();
                 let mut count = 0;
@@ -4007,14 +4403,15 @@ mod tests {
     #[test]
     fn cue_opus_preroll_and_end_remain_inside_the_segment() {
         let file = opus_file();
-        let mut source =
-            Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Auto, false).unwrap();
-        source
-            .restrict(crate::PlaybackRange {
+        let mut source = open_selected(
+            file.path(),
+            DecoderHint::Auto,
+            false,
+            Some(crate::PlaybackRange {
                 start_seconds: 1.0,
                 end_seconds: Some(1.5),
-            })
-            .unwrap();
+            }),
+        );
         assert_eq!(source.info().duration, Some(0.5));
         assert_eq!(source.info().bitrate_bps, None);
         assert_eq!(source.info().bits_per_sample, None);

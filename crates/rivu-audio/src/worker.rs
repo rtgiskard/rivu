@@ -6,7 +6,7 @@ use super::{
     graph::GraphRunner,
     output::validate_device,
     playback::{Playback, PlaybackOptions},
-    source::Source,
+    source::{Source, SourceSelection},
 };
 use crate::analysis::AnalysisWorker;
 use anyhow::anyhow;
@@ -68,7 +68,7 @@ impl CommandInbox {
 }
 
 // Only the worker owns an unfinished source. No output or lifecycle event is
-// published until its first-frame prefix has completed in finite rounds.
+// published until its selected opening has completed in finite decode rounds.
 struct Opening {
     path: PathBuf,
     range: Option<super::PlaybackRange>,
@@ -92,6 +92,10 @@ impl Opening {
                 buffer_len,
                 self.decoder_hint,
                 ffmpeg_enabled,
+                SourceSelection {
+                    range: self.range,
+                    start: self.start,
+                },
             )?);
             if let Some(expected) = self.expected_identity
                 && self.source.as_ref().unwrap().identity() != expected
@@ -406,10 +410,16 @@ impl Worker {
                 self.refresh_analysis();
             }
             AudioCommand::Seek(seconds) => {
-                if let Some(opening) = self.opening.as_mut() {
+                let result = if let Some(opening) = self.opening.as_mut() {
                     opening.start = seconds.max(0.0);
-                }
-                if let Err(error) = self.reopen(Some(seconds)) {
+                    opening
+                        .source
+                        .as_mut()
+                        .map_or(Ok(()), |source| source.seek(opening.start))
+                } else {
+                    self.reopen(Some(seconds))
+                };
+                if let Err(error) = result {
                     self.fail(error);
                 }
             }
@@ -809,6 +819,44 @@ mod tests {
     }
 
     #[test]
+    fn seeking_during_opening_changes_the_first_published_pcm() {
+        for hint in opening_hints() {
+            let file = crate::source::opening_prefix_file(1024, true);
+            let (mut worker, _commands, events, _shutdown) = opening_worker();
+            load_prefix(&mut worker, file.path(), hint, 41);
+            worker.poll_opening();
+            assert!(events.is_empty());
+            let target = 1.0 / 8000.0;
+            worker.command(AudioCommand::Seek(target));
+            assert!(worker.opening.is_some(), "{:?}", events.try_recv());
+            let opening = worker.opening.as_mut().unwrap();
+            let mut opened = false;
+            for _ in 0..64 {
+                if opening.poll(65_536, hint == DecoderHint::Ffmpeg).unwrap() {
+                    opened = true;
+                    break;
+                }
+            }
+            assert!(opened, "finite fixture must finish opening");
+            let source = opening.source.as_mut().unwrap();
+            let mut samples = Vec::new();
+            loop {
+                let mut budget = crate::source::DECODE_WORK_BUDGET;
+                match source.next_frames_with_budget(&mut budget).unwrap() {
+                    crate::source::DecodeStep::Frames(span) => {
+                        assert!((span.media_start - target).abs() < 1e-9);
+                        samples.extend_from_slice(span.samples);
+                    }
+                    crate::source::DecodeStep::Yield => (),
+                    crate::source::DecodeStep::Eof => break,
+                }
+            }
+            assert_eq!(samples, [-0.5]);
+            assert!(events.is_empty());
+        }
+    }
+
+    #[test]
     fn paused_opening_retains_metadata_and_rejects_retired_generation_updates() {
         let file = crate::source::opening_prefix_file(1024, true);
         let (mut worker, commands, events, _shutdown) = opening_worker();
@@ -821,13 +869,14 @@ mod tests {
             artist: "Library artist".into(),
             album: "Library album".into(),
         });
+        let target = 1.0 / 8000.0;
         for command in [
             AudioCommand::Pause(true),
             AudioCommand::Metadata {
                 generation: 41,
                 metadata: Arc::clone(&edited),
             },
-            AudioCommand::Seek(0.125),
+            AudioCommand::Seek(target),
             AudioCommand::Metadata {
                 generation: 40,
                 metadata: Arc::default(),
@@ -836,15 +885,15 @@ mod tests {
             commands.try_send(command).unwrap();
         }
         assert!(worker.control_round());
+        assert!(worker.opening.is_some(), "{:?}", events.try_recv());
         let opening = worker.opening.as_ref().unwrap();
         assert!(opening.paused);
-        assert_eq!(opening.start, 0.125);
+        assert_eq!(opening.start, target);
         assert!(
             opening.source.is_some(),
             "metadata must not reopen the source"
         );
         assert!(Arc::ptr_eq(&opening.metadata, &edited));
-        worker.poll_opening();
         assert!(worker.playback.is_none());
         assert!(events.is_empty());
 
@@ -1692,6 +1741,7 @@ mod tests {
     #[test]
     fn cancelling_an_audition_opening_keeps_cumulative_heard_and_metadata() {
         let file = crate::source::opening_prefix_file(1024, true);
+        let target = 1.0 / 8000.0;
         let info = Source::open(file.path(), 65_536, DecoderHint::Native, false)
             .unwrap()
             .info()
@@ -1708,20 +1758,25 @@ mod tests {
             source_info: Some(info),
             metadata: metadata.clone(),
             generation: 91,
-            start_seconds: 0.125,
+            start_seconds: 0.0,
             paused: true,
             listened_seconds: 12.5,
         });
         worker.poll_opening();
+        assert!(worker.opening.is_some(), "{:?}", events.try_recv());
+        // Cancel an actual retained decoder after an in-range seek, before the
+        // next opening poll can publish playback/output.
+        worker.command(AudioCommand::Seek(target));
+        assert!(worker.opening.is_some(), "{:?}", events.try_recv());
         let opening = worker.opening.as_ref().unwrap();
-        assert_eq!(opening.start, 0.125);
+        assert_eq!(opening.start, target);
         assert!(opening.paused);
         assert!(Arc::ptr_eq(&opening.metadata, &metadata));
         assert_eq!(
             worker.stop(),
             AudioSnapshot {
                 generation: 91,
-                position_seconds: 0.125,
+                position_seconds: target,
                 listened_seconds: 12.5
             }
         );
