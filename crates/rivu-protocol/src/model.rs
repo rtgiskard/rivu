@@ -213,6 +213,14 @@ pub struct LibraryRootCount {
     pub total: usize,
 }
 
+/// Catalog totals; CUE segments share bytes by source path, not fingerprint.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LibraryRootStats {
+    pub path: PathBuf,
+    pub total: usize,
+    pub file_size: u64,
+}
+
 /// Maximum number of rows in a query batch or interactive page.
 pub use rivu_format::config::MAX_QUERY_ROWS;
 

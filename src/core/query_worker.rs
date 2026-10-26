@@ -203,6 +203,9 @@ impl ReadView<'_> {
             Query::LibraryRootCounts { roots } => {
                 ViewResponse::LibraryRootCounts(self.store.library_root_counts(roots)?)
             }
+            Query::LibraryRootStats { roots } => {
+                ViewResponse::LibraryRootStats(self.store.library_root_stats(roots)?)
+            }
             Query::LibraryLocate {
                 track_id,
                 path,

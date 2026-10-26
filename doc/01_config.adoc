@@ -502,6 +502,15 @@ edit marker hold or gravity. Correct the value, then restore the desired style
 or toggle and apply again. Disabling a field does not discard or repair its value.
 
 Saving library roots does not scan or enqueue tracks; use `Scan paths` in Library.
+Each folder entry shows its recursive catalog track count and audio file size in
+IEC units. Sizes use existing scanned metadata, not a filesystem traversal or
+disk-usage measurement. Missing tracks retain their last scanned size; CUE
+segments count as tracks while their shared source path contributes bytes once.
+Separate source paths count separately even when their content is identical.
+Unscanned folders show zero after loading. Statistics load asynchronously when
+Settings opens and refresh after catalog changes or draft-root changes. Removing
+a root changes the draft only; Discard restores the saved roots.
+
 Display-only changes do not reopen audio. Hover an error to read its complete
 message, or click its copy icon to copy it.
 

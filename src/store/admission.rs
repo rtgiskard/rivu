@@ -98,6 +98,7 @@ impl Store {
                     AND s.modified_ns<>?1 AND t.fingerprint IS s.fingerprint))", [i64::MIN])?;
         let mut impacts = tx.query_row(&format!("SELECT
             COALESCE(MAX(t.id IS NULL OR t.fingerprint IS NOT s.fingerprint
+                OR t.file_size IS NOT s.file_size
                 OR COALESCE(t.title_override,t.raw_title) IS NOT COALESCE(t.title_override,s.raw_title)
                 OR COALESCE(t.artist_override,t.raw_artist) IS NOT COALESCE(t.artist_override,s.raw_artist)
                 OR COALESCE(t.album_override,t.raw_album) IS NOT COALESCE(t.album_override,s.raw_album)
@@ -221,6 +222,21 @@ mod tests {
             rejected: 0,
             errors: Vec::new(),
         }
+    }
+
+    #[test]
+    fn external_admission_size_only_changes_invalidate_library_stats() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let mut prepared = admission(&["/outside/existing.wav"], vec![0]);
+        store.admit_external_queue(&prepared, None, None).unwrap();
+        prepared.records[0].size = 1234;
+        let (_, impacts, added) = store.admit_external_queue(&prepared, None, None).unwrap();
+        assert_eq!(added, 0);
+        assert!(impacts.library);
+        assert!(!impacts.structure);
+        let stats = store.library_root_stats(&["/outside".into()]).unwrap();
+        assert_eq!(stats[0].total, 1);
+        assert_eq!(stats[0].file_size, 1234);
     }
 
     #[test]

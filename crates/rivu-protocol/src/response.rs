@@ -188,6 +188,7 @@ pub enum ViewResponse {
     PlaylistSummaryBatch(Batch<PlaylistSummary, i64>),
     PlaylistEntryBatch(Batch<PlaylistEntryRow, BatchContinuation<PlaylistEntryCursor>>),
     LibraryRootCounts(Vec<LibraryRootCount>),
+    LibraryRootStats(Vec<crate::model::LibraryRootStats>),
     OtherTracksCount(usize),
     LibraryLocate(crate::model::LibraryLocateResult),
     ScanTask(crate::model::ScanTaskStatus),

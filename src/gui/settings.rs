@@ -1,5 +1,6 @@
 #[cfg(test)]
 use crate::config::ConfigPersistence;
+mod library_stats;
 mod model;
 mod pages;
 
@@ -538,6 +539,7 @@ pub(super) struct Settings {
     text: HashMap<String, SharedString>,
     handle: CoreHandle,
     artwork_manager: Arc<ArtworkManager>,
+    root_stats: library_stats::RootStats,
     artwork_cache_age: Entity<Input>,
     artwork_cache_age_revision: u64,
     artwork_cache_busy: Option<(u64, bool)>,
@@ -613,6 +615,7 @@ impl Settings {
             i18n,
             handle,
             artwork_manager,
+            root_stats: library_stats::RootStats::default(),
             artwork_cache_age,
             artwork_cache_age_revision: 0,
             artwork_cache_busy: None,
@@ -688,6 +691,7 @@ impl Settings {
 
     fn cancel(&mut self, cx: &mut Context<Self>) {
         self.active = false;
+        self.root_stats.cancel();
         self.dropdown.close();
         self.reset(&self.handle.config_snapshot(), cx);
         cx.emit(SettingsEvent::Closed);
@@ -1715,6 +1719,8 @@ impl Settings {
         self.artwork_cache_error = None;
         self.fill(cx);
         self.active = true;
+        self.root_stats.reopen();
+        self.sync_library_stats(cx);
         self.scope.focus(window, cx);
         cx.notify();
     }
@@ -1868,6 +1874,7 @@ impl Settings {
                 self.font_value = self.value(Field::Font, cx);
             }
         }
+        self.sync_library_stats(cx);
         cx.notify();
     }
 

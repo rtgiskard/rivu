@@ -480,7 +480,8 @@ content; directory/location projections also use structure. Album projections us
 the Core-owned `album` collection token rather than the global library token.
 A single Track query uses `track = {track_id, revision}`. Bitrate-bearing payloads
 also select the bitrate revision described below.
-Root counts use structure only.
+Root counts use structure only. Root size/count statistics use library content,
+including changes to cached source-file sizes.
 Playlist summaries use the summary catalog only; full entry rows use
 `playlist_metadata = {playlist_id, revision}` plus their scoped content/lifetime
 token. Unfiltered compact entry locations use only their content token; filtered
@@ -694,6 +695,15 @@ results when their roots, request generation, or structure revision have changed
 Library-content-only changes do not invalidate these unfiltered root totals.
 These requests run on the same core owner and revision boundary as other queries;
 frontends must not query storage from rendering.
+
+`LibraryRootStats` accepts the same bounded root list and returns one
+`{path, total, file_size}` per input, in order. `total` counts catalog tracks;
+`file_size` sums cached bytes grouped by source path, so CUE segments sharing a
+source count bytes once while identical content at separate paths counts
+separately. Missing tracks retain their scanned sizes; this query performs no
+filesystem inventory. It uses the library-content stamp rather than the
+count-only structure stamp. Settings batches requests and rejects obsolete
+results when its session, draft roots, or library revision changes.
 
 == Business ownership and transactions
 

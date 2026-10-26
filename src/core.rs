@@ -253,6 +253,9 @@ impl CoreHandle {
     pub fn config_snapshot(&self) -> Arc<Config> {
         Arc::clone(&self.state.read().system.config)
     }
+    pub(crate) fn library_revision(&self) -> u64 {
+        self.state.read().library.revision
+    }
     pub(crate) fn mpris_service_state(&self) -> MprisServiceState {
         let state = self.state.read();
         MprisServiceState {

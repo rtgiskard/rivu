@@ -121,6 +121,9 @@ pub enum Query {
     LibraryRootCounts {
         roots: Vec<PathBuf>,
     },
+    LibraryRootStats {
+        roots: Vec<PathBuf>,
+    },
     ScanTask {
         id: u64,
     },
@@ -240,6 +243,7 @@ pub enum QueryIdentity<'a> {
         LibrarySort,
     ),
     LibraryRootCounts(&'a [PathBuf]),
+    LibraryRootStats(&'a [PathBuf]),
     ScanTask(u64),
     QueuePage(&'a Option<String>),
     QueueBatch(&'a Option<String>),
@@ -260,7 +264,8 @@ impl Query {
             Self::LibraryPage { .. }
             | Self::TrackPage { .. }
             | Self::TrackBatch { .. }
-            | Self::LibraryStats => stamp.library = revisions.library,
+            | Self::LibraryStats
+            | Self::LibraryRootStats { .. } => stamp.library = revisions.library,
             Self::Track { track_id } => {
                 stamp.track = revisions.track.filter(|scope| scope.track_id == *track_id);
                 if stamp.track.is_none() {
@@ -433,6 +438,7 @@ impl Query {
                 *track_id, path, *tree, query, *favorite, *missing, *sort,
             ),
             Self::LibraryRootCounts { roots } => QueryIdentity::LibraryRootCounts(roots),
+            Self::LibraryRootStats { roots } => QueryIdentity::LibraryRootStats(roots),
             Self::ScanTask { id } => QueryIdentity::ScanTask(*id),
             Self::QueuePage { query, .. } => QueryIdentity::QueuePage(query),
             Self::QueueBatch { query, .. } => QueryIdentity::QueueBatch(query),

@@ -797,6 +797,7 @@ impl Store {
             &format!("SELECT
                 COALESCE(MAX(t.id IS NULL OR t.path IS NOT s.path
                     OR t.fingerprint IS NOT s.fingerprint
+                    OR t.file_size IS NOT s.file_size
                     OR COALESCE(t.title_override,t.raw_title) IS NOT COALESCE(t.title_override,s.raw_title)
                     OR COALESCE(t.artist_override,t.raw_artist) IS NOT COALESCE(t.artist_override,s.raw_artist)
                     OR COALESCE(t.album_override,t.raw_album) IS NOT COALESCE(t.album_override,s.raw_album)
@@ -1227,7 +1228,7 @@ mod tests {
     }
 
     #[test]
-    fn verification_only_rescans_change_members_without_evicting_tracks() {
+    fn verification_rescans_invalidate_library_stats_only_when_size_changes() {
         let (store, mut scan, id) = queued(record());
         let track = store.track(id).unwrap().unwrap();
         let page = store.queue_page(None, 0, 10).unwrap();
@@ -1242,11 +1243,15 @@ mod tests {
                 store.apply_scan(&scan).unwrap(),
                 ScanImpacts {
                     changed: true,
+                    library: !mtime_only,
                     duplicate_members: true,
                     ..ScanImpacts::default()
                 }
             );
-            assert!(store.track_cache.borrow().entries.contains_key(&id));
+            assert_eq!(
+                store.track_cache.borrow().entries.contains_key(&id),
+                mtime_only
+            );
             assert_eq!(store.track(id).unwrap().unwrap(), track);
             assert_eq!(store.queue_state().unwrap(), state);
             assert_eq!(store.queue_page(None, 0, 10).unwrap(), page);
@@ -1257,8 +1262,42 @@ mod tests {
                 .remove(0);
             assert_eq!(member.file_size, scan.records[0].size);
             assert_eq!(member.modified_ns, scan.records[0].modified_ns);
+            let stats = store.library_root_stats(&["/music".into()]).unwrap();
+            assert_eq!(stats[0].file_size, scan.records[0].size);
+            assert_eq!(stats[0].total, 1);
             assert_eq!(store.apply_scan(&scan).unwrap(), ScanImpacts::default());
         }
+    }
+
+    #[test]
+    fn cue_size_only_rescans_invalidate_library_stats_without_fingerprints() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let mut source = record();
+        source.fingerprint = None;
+        let mut scan = ScanResult {
+            segments: vec![CueRecord::registered(
+                std::sync::Arc::new(source),
+                CueSegment {
+                    sheet: "/music/album.cue".into(),
+                    number: 1,
+                    start_frame: 0,
+                    end_frame: Some(4500),
+                },
+                cue_metadata(),
+                Some(60.0),
+            )],
+            ..ScanResult::default()
+        };
+        store.apply_scan(&scan).unwrap();
+        std::sync::Arc::make_mut(&mut scan.segments[0].source).size += 1;
+        let impacts = store.apply_scan(&scan).unwrap();
+        assert!(impacts.library);
+        assert!(!impacts.structure);
+        assert!(!impacts.duplicate_members);
+        assert_eq!(
+            store.library_root_stats(&["/music".into()]).unwrap()[0].file_size,
+            scan.segments[0].source.size
+        );
     }
 
     #[test]

@@ -171,6 +171,9 @@ pub enum WireQuery {
     LibraryRootCounts {
         roots: Vec<PathBuf>,
     },
+    LibraryRootStats {
+        roots: Vec<PathBuf>,
+    },
     ScanTask {
         id: u64,
     },
@@ -718,6 +721,7 @@ impl From<Query> for WireQuery {
                 sort,
             },
             Query::LibraryRootCounts { roots } => Self::LibraryRootCounts { roots },
+            Query::LibraryRootStats { roots } => Self::LibraryRootStats { roots },
             Query::ScanTask { id } => Self::ScanTask { id },
             Query::QueuePage {
                 query,
@@ -971,6 +975,7 @@ impl TryFrom<WireQuery> for Query {
                 sort,
             },
             WireQuery::LibraryRootCounts { roots } => Self::LibraryRootCounts { roots },
+            WireQuery::LibraryRootStats { roots } => Self::LibraryRootStats { roots },
             WireQuery::ScanTask { id } => Self::ScanTask { id },
             WireQuery::QueuePage {
                 query,

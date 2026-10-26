@@ -229,6 +229,11 @@ impl Settings {
             .overflow_y_scroll()
             .gap_1();
         for (index, path) in self.model.draft.library_roots.iter().enumerate() {
+            let stats = self.root_stats_label(path);
+            let stats_hint: SharedString = self
+                .root_stats_error()
+                .map(|error| SharedString::from(error.to_owned()))
+                .unwrap_or_else(|| self.tr("settings-library-root-stats-hint"));
             let path: SharedString = path.to_string_lossy().into_owned().into();
             paths = paths.child(
                 row()
@@ -238,12 +243,22 @@ impl Settings {
                     .child(
                         div()
                             .id(("settings-library-root-path", index))
+                            .flex_1()
                             .min_w_0()
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .text_ellipsis_middle()
                             .child(path.clone())
                             .tooltip(text_tooltip(path)),
+                    )
+                    .child(
+                        div()
+                            .id(("settings-library-root-stats", index))
+                            .flex_shrink_0()
+                            .whitespace_nowrap()
+                            .text_color(rgb(colors.muted))
+                            .child(stats)
+                            .tooltip(text_tooltip(stats_hint)),
                     )
                     .child(rivu_ui::hover_reveal(
                         ("settings-root-remove-reveal", index),
@@ -259,6 +274,7 @@ impl Settings {
                             cx,
                             move |this, _, cx| {
                                 this.model.draft.library_roots.remove(index);
+                                this.sync_library_stats(cx);
                                 cx.notify();
                             },
                         ),

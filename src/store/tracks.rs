@@ -613,6 +613,52 @@ impl Store {
             .collect())
     }
 
+    /// Count catalog tracks recursively and count each source path's cached bytes once.
+    /// Missing tracks retain their last scanned size; no filesystem access is needed.
+    pub fn library_root_stats(
+        &self,
+        roots: &[PathBuf],
+    ) -> Result<Vec<rivu_protocol::model::LibraryRootStats>> {
+        anyhow::ensure!(
+            roots.len() <= rivu_protocol::model::MAX_QUERY_ROWS,
+            "Library root stats request exceeds {} roots",
+            rivu_protocol::model::MAX_QUERY_ROWS
+        );
+        if roots.is_empty() {
+            return Ok(Vec::new());
+        }
+        let prefixes = roots
+            .iter()
+            .map(|path| directory_prefix(path))
+            .collect::<Result<Vec<_>>>()?;
+        let mut statement = self.conn.prepare(
+            "WITH roots AS (SELECT key,value FROM json_each(?1)),
+             source_totals AS (
+                 SELECT roots.key AS root_key,COUNT(*) AS track_total,MAX(tracks.file_size) AS source_size
+                 FROM roots CROSS JOIN tracks INDEXED BY tracks_directory
+                 WHERE roots.value<>'' AND tracks.path>=roots.value
+                   AND tracks.path<(rtrim(roots.value,'/')||'0')
+                 GROUP BY roots.key,tracks.path
+                 UNION ALL
+                 SELECT roots.key,COUNT(*),MAX(tracks.file_size)
+                 FROM roots CROSS JOIN tracks INDEXED BY tracks_directory
+                 WHERE roots.value='' GROUP BY roots.key,tracks.path
+             )
+             SELECT roots.key,COALESCE(SUM(track_total),0),COALESCE(SUM(source_size),0)
+             FROM roots LEFT JOIN source_totals ON source_totals.root_key=roots.key
+             GROUP BY roots.key ORDER BY roots.key",
+        )?;
+        Ok(statement
+            .query_map([serde_json::to_string(&prefixes)?], |row| {
+                Ok(rivu_protocol::model::LibraryRootStats {
+                    path: roots[row.get::<_, i64>(0)? as usize].clone(),
+                    total: row.get::<_, i64>(1)? as usize,
+                    file_size: row.get::<_, i64>(2)? as u64,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub(crate) fn track_count(&self) -> Result<usize> {
         Ok(self
             .conn
@@ -1707,5 +1753,99 @@ mod request_tests {
                 .is_err()
         );
         Ok(())
+    }
+
+    #[test]
+    fn library_root_stats_share_whole_and_cue_source_size_and_retain_missing_sizes() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        store
+            .conn
+            .execute_batch(
+                "INSERT INTO tracks(path,file_size,missing,cue_sheet,cue_number) VALUES
+                 ('/music/image.flac',1024,0,NULL,NULL),
+                 ('/music/image.flac',2048,1,'/sheets/album.cue',1),
+                 ('/music/image.flac',2048,1,'/sheets/album.cue',2);",
+            )
+            .unwrap();
+        let stats = store.library_root_stats(&["/music".into()]).unwrap();
+        assert_eq!((stats[0].total, stats[0].file_size), (3, 2048));
+    }
+
+    #[test]
+    fn library_root_stats_count_cue_tracks_and_unique_source_path_bytes() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        // Entirely catalog-backed: none of these paths need to exist.
+        for (path, size, missing) in [
+            ("/music/copy-a.flac", 1024, false),
+            ("/music/deep/copy-b.flac", 1024, false),
+            ("/music/missing.flac", 2048, true),
+            ("/music2/outside.flac", 8192, false),
+            ("/音楽/夏.flac", 4096, false),
+        ] {
+            store
+                .conn
+                .execute(
+                    "INSERT INTO tracks(path,file_size,missing,fingerprint) VALUES(?1,?2,?3,zeroblob(32))",
+                    params![path, size, missing],
+                )
+                .unwrap();
+        }
+        for (number, sheet) in [
+            (1, "/sheets/album.cue"),
+            (2, "/sheets/album.cue"),
+            (1, "/other/album.cue"),
+        ] {
+            store
+                .conn
+                .execute(
+                    "INSERT INTO tracks(path,file_size,cue_sheet,cue_number,cue_start_frame)
+                     VALUES('/music/deep/album.flac',3072,?1,?2,?3)",
+                    params![sheet, number, number * 75],
+                )
+                .unwrap();
+        }
+        let roots = [
+            "/music",
+            "/music/deep",
+            "/music/./deep/..",
+            "/music2",
+            "/音楽",
+            "/empty",
+            "/music",
+            "/",
+            "",
+        ]
+        .map(PathBuf::from);
+        let stats = store.library_root_stats(&roots).unwrap();
+        assert_eq!(
+            stats.iter().map(|stats| &stats.path).collect::<Vec<_>>(),
+            roots.iter().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            stats
+                .iter()
+                .map(|stats| (stats.total, stats.file_size))
+                .collect::<Vec<_>>(),
+            [
+                (6, 7168),
+                (4, 4096),
+                (6, 7168),
+                (1, 8192),
+                (1, 4096),
+                (0, 0),
+                (6, 7168),
+                (8, 19456),
+                (8, 19456),
+            ]
+        );
+        assert!(store.library_root_stats(&[]).unwrap().is_empty());
+        assert!(
+            store
+                .library_root_stats(&vec![
+                    PathBuf::from("/music");
+                    rivu_protocol::model::MAX_QUERY_ROWS + 1
+                ])
+                .is_err()
+        );
     }
 }

@@ -652,25 +652,31 @@ fn library_root_query_wire_round_trip_preserves_paths_filters_and_pages() {
         ],
         vec!["/music".into(); rivu_protocol::model::MAX_QUERY_ROWS],
     ] {
-        let query = Query::LibraryRootCounts { roots };
-        let expected = serde_json::to_value(&query).unwrap();
-        let mut encoded = Vec::new();
-        encode_request_frame_into(&WireRequest::Query(WireQuery::from(query)), &mut encoded)
-            .unwrap();
-        let WireRequest::Query(wire) = decode_request_frame(&encoded[4..]).unwrap() else {
-            panic!("expected query");
-        };
-        assert_eq!(
-            serde_json::to_value(Query::try_from(wire).unwrap()).unwrap(),
-            expected
-        );
+        for query in [
+            Query::LibraryRootCounts {
+                roots: roots.clone(),
+            },
+            Query::LibraryRootStats { roots },
+        ] {
+            let expected = serde_json::to_value(&query).unwrap();
+            let mut encoded = Vec::new();
+            encode_request_frame_into(&WireRequest::Query(WireQuery::from(query)), &mut encoded)
+                .unwrap();
+            let WireRequest::Query(wire) = decode_request_frame(&encoded[4..]).unwrap() else {
+                panic!("expected query");
+            };
+            assert_eq!(
+                serde_json::to_value(Query::try_from(wire).unwrap()).unwrap(),
+                expected
+            );
+        }
     }
 }
 
 #[test]
 fn library_root_responses_wire_round_trip_preserves_projection_and_revisions() {
     use rivu_protocol::{
-        model::{LibraryRootCount, LibraryRow, Page},
+        model::{LibraryRootCount, LibraryRootStats, LibraryRow, Page},
         response::{QueryRevisions, ViewResponse},
     };
     for result in [
@@ -687,6 +693,18 @@ fn library_root_responses_wire_round_trip_preserves_projection_and_revisions() {
         ViewResponse::OtherTracksCount(0),
         ViewResponse::OtherTracksCount(usize::MAX),
         ViewResponse::LibraryRootCounts(Vec::new()),
+        ViewResponse::LibraryRootStats(vec![
+            LibraryRootStats {
+                path: "/音楽".into(),
+                total: 3,
+                file_size: u64::from(u32::MAX) + 1,
+            },
+            LibraryRootStats {
+                path: "/empty".into(),
+                total: 0,
+                file_size: 0,
+            },
+        ]),
         ViewResponse::LibraryPage(Page {
             total: 4,
             rows: vec![LibraryRow {

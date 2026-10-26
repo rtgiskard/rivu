@@ -1174,6 +1174,10 @@ impl GuiApp {
                 );
             });
         }
+        if self.state.library.revision != state.library.revision {
+            self.settings
+                .update(cx, |settings, cx| settings.sync_library_stats(cx));
+        }
         let waveform_seek_disabled = self.state.system.config.waveform_seek_enabled
             && !state.system.config.waveform_seek_enabled;
         let still_mode_changed =

@@ -61,6 +61,14 @@ settings-animation-rate-fps = Animation rate (FPS)
 settings-library-folders-add-hint = Add folders through the Library component
 settings-remove-library-folder = Remove folder from draft
 settings-library-folders-empty = No folders; add folders in the Library component
+settings-library-root-stats =
+    { $count ->
+        [one] { $count } track · audio file size { $size }
+       *[other] { $count } tracks · audio file size { $size }
+    }
+settings-library-root-stats-loading = Loading statistics…
+settings-library-root-stats-unavailable = Statistics unavailable
+settings-library-root-stats-hint = Catalog audio file sizes, including missing tracks at their last scanned size. CUE tracks sharing a source file count its bytes once; separate copies count separately. Updated after scanning; not directory or disk usage.
 settings-artwork-period-hint = Finite and greater than zero
 settings-animation-fps-hint = 0–240; 0 follows the display, a cap reduces rendering work
 settings-scan-depth-hint = Minimum 1; starting folder = depth 0
