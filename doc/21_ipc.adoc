@@ -307,6 +307,11 @@ is independent of on-disk configuration and database schema versions:
 version authority and maintenance belong to
 link:26_migration.adoc#_version_authority[Database and configuration migration].
 
+Processing task status distinguishes the task `id` from `graph_run_id`, the retained
+graph snapshot accepted by audition and export commands. Export receipts carry
+the source run ID rather than becoming retained audition results or command aliases.
+This positional status-schema change requires protocol version 13 on both peers.
+
 `EditTrack` carries optional title, artist, and album fields. `None` leaves a
 field untouched; `Some("")` explicitly overrides it with empty text. The core
 merges these field intents into the current track rather than replacing it

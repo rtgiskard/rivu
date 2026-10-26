@@ -225,21 +225,26 @@ expansions. These caches are independent of visualization caching.
 
 The processing service, not a window or its query cache, owns scratch, retained
 PCM, and auditions. Graph PCM is capped at 2 GiB per run; graph and ordinary jobs
-share a 4 GiB output budget and at most four retained results. The selected audition
-is pinned; output that cannot coexist within the budget fails publication rather
-than evicting that audition. Native source rendering also has the RIFF 4 GiB
-scratch limit. The latest 32 terminal statuses may outlive their output files, so
-a terminal status alone does not authorize audition. Cancellation/closed views do
-not prove worker retirement. Workflow and source/output validity are specified in
+share a 4 GiB output budget and at most four retained audition results. The selected
+audition is pinned; output that cannot coexist within the budget fails publication
+rather than evicting that audition. Export jobs publish durable files without
+occupying audition slots or evicting retained runs, whether copying cached PCM or
+rendering another port. Their scratch is retired after publication, and their
+receipts share the latest 32 terminal statuses. Those statuses may outlive audition
+files, so a terminal status alone does not authorize audition. Native source
+rendering also has the RIFF 4 GiB scratch limit. Cancellation/closed views do not
+prove worker retirement. Workflow and source/output validity are specified in
 link:27_audio_processing.adoc#_tasks_retention_and_audition[Audio processing].
 
 Retirement is nonblocking on Core: one bounded reclamation worker deletes rejected
 and evicted results. Retiring bytes remain charged until deletion succeeds, and
 stem mixes count toward the same output budget. A subsequent processing worker
-waits for prior reclamation before preparing more PCM. A completed result that
-must wait for reclamation remains cancellable and is revalidated before publication;
-export publication follows that final decision. A deletion failure retains its
-ownership and charge and fails later preparation rather than allowing more PCM
+waits for prior reclamation before preparing more PCM. An audition result that
+must wait for reclamation remains cancellable and is revalidated before publication.
+Export publication also rechecks cancellation and source identity before its
+no-clobber commit; it does not admit temporary PCM into the audition budget.
+A deletion failure retains ownership and charge and fails later preparation
+rather than allowing more PCM
 to accumulate. Shutdown joins work and reclamation; retained audition files live
 until final service destruction after playback retirement.
 

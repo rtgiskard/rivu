@@ -41,6 +41,7 @@ impl Core {
             target,
             mode,
             export_path: None,
+            source_run: None,
             cached_output: None,
         };
         let status =
@@ -99,6 +100,7 @@ impl Core {
             target: node,
             mode: GraphExecutionMode::Auto,
             export_path: None,
+            source_run: None,
             cached_output: None,
         };
         let status = self
@@ -230,6 +232,7 @@ impl Core {
             target: node,
             mode: GraphExecutionMode::Offline,
             export_path: Some(path),
+            source_run: Some(id),
             cached_output,
         };
         let status = self
@@ -515,19 +518,21 @@ impl Core {
             crate::processing::SourceStamp::read(&track.path)? == result.stamp,
             "Source file changed before publication"
         );
-        let pinned_bytes = self
-            .processing
-            .results
-            .iter()
-            .filter(|r| Some(r.status.id) == self.processing.audition)
-            .map(|r| r.cache_bytes)
-            .sum::<u64>();
-        ensure!(
-            pinned_bytes
-                .checked_add(result.cache_bytes)
-                .is_some_and(|bytes| bytes <= crate::processing::graph::MAX_RETAINED_CACHE_BYTES),
-            "Processing cache plus selected audition exceeds the 4 GiB retention limit; stop that audition before running again"
-        );
+        if result.retains_audio() {
+            let pinned_bytes = self
+                .processing
+                .results
+                .iter()
+                .filter(|r| Some(r.status.id) == self.processing.audition)
+                .map(|r| r.cache_bytes)
+                .sum::<u64>();
+            ensure!(
+                pinned_bytes.checked_add(result.cache_bytes).is_some_and(
+                    |bytes| bytes <= crate::processing::graph::MAX_RETAINED_CACHE_BYTES
+                ),
+                "Processing cache plus selected audition exceeds the 4 GiB retention limit; stop that audition before running again"
+            );
+        }
         Ok(())
     }
 
@@ -619,15 +624,16 @@ impl Core {
                         self.processing.retire(result);
                         return Err(error);
                     }
-                    while self.processing.results.len() >= 4
-                        || self
-                            .processing
-                            .results
-                            .iter()
-                            .map(|r| r.cache_bytes)
-                            .sum::<u64>()
-                            .saturating_add(result.cache_bytes)
-                            > crate::processing::graph::MAX_RETAINED_CACHE_BYTES
+                    while result.retains_audio()
+                        && (self.processing.results.len() >= 4
+                            || self
+                                .processing
+                                .results
+                                .iter()
+                                .map(|r| r.cache_bytes)
+                                .sum::<u64>()
+                                .saturating_add(result.cache_bytes)
+                                > crate::processing::graph::MAX_RETAINED_CACHE_BYTES)
                     {
                         let index = self
                             .processing
@@ -641,6 +647,7 @@ impl Core {
                     Ok(result)
                 });
                 if let Ok(completed) = &result
+                    && completed.retains_audio()
                     && self
                         .processing
                         .results
@@ -673,12 +680,21 @@ impl Core {
                         }
                         result.status.graph_exported_path = Some(destination);
                     }
-                    Ok(*result)
+                    Ok(result)
                 });
                 match result {
-                    Ok(result) => {
-                        self.state.system.processing = Some(result.status.clone());
-                        self.processing.results.push_back(result);
+                    Ok(mut result) => {
+                        if !result.retains_audio() {
+                            // Export receipts outlive scratch, but never advertise
+                            // its soon-to-be-retired audition paths.
+                            result.status.outputs = None;
+                            result.status.graph_outputs.clear();
+                            self.state.system.processing = Some(result.status.clone());
+                            self.processing.retire(result);
+                        } else {
+                            self.state.system.processing = Some(result.status.clone());
+                            self.processing.results.push_back(*result);
+                        }
                         if let Some((pending_id, generation)) = self.processing.pending_audition
                             && pending_id == id
                         {

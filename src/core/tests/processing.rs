@@ -1586,6 +1586,78 @@ fn graph_export_uses_frozen_graph_and_publishes_only_after_acceptance() {
 }
 
 #[test]
+fn graph_exports_preserve_all_retained_runs_and_never_retain_export_scratch() {
+    for cached in [true, false] {
+        let (directory, mut core) = fixture();
+        let expected = source(directory.path());
+        for _ in 0..4 {
+            core.processing_graph_run(
+                1,
+                graph_port(if cached { 2 } else { 1 }, 0),
+                GraphExecutionMode::Offline,
+            )
+            .unwrap();
+            complete(&mut core);
+        }
+        let outputs = core.processing_status(1).unwrap().graph_outputs;
+        let mut action_run = core.processing_status(1).unwrap().graph_run_id.unwrap();
+        for index in 0..6 {
+            let destination = directory.path().join(format!("export-{index}.wav"));
+            core.processing_graph_export(action_run, graph_port(2, 0), destination.clone())
+                .unwrap();
+            complete(&mut core);
+            let task = core.processing_status(5 + index).unwrap();
+            assert_eq!(task.phase, ProcessingPhase::Complete, "{:?}", task.error);
+            assert_eq!(task.graph_exported_path, Some(destination.clone()));
+            assert!(task.graph_outputs.is_empty());
+            assert!(task.outputs.is_none());
+            let actual = hound::WavReader::open(destination)
+                .unwrap()
+                .samples::<f32>()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(actual, expected);
+            assert_eq!(
+                core.processing
+                    .results
+                    .iter()
+                    .map(|r| r.status.id)
+                    .collect::<Vec<_>>(),
+                vec![1, 2, 3, 4]
+            );
+            for id in 1..=4 {
+                let retained = core.processing_status(id).unwrap();
+                assert!(retained.error.is_none());
+                for output in retained.graph_outputs {
+                    assert!(output.path.is_file());
+                }
+            }
+            action_run = task.graph_run_id.unwrap();
+        }
+        assert_eq!(core.processing_status(1).unwrap().graph_outputs, outputs);
+        let _commands = recording_audio(&mut core);
+        core.processing_graph_audition(action_run, graph_port(if cached { 2 } else { 1 }, 0))
+            .unwrap();
+
+        // A destination created after preparation must survive the final
+        // no-clobber commit, without evicting any audition output.
+        let destination = directory.path().join("raced-export.wav");
+        core.processing_graph_export(1, graph_port(2, 0), destination.clone())
+            .unwrap();
+        let event = completion(&mut core);
+        std::fs::write(&destination, b"existing destination").unwrap();
+        core.processing_event(event);
+        assert_eq!(
+            core.processing_status(11).unwrap().phase,
+            ProcessingPhase::Failed
+        );
+        assert_eq!(std::fs::read(destination).unwrap(), b"existing destination");
+        assert_eq!(core.processing_status(1).unwrap().graph_outputs, outputs);
+        assert_eq!(core.processing.results.len(), 4);
+    }
+}
+
+#[test]
 fn graph_export_cancel_after_physical_completion_never_publishes_a_file() {
     let (directory, mut core) = fixture();
     source(directory.path());

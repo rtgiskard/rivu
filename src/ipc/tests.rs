@@ -3144,6 +3144,7 @@ fn graph_task_query_frame_retains_snapshot_revision_and_multiple_node_output_pat
             graph_export_path: Some("/rendered outputs/voice -6 dB.wav".into()),
         },
         graph_revision: Some(0),
+        graph_run_id: Some(90),
         graph_outputs: vec![
             GraphNodeOutput {
                 port: GraphPort { node: 1, port: 0 },

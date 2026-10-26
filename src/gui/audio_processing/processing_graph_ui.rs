@@ -1679,6 +1679,7 @@ mod tests {
                     graph_export_path: None,
                 },
                 graph_revision: Some(config.processing_graph.revision),
+                graph_run_id: Some(1),
                 graph_outputs: Vec::new(),
                 graph_exported_path: None,
                 graph_nodes: Vec::new(),

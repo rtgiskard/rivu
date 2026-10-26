@@ -52,6 +52,7 @@ pub(crate) struct GraphRequest {
     pub target: GraphPort,
     pub mode: GraphExecutionMode,
     pub export_path: Option<PathBuf>,
+    pub source_run: Option<u64>,
     pub cached_output: Option<CachedGraphOutput>,
 }
 
@@ -71,6 +72,13 @@ pub(crate) struct ProcessingResult {
     pub cache_bytes: u64,
     pub pending_export: Option<(tempfile::NamedTempFile, PathBuf)>,
     pub runner: Option<audio::GraphRunner>,
+}
+impl ProcessingResult {
+    pub(crate) fn retains_audio(&self) -> bool {
+        // Export scratch belongs to publication, not to the audition cache.
+        // Live runs still retain their frozen graph even without cached PCM.
+        self.status.settings.graph_export_path.is_none()
+    }
 }
 pub(crate) enum Event {
     GraphNode {
@@ -166,15 +174,17 @@ impl Service {
         profile: Option<NoiseSelection>,
         request: Option<GraphRequest>,
     ) -> Result<ProcessingTaskStatus> {
-        let (target, mode, export_path, cached_output) = if let Some(request) = request {
+        let (target, mode, export_path, cached_output, source_run) = if let Some(request) = request
+        {
             (
                 Some(request.target),
                 request.mode,
                 request.export_path,
                 request.cached_output,
+                request.source_run,
             )
         } else {
-            (None, GraphExecutionMode::Offline, None, None)
+            (None, GraphExecutionMode::Offline, None, None, None)
         };
         ensure!(
             self.active.is_none(),
@@ -228,6 +238,7 @@ impl Service {
                 graph_export_path: export_path,
             },
             graph_revision: target.map(|_| config.processing_graph.revision),
+            graph_run_id: target.map(|_| source_run.unwrap_or(id)),
             graph_outputs: Vec::new(),
             graph_exported_path: None,
             graph_nodes: if let Some(target) = target {

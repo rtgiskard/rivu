@@ -503,9 +503,14 @@ marks the task `cancelled`; stopping a cached offline audition leaves its comple
 task status intact. Completion of preparation is not the lifetime of live audio.
 
 Scratch lives in session-owned `processing-*` directories under the data
-directory. Up to four retained results share 4 GiB; the selected audition stays
-protected, so a result too large to coexist with it fails. Old task status does
-not guarantee that its audio remains available. See
+directory. Up to four retained audition results share 4 GiB; the selected audition
+stays protected, so a result too large to coexist with it fails. Export jobs keep
+only a terminal receipt and the destination WAV, not another audition result;
+repeated exports do not evict their source run. Task status keeps the export job's
+`id` separate from `graph_run_id`, the retained snapshot used for subsequent
+audition and export actions. The results page preserves the receipt identity and
+routes those actions to the source snapshot. Old task status does not guarantee
+that its audio remains available. See
 link:22_cache.adoc#_processing_output_retention[Processing output retention]
 for eviction and status-history lifetimes. Export a graph output to keep a durable
 WAV. Shutdown closes task admission and joins processing/reclamation workers while

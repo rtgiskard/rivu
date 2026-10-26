@@ -221,7 +221,11 @@ impl AudioProcessing {
         let Some(task) = self.state.system.processing.as_ref() else {
             return column();
         };
-        let id = task.id;
+        let task_id = task.id;
+        let Some(id) = task.graph_run_id else {
+            return column();
+        };
+        let export_receipt = id != task_id;
         let expanded = self.graph_ui.result_details.contains(&panel);
         let mut content = column().flex_shrink_0().gap_2();
         if let Some(error) = &task.error {
@@ -272,7 +276,7 @@ impl AudioProcessing {
                             ("graph-choose-export", panel),
                             self.tr("processing-result-choose-path"),
                             cx,
-                            move |this, _, cx| this.choose_graph_export_path(panel, id, cx),
+                            move |this, _, cx| this.choose_graph_export_path(panel, task_id, cx),
                         )
                         .self_start(),
                     )
@@ -302,15 +306,18 @@ impl AudioProcessing {
             for (kind, port) in ports {
                 let file = task.graph_outputs.iter().find(|output| output.port == port);
                 let label = self.tr(node_label(kind));
-                let availability = file
-                    .map(|output| {
+                let availability = if export_receipt {
+                    format!("{} #{id}", self.tr("processing-result-source-run"))
+                } else {
+                    file.map(|output| {
                         format!(
                             "{} · {}",
                             self.tr("processing-graph-cached"),
                             output.path.display()
                         )
                     })
-                    .unwrap_or_else(|| self.tr("processing-result-not-rendered").to_string());
+                    .unwrap_or_else(|| self.tr("processing-result-not-rendered").to_string())
+                };
                 content = content.child(
                     row()
                         .flex_wrap()
@@ -329,7 +336,9 @@ impl AudioProcessing {
                                 "graph-audition-{panel}-{id}-{}-{}",
                                 port.node, port.port
                             )),
-                            self.tr(if file.is_some() {
+                            self.tr(if export_receipt {
+                                "processing-graph-audition"
+                            } else if file.is_some() {
                                 "processing-result-audition-cached"
                             } else {
                                 "processing-result-calculate-audition"
@@ -344,7 +353,9 @@ impl AudioProcessing {
                                 "graph-export-{panel}-{id}-{}-{}",
                                 port.node, port.port
                             )),
-                            self.tr(if file.is_some() {
+                            self.tr(if export_receipt {
+                                "processing-graph-export"
+                            } else if file.is_some() {
                                 "processing-result-export-cached"
                             } else {
                                 "processing-result-calculate-export"

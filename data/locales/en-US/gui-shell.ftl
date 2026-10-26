@@ -355,6 +355,7 @@ processing-fields-cpu = CPU
 processing-fields-cuda = CUDA
 processing-result-edited = Edited audio settings differ
 processing-result-target = Captured target
+processing-result-source-run = Source snapshot run
 processing-result-open = Results
 processing-workspace-selected-audio = Selected audio
 processing-workspace-original = Original source

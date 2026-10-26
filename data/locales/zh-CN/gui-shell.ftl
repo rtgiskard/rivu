@@ -355,6 +355,7 @@ processing-fields-cpu = CPU
 processing-fields-cuda = CUDA
 processing-result-edited = 编辑后的音频设置不同
 processing-result-target = 冻结目标
+processing-result-source-run = 来源快照运行
 processing-result-open = 结果
 processing-workspace-selected-audio = 当前音频源
 processing-workspace-original = 原始音频

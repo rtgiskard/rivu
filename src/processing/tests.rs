@@ -122,6 +122,7 @@ fn completed_graph(
             target: GraphPort { node: 2, port: 0 },
             mode: GraphExecutionMode::Offline,
             export_path: None,
+            source_run: None,
             cached_output: None,
         },
     )?;

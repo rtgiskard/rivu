@@ -342,6 +342,8 @@ pub struct ProcessingTaskStatus {
     pub settings: ProcessingSettings,
     #[serde(default)]
     pub graph_revision: Option<u64>,
+    /// Retained graph run used for snapshot actions, distinct from an export receipt.
+    pub graph_run_id: Option<u64>,
     #[serde(default)]
     pub graph_outputs: Vec<GraphNodeOutput>,
     #[serde(default)]
