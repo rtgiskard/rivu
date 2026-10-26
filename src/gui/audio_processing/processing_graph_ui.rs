@@ -270,6 +270,16 @@ impl AudioProcessing {
         self.graph_ui.pending.is_some() || self.pending > 0
     }
 
+    pub(super) fn graph_collecting_equalizer_input(&self) -> Option<(u64, u64)> {
+        let pending = self.graph_ui.pending.as_ref()?;
+        pending
+            .equalizer_submitted
+            .as_ref()?
+            .live_input
+            .then_some(())?;
+        Some((pending.equalizer_target?, pending.before.revision))
+    }
+
     pub(super) fn reconcile_graph(&mut self, cx: &mut Context<Self>) {
         let mut equalizer_completed = None;
         let mut equalizer_rebased = None;

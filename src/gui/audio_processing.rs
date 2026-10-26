@@ -3,6 +3,7 @@
 use super::{feature::FeatureContext, layout::interaction::DockGeometry};
 use crate::projection::GuiSnapshot;
 use gpui::{prelude::*, *};
+use rivu_format::config::NeuralDevice;
 use rivu_protocol::model::{
     AuditionMode, Command, DenoisePatch, EqualizerEdit, NeuralPatch, NoiseSelection,
     ProcessingOperation, ProcessingPhase, Track,
@@ -406,19 +407,53 @@ impl AudioProcessing {
     }
 
     fn sync_fields(&mut self, cx: &mut Context<Self>) {
-        for (prefix, value) in [
+        let denoise =
+            serde_json::to_value(&self.state.system.config.denoise).expect("serializable denoise");
+        self.sync_object_fields("denoise", &denoise, cx);
+        // Formatting the typed f32 values avoids widening their binary error
+        // through serde_json::Value (for example, 0.6 becoming 0.6000000238418579).
+        let neural = &self.state.system.config.neural;
+        let values = [
             (
-                "denoise",
-                serde_json::to_value(&self.state.system.config.denoise)
-                    .expect("serializable denoise"),
+                "speech_interpreter",
+                neural.speech_interpreter.display().to_string(),
             ),
             (
-                "neural",
-                serde_json::to_value(&self.state.system.config.neural)
-                    .expect("serializable neural"),
+                "separation_interpreter",
+                neural.separation_interpreter.display().to_string(),
             ),
-        ] {
-            self.sync_object_fields(prefix, &value, cx);
+            ("worker", neural.worker.display().to_string()),
+            (
+                "speech_manifest",
+                neural
+                    .speech_manifest
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default(),
+            ),
+            (
+                "separation_manifest",
+                neural
+                    .separation_manifest
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default(),
+            ),
+            ("threads", neural.threads.to_string()),
+            ("speech_wet_mix", neural.speech_wet_mix.to_string()),
+            (
+                "speech_attenuation_limit_db",
+                neural.speech_attenuation_limit_db.to_string(),
+            ),
+            ("separation_overlap", neural.separation_overlap.to_string()),
+        ];
+        for (key, value) in values {
+            self.field(
+                &format!("neural.{key}"),
+                &self.parameter_path_label("neural", key),
+                value,
+                cx,
+            );
         }
         for (key, label, value) in [
             ("preset_name", "processing-preset-name", ""),
@@ -617,20 +652,22 @@ impl AudioProcessing {
         let theme = rivu_ui::theme::palette(cx);
         let field = &self.fields[key];
         let label: SharedString = label.into();
-        let control = row()
+        Self::parameter_row(
+            caption(theme, label.clone())
+                .id(SharedString::from(format!("field-label-{key}")))
+                .tooltip(rivu_ui::text_tooltip(self.path_help(key).unwrap_or(label))),
+            field.input.clone(),
+        )
+        .opacity(if enabled { 1. } else { 0.5 })
+    }
+
+    fn parameter_row(label: impl IntoElement + Styled, control: impl IntoElement) -> Div {
+        row()
             .min_w_0()
             .items_center()
             .gap_2()
-            .child(
-                caption(theme, label.clone())
-                    .w(relative(0.42))
-                    .min_w_0()
-                    .truncate()
-                    .id(SharedString::from(format!("field-label-{key}")))
-                    .tooltip(rivu_ui::text_tooltip(self.path_help(key).unwrap_or(label))),
-            )
-            .child(div().flex_1().min_w_0().child(field.input.clone()));
-        control.opacity(if enabled { 1. } else { 0.5 })
+            .child(label.w(relative(0.42)).flex_shrink_0().min_w_0().truncate())
+            .child(div().flex_1().min_w_0().child(control))
     }
 
     fn set_preset_popup(
@@ -1003,11 +1040,7 @@ impl AudioProcessing {
         for &key in keys {
             let path = format!("{prefix}.{key}");
             if let Some(checked) = value[key].as_bool() {
-                let neural = prefix == "neural";
-                let local = path
-                    .strip_prefix(if neural { "neural." } else { "denoise." })
-                    .unwrap_or(&path)
-                    .to_owned();
+                let local = path.strip_prefix("denoise.").unwrap_or(&path).to_owned();
                 content = content.child(checkbox(
                     SharedString::from(path),
                     self.parameter_label(key),
@@ -1015,11 +1048,7 @@ impl AudioProcessing {
                     true,
                     cx,
                     move |this, value, cx| {
-                        if neural {
-                            this.patch_neural(&local, json!(value), cx);
-                        } else {
-                            this.patch_denoise(&local, json!(value), cx);
-                        }
+                        this.patch_denoise(&local, json!(value), cx);
                     },
                 ));
             } else if self.fields.contains_key(&path) {
@@ -1148,40 +1177,113 @@ impl AudioProcessing {
         )
     }
 
+    fn neural_fields(&self, keys: &[&str], cx: &mut Context<Self>) -> Div {
+        let mut content = column().min_w_0().gap_1();
+        for key in keys {
+            content = content.child(self.field_view(
+                &format!("neural.{key}"),
+                self.parameter_label(key),
+                true,
+                cx,
+            ));
+        }
+        content
+    }
+
     fn neural_view(&self, panel: u64, speech: bool, cx: &mut Context<Self>) -> Div {
         let theme = rivu_ui::theme::palette(cx);
-        let neural =
-            serde_json::to_value(&self.state.system.config.neural).expect("serializable neural");
+        let neural = &self.state.system.config.neural;
         let open = if speech {
             self.speech_advanced
         } else {
             self.separation_advanced
         };
-        let parameters = self.parameter_controls(
-            "neural",
+        let mut parameters = self.neural_fields(
             if speech {
-                &[
-                    "speech_wet_mix",
-                    "speech_attenuation_limit_db",
-                    "speech_post_filter",
-                ][..]
+                &["speech_wet_mix", "speech_attenuation_limit_db"][..]
             } else {
                 &["separation_overlap"][..]
             },
-            &neural,
             cx,
         );
-        let model = self.parameter_controls(
-            "neural",
+        if speech {
+            parameters = parameters.child(Self::parameter_row(
+                caption(theme, self.tr("processing-speech-post-filter-label"))
+                    .id("speech-post-filter-label")
+                    .tooltip(rivu_ui::text_tooltip(
+                        self.tr("processing-speech-post-filter-help"),
+                    )),
+                checkbox(
+                    "neural.speech_post_filter",
+                    self.tr("processing-speech-post-filter-model"),
+                    neural.speech_post_filter,
+                    true,
+                    cx,
+                    |this, value, cx| this.patch_neural("speech_post_filter", json!(value), cx),
+                )
+                .aria_label(self.tr("processing-speech-post-filter")),
+            ));
+        }
+        let model = self.neural_fields(
             if speech {
                 &["speech_manifest", "speech_interpreter"][..]
             } else {
                 &["separation_manifest", "separation_interpreter"][..]
             },
-            &neural,
             cx,
         );
-        let mut content = column()
+        let mut model = column().min_w_0().gap_2().child(model).child(
+            div()
+                .mt_2()
+                .pt_2()
+                .border_t_1()
+                .border_color(rgb(theme.border))
+                .child(activate_control(
+                    dropdown_trigger(
+                        theme,
+                        ("neural-advanced", panel),
+                        self.tr("processing-runtime-options"),
+                        open,
+                        cx,
+                    ),
+                    cx,
+                    move |this, _, cx| {
+                        if speech {
+                            this.speech_advanced = !this.speech_advanced;
+                        } else {
+                            this.separation_advanced = !this.separation_advanced;
+                        }
+                        cx.notify();
+                    },
+                )),
+        );
+        if open {
+            let mut runtime = self.neural_fields(&["worker", "threads"], cx);
+            let mut devices = row().gap_1().flex_wrap();
+            for (device, value, label) in [
+                (NeuralDevice::Cpu, "cpu", "CPU"),
+                (NeuralDevice::Cuda, "cuda", "CUDA"),
+            ] {
+                devices = devices.child(
+                    button(
+                        SharedString::from(format!("neural-device-{value}")),
+                        label,
+                        cx,
+                        move |this, _, cx| this.patch_neural("device", json!(value), cx),
+                    )
+                    .when(neural.device == device, |v| v.bg(rgb(theme.selected))),
+                );
+            }
+            runtime = runtime.child(Self::parameter_row(
+                caption(theme, self.tr("processing-device")),
+                devices,
+            ));
+            model = model.child(runtime).child(
+                caption(theme, self.tr("processing-runtime-shared-help"))
+                    .text_color(rgb(theme.muted)),
+            );
+        }
+        column()
             .min_w_0()
             .gap_3()
             .child(rivu_ui::section_group(
@@ -1194,48 +1296,6 @@ impl AudioProcessing {
                 self.tr("processing-model-runtime"),
                 model,
             ))
-            .child(activate_control(
-                dropdown_trigger(
-                    theme,
-                    ("neural-advanced", panel),
-                    self.tr("processing-runtime-options"),
-                    open,
-                    cx,
-                ),
-                cx,
-                move |this, _, cx| {
-                    if speech {
-                        this.speech_advanced = !this.speech_advanced;
-                    } else {
-                        this.separation_advanced = !this.separation_advanced;
-                    }
-                    cx.notify();
-                },
-            ));
-        if open {
-            content = content.child(self.parameter_controls(
-                "neural",
-                &["worker", "threads"],
-                &neural,
-                cx,
-            ));
-            let mut devices = row()
-                .gap_1()
-                .child(caption(theme, self.tr("processing-device")));
-            for (device, label) in [("cpu", "CPU"), ("cuda", "CUDA")] {
-                devices = devices.child(
-                    button(
-                        SharedString::from(format!("neural-device-{device}")),
-                        label,
-                        cx,
-                        move |this, _, cx| this.patch_neural("device", json!(device), cx),
-                    )
-                    .when(neural["device"] == device, |v| v.bg(rgb(theme.selected))),
-                );
-            }
-            content = content.child(devices);
-        }
-        content
     }
 
     fn input_track(&self) -> Option<&Track> {

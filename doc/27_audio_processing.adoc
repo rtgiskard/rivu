@@ -110,18 +110,23 @@ remains a separate action. Canvas space follows the available panel height; shor
 panels scroll the graph tools and canvas independently rather than letting them
 overlap the execution bar. Working-area scrolling never moves the footer or
 execution bar. Multiple processing panels share typed graph drafts and
-acknowledged settings. EQ band editors retain panel-local drafts and reject
-conflicting values when applying them together; valid overall-gain edits submit
-directly. Each field has its own focus, cursor and hit-test geometry; each panel
-retains its graph parameter view and scroll positions.
+acknowledged settings. EQ band editors retain panel-local drafts. Valid numeric
+edits submit directly. Native numeric input and sliders continue collecting the
+latest draft while that target's own numeric command is in flight; graph mutations
+remain serialized. Other graph operations retain their editing lock, and an
+external graph revision is not overwritten by replaying an old draft.
+Each field has its own focus, cursor and hit-test geometry; each panel retains
+its graph parameter view and scroll positions.
 Node parameters use typed choices, toggles, precision numeric entry/steps and
 explicit file selection. Backend paths and parameters unused by the current
-algorithm are available in an expandable section, not discarded. Enter and
-Apply this field commit one draft. Apply all node drafts validates and commits
-the selected node atomically, including EQ drafts; Discard restores committed
-values. Stale graph revisions and rejected values retain the draft and report
-errors at the affected controls. Acknowledgements do not clear text edited after
-submission. File selection changes only the path draft and never starts a run.
+algorithm are available in an expandable section, not discarded. Outside EQ's
+live numeric controls, Enter and Apply this field commit one draft. Apply all
+node drafts validates and commits the selected node atomically, including
+remaining EQ drafts. Discard restores unapplied text and clears its errors,
+without undoing accepted live edits. Stale graph revisions and rejected values
+retain the draft and report errors at the affected controls. Acknowledgements
+do not clear text edited after submission. File selection changes only the path
+draft and never starts a run.
 Deleting or duplicating a node requires its drafts to be applied or discarded;
 undo and redo require all graph drafts to be resolved. These guards apply to
 keyboard shortcuts as well as buttons. Keyboard viewport changes cancel active
@@ -152,7 +157,23 @@ change the committed gain. Acknowledgements preserve newer typed text.
 IME preedit remains a draft even when it parses as a valid gain. Unmarking or
 committing submits the completed value once; Escape cancels composition without
 applying the preedit.
-Band numeric step icons stage drafts; Enter or the check icon commits a band field.
+Valid band frequency, gain, Q, shelf slope and stage-count edits submit as you
+type; numeric step buttons also apply immediately. Channels remain an explicit
+Enter/Apply field. Linked sliders use logarithmic frequency and Q, linear gain
+and shelf slope, and integer stages. Left/Right adjust the focused slider;
+Home/End select its range limits. Enter on unchanged displayed text never rounds
+the stored value. Typed precision survives acknowledgement while that value
+remains authoritative; a later Core change is displayed instead.
+Incomplete or invalid text and IME preedit remain local drafts. Slider edits
+apply during movement. Motion and release retain the latest value while a local
+acknowledgement is pending; an unrelated graph revision cannot inherit that intent.
+Cancellation stops the gesture but does not roll back
+accepted values. Reset clears input/output and every band's gain while preserving
+the band count, filter kinds, frequency, Q, slope, stages and channel targets.
+It discards unapplied gain drafts for that target across panels so an older queued
+gain cannot reapply after Reset; other parameter drafts remain.
+Reset is unavailable while a processing command awaits acknowledgement, avoiding
+a bank replacement based on parameters that are still changing.
 The compact response-channel dropdown shares a wrapping row with input/output gain
 controls. It is hidden for mono and follows the available stream channels;
 changing it only changes the displayed response, never the channels a band
@@ -186,15 +207,19 @@ range edges. Existing bands outside this range keep their original frequencies.
 Invalid counts are rejected without changing the configuration. The count field
 is unavailable while a processing command is awaiting acknowledgement.
 
-Numbered nodes on the EQ curve select the band shown in the linked property
-editor, whose heading identifies the band number and filter kind. Disabled bands
-remain selectable as hollow numbered nodes, with their disabled state shown in
-the editor. Input and output gain remain distinct overall-gain controls, not
-properties of the selected band. An empty bank prompts you to add a band before
-editing its properties.
+Numbered nodes appear while the curve is hovered, a node has keyboard focus or
+a curve drag is active. Selection alone does not keep them visible. Nodes select
+the band shown in the linked property editor, whose heading identifies the band
+number and filter kind. Disabled bands remain selectable as hollow numbered
+nodes, with their disabled state shown in the editor. Input and output gain remain
+distinct overall-gain controls, not properties of the selected band. An empty
+bank prompts you to add a band before editing its properties.
 
 Select a band node and drag horizontally for frequency and vertically for
-peak/shelf gain. Overlapping nodes stay at their true Hz/dB positions and show
+peak/shelf gain. The curve and non-dirty numeric fields preview the same values;
+release commits once. Escape or a lost interaction cancels the preview without
+submitting it or replacing an existing text draft. Overlapping nodes stay at
+their true Hz/dB positions and show
 the stack count and current member. A press prefers the selected member;
 clicking without dragging cycles through overlapping members, while dragging
 keeps the chosen member. Pointer selection and overlap cycling transfer keyboard
@@ -284,9 +309,13 @@ The Restoration page exposes Off, Stationary, Profile and Adaptive as direct mod
 choices. Off hides only spectral-noise parameters; hum removal and impulse repair
 each have their own enable switch and reveal their parameters when enabled.
 Noise-range fields appear only for Profile. Wet controls the complete chain.
-Speech enhancement and Separation have separate pages with operation-specific
-controls; environment/model paths and shared device/thread settings live under
-advanced settings. Collapsing an advanced section preserves its drafts.
+Speech enhancement and Separation have separate pages. Sound parameters are
+separate from Model configuration; advanced runtime options are nested under
+the latter. The post-filter is explicitly labeled DeepFilterNet3-only: enabling
+it with another speech model reports an error, not a fallback. Environment/model
+paths and numeric fields still require Enter or Apply; toggles and device choices
+submit directly. Worker script, device and threads are shared by Speech and
+Separation. Collapsing an advanced section preserves its drafts.
 
 [source,shell]
 ----
