@@ -1419,6 +1419,7 @@ fn system_config_wire_adapter_preserves_optional_fields_and_library_columns() {
             album_artwork_period_seconds: 12.5,
             album_artwork_direction: crate::config::AlbumArtworkDirection::Counterclockwise,
             album_artwork_fps: 240,
+            visualization_fps: 240,
             ..Default::default()
         });
         let system = rivu_protocol::model::SystemState {
@@ -1539,6 +1540,7 @@ fn configure_request_round_trip_preserves_optional_config_field_and_library_colu
             album_artwork_period_seconds: 12.5,
             album_artwork_direction: crate::config::AlbumArtworkDirection::Counterclockwise,
             album_artwork_fps: 30,
+            visualization_fps: 30,
             ..Default::default()
         };
         let request = WireRequest::Command(WireCommand::from(Command::Configure {

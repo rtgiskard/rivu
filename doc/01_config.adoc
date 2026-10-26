@@ -792,11 +792,17 @@ Live FFT analysis runs during playback only when Still Mode is off, the
 application window is visible, and a Spectrum, Spectrogram, or Audio Visualizer
 panel is visible.
 `visualizations.analysis_fps` accepts `5`–`60` and defaults to `20`; it limits FFT
-analysis, not display animation. Spectrum release, Spectrogram scrolling, radial
-motion, and generative light follow native window frames between accepted audio
-updates. Display time never advances beyond received audio; pause, hidden windows,
-and Still Mode stop both clocks. Stereo Density and Spatial Spectrum retain
-their measured analysis-update cadence.
+analysis, not display animation. `visualizations.fps` defaults to `0`, following
+native window frames; `1`–`240` caps the shared animation rate for Spectrum,
+Spectrogram, and Audio Visualizer. It does not affect Waveform or album artwork.
+Set it under Settings → Visualizations → General → Animation, separately from
+Frequency analysis. Spectrum release, Spectrogram scrolling, radial motion, and
+generative light advance between accepted audio updates at this display cadence.
+Display time never advances beyond received audio. Pause stops analysis and
+audio-driven animation; the optional idle fade continues at the display cap.
+Hidden windows and Still Mode stop both clocks; losing focus alone does not.
+Stereo Density and Spatial Spectrum refresh from the latest analysis result,
+bounded by the display cap rather than replaying skipped publications.
 
 When no matching panel remains visible, Spectrum drops derived geometry and
 resets its envelopes, Spectrogram releases its history, and Audio Visualizer
@@ -842,8 +848,8 @@ Shared visualization settings apply as follows:
   from `512` to `32768` and defaults to `8192`. Window accepts `hann`,
   `blackman_harris` (default), or `none`. Changing size or window clears
   visualization history.
-  `visualizations.analysis_fps` is the maximum analysis rate; actual updates follow window
-  frames and can be slower when the compositor throttles presentation.
+  `visualizations.analysis_fps` is the maximum analysis rate, independent of
+  `visualizations.fps` and compositor-throttled display callbacks.
 * Still Mode stops processing and discards results; see <<_still_mode,Still Mode>>.
   This is independent of rendering reuse and media read buffering.
 

@@ -1042,6 +1042,11 @@ impl Settings {
                     ))
                     .child(settings_card(
                         palette(cx),
+                        settings.tr("settings-animation"),
+                        settings.single(Field::VisualizationFps, cx),
+                    ))
+                    .child(settings_card(
+                        palette(cx),
                         settings.tr("settings-frequency-analysis"),
                         column()
                             .gap_2()

@@ -127,6 +127,8 @@ pub(super) struct Presentation {
     frame_requested: bool,
     frame_pending: bool,
     frame_generation: u64,
+    frame_timer: Option<Task<()>>,
+    last_frame_request: Option<Instant>,
     analysis_timer: Option<Task<()>>,
     animation_clock: AnimationClock,
     _waveform_subscription: Subscription,
@@ -164,6 +166,8 @@ impl Presentation {
             frame_requested: false,
             frame_pending: false,
             frame_generation: 0,
+            frame_timer: None,
+            last_frame_request: None,
             analysis_timer: None,
             animation_clock: AnimationClock::default(),
             _waveform_subscription: subscription,
@@ -183,6 +187,7 @@ impl Presentation {
         } = state;
         let config_changed = !Arc::ptr_eq(&self.config, &config);
         let still_changed = self.config.still_mode != config.still_mode;
+        let fps_changed = self.config.visualization_fps != config.visualization_fps;
         let visibility_changed = self.visible != visible || self.shutting_down != shutting_down;
         let status_changed = self.status != status;
         let position_changed = self.position != position || self.duration != duration;
@@ -278,7 +283,11 @@ impl Presentation {
             }
             self.demand = demand;
         }
-        if was_running != self.analysis_interval() || visibility_changed || still_changed {
+        if was_running != self.analysis_interval()
+            || visibility_changed
+            || still_changed
+            || fps_changed
+        {
             self.cancel_clock();
         }
         let waveform_enabled = !self.config.still_mode && !self.shutting_down;
@@ -316,6 +325,8 @@ impl Presentation {
     fn cancel_clock(&mut self) {
         self.frame_generation = self.frame_generation.wrapping_add(1);
         self.analysis_timer.take();
+        self.frame_timer = None;
+        self.last_frame_request = None;
         self.animation_clock.suspend();
         self.frame_requested = false;
         // Native callbacks cannot be removed. Keep their pending slot occupied
@@ -364,12 +375,41 @@ impl Presentation {
     pub(super) fn request_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.active()
             || !self.demand.enabled
-            || (!self.frame_requested && self.analysis_interval().is_none())
+            || (!self.frame_requested
+                && self.analysis_interval().is_none()
+                && !self.audio_visualizer.idle_fading(Instant::now()))
             || self.frame_pending
+            || self.frame_timer.is_some()
         {
             return;
         }
         self.start_analysis_clock(cx);
+        let now = Instant::now();
+        let delay = self.last_frame_request.map_or(Duration::ZERO, |last| {
+            if self.config.visualization_fps == 0 {
+                Duration::ZERO
+            } else {
+                Duration::from_nanos(
+                    1_000_000_000_u64.div_ceil(u64::from(self.config.visualization_fps)),
+                )
+                .saturating_sub(now.saturating_duration_since(last))
+            }
+        });
+        if !delay.is_zero() {
+            let generation = self.frame_generation;
+            let timer = cx.background_executor().timer(delay);
+            self.frame_timer = Some(cx.spawn_in(window, async move |this, cx| {
+                timer.await;
+                let _ = this.update_in(cx, |this, window, cx| {
+                    if generation == this.frame_generation {
+                        this.frame_timer = None;
+                        this.request_frame(window, cx);
+                    }
+                });
+            }));
+            return;
+        }
+        self.last_frame_request = Some(now);
         self.frame_pending = true;
         let generation = self.frame_generation;
         let entity = cx.weak_entity();
@@ -395,6 +435,9 @@ impl Presentation {
                 } else {
                     this.animation_clock.suspend();
                     this.consume_analysis(now, cx);
+                    this.audio_visualizer.begin_idle_fade(now);
+                    this.notify_animation(false, true, cx);
+                    this.request_frame(window, cx);
                 }
             });
         });
@@ -862,6 +905,39 @@ mod tests {
                     owner.frame_pending,
                     "native animation continues while analysis waits"
                 );
+                let mut capped = config.as_ref().clone();
+                capped.visualization_fps = 1;
+                owner.sync(
+                    PresentationState {
+                        config: Arc::new(capped),
+                        layout: &layout,
+                        status: PlaybackStatus::Playing,
+                        visible: true,
+                        shutting_down: false,
+                        track: None,
+                        position: 0.0,
+                        duration: None,
+                    },
+                    cx,
+                );
+            });
+            // Retire the pre-configuration native callback before pacing again.
+            window.simulate_next_frame(cx);
+            owner.update(cx, |owner, _| {
+                owner.last_frame_request = Some(Instant::now() + Duration::from_secs(60));
+            });
+            window.simulate_next_frame(cx);
+            owner.update(cx, |owner, cx| {
+                assert!(!owner.frame_pending);
+                assert!(owner.frame_timer.is_some());
+                assert!(owner.analysis_timer.is_some());
+                assert_eq!(
+                    owner.analysis_interval(),
+                    Some(Duration::from_secs_f64(1.0 / config.analysis_fps as f64))
+                );
+                // Repeated wakeups must coalesce behind the one delayed request.
+                owner.request_frame(window, cx);
+                assert!(!owner.frame_pending);
                 let mut still = config.as_ref().clone();
                 still.still_mode = true;
                 owner.sync(
@@ -879,6 +955,8 @@ mod tests {
                 );
                 assert_eq!(owner.demand, DisplayDemand::default());
                 assert!(owner.analysis_timer.is_none());
+                assert!(owner.frame_timer.is_none());
+                assert!(owner.last_frame_request.is_none());
                 assert!(owner.analysis_interval().is_none());
                 assert_eq!(owner.staging.settings, None);
                 owner.sync(

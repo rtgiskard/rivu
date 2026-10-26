@@ -198,6 +198,7 @@ file_group!(Visualizations, VisualizationsView {
     still_mode => still_mode: bool,
     signal => visualization_signal: VisualizationSignal,
     analysis_fps => analysis_fps: u32,
+    fps => visualization_fps: u16,
     background => visual_background: RgbColor,
     palette => visual_palette: VisualizationPalette,
     analysis_fft_size => analysis_fft_size: u32,

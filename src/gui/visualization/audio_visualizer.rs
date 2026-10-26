@@ -385,6 +385,22 @@ impl AudioVisualizer {
         changed
     }
 
+    pub(in crate::gui) fn begin_idle_fade(&self, now: Instant) {
+        let mut data = self.data.borrow_mut();
+        if data.fade_when_idle && !data.displayed.is_empty() {
+            data.fade_started.get_or_insert(now);
+        }
+    }
+
+    pub(in crate::gui) fn idle_fading(&self, now: Instant) -> bool {
+        let data = self.data.borrow();
+        data.fade_when_idle
+            && !data.displayed.is_empty()
+            && data
+                .fade_started
+                .is_some_and(|start| now.saturating_duration_since(start) < IDLE_FADE_DURATION)
+    }
+
     pub(in crate::gui) fn view(
         &self,
         i18n: &Arc<Localizer>,
@@ -447,13 +463,8 @@ impl AudioVisualizer {
                         } else {
                             let started = *data.fade_started.get_or_insert_with(Instant::now);
                             let elapsed = started.elapsed();
-                            let alpha = 1.0
-                                - (elapsed.as_secs_f32() / IDLE_FADE_DURATION.as_secs_f32())
-                                    .clamp(0.0, 1.0);
-                            if alpha > 0.0 {
-                                window.request_animation_frame();
-                            }
-                            alpha
+                            1.0 - (elapsed.as_secs_f32() / IDLE_FADE_DURATION.as_secs_f32())
+                                .clamp(0.0, 1.0)
                         };
                         if fade_alpha == 0.0 {
                             paint_guides(
@@ -916,6 +927,24 @@ mod tests {
     fn accept(radial: &mut AudioVisualizer, frame: &AnalysisFrame) {
         radial.update(frame, frame.sample_time);
         radial.animate(frame.sample_time);
+    }
+
+    #[test]
+    fn idle_fade_starts_before_paint_and_finishes_without_restarting() {
+        let mut radial = AudioVisualizer::new();
+        radial.configure(&Config {
+            audio_visualizer_fade_when_idle: true,
+            ..Config::default()
+        });
+        accept(&mut radial, &frame());
+        let start = Instant::now();
+        radial.begin_idle_fade(start);
+        assert!(radial.idle_fading(start));
+        radial.begin_idle_fade(start + Duration::from_secs(1));
+        assert!(!radial.idle_fading(start + IDLE_FADE_DURATION));
+        radial.set_visible(false);
+        radial.begin_idle_fade(start + IDLE_FADE_DURATION);
+        assert!(!radial.idle_fading(start + IDLE_FADE_DURATION));
     }
 
     #[test]

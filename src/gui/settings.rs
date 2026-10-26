@@ -109,6 +109,7 @@ enum Field {
     Scale,
     LayoutSnapGrid,
     Fps,
+    VisualizationFps,
     Background,
     VisualizationDb,
     AudioVisualizerSensitivity,
@@ -190,6 +191,7 @@ impl Field {
             Self::Scale => "settings-interface-scale",
             Self::LayoutSnapGrid => "settings-layout-grid-spacing-px",
             Self::Fps => "settings-analysis-rate-hz",
+            Self::VisualizationFps => "settings-animation-rate-fps",
             Self::Background => "settings-background-color",
             Self::VisualizationDb => "settings-default-display-range-db",
             Self::AudioVisualizerSensitivity => "settings-sensitivity",
@@ -265,6 +267,7 @@ impl Field {
             Self::Scale => "0.75–2.".into(),
             Self::LayoutSnapGrid => settings.tr("settings-layout-grid-hint"),
             Self::Fps => settings.tr("settings-analysis-rate-hint"),
+            Self::VisualizationFps => settings.tr("settings-visualization-fps-hint"),
             Self::Background => settings.tr("settings-background-hint"),
             Self::AudioVisualizerPrimaryColor | Self::AudioVisualizerSecondaryColor => {
                 settings.tr("settings-colors-hint")
@@ -733,6 +736,7 @@ impl Settings {
             Field::Scale,
             Field::LayoutSnapGrid,
             Field::Fps,
+            Field::VisualizationFps,
             Field::Background,
             Field::VisualizationDb,
             Field::AudioVisualizerSensitivity,
@@ -782,7 +786,9 @@ impl Settings {
                     | Field::CursorColor => "settings-color-placeholder",
                     Field::MediaReadBuffer => "settings-buffer-placeholder",
                     Field::SpectrumBars => "settings-auto-zero-placeholder",
-                    Field::AlbumArtworkFps => "settings-display-fps-placeholder",
+                    Field::AlbumArtworkFps | Field::VisualizationFps => {
+                        "settings-display-fps-placeholder"
+                    }
                     Field::ScanMinDuration => "settings-duration-placeholder",
                     _ => field.label_id(),
                 });
@@ -1119,6 +1125,12 @@ impl Settings {
             cx,
         );
         self.set_value(
+            Field::VisualizationFps,
+            self.model.draft.visualization_fps.to_string(),
+            unchanged,
+            cx,
+        );
+        self.set_value(
             Field::Background,
             self.model.draft.visual_background.to_string(),
             unchanged,
@@ -1358,6 +1370,7 @@ impl Settings {
         config.ui_scale = self.float(Field::Scale, self.model.draft.ui_scale, cx)?;
         config.layout_snap_grid_px = self.number(Field::LayoutSnapGrid, cx)?;
         config.analysis_fps = self.number(Field::Fps, cx)?;
+        config.visualization_fps = self.number(Field::VisualizationFps, cx)?;
         config.visualization_db_range = self.float(
             Field::VisualizationDb,
             self.model.draft.visualization_db_range,

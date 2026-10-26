@@ -11,7 +11,7 @@ use rivu_format::media::DecoderHint;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub const PROTOCOL_VERSION: u8 = 8;
+pub const PROTOCOL_VERSION: u8 = 9;
 pub const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub const MAX_CLIENTS: usize = 16;
@@ -1622,6 +1622,7 @@ pub struct WireConfig {
     still_mode: bool,
     visualization_signal: rivu_format::config::VisualizationSignal,
     analysis_fps: u32,
+    visualization_fps: u16,
     visual_background: rivu_format::config::RgbColor,
     visual_palette: rivu_format::config::VisualizationPalette,
     spectrum_style: rivu_format::config::SpectrumStyle,
@@ -1724,6 +1725,7 @@ impl From<&rivu_format::config::Config> for WireConfig {
             still_mode: value.still_mode,
             visualization_signal: value.visualization_signal,
             analysis_fps: value.analysis_fps,
+            visualization_fps: value.visualization_fps,
             visual_background: value.visual_background,
             visual_palette: value.visual_palette,
             spectrum_style: value.spectrum_style,
@@ -1828,6 +1830,7 @@ impl From<WireConfig> for rivu_format::config::Config {
             still_mode: value.still_mode,
             visualization_signal: value.visualization_signal,
             analysis_fps: value.analysis_fps,
+            visualization_fps: value.visualization_fps,
             visual_background: value.visual_background,
             visual_palette: value.visual_palette,
             spectrum_style: value.spectrum_style,

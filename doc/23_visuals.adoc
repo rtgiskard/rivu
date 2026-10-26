@@ -144,6 +144,13 @@ The GUI presentation owner owns the shared visual models, staging buffer,
 display demand, and per-panel view entities. One analysis timer requests frames
 at `analysis_fps`; one pending native window callback consumes the latest
 publication and advances display animation independently of that timer.
+`visualizations.fps` sets a shared display cap for Spectrum, Spectrogram, and
+Audio Visualizer: `0` (default) follows window frames, while `1`–`240` limits
+animation frames per second. The cap does not throttle analysis or control
+Waveform or album artwork. The setting is under Settings → Visualizations →
+General → Animation, separate from Frequency analysis.
+The owner coalesces capped requests behind one cancellable timer; late frames
+do not create a catch-up backlog. Audio Visualizer's idle fade uses the same cap.
 Business/configuration changes update its inputs; neither clock refreshes the
 business root. Missed analysis deadlines coalesce rather than replaying a backlog.
 A configuration-only refresh reuses the current staging frame when its analysis
@@ -155,8 +162,9 @@ and smoothing, generative motion, and Spectrogram placement can therefore change
 between analysis publications without another FFT or history insertion. If the
 producer stalls, display time stops at the accepted boundary rather than inventing
 audio. Generation/sample-rate changes, clock rewinds, and accepted gaps longer
-than half a second reset continuity. Pause cancels both clocks; a paused business
-update can still request one refresh without starting an idle animation loop.
+than half a second reset continuity. Pause cancels analysis and audio-driven
+animation; a paused business update can still request one refresh. The optional
+Audio Visualizer idle fade continues at the display cap until it finishes.
 
 Only affected visual panel entities are invalidated by analysis or waveform
 updates. Cached scenes retain their measured panel dimensions until geometry or

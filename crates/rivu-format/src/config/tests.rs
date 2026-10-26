@@ -205,6 +205,29 @@ fn grouped_round_trip_uses_shared_defaults_validation_and_normalization() {
 }
 
 #[test]
+fn visualization_animation_fps_validates_and_persists_boundaries() {
+    for fps in [0, 1, 60, 240] {
+        let config = from_toml(&format!("[visualizations]\nfps = {fps}\n")).unwrap();
+        assert_eq!(config.visualization_fps, fps);
+        let saved = to_toml(&config).unwrap();
+        assert_eq!(from_toml(&saved).unwrap(), config);
+        let patched = update_toml("", None, &config).unwrap();
+        assert_eq!(from_toml(&patched).unwrap(), config);
+    }
+    for fps in [241, u16::MAX] {
+        let config = Config {
+            visualization_fps: fps,
+            ..Config::default()
+        };
+        assert!(config.validate().is_err());
+        assert!(to_toml(&config).is_err());
+    }
+    for value in ["-1", "241", "65536", "1.5", "'60'"] {
+        assert!(from_toml(&format!("[visualizations]\nfps = {value}\n")).is_err());
+    }
+}
+
+#[test]
 fn processing_tables_roundtrip_and_reject_invalid_controls() {
     let mut config = Config::default();
     config.equalizer.enabled = true;

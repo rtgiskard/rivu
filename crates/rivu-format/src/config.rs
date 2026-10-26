@@ -406,6 +406,8 @@ macro_rules! config_fields {
         pub still_mode: bool,
         pub visualization_signal: VisualizationSignal,
         pub analysis_fps: u32,
+        /// Animation request cap (0 follows display callbacks), at most 240 FPS.
+        pub visualization_fps: u16,
         pub visual_background: RgbColor,
         pub visual_palette: VisualizationPalette,
         pub spectrum_style: SpectrumStyle,
@@ -530,6 +532,7 @@ impl Default for Config {
             still_mode: false,
             visualization_signal: VisualizationSignal::After,
             analysis_fps: 20,
+            visualization_fps: 0,
             visual_background: RgbColor(0x08090c),
             visual_palette: VisualizationPalette::Deadbeef,
             spectrum_style: SpectrumStyle::Solid,
@@ -724,6 +727,10 @@ impl Config {
             (5..=60).contains(&self.analysis_fps),
             "visualizations.analysis_fps must be between 5 and 60 (inclusive); got {}",
             self.analysis_fps
+        );
+        ensure!(
+            self.visualization_fps <= 240,
+            "visualizations.fps must be between 0 and 240"
         );
         for (name, range) in [
             ("visualizations.db_range", Some(self.visualization_db_range)),
