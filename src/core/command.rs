@@ -114,9 +114,10 @@ impl Core {
             Command::EqualizerEdit { edit } => self.equalizer_edit(edit)?,
             Command::DenoiseEdit { patch } => self.denoise_edit(*patch)?,
             Command::NeuralEdit { patch } => self.neural_edit(*patch)?,
-            Command::ProcessingGraphEdit { revision, edit } => {
-                self.processing_graph_edit(revision, *edit)?
-            }
+            Command::ProcessingGraphEdit {
+                expected_revision,
+                edit,
+            } => self.processing_graph_edit(expected_revision, *edit)?,
             Command::ProcessingGraphRun {
                 track_id,
                 target,

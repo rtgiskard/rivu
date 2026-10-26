@@ -444,7 +444,7 @@ impl AudioProcessing {
             return;
         }
         let graph = self.state.system.config.processing_graph.clone();
-        let revision = graph.revision;
+        let expected_revision = graph.revision;
         let select_after = matches!(&edit, GraphEdit::Add { .. } | GraphEdit::Duplicate { .. })
             .then_some(graph.next_id);
         let equalizer_target = match &edit {
@@ -465,7 +465,7 @@ impl AudioProcessing {
         });
         self.send(
             Command::ProcessingGraphEdit {
-                revision,
+                expected_revision,
                 edit: Box::new(edit),
             },
             cx,

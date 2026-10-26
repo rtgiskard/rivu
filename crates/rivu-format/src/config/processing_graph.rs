@@ -310,9 +310,9 @@ impl ProcessingGraph {
         }
         Ok(order.into_iter().filter(|id| needed.contains(id)).collect())
     }
-    pub fn edit(&mut self, revision: u64, edit: GraphEdit) -> Result<()> {
+    pub fn edit(&mut self, expected_revision: u64, edit: GraphEdit) -> Result<()> {
         ensure!(
-            revision == self.revision,
+            expected_revision == self.revision,
             "Graph changed; refresh before editing"
         );
         let mut next = self.clone();

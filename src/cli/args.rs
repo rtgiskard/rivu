@@ -137,8 +137,8 @@ pub(super) enum ProcessingGraphAction {
     Edit {
         #[arg(allow_hyphen_values = true)]
         edit: String,
-        #[arg(long = "expected-revision")]
-        revision: u64,
+        #[arg(long)]
+        expected_revision: u64,
     },
     /// Process a track through the selected node output and its ancestors only.
     Run {
@@ -265,7 +265,7 @@ pub(super) enum LibraryAction {
     /// Set or clear favorites without modifying media files.
     Favorite {
         #[arg(value_enum)]
-        set: Switch,
+        mode: Switch,
         #[arg(required = true)]
         track_ids: Vec<i64>,
     },
@@ -728,7 +728,7 @@ mod tests {
     fn favorite_position_and_tristate_filters_preserve_explicit_false() {
         use super::{Action, LibraryAction, Switch};
         assert!(
-            matches!(parse_and_validate(&["rivu", "library", "favorite", "off", "2", "3"]).unwrap().action, Some(Action::Library(LibraryAction::Favorite { set: Switch::Off, track_ids })) if track_ids == [2, 3])
+            matches!(parse_and_validate(&["rivu", "library", "favorite", "off", "2", "3"]).unwrap().action, Some(Action::Library(LibraryAction::Favorite { mode: Switch::Off, track_ids })) if track_ids == [2, 3])
         );
         assert!(matches!(
             parse_and_validate(&[
@@ -949,12 +949,12 @@ mod graph_tests {
         .unwrap();
         let Some(Action::Processing(ProcessingAction::Graph(ProcessingGraphAction::Edit {
             edit: parsed,
-            revision,
+            expected_revision,
         }))) = args.action
         else {
             panic!("expected graph edit");
         };
-        assert_eq!(revision, 19);
+        assert_eq!(expected_revision, 19);
         assert_eq!(parsed, edit);
     }
 

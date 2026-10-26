@@ -3005,7 +3005,7 @@ fn graph_command_frames_preserve_revision_typed_edit_targets_modes_and_export_pa
     };
     let mut commands = vec![
         Command::ProcessingGraphEdit {
-            revision: u64::MAX,
+            expected_revision: u64::MAX,
             edit: Box::new(GraphEdit::Replace {
                 id: 7,
                 kind: GraphNodeKind::Mix {

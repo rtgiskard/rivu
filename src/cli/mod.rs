@@ -603,9 +603,9 @@ fn translate(action: Action) -> Result<(Command, bool)> {
             PlaylistAction::List | PlaylistAction::Show { .. } => unreachable!(),
         },
         Action::Library(LibraryAction::Remove { track_ids }) => Command::RemoveTracks { track_ids },
-        Action::Library(LibraryAction::Favorite { track_ids, set }) => Command::SetFavorite {
+        Action::Library(LibraryAction::Favorite { track_ids, mode }) => Command::SetFavorite {
             track_ids,
-            favorite: matches!(set, Switch::On),
+            favorite: matches!(mode, Switch::On),
         },
         Action::Library(LibraryAction::CleanMissing) => Command::RemoveMissingTracks,
         Action::Library(LibraryAction::KeepIndependent { track_id }) => {

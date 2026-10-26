@@ -853,7 +853,7 @@ pub enum Command {
         patch: Box<NeuralPatch>,
     },
     ProcessingGraphEdit {
-        revision: u64,
+        expected_revision: u64,
         edit: Box<GraphEdit>,
     },
     ProcessingGraphRun {

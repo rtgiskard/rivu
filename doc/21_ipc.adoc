@@ -1137,10 +1137,11 @@ CLI equivalents, terminal states, provisioning, scratch and audition lifetime.
 
 ==== Immutable audio graph runs
 
-`ProcessingGraphEdit { revision, edit }` compares the authoritative graph revision
-before applying one typed edit. A stale revision rejects the entire edit. Node
-removal disconnects its edges; it never guesses replacement routing. Positions do
-not affect audio. Graphs allow at most 64 nodes and 128 typed, acyclic edges, with
+`ProcessingGraphEdit { expected_revision, edit }` compares `expected_revision` with
+the authoritative graph revision before applying one typed edit. A stale revision
+rejects the entire edit. Node removal disconnects its edges; it never guesses
+replacement routing. Positions do not affect audio. Graphs allow at most 64 nodes
+and 128 typed, acyclic edges, with
 one connection per input and explicit mix nodes for fan-in.
 Generic `Configure` requests cannot replace this graph, including from a stale
 settings snapshot; graph changes use the revision-checked edit command.

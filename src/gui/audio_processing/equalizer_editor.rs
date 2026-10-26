@@ -2442,12 +2442,14 @@ impl AudioProcessing {
             Command::EqualizerEdit { edit } if replaces_band_identity(edit) => {
                 Some(EqTarget::Monitor)
             }
-            Command::ProcessingGraphEdit { revision, edit }
-                if matches!(
-                    edit.as_ref(),
-                    GraphEdit::Replace { id, .. }
-                        if self.equalizer_ui.pending_node_focus_reset == Some((*id, *revision))
-                ) =>
+            Command::ProcessingGraphEdit {
+                expected_revision,
+                edit,
+            } if matches!(
+                edit.as_ref(),
+                GraphEdit::Replace { id, .. }
+                    if self.equalizer_ui.pending_node_focus_reset == Some((*id, *expected_revision))
+            ) =>
             {
                 self.equalizer_ui
                     .pending_node_focus_reset

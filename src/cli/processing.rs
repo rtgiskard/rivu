@@ -145,8 +145,11 @@ fn equalizer_command(edit: &str) -> Result<Command> {
 fn graph_command(action: ProcessingGraphAction) -> Result<(Command, bool)> {
     let mut wait = false;
     let command = match action {
-        ProcessingGraphAction::Edit { edit, revision } => Command::ProcessingGraphEdit {
-            revision,
+        ProcessingGraphAction::Edit {
+            edit,
+            expected_revision,
+        } => Command::ProcessingGraphEdit {
+            expected_revision,
             edit: serde_json::from_str(&edit).context("Parsing GraphEdit JSON")?,
         },
         ProcessingGraphAction::Run {
@@ -347,10 +350,14 @@ mod tests {
     fn graph_edit_parses_typed_json_and_preserves_revision_and_signed_gains() {
         let edit = r#"{"Replace":{"id":3,"kind":{"mix":{"gains_db":[-6.0,-12.5],"muted":[false,false],"solo":[false,false]}}}}"#;
         let (command, wait) = parse_graph_command(&["edit", edit, "--expected-revision", "19"]);
-        let Command::ProcessingGraphEdit { revision, edit } = command else {
+        let Command::ProcessingGraphEdit {
+            expected_revision,
+            edit,
+        } = command
+        else {
             panic!("expected graph edit command");
         };
-        assert_eq!(revision, 19);
+        assert_eq!(expected_revision, 19);
         assert!(!wait);
         let GraphEdit::Replace {
             id,
@@ -363,7 +370,7 @@ mod tests {
         assert_eq!(gains_db, [-6.0, -12.5]);
         assert!(
             graph_command(ProcessingGraphAction::Edit {
-                revision: 19,
+                expected_revision: 19,
                 edit: "not GraphEdit JSON".into(),
             })
             .is_err()

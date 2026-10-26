@@ -22,11 +22,11 @@ impl Core {
 
     pub(in crate::core) fn processing_graph_edit(
         &mut self,
-        revision: u64,
+        expected_revision: u64,
         edit: GraphEdit,
     ) -> Result<()> {
         let mut config = self.effective_config();
-        config.processing_graph.edit(revision, edit)?;
+        config.processing_graph.edit(expected_revision, edit)?;
         self.commit_processing_config(config)
     }
 
