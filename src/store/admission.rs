@@ -38,7 +38,7 @@ impl Store {
             bitrate_bps INTEGER,bitrate_exact INTEGER NOT NULL,track_number INTEGER,disc_number INTEGER,
             bits_per_sample INTEGER,release_date TEXT);")?;
         {
-            let mut existing = tx.prepare_cached("SELECT id FROM tracks INDEXED BY tracks_directory WHERE path=?1 AND cue_sheet IS NULL ORDER BY id LIMIT 1")?;
+            let mut existing = tx.prepare_cached("SELECT id FROM tracks INDEXED BY tracks_path WHERE path=?1 AND CASE WHEN cue_sheet IS NULL THEN 0 ELSE NULL END = 0 ORDER BY id LIMIT 1")?;
             let mut stage = tx.prepare("INSERT INTO external_sources VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)")?;
             for (ordinal, record) in admission.records.iter().enumerate() {
                 ensure!(
@@ -138,7 +138,7 @@ impl Store {
             SELECT path,fingerprint,file_size,modified_ns,raw_title,raw_artist,raw_album,duration,
             codec,channels,sample_rate,probe_version,bitrate_bps,bitrate_exact,track_number,
             disc_number,bits_per_sample,release_date FROM external_sources WHERE resolved_id IS NULL ORDER BY ordinal", [])?;
-        tx.execute("UPDATE external_sources AS s SET resolved_id=(SELECT id FROM tracks INDEXED BY tracks_directory WHERE path=s.path AND cue_sheet IS NULL ORDER BY id LIMIT 1) WHERE resolved_id IS NULL", [])?;
+        tx.execute("UPDATE external_sources AS s SET resolved_id=(SELECT id FROM tracks INDEXED BY tracks_path WHERE path=s.path AND CASE WHEN cue_sheet IS NULL THEN 0 ELSE NULL END = 0 ORDER BY id LIMIT 1) WHERE resolved_id IS NULL", [])?;
         let resolved = tx
             .prepare("SELECT resolved_id FROM external_sources ORDER BY ordinal")?
             .query_map([], |row| row.get::<_, i64>(0))?

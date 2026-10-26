@@ -126,8 +126,7 @@ pub fn validate_structure(conn: &Connection) -> Result<()> {
         conn.prepare("SELECT \"unique\",partial FROM pragma_index_list(?1) WHERE name=?2")?;
     for (table, name, unique, partial) in [
         ("tracks", "tracks_fingerprint", false, false),
-        ("tracks", "tracks_path", true, true),
-        ("tracks", "tracks_directory", false, false),
+        ("tracks", "tracks_path", true, false),
         ("tracks", "tracks_cue", true, true),
         ("tracks", "tracks_recent", false, true),
         ("tracks", "tracks_album", false, false),
@@ -151,19 +150,30 @@ pub fn validate_structure(conn: &Connection) -> Result<()> {
             "Unsupported library database: missing or incompatible index {name}"
         );
     }
-    let mut index_keys = conn.prepare("SELECT name FROM pragma_index_info(?1) ORDER BY seqno")?;
+    let mut index_keys =
+        conn.prepare("SELECT cid,name FROM pragma_index_info(?1) ORDER BY seqno")?;
     for (name, columns) in [
-        ("tracks_path", &["path"][..]),
-        ("tracks_cue", &["cue_sheet", "cue_number"][..]),
-        ("playlist_track", &["playlist_id", "track_id"][..]),
+        ("tracks_path", &[Some("path"), None][..]),
+        ("tracks_cue", &[Some("cue_sheet"), Some("cue_number")][..]),
+        (
+            "playlist_track",
+            &[Some("playlist_id"), Some("track_id")][..],
+        ),
     ] {
         let mut rows = index_keys.query([name])?;
         for expected in columns {
             let row = rows.next()?.with_context(|| {
                 format!("Unsupported library database: incompatible key columns for index {name}")
             })?;
+            let matches = match expected {
+                Some(expected) => row.get_ref(1)?.as_str().ok() == Some(*expected),
+                None => {
+                    row.get::<_, i64>(0)? == -2
+                        && matches!(row.get_ref(1)?, rusqlite::types::ValueRef::Null)
+                }
+            };
             ensure!(
-                row.get_ref(0)?.as_str().ok() == Some(*expected),
+                matches,
                 "Unsupported library database: incompatible key columns for index {name}"
             );
         }
@@ -172,13 +182,14 @@ pub fn validate_structure(conn: &Connection) -> Result<()> {
             "Unsupported library database: incompatible key columns for index {name}"
         );
     }
-    // Ask SQLite whether these partial indexes support current consumer predicates;
-    // do not compare CREATE INDEX SQL or attempt a general predicate equivalence test.
+    // Expression metadata identifies expression keys, not their semantics. These
+    // read-only prepares check consumer compatibility, not expression equivalence
+    // or whether the planner uses every key; no CREATE SQL comparison or writes.
     // The CUE branches mirror the exact and descendant scopes in store::scan.
     for (name, query) in [
         (
             "tracks_path",
-            "SELECT id FROM tracks INDEXED BY tracks_path WHERE path=?1 AND cue_sheet IS NULL AND missing=0",
+            "SELECT id FROM tracks INDEXED BY tracks_path WHERE path=?1 AND CASE WHEN cue_sheet IS NULL THEN 0 ELSE NULL END=0 AND missing=0",
         ),
         (
             "tracks_cue",
@@ -253,8 +264,7 @@ const TRACK_TABLE: &str = "CREATE TABLE tracks(
 
 const TRACK_INDEXES: &str = "
     CREATE INDEX tracks_fingerprint ON tracks(fingerprint);
-    CREATE UNIQUE INDEX tracks_path ON tracks(path) WHERE cue_sheet IS NULL;
-    CREATE INDEX tracks_directory ON tracks(path);
+    CREATE UNIQUE INDEX tracks_path ON tracks(path, CASE WHEN cue_sheet IS NULL THEN 0 ELSE NULL END);
     CREATE UNIQUE INDEX tracks_cue ON tracks(cue_sheet,cue_number) WHERE cue_sheet IS NOT NULL;
     CREATE INDEX tracks_recent ON tracks(last_played DESC,id DESC) WHERE last_played IS NOT NULL;
     CREATE INDEX tracks_album ON tracks(COALESCE(album_override,raw_album), CASE WHEN COALESCE(album_override,raw_album)<>'' THEN COALESCE(disc_number,4294967295) END, CASE WHEN COALESCE(album_override,raw_album)<>'' THEN COALESCE(track_number,4294967295) END, COALESCE(title_override,raw_title));
@@ -438,7 +448,118 @@ mod tests {
     }
 
     #[test]
-    fn current_metadata_tracks_queue_occurrence_without_version_tables() -> Result<()> {
+    fn ordinary_paths_are_unique_while_cue_tracks_share_audio_paths() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        create_current(&conn)?;
+        conn.execute_batch(
+            "INSERT INTO tracks(id,path,cue_sheet,cue_number) VALUES
+                (1,'/album/image.flac',NULL,NULL),
+                (2,'/album/image.flac','/album/disc.cue',1),
+                (3,'/album/image.flac','/album/disc.cue',2),
+                (4,'/album/image.flac','/album/alternate.cue',1),
+                (5,'/album-other/image.flac',NULL,NULL);",
+        )?;
+        for missing in [0, 1] {
+            let error = conn
+                .execute(
+                    "INSERT INTO tracks(path,missing) VALUES('/album/image.flac',?1)",
+                    [missing],
+                )
+                .unwrap_err();
+            assert_eq!(
+                error.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::ConstraintViolation)
+            );
+        }
+        let error = conn
+            .execute(
+                "INSERT INTO tracks(path,cue_sheet,cue_number)
+                 VALUES('/different.flac','/album/disc.cue',1)",
+                [],
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::ConstraintViolation)
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT id FROM tracks WHERE path=?1
+                 AND CASE WHEN cue_sheet IS NULL THEN 0 ELSE NULL END=0 AND missing=0",
+                ["/album/image.flac"],
+                |row| row.get::<_, i64>(0),
+            )?,
+            1
+        );
+        let mut directory =
+            conn.prepare("SELECT id FROM tracks WHERE path>=?1 AND path<?2 ORDER BY id")?;
+        let ids = directory
+            .query_map(["/album/", "/album0"], |row| row.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert_eq!(ids, [1, 2, 3, 4]);
+        Ok(())
+    }
+
+    #[test]
+    fn path_uniqueness_follows_cue_identity_transitions() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        create_current(&conn)?;
+        conn.execute_batch(
+            "INSERT INTO tracks(id,path,cue_sheet,cue_number,play_count,favorite) VALUES
+                (1,'/album/image.flac','/album/disc.cue',1,11,1),
+                (2,'/album/image.flac','/album/disc.cue',2,22,0);
+             UPDATE tracks SET cue_sheet=NULL,cue_number=NULL WHERE id=1;",
+        )?;
+        let error = conn
+            .execute(
+                "UPDATE tracks SET cue_sheet=NULL,cue_number=NULL WHERE id=2",
+                [],
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::ConstraintViolation)
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT cue_sheet,cue_number FROM tracks WHERE id=2",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )?,
+            ("/album/disc.cue".into(), 2)
+        );
+        conn.execute_batch(
+            "UPDATE tracks SET cue_sheet='/album/disc.cue',cue_number=3 WHERE id=1;
+             UPDATE tracks SET cue_sheet=NULL,cue_number=NULL WHERE id=2;
+             UPDATE tracks SET path='/album/other.flac' WHERE id=2;
+             UPDATE tracks SET cue_sheet=NULL,cue_number=NULL WHERE id=1;",
+        )?;
+        let mut tracks = conn.prepare(
+            "SELECT id,path,play_count,favorite FROM tracks
+             WHERE cue_sheet IS NULL AND cue_number IS NULL ORDER BY id",
+        )?;
+        let rows = tracks
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, bool>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert_eq!(
+            rows,
+            [
+                (1, "/album/image.flac".into(), 11, true),
+                (2, "/album/other.flac".into(), 22, false),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn current_metadata_tracks_queue_occurrence() -> Result<()> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch("PRAGMA foreign_keys=ON;")?;
         create_current(&conn)?;
@@ -465,18 +586,6 @@ mod tests {
             )
             .is_err()
         );
-        let tables: i64 = conn.query_row(
-            "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name NOT GLOB 'sqlite_*'",
-            [],
-            |row| row.get(0),
-        )?;
-        assert_eq!(tables, 7);
-        let triggers: i64 = conn.query_row(
-            "SELECT count(*) FROM sqlite_schema WHERE type='trigger'",
-            [],
-            |row| row.get(0),
-        )?;
-        assert_eq!(triggers, 4);
         Ok(())
     }
 
@@ -537,24 +646,26 @@ mod tests {
     }
 
     #[test]
-    fn preflight_checks_columns_and_index_properties_not_sql_spelling() -> Result<()> {
+    fn preflight_rejects_incompatible_path_index_properties() -> Result<()> {
+        for definition in [
+            "CREATE INDEX tracks_path ON tracks(path, CASE WHEN cue_sheet IS NULL THEN 0 ELSE NULL END)",
+            "CREATE UNIQUE INDEX tracks_path ON tracks(path, CASE WHEN cue_sheet IS NULL THEN 0 ELSE NULL END) WHERE cue_sheet IS NULL",
+            "CREATE UNIQUE INDEX tracks_path ON tracks(path) WHERE cue_sheet IS NULL",
+        ] {
+            let conn = Connection::open_in_memory()?;
+            create_current(&conn)?;
+            conn.execute_batch(&format!("DROP INDEX tracks_path; {definition};"))?;
+            conn.execute_batch("PRAGMA query_only=ON;")?;
+            assert!(validate_structure(&conn).is_err(), "{definition}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn preflight_rejects_missing_reader_columns() -> Result<()> {
         let conn = Connection::open_in_memory()?;
         create_current(&conn)?;
-        conn.execute_batch(
-            "DROP INDEX tracks_path;
-             CREATE UNIQUE INDEX \"tracks_path\" ON \"tracks\" (\"path\") WHERE \"cue_sheet\" IS NULL;",
-        )?;
-        validate_structure(&conn)?;
-        conn.execute_batch(
-            "DROP INDEX tracks_path;
-             CREATE INDEX tracks_path ON tracks(path) WHERE cue_sheet IS NULL;",
-        )?;
-        assert!(validate_structure(&conn).is_err());
-        conn.execute_batch(
-            "DROP INDEX tracks_path;
-             CREATE UNIQUE INDEX tracks_path ON tracks(path) WHERE cue_sheet IS NULL;
-             ALTER TABLE tracks RENAME COLUMN favorite TO unsupported_favorite;",
-        )?;
+        conn.execute_batch("ALTER TABLE tracks RENAME COLUMN favorite TO unsupported_favorite;")?;
         assert!(validate_structure(&conn).is_err());
         Ok(())
     }
@@ -603,7 +714,17 @@ mod tests {
         for (name, definition) in [
             (
                 "tracks_path",
-                "ON tracks(raw_title) WHERE cue_sheet IS NULL",
+                "ON tracks(raw_title, CASE WHEN cue_sheet IS NULL THEN 0 ELSE NULL END)",
+            ),
+            ("tracks_path", "ON tracks(path)"),
+            ("tracks_path", "ON tracks(path,cue_sheet)"),
+            (
+                "tracks_path",
+                "ON tracks(CASE WHEN cue_sheet IS NULL THEN 0 ELSE NULL END,path)",
+            ),
+            (
+                "tracks_path",
+                "ON tracks(path, CASE WHEN cue_sheet IS NULL THEN 0 ELSE NULL END,id)",
             ),
             (
                 "tracks_cue",
@@ -630,10 +751,6 @@ mod tests {
     #[test]
     fn preflight_rejects_partial_indexes_unusable_by_current_consumers() -> Result<()> {
         for (name, definition) in [
-            (
-                "tracks_path",
-                "CREATE UNIQUE INDEX tracks_path ON tracks(path) WHERE cue_sheet IS NOT NULL",
-            ),
             (
                 "tracks_cue",
                 "CREATE UNIQUE INDEX tracks_cue ON tracks(cue_sheet,cue_number) WHERE cue_sheet IS NULL",

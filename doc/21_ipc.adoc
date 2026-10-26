@@ -955,9 +955,15 @@ snapshot, per-client map, or full-list cache is introduced.
 
 Directory/root queries use BINARY component ranges: a normalized nonempty prefix
 ends in `/`; replacing that delimiter with `0` gives the exclusive upper bound.
-A full path index covers ordinary and CUE identities without altering literal
-characters, case, or Unicode. Equivalent normalized root prefixes are counted
-once, then expanded to input order with request-local state bounded by 256 roots.
+The unique expression index `tracks_path` uses
+`(path, CASE WHEN cue_sheet IS NULL THEN 0 ELSE NULL END)`. Ordinary identities
+have key `(path, 0)`, enforcing one whole-file track per path; CUE identities
+have a NULL second key and can share the source path. The separate `tracks_cue`
+index enforces sheet/track-number identity. Path-range queries cover both kinds
+without altering literal characters, case, or Unicode; ordinary source lookups
+match the expression's zero key directly. Equivalent normalized root prefixes
+are counted once, then expanded to input order with request-local state bounded
+by 256 roots.
 Directory pages derive one temporary child relation for exact count and ordered
 page selection; track payloads join only for selected track children. Its size
 follows matching children, not page limit. Count-only requests avoid that relation;
@@ -973,7 +979,7 @@ the album row or member count. Unchanged effective values do no summary work.
 Indexed counters avoid rescanning an album per changed member; the ordered member
 index supplies representatives and member ranges. This trades summary/index
 storage and write maintenance for cheaper reads; substring search and OFFSET
-still scale with matching summaries. Only schema version 1 is supported; other
+still scale with matching summaries. Only schema version 2 is supported; other
 or unversioned databases are rejected without migration, reset, or deletion.
 Fresh databases create these summaries and triggers directly.
 

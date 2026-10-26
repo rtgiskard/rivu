@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 const TRACK_SEARCH_FILTER: &str = "WHERE (?1 IS NULL OR instr(lower(COALESCE(tracks.title_override,tracks.raw_title) || ' ' || COALESCE(tracks.artist_override,tracks.raw_artist) || ' ' || tracks.path),?1)>0) AND (?2 IS NULL OR tracks.favorite=?2) AND (?3 IS NULL OR tracks.missing=?3)";
-pub(super) const SOURCE_FILTER: &str = "tracks.id IN (SELECT value FROM json_each(?2) UNION SELECT scoped.id FROM json_each(?1,'$.directories') AS directory CROSS JOIN tracks AS scoped INDEXED BY tracks_directory WHERE directory.value<>'' AND scoped.path>=directory.value AND scoped.path<(rtrim(directory.value,'/')||'0') UNION SELECT id FROM tracks WHERE EXISTS(SELECT 1 FROM json_each(?1,'$.directories') WHERE value='') UNION SELECT id FROM tracks WHERE json_type(?1,'$.roots')='array' AND NOT EXISTS(SELECT 1 FROM json_each(?1,'$.roots') AS root WHERE tracks.path>=root.value AND tracks.path<(rtrim(root.value,'/')||'0')))";
+pub(super) const SOURCE_FILTER: &str = "tracks.id IN (SELECT value FROM json_each(?2) UNION SELECT scoped.id FROM json_each(?1,'$.directories') AS directory CROSS JOIN tracks AS scoped INDEXED BY tracks_path WHERE directory.value<>'' AND scoped.path>=directory.value AND scoped.path<(rtrim(directory.value,'/')||'0') UNION SELECT id FROM tracks WHERE EXISTS(SELECT 1 FROM json_each(?1,'$.directories') WHERE value='') UNION SELECT id FROM tracks WHERE json_type(?1,'$.roots')='array' AND NOT EXISTS(SELECT 1 FROM json_each(?1,'$.roots') AS root WHERE tracks.path>=root.value AND tracks.path<(rtrim(root.value,'/')||'0')))";
 // Normalized nonempty prefixes end in ASCII '/'; replacing that final byte with
 // '0' gives the exclusive BINARY upper bound, including every Unicode suffix.
 const DIRECTORY_SCOPE: &str = " AND tracks.path>=?4 AND tracks.path<(rtrim(?4,'/')||'0')";
@@ -635,13 +635,13 @@ impl Store {
             "WITH roots AS (SELECT key,value FROM json_each(?1)),
              source_totals AS (
                  SELECT roots.key AS root_key,COUNT(*) AS track_total,MAX(tracks.file_size) AS source_size
-                 FROM roots CROSS JOIN tracks INDEXED BY tracks_directory
+                 FROM roots CROSS JOIN tracks INDEXED BY tracks_path
                  WHERE roots.value<>'' AND tracks.path>=roots.value
                    AND tracks.path<(rtrim(roots.value,'/')||'0')
                  GROUP BY roots.key,tracks.path
                  UNION ALL
                  SELECT roots.key,COUNT(*),MAX(tracks.file_size)
-                 FROM roots CROSS JOIN tracks INDEXED BY tracks_directory
+                 FROM roots CROSS JOIN tracks INDEXED BY tracks_path
                  WHERE roots.value='' GROUP BY roots.key,tracks.path
              )
              SELECT roots.key,COALESCE(SUM(track_total),0),COALESCE(SUM(source_size),0)
@@ -857,7 +857,7 @@ impl Store {
             super::TrackIdentity::File(path) => self
                 .conn
                 .query_row(
-                    "SELECT id FROM tracks WHERE path=?1 AND cue_sheet IS NULL AND missing=0",
+                    "SELECT id FROM tracks WHERE path=?1 AND CASE WHEN cue_sheet IS NULL THEN 0 ELSE NULL END = 0 AND missing=0",
                     [path.to_string_lossy().as_ref()],
                     |row| row.get(0),
                 )

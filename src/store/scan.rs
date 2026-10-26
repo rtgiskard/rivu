@@ -79,10 +79,10 @@ pub(super) fn staged_projection_columns(cue: bool) -> String {
 // A slash-terminated prefix has the exclusive BINARY upper bound ending in '0'.
 const SCAN_SCOPE_IDS: &str = "
     SELECT t.id FROM json_each(?1) AS scope
-    CROSS JOIN tracks AS t INDEXED BY tracks_directory WHERE t.path=scope.value
+    CROSS JOIN tracks AS t INDEXED BY tracks_path WHERE t.path=scope.value
     UNION
     SELECT t.id FROM json_each(?2) AS scope
-    CROSS JOIN tracks AS t INDEXED BY tracks_directory
+    CROSS JOIN tracks AS t INDEXED BY tracks_path
     WHERE t.path>=scope.value AND t.path<(rtrim(scope.value,'/')||'0')
     UNION
     SELECT t.id FROM json_each(?1) AS scope
@@ -285,7 +285,7 @@ fn stored_scan_file_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<StoredSc
 
 impl Store {
     /// Read one reusable source snapshot, preferring an ordinary file identity.
-    /// Both branches seek existing path indexes; no unrelated row is decoded.
+    /// Both branches seek the path/identity index; no unrelated row is decoded.
     pub fn known_source(&self, path: &Path) -> Result<Option<KnownFile>> {
         let path = path.to_str().context("Scan source path is not UTF-8")?;
         let mut q = self.conn.prepare_cached(
@@ -294,10 +294,10 @@ impl Store {
                     cue_end_frame,probe_version,bitrate_bps,track_number,disc_number,
                     bits_per_sample,release_date,bitrate_exact
              FROM tracks WHERE id=COALESCE(
-                (SELECT id FROM tracks INDEXED BY tracks_directory
-                 WHERE path=?1 AND cue_sheet IS NULL ORDER BY id LIMIT 1),
-                (SELECT id FROM tracks INDEXED BY tracks_directory
-                 WHERE path=?1 ORDER BY id LIMIT 1)
+                (SELECT id FROM tracks INDEXED BY tracks_path
+                 WHERE path=?1 AND CASE WHEN cue_sheet IS NULL THEN 0 ELSE NULL END = 0 ORDER BY id LIMIT 1),
+                (SELECT id FROM tracks INDEXED BY tracks_path
+                 WHERE path=?1 AND CASE WHEN cue_sheet IS NULL THEN 0 ELSE NULL END IS NULL ORDER BY id LIMIT 1)
              )",
         )?;
         Ok(q.query_row([path], known_file_from_row).optional()?)
@@ -340,7 +340,7 @@ impl Store {
         let mut query = self.conn.prepare_cached(
             "SELECT cue_sheet,cue_number,cue_start_frame,cue_end_frame,
                     raw_title,raw_artist,raw_album,track_number,disc_number,release_date
-             FROM tracks INDEXED BY tracks_directory WHERE path=?1 ORDER BY id",
+             FROM tracks INDEXED BY tracks_path WHERE path=?1 ORDER BY id",
         )?;
         for source in result.records.drain(..) {
             let mut rows =
@@ -456,9 +456,9 @@ impl Store {
         };
         let scope_ids = if exact_sources {
             "SELECT t.id FROM json_each(?1) AS scope
-             CROSS JOIN tracks AS t INDEXED BY tracks_directory WHERE t.path=scope.value
+             CROSS JOIN tracks AS t INDEXED BY tracks_path WHERE t.path=scope.value
              UNION SELECT t.id FROM json_each(?2) AS scope
-             CROSS JOIN tracks AS t INDEXED BY tracks_directory WHERE t.path=scope.value"
+             CROSS JOIN tracks AS t INDEXED BY tracks_path WHERE t.path=scope.value"
         } else {
             SCAN_SCOPE_IDS
         };
@@ -1861,6 +1861,52 @@ mod tests {
         assert_eq!(store.track(id).unwrap().unwrap().title, "Unqueued title");
         assert_eq!(store.queue_state().unwrap(), state);
         assert_eq!(store.queue_page(None, 0, 10).unwrap(), page);
+    }
+
+    #[test]
+    fn source_lookup_prefers_ordinary_then_lowest_cue_id_even_when_missing() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let path = Path::new("/music/shared.wav");
+        store
+            .conn
+            .execute_batch(
+                "INSERT INTO tracks(id,path,cue_sheet,cue_number,cue_start_frame,missing) VALUES
+                 (20,'/music/shared.wav','/music/a.cue',1,0,0),
+                 (5,'/music/shared.wav','/music/z.cue',2,75,1),
+                 (30,'/music/shared.wav',NULL,NULL,NULL,0);",
+            )
+            .unwrap();
+        assert!(store.known_source(path).unwrap().unwrap().cue.is_none());
+        assert_eq!(
+            store
+                .track_id_for_identity(crate::store::TrackIdentity::File(path))
+                .unwrap(),
+            Some(30)
+        );
+        store
+            .conn
+            .execute("UPDATE tracks SET missing=1 WHERE id=30", [])
+            .unwrap();
+        assert!(store.known_source(path).unwrap().unwrap().cue.is_none());
+        assert_eq!(
+            store
+                .track_id_for_identity(crate::store::TrackIdentity::File(path))
+                .unwrap(),
+            None
+        );
+        store
+            .conn
+            .execute("DELETE FROM tracks WHERE id=30", [])
+            .unwrap();
+        let cue = store.known_source(path).unwrap().unwrap().cue.unwrap();
+        assert_eq!(cue.sheet, Path::new("/music/z.cue"));
+        assert_eq!(cue.number, 2);
+        assert_eq!(
+            store
+                .track_id_for_identity(crate::store::TrackIdentity::File(path))
+                .unwrap(),
+            None
+        );
     }
 
     #[test]
