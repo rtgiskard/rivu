@@ -6,7 +6,7 @@
 use super::{
     Channel, MediaInfo,
     bitrate::PacketStats,
-    source::{DecodeStep, SourceIdentity, check_cancelled, finite_sample},
+    source::{DecodeStep, FrameTiming, SourceIdentity, check_cancelled, finite_sample},
 };
 use anyhow::{Context, Result, bail};
 use libloading::Library;
@@ -46,7 +46,7 @@ const MAX_PACKET_SIDE_DATA: i32 = 64;
 
 // FFmpeg's default decoder applies AV_PKT_DATA_SKIP_SAMPLES. Restore these
 // samples to the encoded-duration denominator, never to the audible PCM.
-fn packet_trim_samples(packet: &AVPacket) -> Option<u64> {
+fn packet_trims(packet: &AVPacket) -> Option<(u64, u64)> {
     if !(0..=MAX_PACKET_SIDE_DATA).contains(&packet.side_data_elems)
         || (packet.side_data_elems > 0 && packet.side_data.is_null())
     {
@@ -64,9 +64,13 @@ fn packet_trim_samples(packet: &AVPacket) -> Option<u64> {
         let bytes = unsafe { std::slice::from_raw_parts(side.data, 10) };
         let start = u32::from_le_bytes(bytes[..4].try_into().ok()?);
         let end = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
-        trim = Some(u64::from(start) + u64::from(end));
+        trim = Some((u64::from(start), u64::from(end)));
     }
-    Some(trim.unwrap_or(0))
+    Some(trim.unwrap_or((0, 0)))
+}
+
+fn packet_trim_samples(packet: &AVPacket) -> Option<u64> {
+    packet_trims(packet).map(|(start, end)| start + end)
 }
 
 fn automatic_frame_trim(frame: &AVFrame) -> bool {
@@ -127,6 +131,8 @@ type FDictGet = unsafe extern "C" fn(
 type FDictSet =
     unsafe extern "C" fn(*mut *mut AVDictionary, *const c_char, *const c_char, c_int) -> c_int;
 type FDictFree = unsafe extern "C" fn(*mut *mut AVDictionary);
+type FOptSetQ =
+    unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, AVRational, c_int) -> c_int;
 type FStrError = unsafe extern "C" fn(c_int, *mut c_char, usize) -> c_int;
 type FCodecName = unsafe extern "C" fn(AVCodecID) -> *const c_char;
 type FProfileName = unsafe extern "C" fn(AVCodecID, c_int) -> *const c_char;
@@ -159,6 +165,7 @@ struct Functions {
     dict_get: FDictGet,
     dict_set: FDictSet,
     dict_free: FDictFree,
+    opt_set_q: FOptSetQ,
     strerror: FStrError,
     codec_name: FCodecName,
     profile_name: FProfileName,
@@ -267,6 +274,7 @@ fn load_runtime() -> Result<Runtime> {
         dict_get: s!(&util, "av_dict_get", FDictGet),
         dict_set: s!(&util, "av_dict_set", FDictSet),
         dict_free: s!(&util, "av_dict_free", FDictFree),
+        opt_set_q: s!(&util, "av_opt_set_q", FOptSetQ),
         strerror: s!(&util, "av_strerror", FStrError),
         codec_name: s!(&codec, "avcodec_get_name", FCodecName),
         profile_name: s!(&codec, "avcodec_profile_name", FProfileName),
@@ -535,6 +543,7 @@ pub(super) struct Decoder {
     rt: &'static Runtime,
     identity: SourceIdentity,
     _file: File,
+    path: PathBuf,
     format: *mut AVFormatContext,
     codec: *mut AVCodecContext,
     packet: *mut AVPacket,
@@ -542,10 +551,12 @@ pub(super) struct Decoder {
     stream: c_int,
     time_base: AVRational,
     start_time: i64,
+    vorbis_rate: Option<u32>,
+    vorbis_trims: (u64, u64),
     draining: bool,
     require_timestamp: bool,
     next_sample: i64,
-    pending_frame: Option<(usize, f64)>,
+    pending_frame: Option<(usize, FrameTiming)>,
     layout: Vec<Channel>,
     info: MediaInfo,
     packet_stats: PacketStats,
@@ -602,6 +613,24 @@ impl Decoder {
                 (rt.f.free_codec)(&mut codec);
             }
             return Err(error_text(rt, ret, "copy codec parameters"));
+        }
+        // Automatic skip-sample trimming must adjust frame PTS in the stream
+        // clock; codec parameters alone do not populate this field.
+        let ret = unsafe {
+            (rt.f.opt_set_q)(
+                codec.cast(),
+                c"pkt_timebase".as_ptr(),
+                (*stream_ptr).time_base,
+                0,
+            )
+        };
+        if ret < 0 {
+            unsafe {
+                (rt.f.frame_free)(&mut frame);
+                (rt.f.packet_free)(&mut packet);
+                (rt.f.free_codec)(&mut codec);
+            }
+            return Err(error_text(rt, ret, "set packet timebase"));
         }
         let ret = unsafe { (rt.f.codec_open)(codec, decoder, ptr::null_mut()) };
         if ret < 0 {
@@ -709,6 +738,7 @@ impl Decoder {
             rt,
             identity: input.identity,
             _file: input.file.take().expect("FFmpeg input owns its local file"),
+            path: path.clone(),
             format,
             codec,
             packet,
@@ -716,6 +746,10 @@ impl Decoder {
             stream: stream_index,
             time_base: stream_ref.time_base,
             start_time: stream_ref.start_time,
+            vorbis_rate: (codec_name == "vorbis")
+                .then(|| u32::try_from(p.sample_rate).ok().filter(|rate| *rate > 0))
+                .flatten(),
+            vorbis_trims: (0, 0),
             draining: false,
             require_timestamp: false,
             next_sample: 0,
@@ -761,6 +795,11 @@ impl Decoder {
         symphonia::core::units::TimeBase::try_new(numer, denom)
             .context("FFmpeg stream has a zero time base")
     }
+    /// Stream origin is a timestamp anchor, not a decoded zero-length frame.
+    pub(super) fn vorbis_timing(&self) -> Option<(u32, Option<f64>)> {
+        self.vorbis_rate
+            .map(|rate| (rate, (self.start_time != NOPTS).then_some(0.0)))
+    }
     pub(super) fn layout(&self) -> &[Channel] {
         &self.layout
     }
@@ -773,7 +812,7 @@ impl Decoder {
         frames: &mut Vec<f32>,
         cancelled: Option<&AtomicBool>,
         budget: &mut usize,
-    ) -> Result<DecodeStep<f64>> {
+    ) -> Result<DecodeStep<FrameTiming>> {
         let read = self.rt.f.read_frame;
         let result =
             self.next_frames_with_reader(frames, cancelled, budget, |format, packet| unsafe {
@@ -791,7 +830,7 @@ impl Decoder {
         cancelled: Option<&AtomicBool>,
         budget: &mut usize,
         mut read: impl FnMut(*mut AVFormatContext, *mut AVPacket) -> c_int,
-    ) -> Result<DecodeStep<f64>> {
+    ) -> Result<DecodeStep<FrameTiming>> {
         check_cancelled(cancelled)?;
         if *budget == 0 {
             return Ok(DecodeStep::Yield);
@@ -866,7 +905,20 @@ impl Decoder {
                 self.require_timestamp = false;
                 self.next_sample = ((timestamp.max(0.0) * rate as f64).round() as i64)
                     .saturating_add(frame.nb_samples as i64);
-                self.pending_frame = Some((0, timestamp.max(0.0)));
+                let (leading, trailing) = if self.vorbis_rate.is_some() {
+                    self.vorbis_trims
+                } else {
+                    (0, 0)
+                };
+                self.pending_frame = Some((
+                    0,
+                    FrameTiming {
+                        timestamp: timestamp - leading as f64 / rate as f64,
+                        represented: frame.nb_samples as u64 + leading + trailing,
+                        trim: leading as f64 / rate as f64,
+                        offset: 0,
+                    },
+                ));
                 self.packet_stats.add_duration(frame.nb_samples as u64);
                 return self.copy_pending_frame(frames).map(DecodeStep::Frames);
             }
@@ -914,6 +966,9 @@ impl Decoder {
                     }
                     _ => self.packet_stats.invalidate(),
                 }
+                if self.vorbis_rate.is_some() {
+                    self.vorbis_trims = packet_trims(packet).unwrap_or((0, 0));
+                }
                 let sent = unsafe { (self.rt.f.send_packet)(self.codec, self.packet) };
                 if sent == ERR_EAGAIN {
                     bail!("FFmpeg decoder backpressure while sending audio packet");
@@ -928,8 +983,8 @@ impl Decoder {
     // AVFrame remains decoder-owned until every fragment is consumed. This
     // limits our converted PCM allocation/work without rejecting codec blocks
     // larger than a playback round or claiming to bound FFmpeg internals.
-    fn copy_pending_frame(&mut self, output: &mut Vec<f32>) -> Result<f64> {
-        let (offset, timestamp) = self.pending_frame.expect("pending FFmpeg frame");
+    fn copy_pending_frame(&mut self, output: &mut Vec<f32>) -> Result<FrameTiming> {
+        let (offset, timing) = self.pending_frame.expect("pending FFmpeg frame");
         let frame = unsafe { &*self.frame };
         let channels = self.layout.len();
         let count =
@@ -938,14 +993,28 @@ impl Decoder {
         output.resize(samples, 0.0);
         copy_frame(frame, offset, output)?;
         self.pending_frame =
-            (offset + count < frame.nb_samples as usize).then_some((offset + count, timestamp));
-        Ok(timestamp + offset as f64 / f64::from(self.info.sample_rate))
+            (offset + count < frame.nb_samples as usize).then_some((offset + count, timing));
+        Ok(FrameTiming { offset, ..timing })
     }
     pub(super) fn seek(&mut self, seconds: f64, cancelled: Option<&AtomicBool>) -> Result<()> {
         self.packet_stats.invalidate();
         check_cancelled(cancelled)?;
         if !seconds.is_finite() || seconds < 0.0 {
             bail!("Invalid FFmpeg seek position");
+        }
+        // Origin-reaching preroll starts a fresh decoder traversal. Demuxer
+        // seeks plus codec flush can lose overlap primers or initial skip data.
+        // Reopen the held file object, never its potentially replaced path.
+        if seconds <= 2.0 {
+            let file = self
+                ._file
+                .try_clone()
+                .context("Retaining FFmpeg seek source")?;
+            let input = Input::from_file(self.path.clone(), file, self.rt)?;
+            let mut replacement = Self::from_input(input, cancelled)?;
+            replacement.packet_stats.invalidate();
+            *self = replacement;
+            return Ok(());
         }
         let preroll = seconds.min(2.0);
         let seek_seconds = seconds - preroll;

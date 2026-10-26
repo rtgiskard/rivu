@@ -57,9 +57,16 @@ Still Mode discard incompatible pending tap state without reprocessing pending
 output. Inactive analysis releases FIFO capacity on the next audio-worker refill,
 even if output admits no PCM; exhausting the final output span also releases it.
 
-Decoder timestamp discontinuities use the larger of one container tick and half
-a sample as their tolerance. With a realtime graph, packet boundaries map into
-latency-trimmed output frame coordinates, excluding source preguard; a boundary
+Decoded PCM carries a traversal-relative frame position and an explicit source
+discontinuity marker, separately from its media timestamp. Analysis advances by
+admitted sample counts; neither tap nor Before FIFO alignment compares media
+PTS to infer continuity. The source normalizes timestamp semantics and owns
+container-gap detection. Successful seek/source replacement, confirmed source
+gaps and dropped analysis samples start a new analysis segment; ordinary media
+clock corrections do not. A rejected source seek does not itself retire the
+current output or analysis epoch. Seek priming samples are discarded before the first new span.
+With a realtime graph, explicit boundaries map into latency-trimmed output
+frame coordinates, excluding source preguard; a boundary
 at or before the preguard end does not publish a gap. Output admission splits at
 each retained boundary so both Before and After mark the discontinuity when
 that output span is admitted, not early while the decoder is feeding the graph.

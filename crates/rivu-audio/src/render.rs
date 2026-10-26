@@ -83,7 +83,7 @@ pub fn render_source(
         loop {
             let mut budget = DECODE_WORK_BUDGET;
             let samples = match source.next_frames_with_cancel(Some(cancelled), &mut budget)? {
-                DecodeStep::Frames((samples, _)) => samples,
+                DecodeStep::Frames(span) => span.samples,
                 DecodeStep::Yield => continue,
                 DecodeStep::Eof => break,
             };

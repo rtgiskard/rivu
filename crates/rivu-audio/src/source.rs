@@ -1,5 +1,9 @@
 //! Container probing, decoding, seeking, and packet-accurate native-channel samples.
 
+mod vorbis_timing;
+
+use vorbis_timing::VorbisTiming;
+
 use super::{
     BYTES_PER_MEBIBYTE, Channel, MediaInfo,
     bitrate::{self, PacketStats},
@@ -25,7 +29,7 @@ use symphonia::{
             CodecParameters,
             audio::{
                 AudioCodecParameters, AudioDecoder, AudioDecoderOptions, CODEC_ID_NULL_AUDIO,
-                well_known::CODEC_ID_OPUS,
+                well_known::{CODEC_ID_OPUS, CODEC_ID_VORBIS},
             },
         },
         formats::{FormatOptions, FormatReader, SeekMode, SeekTo, Track, TrackType, probe::Hint},
@@ -111,6 +115,24 @@ pub(super) enum DecodeStep<T> {
     Frames(T),
     Yield,
     Eof,
+}
+
+/// One admitted PCM span. Position counts PCM frames, independent of media PTS.
+#[derive(Debug, PartialEq)]
+pub(super) struct PcmSpan<'a> {
+    pub(super) samples: &'a [f32],
+    pub(super) media_start: f64,
+    pub(super) position: u64,
+    pub(super) discontinuity: bool,
+}
+
+/// Backend timing for one converted codec-block fragment, before normalization.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct FrameTiming {
+    pub(super) timestamp: f64,
+    pub(super) represented: u64,
+    pub(super) trim: f64,
+    pub(super) offset: usize,
 }
 
 fn native_error(error: SymphoniaError) -> anyhow::Error {
@@ -259,10 +281,7 @@ fn trim_samples(
 fn trim_sample_count(base: TimeBase, ticks: u64, rate: u32) -> Option<u64> {
     let scaled = u128::from(ticks) * u128::from(base.numer.get()) * u128::from(rate);
     let denominator = u128::from(base.denom.get());
-    if scaled % denominator != 0 {
-        return None;
-    }
-    u64::try_from(scaled / denominator).ok()
+    u64::try_from((scaled + denominator / 2) / denominator).ok()
 }
 
 fn duration(track: &Track, rate: u32) -> Option<f64> {
@@ -417,9 +436,16 @@ pub(super) struct Source {
     track: u32,
     decode: Decode,
     time_base: TimeBase,
+    timestamp_tick: f64,
     frames: Vec<f32>,
     frame_start: f64,
+    next_media_start: Option<f64>,
+    delivered_frames: u64,
+    frame_discontinuity: bool,
+    discontinuity_pending: bool,
     native_pcm: Option<NativePcm>,
+    ffmpeg_pending: Option<(Vec<f32>, f64)>,
+    vorbis_timing: Option<VorbisTiming>,
     layout: Vec<Channel>,
     info: MediaInfo,
     probe_backend: ProbeBackend,
@@ -570,6 +596,10 @@ impl Source {
         let info = decode.info().clone();
         let layout = decode.layout().to_vec();
         let time_base = decode.time_base()?;
+        let timestamp_tick = f64::from(time_base.numer.get()) / f64::from(time_base.denom.get());
+        let vorbis_timing = decode
+            .vorbis_timing()
+            .map(|(rate, origin)| VorbisTiming::with_origin(timestamp_tick, rate, origin));
         // Container duration is only an estimate, never a decoder EOF.
         Ok(Self {
             identity: decode.identity(),
@@ -578,9 +608,16 @@ impl Source {
             track: 0,
             decode: Decode::Ffmpeg(Box::new(decode)),
             time_base,
+            timestamp_tick,
             frames: Vec::new(),
             frame_start: 0.0,
+            next_media_start: Some(0.0),
+            delivered_frames: 0,
+            frame_discontinuity: false,
+            discontinuity_pending: true,
             native_pcm: None,
+            ffmpeg_pending: None,
+            vorbis_timing,
             layout,
             info,
             probe_backend: ProbeBackend::Ffmpeg,
@@ -758,16 +795,36 @@ impl Source {
             sample_rate: rate,
         };
         metadata_tags(format.metadata(), track, &mut info);
+        let time_base = track_time_base.unwrap_or_else(|| TimeBase::try_new(1, rate).unwrap());
+        // Matroska emits nanosecond packets for exact trim, but timestamps
+        // still have the Segment's declared quantization granularity.
+        let timestamp_base = if format.format_info().short_name == "matroska" {
+            format.media_info().time_base.unwrap_or(time_base)
+        } else {
+            time_base
+        };
+        let timestamp_tick =
+            f64::from(timestamp_base.numer.get()) / f64::from(timestamp_base.denom.get());
+        let vorbis_timing = (params.codec == CODEC_ID_VORBIS
+            && format.format_info().short_name == "matroska")
+            .then(|| VorbisTiming::new(timestamp_tick, rate));
         Ok(Self {
             identity,
-            time_base: track_time_base.unwrap_or_else(|| TimeBase::try_new(1, rate).unwrap()),
+            time_base,
+            timestamp_tick,
             format: Some(format),
             metadata_budget,
             track,
             decode,
             frames: Vec::with_capacity(8192),
             frame_start: 0.0,
+            next_media_start: Some(0.0),
+            delivered_frames: 0,
+            frame_discontinuity: false,
+            discontinuity_pending: true,
             native_pcm: None,
+            ffmpeg_pending: None,
+            vorbis_timing,
             layout: Vec::new(),
             info,
             probe_backend: ProbeBackend::Native,
@@ -817,14 +874,17 @@ impl Source {
 
     fn seek_with_cancel(&mut self, target: f64, cancelled: Option<&AtomicBool>) -> Result<()> {
         check_cancelled(cancelled)?;
+        if !target.is_finite() {
+            bail!("Invalid seek position");
+        }
         self.complete_stream = false;
         self.packet_stats.invalidate();
         let target = target.max(0.0);
-        self.native_pcm = None;
         if self
             .range_end
             .is_some_and(|end| self.range_start + target >= end)
         {
+            self.reset_traversal();
             self.frames.clear();
             self.ready = false;
             self.seek_target = None;
@@ -834,6 +894,7 @@ impl Source {
         let target = self.range_start + target;
         if let Decode::Ffmpeg(decoder) = &mut self.decode {
             decoder.seek(target, cancelled)?;
+            self.reset_traversal();
             self.frames.clear();
             self.ready = false;
             self.seek_target = Some(target);
@@ -842,6 +903,8 @@ impl Source {
         }
         let preroll = if matches!(self.decode, Decode::Opus(_)) {
             (target - 0.08).max(0.0)
+        } else if self.vorbis_timing.is_some() {
+            (target - 2.0).max(0.0)
         } else {
             target
         };
@@ -889,11 +952,23 @@ impl Source {
             }
             Decode::Ffmpeg(_) => unreachable!(),
         }
+        self.reset_traversal();
         self.frames.clear();
         self.ready = false;
         self.seek_target = Some(target);
         self.exhausted = false;
         Ok(())
+    }
+
+    fn reset_traversal(&mut self) {
+        self.ffmpeg_pending = None;
+        self.native_pcm = None;
+        if let Some(timing) = &mut self.vorbis_timing {
+            timing.seek();
+        }
+        self.next_media_start = Some(0.0);
+        self.delivered_frames = 0;
+        self.discontinuity_pending = true;
     }
     pub(super) fn info(&self) -> &MediaInfo {
         &self.info
@@ -914,12 +989,12 @@ impl Source {
         &self.layout
     }
 
-    /// Returns PCM and its first sample's segment-relative decoded timestamp.
-    /// The primed first packet is returned before advancing the decoder.
+    /// Returns normalized media alignment and explicit source continuity.
+    /// Priming preserves the first span without counting it as delivered.
     pub(super) fn next_frames_with_budget(
         &mut self,
         budget: &mut usize,
-    ) -> Result<DecodeStep<(&[f32], f64)>> {
+    ) -> Result<DecodeStep<PcmSpan<'_>>> {
         self.next_frames_with_cancel(None, budget)
     }
 
@@ -927,7 +1002,7 @@ impl Source {
         &mut self,
         cancelled: Option<&AtomicBool>,
         budget: &mut usize,
-    ) -> Result<DecodeStep<(&[f32], f64)>> {
+    ) -> Result<DecodeStep<PcmSpan<'_>>> {
         check_cancelled(cancelled)?;
         if *budget == 0 {
             return Ok(DecodeStep::Yield);
@@ -942,16 +1017,27 @@ impl Source {
                 DecodeStep::Eof => return Ok(DecodeStep::Eof),
             }
         }
-        Ok(DecodeStep::Frames((&self.frames, self.frame_start)))
+        let position = self.delivered_frames;
+        self.delivered_frames += (self.frames.len() / self.layout.len()) as u64;
+        Ok(DecodeStep::Frames(PcmSpan {
+            samples: &self.frames,
+            media_start: self.frame_start,
+            position,
+            discontinuity: self.frame_discontinuity,
+        }))
     }
 
     // Full-file test consumers deliberately drain successive finite rounds.
     #[cfg(test)]
     fn next_frames(&mut self) -> Result<Option<(&[f32], f64)>> {
-        if !self.ready && !self.prime(None)? {
-            return Ok(None);
+        loop {
+            let mut budget = DECODE_WORK_BUDGET;
+            match self.next_frames_with_budget(&mut budget)? {
+                DecodeStep::Frames(_) => break,
+                DecodeStep::Yield => (),
+                DecodeStep::Eof => return Ok(None),
+            }
         }
-        self.ready = false;
         Ok(Some((&self.frames, self.frame_start)))
     }
 
@@ -995,18 +1081,6 @@ impl Source {
         }
     }
 
-    #[cfg(test)]
-    fn prime(&mut self, cancelled: Option<&AtomicBool>) -> Result<bool> {
-        loop {
-            let mut budget = DECODE_WORK_BUDGET;
-            match self.read_next(cancelled, &mut budget)? {
-                DecodeStep::Frames(()) => return Ok(true),
-                DecodeStep::Yield => continue,
-                DecodeStep::Eof => return Ok(false),
-            }
-        }
-    }
-
     pub(super) fn identity(&self) -> SourceIdentity {
         self.identity
     }
@@ -1018,9 +1092,8 @@ impl Source {
     /// Adjacent quantized packet timestamps can differ by one container tick.
     /// Sample-accurate timelines retain the half-sample coverage threshold.
     pub(super) fn waveform_timestamp_tolerance(&self) -> f64 {
-        let tick = f64::from(self.time_base.numer.get()) / f64::from(self.time_base.denom.get());
-        if tick > f64::from(self.info.sample_rate).recip() {
-            tick
+        if self.timestamp_tick > f64::from(self.info.sample_rate).recip() {
+            self.timestamp_tick
         } else {
             0.0
         }
@@ -1126,12 +1199,13 @@ impl Source {
         let mut end_frames = 0_u64;
         loop {
             let mut budget = DECODE_WORK_BUDGET;
-            let (samples, start_seconds) =
-                match self.next_frames_with_cancel(Some(cancelled), &mut budget)? {
-                    DecodeStep::Frames(frame) => frame,
-                    DecodeStep::Yield => continue,
-                    DecodeStep::Eof => break,
-                };
+            let span = match self.next_frames_with_cancel(Some(cancelled), &mut budget)? {
+                DecodeStep::Frames(span) => span,
+                DecodeStep::Yield => continue,
+                DecodeStep::Eof => break,
+            };
+            let samples = span.samples;
+            let start_seconds = span.media_start;
             if !samples.len().is_multiple_of(channels) {
                 bail!("Waveform PCM contains an incomplete frame");
             }
@@ -1239,6 +1313,24 @@ impl Source {
     // it is neither decoder EOF nor a reason to reset the caller's work budget.
     fn retain_pcm(&mut self, mut packet_start: f64) -> bool {
         let channels = self.layout.len();
+        if self.frames.is_empty() {
+            return false;
+        }
+        // Normalize only timestamp rounding, never real missing/overlapping PCM.
+        // Keep this judgement here for every backend and every consumer.
+        if let Some(expected) = self.next_media_start {
+            let tolerance = self
+                .waveform_timestamp_tolerance()
+                .max(0.5 / f64::from(self.info.sample_rate));
+            if (packet_start - expected).abs() <= tolerance + 1e-9 {
+                packet_start = expected;
+            } else {
+                self.discontinuity_pending = true;
+            }
+        }
+        self.next_media_start = Some(
+            packet_start + (self.frames.len() / channels) as f64 / f64::from(self.info.sample_rate),
+        );
         if let Some(end) = self.range_end {
             let remaining =
                 ((end - packet_start).max(0.0) * self.info.sample_rate as f64).round() as usize;
@@ -1264,6 +1356,8 @@ impl Source {
             return false;
         }
         self.frame_start = packet_start - self.range_start;
+        self.frame_discontinuity = self.discontinuity_pending;
+        self.discontinuity_pending = false;
         true
     }
 
@@ -1274,14 +1368,47 @@ impl Source {
     ) -> Result<DecodeStep<()>> {
         loop {
             check_cancelled(cancelled)?;
+            if *budget == 0 {
+                return Ok(DecodeStep::Yield);
+            }
+            self.frames.clear();
+            if let Some(timing) = &mut self.vorbis_timing
+                && let Some(start) = timing.copy_ready(&mut self.frames, self.layout.len())?
+            {
+                *budget -= 1;
+                if self.retain_pcm(start) {
+                    return Ok(DecodeStep::Frames(()));
+                }
+                if self.exhausted {
+                    return Ok(DecodeStep::Eof);
+                }
+                continue;
+            }
+            if let Some((pcm, start)) = self.ffmpeg_pending.take() {
+                self.frames = pcm;
+                *budget -= 1;
+                if self.retain_pcm(start) {
+                    return Ok(DecodeStep::Frames(()));
+                }
+                if self.exhausted {
+                    return Ok(DecodeStep::Eof);
+                }
+                continue;
+            }
             let decoded = match &mut self.decode {
                 Decode::Ffmpeg(decoder) => decoder.next_frames(&mut self.frames, cancelled, budget),
                 _ => unreachable!(),
             };
-            let packet_start = match decoded {
-                Ok(DecodeStep::Frames(timestamp)) => timestamp,
+            let decoded_timing = match decoded {
+                Ok(DecodeStep::Frames(timing)) => timing,
                 Ok(DecodeStep::Yield) => return Ok(DecodeStep::Yield),
                 Ok(DecodeStep::Eof) => {
+                    if let Some(timing) = &mut self.vorbis_timing {
+                        timing.finish();
+                        if timing.ready() {
+                            continue;
+                        }
+                    }
                     self.frames.clear();
                     self.exhausted = true;
                     return Ok(DecodeStep::Eof);
@@ -1305,6 +1432,40 @@ impl Source {
             let channels = self.layout.len();
             if channels == 0 || !self.frames.len().is_multiple_of(channels) {
                 bail!("FFmpeg decoder returned incomplete interleaved frames");
+            }
+            let trim = decoded_timing.trim
+                + decoded_timing.offset as f64 / f64::from(self.info.sample_rate);
+            let start = if let Some(timing) = &mut self.vorbis_timing {
+                if decoded_timing.offset == 0 {
+                    timing.packet(
+                        decoded_timing.timestamp,
+                        decoded_timing.represented,
+                        trim,
+                        self.frames.len(),
+                    )
+                } else {
+                    timing.continuation(
+                        decoded_timing.timestamp,
+                        decoded_timing.represented,
+                        trim,
+                        self.frames.len(),
+                    )
+                }
+            } else {
+                Some(decoded_timing.timestamp + trim)
+            };
+            let Some(packet_start) = start else {
+                self.vorbis_timing.as_mut().unwrap().buffer(
+                    decoded_timing.timestamp,
+                    decoded_timing.represented,
+                    trim,
+                    &self.frames,
+                )?;
+                continue;
+            };
+            if self.vorbis_timing.as_ref().is_some_and(VorbisTiming::ready) {
+                self.ffmpeg_pending = Some((std::mem::take(&mut self.frames), packet_start));
+                continue;
             }
             if self.retain_pcm(packet_start) {
                 return Ok(DecodeStep::Frames(()));
@@ -1385,6 +1546,17 @@ impl Source {
             // Seeking can discard whole packets (including Opus preroll).
             // Never append the next packet onto samples already discarded.
             self.frames.clear();
+            if let Some(timing) = &mut self.vorbis_timing
+                && let Some(start) = timing.copy_ready(&mut self.frames, self.layout.len())?
+            {
+                if self.retain_pcm(start) {
+                    return Ok(DecodeStep::Frames(()));
+                }
+                if self.exhausted {
+                    return Ok(DecodeStep::Eof);
+                }
+                continue;
+            }
             if let Some(start) = self.copy_native_pcm()? {
                 if self.retain_pcm(start) {
                     return Ok(DecodeStep::Frames(()));
@@ -1400,7 +1572,13 @@ impl Source {
                 .context("Native source has no format reader")?;
             let packet = self.metadata_budget.with(|| read(format.as_mut()));
             check_cancelled(cancelled)?;
-            let Some(packet) = packet? else {
+            let Some(mut packet) = packet? else {
+                if let Some(timing) = &mut self.vorbis_timing {
+                    timing.finish();
+                    if timing.ready() {
+                        continue;
+                    }
+                }
                 self.exhausted = true;
                 self.packet_stats.finish(self.expected_samples);
                 return Ok(DecodeStep::Eof);
@@ -1415,6 +1593,22 @@ impl Source {
             );
             let encoded_samples = match &mut self.decode {
                 Decode::Native(decoder) => {
+                    // Native codec buffers trim in PCM-frame units even when
+                    // the container exposes timestamps/trims in another base.
+                    let leading = trim_sample_count(
+                        self.time_base,
+                        packet.trim_start.get(),
+                        self.info.sample_rate,
+                    )
+                    .context("Packet leading trim out of range")?;
+                    let trailing = trim_sample_count(
+                        self.time_base,
+                        packet.trim_end.get(),
+                        self.info.sample_rate,
+                    )
+                    .context("Packet trailing trim out of range")?;
+                    packet.trim_start = symphonia::core::units::Duration::new(leading);
+                    packet.trim_end = symphonia::core::units::Duration::new(trailing);
                     let audio = decoder.decode(&packet).map_err(native_error)?;
                     if audio.spec().rate() != self.info.sample_rate {
                         bail!("Sample rate changes within this track are unsupported");
@@ -1424,29 +1618,34 @@ impl Source {
                     let represented = if self.mpeg_packets {
                         bitrate::mpeg_packet_samples(&packet.data, self.info.sample_rate)
                     } else {
-                        trim_sample_count(
-                            self.time_base,
-                            packet.trim_start.get(),
-                            self.info.sample_rate,
-                        )
-                        .and_then(|trim| (audio.frames() as u64).checked_add(trim))
-                        .and_then(|samples| {
-                            samples.checked_add(trim_sample_count(
-                                self.time_base,
-                                packet.trim_end.get(),
-                                self.info.sample_rate,
-                            )?)
-                        })
+                        (audio.frames() as u64)
+                            .checked_add(leading)
+                            .and_then(|samples| samples.checked_add(trailing))
                     };
-                    packet_start += self
-                        .time_base
-                        .calc_duration(packet.trim_start)
-                        .context("Packet trim out of range")?
-                        .as_secs_f64();
-                    self.native_pcm = Some(NativePcm {
-                        start: packet_start,
-                        offset: 0,
-                    });
+                    let trim = leading as f64 / f64::from(self.info.sample_rate);
+                    let start = if let Some(timing) = &mut self.vorbis_timing {
+                        timing.packet(
+                            packet_start,
+                            represented.context("Vorbis sample count out of range")?,
+                            trim,
+                            audio.frames() * self.layout.len(),
+                        )
+                    } else {
+                        Some(packet_start + trim)
+                    };
+                    if let Some(start) = start {
+                        self.native_pcm = Some(NativePcm { start, offset: 0 });
+                    } else {
+                        let frames = audio.frames();
+                        interleave_audio(audio, 0..frames, &mut self.frames)?;
+                        self.vorbis_timing.as_mut().unwrap().buffer(
+                            packet_start,
+                            represented.unwrap(),
+                            trim,
+                            &self.frames,
+                        )?;
+                        self.frames.clear();
+                    }
                     represented
                 }
                 Decode::Opus(opus) => {
@@ -1483,6 +1682,9 @@ impl Source {
             match encoded_samples {
                 Some(samples) => self.packet_stats.add(packet.data.len() as u64, samples),
                 None => self.packet_stats.invalidate(),
+            }
+            if self.vorbis_timing.as_ref().is_some_and(VorbisTiming::ready) {
+                continue;
             }
             if let Some(start) = self.copy_native_pcm()? {
                 packet_start = start;
@@ -3376,6 +3578,281 @@ mod tests {
         }
     }
 
+    const TIMING_HINTS: &[DecoderHint] = &[
+        DecoderHint::Native,
+        #[cfg(feature = "ffmpeg")]
+        DecoderHint::Ffmpeg,
+    ];
+
+    const VORBIS_FIXTURES: &[(&[u8], bool)] = &[
+        (include_bytes!("../tests/fixtures/vorbis-start.mka"), false),
+        (include_bytes!("../tests/fixtures/vorbis-end.mka"), false),
+        (
+            include_bytes!("../tests/fixtures/vorbis-start-gap.mka"),
+            true,
+        ),
+        (include_bytes!("../tests/fixtures/vorbis-end-gap.mka"), true),
+    ];
+
+    #[derive(Debug)]
+    struct CapturedSpan {
+        position: u64,
+        media_start: f64,
+        discontinuity: bool,
+        frames: usize,
+    }
+
+    fn capture_spans(source: &mut Source) -> (Vec<f32>, Vec<CapturedSpan>) {
+        let channels = source.layout.len();
+        let mut pcm = Vec::new();
+        let mut spans = Vec::new();
+        loop {
+            let mut budget = DECODE_WORK_BUDGET;
+            match source.next_frames_with_budget(&mut budget).unwrap() {
+                DecodeStep::Frames(span) => {
+                    spans.push(CapturedSpan {
+                        position: span.position,
+                        media_start: span.media_start,
+                        discontinuity: span.discontinuity,
+                        frames: span.samples.len() / channels,
+                    });
+                    pcm.extend_from_slice(span.samples);
+                }
+                DecodeStep::Yield => (),
+                DecodeStep::Eof => break,
+            }
+        }
+        (pcm, spans)
+    }
+
+    #[test]
+    fn source_normalizes_rounding_but_marks_real_gaps_and_counts_pcm_frames() {
+        let file = pcm_file();
+        let mut source =
+            Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
+        source.info.sample_rate = 48_000;
+        source.layout = vec![Channel::FrontLeft, Channel::FrontRight];
+        source.timestamp_tick = 0.001;
+        source.reset_traversal();
+        for (index, (timestamp, expected, discontinuity)) in [
+            (0.0004, 0.0, true),
+            (0.0104, 0.01, false),
+            (0.07, 0.07, true),
+            (0.0798, 0.08, false),
+            (0.081, 0.081, true),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            source.frames.resize(480 * 2, 0.25);
+            assert!(source.retain_pcm(timestamp));
+            source.ready = true;
+            let DecodeStep::Frames(span) = source.next_frames_with_budget(&mut 1).unwrap() else {
+                panic!("primed normalized span must be delivered");
+            };
+            assert_eq!(span.samples.len(), 960);
+            assert_eq!(span.position, index as u64 * 480);
+            assert_eq!(span.discontinuity, discontinuity);
+            assert!((span.media_start - expected).abs() < 1e-12);
+        }
+        assert_eq!(source.delivered_frames, 2400);
+    }
+
+    #[test]
+    fn vorbis_timestamps_preserve_pcm_through_seek_and_range_end() {
+        for &hint in TIMING_HINTS {
+            let mut reference = Vec::new();
+            for &(bytes, has_gap) in VORBIS_FIXTURES {
+                let mut file = tempfile::NamedTempFile::new().unwrap();
+                file.write_all(bytes).unwrap();
+                let mut source = Source::open(file.path(), PROBE_BUFFER_LEN, hint, true).unwrap();
+                assert_eq!((source.info.sample_rate, source.layout.len()), (48_000, 1));
+                // Opening and repeated completion polls must not deliver PCM.
+                assert!(source.poll_open().unwrap());
+                assert!(source.poll_open().unwrap());
+                assert_eq!(source.delivered_frames, 0);
+                assert!(source.seek(f64::INFINITY).is_err());
+                let (original, spans) = capture_spans(&mut source);
+                assert_eq!(original.len(), 18_944);
+                let mut position = 0;
+                for span in &spans {
+                    assert_eq!(span.position, position);
+                    let gap = has_gap && position >= 12_480;
+                    let start = position as f64 / 48_000.0 + if gap { 0.1 } else { 0.0 };
+                    assert!(
+                        (span.media_start - start).abs() < 1e-9,
+                        "{hint:?}: {span:?}"
+                    );
+                    assert_eq!(
+                        span.discontinuity,
+                        position == 0 || has_gap && position == 12_480
+                    );
+                    position += span.frames as u64;
+                }
+                for length in [128, 576, 1024] {
+                    assert!(spans.iter().any(|span| span.frames == length));
+                }
+                if reference.is_empty() {
+                    reference = original.clone();
+                } else {
+                    assert_eq!(original, reference, "timestamps cannot change PCM");
+                }
+                // EOF, a retained startup prefix, and repeated zero seeks all
+                // preserve the actual first 128-frame output and total count.
+                for _ in 0..3 {
+                    source.seek(0.0).unwrap();
+                    let first = loop {
+                        let mut budget = DECODE_WORK_BUDGET;
+                        match source.next_frames_with_budget(&mut budget).unwrap() {
+                            DecodeStep::Frames(span) => {
+                                assert_eq!(span.position, 0);
+                                assert!(span.discontinuity);
+                                assert_eq!(span.samples, &original[..128]);
+                                break span.samples.len();
+                            }
+                            DecodeStep::Yield => (),
+                            DecodeStep::Eof => panic!("zero seek lost the first PCM"),
+                        }
+                    };
+                    assert_eq!(first, 128);
+                    assert!(source.seek(f64::INFINITY).is_err());
+                    let (tail, tail_spans) = capture_spans(&mut source);
+                    assert_eq!(tail_spans[0].position, 128);
+                    assert!(!tail_spans[0].discontinuity);
+                    assert_eq!(tail, original[128..]);
+                }
+                source.seek(0.05).unwrap();
+                let (tail, spans) = capture_spans(&mut source);
+                assert_eq!(tail, original[2400..]);
+                assert_eq!(spans[0].position, 0);
+                assert!(spans[0].discontinuity);
+                assert!((spans[0].media_start - 0.05).abs() < 1e-9);
+                source
+                    .restrict(crate::PlaybackRange {
+                        start_seconds: 0.0,
+                        end_seconds: Some(0.1),
+                    })
+                    .unwrap();
+                assert_eq!(capture_spans(&mut source).0, original[..4800]);
+            }
+        }
+    }
+
+    // Repackage the embedded packets only; no encoder/CLI is needed. Cues are
+    // omitted because rebuilding element sizes invalidates their byte offsets.
+    fn vorbis_excerpt(bytes: &[u8], decoded_blocks: usize, padding_ns: Option<i64>) -> Vec<u8> {
+        fn children(mut bytes: &[u8]) -> Vec<(u32, &[u8])> {
+            let mut result = Vec::new();
+            while !bytes.is_empty() {
+                let id_len = bytes[0].leading_zeros() as usize + 1;
+                assert!(id_len <= 4);
+                let id = bytes[..id_len]
+                    .iter()
+                    .fold(0_u32, |id, byte| (id << 8) | u32::from(*byte));
+                bytes = &bytes[id_len..];
+                let size_len = bytes[0].leading_zeros() as usize + 1;
+                assert!(size_len <= 8);
+                let raw_size = bytes[..size_len]
+                    .iter()
+                    .fold(0_u64, |size, byte| (size << 8) | u64::from(*byte));
+                let mask = (1_u64 << (7 * size_len)) - 1;
+                bytes = &bytes[size_len..];
+                let size = if raw_size & mask == mask {
+                    bytes.len()
+                } else {
+                    (raw_size & mask) as usize
+                };
+                result.push((id, &bytes[..size]));
+                bytes = &bytes[size..];
+            }
+            result
+        }
+        fn element(id: u32, payload: &[u8]) -> Vec<u8> {
+            let id_bytes = id.to_be_bytes();
+            let first = (id.leading_zeros() / 8) as usize;
+            let mut bytes = id_bytes[first..].to_vec();
+            bytes.extend_from_slice(&((1_u64 << 56) | payload.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(payload);
+            bytes
+        }
+        let mut output = Vec::new();
+        for (id, payload) in children(bytes) {
+            if id != 0x1853_8067 {
+                output.extend(element(id, payload));
+                continue;
+            }
+            let mut segment = Vec::new();
+            let mut packets = 0;
+            for (id, payload) in children(payload) {
+                if id == 0x1c53_bb6b || id == 0x114d_9b74 {
+                    continue;
+                }
+                if id != 0x1f43_b675 {
+                    segment.extend(element(id, payload));
+                    continue;
+                }
+                if packets > decoded_blocks {
+                    continue;
+                }
+                let mut cluster = Vec::new();
+                for (id, payload) in children(payload) {
+                    if id == 0xa3
+                        && packets == decoded_blocks
+                        && let Some(padding_ns) = padding_ns
+                    {
+                        let mut block = payload.to_vec();
+                        // The fixtures use one-byte track numbers. SimpleBlock's
+                        // keyframe/discardable bits are reserved on a Block.
+                        block[3] &= 0x0e;
+                        let mut group = element(0xa1, &block);
+                        group.extend(element(0x75a2, &padding_ns.to_be_bytes()));
+                        cluster.extend(element(0xa0, &group));
+                    } else {
+                        cluster.extend(element(id, payload));
+                    }
+                }
+                segment.extend(element(id, &cluster));
+                packets += 1;
+            }
+            output.extend(element(id, &segment));
+        }
+        output
+    }
+
+    #[test]
+    fn short_vorbis_eof_and_padding_keep_exact_pcm_on_repeated_seeks() {
+        for &hint in TIMING_HINTS {
+            for &(bytes, _) in &VORBIS_FIXTURES[..2] {
+                for (blocks, padding, count) in [(1, None, 128), (36, Some(2_666_667), 18_816)] {
+                    let mut file = tempfile::NamedTempFile::new().unwrap();
+                    file.write_all(&vorbis_excerpt(bytes, blocks, padding))
+                        .unwrap();
+                    let mut source =
+                        Source::open(file.path(), PROBE_BUFFER_LEN, hint, true).unwrap();
+                    let (reference, spans) = capture_spans(&mut source);
+                    assert_eq!(reference.len(), count, "{hint:?}, blocks={blocks}");
+                    assert_eq!(spans[0].position, 0);
+                    assert!(spans[0].discontinuity);
+                    for _ in 0..3 {
+                        source.seek(0.0).unwrap();
+                        let (replayed, spans) = capture_spans(&mut source);
+                        assert_eq!(replayed, reference);
+                        assert_eq!(spans[0].position, 0);
+                        assert!(spans[0].discontinuity);
+                        assert!(spans[1..].iter().all(|span| !span.discontinuity));
+                    }
+                    if padding.is_some() {
+                        let mut full_file = tempfile::NamedTempFile::new().unwrap();
+                        full_file.write_all(bytes).unwrap();
+                        let mut full =
+                            Source::open(full_file.path(), PROBE_BUFFER_LEN, hint, true).unwrap();
+                        assert_eq!(reference, capture_spans(&mut full).0[..count]);
+                    }
+                }
+            }
+        }
+    }
+
     // FFmpeg-generated 440 Hz AAC, 48 kHz, 0.2 s, Matroska's 1 ms timestamps.
     // Embedded so this regression needs the decoder runtime, not an ffmpeg CLI.
     #[cfg(feature = "ffmpeg")]
@@ -3472,6 +3949,58 @@ mod tests {
             assert!(source.next_frames().unwrap().is_none());
             source.seek(0.0).unwrap();
             assert_eq!(decode_remaining(&mut source), reference[start..end]);
+        }
+    }
+
+    #[test]
+    fn matroska_opus_padding_and_zero_seek_preserve_the_audible_timeline() {
+        // 100ms at 48kHz, with 312 leading and 648 trailing discarded samples.
+        // The final BlockDuration is the already-trimmed 7ms presentation span.
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/opus-padding.mka"))
+            .unwrap();
+        for hint in [DecoderHint::Native, DecoderHint::Ffmpeg] {
+            if hint == DecoderHint::Ffmpeg
+                && (!cfg!(feature = "ffmpeg") || crate::ffmpeg_status().is_err())
+            {
+                continue;
+            }
+            let mut source = Source::open(file.path(), PROBE_BUFFER_LEN, hint, true).unwrap();
+            assert_eq!(
+                decode_remaining(&mut source).len(),
+                4800,
+                "{hint:?} complete decode"
+            );
+            source
+                .restrict(crate::PlaybackRange {
+                    start_seconds: 0.0,
+                    end_seconds: Some(0.1),
+                })
+                .unwrap();
+            for target in [0.0, 0.05, 0.0] {
+                source.seek(target).unwrap();
+                let mut count = 0;
+                loop {
+                    let mut budget = DECODE_WORK_BUDGET;
+                    match source.next_frames_with_budget(&mut budget).unwrap() {
+                        DecodeStep::Frames(span) => {
+                            assert_eq!(span.discontinuity, count == 0, "{hint:?} at {target}");
+                            assert!(
+                                (span.media_start - target - count as f64 / 48_000.0).abs()
+                                    < 0.5 / 48_000.0
+                            );
+                            count += span.samples.len();
+                        }
+                        DecodeStep::Yield => (),
+                        DecodeStep::Eof => break,
+                    }
+                }
+                assert_eq!(
+                    count,
+                    ((0.1 - target) * 48_000.0).round() as usize,
+                    "{hint:?} seek {target}"
+                );
+            }
         }
     }
 

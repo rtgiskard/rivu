@@ -55,15 +55,16 @@ pub(super) struct Playback {
     graph_input_frames: u64,
     graph_output_frames: u64,
     graph_output_remaining: Option<u64>,
-    graph_last_end: Option<f64>,
-    // Packet timestamp gaps use latency-trimmed output frame coordinates, not
-    // the decoder's admission clock. Preguard-only gaps are never published.
+    // Explicit source boundaries in latency-trimmed output frame coordinates.
+    // Preguard-only boundaries are never published.
     graph_gaps: VecDeque<u64>,
     source_eof: bool,
     // Audition keeps the selected source's metadata/timeline, not the WAV's tags.
     source_info: Option<MediaInfo>,
     pending: Vec<f32>,
     pending_start: f64,
+    pending_position: u64,
+    pending_discontinuity: bool,
     pending_tap: PendingTap,
     before_skip_frames: usize,
     before_output_frames: u64,
@@ -88,39 +89,30 @@ struct VisualizationCapture {
     still_mode: bool,
     producer: Option<AnalysisProducer>,
     signal: VisualizationSignal,
-    last_end: Option<f64>,
-    timestamp_tolerance: f64,
-    tap_last_end: Option<f64>,
     tap_identity: Option<AnalysisAudioIdentity>,
     // Destructive DSP needs a separate Before signal, bounded by its output
     // latency plus one PCM fragment. Other taps borrow admitted PCM directly.
     before: VecDeque<[f32; 2]>,
-    before_start: f64,
-    before_offset_frames: u64,
+    before_position: u64,
 }
 
 impl VisualizationCapture {
     fn begin_traversal(&mut self) {
-        self.last_end = None;
         if let Some(accumulator) = &mut self.accumulator {
             accumulator.begin_traversal();
         }
     }
 
-    fn push(&mut self, start: f64, pcm: &[f32], rate: u32, channels: usize) -> bool {
+    fn push(&mut self, start: f64, pcm: &[f32], rate: u32, channels: usize, gap: bool) {
         if pcm.is_empty() {
-            return false;
+            return;
         }
-        let gap = self.last_end.is_some_and(|end| {
-            (start - end).abs() > self.timestamp_tolerance.max(0.5 / rate as f64)
-        });
         if gap {
             self.begin_traversal();
         }
-        self.last_end = Some(start + (pcm.len() / channels) as f64 / rate as f64);
         if self.still_mode {
             self.coverage.skip();
-            return gap;
+            return;
         }
         self.coverage.record(start, pcm.len() / channels, rate);
         let accumulator = self.accumulator.get_or_insert_with(|| {
@@ -132,7 +124,6 @@ impl VisualizationCapture {
         });
         accumulator.push(start, pcm, rate, channels);
         self.try_publish();
-        gap
     }
 
     fn try_publish(&mut self) {
@@ -152,7 +143,6 @@ impl VisualizationCapture {
 
     fn reset_tap(&mut self) {
         self.before = VecDeque::new();
-        self.tap_last_end = None;
         self.tap_identity = None;
         if let Some(producer) = &mut self.producer {
             producer.discontinuity();
@@ -174,16 +164,11 @@ impl VisualizationCapture {
 
     fn stage_before(
         &mut self,
-        start: f64,
+        position: u64,
         pcm: &[f32],
-        rate: u32,
         channels: usize,
         limit: usize,
     ) -> Result<()> {
-        let gap = self.push(start, pcm, rate, channels);
-        if gap {
-            self.reset_tap();
-        }
         if self.sync_tap().is_none() || pcm.is_empty() {
             return Ok(());
         }
@@ -191,8 +176,7 @@ impl VisualizationCapture {
             bail!("Before analysis staging exceeds graph latency plus packet bound");
         }
         if self.before.is_empty() {
-            self.before_start = start;
-            self.before_offset_frames = 0;
+            self.before_position = position;
         }
         self.before.extend(pcm.chunks_exact(channels).map(|frame| {
             let mut samples = [0.0; 2];
@@ -205,7 +189,7 @@ impl VisualizationCapture {
         Ok(())
     }
 
-    fn submit_tap(&mut self, tap: PendingTap, start: f64, pcm: &[f32], rate: u32, channels: usize) {
+    fn submit_tap(&mut self, tap: PendingTap, position: u64, pcm: &[f32], channels: usize) {
         let Some(identity) = self.sync_tap() else {
             return;
         };
@@ -213,37 +197,27 @@ impl VisualizationCapture {
             return;
         }
         let producer = self.producer.as_mut().expect("active tap producer");
-        if self.tap_last_end.is_some_and(|end| {
-            (start - end).abs() > self.timestamp_tolerance.max(0.5 / rate as f64)
-        }) {
-            producer.discontinuity();
-        }
         match tap {
             PendingTap::Direct(signal) if signal == self.signal => {
                 producer.push(pcm, &self.weights);
-                self.tap_last_end = Some(start + (pcm.len() / channels) as f64 / rate as f64);
             }
             PendingTap::Before if self.signal == VisualizationSignal::Before => {
                 let frames = pcm.len() / channels;
-                let queued_start =
-                    self.before_start + self.before_offset_frames as f64 / rate as f64;
-                let skip = (((start - queued_start) * rate as f64).round().max(0.0) as usize)
-                    .min(self.before.len());
+                let skip = position
+                    .saturating_sub(self.before_position)
+                    .min(self.before.len() as u64) as usize;
                 drop(self.before.drain(..skip));
-                self.before_offset_frames += skip as u64;
-                let queued_start =
-                    self.before_start + self.before_offset_frames as f64 / rate as f64;
-                let lead =
-                    (((queued_start - start) * rate as f64).round().max(0.0) as usize).min(frames);
+                self.before_position += skip as u64;
+                let lead = self
+                    .before_position
+                    .saturating_sub(position)
+                    .min(frames as u64) as usize;
                 let count = (frames - lead).min(self.before.len());
                 if lead != 0 || skip != 0 {
                     producer.discontinuity();
                 }
                 producer.push_samples_for(identity, self.before.drain(..count));
-                self.before_offset_frames += count as u64;
-                if count != 0 {
-                    self.tap_last_end = Some(start + (lead + count) as f64 / rate as f64);
-                }
+                self.before_position += count as u64;
                 if count + lead != frames {
                     producer.discontinuity();
                 }
@@ -370,12 +344,13 @@ impl Playback {
             graph_input_frames: 0,
             graph_output_frames: 0,
             graph_output_remaining,
-            graph_last_end: None,
             graph_gaps: VecDeque::new(),
             source_eof: false,
             source_info,
             pending: Vec::with_capacity(PENDING_BUFFER_CAPACITY * channels),
             pending_start: start,
+            pending_position: 0,
+            pending_discontinuity: false,
             pending_tap: PendingTap::None,
             before_skip_frames,
             before_output_frames: 0,
@@ -395,19 +370,15 @@ impl Playback {
                 still_mode,
                 producer: Some(analyzer.audio_producer()),
                 signal: analyzer.settings().signal,
-                last_end: None,
-                timestamp_tolerance,
-                tap_last_end: None,
                 tap_identity: None,
                 before: VecDeque::new(),
-                before_start: start,
-                before_offset_frames: 0,
+                before_position: 0,
             },
             scan_source,
         })
     }
-    // Rebuild only device state: closing first discards queued PCM,
-    // device-clock spans and the old analysis epoch before the source seeks.
+    // Rebuild output only after the source accepts the seek. A failed seek
+    // must not discard queued PCM or retire the current analysis epoch.
     pub(super) fn restart_output(
         &mut self,
         target: Option<f64>,
@@ -439,8 +410,8 @@ impl Playback {
         create: impl FnOnce(&Source, bool) -> Result<Output>,
     ) -> Result<()> {
         let position = target.unwrap_or_else(|| self.position()).max(0.0);
-        let heard = self.prior_heard + self.output.close();
         self.source.seek(position)?;
+        let heard = self.prior_heard + self.output.close();
         self.equalizer.reset();
         if let Some(graph) = &mut self.graph {
             graph.reset();
@@ -455,13 +426,14 @@ impl Playback {
         self.before_output_frames = 0;
         self.graph_input_frames = 0;
         self.graph_output_frames = 0;
-        self.graph_last_end = None;
         self.graph_gaps = VecDeque::new();
         self.source_eof = false;
         let output = create(&self.source, self.paused)?;
         self.output = output;
         self.pending.clear();
         self.pending_tap = PendingTap::None;
+        self.pending_position = 0;
+        self.pending_discontinuity = false;
         self.visualization.reset_tap();
         self.offset_frames = 0;
         self.base_position = position;
@@ -599,7 +571,7 @@ impl Playback {
         let mut remaining_packets = DECODE_WORK_BUDGET;
         while remaining_frames > 0 {
             if self.offset_frames < self.pending.len() / channels {
-                remaining_frames -= self.submit_pending(remaining_frames, sample_rate, channels);
+                remaining_frames -= self.submit_pending(remaining_frames, channels);
                 if self.offset_frames < self.pending.len() / channels {
                     break;
                 }
@@ -636,28 +608,23 @@ impl Playback {
                 .source
                 .next_frames_with_budget(&mut remaining_packets)?
             {
-                DecodeStep::Frames((frames, start_seconds)) => {
+                DecodeStep::Frames(span) => {
+                    let frames = span.samples;
+                    let start_seconds = span.media_start;
+                    let position = span.position;
+                    let discontinuity = span.discontinuity;
                     if !frames.len().is_multiple_of(channels) {
                         bail!("Decoded audio ends in an incomplete interleaved frame");
                     }
                     let borrowed = self.graph.is_none() && self.equalizer.is_bypassed();
                     if let Some(graph) = &self.graph {
                         if self.graph_input_frames > graph.source_lead_frames() as u64
-                            && self.graph_last_end.is_some_and(|end| {
-                                (start_seconds - end).abs()
-                                    > self
-                                        .visualization
-                                        .timestamp_tolerance
-                                        .max(0.5 / sample_rate as f64)
-                            })
+                            && discontinuity
                         {
                             self.graph_gaps.push_back(
                                 self.graph_input_frames - graph.source_lead_frames() as u64,
                             );
                         }
-                        self.graph_last_end = Some(
-                            start_seconds + (frames.len() / channels) as f64 / sample_rate as f64,
-                        );
                         let skip = self.before_skip_frames.min(frames.len() / channels);
                         self.before_skip_frames -= skip;
                         let mut samples = &frames[skip * channels..];
@@ -675,10 +642,16 @@ impl Playback {
                                 + graph
                                     .latency_frames()
                                     .saturating_sub(graph.source_lead_frames());
-                            self.visualization.stage_before(
+                            self.visualization.push(
                                 start,
                                 samples,
                                 sample_rate,
+                                channels,
+                                discontinuity,
+                            );
+                            self.visualization.stage_before(
+                                self.before_output_frames,
+                                samples,
                                 channels,
                                 limit,
                             )?;
@@ -686,13 +659,24 @@ impl Playback {
                         self.before_output_frames += (samples.len() / channels) as u64;
                     } else if self.visualization.signal == VisualizationSignal::Before {
                         if borrowed {
-                            self.visualization
-                                .push(start_seconds, frames, sample_rate, channels);
-                        } else {
-                            self.visualization.stage_before(
+                            self.visualization.push(
                                 start_seconds,
                                 frames,
                                 sample_rate,
+                                channels,
+                                discontinuity,
+                            );
+                        } else {
+                            self.visualization.push(
+                                start_seconds,
+                                frames,
+                                sample_rate,
+                                channels,
+                                discontinuity,
+                            );
+                            self.visualization.stage_before(
+                                position,
+                                frames,
                                 channels,
                                 frames.len() / channels,
                             )?;
@@ -700,21 +684,35 @@ impl Playback {
                     }
                     if borrowed {
                         if self.visualization.signal == VisualizationSignal::After {
-                            self.visualization
-                                .push(start_seconds, frames, sample_rate, channels);
+                            self.visualization.push(
+                                start_seconds,
+                                frames,
+                                sample_rate,
+                                channels,
+                                discontinuity,
+                            );
                         }
                         // Settled disabled EQ keeps the original borrowed fast path.
                         let prefix = frames.len().min(remaining_frames * channels);
                         let count = self.output.push(&frames[..prefix]);
                         self.pending_tap = PendingTap::Direct(self.visualization.signal);
+                        self.pending_discontinuity = discontinuity;
+                        if count != 0 {
+                            if self.pending_discontinuity
+                                && let Some(producer) = &mut self.visualization.producer
+                            {
+                                producer.discontinuity();
+                            }
+                            self.pending_discontinuity = false;
+                        }
                         self.visualization.submit_tap(
                             self.pending_tap,
-                            start_seconds,
+                            position,
                             &frames[..count * channels],
-                            sample_rate,
                             channels,
                         );
                         self.pending_start = start_seconds + count as f64 / sample_rate as f64;
+                        self.pending_position = position + count as u64;
                         remaining_frames -= count;
                         self.pending.extend_from_slice(&frames[count * channels..]);
                     } else {
@@ -729,9 +727,10 @@ impl Playback {
                         }
                         self.pending.extend_from_slice(frames);
                         self.pending_start = start_seconds;
+                        self.pending_position = position;
+                        self.pending_discontinuity = self.graph.is_none() && discontinuity;
                         self.process_graph_pending(channels)?;
-                        remaining_frames -=
-                            self.submit_pending(remaining_frames, sample_rate, channels);
+                        remaining_frames -= self.submit_pending(remaining_frames, channels);
                     }
                     after_packet();
                 }
@@ -767,7 +766,7 @@ impl Playback {
         )
     }
 
-    fn submit_pending(&mut self, max_frames: usize, rate: u32, channels: usize) -> usize {
+    fn submit_pending(&mut self, max_frames: usize, channels: usize) -> usize {
         let start = self.offset_frames;
         let mut end = (start + max_frames).min(self.pending.len() / channels);
         if self.graph.is_some() {
@@ -786,11 +785,16 @@ impl Playback {
         let count = self
             .output
             .push(&self.pending[start * channels..end * channels]);
+        if count != 0 && self.pending_discontinuity {
+            if let Some(producer) = &mut self.visualization.producer {
+                producer.discontinuity();
+            }
+            self.pending_discontinuity = false;
+        }
         self.visualization.submit_tap(
             self.pending_tap,
-            self.pending_start + start as f64 / rate as f64,
+            self.pending_position + start as u64,
             &self.pending[start * channels..(start + count) * channels],
-            rate,
             channels,
         );
         self.offset_frames += count;
@@ -818,6 +822,9 @@ impl Playback {
             self.pending_start
         };
         self.pending_start = start;
+        if self.graph.is_some() {
+            self.pending_position = self.graph_output_frames;
+        }
         self.pending_tap = if self.visualization.signal == VisualizationSignal::Before {
             PendingTap::Before
         } else {
@@ -843,6 +850,7 @@ impl Playback {
                 &self.pending,
                 self.source.info().sample_rate,
                 channels,
+                self.pending_discontinuity,
             );
         }
         Ok(())
@@ -885,7 +893,7 @@ mod tests {
             playback.set_signal(VisualizationSignal::Before);
             playback
                 .visualization
-                .stage_before(0.0, &[0.5; 32], 8_000, 1, 32)
+                .stage_before(0, &[0.5; 32], 1, 32)
                 .unwrap();
             if pause {
                 playback.pause(true);
@@ -899,17 +907,17 @@ mod tests {
             }
             playback
                 .visualization
-                .submit_tap(PendingTap::Before, 0.0, &[0.0; 32], 8_000, 1);
+                .submit_tap(PendingTap::Before, 0, &[0.0; 32], 1);
             assert!(captured.try_pop().is_none());
             assert_eq!(playback.visualization.before.capacity(), 0);
 
             playback
                 .visualization
-                .stage_before(0.004, &[0.25; 32], 8_000, 1, 32)
+                .stage_before(32, &[0.25; 32], 1, 32)
                 .unwrap();
             playback
                 .visualization
-                .submit_tap(PendingTap::Before, 0.004, &[0.0; 32], 8_000, 1);
+                .submit_tap(PendingTap::Before, 32, &[0.0; 32], 1);
             let first = captured.try_pop().unwrap();
             assert_eq!(
                 first.samples,
@@ -920,7 +928,7 @@ mod tests {
 
             playback
                 .visualization
-                .stage_before(0.008, &[0.5; 32], 8_000, 1, 32)
+                .stage_before(64, &[0.5; 32], 1, 32)
                 .unwrap();
             worker.control.set_display_enabled(false);
             playback.eof = true;
@@ -1043,12 +1051,13 @@ mod tests {
             graph_input_frames: 0,
             graph_output_frames: 0,
             graph_output_remaining: None,
-            graph_last_end: None,
             graph_gaps: VecDeque::new(),
             source_eof: false,
             source_info: None,
             pending: Vec::new(),
             pending_start: 0.0,
+            pending_position: 0,
+            pending_discontinuity: false,
             pending_tap: PendingTap::None,
             before_skip_frames: 0,
             before_output_frames: 0,
@@ -1068,13 +1077,9 @@ mod tests {
                 still_mode: false,
                 producer: None,
                 signal: VisualizationSignal::After,
-                last_end: None,
-                timestamp_tolerance,
-                tap_last_end: None,
                 tap_identity: None,
                 before: VecDeque::new(),
-                before_start: 0.0,
-                before_offset_frames: 0,
+                before_position: 0,
             },
             scan_source: crate::WaveformScanSnapshot::original(
                 path.to_owned(),
@@ -1386,6 +1391,186 @@ mod tests {
     }
 
     #[test]
+    fn vorbis_timestamp_conventions_preserve_pcm_and_only_real_tap_gaps() {
+        use ringbuf::traits::Consumer;
+        use rivu_format::config::processing_graph::GraphPort;
+
+        // Synthetic fixture provenance: 48,000 mono f32 samples at 48 kHz,
+        // 0.18*sin(2*pi*440*n/48000), plus a +/-0.45 square transient
+        // (sign alternates every seven samples) when n%4800 < 160.
+        // Encoded with FFmpeg n9.0.2, libvorbis -q:a 2, -map_metadata -1,
+        // -fflags +bitexact -flags:a +bitexact. Retained the overlap primer
+        // and first 36 complete packets, with no final discard padding.
+        // All four Matroska files have identical CodecPrivate/audio packets;
+        // only TimestampScale=1 ns cluster times and segment duration differ.
+        // Start/end stamps are rounded cumulative sample boundaries; gap
+        // variants add 4,800 samples before decoded block 24. No tools or
+        // external media are needed by these tests.
+        let fixtures = [
+            ("vorbis-start.mka", false),
+            ("vorbis-end.mka", false),
+            ("vorbis-start-gap.mka", true),
+            ("vorbis-end-gap.mka", true),
+        ];
+        let expected_blocks = [
+            128, 128, 576, 1024, 1024, 1024, 576, 128, 128, 128, 128, 128, 576, 1024, 1024, 1024,
+            576, 128, 128, 128, 128, 576, 1024, 1024, 1024, 576, 128, 128, 128, 128, 128, 576,
+            1024, 1024, 1024, 576,
+        ];
+        let rate = 48_000;
+        let total = 18_944;
+        let gap_frame = 12_480;
+        let mut reference = Vec::new();
+        for (name, has_gap) in fixtures {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures")
+                .join(name);
+            let mut source = Source::open(&path, 64 * 1024, DecoderHint::Native, false).unwrap();
+            assert_eq!(source.info().sample_rate, rate);
+            assert_eq!(source.layout().len(), 1);
+            let mut decoded = Vec::new();
+            let mut blocks = Vec::new();
+            loop {
+                let mut budget = DECODE_WORK_BUDGET;
+                match source.next_frames_with_budget(&mut budget).unwrap() {
+                    DecodeStep::Frames(span) => {
+                        let frames = span.samples;
+                        let start = span.media_start;
+                        let expected_start = decoded.len() as f64 / f64::from(rate)
+                            + if has_gap && decoded.len() >= gap_frame {
+                                0.1
+                            } else {
+                                0.0
+                            };
+                        assert!((start - expected_start).abs() < 1e-9, "{name}: {start}");
+                        blocks.push(frames.len());
+                        decoded.extend_from_slice(frames);
+                    }
+                    DecodeStep::Yield => continue,
+                    DecodeStep::Eof => break,
+                }
+            }
+            assert_eq!(
+                blocks, expected_blocks,
+                "{name}: short/transition/long blocks"
+            );
+            assert_eq!(decoded.len(), total, "{name}: exact decoded sample count");
+            assert!(decoded.iter().all(|sample| sample.is_finite()));
+            assert!(decoded.iter().any(|sample| sample.abs() > 0.1));
+            if reference.is_empty() {
+                reference = decoded;
+            } else {
+                assert_eq!(
+                    decoded, reference,
+                    "timestamps must not drop or duplicate PCM"
+                );
+            }
+
+            for processing in 0..3 {
+                for signal in [VisualizationSignal::Before, VisualizationSignal::After] {
+                    let (mut playback, _) =
+                        test_playback_with_waveform(&path, None, Arc::default());
+                    if processing == 2 {
+                        let mut graph = GraphRunner::compile(
+                            &unity_fir_graph(),
+                            GraphPort { node: 2, port: 0 },
+                            rate,
+                            1,
+                        )
+                        .unwrap();
+                        graph.set_source_context(0, total as u64).unwrap();
+                        playback.before_skip_frames = graph.source_lead_frames();
+                        playback.graph_skip_frames = graph.latency_frames();
+                        playback.graph_output_remaining = Some(total as u64);
+                        playback.graph = Some(graph);
+                    } else if processing == 1 {
+                        playback.equalizer = Equalizer::new(
+                            &EqualizerConfig {
+                                enabled: true,
+                                preamp_db: 6.0,
+                                ..Default::default()
+                            },
+                            rate,
+                            1,
+                        )
+                        .unwrap();
+                    }
+                    let worker = AnalysisWorker::new(Arc::default()).unwrap();
+                    worker.set_playback_active(true);
+                    worker.control.set_display_enabled(true);
+                    let (producer, mut captured) = AnalysisProducer::capture_for_test(&worker, 73);
+                    playback.visualization.producer = Some(producer);
+                    playback.set_signal(signal);
+                    let (output, mut render) = crate::output::test_backend_with_capacity(
+                        rate,
+                        false,
+                        playback.source.layout(),
+                        73,
+                    );
+                    playback.output = output;
+                    let weights = playback.visualization.weights[0];
+                    let mut taps = Vec::new();
+                    for step in 0..(total / 73 + 16) {
+                        playback.fill().unwrap();
+                        let submitted = taps.len();
+                        taps.extend(captured.pop_iter());
+                        let count = taps.len() - submitted;
+                        assert!(count <= 73, "tap must follow partial output admission");
+                        if step == 0 {
+                            assert_eq!(count, 73);
+                            assert!(!playback.eof, "admission must not drain the whole source");
+                        }
+                        let mut audible = vec![0.0; count];
+                        render(&mut audible, step as u64 * 2);
+                        for (index, (tap, sample)) in
+                            taps[submitted..].iter().zip(audible).enumerate()
+                        {
+                            let original = reference[submitted + index];
+                            if processing != 2 {
+                                let gain = if processing == 1 {
+                                    10.0_f32.powf(6.0 / 20.0)
+                                } else {
+                                    1.0
+                                };
+                                assert!((sample - original * gain).abs() < 2e-6);
+                            }
+                            let selected = if signal == VisualizationSignal::Before {
+                                original
+                            } else {
+                                sample
+                            };
+                            for (actual, weight) in tap.samples.into_iter().zip(weights) {
+                                assert!((actual - selected * weight).abs() < 2e-6);
+                            }
+                        }
+                        if playback.eof && playback.offset_frames == playback.pending.len() {
+                            break;
+                        }
+                    }
+                    assert!(playback.eof);
+                    assert_eq!(
+                        taps.len(),
+                        total,
+                        "{name}: every sample admitted exactly once"
+                    );
+                    let gaps: Vec<_> = taps
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, frame)| frame.gap.then_some(index))
+                        .collect();
+                    let expected = if has_gap { vec![0, gap_frame] } else { vec![0] };
+                    assert_eq!(
+                        gaps, expected,
+                        "{name}: processing={processing}, signal={signal:?}"
+                    );
+                    assert_eq!(playback.visualization.before.capacity(), 0);
+                    assert_eq!(playback.graph_gaps.capacity(), 0);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn real_container_gaps_follow_graph_delay_and_preguard_to_output_admission() {
         use ringbuf::traits::Consumer;
         use rivu_format::config::processing_graph::GraphPort;
@@ -1439,7 +1624,9 @@ mod tests {
         loop {
             let mut budget = DECODE_WORK_BUDGET;
             match source.next_frames_with_budget(&mut budget).unwrap() {
-                DecodeStep::Frames((frames, start)) => {
+                DecodeStep::Frames(span) => {
+                    let frames = span.samples;
+                    let start = span.media_start;
                     assert_eq!(frames.len(), 512);
                     starts.push(start);
                 }
@@ -2079,6 +2266,68 @@ mod tests {
         assert!(playback.finished());
         assert_eq!(playback.heard(), 1.5);
         assert_eq!(playback.position(), 1.5);
+    }
+
+    #[test]
+    fn seek_marks_only_new_admitted_pcm_and_rejecting_seek_keeps_old_output() {
+        use ringbuf::traits::Consumer;
+        for signal in [VisualizationSignal::Before, VisualizationSignal::After] {
+            let file = pcm();
+            let (mut playback, _) = test_playback_with_waveform(file.path(), None, Arc::default());
+            let worker = AnalysisWorker::new(Arc::default()).unwrap();
+            worker.set_playback_active(true);
+            worker.control.set_display_enabled(true);
+            let (producer, mut captured) = AnalysisProducer::capture_for_test(&worker, 256);
+            playback.visualization.producer = Some(producer);
+            playback.set_signal(signal);
+            let (output, mut old_render) = crate::output::test_backend_with_capacity(
+                8_000,
+                false,
+                playback.source.layout(),
+                73,
+            );
+            playback.output = output;
+            playback.fill().unwrap();
+            let first: Vec<_> = captured.pop_iter().collect();
+            assert_eq!(first.len(), 73);
+            assert_eq!(first.iter().filter(|frame| frame.gap).count(), 1);
+            let rejected = playback.restart_output_with(Some(f64::INFINITY), |_, _| {
+                panic!("a rejected seek must not replace output")
+            });
+            assert!(rejected.is_err());
+            let mut old = [0.0; 73];
+            old_render(&mut old, 0);
+            for (index, actual) in old.iter().enumerate() {
+                assert!((*actual - index as f32 / 32768.0).abs() < 1e-6);
+            }
+            playback.fill().unwrap();
+            let continued: Vec<_> = captured.pop_iter().collect();
+            assert_eq!(continued.len(), 73);
+            assert!(continued.iter().all(|frame| !frame.gap));
+            let (output, mut render) = crate::output::test_backend_with_capacity(
+                8_000,
+                false,
+                playback.source.layout(),
+                73,
+            );
+            playback
+                .restart_output_with(Some(0.25), |_, _| Ok(output))
+                .unwrap();
+            assert!(
+                captured.try_pop().is_none(),
+                "seek alone admits no analysis samples"
+            );
+            playback.fill().unwrap();
+            let after: Vec<_> = captured.pop_iter().collect();
+            assert_eq!(after.len(), 73);
+            assert!(after[0].gap);
+            assert!(after[1..].iter().all(|frame| !frame.gap));
+            let mut samples = [0.0; 73];
+            render(&mut samples, 20);
+            for (index, sample) in samples.iter().enumerate() {
+                assert!((*sample - (2000 + index) as f32 / 32768.0).abs() < 1e-6);
+            }
+        }
     }
 
     #[test]

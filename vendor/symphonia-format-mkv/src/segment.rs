@@ -20,7 +20,7 @@ use symphonia_core::meta::{
     Chapter, ChapterGroup, ChapterGroupItem, MetadataBuilder, MetadataInfo, MetadataRevision,
     PerTrackMetadataBuilder, RawTag, RawTagSubField, RawValue, StandardTag, Tag,
 };
-use symphonia_core::units::{Duration, Time, TimeBase, Timestamp};
+use symphonia_core::units::{Time, TimeBase};
 
 use crate::ebml::{EbmlElement, EbmlElementHeader, EbmlError, EbmlIterator, ReadEbml, Result};
 use crate::schema::{MkvElement, MkvSchema};
@@ -125,16 +125,6 @@ impl MatroskaTicks {
             / u64::from(segment_time_base.denom.get());
         SegmentTicks(self.0 / factor)
     }
-
-    /// Convert `self` into Track ticks using the track timebase.
-    #[inline]
-    pub fn into_track_ticks(self, track_time_base: TimeBase) -> TrackTicks {
-        // The timebase may have been reduced so it is not possible to assume a 1_000_000_000
-        // denominator.
-        let factor = (1_000_000_000 * u64::from(track_time_base.numer.get()))
-            / u64::from(track_time_base.denom.get());
-        TrackTicks(self.0 / factor)
-    }
 }
 
 impl From<u64> for MatroskaTicks {
@@ -177,6 +167,13 @@ impl From<NonZeroU64> for NonZeroMatroskaTicks {
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SignedMatroskaTicks(i64);
 
+impl SignedMatroskaTicks {
+    #[inline]
+    pub const fn get(self) -> i64 {
+        self.0
+    }
+}
+
 impl From<i64> for SignedMatroskaTicks {
     #[inline]
     fn from(value: i64) -> Self {
@@ -196,15 +193,6 @@ impl SegmentTicks {
     #[inline]
     pub const fn get(self) -> u64 {
         self.0
-    }
-
-    /// Convert `self` into Track ticks using the track's timestamp scale.
-    #[inline]
-    pub fn into_track_ticks(self, track_timestamp_scale: f64) -> TrackTicks {
-        if track_timestamp_scale == 1.0 {
-            return TrackTicks(self.0);
-        }
-        TrackTicks((self.0 as f64 * track_timestamp_scale).round() as u64)
     }
 }
 
@@ -254,18 +242,6 @@ impl TrackTicks {
     pub const fn get(&self) -> u64 {
         self.0
     }
-
-    /// Try to convert into signed Track ticks.
-    #[inline]
-    pub fn try_into_signed(self) -> Option<SignedTrackTicks> {
-        self.0.try_into().map(SignedTrackTicks).ok()
-    }
-
-    /// Convert into a `Duration`.
-    #[inline]
-    pub fn into_dur(self) -> Duration {
-        Duration::new(self.0)
-    }
 }
 
 impl From<u64> for TrackTicks {
@@ -294,39 +270,6 @@ impl SignedTrackTicks {
     pub const fn get(&self) -> i64 {
         self.0
     }
-
-    // Convert into a Timestamp.
-    #[inline]
-    pub fn into_ts(self) -> Timestamp {
-        Timestamp::new(self.0)
-    }
-
-    /// Add the provided signed track ticks to `self`, returning `None` if an overflow occurred.
-    #[inline]
-    pub fn checked_add(self, other: Self) -> Option<Self> {
-        self.0.checked_add(other.0).map(SignedTrackTicks)
-    }
-
-    /// Add the provided track ticks to `self`, returning `None` if an overflow occurred.
-    #[inline]
-    pub fn checked_add_unsigned(self, other: TrackTicks) -> Option<Self> {
-        self.0.checked_add_unsigned(other.0).map(SignedTrackTicks)
-    }
-
-    /// Subtract the provided track ticks to `self`, returning `None` if an overflow occurred.
-    #[inline]
-    pub fn checked_sub_unsigned(self, other: TrackTicks) -> Option<Self> {
-        self.0.checked_sub_unsigned(other.0).map(SignedTrackTicks)
-    }
-
-    /// Try to convert Segment ticks to Matroska ticks using the track timebase.
-    #[inline]
-    pub fn try_into_matroska_ticks(self, track_time_base: TimeBase) -> Option<MatroskaTicks> {
-        if self.0.is_negative() {
-            return None;
-        }
-        (self.0 as u64).checked_mul(u64::from(track_time_base.numer.get())).map(MatroskaTicks)
-    }
 }
 
 impl From<i64> for SignedTrackTicks {
@@ -336,12 +279,6 @@ impl From<i64> for SignedTrackTicks {
     }
 }
 
-impl From<Timestamp> for SignedTrackTicks {
-    #[inline]
-    fn from(value: Timestamp) -> Self {
-        Self(value.get())
-    }
-}
 
 impl std::fmt::Display for SignedTrackTicks {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1071,7 +1008,7 @@ impl EbmlElement<MkvSchema> for CuesElement {
 #[derive(Debug)]
 pub(crate) struct CuePointElement {
     /// Time in segment ticks.
-    pub(crate) time: MatroskaTicks,
+    pub(crate) time: SegmentTicks,
     pub(crate) positions: CueTrackPositionsElement,
 }
 
@@ -1086,7 +1023,7 @@ impl EbmlElement<MkvSchema> for CuePointElement {
             match child.element_type() {
                 MkvElement::CueTime => {
                     // Mandatory element. No schema-defined default.
-                    time = Some(MatroskaTicks(it.read_u64_no_default()?));
+                    time = Some(SegmentTicks(it.read_u64_no_default()?));
                 }
                 MkvElement::CueTrackPositions => {
                     // Mandatory element.

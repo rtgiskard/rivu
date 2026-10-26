@@ -81,6 +81,10 @@ mod ffmpeg {
             unreachable!("FFmpeg decoder cannot be opened without the ffmpeg feature")
         }
 
+        pub(super) fn vorbis_timing(&self) -> Option<(u32, Option<f64>)> {
+            unreachable!("FFmpeg decoder cannot be opened without the ffmpeg feature")
+        }
+
         pub(super) fn identity(&self) -> super::source::SourceIdentity {
             unreachable!("FFmpeg decoder cannot be opened without the ffmpeg feature")
         }
@@ -98,7 +102,7 @@ mod ffmpeg {
             _: &mut Vec<f32>,
             _: Option<&AtomicBool>,
             _: &mut usize,
-        ) -> Result<super::source::DecodeStep<f64>> {
+        ) -> Result<super::source::DecodeStep<super::source::FrameTiming>> {
             bail!("FFmpeg extension is not compiled; rebuild with --features ffmpeg")
         }
 

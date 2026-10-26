@@ -280,6 +280,38 @@ decoder and are converted in bounded fragments, preserving all samples and seek
 timestamps. This bounds Rivu's conversion work, not the codec's internal memory
 or the duration of a decode call.
 
+Native and FFmpeg Matroska/WebM Vorbis decoding share timestamp normalization
+before exposing PCM to playback, waveform generation or analysis.
+The startup probe retains at most 64 selected-track packets and 256 KiB of PCM;
+it requires two timestamp transitions that distinguish the conventions within
+the container's timestamp precision. The initial discarded overlap packet can
+anchor a transition but cannot select a convention alone. Conflicting evidence,
+an exhausted probe budget or early EOF retains start-stamp semantics.
+End stamps are converted using the represented sample count before codec trims,
+then leading trim is applied. The selected convention survives seeks; buffered
+startup audio does not. Later gaps and overlaps remain discontinuities, including
+an inconsistent final timestamp. This is not general timestamp repair and does
+not enlarge analysis or waveform gap tolerances.
+
+PCM delivery has a separate frame-count position and explicit discontinuity
+marker. Media timestamps drive seek/crop and waveform placement, not tap FIFO
+alignment or repeated FFT continuity guesses. Seek switches the PCM traversal
+only after the source accepts it; decoder priming is never published as new audio.
+Matroska packet timestamps and trims use nanoseconds so signed DiscardPadding
+is applied at the first/last laced frame boundary without losing sub-tick padding.
+Trim durations are converted to the nearest decoded sample; continuity tolerance
+still reflects the original container timestamp precision.
+`BlockDuration` may already describe the trimmed presentation span; it is not
+an upper bound on `DiscardPadding` and is not trimmed a second time.
+
+FFmpeg receives the stream packet timebase so automatic codec trims also move
+decoded-frame timestamps. Preroll that reaches the origin reopens the held file
+object to restore initial codec skip/overlap state rather than synthesizing PCM.
+
+Seekable native Matroska sources support backward seeks with or without Cues,
+including after EOF. A successful seek discards queued old packets; a rejected
+seek restores pending laced frames. Unseekable sources retain forward-only scanning.
+
 
 == Optional FFmpeg decoder
 

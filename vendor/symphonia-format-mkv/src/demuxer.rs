@@ -27,11 +27,18 @@ use crate::schema::{MkvElement, MkvSchema};
 use crate::segment::{
     AttachmentsElement, BlockGroupElement, ChaptersElement, CuesElement, EbmlHeaderElement,
     InfoElement, MatroskaTicks, NonZeroMatroskaTicks, SeekHeadElement, SegmentTicks,
-    SignedTrackTicks, TagsElement, TargetTagsMap, TracksElement,
+    TagsElement, TargetTagsMap, TracksElement,
 };
 
 const MKV_FORMAT_INFO: FormatInfo =
     FormatInfo { format: FORMAT_ID_MKV, short_name: "matroska", long_name: "Matroska / WebM" };
+
+// CodecDelay and DiscardPadding are always nanoseconds. Packet timing uses the same
+// exact unit so neither is rounded to the (often millisecond) Segment timebase.
+const PACKET_TIME_BASE: TimeBase = TimeBase::new(
+    NonZero::new(1).expect("1 is non-zero"),
+    NonZero::new(1_000_000_000).expect("1_000_000_000 is non-zero"),
+);
 
 pub struct TrackState {
     /// The Matroska track number (Symphonia's track ID).
@@ -40,10 +47,10 @@ pub struct TrackState {
     pub(crate) default_frame_duration: Option<NonZeroMatroskaTicks>,
     /// The codec delay.
     pub(crate) codec_delay: MatroskaTicks,
-    /// The track's timebase.
+    /// The native timebase of block-relative timestamps and durations.
     pub(crate) track_time_base: TimeBase,
-    /// The track's timestamp scale.
-    pub(crate) track_timestamp_scale: f64,
+    /// The native timebase of cluster timestamps.
+    pub(crate) segment_time_base: TimeBase,
 }
 
 /// Matroska (MKV) and WebM demultiplexer.
@@ -52,6 +59,8 @@ pub struct TrackState {
 pub struct MkvReader<'s> {
     /// Iterator over EBML element headers
     iter: EbmlIterator<MediaSourceStream<'s>, MkvSchema>,
+    /// Whether the underlying media source supports random access.
+    is_seekable: bool,
     media_info: MediaInfo,
     tracks: Vec<Track>,
     track_states: HashMap<u32, TrackState>,
@@ -60,6 +69,8 @@ pub struct MkvReader<'s> {
     metadata: MetadataLog,
     cues: Option<CuesElement>,
     current_cluster: Option<ClusterState>,
+    /// The first cluster's offset from the Segment data position.
+    first_cluster_pos: u64,
     frames: VecDeque<Frame>,
 }
 
@@ -299,13 +310,13 @@ impl<'s> MkvReader<'s> {
                 default_frame_duration: track.default_duration,
                 codec_delay: track.codec_delay,
                 track_time_base,
-                track_timestamp_scale: track.track_timestamp_scale,
+                segment_time_base: time_base,
             };
 
             // Create the track.
             let mut tr = Track::new(state.track_num);
 
-            tr.with_time_base(track_time_base);
+            tr.with_time_base(PACKET_TIME_BASE);
 
             if let Some(lang_bcp47) = &track.lang_bcp47 {
                 tr.with_language(lang_bcp47);
@@ -335,6 +346,7 @@ impl<'s> MkvReader<'s> {
 
         Ok(Self {
             iter: it,
+            is_seekable,
             media_info,
             tracks,
             track_states,
@@ -343,6 +355,7 @@ impl<'s> MkvReader<'s> {
             metadata,
             cues,
             current_cluster,
+            first_cluster_pos: current_cluster.as_ref().map(|cluster| cluster.start).unwrap_or(0),
             frames: VecDeque::new(),
         })
     }
@@ -353,12 +366,11 @@ impl<'s> MkvReader<'s> {
             while let Some(frame) = self.frames.front() {
                 let next_frame_pts = frame
                     .pts
-                    .into_ts()
-                    .checked_add(frame.dur.into_dur())
+                    .checked_add(frame.dur)
                     .ok_or(Error::SeekError(SeekErrorKind::OutOfRange))?;
 
                 if next_frame_pts >= ts && frame.track_num == track_id {
-                    break 'out frame.pts.into_ts();
+                    break 'out frame.pts;
                 }
                 else {
                     self.frames.pop_front();
@@ -380,35 +392,43 @@ impl<'s> MkvReader<'s> {
         tb: TimeBase,
         ts: Timestamp,
     ) -> Result<SeekedTo> {
+        if !self.is_seekable {
+            // A streaming source cannot rewind or restore a failed seek. Continue
+            // scanning its existing frame queue without discarding pending laces.
+            return self.seek_track_by_ts_forward(id, ts);
+        }
+
         // Save the iterator and cluster states to restore in-case of and error.
         let iter_state = self.iter.save_state();
         let cluster_state = self.current_cluster;
+        let frames = std::mem::take(&mut self.frames);
 
         match self.seek_track_by_ts(id, tb, ts) {
             Err(err) => {
                 // Restore saved iterator and cluster states.
                 self.iter.restore_state(iter_state)?;
                 self.current_cluster = cluster_state;
+                self.frames = frames;
                 Err(err)
             }
             value => value,
         }
     }
 
-    fn seek_track_by_ts(&mut self, id: u32, tb: TimeBase, ts: Timestamp) -> Result<SeekedTo> {
+    fn seek_track_by_ts(&mut self, id: u32, _tb: TimeBase, ts: Timestamp) -> Result<SeekedTo> {
         log::debug!("seeking track_id={id} to ts={ts}");
 
         // If cues exist, seek to the nearest cue point.
         if let Some(cues) = &self.cues {
             let mut target_cue_point = None;
 
-            // Cue points store timestamps in Matroska ticks while the timestamp being seeked to is
-            // in signed Track ticks. Convert to unsigned Matroska ticks for iterating the cue
-            // points. If the timestamp is negative, then this is an error because cue points only
-            // contain unsigned Matroska ticks.
-            let ts = SignedTrackTicks::from(ts)
-                .try_into_matroska_ticks(tb)
-                .ok_or(Error::SeekError(SeekErrorKind::OutOfRange))?;
+            // Cue timestamps are Segment ticks, while packet timestamps are nanoseconds.
+            let ts = u64::try_from(ts.get())
+                .map(MatroskaTicks::from)
+                .map_err(|_| Error::SeekError(SeekErrorKind::OutOfRange))?
+                .into_segment_ticks(
+                    self.media_info.time_base.expect("media info time base always populated"),
+                );
 
             for cue_point in &cues.points {
                 if cue_point.time > ts {
@@ -442,11 +462,8 @@ impl<'s> MkvReader<'s> {
                 _ => return seek_error(SeekErrorKind::Unseekable),
             };
 
-            // Convert the cue point's timestamp (Matroska ticks) into Segment ticks for the cluster
-            // state.
-            let timestamp = target_cue_point.time.into_segment_ticks(
-                self.media_info.time_base.expect("media info time base always populated"),
-            );
+            // Cue timestamps are already in Segment ticks.
+            let timestamp = target_cue_point.time;
 
             // Update the current cluster metadata.
             self.current_cluster =
@@ -461,6 +478,13 @@ impl<'s> MkvReader<'s> {
                 self.iter.seek_to_child(cluster_rel_pos)?;
             }
         }
+        else if self.is_seekable {
+            // Without an index, rescan from the first cluster so backward seeks (including
+            // seeking after EOF) do not depend on the current iterator position.
+            self.iter.pop_elements_upto(MkvElement::Segment)?;
+            self.iter.seek_to_child(self.first_cluster_pos)?;
+            self.current_cluster = None;
+        }
 
         // Seek to exact block.
         self.seek_track_by_ts_forward(id, ts)
@@ -474,6 +498,11 @@ impl<'s> MkvReader<'s> {
                 match self.iter.parent() {
                     None => {
                         // The parent is the document. The media has ended.
+                        return Ok(false);
+                    }
+                    Some(parent) if parent.element_type() == MkvElement::Segment => {
+                        // Keep the Segment as an ancestor so a later seek can revisit its
+                        // clusters, even after a sized Segment has been fully consumed.
                         return Ok(false);
                     }
                     Some(parent) if parent.element_type() == MkvElement::Cluster => {
@@ -521,12 +550,12 @@ impl<'s> MkvReader<'s> {
                             return Ok(true);
                         };
 
-                        // Get block data and duration.
-                        let (data, duration) = match block_type {
-                            MkvElement::SimpleBlock => (self.iter.read_binary()?, None),
+                        // Get block data, duration, and exact nanosecond padding.
+                        let (data, duration, discard_padding) = match block_type {
+                            MkvElement::SimpleBlock => (self.iter.read_binary()?, None, None),
                             MkvElement::BlockGroup => {
                                 let group = self.iter.read_master_element::<BlockGroupElement>()?;
-                                (group.data, group.duration)
+                                (group.data, group.duration, group.discard_padding)
                             }
                             _ => unreachable!(),
                         };
@@ -535,6 +564,7 @@ impl<'s> MkvReader<'s> {
                         if !extract_frames(
                             &data,
                             duration,
+                            discard_padding,
                             cluster_ts,
                             &self.track_states,
                             &mut self.frames,
@@ -639,12 +669,10 @@ impl FormatReader for MkvReader<'_> {
     fn next_packet(&mut self) -> Result<Option<Packet>> {
         loop {
             if let Some(frame) = self.frames.pop_front() {
-                return Ok(Some(Packet::new(
-                    frame.track_num,
-                    frame.pts.into_ts(),
-                    frame.dur.into_dur(),
-                    frame.data,
-                )));
+                let mut packet = Packet::new(frame.track_num, frame.pts, frame.dur, frame.data);
+                packet.trim_start = frame.trim_start;
+                packet.trim_end = frame.trim_end;
+                return Ok(Some(packet));
             }
 
             if !self.next_element()? {
@@ -700,5 +728,239 @@ impl From<EbmlError> for Error {
             EbmlError::ElementError(err) => err,
         };
         Error::DecodeError(msg)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use super::*;
+
+    fn element(id: &[u8], payload: &[u8]) -> Vec<u8> {
+        let mut bytes = id.to_vec();
+        bytes.extend_from_slice(&((1u64 << 56) | payload.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(payload);
+        bytes
+    }
+
+    fn uint(id: &[u8], value: u64) -> Vec<u8> {
+        element(id, &value.to_be_bytes())
+    }
+
+    fn block(timestamp: i16, flags: u8, data: &[u8]) -> Vec<u8> {
+        let mut bytes = vec![0x81];
+        bytes.extend_from_slice(&timestamp.to_be_bytes());
+        bytes.push(flags);
+        bytes.extend_from_slice(data);
+        bytes
+    }
+
+    fn group(timestamp: i16, flags: u8, data: &[u8], padding: i64) -> Vec<u8> {
+        let mut payload = element(&[0xa1], &block(timestamp, flags, data));
+        payload.extend(element(&[0x75, 0xa2], &padding.to_be_bytes()));
+        element(&[0xa0], &payload)
+    }
+
+    fn cluster(timestamp: u64, blocks: &[u8]) -> Vec<u8> {
+        let mut payload = uint(&[0xe7], timestamp);
+        payload.extend_from_slice(blocks);
+        element(&[0x1f, 0x43, 0xb6, 0x75], &payload)
+    }
+
+    fn cues(positions: &[u64]) -> Vec<u8> {
+        let mut points = Vec::new();
+        for (index, &position) in positions.iter().enumerate() {
+            let mut track_position = uint(&[0xf7], 1);
+            track_position.extend(uint(&[0xf1], position));
+            let mut point = uint(&[0xb3], index as u64 * 100);
+            point.extend(element(&[0xb7], &track_position));
+            points.extend(element(&[0xbb], &point));
+        }
+        element(&[0x1c, 0x53, 0xbb, 0x6b], &points)
+    }
+
+    fn fixture(clusters: &[Vec<u8>], indexed: bool, codec_delay: u64) -> Vec<u8> {
+        let mut info = element(&[0x4d, 0x80], b"test");
+        info.extend(element(&[0x57, 0x41], b"test"));
+        let mut segment = element(&[0x15, 0x49, 0xa9, 0x66], &info);
+        let mut track = uint(&[0xd7], 1);
+        track.extend(uint(&[0x73, 0xc5], 1));
+        track.extend(element(&[0x86], b"A_OPUS"));
+        track.extend(uint(&[0x23, 0xe3, 0x83], 20_000_000));
+        track.extend(uint(&[0x56, 0xaa], codec_delay));
+        let mut audio = element(&[0xb5], &48_000f64.to_be_bytes());
+        audio.extend(uint(&[0x9f], 1));
+        track.extend(element(&[0xe1], &audio));
+        segment.extend(element(&[0x16, 0x54, 0xae, 0x6b], &element(&[0xae], &track)));
+        if indexed {
+            let mut position = segment.len() as u64 + cues(&vec![0; clusters.len()]).len() as u64;
+            let positions: Vec<_> = clusters.iter().map(|cluster| {
+                let start = position;
+                position += cluster.len() as u64;
+                start
+            }).collect();
+            segment.extend(cues(&positions));
+        }
+        for cluster in clusters {
+            segment.extend_from_slice(cluster);
+        }
+        let mut bytes = element(&[0x1a, 0x45, 0xdf, 0xa3], &element(&[0x42, 0x82], b"webm"));
+        bytes.extend(element(&[0x18, 0x53, 0x80, 0x67], &segment));
+        bytes
+    }
+
+    fn reader(bytes: Vec<u8>) -> MkvReader<'static> {
+        let stream = MediaSourceStream::new(Box::new(Cursor::new(bytes)), Default::default());
+        MkvReader::try_new(stream, Default::default()).unwrap()
+    }
+
+    fn seek(reader: &mut MkvReader<'_>, ns: i64) -> SeekedTo {
+        reader.seek(
+            SeekMode::Accurate,
+            SeekTo::Timestamp { ts: Timestamp::new(ns), track_id: 1 },
+        ).unwrap()
+    }
+
+    #[test]
+    fn opus_discard_padding_preserves_exact_sample_count() {
+        // Six 20ms packets decode 5760 samples. OpusHead's 312-sample pre-skip
+        // plus the final 13.5ms/648-sample discard leave exactly 100ms at 48kHz.
+        let mut blocks = Vec::new();
+        for index in 0..6 {
+            blocks.extend(group(index * 20, 0, &[index as u8], if index == 5 { 13_500_000 } else { 0 }));
+        }
+        let mut reader = reader(fixture(&[cluster(0, &blocks)], false, 6_500_000));
+        assert_eq!(reader.tracks()[0].time_base, Some(PACKET_TIME_BASE));
+        assert_eq!(reader.media_info().time_base.unwrap().denom.get(), 1000);
+        let mut packets = Vec::new();
+        while let Some(packet) = reader.next_packet().unwrap() {
+            packets.push(packet);
+        }
+        assert_eq!(packets.len(), 6);
+        assert_eq!(packets[0].pts.get(), -6_500_000);
+        assert_eq!(packets[5].trim_end.get(), 13_500_000);
+        assert_eq!(packets[5].dur.get(), 6_500_000);
+        let trimmed_samples: u64 = packets.iter().map(|packet| {
+            packet.trim_end.get() * 48_000 / 1_000_000_000
+        }).sum();
+        assert_eq!(5760 - 312 - trimmed_samples, 4800);
+    }
+
+    #[test]
+    fn discard_padding_applies_only_at_lace_boundary() {
+        // Three one-byte frames, using each supported lacing scheme.
+        for (flags, data) in [
+            (0x02, vec![2, 1, 1, 10, 11, 12]),
+            (0x04, vec![2, 10, 11, 12]),
+            (0x06, vec![2, 0x81, 0xbf, 10, 11, 12]),
+        ] {
+            for padding in [13_500_000i64, -13_500_000, 25_000_000, -25_000_000] {
+                let blocks = group(0, flags, &data, padding);
+                let mut reader = reader(fixture(&[cluster(0, &blocks)], false, 0));
+                let packets: Vec<_> = (0..3).map(|_| reader.next_packet().unwrap().unwrap()).collect();
+                assert!(reader.next_packet().unwrap().is_none());
+                assert_eq!(packets.iter().map(|p| p.trim_start.get() + p.trim_end.get()).sum::<u64>(), padding.unsigned_abs());
+                assert_eq!(packets.iter().map(|p| p.dur.get()).sum::<u64>(), 60_000_000 - padding.unsigned_abs());
+                let untouched = if padding < 0 { 2 } else { 0 };
+                assert_eq!(packets[untouched].dur.get(), 20_000_000);
+                assert_eq!(packets[untouched].trim_start.get(), 0);
+                assert_eq!(packets[untouched].trim_end.get(), 0);
+                assert_eq!(packets[1].pts.get(), 20_000_000);
+            }
+        }
+    }
+
+    #[test]
+    fn backward_seek_and_seek_after_sized_segment_eof() {
+        let clusters = [
+            cluster(0, &element(&[0xa3], &block(0, 0x04, &[2, 10, 11, 12]))),
+            cluster(100, &element(&[0xa3], &block(0, 0, &[20]))),
+        ];
+        for indexed in [false, true] {
+            let mut reader = reader(fixture(&clusters, indexed, 0));
+            assert_eq!(&*reader.next_packet().unwrap().unwrap().data, &[10]);
+            // A seek must discard the pending second and third laced frames.
+            assert_eq!(seek(&mut reader, 100_000_000).actual_ts.get(), 100_000_000);
+            assert_eq!(&*reader.next_packet().unwrap().unwrap().data, &[20]);
+            assert!(reader.next_packet().unwrap().is_none());
+            assert!(reader.next_packet().unwrap().is_none());
+            assert_eq!(seek(&mut reader, 0).actual_ts.get(), 0);
+            assert_eq!(&*reader.next_packet().unwrap().unwrap().data, &[10]);
+            seek(&mut reader, 100_000_000);
+            seek(&mut reader, 0);
+            assert_eq!(&*reader.next_packet().unwrap().unwrap().data, &[10]);
+        }
+    }
+
+    #[test]
+    fn failed_seek_restores_pending_laced_frames() {
+        let cluster = cluster(0, &element(&[0xa3], &block(0, 0x04, &[2, 10, 11, 12])));
+        let mut reader = reader(fixture(&[cluster], false, 0));
+        assert_eq!(&*reader.next_packet().unwrap().unwrap().data, &[10]);
+        assert!(reader.seek(
+            SeekMode::Accurate,
+            SeekTo::Timestamp { ts: Timestamp::new(1_000_000_000), track_id: 1 },
+        ).is_err());
+        assert_eq!(&*reader.next_packet().unwrap().unwrap().data, &[11]);
+        assert_eq!(&*reader.next_packet().unwrap().unwrap().data, &[12]);
+    }
+
+    #[test]
+    fn native_timestamp_scale_does_not_quantize_padding() {
+        let tracks = HashMap::from([(1, TrackState {
+            track_num: 1,
+            default_frame_duration: None,
+            codec_delay: MatroskaTicks::from(6_500_000),
+            track_time_base: TimeBase::new(NonZero::new(1).unwrap(), NonZero::new(500).unwrap()),
+            segment_time_base: TimeBase::new(NonZero::new(1).unwrap(), NonZero::new(1000).unwrap()),
+        })]);
+        let mut frames = VecDeque::new();
+        assert!(extract_frames(
+            &block(3, 0, &[1]),
+            Some(crate::segment::TrackTicks::from(10)),
+            Some(crate::segment::SignedMatroskaTicks::from(13_500_000)),
+            SegmentTicks::from(100),
+            &tracks,
+            &mut frames,
+        ).unwrap());
+        let frame = frames.pop_front().unwrap();
+        assert_eq!(frame.pts.get(), 99_500_000);
+        assert_eq!(frame.dur.get(), 20_000_000);
+        assert_eq!(frame.trim_end.get(), 13_500_000);
+    }
+
+    #[test]
+    fn discard_padding_is_not_bounded_by_presented_block_duration() {
+        let base = TimeBase::new(NonZero::new(1).unwrap(), NonZero::new(1000).unwrap());
+        let tracks = HashMap::from([(1, TrackState {
+            track_num: 1,
+            default_frame_duration: None,
+            codec_delay: MatroskaTicks::from(0),
+            track_time_base: base,
+            segment_time_base: base,
+        })]);
+        for padding in [13_500_000, -13_500_000] {
+            let mut frames = VecDeque::new();
+            assert!(extract_frames(
+                &block(0, 0, &[1]),
+                Some(crate::segment::TrackTicks::from(7)),
+                Some(crate::segment::SignedMatroskaTicks::from(padding)),
+                SegmentTicks::from(0), &tracks, &mut frames,
+            ).unwrap());
+            let frame = frames.pop_front().unwrap();
+            assert_eq!(frame.dur.get(), 7_000_000);
+            assert_eq!(frame.trim_start.get(), if padding < 0 { 13_500_000 } else { 0 });
+            assert_eq!(frame.trim_end.get(), if padding > 0 { 13_500_000 } else { 0 });
+        }
+    }
+
+    #[test]
+    fn truncated_lacing_is_not_clean_eof() {
+        // Two Xiph-laced frames, but the first size has no terminating byte.
+        let packet = element(&[0xa3], &block(0, 0x02, &[1, 0xff]));
+        let mut reader = reader(fixture(&[cluster(0, &packet)], false, 0));
+        assert!(matches!(reader.next_packet(), Err(Error::IoError(error))
+            if error.kind() == std::io::ErrorKind::UnexpectedEof));
     }
 }
