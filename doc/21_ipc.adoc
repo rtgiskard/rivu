@@ -365,6 +365,11 @@ exposes `CommandFailure` without inventing a Core revision or task ID.
 interactive GUI/tray quit uses the separate user-shutdown path. Shutdown
 acknowledgement means accepted shutdown, not final persistence or worker
 retirement. Blocking I/O and cooperative cancellation provide no hard exit deadline.
+The host attempts each final persistence domain even if another fails, retires
+its workers and services, then exits with failure if final persistence failed.
+The earlier successful shutdown acknowledgement is not changed by that result.
+If read-worker startup fails, the host still attempts final persistence and retains
+both the startup cause and any finalization failure in its returned error.
 
 Failed exchanges discard the client connection. A later explicit request can
 reconnect and perform a fresh Hello, but clients never automatically replay a

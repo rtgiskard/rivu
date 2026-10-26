@@ -32,7 +32,14 @@ impl Core {
             Err(error) => {
                 self.state.system.last_error = Some(format!("Starting read queries: {error:#}"));
                 self.publish();
-                self.finalize();
+                let error = error.context("Starting read queries");
+                let error = match self.finalize() {
+                    Ok(()) => error,
+                    Err(finalization) => {
+                        error.context(format!("Finalization also failed: {finalization:#}"))
+                    }
+                };
+                control.record_result(Err(error));
                 return;
             }
         }
@@ -56,7 +63,7 @@ impl Core {
             }
         }
         drop(self.read_queries.take());
-        self.finalize();
+        control.record_result(self.finalize());
     }
 
     async fn next_event(
@@ -352,7 +359,7 @@ impl Core {
         }
     }
 
-    fn finalize(&mut self) {
+    fn finalize(&mut self) -> Result<()> {
         self.state.system.shutting_down = true;
         // Retire background database users before final writes on Core's connection.
         if let Some((reply, result)) = self.shutdown_export() {
@@ -365,24 +372,33 @@ impl Core {
         if let Some((reply, result)) = self.shutdown_optimization() {
             self.complete_background(reply, result);
         }
-        if let Err(error) = self.flush_deferred_playback() {
-            self.state.system.last_error =
-                Some(format!("Saving deferred playback statistics: {error:#}"));
-        }
-        if let Err(error) = self.stop() {
-            self.state.system.last_error = Some(format!("Saving play count: {error:#}"));
-        }
-        // Independent persistence domains both get a final attempt even if one fails.
-        let queue = self.save_queue();
-        let config = self.flush_config().map(|_| ());
-        if let Err(error) = queue.and(config) {
+        // Every persistence domain gets its final attempt, even after a failure.
+        let deferred = self
+            .flush_deferred_playback()
+            .context("Saving deferred playback statistics");
+        let playback = self.stop().context("Saving play count");
+        let queue = self.save_queue().context("Saving queue");
+        let config = self
+            .flush_config()
+            .map(|_| ())
+            .context("Saving configuration");
+        let errors: Vec<_> = [deferred, playback, queue, config]
+            .into_iter()
+            .filter_map(|result| result.err().map(|error| format!("{error:#}")))
+            .collect();
+        let result = if errors.is_empty() {
+            Ok(())
+        } else {
+            let error = anyhow::anyhow!("Final save failed: {}", errors.join("; "));
             tracing::error!(error = %error, "shutdown_persistence_failed");
-            self.state.system.last_error = Some(format!("Final save failed: {error:#}"));
-        }
+            self.state.system.last_error = Some(error.to_string());
+            Err(error)
+        };
         let _ = self.engine.send(AudioCommand::Shutdown);
         self.state.playback.status = PlaybackStatus::Stopped;
         self.state.system.shutting_down = true;
         self.publish();
+        result
     }
 
     pub(in crate::core) fn complete_background(

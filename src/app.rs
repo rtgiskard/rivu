@@ -10,7 +10,7 @@ use crate::{
     ipc, logging, mpris,
     tray::TrayController,
 };
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use async_signal::{Signal, Signals};
 #[cfg(test)]
 use crossbeam_channel::bounded;
@@ -574,7 +574,7 @@ impl App {
         // Keep IPC/socket acquisition and logging alive through core and MPRIS stop.
         self.stop_services();
         interface_result?;
-        join_result.map_err(|_| anyhow!("Rivu core worker panicked"))
+        join_result
     }
 
     /// Drain producers before flushing, only after core join and outside GPUI.
@@ -826,6 +826,51 @@ mod tests {
         assert!(ack.is_success());
         worker.join().unwrap().unwrap();
         assert!(ipc::SocketOwner::acquire(directory.path()).is_ok());
+    }
+
+    #[test]
+    fn accepted_shutdown_returns_final_save_failure_after_services_retire() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        crate::config::Config {
+            media_read_buffer_mb: 1,
+            ffmpeg_enabled: false,
+            mpris_enabled: false,
+            tray_enabled: false,
+            ..Default::default()
+        }
+        .save(&config_path)
+        .unwrap();
+        let data_dir = directory.path().to_owned();
+        let config = config_path.clone();
+        let (ready, started) = bounded(1);
+        let worker = thread::spawn(move || {
+            let app = App::start(data_dir, config, Vec::new(), false)?;
+            ready.send(()).unwrap();
+            app.run()
+        });
+        started.recv_timeout(Duration::from_secs(15)).unwrap();
+        // An externally edited invalid file must not be overwritten. A quick
+        // control changes desired config, guaranteeing a final save attempt.
+        let invalid = "[playback]\nvolume_percent = 101\n";
+        std::fs::write(&config_path, invalid).unwrap();
+        assert!(
+            rivu_client::request_ack(directory.path(), Command::Volume { value: 0.25 })
+                .unwrap()
+                .is_success()
+        );
+        let ack = rivu_client::request_ack(directory.path(), AppCommand::Shutdown).unwrap();
+        assert!(ack.is_success());
+        let error = worker.join().unwrap().unwrap_err();
+        assert!(format!("{error:#}").contains("Saving configuration"));
+        assert_eq!(std::fs::read_to_string(config_path).unwrap(), invalid);
+        // App's error is observable only after transport/core teardown, including
+        // the accepted IPC reply. Ownership can immediately be reacquired.
+        assert!(ipc::SocketOwner::acquire(directory.path()).is_ok());
+        let database = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+        database
+            .execute_batch("BEGIN EXCLUSIVE; ROLLBACK;")
+            .unwrap();
     }
 
     #[test]

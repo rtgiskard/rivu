@@ -485,6 +485,7 @@ struct CompletionState {
     ack: Option<Ack>,
     finished: bool,
     callback: Option<Wakeup>,
+    error: Option<anyhow::Error>,
 }
 
 impl RuntimeControl {
@@ -556,6 +557,10 @@ impl RuntimeControl {
         if finished {
             callback();
         }
+    }
+
+    fn record_result(&self, result: Result<()>) {
+        self.completion.state.lock().error = result.err();
     }
 
     fn complete(&self) {
@@ -742,8 +747,18 @@ impl Runtime {
             .as_ref()
             .is_none_or(|worker| worker.is_finished())
     }
-    pub fn join(&mut self) -> thread::Result<()> {
-        self.worker.take().map_or(Ok(()), JoinHandle::join)
+    pub fn join(&mut self) -> Result<()> {
+        if let Some(worker) = self.worker.take() {
+            worker
+                .join()
+                .map_err(|_| anyhow::anyhow!("Rivu core worker panicked"))?;
+        }
+        // Only expose finalization failures after Core and its owned resources
+        // have physically retired; shutdown acknowledgement remains admission.
+        match self.control.completion.state.lock().error.take() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 }
 impl Drop for Runtime {

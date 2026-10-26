@@ -238,6 +238,66 @@ fn shutdown_acknowledgement_does_not_claim_runtime_teardown_is_finished() {
 }
 
 #[test]
+fn query_startup_failure_retains_its_cause_after_final_persistence() {
+    for invalid_config in [false, true] {
+        let (_directory, mut core) = fixture();
+        let _audio = recording_audio(&mut core);
+        core.flush_config().unwrap();
+        let path = core.state.system.config_path.clone();
+        core.command(Command::Volume { value: 0.25 }).unwrap();
+        if invalid_config {
+            std::fs::write(&path, "[playback]\nvolume_percent = 101\n").unwrap();
+        }
+        // A memory-only store cannot start the independent read owner.
+        core.store = Store::open(std::path::Path::new(":memory:")).unwrap();
+        let (_sender, requests) = async_channel::bounded(1);
+        let (control, shutdown) = RuntimeControl::new();
+        core.run(requests, shutdown, &control);
+        let error = control.completion.state.lock().error.take().unwrap();
+        let error = format!("{error:#}");
+        assert!(error.contains("Starting read queries"));
+        assert!(error.contains("file-backed library"));
+        assert_eq!(error.contains("Saving configuration"), invalid_config);
+        assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+        if invalid_config {
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                "[playback]\nvolume_percent = 101\n"
+            );
+        } else {
+            assert_eq!(Config::load(&path).unwrap().volume, 0.25);
+        }
+    }
+}
+
+#[test]
+fn final_queue_failure_still_attempts_config_and_retains_all_failures() {
+    for invalid_config in [false, true] {
+        let (_directory, mut core) = fixture();
+        let _audio = recording_audio(&mut core);
+        core.flush_config().unwrap();
+        let path = core.state.system.config_path.clone();
+        if invalid_config {
+            std::fs::write(&path, "[playback]\nvolume_percent = 101\n").unwrap();
+        }
+        core.command(Command::Volume { value: 0.25 }).unwrap();
+        core.database_unavailable = true;
+        let (handle, control, worker, _) = navigation_runtime(core);
+        let ack = futures::executor::block_on(control.shutdown_ack_async(|| handle.revision()));
+        assert!(ack.is_success());
+        let core = worker.join().unwrap();
+        assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+        let error = control.completion.state.lock().error.take().unwrap();
+        let error = format!("{error:#}");
+        assert!(error.contains("Saving queue"));
+        assert_eq!(error.contains("Saving configuration"), invalid_config);
+        if !invalid_config {
+            assert_eq!(Config::load(&path).unwrap().volume, 0.25);
+        }
+    }
+}
+
+#[test]
 fn accepted_shutdown_reports_stop_failure_without_rejecting_the_request() {
     let (directory, mut core) = fixture_with_database(Some(10.0));
     let _audio = recording_audio(&mut core);
@@ -258,6 +318,8 @@ fn accepted_shutdown_reports_stop_failure_without_rejecting_the_request() {
     assert!(core.state.system.shutting_down);
     assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
     assert!(core.state.system.last_error.is_some());
+    let error = control.completion.state.lock().error.take().unwrap();
+    assert!(format!("{error:#}").contains("activity unavailable"));
     let (count, last_played) = connection
         .query_row(
             "SELECT play_count,last_played FROM tracks WHERE id=1",
