@@ -238,6 +238,7 @@ mod tests {
         assert_eq!(std::fs::read(&path)?, b"#EXTM3U\n");
 
         let writer = rusqlite::Connection::open(&database)?;
+        writer.pragma_update(None, "foreign_keys", false)?;
         writer.execute(
             "INSERT INTO playlist_entries(playlist_id,track_id,position) VALUES(?1,999,0)",
             [id],

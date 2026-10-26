@@ -22,7 +22,7 @@ impl Store {
         let empty =
             rivu_format::database::inspect(&c)? == rivu_format::database::DatabaseState::Empty;
         if !empty {
-            rivu_format::database::validate_current(&c)?;
+            rivu_format::database::validate_structure(&c)?;
         }
         c.pragma_update(None, "journal_mode", "WAL")?;
         c.pragma_update(None, "foreign_keys", "ON")?;
@@ -208,6 +208,43 @@ mod tests {
                     |row| row.get::<_, Option<i64>>(0)
                 )?,
                 version
+            );
+        }
+        Ok(())
+    }
+    #[test]
+    fn incompatible_same_version_structure_is_rejected_before_journal_changes() -> Result<()> {
+        for incompatible in [
+            "DELETE FROM playlists WHERE id=0;",
+            "CREATE UNIQUE INDEX incompatible_membership ON playlist_entries(playlist_id,track_id);",
+            "DROP INDEX playlist_order;",
+        ] {
+            let directory = tempfile::tempdir()?;
+            let path = directory.path().join("library.db");
+            let conn = Connection::open(&path)?;
+            rivu_format::database::create_current(&conn)?;
+            conn.execute_batch(
+                "INSERT INTO tracks(id,path,title_override) VALUES(1,'one','preserved');",
+            )?;
+            conn.execute_batch(incompatible)?;
+            let schema: i64 = conn.query_row("PRAGMA schema_version", [], |row| row.get(0))?;
+            let journal: String = conn.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+            let changes = conn.total_changes();
+            assert!(Store::open(&path).is_err(), "{incompatible}");
+            assert_eq!(
+                conn.query_row("PRAGMA schema_version", [], |row| row.get::<_, i64>(0))?,
+                schema
+            );
+            assert_eq!(
+                conn.query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))?,
+                journal
+            );
+            assert_eq!(conn.total_changes(), changes);
+            assert_eq!(
+                conn.query_row("SELECT title_override FROM tracks WHERE id=1", [], |row| {
+                    row.get::<_, String>(0)
+                })?,
+                "preserved"
             );
         }
         Ok(())

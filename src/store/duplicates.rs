@@ -8,8 +8,8 @@ use std::path::PathBuf;
 const DUPLICATE_MEMBER_COLUMNS: &str = "file_size,modified_ns,
     (title_override IS NOT NULL OR artist_override IS NOT NULL
      OR album_override IS NOT NULL OR decoder_hint<>0),
-    (SELECT COUNT(*) FROM playlist_entries WHERE track_id=tracks.id),
-    (SELECT COUNT(*) FROM queue_entries WHERE track_id=tracks.id),
+    (SELECT COUNT(*) FROM playlist_entries WHERE playlist_id>0 AND track_id=tracks.id),
+    (SELECT COUNT(*) FROM playlist_entries WHERE playlist_id=0 AND track_id=tracks.id),
     relocation_independent";
 
 pub(super) struct DuplicateGroupCount {
@@ -61,8 +61,7 @@ fn relocation_row(conn: &Connection, id: i64) -> Result<RelocationRow> {
                     cue_sheet,(title_override IS NOT NULL OR artist_override IS NOT NULL
                     OR album_override IS NOT NULL OR decoder_hint<>0 OR favorite<>0
                     OR play_count<>0 OR last_played IS NOT NULL
-                    OR EXISTS(SELECT 1 FROM playlist_entries WHERE track_id=tracks.id)
-                    OR EXISTS(SELECT 1 FROM queue_entries WHERE track_id=tracks.id))
+                    OR EXISTS(SELECT 1 FROM playlist_entries WHERE track_id=tracks.id))
              FROM tracks WHERE id=?1",
             [id],
             |row| {
@@ -293,7 +292,7 @@ impl Store {
             [target.identity.id],
         )?;
         let queue = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM queue_entries WHERE track_id=?1)",
+            "SELECT EXISTS(SELECT 1 FROM playlist_entries WHERE playlist_id=0 AND track_id=?1)",
             [source.identity.id],
             |row| row.get(0),
         )?;
@@ -542,7 +541,7 @@ mod tests {
             "UPDATE tracks SET favorite=1 WHERE id=2",
             "UPDATE tracks SET play_count=1 WHERE id=2",
             "UPDATE tracks SET last_played=0 WHERE id=2",
-            "INSERT INTO queue_entries(track_id,position) VALUES(2,0)",
+            "INSERT INTO playlist_entries(playlist_id,track_id,position) VALUES(0,2,0)",
             "INSERT INTO playlists(id,name) VALUES(1,'Target'); INSERT INTO playlist_entries(playlist_id,track_id,position) VALUES(1,2,0)",
         ] {
             let store = fixture()?;

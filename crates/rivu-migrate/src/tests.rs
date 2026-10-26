@@ -226,7 +226,7 @@ fn unsupported_database_leaves_valid_unversioned_configuration_untouched() {
         "UPDATE rivu_meta SET format_version=99 WHERE singleton=1",
         "UPDATE rivu_meta SET format_version=1 WHERE singleton=1",
         "DELETE FROM rivu_meta",
-        "DROP TABLE queue_entries",
+        "DROP TABLE playlist_entries",
     ] {
         let (_directory, options) = fixture();
         fs::write(&options.config, "# user formatting\n[playback]\n").unwrap();
@@ -298,7 +298,7 @@ fn sqlite_backup_includes_committed_wal_and_transaction_preserves_user_state() {
     connection.execute_batch("INSERT INTO playlists(name) VALUES('User playlist');
         INSERT INTO albums(directory,title,artist,track_count) VALUES('/retained','Retain','Artist',1);
         INSERT INTO tracks(id,path,favorite,play_count,last_played) VALUES(1,'/music/original.flac',1,7,12345);
-        INSERT INTO queue_entries(id,track_id,position) VALUES(41,1,0),(42,1,1);
+        INSERT INTO playlist_entries(id,playlist_id,track_id,position) VALUES(41,0,1,0),(42,0,1,1);
         UPDATE rivu_meta SET current_queue_entry_id=42;").unwrap();
     let checked = execute(&options, Mode::Check).unwrap();
     assert!(!checked.needs_changes);
@@ -327,7 +327,9 @@ fn sqlite_backup_includes_committed_wal_and_transaction_preserves_user_state() {
     assert_eq!(format_version(&backup), database::SCHEMA_VERSION);
     for source in [&connection, &backup] {
         let name: String = source
-            .query_row("SELECT name FROM playlists", [], |row| row.get(0))
+            .query_row("SELECT name FROM playlists WHERE id>0", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(name, "User playlist");
         let title: String = source
@@ -341,7 +343,7 @@ fn sqlite_backup_includes_committed_wal_and_transaction_preserves_user_state() {
         assert_eq!(
             source
                 .query_row(
-                    "SELECT current_queue_entry_id,COUNT(*) FROM queue_entries CROSS JOIN rivu_meta",
+                    "SELECT current_queue_entry_id,COUNT(*) FROM playlist_entries CROSS JOIN rivu_meta WHERE playlist_id=0",
                     [],
                     |row| { Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)) }
                 )
@@ -349,7 +351,7 @@ fn sqlite_backup_includes_committed_wal_and_transaction_preserves_user_state() {
             (42, 2)
         );
         let entries = source
-            .prepare("SELECT id,track_id,position FROM queue_entries ORDER BY position,id")
+            .prepare("SELECT id,track_id,position FROM playlist_entries WHERE playlist_id=0 ORDER BY position,id")
             .unwrap()
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
             .unwrap()
@@ -369,16 +371,6 @@ fn sqlite_backup_includes_committed_wal_and_transaction_preserves_user_state() {
                 )
                 .unwrap(),
             (1, 7, 12345)
-        );
-        assert_eq!(
-            source
-                .query_row(
-                    "SELECT seq FROM sqlite_sequence WHERE name='queue_entries'",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )
-                .unwrap(),
-            42
         );
     }
     connection
@@ -414,8 +406,10 @@ fn transactional_change_failure_rolls_back_and_reentry_keeps_distinct_backups() 
     assert_eq!(format_version(&connection), database::SCHEMA_VERSION);
     assert_eq!(
         connection
-            .query_row("SELECT count(*) FROM playlists", [], |row| row
-                .get::<_, i64>(0))
+            .query_row("SELECT count(*) FROM playlists WHERE id>0", [], |row| row
+                .get::<_, i64>(
+                0
+            ))
             .unwrap(),
         0
     );
@@ -431,7 +425,7 @@ fn transactional_change_failure_rolls_back_and_reentry_keeps_distinct_backups() 
     .unwrap();
     assert_eq!(
         connection
-            .query_row("SELECT name FROM playlists", [], |row| row
+            .query_row("SELECT name FROM playlists WHERE id>0", [], |row| row
                 .get::<_, String>(0))
             .unwrap(),
         "Committed"

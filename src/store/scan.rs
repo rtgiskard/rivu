@@ -68,7 +68,7 @@ pub(super) fn staged_projection_columns(cue: bool) -> String {
     let new_album = rivu_format::database::eligible_title("COALESCE(t.album_override,s.raw_album)");
     let representative = super::albums::representative("t");
     format!(
-        "COALESCE(MAX(({visible} {cue_number}) AND EXISTS(SELECT 1 FROM queue_entries WHERE track_id=t.id)),0),
+        "COALESCE(MAX(({visible} {cue_number}) AND EXISTS(SELECT 1 FROM playlist_entries WHERE playlist_id=0 AND track_id=t.id)),0),
         COALESCE(MAX(((t.id IS NULL OR {visible} {cue_number}
             OR t.track_number IS NOT s.track_number OR t.disc_number IS NOT s.disc_number)
             AND ({old_album} OR {new_album})) OR (({full}) AND {representative})),0)"
@@ -880,7 +880,7 @@ impl Store {
         )?;
         tx.execute_batch("DROP TABLE temp.scan_stage")?;
         let mut mark_missing = tx.prepare(&format!(
-            "UPDATE tracks SET missing=1 WHERE id=?1 AND missing=0 RETURNING EXISTS(SELECT 1 FROM queue_entries WHERE track_id=tracks.id),{}",
+            "UPDATE tracks SET missing=1 WHERE id=?1 AND missing=0 RETURNING EXISTS(SELECT 1 FROM playlist_entries WHERE playlist_id=0 AND track_id=tracks.id),{}",
             super::albums::eligible_member("tracks"),
         ))?;
         for o in &old {
@@ -1088,7 +1088,7 @@ mod tests {
         assert_eq!(cue.duration, Some(1.0));
         assert_eq!(
             store.playlist_track_ids(playlist, 10).unwrap(),
-            [cue_id, whole_id]
+            [cue_id, whole_id, cue_id]
         );
     }
 

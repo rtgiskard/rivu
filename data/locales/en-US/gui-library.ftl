@@ -126,6 +126,8 @@ gl-entry-down = Move this entry down
 
 gl-add-current = Add current track
 
+gl-deduplicate-playlist = Remove duplicates
+
 gl-rename = Rename…
 
 gl-delete = Delete…

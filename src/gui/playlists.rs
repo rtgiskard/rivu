@@ -789,6 +789,12 @@ impl Playlists {
         if let PlaylistAction::Menu(target, position) = action {
             let id = target.id;
             let has_tracks = self.state.current_track().is_some();
+            let entry_revision = self
+                .state
+                .library
+                .playlist_entry_revisions
+                .get(&id)
+                .copied();
             let rename = target.clone();
             let delete = target.clone();
             let menu = rivu_ui::Popover::menu(theme, "playlist-row-menu", window)
@@ -848,6 +854,28 @@ impl Playlists {
                         },
                     ),
                     !has_tracks,
+                ))
+                .child(rivu_ui::disabled_control(
+                    theme,
+                    rivu_ui::menu_item(
+                        "playlist-row-deduplicate",
+                        self.tr("gl-deduplicate-playlist"),
+                        cx,
+                        move |this, window, cx| {
+                            let Some(revision) = entry_revision else {
+                                return;
+                            };
+                            this.dismiss_playlist_action(window, cx);
+                            this.send(
+                                Command::DeduplicatePlaylist {
+                                    playlist_id: id,
+                                    expected_revision: revision,
+                                },
+                                cx,
+                            );
+                        },
+                    ),
+                    entry_revision.is_none(),
                 ))
                 .child(rivu_ui::menu_item(
                     "playlist-row-rename",
@@ -2028,6 +2056,7 @@ mod playlist_drag_tests {
             stamp: Default::default(),
             selection_generation: 4,
         };
+        assert_eq!(drag.track_ids(), [9, 9, 3]);
         for target in [7, 40, 2] {
             assert!(drag.command(Some(target), false).is_none());
             assert!(drag.command(Some(target), true).is_none());
@@ -2459,7 +2488,64 @@ mod content_menu_keyboard_tests {
         key(handle, "down", cx);
         key(handle, "down", cx);
         key(handle, "down", cx);
+        key(handle, "down", cx);
         key(handle, "enter", cx);
         assert!(app.read_with(cx, |app, cx| app.playlists.read(cx).editor_open()));
+    }
+
+    #[gpui::test]
+    fn playlist_row_deduplicate_preserves_first_identity_and_closes_menu(cx: &mut TestAppContext) {
+        let (_directory, runtime, _save, app, handle) = fixture(cx);
+        assert!(
+            futures::executor::block_on(runtime.handle.request_ack(Command::AddPlaylist {
+                playlist_id: 1,
+                track_ids: vec![1, 1, 1],
+            }))
+            .is_success()
+        );
+        let entries = || {
+            let ViewResponse::PlaylistEntries(page) = runtime
+                .handle
+                .query(Query::PlaylistEntries {
+                    playlist_id: 1,
+                    query: None,
+                    offset: 0,
+                    limit: 10,
+                })
+                .result
+                .unwrap()
+            else {
+                panic!("expected playlist entries");
+            };
+            page.rows
+        };
+        let before = entries();
+        assert_eq!(before.len(), 3);
+        app.update(cx, |app, cx| {
+            app.playlists.update(cx, |playlists, cx| {
+                playlists.refresh(cx);
+                playlists.playlist_action = Some(PlaylistAction::Menu(
+                    PlaylistTarget {
+                        id: 1,
+                        name: "Target".into(),
+                    },
+                    gpui::point(px(10.), px(10.)),
+                ));
+                cx.notify();
+            });
+            cx.notify();
+        });
+        draw(handle, cx);
+        key(handle, "down", cx);
+        key(handle, "down", cx);
+        key(handle, "down", cx);
+        key(handle, "enter", cx);
+        assert!(app.read_with(cx, |app, cx| {
+            app.playlists.read(cx).playlist_action.is_none()
+        }));
+        let after = entries();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].id, before[0].id);
+        assert_eq!(after[0].position, 0);
     }
 }

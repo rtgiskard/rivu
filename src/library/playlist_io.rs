@@ -331,8 +331,8 @@ async fn prepare_import(
     Ok(builder.result)
 }
 
-/// Export a database-ordered stream of unique playlist tracks atomically.
-/// SQLite enforces uniqueness; retain only the current CUE validation run.
+/// Export a database-ordered stream of playlist occurrences atomically.
+/// Preserve repetitions; retain only the current CUE validation run.
 pub async fn export_m3u<S>(
     workers: &BlockingPool,
     path: &Path,

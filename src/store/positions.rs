@@ -1,17 +1,10 @@
 use anyhow::Result;
 use rusqlite::{Transaction, params};
 
-#[derive(Clone, Copy)]
-pub(super) enum PositionScope {
-    Queue,
-    Playlist(i64),
-}
-
-/// Stage only incoming tracks, then open a gap and insert within one transaction.
-/// Source selection keeps the existing union's stable ID order and deduplication.
+/// Stage incoming occurrences; directory unions alone are set selections.
 pub(super) fn insert_tracks(
     tx: &Transaction<'_>,
-    scope: PositionScope,
+    collection_id: i64,
     index: usize,
     ids: &str,
     directories: Option<&str>,
@@ -28,31 +21,20 @@ pub(super) fn insert_tracks(
             [ids],
         )?;
     }
-    if let PositionScope::Playlist(id) = scope {
-        tx.execute(
-            "DELETE FROM insertion_tracks WHERE track_id IN (SELECT track_id FROM playlist_entries WHERE playlist_id=?1) OR ordinal NOT IN (SELECT MIN(ordinal) FROM insertion_tracks GROUP BY track_id)",
-            [id],
-        )?;
-    }
-    insert_staged_tracks(tx, scope, index)
+    insert_staged_tracks(tx, collection_id, index)
 }
 
 /// Consume SQL-staged occurrences without changing their order or multiplicity.
 pub(super) fn insert_staged_tracks(
     tx: &Transaction<'_>,
-    scope: PositionScope,
+    collection_id: i64,
     index: usize,
 ) -> Result<usize> {
     let index = i64::try_from(index)?;
-    let total: i64 = match scope {
-        PositionScope::Queue => tx.query_row(
-            "SELECT COALESCE(MAX(position)+1,0) FROM queue_entries", [], |row| row.get(0),
-        )?,
-        PositionScope::Playlist(id) => tx.query_row(
-            "SELECT (SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=?1) FROM playlists WHERE id=?1",
-            [id], |row| row.get(0),
-        )?,
-    };
+    let total: i64 = tx.query_row(
+        "SELECT (SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=?1) FROM playlists WHERE id=?1",
+        [collection_id], |row| row.get(0),
+    )?;
     anyhow::ensure!(index <= total, "Insertion index out of range");
     let count: i64 = tx.query_row("SELECT COUNT(*) FROM insertion_tracks", [], |row| {
         row.get(0)
@@ -62,19 +44,8 @@ pub(super) fn insert_staged_tracks(
         "Insertion exceeds database positions"
     );
     if count != 0 {
-        match scope {
-            PositionScope::Queue => {
-                tx.execute(
-                    "UPDATE queue_entries SET position=position+?2 WHERE position>=?1",
-                    params![index, count],
-                )?;
-                tx.execute("INSERT INTO queue_entries(track_id,position) SELECT track_id,?1+ordinal FROM insertion_tracks ORDER BY ordinal", [index])?;
-            }
-            PositionScope::Playlist(id) => {
-                tx.execute("UPDATE playlist_entries SET position=position+?2 WHERE playlist_id=?3 AND position>=?1", params![index, count, id])?;
-                tx.execute("INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT ?2,track_id,?1+row_number() OVER (ORDER BY ordinal)-1 FROM insertion_tracks ORDER BY ordinal", params![index, id])?;
-            }
-        }
+        tx.execute("UPDATE playlist_entries SET position=position+?2 WHERE playlist_id=?3 AND position>=?1", params![index, count, collection_id])?;
+        tx.execute("INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT ?2,track_id,?1+row_number() OVER (ORDER BY ordinal)-1 FROM insertion_tracks ORDER BY ordinal", params![index, collection_id])?;
     }
     tx.execute_batch("DROP TABLE insertion_tracks;")?;
     Ok(usize::try_from(count)?)
@@ -85,18 +56,10 @@ pub(super) fn insert_staged_tracks(
 pub(super) fn close_gaps(
     tx: &Transaction<'_>,
     positions: &[i64],
-    scope: PositionScope,
+    collection_id: i64,
 ) -> Result<()> {
     let Some(&last) = positions.last() else {
         return Ok(());
-    };
-    let sql = match scope {
-        PositionScope::Queue => {
-            "UPDATE queue_entries SET position=position-?3 WHERE position>?1 AND position<=?2"
-        }
-        PositionScope::Playlist(_) => {
-            "UPDATE playlist_entries SET position=position-?3 WHERE playlist_id=?4 AND position>?1 AND position<=?2"
-        }
     };
     let mut update: Option<rusqlite::Statement<'_>> = None;
     for (index, interval) in positions.windows(2).enumerate() {
@@ -107,26 +70,19 @@ pub(super) fn close_gaps(
         }
         let update = match update.as_mut() {
             Some(update) => update,
-            None => update.insert(tx.prepare(sql)?),
+            None => update.insert(tx.prepare("UPDATE playlist_entries SET position=position-?3 WHERE playlist_id=?4 AND position>?1 AND position<=?2")?),
         };
-        let shift = i64::try_from(index + 1)?;
-        match scope {
-            PositionScope::Queue => update.execute(params![lower, upper, shift])?,
-            PositionScope::Playlist(id) => update.execute(params![lower, upper, shift, id])?,
-        };
+        update.execute(params![
+            lower,
+            upper,
+            i64::try_from(index + 1)?,
+            collection_id
+        ])?;
     }
-    let shift = i64::try_from(positions.len())?;
-    // An empty tail is cheaper to update than probing its maximum first.
-    match scope {
-        PositionScope::Queue => tx.execute(
-            "UPDATE queue_entries SET position=position-?2 WHERE position>?1",
-            params![last, shift],
-        )?,
-        PositionScope::Playlist(id) => tx.execute(
-            "UPDATE playlist_entries SET position=position-?2 WHERE playlist_id=?3 AND position>?1",
-            params![last, shift, id],
-        )?,
-    };
+    tx.execute(
+        "UPDATE playlist_entries SET position=position-?2 WHERE playlist_id=?3 AND position>?1",
+        params![last, i64::try_from(positions.len())?, collection_id],
+    )?;
     Ok(())
 }
 
@@ -134,7 +90,7 @@ pub(super) fn close_gaps(
 /// Shift original intervals left in ascending order and right in descending order.
 pub(super) fn move_selection(
     tx: &Transaction<'_>,
-    scope: PositionScope,
+    collection_id: i64,
     selected: &[(i64, i64)],
     insertion: i64,
 ) -> Result<bool> {
@@ -158,15 +114,7 @@ pub(super) fn move_selection(
             .map(|(ordinal, &(id, _))| (id, insertion + ordinal as i64)),
     )?;
     let destinations = String::from_utf8(destinations)?;
-    let sql = match scope {
-        PositionScope::Queue => {
-            "UPDATE queue_entries SET position=position+?1 WHERE position BETWEEN ?2 AND ?3"
-        }
-        PositionScope::Playlist(_) => {
-            "UPDATE playlist_entries SET position=position+?1 WHERE position BETWEEN ?2 AND ?3 AND playlist_id=?4"
-        }
-    };
-    let mut update = tx.prepare(sql)?;
+    let mut update = tx.prepare("UPDATE playlist_entries SET position=position+?1 WHERE position BETWEEN ?2 AND ?3 AND playlist_id=?4")?;
     let mut shift_interval = |index: usize, left: bool| -> Result<()> {
         let lower = if index == 0 {
             first
@@ -179,17 +127,13 @@ pub(super) fn move_selection(
             selected[index].1 - 1
         };
         let picked = i64::try_from(index)?;
-        // Split at the insertion point in positions compressed by removal.
         let (lower, upper, shift) = if left {
             (lower, upper.min(insertion + picked - 1), -picked)
         } else {
             (lower.max(insertion + picked), upper, count - picked)
         };
         if lower <= upper && shift != 0 {
-            match scope {
-                PositionScope::Queue => update.execute(params![shift, lower, upper])?,
-                PositionScope::Playlist(id) => update.execute(params![shift, lower, upper, id])?,
-            };
+            update.execute(params![shift, lower, upper, collection_id])?;
         }
         Ok(())
     };
@@ -199,20 +143,13 @@ pub(super) fn move_selection(
     for index in (0..=selected.len()).rev() {
         shift_interval(index, false)?;
     }
-    let sql = match scope {
-        PositionScope::Queue => {
-            "UPDATE queue_entries SET position=json_extract(destination.value,'$[1]')
-             FROM json_each(?1) AS destination
-             WHERE queue_entries.id=json_extract(destination.value,'$[0]')
-             AND queue_entries.position<>json_extract(destination.value,'$[1]')"
-        }
-        PositionScope::Playlist(_) => {
-            "UPDATE playlist_entries SET position=json_extract(destination.value,'$[1]')
-             FROM json_each(?1) AS destination
-             WHERE playlist_entries.id=json_extract(destination.value,'$[0]')
-             AND playlist_entries.position<>json_extract(destination.value,'$[1]')"
-        }
-    };
-    tx.execute(sql, [destinations])?;
+    tx.execute(
+        "UPDATE playlist_entries SET position=json_extract(destination.value,'$[1]')
+         FROM json_each(?1) AS destination
+         WHERE playlist_entries.id=json_extract(destination.value,'$[0]')
+         AND playlist_entries.playlist_id=?2
+         AND playlist_entries.position<>json_extract(destination.value,'$[1]')",
+        params![destinations, collection_id],
+    )?;
     Ok(true)
 }

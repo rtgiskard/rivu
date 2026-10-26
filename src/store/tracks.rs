@@ -1,4 +1,4 @@
-use super::positions::{PositionScope, close_gaps};
+use super::positions::close_gaps;
 use super::rows::{
     LIBRARY_ROW_COLUMNS, LIBRARY_ROW_COLUMNS_QUALIFIED, TRACK_COLUMNS, library_row_at,
     library_row_from_row, track_from_row,
@@ -1000,7 +1000,7 @@ impl Store {
         ).optional()?.with_context(|| format!("track {id} does not exist"))?;
         impact.queue = playlist_values_changed
             && tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM queue_entries WHERE track_id=?1)",
+                "SELECT EXISTS(SELECT 1 FROM playlist_entries WHERE playlist_id=0 AND track_id=?1)",
                 [id],
                 |row| row.get::<_, bool>(0),
             )?;
@@ -1026,7 +1026,7 @@ impl Store {
             impact.playlists = if playlist_values_changed {
                 bounded_metadata_ids(
                     &tx,
-                    "SELECT DISTINCT playlist_id FROM playlist_entries WHERE track_id=?1",
+                    "SELECT DISTINCT playlist_id FROM playlist_entries WHERE playlist_id>0 AND track_id=?1",
                     [id],
                 )?
             } else {
@@ -1092,12 +1092,12 @@ impl Store {
         }
         let ids = removal.encoded;
         let queue_positions = tx
-            .prepare("SELECT position FROM queue_entries WHERE track_id IN (SELECT value FROM json_each(?1)) ORDER BY position")?
+            .prepare("SELECT position FROM playlist_entries WHERE playlist_id=0 AND track_id IN (SELECT value FROM json_each(?1)) ORDER BY position")?
             .query_map([&ids], |row| row.get(0))?
             .collect::<rusqlite::Result<Vec<i64>>>()?;
         let playlist_positions = removed_playlist_positions(
             tx,
-            "SELECT playlist_id,position FROM playlist_entries WHERE track_id IN (SELECT value FROM json_each(?1)) ORDER BY playlist_id,position",
+            "SELECT playlist_id,position FROM playlist_entries WHERE playlist_id>0 AND track_id IN (SELECT value FROM json_each(?1)) ORDER BY playlist_id,position",
             [&ids],
         )?;
         tx.execute(
@@ -1108,10 +1108,10 @@ impl Store {
             "DELETE FROM tracks WHERE id IN (SELECT value FROM json_each(?1))",
             [&ids],
         )?;
-        close_gaps(tx, &queue_positions, PositionScope::Queue)?;
+        close_gaps(tx, &queue_positions, 0)?;
         let mut playlists = Vec::with_capacity(playlist_positions.len());
         for (playlist_id, positions) in playlist_positions {
-            close_gaps(tx, &positions, PositionScope::Playlist(playlist_id))?;
+            close_gaps(tx, &positions, playlist_id)?;
             playlists.push(playlist_id);
         }
         Ok((playlists, !queue_positions.is_empty()))
@@ -1121,12 +1121,12 @@ impl Store {
         self.track_cache.borrow_mut().entries.clear();
         let tx = self.conn.unchecked_transaction()?;
         let queue_positions = tx
-            .prepare("SELECT position FROM queue_entries WHERE track_id IN (SELECT id FROM tracks WHERE missing=1) ORDER BY position")?
+            .prepare("SELECT position FROM playlist_entries WHERE playlist_id=0 AND track_id IN (SELECT id FROM tracks WHERE missing=1) ORDER BY position")?
             .query_map([], |row| row.get(0))?
             .collect::<rusqlite::Result<Vec<i64>>>()?;
         let playlist_positions = removed_playlist_positions(
             &tx,
-            "SELECT playlist_id,position FROM playlist_entries WHERE track_id IN (SELECT id FROM tracks WHERE missing=1) ORDER BY playlist_id,position",
+            "SELECT playlist_id,position FROM playlist_entries WHERE playlist_id>0 AND track_id IN (SELECT id FROM tracks WHERE missing=1) ORDER BY playlist_id,position",
             [],
         )?;
         let duplicate_groups = tx.query_row(
@@ -1146,10 +1146,10 @@ impl Store {
             [],
         )?;
         let removed = tx.execute("DELETE FROM tracks WHERE missing=1", [])?;
-        close_gaps(&tx, &queue_positions, PositionScope::Queue)?;
+        close_gaps(&tx, &queue_positions, 0)?;
         let mut playlists = Vec::with_capacity(playlist_positions.len());
         for (playlist_id, positions) in playlist_positions {
-            close_gaps(&tx, &positions, PositionScope::Playlist(playlist_id))?;
+            close_gaps(&tx, &positions, playlist_id)?;
             playlists.push(playlist_id);
         }
         tx.commit()?;
@@ -1192,7 +1192,7 @@ impl Store {
             [track], super::TrackStats::from_row,
         ).optional()?.with_context(|| format!("track {track} does not exist"))?;
         stats.changed = true;
-        (stats.queue, stats.albums) = tx.query_row(&format!("SELECT EXISTS(SELECT 1 FROM queue_entries WHERE track_id=t.id),{} FROM tracks AS t WHERE id=?1", super::albums::eligible_member("t")), [track], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        (stats.queue, stats.albums) = tx.query_row(&format!("SELECT EXISTS(SELECT 1 FROM playlist_entries WHERE playlist_id=0 AND track_id=t.id),{} FROM tracks AS t WHERE id=?1", super::albums::eligible_member("t")), [track], |row| Ok((row.get(0)?, row.get(1)?)))?;
         tx.commit()?;
         self.cache_track_stats(track, stats);
         Ok(stats)
@@ -1233,13 +1233,13 @@ fn favorite_metadata(
         Some(ids) if ids.is_empty() => Some(Vec::new()),
         Some(_) => bounded_metadata_ids(
             conn,
-            "SELECT DISTINCT p.playlist_id FROM tracks AS t JOIN playlist_entries AS p ON p.track_id=t.id WHERE t.id IN (SELECT value FROM json_each(?1)) AND (?2 IS NULL OR t.favorite<>?2)",
+            "SELECT DISTINCT p.playlist_id FROM tracks AS t JOIN playlist_entries AS p ON p.track_id=t.id WHERE p.playlist_id>0 AND t.id IN (SELECT value FROM json_each(?1)) AND (?2 IS NULL OR t.favorite<>?2)",
             params![encoded_ids, favorite],
         )?,
         None => None,
     };
     let (queue, albums) = conn.query_row(
-        &format!("SELECT EXISTS(SELECT 1 FROM tracks AS t JOIN queue_entries AS q ON q.track_id=t.id WHERE t.id IN (SELECT value FROM json_each(?1)) AND (?2 IS NULL OR t.favorite<>?2)), EXISTS(SELECT 1 FROM tracks AS t WHERE t.id IN (SELECT value FROM json_each(?1)) AND (?2 IS NULL OR t.favorite<>?2) AND {})", super::albums::eligible_member("t")),
+        &format!("SELECT EXISTS(SELECT 1 FROM tracks AS t JOIN playlist_entries AS q ON q.track_id=t.id WHERE q.playlist_id=0 AND t.id IN (SELECT value FROM json_each(?1)) AND (?2 IS NULL OR t.favorite<>?2)), EXISTS(SELECT 1 FROM tracks AS t WHERE t.id IN (SELECT value FROM json_each(?1)) AND (?2 IS NULL OR t.favorite<>?2) AND {})", super::albums::eligible_member("t")),
         params![encoded_ids, favorite], |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
     Ok(FavoriteImpact {
@@ -1298,9 +1298,9 @@ mod deletion_tests {
             "INSERT INTO tracks(id,path) VALUES
                 (1,'one'),(2,'two'),(3,'three'),(4,'four'),
                 (5,'five'),(6,'six'),(7,'seven'),(8,'unreferenced');
-             INSERT INTO queue_entries(id,track_id,position) VALUES
-                (100,1,0),(101,2,1),(102,2,2),(103,3,3),
-                (104,4,4),(105,5,5),(106,6,6),(107,7,7);
+             INSERT INTO playlist_entries(id,playlist_id,track_id,position) VALUES
+                (100,0,1,0),(101,0,2,1),(102,0,2,2),(103,0,3,3),
+                (104,0,4,4),(105,0,5,5),(106,0,6,6),(107,0,7,7);
              UPDATE rivu_meta SET current_queue_entry_id=106 WHERE singleton=1;
              INSERT INTO playlists(id,name) VALUES (10,'first'),(20,'second'),(30,'untouched');
              INSERT INTO playlist_entries(id,playlist_id,track_id,position) VALUES
@@ -1316,13 +1316,13 @@ mod deletion_tests {
     fn queue_rows(store: &Store) -> Result<Vec<(i64, i64, i64)>> {
         Ok(store
             .conn
-            .prepare("SELECT id,track_id,position FROM queue_entries ORDER BY position")?
+            .prepare("SELECT id,track_id,position FROM playlist_entries WHERE playlist_id=0 ORDER BY position")?
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     fn playlist_rows(store: &Store) -> Result<Vec<(i64, i64, i64, i64)>> {
-        Ok(store.conn.prepare("SELECT id,playlist_id,track_id,position FROM playlist_entries ORDER BY playlist_id,position")?
+        Ok(store.conn.prepare("SELECT id,playlist_id,track_id,position FROM playlist_entries WHERE playlist_id>0 ORDER BY playlist_id,position")?
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }

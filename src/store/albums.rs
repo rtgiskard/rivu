@@ -36,7 +36,7 @@ impl Store {
         source: &rivu_protocol::model::CollectionSource,
         destination: rivu_protocol::model::CollectionDestination,
     ) -> Result<(usize, Vec<u64>)> {
-        use super::positions::{PositionScope, insert_staged_tracks};
+        use super::positions::insert_staged_tracks;
         use rivu_protocol::model::{CollectionDestination, CollectionSource};
         let tx = rusqlite::Transaction::new_unchecked(
             &self.conn,
@@ -61,7 +61,7 @@ impl Store {
             }
             CollectionSource::Playlist { playlist_id, .. } => {
                 let exists: bool = tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM playlists WHERE id=?1)",
+                    "SELECT EXISTS(SELECT 1 FROM playlists WHERE id=?1 AND id>0)",
                     [playlist_id],
                     |row| row.get(0),
                 )?;
@@ -77,21 +77,20 @@ impl Store {
                     usize::try_from(insertion.index)?
                 } else {
                     tx.query_row(
-                        "SELECT COALESCE(MAX(position)+1,0) FROM queue_entries",
+                        "SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=0",
                         [],
                         |row| integer(row, 0),
                     )?
                 };
-                (PositionScope::Queue, index)
+                (0, index)
             }
             CollectionDestination::Playlist {
                 playlist_id, index, ..
             } => {
-                // Preserve the playlist's unique-track and first-occurrence policy.
-                tx.execute("DELETE FROM insertion_tracks WHERE track_id IN (SELECT track_id FROM playlist_entries WHERE playlist_id=?1) OR ordinal NOT IN (SELECT MIN(ordinal) FROM insertion_tracks GROUP BY track_id)", [playlist_id])?;
+                ensure!(playlist_id > 0, "Playlist not found");
                 let total: usize = tx.query_row("SELECT (SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=?1) FROM playlists WHERE id=?1", [playlist_id], |row| integer(row, 0))?;
                 (
-                    PositionScope::Playlist(playlist_id),
+                    playlist_id,
                     index.map(usize::try_from).transpose()?.unwrap_or(total),
                 )
             }
@@ -104,7 +103,7 @@ impl Store {
             let end = index
                 .checked_add(count)
                 .context("Queue insertion overflow")?;
-            tx.prepare("SELECT id FROM queue_entries WHERE position>=?1 AND position<?2 ORDER BY position,id")?
+            tx.prepare("SELECT id FROM playlist_entries WHERE playlist_id=0 AND position>=?1 AND position<?2 ORDER BY position,id")?
                 .query_map(params![i64::try_from(index)?, i64::try_from(end)?], |row| integer(row, 0))?
                 .collect::<rusqlite::Result<Vec<u64>>>()?
         } else {
@@ -228,9 +227,9 @@ impl Store {
                 "UPDATE rivu_meta SET current_queue_entry_id=NULL WHERE singleton=1",
                 [],
             )?;
-            tx.execute("DELETE FROM queue_entries", [])?;
+            tx.execute("DELETE FROM playlist_entries WHERE playlist_id=0", [])?;
         }
-        tx.execute(&format!("INSERT INTO queue_entries(track_id,position) SELECT id,(SELECT COALESCE(MAX(position)+1,0) FROM queue_entries)+row_number() OVER (ORDER BY {ORDER})-1 FROM tracks INDEXED BY tracks_album_members WHERE {filter} ORDER BY {ORDER}"), params![directory, key.title])?;
+        tx.execute(&format!("INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT 0,id,(SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=0)+row_number() OVER (ORDER BY {ORDER})-1 FROM tracks INDEXED BY tracks_album_members WHERE {filter} ORDER BY {ORDER}"), params![directory, key.title])?;
         tx.commit()?;
         Ok(())
     }

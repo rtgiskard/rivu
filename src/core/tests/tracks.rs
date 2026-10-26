@@ -216,7 +216,7 @@ fn committed_deletions_isolate_history_and_queue_read_failures() {
                 rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
             let failure = if fail_queue_ids {
                 // A negative persisted ID cannot be represented by the queue cache.
-                "UPDATE queue_entries SET id=-5 WHERE id=5;"
+                "UPDATE playlist_entries SET id=-5 WHERE playlist_id=0 AND id=5;"
             } else {
                 // Only history reads this surviving, non-current row's timestamp.
                 "UPDATE tracks SET last_played='unreadable' WHERE id=3;"

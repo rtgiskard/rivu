@@ -1400,6 +1400,50 @@ mod tests {
         response::{QueryError, QueryResponse, QueryRevisions, ViewResponse},
     };
 
+    #[test]
+    fn repeated_tracks_remain_independent_ordered_occurrences() {
+        let mut selection = EntrySelection::default();
+        let first = EntryIdentity {
+            id: 91,
+            track_id: 7,
+            position: 0,
+            offset: 0,
+        };
+        let second = EntryIdentity {
+            id: 12,
+            track_id: 7,
+            position: 1,
+            offset: 1,
+        };
+        let third = EntryIdentity {
+            id: 53,
+            track_id: 3,
+            position: 2,
+            offset: 2,
+        };
+        selection.select(third, false);
+        selection.select(first, true);
+        selection.select(second, true);
+        assert_eq!(selection.ordered_ids(), [91, 12, 53]);
+        assert_eq!(
+            selection
+                .ordered()
+                .iter()
+                .map(|row| row.track_id)
+                .collect::<Vec<_>>(),
+            [7, 7, 3]
+        );
+
+        selection.select(first, true);
+        assert!(!selection.contains(first.id));
+        assert!(selection.contains(second.id));
+        assert_eq!(selection.ordered_ids(), [12, 53]);
+
+        selection.reconcile(vec![third, second]);
+        assert_eq!(selection.ordered_ids(), [12, 53]);
+        assert_eq!(selection.len(), 2);
+    }
+
     fn navigate(
         selection: &mut EntrySelection,
         scope: EntryNavigationScope,

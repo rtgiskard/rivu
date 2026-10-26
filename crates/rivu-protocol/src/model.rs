@@ -613,7 +613,7 @@ pub struct CollectionInsertion {
     pub revision: u64,
 }
 
-/// Queue copies retain occurrences; playlists retain their existing unique-track policy.
+/// Copies retain every source occurrence in order for both queue and playlist destinations.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub enum CollectionDestination {
     Queue {
@@ -891,6 +891,10 @@ pub enum Command {
         mode: AuditionMode,
         vocal_gain_db: f32,
         accompaniment_gain_db: f32,
+    },
+    DeduplicatePlaylist {
+        playlist_id: i64,
+        expected_revision: u64,
     },
 }
 

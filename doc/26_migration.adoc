@@ -80,8 +80,9 @@ are not historical compatibility logic.
 The singleton `rivu_meta` row stores `format_version` and
 `current_queue_entry_id`. The version describes persistent structure and
 interpretation, not the application release or a count of writes. The current
-queue occurrence retains its foreign key with `ON DELETE SET NULL`.
-New databases create the current format directly, without historical migrations.
+queue occurrence references unified `playlist_entries.id` with `ON DELETE SET NULL`;
+runtime storage accepts only occurrences belonging to the system queue.
+New databases create format `2` directly, without historical migrations.
 
 
 Offline preflight checks required tables and readable columns, primary and unique
@@ -130,8 +131,24 @@ four SQLite triggers and indexes. Their definitions belong to the database forma
 there is no independent trigger-maintenance revision. A future persistent trigger
 change must account for both future writes and already stored summaries.
 
-The seven application tables are `tracks`, `playlists`, `playlist_entries`,
-`queue_entries`, `rivu_meta`, `albums`, and `album_artists`.
+The six application tables are `tracks`, `playlists`, `playlist_entries`,
+`rivu_meta`, `albums`, and `album_artists`. `playlists(id = 0, name = '')` is the
+protected system queue; ordinary playlists have positive IDs. Ordinary playlist
+catalogs and APIs hide or reject `0`, while shared storage primitives accept it.
+`playlist_entries(id INTEGER PRIMARY KEY AUTOINCREMENT, playlist_id, track_id,
+position)` stores every queue and playlist occurrence. Repeated track IDs are
+valid in one collection; occurrence IDs and contiguous positions identify entries.
+Loading, saving, importing and transferring preserve occurrence order and
+multiplicity while copying entries rather than linking collection contents.
+
+There are eleven explicit indexes: the seven track indexes `tracks_fingerprint`,
+`tracks_path`, `tracks_cue`, `tracks_recent`, `tracks_album`, `tracks_most_played`,
+and `tracks_album_members`; collection indexes `playlist_order` and
+`playlist_track_lookup`; and summary indexes `albums_title` and `albums_artist`.
+`playlist_order` supports collection-local position lookup;
+`playlist_track_lookup` is a nonunique track-reference lookup, not a constraint
+against repeated tracks. There is no separate queue table or queue index.
+
 Core owns queue and album revisions, playlist content/lifetime tokens and their
 issuing sequence in memory. They are reconstructed at startup and never persisted.
 Normal queries and state publication do not synchronize tokens from SQLite.

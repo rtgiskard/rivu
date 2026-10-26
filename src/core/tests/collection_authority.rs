@@ -133,8 +133,8 @@ fn collection_transfer_rollback_preserves_all_tokens_and_rows() {
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     connection
         .execute_batch(
-            "CREATE TRIGGER reject_transfer BEFORE INSERT ON queue_entries
-         WHEN NEW.track_id=1 BEGIN SELECT RAISE(ABORT,'queue insertion refused'); END;
+            "CREATE TRIGGER reject_transfer BEFORE INSERT ON playlist_entries
+         WHEN NEW.playlist_id=0 AND NEW.track_id=1 BEGIN SELECT RAISE(ABORT,'queue insertion refused'); END;
          CREATE TRIGGER reject_playlist_transfer BEFORE INSERT ON playlist_entries
          WHEN NEW.playlist_id=2 AND NEW.track_id=1
          BEGIN SELECT RAISE(ABORT,'playlist insertion refused'); END;",

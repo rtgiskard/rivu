@@ -542,7 +542,7 @@ automatic retry; only stale work or revision-change responses retire for fresh d
 Playback statistics retain their existing scoped metadata semantics and do not
 advance the bitrate revision. No historical guard carry-forward is needed when
 EOF and final statistics share a publication. The positional wire payload uses
-protocol 10; clients and servers must be upgraded together.
+protocol 13; clients and servers must be upgraded together.
 
 Whole-collection transfers carry an album key plus its `album` revision, or a
 playlist ID plus its content/lifetime revision. Destination playlists carry their
@@ -550,8 +550,8 @@ own content/lifetime token; positional Queue insertion carries its in-memory
 queue revision. Core validates these tokens before Store starts the transaction
 that resolves members and inserts them. Serialized ownership and the save gate
 prevent another runtime writer from changing the validated state. Album lookup
-uses exact parent/title and album order; Queue preserves repeated occurrences and
-playlists keep first-occurrence uniqueness.
+uses exact parent/title and album order; both Queue and Playlist destinations
+preserve source occurrences and their order, including repeated track IDs.
 
 Entry pages/batches and scoped `PlaylistEntryLocations` (including empty results)
 attach `revisions.playlist_entries = {playlist_id, revision}` when the collection
@@ -721,6 +721,14 @@ link:04_playback.adoc[Playback].
 
 === Ordered collections and transaction ownership
 
+Queue and ordinary playlists use the same `playlist_entries` occurrence table.
+The protected system playlist has `id = 0` and `name = ''`; ordinary playlist IDs
+are positive. Catalogs, playlist queries, playlist commands and Playlist transfer
+scopes exclude or reject `0`; clients keep using the queue-specific commands,
+rows and revisions for the queue. Entry IDs are globally unique occurrence
+identities, not track identities, and remain stable across moves. Shared storage
+does not transfer playback ownership or merge collection validity tokens.
+
 Queue and playlist positions are contiguous and zero-based. Deletion captures
 removed positions and closes gaps in ascending disjoint original-position
 intervals within the same transaction. Each affected survivor is updated at most
@@ -768,9 +776,21 @@ commands. Toggle reads and reverses each track's current favorite state in one
 transaction; repeated track IDs toggle once, and any unknown ID rejects the
 whole request without changes.
 
-`EnqueueSources` expands directories and explicit track IDs directly in SQL with
-no total queue cap. `CreatePlaylistFromQueue {name}` atomically saves the complete
-queue as a playlist on the server, keeping each track's first occurrence order.
+`DeduplicatePlaylist {playlist_id, expected_revision}` keeps the first occurrence
+of each track in playlist order, preserving each retained entry's ID and closing
+position gaps. It rejects the protected system playlist and unknown playlists.
+Core requires `expected_revision` to match the current content token before
+mutation; the desktop supplies the displayed playlist's token. Removing
+duplicates advances only the affected playlist's content token and summary
+counts. An already-unique playlist is a no-op and advances no revision. Queue
+deduplication remains a separate queue command with Core-owned playback effects.
+
+`EnqueueSources` expands inputs directly in SQL with no total queue cap.
+Source commands with only explicit track IDs preserve input order and repetitions.
+When directories or Other are included, expansion selects a stable track-ID set
+union, so overlapping sources contribute each track once.
+`CreatePlaylistFromQueue {name}` atomically
+saves every queue occurrence as a new playlist in queue order, including duplicates.
 Explicit ID selections remain bounded by request-frame bytes, not total queue size.
 
 The source commands `EnqueueSources`, `InsertQueueSources`, `AddPlaylistSources`,
@@ -793,11 +813,12 @@ at an original-list boundary in `0..=total`. The corresponding
 use the existing stable track-ID union order for source expansion. The core
 checks the destination's order revision before mutation, including empty requests;
 stale revisions, invalid boundaries, or unknown tracks fail without partial writes.
-Queue insertion preserves supplied occurrence order and duplicates without
-changing the playing occurrence. Playlist insertion retains existing entries and
-inserts only the first occurrence of each previously absent track ID. Storage
-stages incoming identities, opens a position gap, and inserts in one transaction;
-there is no externally visible append-then-move phase or whole-list metadata load.
+Both queue and playlist insertion preserve supplied occurrence order and
+duplicates; existing destination entries remain intact. Queue insertion does not
+change the playing occurrence. Storage stages incoming occurrences, opens a
+position gap, and inserts in one transaction; there is no externally visible
+append-then-move phase or whole-list metadata load. Explicit `Enqueue` and
+`AddPlaylist` additions have the same multiplicity-preserving behavior.
 
 The core retains only one private compact occurrence-ID vector (8 bytes per row,
 about 1.53 MiB for 200,000 occurrences); client state frames remain constant-size.
@@ -824,9 +845,11 @@ revision; Playlist destinations carry their ID, entry revision and optional
 index. Omitted positions append. Core validates versions before the Store write
 transaction; source staging and insertion use that transaction. A stale source
 or destination rejects the whole operation.
-Queue transfers preserve source occurrences and order; Playlist transfers keep
-the existing unique-track/first-occurrence policy. GUI collection drops, album
-menu copies and playlist-to-queue Append use this intent rather than bare IDs.
+Transfers to either destination preserve every source occurrence and its order,
+including repeated tracks and tracks already present at the destination. They
+create independent copies; subsequent edits to either collection do not affect
+the other. GUI collection drops, album menu copies and playlist-to-queue Append
+use this intent rather than bare IDs.
 
 === Library root identity and configuration
 

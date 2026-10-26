@@ -513,6 +513,10 @@ pub enum WireCommand {
         expected_revision: Option<u64>,
     },
     ProcessingBypass,
+    DeduplicatePlaylist {
+        playlist_id: i64,
+        expected_revision: u64,
+    },
 }
 
 pub fn wire_usize(value: u64, field: &str) -> Result<usize> {
@@ -1305,6 +1309,13 @@ impl From<Command> for WireCommand {
                 vocal_gain_db,
                 accompaniment_gain_db,
             },
+            Command::DeduplicatePlaylist {
+                playlist_id,
+                expected_revision,
+            } => Self::DeduplicatePlaylist {
+                playlist_id,
+                expected_revision,
+            },
         }
     }
 }
@@ -1573,6 +1584,13 @@ impl TryFrom<WireCommand> for Command {
                 mode,
                 vocal_gain_db,
                 accompaniment_gain_db,
+            },
+            WireCommand::DeduplicatePlaylist {
+                playlist_id,
+                expected_revision,
+            } => Self::DeduplicatePlaylist {
+                playlist_id,
+                expected_revision,
             },
         })
     }

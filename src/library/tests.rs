@@ -2784,7 +2784,9 @@ fn logical_cue_alias_paths_roundtrip_complete_sheets() -> Result<()> {
         .filter(|track| track.cue.is_some())
         .map(|track| track.id)
         .collect();
+    sequence.extend_from_within(..);
     sequence.push(tracks.iter().find(|track| track.cue.is_none()).unwrap().id);
+    sequence.push(*sequence.last().unwrap());
     let path = alias.join("playlist.m3u8");
     export_m3u(
         &path,
@@ -2792,7 +2794,7 @@ fn logical_cue_alias_paths_roundtrip_complete_sheets() -> Result<()> {
         &ScanCancellation::default(),
     )?;
     let imported = import_playlist(&path)?;
-    let expected = [sequence[0], sequence[1], *sequence.last().unwrap()];
+    let expected = sequence;
     assert_eq!(imported.len(), expected.len());
     for (item, id) in imported.iter().zip(expected) {
         let track = tracks.iter().find(|track| track.id == id).unwrap();
@@ -2806,7 +2808,7 @@ fn logical_cue_alias_paths_roundtrip_complete_sheets() -> Result<()> {
     let text = fs::read_to_string(&path)?;
     assert_eq!(
         text.lines().filter(|line| *line == "./#album.cue").count(),
-        1
+        2
     );
     Ok(())
 }

@@ -1219,7 +1219,7 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
         session
             .request_ack(Command::AddPlaylist {
                 playlist_id: 20,
-                track_ids: vec![1],
+                track_ids: vec![],
             })
             .unwrap()
             .is_success()
@@ -2783,9 +2783,10 @@ fn filtered_occurrence_continuations_round_trip_and_reject_stale_ipc_scopes() {
         "INSERT INTO tracks(id,path,raw_title) VALUES
              (1,'one.wav','other'),(2,'two.wav','needle'),(3,'three.wav','other'),
              (4,'four.wav','other'),(5,'five.wav','needle'),(6,'six.wav','other'),(7,'seven.wav','needle');
-         INSERT INTO queue_entries(track_id,position) VALUES (1,0),(2,1),(2,2),(3,3),(4,4),(5,5),(6,6),(7,7);
+         INSERT INTO playlist_entries(playlist_id,track_id,position) VALUES (0,1,0),(0,2,1),(0,2,2),(0,3,3),(0,4,4),(0,5,5),(0,6,6),(0,7,7);
          INSERT INTO playlists(id,name) VALUES(10,'first'),(20,'second');
          INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT 10,id,id-1 FROM tracks;
+         INSERT INTO playlist_entries(playlist_id,track_id,position) VALUES(10,2,7);
          INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT 20,id,id-1 FROM tracks;",
     ).unwrap();
     drop(connection);
@@ -2870,7 +2871,7 @@ fn filtered_occurrence_continuations_round_trip_and_reject_stale_ipc_scopes() {
         }
         assert_eq!(after.unwrap().offset, positions.len());
     }
-    assert_eq!(positions, [1, 4, 6]);
+    assert_eq!(positions, [1, 4, 6, 7]);
     assert_eq!(
         session
             .query(entry_query(20, "needle", first_entry))

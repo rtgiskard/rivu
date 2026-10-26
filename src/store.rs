@@ -1,5 +1,7 @@
 //! Persistence over one SQLite connection and its bounded track cache.
 //! Operation modules share this owner; transaction boundaries stay within operations.
+//! Queue occurrences live in the system playlist (ID 0); public playlist operations
+//! expose only positive IDs, while shared position helpers accept either collection.
 
 mod admission;
 mod albums;
@@ -92,7 +94,7 @@ impl Store {
     pub(crate) fn playlist_ids(&self) -> Result<Vec<i64>> {
         Ok(self
             .conn
-            .prepare("SELECT id FROM playlists ORDER BY id")?
+            .prepare("SELECT id FROM playlists WHERE id>0 ORDER BY id")?
             .query_map([], |row| row.get(0))?
             .collect::<rusqlite::Result<_>>()?)
     }
@@ -101,7 +103,7 @@ impl Store {
     pub(crate) fn open_export(path: &std::path::Path, playlist_id: i64) -> Result<Self> {
         let store = Self::open_read_snapshot(path)?;
         let exists = store.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM playlists WHERE id=?1)",
+            "SELECT EXISTS(SELECT 1 FROM playlists WHERE id=?1 AND id>0)",
             [playlist_id],
             |row| row.get::<_, bool>(0),
         )?;

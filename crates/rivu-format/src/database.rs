@@ -70,7 +70,6 @@ pub fn validate_structure(conn: &Connection) -> Result<()> {
         ),
         ("playlists", "id,name"),
         ("playlist_entries", "id,playlist_id,track_id,position"),
-        ("queue_entries", "id,track_id,position"),
         ("albums", "directory,title,track_count,artist"),
         ("album_artists", "directory,title,artist,track_count"),
     ] {
@@ -93,7 +92,6 @@ pub fn validate_structure(conn: &Connection) -> Result<()> {
         ("tracks", &["id"][..]),
         ("playlists", &["id"][..]),
         ("playlist_entries", &["id"][..]),
-        ("queue_entries", &["id"][..]),
         ("albums", &["directory", "title"][..]),
         ("album_artists", &["directory", "title", "artist"][..]),
     ] {
@@ -112,6 +110,16 @@ pub fn validate_structure(conn: &Connection) -> Result<()> {
             "Unsupported library database: incompatible primary key for {table}"
         );
     }
+    for table in ["playlists", "playlist_entries"] {
+        let stable_identity: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name='id' AND upper(type)='INTEGER' AND pk=1) AND EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1 AND instr(upper(sql),'AUTOINCREMENT')>0)",
+            [table], |row| row.get(0),
+        )?;
+        ensure!(
+            stable_identity,
+            "Unsupported library database: incompatible stable identity for {table}"
+        );
+    }
     let queue_singleton: bool = conn.query_row(
         "SELECT count(*)=1 AND count(CASE WHEN singleton=1 THEN 1 END)=1
          FROM (SELECT singleton FROM rivu_meta LIMIT 2)",
@@ -121,6 +129,57 @@ pub fn validate_structure(conn: &Connection) -> Result<()> {
     ensure!(
         queue_singleton,
         "Unsupported library database: missing or incompatible rivu_meta singleton"
+    );
+    let queue_collection: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM playlists WHERE id=0 AND name='') AND NOT EXISTS(SELECT 1 FROM playlists WHERE id<0)",
+        [], |row| row.get(0),
+    )?;
+    ensure!(
+        queue_collection,
+        "Unsupported library database: missing or incompatible system queue"
+    );
+    for (table, from, target, to, on_delete) in [
+        (
+            "playlist_entries",
+            "playlist_id",
+            "playlists",
+            "id",
+            "CASCADE",
+        ),
+        ("playlist_entries", "track_id", "tracks", "id", "CASCADE"),
+        (
+            "rivu_meta",
+            "current_queue_entry_id",
+            "playlist_entries",
+            "id",
+            "SET NULL",
+        ),
+    ] {
+        let valid: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_list(?1) WHERE \"from\"=?2 AND \"table\"=?3 AND \"to\"=?4 AND on_delete=?5)",
+            rusqlite::params![table, from, target, to, on_delete], |row| row.get(0),
+        )?;
+        ensure!(
+            valid,
+            "Unsupported library database: incompatible reference {table}.{from}"
+        );
+    }
+    let current_valid: bool = conn.query_row(
+        "SELECT current_queue_entry_id IS NULL OR EXISTS(SELECT 1 FROM playlist_entries WHERE id=current_queue_entry_id AND playlist_id=0) FROM rivu_meta WHERE singleton=1",
+        [], |row| row.get(0),
+    )?;
+    ensure!(
+        current_valid,
+        "Unsupported library database: current occurrence is not in the queue"
+    );
+    let unique_membership: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_index_list('playlist_entries') WHERE \"unique\"=1)",
+        [],
+        |row| row.get(0),
+    )?;
+    ensure!(
+        !unique_membership,
+        "Unsupported library database: collection occurrences must allow duplicates"
     );
     let mut index =
         conn.prepare("SELECT \"unique\",partial FROM pragma_index_list(?1) WHERE name=?2")?;
@@ -133,10 +192,7 @@ pub fn validate_structure(conn: &Connection) -> Result<()> {
         ("tracks", "tracks_most_played", false, false),
         ("tracks", "tracks_album_members", false, false),
         ("playlist_entries", "playlist_order", false, false),
-        ("playlist_entries", "playlist_track", true, false),
         ("playlist_entries", "playlist_track_lookup", false, false),
-        ("queue_entries", "queue_order", false, false),
-        ("queue_entries", "queue_track", false, false),
         ("albums", "albums_title", false, false),
         ("albums", "albums_artist", false, false),
     ] {
@@ -156,8 +212,12 @@ pub fn validate_structure(conn: &Connection) -> Result<()> {
         ("tracks_path", &[Some("path"), None][..]),
         ("tracks_cue", &[Some("cue_sheet"), Some("cue_number")][..]),
         (
-            "playlist_track",
-            &[Some("playlist_id"), Some("track_id")][..],
+            "playlist_order",
+            &[Some("playlist_id"), Some("position")][..],
+        ),
+        (
+            "playlist_track_lookup",
+            &[Some("track_id"), Some("playlist_id")][..],
         ),
     ] {
         let mut rows = index_keys.query([name])?;
@@ -237,7 +297,7 @@ pub fn ensure_current(conn: &Connection) -> Result<()> {
     if inspect(conn)? == DatabaseState::Empty {
         create_current(conn)
     } else {
-        validate_current(conn)
+        validate_structure(conn)
     }
 }
 pub const SCHEMA_VERSION: i64 = 2;
@@ -276,25 +336,18 @@ pub fn create_current(conn: &Connection) -> Result<()> {
     tx.execute_batch(TRACK_TABLE)?;
     tx.execute_batch(
         "CREATE TABLE playlists(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL);
+        INSERT INTO playlists(id,name) VALUES(0,'');
         CREATE TABLE playlist_entries(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
-            track_id INTEGER NOT NULL,position INTEGER NOT NULL
+            track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,position INTEGER NOT NULL
         );
         CREATE INDEX playlist_order ON playlist_entries(playlist_id,position);
-        CREATE UNIQUE INDEX playlist_track ON playlist_entries(playlist_id,track_id);
         CREATE INDEX playlist_track_lookup ON playlist_entries(track_id,playlist_id);
-        CREATE TABLE queue_entries(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
-            position INTEGER NOT NULL
-        );
-        CREATE INDEX queue_order ON queue_entries(position);
-        CREATE INDEX queue_track ON queue_entries(track_id);
         CREATE TABLE rivu_meta(
             singleton INTEGER PRIMARY KEY CHECK(singleton=1),
             format_version INTEGER NOT NULL,
-            current_queue_entry_id INTEGER REFERENCES queue_entries(id) ON DELETE SET NULL
+            current_queue_entry_id INTEGER REFERENCES playlist_entries(id) ON DELETE SET NULL
         );",
     )?;
     tx.execute(
@@ -565,9 +618,9 @@ mod tests {
         create_current(&conn)?;
         conn.execute_batch(
             "INSERT INTO tracks(id,path) VALUES(1,'/retained.wav');
-             INSERT INTO queue_entries(id,track_id,position) VALUES(41,1,0),(42,1,1);
+             INSERT INTO playlist_entries(id,playlist_id,track_id,position) VALUES(41,0,1,0),(42,0,1,1);
              UPDATE rivu_meta SET current_queue_entry_id=42 WHERE singleton=1;
-             DELETE FROM queue_entries WHERE id=41;",
+             DELETE FROM playlist_entries WHERE id=41;",
         )?;
         let current = || {
             conn.query_row(
@@ -577,7 +630,7 @@ mod tests {
             )
         };
         assert_eq!(current()?, Some(42));
-        conn.execute("DELETE FROM queue_entries WHERE id=42", [])?;
+        conn.execute("DELETE FROM playlist_entries WHERE id=42", [])?;
         assert_eq!(current()?, None);
         assert!(
             conn.execute(
@@ -730,10 +783,6 @@ mod tests {
                 "tracks_cue",
                 "ON tracks(cue_sheet,path) WHERE cue_sheet IS NOT NULL",
             ),
-            (
-                "playlist_track",
-                "ON playlist_entries(playlist_id,position)",
-            ),
         ] {
             let conn = Connection::open_in_memory()?;
             create_current(&conn)?;
@@ -806,6 +855,79 @@ mod tests {
             let schema: i64 = conn.query_row("PRAGMA schema_version", [], |row| row.get(0))?;
             conn.execute_batch("PRAGMA query_only=ON;")?;
             assert!(validate_structure(&conn).is_err(), "{sql}");
+            assert_eq!(conn.total_changes(), changes);
+            assert_eq!(
+                conn.query_row("PRAGMA schema_version", [], |row| row.get::<_, i64>(0))?,
+                schema
+            );
+        }
+        Ok(())
+    }
+    #[test]
+    fn collection_occurrences_share_identity_and_cascade_without_deduplication() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+        create_current(&conn)?;
+        conn.execute_batch("INSERT INTO tracks(id,path) VALUES(1,'one'),(2,'two'); INSERT INTO playlists(name) VALUES('ordinary'); INSERT INTO playlist_entries(playlist_id,track_id,position) VALUES(0,1,0),(1,1,0),(0,1,1),(1,1,1),(1,2,2);")?;
+        let entries = conn
+            .prepare("SELECT id,playlist_id,track_id,position FROM playlist_entries ORDER BY id")?
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert_eq!(entries.len(), 5);
+        assert!(entries.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        conn.execute(
+            "UPDATE rivu_meta SET current_queue_entry_id=?1",
+            [entries[2].0],
+        )?;
+        conn.execute("DELETE FROM playlists WHERE id=1", [])?;
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM playlist_entries WHERE playlist_id=0",
+                [],
+                |row| row.get::<_, i64>(0)
+            )?,
+            2
+        );
+        conn.execute("DELETE FROM tracks WHERE id=1", [])?;
+        assert_eq!(
+            conn.query_row("SELECT current_queue_entry_id FROM rivu_meta", [], |row| {
+                row.get::<_, Option<i64>>(0)
+            })?,
+            None
+        );
+        conn.execute(
+            "INSERT INTO playlist_entries(playlist_id,track_id,position) VALUES(0,2,0)",
+            [],
+        )?;
+        assert!(conn.last_insert_rowid() > entries[4].0);
+        validate_structure(&conn)?;
+        Ok(())
+    }
+
+    #[test]
+    fn collection_preflight_rejects_incompatible_version_two_without_writes() -> Result<()> {
+        for incompatible in [
+            "DELETE FROM playlists WHERE id=0;",
+            "UPDATE playlists SET name='visible' WHERE id=0;",
+            "CREATE UNIQUE INDEX forbidden_membership ON playlist_entries(playlist_id,track_id);",
+            "ALTER TABLE rivu_meta RENAME TO unsupported_meta; CREATE TABLE rivu_meta(singleton INTEGER PRIMARY KEY,format_version INTEGER NOT NULL,current_queue_entry_id INTEGER); INSERT INTO rivu_meta VALUES(1,2,NULL);",
+            "INSERT INTO tracks(id,path) VALUES(1,'one'); INSERT INTO playlists(id,name) VALUES(1,'ordinary'); INSERT INTO playlist_entries(id,playlist_id,track_id,position) VALUES(1,1,1,0); UPDATE rivu_meta SET current_queue_entry_id=1;",
+        ] {
+            let conn = Connection::open_in_memory()?;
+            create_current(&conn)?;
+            conn.execute_batch(incompatible)?;
+            let changes = conn.total_changes();
+            let schema: i64 = conn.query_row("PRAGMA schema_version", [], |row| row.get(0))?;
+            conn.execute_batch("PRAGMA query_only=ON;")?;
+            assert!(validate_structure(&conn).is_err(), "{incompatible}");
+            assert!(ensure_current(&conn).is_err(), "{incompatible}");
             assert_eq!(conn.total_changes(), changes);
             assert_eq!(
                 conn.query_row("PRAGMA schema_version", [], |row| row.get::<_, i64>(0))?,

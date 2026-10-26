@@ -1933,7 +1933,7 @@ fn forced_scan_reprobes_unchanged_files_instead_of_reusing_cached_metadata() {
 }
 
 #[test]
-fn m3u_playlist_deduplicates_in_first_occurrence_order_without_deduplicating_queue() {
+fn m3u_playlist_and_queue_preserve_occurrence_order() {
     let (directory, mut core) = fixture();
     for track_id in [1, 2, 3] {
         write_pcm(&core.track(track_id).unwrap().path);
@@ -1942,7 +1942,7 @@ fn m3u_playlist_deduplicates_in_first_occurrence_order_without_deduplicating_que
     std::fs::write(&path, "2.wav\n1.wav\n2.wav\n3.wav\n1.wav\n").unwrap();
     core.command(Command::ImportPlaylist {
         path,
-        name: Some("First occurrences".into()),
+        name: Some("Repeated occurrences".into()),
     })
     .unwrap();
     assert!(settle_scan(&mut core));
@@ -1955,7 +1955,7 @@ fn m3u_playlist_deduplicates_in_first_occurrence_order_without_deduplicating_que
             .iter()
             .map(|entry| entry.track_id)
             .collect::<Vec<_>>(),
-        [2, 1, 3]
+        [2, 1, 2, 3, 1]
     );
     core.command(Command::Enqueue {
         track_ids: vec![2, 1, 2, 3, 1],
@@ -1974,7 +1974,7 @@ fn m3u_playlist_deduplicates_in_first_occurrence_order_without_deduplicating_que
 }
 
 #[test]
-fn cue_playlist_import_deduplicates_segments_in_first_occurrence_order() {
+fn cue_playlist_import_preserves_repeated_segments_in_order() {
     let (directory, mut core) = fixture();
     let sheet = directory.path().join("album.cue");
     std::fs::write(&sheet, "FILE album.wav WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nINDEX 01 00:05:00\n").unwrap();
@@ -2061,10 +2061,12 @@ fn cue_playlist_import_deduplicates_segments_in_first_occurrence_order() {
             .iter()
             .map(|track| track.title.as_str())
             .collect::<Vec<_>>(),
-        ["Part 2", "Part 1"]
+        ["Part 2", "Part 1", "Part 2"]
     );
     assert_ne!(tracks[0].id, tracks[1].id);
     assert_ne!(entries[0].id, entries[1].id);
+    assert_eq!(tracks[0].id, tracks[2].id);
+    assert_ne!(entries[0].id, entries[2].id);
 }
 
 #[test]

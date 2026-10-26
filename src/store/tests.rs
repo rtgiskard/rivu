@@ -68,7 +68,7 @@ fn projection_totals_and_rows_follow_filters_and_writer_changes() {
             "WITH RECURSIVE ids(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM ids WHERE id<1024)
          INSERT INTO tracks(id,path,raw_title,raw_album) SELECT id,'/outside/'||id||'.wav',
              CASE WHEN id%7=0 THEN 'needle' ELSE 'other' END,'Collection' FROM ids;
-         INSERT INTO queue_entries(track_id,position) SELECT id,id-1 FROM tracks;
+         INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT 0,id,id-1 FROM tracks;
          INSERT INTO playlists(id,name) VALUES(1,'Count fixture');
          INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT 1,id,id-1 FROM tracks;",
         )
@@ -184,8 +184,8 @@ fn filtered_traversal_steps(total: usize) -> (u64, u64) {
     store
         .conn
         .execute_batch(
-            "INSERT INTO queue_entries(track_id,position)
-             SELECT id,2*(id-1) FROM tracks UNION ALL SELECT id,2*(id-1)+1 FROM tracks;
+            "INSERT INTO playlist_entries(playlist_id,track_id,position)
+             SELECT 0,id,2*(id-1) FROM tracks UNION ALL SELECT 0,id,2*(id-1)+1 FROM tracks;
          INSERT INTO playlists(id,name) VALUES(1,'sparse');
          INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT 1,id,id-1 FROM tracks;",
         )
@@ -428,15 +428,15 @@ fn filtered_occurrence_pages_keep_ids_positions_and_match_offsets() {
     assert_ne!(queue_matches[0].id, queue_matches[2].id);
     assert_eq!(queue_matches[0].track_id, queue_matches[2].track_id);
     let mut entry_matches = Vec::new();
-    for offset in [0, 2] {
+    for offset in [0, 2, 4] {
         let entries = store
             .playlist_entries_page(playlist, Some("needle"), offset, 2)
             .unwrap();
-        assert_eq!(entries.total, 4);
+        assert_eq!(entries.total, 6);
         for (index, entry) in entries.rows.iter().enumerate() {
             assert_eq!(
                 (entry.position, entry.offset),
-                (offset + index + 1, offset + index)
+                (positions[offset + index], offset + index)
             );
         }
         entry_matches.extend(entries.rows);
@@ -456,7 +456,7 @@ fn filtered_occurrence_pages_keep_ids_positions_and_match_offsets() {
     assert!(queue_after.is_none());
     let mut entry_after = None;
     let mut entry_batches = Vec::new();
-    for _ in 0..2 {
+    for _ in 0..3 {
         let entries = store
             .playlist_entry_batch(
                 playlist,
@@ -511,8 +511,8 @@ fn filtered_occurrence_pages_keep_ids_positions_and_match_offsets() {
             .map(|row| (row.id, row.position, row.offset, row.total))
             .collect::<Vec<_>>(),
         [
-            (entry_matches[0].id, 1, 0, 4),
-            (entry_matches[3].id, 4, 3, 4)
+            (entry_matches[0].id, 1, 0, 6),
+            (entry_matches[3].id, 5, 3, 6)
         ]
     );
     assert_eq!(store.queue_page(None, 0, 20).unwrap(), original);
@@ -533,7 +533,7 @@ fn filtered_occurrence_pages_keep_ids_positions_and_match_offsets() {
             .playlist_entries_page(playlist, Some("needle"), 0, 0)
             .unwrap()
             .total,
-        4
+        6
     );
     assert!(
         store
@@ -544,7 +544,7 @@ fn filtered_occurrence_pages_keep_ids_positions_and_match_offsets() {
     );
     assert!(
         store
-            .playlist_entries_page(playlist, Some("needle"), 4, 2)
+            .playlist_entries_page(playlist, Some("needle"), 6, 2)
             .unwrap()
             .rows
             .is_empty()
@@ -558,7 +558,7 @@ fn filtered_occurrence_pages_keep_ids_positions_and_match_offsets() {
         .unwrap()[0];
     assert_eq!(
         (location.position, location.offset, location.total),
-        (0, 0, 5)
+        (0, 0, 10)
     );
 }
 
@@ -1649,33 +1649,6 @@ fn playback_precision_upgrade_is_source_conditional_and_idempotent() {
 }
 
 #[test]
-fn playback_precision_commit_does_not_read_collection_membership() {
-    let store = Store::open(Path::new(":memory:")).unwrap();
-    store
-        .apply_scan(&scan(vec![rec(
-            "/music/source.flac",
-            "source",
-            "Source",
-            10.0,
-        )]))
-        .unwrap();
-    let track = all_tracks(&store).remove(0);
-    let source = store.playback_source(&track).unwrap().unwrap();
-    // Collection query targets are unavailable, but a source-conditional
-    // enrichment still has all the information needed for its guarded UPDATE.
-    store
-        .conn
-        .execute_batch("DROP TABLE queue_entries; DROP TABLE playlist_entries;")
-        .unwrap();
-    assert!(store.upgrade_bitrate(&source, 192_000, true).unwrap());
-    let current = store.track(track.id).unwrap().unwrap();
-    assert_eq!(
-        (current.bitrate_bps, current.bitrate_exact),
-        (Some(192_000), true)
-    );
-}
-
-#[test]
 fn bitrate_reader_fresh_payloads_preserve_owned_count_caches() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("bitrate-counts.db");
@@ -2091,7 +2064,7 @@ fn failed_track_batch_rollback_exposes_no_uncommitted_values() {
     assert_eq!(after_delete.title, "A");
 }
 #[test]
-fn playlist_deduplicates_additions_and_preserves_first_order() {
+fn playlist_preserves_occurrences_across_edits_and_restart() {
     let (directory, s) = db();
     let p = directory.path().join("library.db");
     s.apply_scan(&scan(vec![
@@ -2111,10 +2084,10 @@ fn playlist_deduplicates_additions_and_preserves_first_order() {
             .iter()
             .map(|entry| entry.track_id)
             .collect::<Vec<_>>(),
-        ids
+        vec![ids[0], ids[1], ids[0], ids[1], ids[2], ids[2]]
     );
     assert_eq!(entries[0].id, first_entry);
-    assert_eq!(s.move_playlist_entry(entries[2].id, 0).unwrap(), Some(pl));
+    assert_eq!(s.move_playlist_entry(entries[4].id, 0).unwrap(), Some(pl));
     s.remove_playlist_entry(first_entry).unwrap();
     drop(s);
     assert_eq!(
@@ -2122,7 +2095,7 @@ fn playlist_deduplicates_additions_and_preserves_first_order() {
             .iter()
             .map(|entry| entry.track_id)
             .collect::<Vec<_>>(),
-        vec![ids[2], ids[1]]
+        vec![ids[2], ids[1], ids[0], ids[1], ids[2]]
     );
 }
 #[test]
@@ -2247,7 +2220,7 @@ fn deleting_tracks_keeps_playlist_reordering_contiguous() {
     let before = playlist_entries(&store, playlist);
     store.remove_tracks(&[tracks[0].id]).unwrap();
     assert_eq!(
-        store.move_playlist_entry(before[2].id, 0).unwrap(),
+        store.move_playlist_entry(before[3].id, 0).unwrap(),
         Some(playlist)
     );
     assert_eq!(
@@ -2255,7 +2228,7 @@ fn deleting_tracks_keeps_playlist_reordering_contiguous() {
             .iter()
             .map(|entry| entry.id)
             .collect::<Vec<_>>(),
-        vec![before[2].id, before[1].id]
+        vec![before[3].id, before[1].id, before[4].id]
     );
 }
 
@@ -2483,7 +2456,13 @@ fn shared_source_segments_keep_independent_ids_overrides_stats_and_missing_state
     for index in [0, 2, 3] {
         assert!(!after[index].missing);
     }
-    assert_eq!(playlist_entries(&store, playlist).len(), 3);
+    assert_eq!(
+        playlist_entries(&store, playlist)
+            .iter()
+            .map(|entry| entry.track_id)
+            .collect::<Vec<_>>(),
+        [ids[1], ids[2], ids[1], ids[3]]
+    );
     rescan.segments.push(changed);
     store.apply_scan(&rescan).unwrap();
     assert!(!all_tracks(&store)[1].missing);
@@ -4367,7 +4346,7 @@ fn directory_selections_deduplicate_atomically_without_capping_playlists() {
         .add_playlist_sources(playlist, &directories, &[1, 1], None)
         .unwrap();
     let first = store.playlist_entries_page(playlist, None, 0, 2).unwrap();
-    assert_eq!(first.total, 5000);
+    assert_eq!(first.total, 5001);
     assert_eq!(
         first
             .rows
@@ -4389,7 +4368,7 @@ fn directory_selections_deduplicate_atomically_without_capping_playlists() {
                 |row| row.get::<_, i64>(0)
             )
             .unwrap(),
-        4999
+        5000
     );
     store
         .add_playlist_sources(playlist, &directories, &[], None)
@@ -4399,7 +4378,7 @@ fn directory_selections_deduplicate_atomically_without_capping_playlists() {
             .playlist_entries_page(playlist, None, 0, 0)
             .unwrap()
             .total,
-        5000
+        10001
     );
     let empty = store.create_playlist("Atomic").unwrap();
     assert!(
@@ -4446,19 +4425,19 @@ fn bulk_missing_cleanup_spans_pages_and_preserves_playlist_reordering() {
         [1000]
     );
     let page = store.playlist_entries_page(playlist, None, 0, 1).unwrap();
-    assert_eq!(page.total, 500);
+    assert_eq!(page.total, 501);
     assert_eq!(page.rows[0].track_id, 1000);
     assert_eq!(
-        store.move_playlist_entry(page.rows[0].id, 499).unwrap(),
+        store.move_playlist_entry(page.rows[0].id, 500).unwrap(),
         Some(playlist)
     );
     assert_eq!(
         store
-            .playlist_entries_page(playlist, None, 499, 1)
+            .playlist_entries_page(playlist, None, 500, 1)
             .unwrap()
             .rows[0]
-            .track_id,
-        1000
+            .id,
+        page.rows[0].id
     );
 }
 #[test]
@@ -4990,7 +4969,7 @@ fn collection_transfer_failures_preserve_queue_and_playlist_positions() {
     let entries = store.playlist_entries_page(playlist, None, 0, 20).unwrap();
     let playlist_revision = 0;
     // Abort on a later row, after the destination gap has already been opened.
-    store.conn.execute_batch("CREATE TEMP TRIGGER reject_collection_queue BEFORE INSERT ON queue_entries WHEN new.track_id=2 BEGIN SELECT RAISE(ABORT,'rejected member'); END; CREATE TEMP TRIGGER reject_collection_playlist BEFORE INSERT ON playlist_entries WHEN new.track_id=2 BEGIN SELECT RAISE(ABORT,'rejected member'); END;").unwrap();
+    store.conn.execute_batch("CREATE TEMP TRIGGER reject_collection_queue BEFORE INSERT ON playlist_entries WHEN new.playlist_id=0 AND new.track_id=2 BEGIN SELECT RAISE(ABORT,'rejected member'); END; CREATE TEMP TRIGGER reject_collection_playlist BEFORE INSERT ON playlist_entries WHEN new.playlist_id>0 AND new.track_id=2 BEGIN SELECT RAISE(ABORT,'rejected member'); END;").unwrap();
     for destination in [
         CollectionDestination::Queue {
             insertion: Some(CollectionInsertion {

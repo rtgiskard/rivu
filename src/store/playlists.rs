@@ -1,4 +1,4 @@
-use super::positions::{PositionScope, close_gaps, move_selection};
+use super::positions::{close_gaps, move_selection};
 use super::rows::cue_from_row;
 use super::tracks::{SOURCE_FILTER, search_filter, search_query, validate_encoded_track_ids};
 use super::{Store, batch_limit, changed};
@@ -17,7 +17,7 @@ impl Store {
         Ok(self.conn.query_row(
             "SELECT e.id,e.playlist_id,e.track_id,e.position,
                     (SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=e.playlist_id)
-             FROM playlist_entries e WHERE e.id=?1",
+             FROM playlist_entries e WHERE e.id=?1 AND e.playlist_id>0",
             [entry_id],
             |row| Ok(PlaylistEntryLocation {
                 id: row.get(0)?,
@@ -35,6 +35,7 @@ impl Store {
         query: Option<&str>,
         entry_ids: &[i64],
     ) -> Result<Vec<PlaylistEntryLocation>> {
+        anyhow::ensure!(playlist_id > 0, "Playlist not found");
         anyhow::ensure!(
             entry_ids.len() <= rivu_protocol::model::MAX_QUERY_ROWS,
             "Playlist entry query exceeds {} IDs",
@@ -78,6 +79,7 @@ impl Store {
     }
 
     fn playlist_match_count(&self, playlist_id: i64, query: Option<&str>) -> Result<usize> {
+        anyhow::ensure!(playlist_id > 0, "Playlist not found");
         let sql = if query.is_some() {
             format!(
                 "SELECT (SELECT COUNT(*) FROM playlist_entries e LEFT JOIN tracks t ON t.id=e.track_id WHERE e.playlist_id=?1 AND {}) FROM playlists WHERE id=?1",
@@ -110,7 +112,7 @@ impl Store {
     ) -> Result<Page<PlaylistSummary>> {
         let query = search_query(query);
         let total = self.conn.query_row(
-            "SELECT COUNT(*) FROM playlists WHERE ?1 IS NULL OR instr(lower(name),?1)>0",
+            "SELECT COUNT(*) FROM playlists WHERE id>0 AND (?1 IS NULL OR instr(lower(name),?1)>0)",
             [query.as_deref()],
             |row| row.get::<_, i64>(0),
         )? as usize;
@@ -122,7 +124,7 @@ impl Store {
         }
         let mut stmt = self.conn.prepare(
             "SELECT p.id,p.name,(SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries e WHERE e.playlist_id=p.id)
-             FROM playlists p WHERE ?1 IS NULL OR instr(lower(p.name),?1)>0 ORDER BY p.id LIMIT ?2 OFFSET ?3",
+             FROM playlists p WHERE p.id>0 AND (?1 IS NULL OR instr(lower(p.name),?1)>0) ORDER BY p.id LIMIT ?2 OFFSET ?3",
         )?;
         let rows = stmt
             .query_map(
@@ -150,6 +152,10 @@ impl Store {
         track_ids: &[i64],
         other_roots: Option<&[PathBuf]>,
     ) -> Result<bool> {
+        anyhow::ensure!(playlist_id > 0, "Playlist not found");
+        if directories.is_empty() && other_roots.is_none() {
+            return self.add_playlist(playlist_id, track_ids);
+        }
         let tx = self.conn.unchecked_transaction()?;
         if !tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM playlists WHERE id=?1)",
@@ -161,7 +167,7 @@ impl Store {
         let (directories, ids) = self.source_parameters(directories, track_ids, other_roots)?;
         // Assign positions in SQL; playlist size never determines Rust allocation.
         let inserted = tx.execute(&format!(
-            "WITH selected AS (SELECT id FROM tracks WHERE ({SOURCE_FILTER}) AND NOT EXISTS (SELECT 1 FROM playlist_entries e WHERE e.playlist_id=?3 AND e.track_id=tracks.id)), ordered AS (SELECT id,row_number() OVER (ORDER BY id)-1 AS ordinal FROM selected) INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT ?3,id,(SELECT COALESCE(MAX(position),-1)+1 FROM playlist_entries WHERE playlist_id=?3)+ordinal FROM ordered"
+            "WITH selected AS (SELECT id FROM tracks WHERE {SOURCE_FILTER}), ordered AS (SELECT id,row_number() OVER (ORDER BY id)-1 AS ordinal FROM selected) INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT ?3,id,(SELECT COALESCE(MAX(position),-1)+1 FROM playlist_entries WHERE playlist_id=?3)+ordinal FROM ordered"
         ), params![directories, ids, playlist_id])?;
         tx.commit()?;
         Ok(inserted != 0)
@@ -183,7 +189,7 @@ impl Store {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT p.id,p.name,
                     (SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries e WHERE e.playlist_id=p.id)
-             FROM playlists p WHERE (?1 IS NULL OR instr(lower(p.name),?1)>0) AND {cursor} ORDER BY p.id LIMIT ?3",
+             FROM playlists p WHERE p.id>0 AND (?1 IS NULL OR instr(lower(p.name),?1)>0) AND {cursor} ORDER BY p.id LIMIT ?3",
         ))?;
         let mut db_rows = stmt.query(params![query, after, limit + 1])?;
         let mut rows = Vec::with_capacity(limit as usize);
@@ -213,6 +219,7 @@ impl Store {
         limit: usize,
         revisions: QueryStamp,
     ) -> Result<Batch<PlaylistEntryRow, BatchContinuation<PlaylistEntryCursor>>> {
+        anyhow::ensure!(playlist_id > 0, "Playlist not found");
         let limit = batch_limit(limit)?;
         let query = search_query(query);
         let scope = revisions.continuation_scope(query.as_deref(), Some(playlist_id));
@@ -292,6 +299,7 @@ impl Store {
         after: Option<PlaylistEntryCursor>,
         limit: usize,
     ) -> Result<Batch<PlaylistExportTrack, PlaylistEntryCursor>> {
+        anyhow::ensure!(playlist_id > 0, "Playlist not found");
         let limit = batch_limit(limit)?;
         // A LEFT JOIN keeps orphan entries visible so export fails rather than
         // silently dropping them. Project no playback, album or fingerprint data.
@@ -398,6 +406,7 @@ impl Store {
 
     #[cfg(test)]
     pub fn playlist_track_ids(&self, playlist_id: i64, limit: usize) -> Result<Vec<i64>> {
+        anyhow::ensure!(playlist_id > 0, "Playlist not found");
         let mut stmt = self.conn.prepare("SELECT track_id FROM playlist_entries WHERE playlist_id=?1 ORDER BY position,id LIMIT ?2")?;
         let limit = limit.min(i64::MAX as usize) as i64;
         Ok(stmt
@@ -433,11 +442,12 @@ impl Store {
         available_playlist_name(&tx, name)?;
         tx.execute("INSERT INTO playlists(name) VALUES(?1)", [name])?;
         let id = tx.last_insert_rowid();
-        let inserted = tx.execute("WITH first AS (SELECT track_id,MIN(position) AS position FROM queue_entries GROUP BY track_id) INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT ?1,track_id,row_number() OVER (ORDER BY position,track_id)-1 FROM first ORDER BY position,track_id", [id])?;
+        let inserted = tx.execute("INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT ?1,track_id,row_number() OVER (ORDER BY position,id)-1 FROM playlist_entries WHERE playlist_id=0 ORDER BY position,id", [id])?;
         tx.commit()?;
         Ok((id, inserted != 0))
     }
     pub fn rename_playlist(&self, id: i64, name: &str) -> Result<bool> {
+        anyhow::ensure!(id > 0, "Playlist not found");
         Self::validate_playlist_name(name)?;
         let tx = self.conn.unchecked_transaction()?;
         let unchanged: bool = tx
@@ -461,6 +471,7 @@ impl Store {
     }
     /// Returns whether the committed deletion removed any playlist members.
     pub fn delete_playlist(&self, id: i64) -> Result<bool> {
+        anyhow::ensure!(id > 0, "Playlist not found");
         let tx = self.conn.unchecked_transaction()?;
         let removed = tx.execute("DELETE FROM playlist_entries WHERE playlist_id=?", [id])?;
         changed(
@@ -497,6 +508,9 @@ impl Store {
         other_roots: Option<&[PathBuf]>,
         index: usize,
     ) -> Result<bool> {
+        if directories.is_empty() && other_roots.is_none() {
+            return self.insert_playlist_tracks(playlist_id, tracks, index);
+        }
         let (directories, ids) = self.source_parameters(directories, tracks, other_roots)?;
         self.insert_playlist(playlist_id, &ids, Some(&directories), index)
     }
@@ -510,13 +524,7 @@ impl Store {
     ) -> Result<bool> {
         let tx = self.conn.unchecked_transaction()?;
         exists_playlist(&tx, playlist_id)?;
-        let count = super::positions::insert_tracks(
-            &tx,
-            PositionScope::Playlist(playlist_id),
-            index,
-            ids,
-            directories,
-        )?;
+        let count = super::positions::insert_tracks(&tx, playlist_id, index, ids, directories)?;
         tx.commit()?;
         Ok(count != 0)
     }
@@ -525,14 +533,14 @@ impl Store {
         let tx = self.conn.unchecked_transaction()?;
         let (pid, p): (i64, i64) = tx
             .query_row(
-                "SELECT playlist_id,position FROM playlist_entries WHERE id=?",
+                "SELECT playlist_id,position FROM playlist_entries WHERE id=? AND playlist_id>0",
                 [id],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?
             .ok_or_else(|| anyhow!("playlist entry {id} does not exist"))?;
         tx.execute("DELETE FROM playlist_entries WHERE id=?", [id])?;
-        close_gaps(&tx, &[p], PositionScope::Playlist(pid))?;
+        close_gaps(&tx, &[p], pid)?;
         tx.commit()?;
         Ok(pid)
     }
@@ -541,7 +549,7 @@ impl Store {
         let tx = self.conn.unchecked_transaction()?;
         let (pid, old): (i64, i64) = tx
             .query_row(
-                "SELECT playlist_id,position FROM playlist_entries WHERE id=?",
+                "SELECT playlist_id,position FROM playlist_entries WHERE id=? AND playlist_id>0",
                 [id],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
@@ -555,16 +563,30 @@ impl Store {
         if index >= n as usize {
             bail!("playlist index out of range");
         }
-        if !move_selection(
-            &tx,
-            PositionScope::Playlist(pid),
-            &[(id, old)],
-            index as i64,
-        )? {
+        if !move_selection(&tx, pid, &[(id, old)], index as i64)? {
             return Ok(None);
         }
         tx.commit()?;
         Ok(Some(pid))
+    }
+
+    /// Keep the first occurrence of each track without replacing surviving identities.
+    pub fn deduplicate_playlist(&self, playlist_id: i64) -> Result<bool> {
+        let tx = self.conn.unchecked_transaction()?;
+        exists_playlist(&tx, playlist_id)?;
+        let removed = tx.execute(
+            "WITH ranked AS (SELECT id,row_number() OVER (PARTITION BY track_id ORDER BY position,id) AS occurrence FROM playlist_entries WHERE playlist_id=?1) DELETE FROM playlist_entries WHERE playlist_id=?1 AND id IN (SELECT id FROM ranked WHERE occurrence>1)",
+            [playlist_id],
+        )?;
+        if removed == 0 {
+            return Ok(false);
+        }
+        tx.execute(
+            "WITH ordered AS MATERIALIZED (SELECT id,row_number() OVER (ORDER BY position,id)-1 AS position FROM playlist_entries WHERE playlist_id=?1) UPDATE playlist_entries SET position=ordered.position FROM ordered WHERE playlist_entries.id=ordered.id AND playlist_entries.playlist_id=?1 AND playlist_entries.position<>ordered.position",
+            [playlist_id],
+        )?;
+        tx.commit()?;
+        Ok(true)
     }
 
     pub fn remove_playlist_entries(&self, playlist_id: i64, entry_ids: &[i64]) -> Result<bool> {
@@ -578,7 +600,7 @@ impl Store {
             "DELETE FROM playlist_entries WHERE playlist_id=?1 AND id IN (SELECT value FROM json_each(?2))",
             params![playlist_id, ids],
         )?;
-        close_gaps(&tx, &selected, PositionScope::Playlist(playlist_id))?;
+        close_gaps(&tx, &selected, playlist_id)?;
         tx.commit()?;
         Ok(true)
     }
@@ -629,12 +651,7 @@ impl Store {
         let boundary = target + i64::from(after && before_entry_id.is_some());
         let insertion =
             boundary - selected.partition_point(|&(_, position)| position < boundary) as i64;
-        if !move_selection(
-            &tx,
-            PositionScope::Playlist(playlist_id),
-            &selected,
-            insertion,
-        )? {
+        if !move_selection(&tx, playlist_id, &selected, insertion)? {
             return Ok(false);
         }
         tx.commit()?;
@@ -672,7 +689,7 @@ fn selected_entries(tx: &Transaction<'_>, playlist_id: i64, ids: &str) -> Result
 fn append_tracks(tx: &Transaction<'_>, id: i64, tracks: &[i64]) -> Result<usize> {
     let tracks = serde_json::to_string(tracks)?;
     validate_encoded_track_ids(tx, &tracks)?;
-    Ok(tx.execute("WITH selected AS (SELECT value AS track_id,MIN(CAST(key AS INTEGER)) AS ordinal FROM json_each(?2) GROUP BY value), additions AS (SELECT track_id,ordinal FROM selected WHERE NOT EXISTS(SELECT 1 FROM playlist_entries WHERE playlist_id=?1 AND playlist_entries.track_id=selected.track_id)) INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT ?1,track_id,(SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=?1)+row_number() OVER (ORDER BY ordinal)-1 FROM additions ORDER BY ordinal", params![id, tracks])?)
+    Ok(tx.execute("INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT ?1,value,(SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=?1)+CAST(key AS INTEGER) FROM json_each(?2) ORDER BY CAST(key AS INTEGER)", params![id, tracks])?)
 }
 
 fn available_playlist_name(tx: &Transaction<'_>, name: &str) -> Result<()> {
@@ -689,7 +706,7 @@ fn available_playlist_name(tx: &Transaction<'_>, name: &str) -> Result<()> {
 
 fn exists_playlist(tx: &Transaction<'_>, id: i64) -> Result<()> {
     if !tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM playlists WHERE id=?)",
+        "SELECT EXISTS(SELECT 1 FROM playlists WHERE id=? AND id>0)",
         [id],
         |r| r.get(0),
     )? {
@@ -797,13 +814,13 @@ mod deletion_tests {
              INSERT INTO playlist_entries(id,playlist_id,track_id,position) VALUES
                 (100,10,1,0),(101,10,2,1),(102,10,3,2),
                 (200,20,1,0),(201,20,2,1),(202,20,3,2);
-             INSERT INTO queue_entries(id,track_id,position) VALUES (300,2,0);
+             INSERT INTO playlist_entries(id,playlist_id,track_id,position) VALUES (300,0,2,0);
              UPDATE rivu_meta SET current_queue_entry_id=300 WHERE singleton=1;",
         )?;
         assert_eq!(store.remove_playlist_entry(101)?, 10);
         assert!(store.remove_playlist_entry(999).is_err());
         let entries = store.conn.prepare(
-            "SELECT id,playlist_id,track_id,position FROM playlist_entries ORDER BY playlist_id,position",
+            "SELECT id,playlist_id,track_id,position FROM playlist_entries WHERE playlist_id>0 ORDER BY playlist_id,position",
         )?.query_map([], |row| {
             Ok((row.get::<_, i64>(0)?,row.get::<_, i64>(1)?,row.get::<_, i64>(2)?,row.get::<_, i64>(3)?))
         })?.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -920,9 +937,7 @@ mod request_tests {
         let id = store.create_playlist_with_tracks("append", &[1, 2])?;
         let before = store.playlist_entries_page(id, None, 0, 10)?.rows;
         assert!(!store.add_playlist(id, &[])?);
-        assert!(!store.add_playlist(id, &[2, 1, 2])?);
         assert!(!store.add_playlist_sources(id, &[], &[], None)?);
-        assert!(!store.add_playlist_sources(id, &[], &[1, 2], None)?);
         assert!(store.add_playlist(i64::MAX, &[]).is_err());
         assert!(
             store
@@ -936,9 +951,14 @@ mod request_tests {
                 .is_err()
         );
         assert_eq!(store.playlist_entries_page(id, None, 0, 10)?.rows, before);
+        assert!(store.add_playlist(id, &[2, 1, 2])?);
+        assert!(store.add_playlist_sources(id, &[], &[1, 2], None)?);
         assert!(store.add_playlist(id, &[2, 3, 3])?);
         assert!(store.add_playlist_sources(id, &[], &[3, 4], None)?);
-        assert_eq!(store.playlist_track_ids(id, 10)?, [1, 2, 3, 4]);
+        assert_eq!(
+            store.playlist_track_ids(id, 20)?,
+            [1, 2, 2, 1, 2, 1, 2, 2, 3, 3, 3, 4]
+        );
         Ok(())
     }
 
@@ -997,7 +1017,7 @@ mod request_tests {
     }
 
     #[test]
-    fn append_keeps_first_occurrence_order_and_invalid_ids_roll_back() -> Result<()> {
+    fn append_keeps_occurrence_order_and_invalid_ids_roll_back() -> Result<()> {
         let store = store()?;
         assert!(
             store
@@ -1007,14 +1027,14 @@ mod request_tests {
         assert_eq!(store.playlist_summary_page(None, 0, 0)?.total, 0);
         let id = store.create_playlist_with_tracks("valid", &[3, 1, 3, 2, 1])?;
         let original = store.playlist_entries_page(id, None, 0, 10)?.rows;
-        assert_eq!(store.playlist_track_ids(id, 10)?, vec![3, 1, 2]);
+        assert_eq!(store.playlist_track_ids(id, 10)?, vec![3, 1, 3, 2, 1]);
         assert!(store.add_playlist(id, &[4, i64::MAX, 4]).is_err());
         assert!(
             store
                 .add_playlist_sources(id, &[PathBuf::new()], &[i64::MAX], None)
                 .is_err()
         );
-        assert_eq!(store.playlist_track_ids(id, 10)?, vec![3, 1, 2]);
+        assert_eq!(store.playlist_track_ids(id, 10)?, vec![3, 1, 3, 2, 1]);
         assert_eq!(
             store
                 .playlist_entries_page(id, None, 0, 10)?
@@ -1025,7 +1045,10 @@ mod request_tests {
             original.iter().map(|row| row.id).collect::<Vec<_>>()
         );
         store.add_playlist(id, &[2, 4, 3, 4])?;
-        assert_eq!(store.playlist_track_ids(id, 10)?, vec![3, 1, 2, 4]);
+        assert_eq!(
+            store.playlist_track_ids(id, 10)?,
+            vec![3, 1, 3, 2, 1, 2, 4, 3, 4]
+        );
         Ok(())
     }
 
@@ -1186,6 +1209,7 @@ mod export_tests {
                 .playlist_export_batch(empty, None, MAX_QUERY_ROWS + 1)
                 .is_err()
         );
+        store.conn.execute_batch("PRAGMA foreign_keys=OFF;")?;
         store.conn.execute_batch(
             "INSERT INTO tracks(id,path) VALUES(1,'one'),(3,'three');
              INSERT INTO playlist_entries(id,playlist_id,track_id,position)
@@ -1264,14 +1288,13 @@ mod group_tests {
     }
 
     #[test]
-    fn indexed_playlist_insertion_keeps_existing_occurrences_and_first_new_source_order()
-    -> Result<()> {
+    fn indexed_playlist_insertion_preserves_every_source_occurrence() -> Result<()> {
         for index in 0..=1 {
             let store = fixture()?;
             assert!(store.insert_playlist_tracks(20, &[4, 1, 2, 4, 3], index)?);
             let entries = store.playlist_entry_locations(20, None, &order(&store, 20)?)?;
             let mut expected = vec![1];
-            expected.splice(index..index, [4, 2, 3]);
+            expected.splice(index..index, [4, 1, 2, 4, 3]);
             assert_eq!(
                 entries
                     .iter()
@@ -1281,11 +1304,11 @@ mod group_tests {
             );
             assert_eq!(
                 store.playlist_entry(200)?.unwrap().position,
-                if index == 0 { 3 } else { 0 }
+                if index == 0 { 5 } else { 0 }
             );
-            assert!(!store.insert_playlist_tracks(20, &[1, 4, 4], 0)?);
-            assert!(!store.insert_playlist_tracks(20, &[], 4)?);
-            assert!(store.insert_playlist_tracks(20, &[1], 5).is_err());
+            assert!(store.insert_playlist_tracks(20, &[1, 4, 4], 0)?);
+            assert!(!store.insert_playlist_tracks(20, &[], 9)?);
+            assert!(store.insert_playlist_tracks(20, &[1], 10).is_err());
             assert!(store.insert_playlist_tracks(20, &[], usize::MAX).is_err());
             assert!(store.insert_playlist_tracks(999, &[], 0).is_err());
             assert!(store.insert_playlist_tracks(20, &[6, 999], 0).is_err());
@@ -1325,12 +1348,12 @@ mod group_tests {
                 .iter()
                 .map(|entry| entry.track_id)
                 .collect::<Vec<_>>(),
-            [2, 3, 4, 5, 6, 1]
+            [1, 2, 3, 4, 5, 6, 1]
         );
-        assert!(!store.insert_playlist_sources(20, &["/music".into()], &[], None, 6)?);
+        assert!(!store.insert_playlist_sources(20, &[], &[], None, 7)?);
         assert!(
             store
-                .insert_playlist_sources(20, &[], &[], None, 7)
+                .insert_playlist_sources(20, &[], &[], None, 8)
                 .is_err()
         );
         assert!(
@@ -1471,15 +1494,15 @@ mod group_tests {
     #[test]
     fn group_removal_closes_gaps_once_and_preserves_other_references() -> Result<()> {
         let store = fixture()?;
-        store
-            .conn
-            .execute_batch("INSERT INTO queue_entries(id,track_id,position) VALUES (300,2,0);")?;
+        store.conn.execute_batch(
+            "INSERT INTO playlist_entries(id,playlist_id,track_id,position) VALUES (300,0,2,0);",
+        )?;
         assert!(store.remove_playlist_entries(10, &[103, 101, 103])?);
         assert_eq!(order(&store, 10)?, [100, 102, 104, 105]);
         assert_eq!(order(&store, 20)?, [200]);
         assert_eq!(
             store.conn.query_row(
-                "SELECT track_id FROM queue_entries WHERE id=300",
+                "SELECT track_id FROM playlist_entries WHERE playlist_id=0 AND id=300",
                 [],
                 |row| row.get::<_, i64>(0)
             )?,
@@ -1537,7 +1560,7 @@ mod group_tests {
         store.conn.execute_batch(
             "INSERT INTO playlists(id,name) VALUES (30,'large');
              WITH RECURSIVE entries(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM entries WHERE n<1000)
-             INSERT INTO playlist_entries(id,playlist_id,track_id,position) SELECT 1000+n,30,1000+n,n-1 FROM entries;",
+             INSERT INTO playlist_entries(id,playlist_id,track_id,position) SELECT 1000+n,30,1,n-1 FROM entries;",
         )?;
         let ids: Vec<_> = (1001..=1000 + rivu_protocol::model::MAX_QUERY_ROWS as i64).collect();
         let locations = store.playlist_entry_locations(30, None, &ids)?;
@@ -1573,6 +1596,240 @@ mod group_tests {
             (row.id, row.track_id, row.position, row.total),
             (103, 4, 0, 6)
         );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod occurrence_tests {
+    use super::*;
+    use rivu_protocol::model::{CollectionDestination, CollectionSource};
+    use std::path::Path;
+
+    fn fixture() -> Result<Store> {
+        let store = Store::open(Path::new(":memory:"))?;
+        store.conn.execute_batch(
+            "INSERT INTO tracks(id,path) VALUES(1,'one'),(2,'two'),(3,'three'),(4,'four');",
+        )?;
+        Ok(store)
+    }
+
+    #[test]
+    fn dedup_keeps_first_occurrences_and_isolates_queue_and_other_playlists() -> Result<()> {
+        let store = fixture()?;
+        let playlist = store.create_playlist_with_tracks("target", &[1, 2, 1, 3, 2, 1, 4])?;
+        let other = store.create_playlist_with_tracks("other", &[2, 2, 1])?;
+        store.enqueue_tracks(&[1, 2, 1])?;
+        let current = store.queue_ids()?[2];
+        store.set_queue_current(Some(current))?;
+        let late_occurrence = store.playlist_entries_page(playlist, None, 5, 1)?.rows[0].id;
+        store.move_playlist_entry(late_occurrence, 0)?;
+        let before = store.playlist_entries_page(playlist, None, 0, 20)?.rows;
+        let other_before = store.playlist_entries_page(other, None, 0, 20)?;
+        let queue = store.queue_page(None, 0, 20)?;
+        let state = store.queue_state()?;
+        assert!(store.deduplicate_playlist(playlist)?);
+        let rows = store.playlist_entries_page(playlist, None, 0, 20)?.rows;
+        assert_eq!(
+            rows.iter()
+                .map(|row| (row.id, row.track_id, row.position))
+                .collect::<Vec<_>>(),
+            [0, 2, 4, 6]
+                .iter()
+                .enumerate()
+                .map(|(position, &index)| (before[index].id, before[index].track_id, position))
+                .collect::<Vec<_>>()
+        );
+        let changes = store.conn.total_changes();
+        assert!(!store.deduplicate_playlist(playlist)?);
+        let empty = store.create_playlist("empty")?;
+        assert!(!store.deduplicate_playlist(empty)?);
+        assert_eq!(store.conn.total_changes(), changes + 1);
+        assert_eq!(
+            store.playlist_entries_page(other, None, 0, 20)?,
+            other_before
+        );
+        assert_eq!(store.queue_page(None, 0, 20)?, queue);
+        assert_eq!(store.queue_state()?, state);
+        assert!(store.deduplicate_queue()?);
+        assert_eq!(store.queue_state()?.current_id, Some(current));
+        assert_eq!(store.queue_ids()?[0], current);
+        assert_eq!(
+            store.playlist_entries_page(playlist, None, 0, 20)?.rows,
+            rows
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn dedup_rolls_back_deletion_and_compaction_failures() -> Result<()> {
+        for trigger in [
+            "CREATE TEMP TRIGGER reject_dedup BEFORE DELETE ON playlist_entries WHEN old.playlist_id>0 AND old.position=4 BEGIN SELECT RAISE(ABORT,'reject delete'); END;",
+            "CREATE TEMP TRIGGER reject_dedup BEFORE UPDATE OF position ON playlist_entries WHEN new.playlist_id>0 BEGIN SELECT RAISE(ABORT,'reject compact'); END;",
+        ] {
+            let store = fixture()?;
+            let playlist = store.create_playlist_with_tracks("target", &[1, 2, 1, 3, 2, 1, 4])?;
+            let before = store.playlist_entries_page(playlist, None, 0, 20)?;
+            store.conn.execute_batch(trigger)?;
+            assert!(store.deduplicate_playlist(playlist).is_err());
+            assert_eq!(store.playlist_entries_page(playlist, None, 0, 20)?, before);
+            store.conn.execute_batch("DROP TRIGGER reject_dedup;")?;
+            assert!(store.deduplicate_playlist(playlist)?);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn queue_is_hidden_and_rejected_by_ordinary_playlist_apis() -> Result<()> {
+        let store = fixture()?;
+        store.enqueue_tracks(&[1, 1, 2])?;
+        let queue = store.queue_page(None, 0, 20)?;
+        let state = store.queue_state()?;
+        assert!(store.playlist_ids()?.is_empty());
+        assert_eq!(store.playlist_summary_page(None, 0, 20)?.total, 0);
+        assert!(
+            store
+                .playlist_summary_batch(None, None, 20)?
+                .rows
+                .is_empty()
+        );
+        assert!(store.playlist_entry(queue.rows[0].id as i64)?.is_none());
+        assert!(store.playlist_entry_locations(0, None, &[]).is_err());
+        assert!(store.playlist_entries_page(0, None, 0, 0).is_err());
+        assert!(
+            store
+                .playlist_entry_batch(0, None, None, 1, QueryStamp::default())
+                .is_err()
+        );
+        assert!(store.playlist_export_batch(0, None, 1).is_err());
+        assert!(store.rename_playlist(0, "hidden").is_err());
+        assert!(store.delete_playlist(0).is_err());
+        assert!(store.add_playlist(0, &[]).is_err());
+        assert!(store.add_playlist_sources(0, &[], &[1], None).is_err());
+        assert!(store.insert_playlist_tracks(0, &[1], 0).is_err());
+        assert!(
+            store
+                .insert_playlist_sources(0, &[], &[1], None, 0)
+                .is_err()
+        );
+        assert!(
+            store
+                .remove_playlist_entry(queue.rows[0].id as i64)
+                .is_err()
+        );
+        assert!(
+            store
+                .move_playlist_entry(queue.rows[0].id as i64, 1)
+                .is_err()
+        );
+        assert!(store.remove_playlist_entries(0, &[]).is_err());
+        assert!(store.move_playlist_entries(0, &[], None, false).is_err());
+        assert!(store.deduplicate_playlist(0).is_err());
+        assert!(store.deduplicate_playlist(999).is_err());
+        assert!(store.replace_queue_from_playlist(0).is_err());
+        assert_eq!(store.queue_page(None, 0, 20)?, queue);
+        assert_eq!(store.queue_state()?, state);
+        Ok(())
+    }
+
+    #[test]
+    fn collection_copies_preserve_duplicates_and_never_alias_identities() -> Result<()> {
+        let store = fixture()?;
+        store.enqueue_tracks(&[3, 1, 3, 2, 1])?;
+        let queue_ids = store.queue_ids()?;
+        let (source, _) = store.create_playlist_from_queue("copy")?;
+        let source_entries = store.playlist_entries_page(source, None, 0, 20)?.rows;
+        assert_eq!(store.playlist_track_ids(source, 20)?, [3, 1, 3, 2, 1]);
+        assert!(
+            source_entries
+                .iter()
+                .all(|entry| !queue_ids.contains(&(entry.id as u64)))
+        );
+        let destination = store.create_playlist_with_tracks("destination", &[4, 4])?;
+        let selection = CollectionSource::Playlist {
+            playlist_id: source,
+            revision: 0,
+        };
+        assert_eq!(
+            store
+                .transfer_collection(
+                    &selection,
+                    CollectionDestination::Playlist {
+                        playlist_id: destination,
+                        revision: 0,
+                        index: Some(1)
+                    }
+                )?
+                .0,
+            5
+        );
+        assert_eq!(
+            store.playlist_track_ids(destination, 20)?,
+            [4, 3, 1, 3, 2, 1, 4]
+        );
+        assert_eq!(
+            store
+                .transfer_collection(&selection, CollectionDestination::Queue { insertion: None })?
+                .0,
+            5
+        );
+        assert_eq!(
+            store
+                .queue_page(None, 0, 20)?
+                .rows
+                .iter()
+                .map(|row| row.track_id)
+                .collect::<Vec<_>>(),
+            [3, 1, 3, 2, 1, 3, 1, 3, 2, 1]
+        );
+        store.replace_queue_from_playlist(source)?;
+        let copied_queue = store.queue_page(None, 0, 20)?;
+        store.remove_playlist_entry(source_entries[0].id)?;
+        assert_eq!(store.queue_page(None, 0, 20)?, copied_queue);
+        let foreign = source_entries[1].id as u64;
+        assert!(store.set_queue_current(Some(foreign)).is_err());
+        assert!(store.remove_queue_entries(&[foreign]).is_err());
+        assert!(store.move_queue_entries(&[(foreign as i64, 0)], 0).is_err());
+        assert!(store.queue_track_id(foreign).is_err());
+        assert!(store.queue_entries(None, &[foreign])?.is_empty());
+        let queue_entry = copied_queue.rows[0].id as i64;
+        assert!(
+            store
+                .remove_playlist_entries(source, &[queue_entry])
+                .is_err()
+        );
+        assert!(
+            store
+                .move_playlist_entries(source, &[queue_entry], None, false)
+                .is_err()
+        );
+        assert_eq!(store.queue_page(None, 0, 20)?, copied_queue);
+        Ok(())
+    }
+
+    #[test]
+    fn membership_impacts_separate_queue_from_ordinary_playlists() -> Result<()> {
+        let store = fixture()?;
+        store.enqueue_tracks(&[1, 1])?;
+        let first = store.create_playlist_with_tracks("first", &[1, 1, 2])?;
+        let other = store.create_playlist_with_tracks("other", &[1, 3, 1])?;
+        let edit = store.edit_track(1, Some("changed"), None, None, None)?;
+        assert!(edit.queue);
+        let mut playlists = edit.playlists.unwrap();
+        playlists.sort_unstable();
+        assert_eq!(playlists, [first, other]);
+        let favorite = store.set_favorite(&[1], true)?;
+        assert!(favorite.queue);
+        let mut playlists = favorite.playlists.unwrap();
+        playlists.sort_unstable();
+        assert_eq!(playlists, [first, other]);
+        let removal = store.prepare_track_removal(&[1])?;
+        let impact = store.remove_prepared_tracks(removal)?;
+        assert!(impact.queue);
+        assert_eq!(impact.playlists, [first, other]);
+        assert_eq!(store.playlist_track_ids(first, 20)?, [2]);
+        assert_eq!(store.playlist_track_ids(other, 20)?, [3]);
+        assert_eq!(store.queue_state()?.total, 0);
         Ok(())
     }
 }

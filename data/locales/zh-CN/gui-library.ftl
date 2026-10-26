@@ -126,6 +126,8 @@ gl-entry-down = 下移
 
 gl-add-current = 添加当前曲目
 
+gl-deduplicate-playlist = 去重
+
 gl-rename = 重命名…
 
 gl-delete = 删除…

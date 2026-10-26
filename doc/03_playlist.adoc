@@ -2,10 +2,16 @@
 :toc:
 :toclevels: 2
 
-Playlists are ordered collections of library tracks. Each track ID appears at
-most once; adding it again leaves the existing entry unchanged. Imports and
-saved queues retain the first occurrence of each track, unlike the
-link:04_playback.adoc#_queue[playback queue].
+Playlists are ordered collections of library track occurrences. A track may appear
+more than once; each occurrence has its own entry ID and position. Explicit track
+additions, imports, queue saves, and collection transfers preserve duplicates and
+source order, as does the link:04_playback.adoc#_queue[playback queue].
+
+The queue is the protected system playlist `0`, with an empty name, in shared
+`playlist_entries` storage. Ordinary playlists have positive IDs; catalog and
+playlist-management APIs hide or reject `0`. Loading a playlist into the queue
+and saving a queue create independent copies, not live links. Core retains
+playback ownership and separate collection validity tokens.
 
 == Management
 
@@ -22,7 +28,8 @@ by ID; rename or delete them explicitly.
 
 Use `rivu playlist` for command-line management. `playlist list` shows collection
 IDs and summaries; `playlist show PLAYLIST_ID` lists that collection's entries.
-Entry IDs identify items for removal or movement. Move indices start at zero.
+Entry IDs identify individual occurrences for removal or movement, even when they
+share a track ID. Move indices start at zero.
 
 [source,sh]
 ----
@@ -36,10 +43,10 @@ rivu playlist remove ENTRY_ID
 rivu playlist play PLAYLIST_ID
 ----
 
-Adding an existing track, moving an entry to its current position, or renaming
-to the current name leaves contents unchanged, but still validates IDs and move
-bounds. Creating a playlist from a queue saves its name and entries atomically;
-a failed entry save does not leave an empty playlist.
+Moving an entry to its current position or renaming to the current name leaves
+contents unchanged, but still validates IDs and move bounds. Adding a track always
+creates another occurrence. Creating a playlist from a queue saves its name and
+entries atomically; a failed entry save does not leave an empty playlist.
 
 == Desktop UI
 
@@ -64,8 +71,13 @@ When the queue is nonempty, the GUI asks before replacing it by default. Cancel
 or Esc keeps queue and playback untouched. Configure this shared album/playlist
 preference under link:01_config.adoc#_volume_and_playback_controls[Volume and playback controls].
 
-The row menu also offers Add current track, Rename, and Delete. Add current track
-uses the playback track, not Library selection, and is unavailable without one.
+The row menu also offers Add current track, Remove duplicates, Rename, and Delete,
+with Remove duplicates immediately before Rename. Add current track uses the
+playback track, not Library selection, and is unavailable without one. Remove
+duplicates keeps the first occurrence of each track in playlist order, preserving
+retained entry IDs. It changes only that playlist, not the queue or playback;
+an already-unique playlist is unchanged. The command uses the playlist's current
+content token and rejects stale requests rather than editing a changed list.
 Rename opens the current name; Enter submits, while Cancel or Esc discards the
 draft. Saving runs in the background and prevents repeated submissions. Failure
 keeps the draft for correction; a submitted save cannot be cancelled by closing
@@ -102,7 +114,9 @@ explicit destination, even when another playlist is selected. Library tracks and
 directories, album cards and tracks, recent tracks, and queue occurrences can
 also be dropped on a catalog row. Dropping on a track row uses the same before/after
 insertion line; catalog rows and blank space append. Playlist additions retain
-existing entries and insert only previously absent track IDs in source order.
+existing entries and insert every supplied occurrence in source order, including
+tracks already present in the destination. Library directory selections remain
+set unions: overlapping sources contribute each track only once.
 If the target playlist changes before a positional insertion commits, the old
 position is rejected rather than falling back to append.
 
@@ -114,8 +128,9 @@ link:02_library.adoc#_desktop_selection_and_directory_tree[shared selection rule
 
 Use Queue → Save queue as playlist for a nonempty queue. The name dialog suggests
 an editable `Queue_YYYYMMDD_HHMMSS` name, independent of presentation language.
-Duplicate occurrences become one entry, retaining the first occurrence's order.
-Saving does not change the queue. The dialog uses the same
+Every queue occurrence is saved in queue order, including repeated tracks.
+Saving does not change the queue, and later edits to either collection do not
+change the other. The dialog uses the same
 background-save and failure-retry behavior as New playlist and Rename. Loading
 or failed queue selection shows status; Retry remains available after failure.
 
@@ -192,7 +207,7 @@ directories, devices, and FIFOs are rejected without waiting for a writer.
 Referenced directories are never recursively imported; directory discovery belongs
 to `rivu library scan`. M3U input is limited to 16 MiB, each CUE sheet to 1 MiB,
 and aggregate input to 64 MiB (each distinct CUE sheet is read once). Expansion is
-limited to 100,000 entries before first-occurrence deduplication.
+limited to 100,000 entries, counting repeated occurrences.
 
 Expanded entries, parsed sheets, and shared source/segment data each have an
 independent 64 MiB accounting limit, including retained paths, names and vector
@@ -219,6 +234,11 @@ back the saved tracks; once the playlist has been created, a refresh failure doe
 not delete it. Task results retain `library_committed` and `playlist_id` for
 confirmed commits, including failures of later steps. The import is not replayed
 automatically; inspect the result before retrying a missing step.
+
+Imports retain every successfully resolved input occurrence in expanded input
+order, including repeated audio paths, CUE sheets, and CUE subtracks. Export writes
+every representable occurrence in saved order, preserving multiplicity on an M3U
+round trip subject to the CUE export restrictions below.
 
 Listings and exports include every entry, not only the visible rows. For listing
 changes and retry behavior, see link:02_library.adoc#_paged_views[Paged views].

@@ -178,8 +178,8 @@ or playlist tracks onto a Queue row uses the same before/after insertion line;
 blank space appends. Positional drops are unavailable while Queue is filtered.
 If the target queue changes during content resolution, the old position is
 rejected rather than falling back to append. Dragging queue occurrences to a
-playlist copies their track IDs in queue order without removing occurrences;
-playlist deduplication still applies.
+playlist copies every occurrence in queue order, including repeated tracks,
+without removing source occurrences.
 Removing the current occurrence stops playback; removing other occurrences does
 not. Queue controls remain available while the layout is locked.
 

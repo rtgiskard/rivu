@@ -318,6 +318,15 @@ impl Core {
             Command::RenamePlaylist { playlist_id, name } => {
                 self.rename_playlist(playlist_id, name)?;
             }
+            Command::DeduplicatePlaylist {
+                playlist_id,
+                expected_revision,
+            } => {
+                self.check_playlist_entry_revision(playlist_id, expected_revision)?;
+                if self.store.deduplicate_playlist(playlist_id)? {
+                    self.invalidate_playlist_members(&[playlist_id])?;
+                }
+            }
             Command::DeletePlaylist { playlist_id } => self.delete_playlist(playlist_id)?,
             Command::AddPlaylist {
                 playlist_id,

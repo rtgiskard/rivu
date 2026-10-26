@@ -1,4 +1,4 @@
-use super::positions::{PositionScope, close_gaps, move_selection};
+use super::positions::{close_gaps, move_selection};
 use super::rows::{LIBRARY_ROW_COLUMNS_QUALIFIED, library_row_at};
 use super::tracks::{SOURCE_FILTER, search_filter, search_query};
 use super::{Store, batch_limit};
@@ -29,14 +29,14 @@ fn reorder_interval(tx: &Transaction<'_>, start: i64, ids: &[u64]) -> Result<boo
     )?;
     tx.execute("INSERT INTO queue_order_update(id,position) SELECT value,?2+CAST(key AS INTEGER) FROM json_each(?1)", params![serde_json::to_string(ids)?, start])?;
     let matched: usize = tx.query_row(
-        "SELECT COUNT(*) FROM queue_order_update JOIN queue_entries USING(id) WHERE queue_entries.position>=?1 AND queue_entries.position<?2",
+        "SELECT COUNT(*) FROM queue_order_update JOIN playlist_entries USING(id) WHERE playlist_entries.playlist_id=0 AND playlist_entries.position>=?1 AND playlist_entries.position<?2",
         params![start, end], |row| integer(row, 0),
     )?;
     ensure!(
         matched == ids.len(),
         "Queue entry not found in target range"
     );
-    let changed = tx.execute("UPDATE queue_entries SET position=(SELECT position FROM queue_order_update WHERE queue_order_update.id=queue_entries.id) WHERE id IN (SELECT id FROM queue_order_update) AND position<>(SELECT position FROM queue_order_update WHERE queue_order_update.id=queue_entries.id)", [])?;
+    let changed = tx.execute("UPDATE playlist_entries SET position=(SELECT position FROM queue_order_update WHERE queue_order_update.id=playlist_entries.id) WHERE playlist_id=0 AND id IN (SELECT id FROM queue_order_update) AND position<>(SELECT position FROM queue_order_update WHERE queue_order_update.id=playlist_entries.id)", [])?;
     tx.execute_batch("DROP TABLE queue_order_update;")?;
     Ok(changed != 0)
 }
@@ -54,17 +54,17 @@ fn queue_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueueRow> {
 impl Store {
     #[cfg(test)]
     pub fn queue_state(&self) -> Result<QueueState> {
-        let total = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM queue_entries", [], |row| {
-                integer(row, 0)
-            })?;
+        let total = self.conn.query_row(
+            "SELECT COUNT(*) FROM playlist_entries WHERE playlist_id=0",
+            [],
+            |row| integer(row, 0),
+        )?;
         self.queue_projection(total, 0)
     }
 
     pub(crate) fn queue_projection(&self, total: usize, revision: u64) -> Result<QueueState> {
         Ok(self.conn.query_row(
-            "SELECT current_queue_entry_id,(SELECT position FROM queue_entries WHERE id=current_queue_entry_id) FROM rivu_meta WHERE singleton=1",
+            "SELECT current_queue_entry_id,(SELECT position FROM playlist_entries WHERE playlist_id=0 AND id=current_queue_entry_id) FROM rivu_meta WHERE singleton=1",
             [], |row| Ok(QueueState {
                 total,
                 current_id: row.get::<_, Option<i64>>(0)?.map(|value| u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, value))).transpose()?,
@@ -77,7 +77,7 @@ impl Store {
     pub(crate) fn queue_ids(&self) -> Result<Vec<u64>> {
         let mut statement = self
             .conn
-            .prepare("SELECT id FROM queue_entries ORDER BY position,id")?;
+            .prepare("SELECT id FROM playlist_entries WHERE playlist_id=0 ORDER BY position,id")?;
         Ok(statement
             .query_map([], |row| integer(row, 0))?
             .collect::<rusqlite::Result<_>>()?)
@@ -86,7 +86,7 @@ impl Store {
     pub(crate) fn extend_queue_ids(&self, ids: &mut Vec<u64>) -> Result<()> {
         let mut statement = self
             .conn
-            .prepare("SELECT id FROM queue_entries WHERE position>=?1 ORDER BY position,id")?;
+            .prepare("SELECT id FROM playlist_entries WHERE playlist_id=0 AND position>=?1 ORDER BY position,id")?;
         let mut rows = statement.query([ids.len() as i64])?;
         while let Some(row) = rows.next()? {
             ids.push(integer(row, 0)?);
@@ -98,7 +98,7 @@ impl Store {
         let id = i64::try_from(id).context("Queue entry ID exceeds database range")?;
         self.conn
             .query_row(
-                "SELECT track_id FROM queue_entries WHERE id=?1",
+                "SELECT track_id FROM playlist_entries WHERE playlist_id=0 AND id=?1",
                 [id],
                 |row| row.get(0),
             )
@@ -110,7 +110,7 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                "SELECT id FROM queue_entries WHERE track_id=?1 ORDER BY position,id LIMIT 1",
+                "SELECT id FROM playlist_entries WHERE playlist_id=0 AND track_id=?1 ORDER BY position,id LIMIT 1",
                 [track_id],
                 |row| integer(row, 0),
             )
@@ -122,6 +122,14 @@ impl Store {
             .map(i64::try_from)
             .transpose()
             .context("Queue entry ID exceeds database range")?;
+        if let Some(id) = current {
+            let exists: bool = self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM playlist_entries WHERE playlist_id=0 AND id=?1)",
+                [id],
+                |row| row.get(0),
+            )?;
+            ensure!(exists, "Queue entry not found");
+        }
         self.conn.execute(
             "UPDATE rivu_meta SET current_queue_entry_id=?1 WHERE singleton=1 AND current_queue_entry_id IS NOT ?1",
             [current],
@@ -139,9 +147,9 @@ impl Store {
         let filter = search_filter("t", "?1");
         let total = self.cached_count(super::CountDomain::Queue, &[query.as_deref().unwrap_or("")], || {
             if query.is_some() {
-                Ok(self.conn.query_row(&format!("SELECT COUNT(*) FROM queue_entries q JOIN tracks t ON t.id=q.track_id WHERE {filter}"), [query.as_deref()], |row| integer(row, 0))?)
+                Ok(self.conn.query_row(&format!("SELECT COUNT(*) FROM playlist_entries q JOIN tracks t ON t.id=q.track_id WHERE q.playlist_id=0 AND {filter}"), [query.as_deref()], |row| integer(row, 0))?)
             } else {
-                Ok(self.conn.query_row("SELECT COUNT(*) FROM queue_entries", [], |row| integer(row, 0))?)
+                Ok(self.conn.query_row("SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=0", [], |row| integer(row, 0))?)
             }
         })?;
         if limit == 0 {
@@ -155,7 +163,7 @@ impl Store {
         } else {
             "AND q.position>=?2 ORDER BY q.position,q.id LIMIT ?3"
         };
-        let mut statement = self.conn.prepare(&format!("SELECT q.id,q.track_id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED} FROM queue_entries q JOIN tracks t ON t.id=q.track_id WHERE {filter} {paging}"))?;
+        let mut statement = self.conn.prepare(&format!("SELECT q.id,q.track_id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED} FROM playlist_entries q JOIN tracks t ON t.id=q.track_id WHERE q.playlist_id=0 AND {filter} {paging}"))?;
         let mut rows = statement
             .query_map(
                 params![
@@ -188,7 +196,7 @@ impl Store {
             return Err(rivu_protocol::response::QueryError::RevisionChanged.into());
         }
         let filter = search_filter("t", "?4");
-        let mut statement = self.conn.prepare(&format!("SELECT q.id,q.track_id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED} FROM queue_entries q JOIN tracks t ON t.id=q.track_id WHERE (q.position,q.id)>(?1,?2) AND {filter} ORDER BY q.position,q.id LIMIT ?3"))?;
+        let mut statement = self.conn.prepare(&format!("SELECT q.id,q.track_id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED} FROM playlist_entries q JOIN tracks t ON t.id=q.track_id WHERE q.playlist_id=0 AND (q.position,q.id)>(?1,?2) AND {filter} ORDER BY q.position,q.id LIMIT ?3"))?;
         let (position, id) = after.map_or((-1, 0), |cursor| {
             (
                 cursor.cursor.position.min(i64::MAX as usize) as i64,
@@ -242,12 +250,12 @@ impl Store {
         // queue positions. Unfiltered reconciliation remains an indexed lookup.
         let sql = if query.is_some() {
             format!(
-                "WITH matched AS (SELECT q.id AS queue_id,q.track_id AS queue_track_id,q.position AS queue_position,{LIBRARY_ROW_COLUMNS_QUALIFIED},row_number() OVER (ORDER BY q.position,q.id)-1 AS match_offset FROM queue_entries q JOIN tracks t ON t.id=q.track_id WHERE {}) SELECT * FROM matched WHERE queue_id IN (SELECT value FROM json_each(?1)) ORDER BY queue_position,queue_id",
+                "WITH matched AS (SELECT q.id AS queue_id,q.track_id AS queue_track_id,q.position AS queue_position,{LIBRARY_ROW_COLUMNS_QUALIFIED},row_number() OVER (ORDER BY q.position,q.id)-1 AS match_offset FROM playlist_entries q JOIN tracks t ON t.id=q.track_id WHERE q.playlist_id=0 AND {}) SELECT * FROM matched WHERE queue_id IN (SELECT value FROM json_each(?1)) ORDER BY queue_position,queue_id",
                 search_filter("t", "?2")
             )
         } else {
             format!(
-                "SELECT q.id,q.track_id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED},q.position AS match_offset FROM queue_entries q JOIN tracks t ON t.id=q.track_id WHERE q.id IN (SELECT value FROM json_each(?1)) AND ?2 IS NULL ORDER BY q.position,q.id"
+                "SELECT q.id,q.track_id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED},q.position AS match_offset FROM playlist_entries q JOIN tracks t ON t.id=q.track_id WHERE q.playlist_id=0 AND q.id IN (SELECT value FROM json_each(?1)) AND ?2 IS NULL ORDER BY q.position,q.id"
             )
         };
         let mut statement = self.conn.prepare(&sql)?;
@@ -263,7 +271,7 @@ impl Store {
     pub(crate) fn enqueue_tracks(&self, ids: &[i64]) -> Result<bool> {
         let tx = self.conn.unchecked_transaction()?;
         let ids = self.validated_track_ids(ids)?;
-        let changed = tx.execute("INSERT INTO queue_entries(track_id,position) SELECT value,(SELECT COALESCE(MAX(position)+1,0) FROM queue_entries)+CAST(key AS INTEGER) FROM json_each(?1) ORDER BY CAST(key AS INTEGER)", [ids])?;
+        let changed = tx.execute("INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT 0,value,(SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=0)+CAST(key AS INTEGER) FROM json_each(?1) ORDER BY CAST(key AS INTEGER)", [ids])?;
         tx.commit()?;
         Ok(changed != 0)
     }
@@ -274,9 +282,12 @@ impl Store {
         ids: &[i64],
         other_roots: Option<&[PathBuf]>,
     ) -> Result<bool> {
+        if directories.is_empty() && other_roots.is_none() {
+            return self.enqueue_tracks(ids);
+        }
         let tx = self.conn.unchecked_transaction()?;
         let (directories, ids) = self.source_parameters(directories, ids, other_roots)?;
-        let changed = tx.execute(&format!("INSERT INTO queue_entries(track_id,position) SELECT tracks.id,(SELECT COALESCE(MAX(position)+1,0) FROM queue_entries)+row_number() OVER (ORDER BY tracks.id)-1 FROM tracks WHERE {SOURCE_FILTER} ORDER BY tracks.id"), params![directories, ids])?;
+        let changed = tx.execute(&format!("INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT 0,tracks.id,(SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=0)+row_number() OVER (ORDER BY tracks.id)-1 FROM tracks WHERE {SOURCE_FILTER} ORDER BY tracks.id"), params![directories, ids])?;
         tx.commit()?;
         Ok(changed != 0)
     }
@@ -293,15 +304,17 @@ impl Store {
         other_roots: Option<&[PathBuf]>,
         index: usize,
     ) -> Result<Vec<u64>> {
+        if directories.is_empty() && other_roots.is_none() {
+            return self.insert_queue_tracks(ids, index);
+        }
         let (directories, ids) = self.source_parameters(directories, ids, other_roots)?;
         self.insert_queue(&ids, Some(&directories), index)
     }
 
     fn insert_queue(&self, ids: &str, directories: Option<&str>, index: usize) -> Result<Vec<u64>> {
         let tx = self.conn.unchecked_transaction()?;
-        let count =
-            super::positions::insert_tracks(&tx, PositionScope::Queue, index, ids, directories)?;
-        let inserted = tx.prepare("SELECT id FROM queue_entries WHERE position>=?1 AND position<?2 ORDER BY position,id")?
+        let count = super::positions::insert_tracks(&tx, 0, index, ids, directories)?;
+        let inserted = tx.prepare("SELECT id FROM playlist_entries WHERE playlist_id=0 AND position>=?1 AND position<?2 ORDER BY position,id")?
             .query_map(params![i64::try_from(index)?, i64::try_from(index.checked_add(count).context("Queue insertion overflow")?)?], |row| integer(row, 0))?
             .collect::<rusqlite::Result<Vec<u64>>>()?;
         tx.commit()?;
@@ -309,15 +322,16 @@ impl Store {
     }
 
     pub(crate) fn replace_queue_from_playlist(&self, playlist: i64) -> Result<()> {
+        ensure!(playlist > 0, "Playlist not found");
         let tx = self.conn.unchecked_transaction()?;
-        let count: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM playlist_entries WHERE playlist_id=?1",
+        let nonempty: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM playlist_entries WHERE playlist_id=?1)",
             [playlist],
             |row| row.get(0),
         )?;
-        ensure!(count > 0, "Playlist is empty or not found");
-        tx.execute("DELETE FROM queue_entries", [])?;
-        tx.execute("INSERT INTO queue_entries(track_id,position) SELECT track_id,row_number() OVER (ORDER BY position,id)-1 FROM playlist_entries WHERE playlist_id=?1 ORDER BY position,id", [playlist])?;
+        ensure!(nonempty, "Playlist is empty or not found");
+        tx.execute("DELETE FROM playlist_entries WHERE playlist_id=0", [])?;
+        tx.execute("INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT 0,track_id,row_number() OVER (ORDER BY position,id)-1 FROM playlist_entries WHERE playlist_id=?1 ORDER BY position,id", [playlist])?;
         tx.commit()?;
         Ok(())
     }
@@ -325,30 +339,32 @@ impl Store {
     pub(crate) fn remove_queue_entries(&self, ids: &[u64]) -> Result<bool> {
         let tx = self.conn.unchecked_transaction()?;
         let ids = serde_json::to_string(ids)?;
-        let missing: Option<i64> = tx.query_row("SELECT value FROM json_each(?1) WHERE value NOT IN (SELECT id FROM queue_entries) LIMIT 1", [&ids], |row| row.get(0)).optional()?;
+        let missing: Option<i64> = tx.query_row("SELECT requested.value FROM json_each(?1) AS requested WHERE NOT EXISTS (SELECT 1 FROM playlist_entries AS e WHERE e.id=requested.value AND e.playlist_id=0) LIMIT 1", [&ids], |row| row.get(0)).optional()?;
         ensure!(
             missing.is_none(),
             "Queue entry not found: {}",
             missing.unwrap_or_default()
         );
         let positions = tx
-            .prepare("SELECT position FROM queue_entries WHERE id IN (SELECT value FROM json_each(?1)) ORDER BY position")?
+            .prepare("SELECT position FROM playlist_entries WHERE playlist_id=0 AND id IN (SELECT value FROM json_each(?1)) ORDER BY position")?
             .query_map([&ids], |row| row.get::<_, i64>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         tx.execute(
-            "DELETE FROM queue_entries WHERE id IN (SELECT value FROM json_each(?1))",
+            "DELETE FROM playlist_entries WHERE playlist_id=0 AND id IN (SELECT value FROM json_each(?1))",
             [&ids],
         )?;
-        close_gaps(&tx, &positions, PositionScope::Queue)?;
+        close_gaps(&tx, &positions, 0)?;
         tx.commit()?;
         Ok(!positions.is_empty())
     }
 
     pub(crate) fn reorder_queue(&self, ids: &[u64]) -> Result<bool> {
         let tx = self.conn.unchecked_transaction()?;
-        let total: usize = tx.query_row("SELECT COUNT(*) FROM queue_entries", [], |row| {
-            integer(row, 0)
-        })?;
+        let total: usize = tx.query_row(
+            "SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=0",
+            [],
+            |row| integer(row, 0),
+        )?;
         ensure!(
             total == ids.len(),
             "Queue order does not contain every entry"
@@ -361,14 +377,35 @@ impl Store {
     pub(crate) fn move_queue_entries(&self, selected: &[(i64, i64)], index: usize) -> Result<bool> {
         let tx = self.conn.unchecked_transaction()?;
         let insertion = i64::try_from(index).context("Queue target exceeds database range")?;
-        let changed = move_selection(&tx, PositionScope::Queue, selected, insertion)?;
+        ensure!(
+            selected.windows(2).all(|pair| pair[0].1 < pair[1].1),
+            "Queue selection is not in occurrence order"
+        );
+        let total: usize = tx.query_row(
+            "SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=0",
+            [],
+            |row| integer(row, 0),
+        )?;
+        ensure!(
+            selected.len() <= total && index <= total - selected.len(),
+            "Queue target out of range"
+        );
+        let matched: usize = tx.query_row(
+            "SELECT COUNT(*) FROM json_each(?1) AS picked JOIN playlist_entries AS e ON e.id=json_extract(picked.value,'$[0]') AND e.position=json_extract(picked.value,'$[1]') WHERE e.playlist_id=0",
+            [serde_json::to_string(selected)?], |row| integer(row, 0),
+        )?;
+        ensure!(
+            matched == selected.len(),
+            "Queue entry not found in selection"
+        );
+        let changed = move_selection(&tx, 0, selected, insertion)?;
         tx.commit()?;
         Ok(changed)
     }
 
     pub(crate) fn clear_queue(&self) -> Result<bool> {
         let tx = self.conn.unchecked_transaction()?;
-        let changed = tx.execute("DELETE FROM queue_entries", [])?;
+        let changed = tx.execute("DELETE FROM playlist_entries WHERE playlist_id=0", [])?;
         tx.commit()?;
         Ok(changed != 0)
     }
@@ -378,15 +415,15 @@ impl Store {
         // Removed slots are the original non-first occurrences, even when the
         // playing occurrence is relocated to replace its track's first one.
         let positions = tx
-            .prepare("WITH ranked AS (SELECT position,row_number() OVER (PARTITION BY track_id ORDER BY position,id) AS occurrence FROM queue_entries) SELECT position FROM ranked WHERE occurrence>1 ORDER BY position")?
+            .prepare("WITH ranked AS (SELECT position,row_number() OVER (PARTITION BY track_id ORDER BY position,id) AS occurrence FROM playlist_entries WHERE playlist_id=0) SELECT position FROM ranked WHERE occurrence>1 ORDER BY position")?
             .query_map([], |row| row.get::<_, i64>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         if positions.is_empty() {
             return Ok(false);
         }
         // Keep the playing occurrence's identity, but move it to its track's first position.
-        tx.execute_batch("UPDATE queue_entries SET position=(SELECT MIN(other.position) FROM queue_entries other WHERE other.track_id=queue_entries.track_id) WHERE id=(SELECT current_queue_entry_id FROM rivu_meta) AND position<>(SELECT MIN(other.position) FROM queue_entries other WHERE other.track_id=queue_entries.track_id); WITH ranked AS (SELECT id,row_number() OVER (PARTITION BY track_id ORDER BY CASE WHEN id=(SELECT current_queue_entry_id FROM rivu_meta) THEN 0 ELSE 1 END,position,id) AS occurrence FROM queue_entries) DELETE FROM queue_entries WHERE id IN (SELECT id FROM ranked WHERE occurrence>1);")?;
-        close_gaps(&tx, &positions, PositionScope::Queue)?;
+        tx.execute_batch("UPDATE playlist_entries SET position=(SELECT MIN(other.position) FROM playlist_entries other WHERE other.playlist_id=0 AND other.track_id=playlist_entries.track_id) WHERE playlist_id=0 AND id=(SELECT current_queue_entry_id FROM rivu_meta) AND position<>(SELECT MIN(other.position) FROM playlist_entries other WHERE other.playlist_id=0 AND other.track_id=playlist_entries.track_id); WITH ranked AS (SELECT id,row_number() OVER (PARTITION BY track_id ORDER BY CASE WHEN id=(SELECT current_queue_entry_id FROM rivu_meta) THEN 0 ELSE 1 END,position,id) AS occurrence FROM playlist_entries WHERE playlist_id=0) DELETE FROM playlist_entries WHERE playlist_id=0 AND id IN (SELECT id FROM ranked WHERE occurrence>1);")?;
+        close_gaps(&tx, &positions, 0)?;
         tx.commit()?;
         Ok(true)
     }
@@ -493,7 +530,7 @@ mod tests {
         let order = store.queue_ids()?;
         store.set_queue_current(Some(order[2]))?;
         let before = store.queue_state()?;
-        store.conn.execute_batch("CREATE TEMP TRIGGER reject_insertion BEFORE INSERT ON queue_entries WHEN new.track_id=3 BEGIN SELECT RAISE(ABORT,'reject entry'); END;")?;
+        store.conn.execute_batch("CREATE TEMP TRIGGER reject_insertion BEFORE INSERT ON playlist_entries WHEN new.playlist_id=0 AND new.track_id=3 BEGIN SELECT RAISE(ABORT,'reject entry'); END;")?;
         assert!(store.insert_queue_tracks(&[3, 3], 1).is_err());
         assert!(
             store
@@ -619,9 +656,9 @@ mod tests {
         let playlist = store.create_playlist("Replacement")?;
         store.add_playlist(playlist, &[2, 3])?;
         store.conn.execute_batch(
-            "CREATE TEMP TRIGGER reject_queue_insert AFTER INSERT ON queue_entries BEGIN SELECT RAISE(ABORT,'injected failure'); END;
-             CREATE TEMP TRIGGER reject_queue_update AFTER UPDATE ON queue_entries BEGIN SELECT RAISE(ABORT,'injected failure'); END;
-             CREATE TEMP TRIGGER reject_queue_delete AFTER DELETE ON queue_entries BEGIN SELECT RAISE(ABORT,'injected failure'); END;",
+            "CREATE TEMP TRIGGER reject_queue_insert AFTER INSERT ON playlist_entries WHEN new.playlist_id=0 BEGIN SELECT RAISE(ABORT,'injected failure'); END;
+             CREATE TEMP TRIGGER reject_queue_update AFTER UPDATE ON playlist_entries WHEN new.playlist_id=0 BEGIN SELECT RAISE(ABORT,'injected failure'); END;
+             CREATE TEMP TRIGGER reject_queue_delete AFTER DELETE ON playlist_entries WHEN old.playlist_id=0 BEGIN SELECT RAISE(ABORT,'injected failure'); END;",
         )?;
         assert!(store.enqueue_tracks(&[1]).is_err());
         assert!(store.enqueue_sources(&[], &[1], None).is_err());

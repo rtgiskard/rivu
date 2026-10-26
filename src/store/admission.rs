@@ -1,5 +1,5 @@
 use super::Store;
-use super::positions::{PositionScope, insert_tracks};
+use super::positions::insert_tracks;
 use super::scan::{PROBE_VERSION, ScanImpacts};
 use crate::library::ExternalAdmission;
 use anyhow::{Context, Result, ensure};
@@ -23,7 +23,7 @@ impl Store {
         );
         let tx = self.conn.unchecked_transaction()?;
         let total = usize::try_from(tx.query_row(
-            "SELECT COALESCE(MAX(position)+1,0) FROM queue_entries",
+            "SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=0",
             [],
             |row| row.get::<_, i64>(0),
         )?)
@@ -148,17 +148,11 @@ impl Store {
             .iter()
             .map(|&index| resolved[index])
             .collect();
-        let count = insert_tracks(
-            &tx,
-            PositionScope::Queue,
-            insertion,
-            &serde_json::to_string(&ids)?,
-            None,
-        )?;
+        let count = insert_tracks(&tx, 0, insertion, &serde_json::to_string(&ids)?, None)?;
         let end = insertion
             .checked_add(count)
             .context("Queue insertion overflow")?;
-        let inserted = tx.prepare("SELECT id FROM queue_entries WHERE position>=?1 AND position<?2 ORDER BY position,id")?
+        let inserted = tx.prepare("SELECT id FROM playlist_entries WHERE playlist_id=0 AND position>=?1 AND position<?2 ORDER BY position,id")?
             .query_map(params![i64::try_from(insertion)?, i64::try_from(end)?], |row| {
                 let value = row.get::<_, i64>(0)?;
                 u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, value))
@@ -297,7 +291,7 @@ mod tests {
                 .is_none()
         );
         let before = store.queue_state().unwrap();
-        store.conn.execute_batch("CREATE TEMP TRIGGER reject_admission BEFORE INSERT ON queue_entries BEGIN SELECT RAISE(ABORT,'rejected queue write'); END;").unwrap();
+        store.conn.execute_batch("CREATE TEMP TRIGGER reject_admission BEFORE INSERT ON playlist_entries WHEN new.playlist_id=0 BEGIN SELECT RAISE(ABORT,'rejected queue write'); END;").unwrap();
         assert!(store.admit_external_queue(&next, None, None).is_err());
         assert!(
             store
