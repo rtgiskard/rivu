@@ -174,6 +174,7 @@ pub enum AudioVisualizerStyle {
     SpatialSpectrum,
     FractalBeams,
     FractalFlow,
+    Oscilloscope,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

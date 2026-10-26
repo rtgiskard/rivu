@@ -19,6 +19,8 @@ pub struct VisualizerDemand {
     pub stereo_density: bool,
     pub spatial_spectrum: bool,
     pub band_energy: bool,
+    /// Unwindowed stereo samples for the oscilloscope.
+    pub pcm: bool,
 }
 
 impl VisualizerDemand {
@@ -27,6 +29,7 @@ impl VisualizerDemand {
             stereo_density: bits & 1 != 0,
             spatial_spectrum: bits & 2 != 0,
             band_energy: bits & 4 != 0,
+            pcm: bits & 16 != 0,
         }
     }
 
@@ -34,6 +37,7 @@ impl VisualizerDemand {
         u64::from(self.stereo_density)
             | (u64::from(self.spatial_spectrum) << 1)
             | (u64::from(self.band_energy) << 2)
+            | (u64::from(self.pcm) << 4)
     }
 }
 
@@ -45,7 +49,7 @@ pub struct DisplayDemand {
 }
 
 impl DisplayDemand {
-    const MASK: u64 = 15;
+    const MASK: u64 = 31;
 
     fn from_bits(bits: u64) -> Self {
         Self {
@@ -94,11 +98,37 @@ pub struct SpatialBin {
     pub power: f32,
 }
 
+/// Immutable recent stereo PCM, shared without copying between displays.
+/// An empty snapshot owns no allocation; live publications use bounded slots.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PcmSnapshot(Option<Arc<Vec<[f32; 2]>>>);
+
+impl std::ops::Deref for PcmSnapshot {
+    type Target = [[f32; 2]];
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_deref().map_or(&[], Vec::as_slice)
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl From<Vec<[f32; 2]>> for PcmSnapshot {
+    fn from(samples: Vec<[f32; 2]>) -> Self {
+        Self(Some(Arc::new(samples)))
+    }
+}
+
+// Each prepared analyzer owns at most 160 KiB of reusable PCM sample storage.
+// Slow consumers coalesce publications instead of growing this pool.
+const PCM_SNAPSHOT_COUNT: usize = 5;
+const PCM_SNAPSHOT_FRAMES: usize = 4096;
+
 #[derive(Debug, Default)]
 pub struct VisualizerFrame {
     pub demand: VisualizerDemand,
     pub density: DensitySnapshot,
     pub spatial: Vec<SpatialBin>,
+    pub pcm: PcmSnapshot,
     pub correlation: Option<f32>,
     pub balance: Option<f32>,
     pub side_ratio: Option<f32>,
@@ -124,6 +154,11 @@ impl Clone for VisualizerFrame {
             self.spatial.clone_from(&source.spatial);
         } else {
             self.spatial = Vec::new();
+        }
+        if source.demand.pcm {
+            self.pcm.clone_from(&source.pcm);
+        } else {
+            self.pcm = PcmSnapshot::default();
         }
         self.correlation = source.correlation;
         self.balance = source.balance;
@@ -596,6 +631,7 @@ struct SpectrumAnalyzer {
     metadata_dirty: bool,
     visualizer: VisualizerFrame,
     density: Option<DensityField>,
+    pcm_snapshots: Option<[Arc<Vec<[f32; 2]>>; PCM_SNAPSHOT_COUNT]>,
 }
 
 impl SpectrumAnalyzer {
@@ -663,6 +699,7 @@ impl SpectrumAnalyzer {
             metadata_dirty: true,
             visualizer: VisualizerFrame::default(),
             density: None,
+            pcm_snapshots: None,
         }
     }
 
@@ -679,6 +716,7 @@ impl SpectrumAnalyzer {
         self.visualizer.balance = None;
         self.visualizer.side_ratio = None;
         self.visualizer.band_rms = [0.0; 3];
+        self.visualizer.pcm = PcmSnapshot::default();
     }
 
     fn set_visualizer_demand(&mut self, demand: VisualizerDemand) {
@@ -702,6 +740,16 @@ impl SpectrumAnalyzer {
         }
         if !demand.band_energy {
             self.visualizer.band_rms = [0.0; 3];
+        }
+        if demand.pcm {
+            self.pcm_snapshots.get_or_insert_with(|| {
+                std::array::from_fn(|_| {
+                    Arc::new(vec![[0.0; 2]; self.rolling.len().min(PCM_SNAPSHOT_FRAMES)])
+                })
+            });
+        } else {
+            self.visualizer.pcm = PcmSnapshot::default();
+            self.pcm_snapshots = None;
         }
         self.visualizer.demand = demand;
     }
@@ -823,9 +871,38 @@ impl SpectrumAnalyzer {
         [(rms[0] / n as f32).sqrt(), (rms[1] / n as f32).sqrt()]
     }
 
+    fn snapshot_pcm(&mut self) {
+        // Release the worker's handle before seeking a uniquely owned slot.
+        self.visualizer.pcm = PcmSnapshot::default();
+        let Some(slots) = &mut self.pcm_snapshots else {
+            return;
+        };
+        for slot in slots {
+            if let Some(samples) = Arc::get_mut(slot) {
+                let n = self.rolling.len();
+                let start = (self.head + n - samples.len()) % n;
+                let first_len = samples.len().min(n - start);
+                let second_len = samples.len() - first_len;
+                let (first, second) = samples.split_at_mut(first_len);
+                first.copy_from_slice(&self.rolling[start..start + first_len]);
+                second.copy_from_slice(&self.rolling[..second_len]);
+                self.visualizer.pcm = PcmSnapshot(Some(Arc::clone(slot)));
+                return;
+            }
+        }
+        // All slots held by slow consumers: coalesce the entire publication,
+        // never allocate, wait, or pair old PCM with new metrics.
+    }
+
     fn publish(&mut self, frame: &mut AnalysisFrame, rms: [f32; 2], sample_time: Duration) -> bool {
         if self.visualizer.demand.stereo_density && self.visualizer.density.is_empty() {
             return false;
+        }
+        if self.visualizer.demand.pcm {
+            self.snapshot_pcm();
+            if self.visualizer.pcm.is_empty() {
+                return false;
+            }
         }
         // clone_from reuses storage for steady-state publications.
         if self.metadata_dirty {
@@ -1193,21 +1270,31 @@ mod tests {
         stereo_density: true,
         spatial_spectrum: false,
         band_energy: false,
+        pcm: false,
     };
     const SPATIAL_DEMAND: VisualizerDemand = VisualizerDemand {
         stereo_density: false,
         spatial_spectrum: true,
         band_energy: false,
+        pcm: false,
     };
     const BAND_ENERGY_DEMAND: VisualizerDemand = VisualizerDemand {
         stereo_density: false,
         spatial_spectrum: false,
         band_energy: true,
+        pcm: false,
+    };
+    const PCM_DEMAND: VisualizerDemand = VisualizerDemand {
+        stereo_density: false,
+        spatial_spectrum: false,
+        band_energy: false,
+        pcm: true,
     };
     const ALL_DEMAND: VisualizerDemand = VisualizerDemand {
         stereo_density: true,
         spatial_spectrum: true,
         band_energy: true,
+        pcm: true,
     };
 
     fn visualizer_settings() -> AnalysisSettings {
@@ -1226,6 +1313,300 @@ mod tests {
     }
 
     #[test]
+    fn pcm_preserves_unwindowed_stereo_and_latest_bounded_sample_order() {
+        for window in [
+            AnalysisWindow::None,
+            AnalysisWindow::Hann,
+            AnalysisWindow::BlackmanHarris,
+        ] {
+            for fft_size in [512, 8192] {
+                let mut analyzer = SpectrumAnalyzer::new(
+                    AnalysisSettings {
+                        fft_size,
+                        window,
+                        ..visualizer_settings()
+                    },
+                    48_000,
+                );
+                analyzer.set_visualizer_demand(PCM_DEMAND);
+                let total = fft_size as usize + 37;
+                let sample =
+                    |index: usize| [index as f32 / 2048.0 - 1.25, 0.75 - index as f32 / 4096.0];
+                for index in 0..total {
+                    analyzer.push(sample(index));
+                }
+                let rms = analyzer.transform();
+                let mut frame = AnalysisFrame::default();
+                assert!(analyzer.publish(&mut frame, rms, Duration::from_secs(1)));
+                let count = (fft_size as usize).min(PCM_SNAPSHOT_FRAMES);
+                assert_eq!(frame.visualizer.pcm.len(), count);
+                for (offset, actual) in frame.visualizer.pcm.iter().enumerate() {
+                    assert_eq!(*actual, sample(total - count + offset));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pcm_snapshots_isolate_slow_consumers_and_coalesce_until_a_slot_is_released() {
+        let mut analyzer = visualizer_analyzer(PCM_DEMAND);
+        let slots = analyzer.pcm_snapshots.as_ref().unwrap().each_ref();
+        let pointers = slots.map(|slot| slot.as_ptr());
+        let mut frame = AnalysisFrame::default();
+        let mut retained = Vec::new();
+        for (index, pointer) in pointers.iter().enumerate() {
+            let samples = [0.125 * index as f32, -0.0625 * index as f32];
+            for _ in 0..512 {
+                analyzer.push(samples);
+            }
+            let rms = analyzer.transform();
+            assert!(analyzer.publish(
+                &mut frame,
+                rms,
+                Duration::from_millis(100 * (index + 1) as u64),
+            ));
+            assert_eq!(frame.visualizer.pcm.as_ptr(), *pointer);
+            retained.push((frame.clone(), samples));
+        }
+        let previous = frame.clone();
+        for _ in 0..512 {
+            analyzer.push([0.75, -0.5]);
+        }
+        let rms = analyzer.transform();
+        assert!(!analyzer.publish(&mut frame, rms, Duration::from_secs(1)));
+        assert_eq!(frame.sequence, previous.sequence);
+        assert_eq!(frame.sample_time, previous.sample_time);
+        assert_eq!(frame.generation, previous.generation);
+        assert_eq!(frame.spectrum_db, previous.spectrum_db);
+        assert_eq!(frame.rms_left, previous.rms_left);
+        assert_eq!(frame.rms_right, previous.rms_right);
+        assert_eq!(frame.visualizer.pcm, previous.visualizer.pcm);
+        for (snapshot, samples) in &retained {
+            assert!(
+                snapshot
+                    .visualizer
+                    .pcm
+                    .iter()
+                    .all(|actual| actual == samples)
+            );
+        }
+
+        let released = retained.remove(0).0.visualizer.pcm.as_ptr();
+        assert!(analyzer.publish(&mut frame, rms, Duration::from_secs(1)));
+        assert_eq!(frame.visualizer.pcm.as_ptr(), released);
+        assert_eq!(frame.sequence, previous.sequence + 1);
+        assert_eq!(frame.sample_time, Duration::from_secs(1));
+        assert!(
+            frame
+                .visualizer
+                .pcm
+                .iter()
+                .all(|sample| *sample == [0.75, -0.5])
+        );
+        assert_eq!(
+            analyzer
+                .pcm_snapshots
+                .as_ref()
+                .unwrap()
+                .each_ref()
+                .map(|slot| slot.as_ptr()),
+            pointers,
+        );
+        for (snapshot, samples) in &retained {
+            assert!(
+                snapshot
+                    .visualizer
+                    .pcm
+                    .iter()
+                    .all(|actual| actual == samples)
+            );
+        }
+
+        let weak = analyzer
+            .pcm_snapshots
+            .as_ref()
+            .unwrap()
+            .each_ref()
+            .map(Arc::downgrade);
+        analyzer.set_visualizer_demand(VisualizerDemand::default());
+        frame = AnalysisFrame::default();
+        retained.clear();
+        drop(previous);
+        assert!(frame.visualizer.pcm.is_empty());
+        assert!(weak.iter().all(|slot| slot.upgrade().is_none()));
+    }
+
+    #[test]
+    fn pcm_reset_and_demand_release_handles_without_mutating_retained_samples() {
+        let mut analyzer = visualizer_analyzer(PCM_DEMAND);
+        for _ in 0..512 {
+            analyzer.push([0.5, -0.25]);
+        }
+        let rms = analyzer.transform();
+        let mut frame = AnalysisFrame::default();
+        assert!(analyzer.publish(&mut frame, rms, Duration::from_secs(1)));
+        let retained = frame.visualizer.pcm.clone();
+        let slots = analyzer.pcm_snapshots.as_ref().unwrap().each_ref();
+        let pointers = slots.map(|slot| slot.as_ptr());
+        let weak = slots.map(Arc::downgrade);
+        analyzer.reset();
+        frame.visualizer.clone_from(&analyzer.visualizer);
+        assert!(analyzer.visualizer.pcm.is_empty());
+        assert!(frame.visualizer.pcm.is_empty());
+        assert_eq!(
+            analyzer
+                .pcm_snapshots
+                .as_ref()
+                .unwrap()
+                .each_ref()
+                .map(|slot| slot.as_ptr()),
+            pointers,
+        );
+        assert!(retained.iter().all(|sample| *sample == [0.5, -0.25]));
+        analyzer.set_visualizer_demand(VisualizerDemand::default());
+        assert!(analyzer.pcm_snapshots.is_none());
+        assert!(weak[0].upgrade().is_some());
+        assert!(weak[1..].iter().all(|slot| slot.upgrade().is_none()));
+
+        // A disabled style cannot keep a stale handle through staging clones.
+        let disabled = VisualizerFrame {
+            pcm: retained,
+            ..VisualizerFrame::default()
+        };
+        frame.visualizer.clone_from(&disabled);
+        assert!(frame.visualizer.pcm.is_empty());
+        drop(disabled);
+        assert!(weak.iter().all(|slot| slot.upgrade().is_none()));
+    }
+
+    #[test]
+    fn worker_pcm_control_transitions_invalidate_and_require_a_current_complete_window() {
+        for transition in ["hide", "pause", "still", "reset", "settings", "demand"] {
+            let shared = Arc::new(RwLock::new(AnalysisFrame::default()));
+            let worker = AnalysisWorker::new(shared.clone()).unwrap();
+            let settings = AnalysisSettings {
+                fps: 60,
+                ..visualizer_settings()
+            };
+            worker.configure(settings);
+            worker.control.set_display_demand(DisplayDemand {
+                enabled: true,
+                visualizer: PCM_DEMAND,
+            });
+            set_test_playback(&worker, true);
+            let mut producer = worker.producer();
+            let old_epoch = worker.control.epoch.load(Ordering::Acquire);
+            let old_token = worker.control.display_token();
+            push_window(&mut producer, old_epoch, old_token, [0.5, -0.25]);
+            worker.control.request_frame();
+            wait_for_frame(&shared, |frame| frame.settings.is_some());
+            let retired = shared.read().clone();
+            let old_slot = Arc::downgrade(retired.visualizer.pcm.0.as_ref().unwrap());
+
+            match transition {
+                "hide" => {
+                    worker.control.set_display_enabled(false);
+                    wait_for_frame(&shared, |frame| frame.settings.is_none());
+                    assert!(shared.read().visualizer.pcm.is_empty());
+                    worker.control.set_display_enabled(true);
+                }
+                "pause" => {
+                    worker.set_playback_active(false);
+                    wait_for_frame(&shared, |frame| frame.settings.is_none());
+                    assert!(shared.read().visualizer.pcm.is_empty());
+                    worker.set_playback_active(true);
+                }
+                "still" => {
+                    worker.set_still_mode(true);
+                    wait_for_frame(&shared, |frame| frame.settings.is_none());
+                    assert!(shared.read().visualizer.pcm.is_empty());
+                    worker.set_still_mode(false);
+                }
+                "reset" => worker.reset(96_000),
+                "settings" => worker.configure(AnalysisSettings {
+                    fft_size: 1024,
+                    window: AnalysisWindow::Hann,
+                    signal: VisualizationSignal::Before,
+                    ..settings
+                }),
+                "demand" => {
+                    worker.control.set_display_demand(DisplayDemand {
+                        enabled: true,
+                        visualizer: VisualizerDemand::default(),
+                    });
+                    wait_for_frame(&shared, |frame| frame.settings.is_none());
+                    assert!(shared.read().visualizer.pcm.is_empty());
+                    worker.control.set_display_demand(DisplayDemand {
+                        enabled: true,
+                        visualizer: PCM_DEMAND,
+                    });
+                }
+                _ => unreachable!(),
+            }
+            let epoch = worker.control.epoch.load(Ordering::Acquire);
+            let token = worker.control.display_token();
+            wait_for_frame(&shared, |frame| {
+                frame.generation > retired.generation
+                    && frame.display_token == token
+                    && frame.settings.is_none()
+            });
+            assert!(shared.read().visualizer.pcm.is_empty());
+            push_window(&mut producer, old_epoch, old_token, [1.0, -1.0]);
+            let samples = [0.125, -0.375];
+            let count = worker.settings().fft_size as usize;
+            for _ in 0..count - 1 {
+                assert!(
+                    producer
+                        .try_push(TapFrame {
+                            samples,
+                            epoch,
+                            demand_token: token,
+                            gap: false,
+                        })
+                        .is_ok()
+                );
+            }
+            worker.control.request_frame();
+            wait_until(|| producer.occupied_len() == 0);
+            assert_eq!(shared.read().settings, None);
+            assert!(shared.read().visualizer.pcm.is_empty());
+            assert!(
+                producer
+                    .try_push(TapFrame {
+                        samples,
+                        epoch,
+                        demand_token: token,
+                        gap: false,
+                    })
+                    .is_ok()
+            );
+            worker.control.request_frame();
+            wait_for_frame(&shared, |frame| frame.settings.is_some());
+            let frame = shared.read();
+            assert_eq!(frame.display_token, token);
+            assert_eq!(frame.settings, Some(worker.settings()));
+            assert!(frame.generation > retired.generation);
+            assert_eq!(frame.visualizer.pcm.len(), count);
+            assert!(frame.visualizer.pcm.iter().all(|actual| *actual == samples));
+            assert!(
+                retired
+                    .visualizer
+                    .pcm
+                    .iter()
+                    .all(|sample| *sample == [0.5, -0.25])
+            );
+            drop(frame);
+            drop(retired);
+            // Destructive settings replace storage only after current audio;
+            // suspension alone preserves the prepared pool for reuse.
+            assert_eq!(
+                old_slot.upgrade().is_none(),
+                matches!(transition, "reset" | "settings")
+            );
+        }
+    }
+
+    #[test]
     fn demand_flags_and_transition_epoch_are_packed_coherently() {
         let worker = AnalysisWorker::new(Arc::new(RwLock::new(AnalysisFrame::default()))).unwrap();
         let mut previous = 0;
@@ -1236,7 +1617,10 @@ mod tests {
             let token = worker.control.display_token();
             assert_eq!(DisplayDemand::from_bits(token), demand);
             if bits != 0 {
-                assert_eq!(token & !DisplayDemand::MASK, previous + 16);
+                assert_eq!(
+                    token & !DisplayDemand::MASK,
+                    previous + DisplayDemand::MASK + 1
+                );
             }
             previous = token & !DisplayDemand::MASK;
             worker.control.set_display_demand(demand);
@@ -1247,7 +1631,10 @@ mod tests {
         worker
             .control
             .set_display_demand(DisplayDemand::from_bits(DisplayDemand::MASK));
-        assert_eq!(worker.control.display_token(), before + 32);
+        assert_eq!(
+            worker.control.display_token(),
+            before + 2 * (DisplayDemand::MASK + 1)
+        );
     }
 
     #[test]
@@ -1260,7 +1647,13 @@ mod tests {
         };
         let mut combined = SpectrumAnalyzer::new(settings, 32768);
         combined.set_visualizer_demand(ALL_DEMAND);
-        let mut separate = [DENSITY_DEMAND, SPATIAL_DEMAND, BAND_ENERGY_DEMAND].map(|demand| {
+        let mut separate = [
+            DENSITY_DEMAND,
+            SPATIAL_DEMAND,
+            BAND_ENERGY_DEMAND,
+            PCM_DEMAND,
+        ]
+        .map(|demand| {
             let mut analyzer = SpectrumAnalyzer::new(settings, 32768);
             analyzer.set_visualizer_demand(demand);
             analyzer
@@ -1316,6 +1709,9 @@ mod tests {
             separate[1].visualizer.spatial.len()
         );
         assert_eq!(frame.visualizer.band_rms, separate[2].visualizer.band_rms);
+        let mut pcm_frame = AnalysisFrame::default();
+        assert!(separate[3].publish(&mut pcm_frame, rms, Duration::from_millis(125)));
+        assert_eq!(frame.visualizer.pcm, pcm_frame.visualizer.pcm);
         assert_eq!(frame.sample_time, Duration::from_millis(125));
         assert_eq!(frame.sequence, 1);
     }
@@ -1886,6 +2282,7 @@ mod tests {
         });
         let frame = shared.read();
         assert!(frame.visualizer.density.is_empty());
+        assert!(frame.visualizer.pcm.is_empty());
         assert_eq!(frame.visualizer.spatial.capacity(), 0);
         assert_eq!(frame.visualizer.band_rms, [0.0; 3]);
     }
@@ -2225,6 +2622,12 @@ mod tests {
                 density.snapshots.each_ref().map(|slot| slot.as_ptr()),
                 analyzer.visualizer.spatial.as_ptr(),
                 analyzer.visualizer.spatial.capacity(),
+                analyzer
+                    .pcm_snapshots
+                    .as_ref()
+                    .unwrap()
+                    .each_ref()
+                    .map(|slot| slot.as_ptr()),
             )
         };
         let prepared_storage = storage(analyzer);
@@ -2249,6 +2652,8 @@ mod tests {
             assert!(shared.read().spectrum_db.is_empty());
             assert!(shared.read().visualizer.density.is_empty());
             assert_eq!(shared.read().visualizer.spatial.capacity(), 0);
+            assert!(analyzer.visualizer.pcm.is_empty());
+            assert!(shared.read().visualizer.pcm.is_empty());
 
             // Desired configuration may change repeatedly while suspended;
             // returning to the prepared configuration must not rebuild it.
@@ -2300,6 +2705,14 @@ mod tests {
             assert!(!frame.frequencies_hz.is_empty());
             assert_eq!(frame.frequencies_hz.len(), frame.spectrum_db.len());
             assert!(frame.visualizer.density.iter().all(|cell| *cell == 0.0));
+            assert_eq!(frame.visualizer.pcm.len(), 512);
+            assert!(
+                frame
+                    .visualizer
+                    .pcm
+                    .iter()
+                    .all(|sample| *sample == [0.0; 2])
+            );
             assert!(
                 frame
                     .visualizer
@@ -2847,6 +3260,7 @@ mod tests {
             assert_eq!(shared.read().visualizer.demand, VisualizerDemand::default());
             assert!(shared.read().visualizer.density.is_empty());
             assert_eq!(shared.read().visualizer.spatial.capacity(), 0);
+            assert!(shared.read().visualizer.pcm.is_empty());
             worker.control.set_display_demand(DisplayDemand {
                 enabled: true,
                 visualizer: BAND_ENERGY_DEMAND,
@@ -2886,6 +3300,14 @@ mod tests {
         assert!(frame.visualizer.density.iter().all(|value| *value == 0.0));
         assert_eq!(frame.visualizer.demand, ALL_DEMAND);
         assert_eq!(frame.visualizer.density.len(), DENSITY_SIDE * DENSITY_SIDE);
+        assert_eq!(frame.visualizer.pcm.len(), settings.fft_size as usize);
+        assert!(
+            frame
+                .visualizer
+                .pcm
+                .iter()
+                .all(|sample| *sample == [0.0; 2])
+        );
         assert_eq!(
             frame.visualizer.spatial.len(),
             settings.fft_size as usize / 2

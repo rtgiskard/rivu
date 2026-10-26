@@ -1,6 +1,21 @@
 use super::*;
 
 #[test]
+fn oscilloscope_style_roundtrips_global_defaults_and_incremental_edits() {
+    let original = "[visualizations.audio_visualizer]\nstyle = 'oscilloscope'\n";
+    let config = from_toml(original).unwrap();
+    assert_eq!(
+        config.audio_visualizer_style,
+        AudioVisualizerStyle::Oscilloscope
+    );
+    config.validate().unwrap();
+    assert_eq!(from_toml(&to_toml(&config).unwrap()).unwrap(), config);
+    let baseline = Config::default();
+    let saved = update_toml("", Some(&baseline), &config).unwrap();
+    assert_eq!(from_toml(&saved).unwrap(), config);
+}
+
+#[test]
 fn file_and_direct_configuration_inputs_share_the_byte_budget() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");

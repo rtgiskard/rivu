@@ -1592,6 +1592,7 @@ mod state_tests {
                 stereo_density: true,
                 spatial_spectrum: true,
                 band_energy: true,
+                pcm: true,
             },
         };
         worker.control.set_display_demand(all);
@@ -1636,6 +1637,7 @@ mod state_tests {
                 .any(|value| *value > 0.0)
         );
         assert!(!publication.visualizer.spatial.is_empty());
+        assert_eq!(publication.visualizer.pcm.len(), 512);
         assert!(
             publication
                 .visualizer
@@ -1657,6 +1659,10 @@ mod state_tests {
                 band_energy: true,
                 ..Default::default()
             },
+            VisualizerDemand {
+                pcm: true,
+                ..Default::default()
+            },
         ] {
             let mut staging = AnalysisFrame::default();
             let mut sequence = 0;
@@ -1675,6 +1681,7 @@ mod state_tests {
             let spectrum = staging.spectrum_db.as_ptr();
             let density = staging.visualizer.density.as_ptr();
             let spatial = staging.visualizer.spatial.as_ptr();
+            let pcm = staging.visualizer.pcm.as_ptr();
             retain_analysis_staging(
                 &mut staging,
                 DisplayDemand {
@@ -1703,6 +1710,11 @@ mod state_tests {
             } else {
                 assert_eq!(staging.visualizer.spatial.capacity(), 0);
             }
+            if survivor.pcm {
+                assert_eq!(staging.visualizer.pcm.as_ptr(), pcm);
+            } else {
+                assert!(staging.visualizer.pcm.is_empty());
+            }
             assert_eq!(
                 staging.visualizer.band_rms,
                 if survivor.band_energy {
@@ -1716,12 +1728,14 @@ mod state_tests {
             assert_eq!(staging.frequencies_hz.capacity(), 0);
             assert_eq!(staging.spectrum_db.capacity(), 0);
             assert!(staging.visualizer.density.is_empty());
+            assert!(staging.visualizer.pcm.is_empty());
             assert_eq!(staging.visualizer.spatial.capacity(), 0);
             assert_eq!(staging.settings, None);
             retain_analysis_staging(&mut staging, all);
             assert_eq!(staging.settings, None);
             assert_eq!(staging.visualizer.demand, VisualizerDemand::default());
             assert!(staging.visualizer.density.is_empty());
+            assert!(staging.visualizer.pcm.is_empty());
             assert_eq!(staging.visualizer.spatial.capacity(), 0);
         }
 

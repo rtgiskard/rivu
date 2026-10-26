@@ -2771,7 +2771,7 @@ mod tests {
         let first = set.current_mut().add("audio_visualizer", None);
         let second = set.current_mut().add("audio_visualizer", None);
         let saved = AudioVisualizerOptions {
-            style: AudioVisualizerStyle::Rings,
+            style: AudioVisualizerStyle::Oscilloscope,
             reference_lines: false,
             labels: true,
         };
@@ -2793,7 +2793,7 @@ mod tests {
         set.duplicate("Another").unwrap();
         let value = encoded(&set);
         let panels = &value["layouts"]["Default"]["root"]["panels"];
-        assert_eq!(panels[0]["style"], "rings");
+        assert_eq!(panels[0]["style"], "oscilloscope");
         assert_eq!(panels[0]["reference_lines"], false);
         assert_eq!(panels[0]["labels"], true);
         assert!(panels[0].get("audio_visualizer").is_none());

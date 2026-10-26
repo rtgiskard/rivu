@@ -1,11 +1,14 @@
-//! AudioVisualizer coordinates all seven audio visualization styles.
+//! AudioVisualizer coordinates the audio visualization styles.
 //!
 //! Its radial Bars, Rings, and Bars + Rings renderers follow the Noctalia v5
 //! control's concept and parameter model using GPUI-native paths. Analysis and
 //! fractal styles are delegated to their respective rendering backends.
 use crate::i18n::Localizer;
 
-use super::{analysis_visualizer::AnalysisVisualizer, fractal_visualizer::FractalVisualizer};
+use super::{
+    analysis_visualizer::AnalysisVisualizer, fractal_visualizer::FractalVisualizer,
+    oscilloscope::Oscilloscope,
+};
 use crate::config::{AudioVisualizerOptions, AudioVisualizerStyle, Config};
 use gpui::{
     AnyElement, App, Bounds, PathBuilder, Rgba, TextAlign, Window, canvas, div, point, prelude::*,
@@ -119,6 +122,7 @@ pub(in crate::gui) struct AudioVisualizer {
     data: Rc<RefCell<VisualizerData>>,
     analysis: [AnalysisVisualizer; 2],
     fractal: [FractalVisualizer; 2],
+    oscilloscope: Oscilloscope,
 }
 
 struct VisualizerData {
@@ -152,6 +156,7 @@ impl AudioVisualizer {
         Self {
             analysis: ANALYSIS_STYLES.map(AnalysisVisualizer::new),
             fractal: FRACTAL_STYLES.map(FractalVisualizer::new),
+            oscilloscope: Oscilloscope::new(),
             data: Rc::new(RefCell::new(VisualizerData {
                 guide_labels: None,
                 background: 0x08090c,
@@ -190,6 +195,7 @@ impl AudioVisualizer {
         let mut radial_visible = false;
         let mut analysis_visible = [false; 2];
         let mut fractal_visible = [false; 2];
+        let mut oscilloscope_visible = false;
         if window_visible {
             for options in options {
                 match options.style {
@@ -200,6 +206,7 @@ impl AudioVisualizer {
                     AudioVisualizerStyle::SpatialSpectrum => analysis_visible[1] = true,
                     AudioVisualizerStyle::FractalBeams => fractal_visible[0] = true,
                     AudioVisualizerStyle::FractalFlow => fractal_visible[1] = true,
+                    AudioVisualizerStyle::Oscilloscope => oscilloscope_visible = true,
                 }
             }
         }
@@ -212,6 +219,7 @@ impl AudioVisualizer {
             changed |= renderer.set_visible(visible);
             changed |= renderer.configure(config);
         }
+        changed |= self.oscilloscope.configure(config, oscilloscope_visible);
         changed | self.configure(config)
     }
 
@@ -280,6 +288,7 @@ impl AudioVisualizer {
         for renderer in &self.fractal {
             renderer.update(frame, presentation_time);
         }
+        self.oscilloscope.update(frame);
         let mut data = self.data.borrow_mut();
         if !data.visible {
             return;
@@ -421,6 +430,9 @@ impl AudioVisualizer {
             AudioVisualizerStyle::FractalFlow => {
                 return self.fractal[1].view(i18n, panel_id, options);
             }
+            AudioVisualizerStyle::Oscilloscope => {
+                return self.oscilloscope.view(i18n, panel_id, options);
+            }
             AudioVisualizerStyle::Bars
             | AudioVisualizerStyle::Rings
             | AudioVisualizerStyle::BarsRings => {}
@@ -487,7 +499,8 @@ impl AudioVisualizer {
                             AudioVisualizerStyle::StereoDensity
                             | AudioVisualizerStyle::SpatialSpectrum
                             | AudioVisualizerStyle::FractalBeams
-                            | AudioVisualizerStyle::FractalFlow => {}
+                            | AudioVisualizerStyle::FractalFlow
+                            | AudioVisualizerStyle::Oscilloscope => {}
                         }
                         if fade_alpha < 1.0 {
                             window.paint_quad(gpui::fill(

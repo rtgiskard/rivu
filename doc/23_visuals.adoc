@@ -406,6 +406,41 @@ Paint and panel size changes do not advance these levels or rotation; the
 optional idle fade is a wall-clock presentation overlay, not audio smoothing.
 There is no reusable rendering cache for these styles.
 
+=== Oscilloscope
+
+Oscilloscope consumes the same selected before/after signal as FFT analysis,
+but uses unwindowed stereo PCM rather than reconstructing samples from FFT bins.
+Only visible Oscilloscope instances request PCM. The analysis worker publishes
+an immutable, shared stereo snapshot through five reusable slots, each holding
+the latest `min(analysis_fft_size, 4096)` chronological stereo frames. Their
+sample storage is bounded to 160 KiB per prepared analyzer, plus container
+headers. Retaining an older GUI frame cannot force unbounded allocations or
+block audio: if every slot is retained, the worker coalesces the entire analysis
+publication rather than pairing new timing or metrics with old PCM. Panels share
+the snapshot and its selected sweep, not a second audio queue.
+
+A rising zero crossing on the left anchors at most 10 ms of samples. A silent
+left channel selects the right trigger; a window shorter than two sweeps shows
+its available half-window. Without a crossing, the latest complete sweep is used.
+Trigger selection happens once per accepted publication. Painting partitions the
+sweep into at most one bucket per physical pixel, preserving finite minimum and
+maximum amplitudes in each channel instead of dropping peaks. Invalid amplitudes
+are omitted, and finite values are clipped to the fixed ±1 scale. Left and right
+use separate vertical centers and solid primary/secondary colors. The measured
+label is omitted when the panel cannot fit it; neither labels nor geometry
+changes alter the samples or trigger.
+
+Hiding the style, disabling presentation, or changing analysis settings releases
+the GUI's retained PCM. Prepared analyzer storage can remain reusable across hide
+and Still Mode; revoking publication handles and generations prevents it from
+reviving an old sweep. Reset, missing-demand, and unusable publications clear the old
+sweep. The presentation owner's display token and generation gates reject retired
+frames before dispatch; returning to a visible style cannot replay pre-hide PCM.
+Pause invalidates the analysis publication and clears the sweep; resuming waits
+for a current complete PCM window rather than replaying pre-pause samples.
+This style has no FFT windowing, automatic gain, dB color mapping, trails, or idle
+fade, and it does not change the independent track-preview Waveform panel.
+
 === Stereo analysis styles
 
 Stereo Density uses a fixed 256 by 256 mid/side field with decay normalized to

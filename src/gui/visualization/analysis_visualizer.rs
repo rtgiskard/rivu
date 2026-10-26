@@ -902,6 +902,7 @@ mod tests {
                     stereo_density: style == AudioVisualizerStyle::StereoDensity,
                     spatial_spectrum: style == AudioVisualizerStyle::SpatialSpectrum,
                     band_energy: false,
+                    pcm: false,
                 },
                 spatial: vec![SpatialBin {
                     frequency_hz: 1000.0,

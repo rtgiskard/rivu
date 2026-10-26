@@ -3,6 +3,7 @@ mod audio_visualizer;
 mod fractal_beams;
 mod fractal_flow;
 mod fractal_visualizer;
+mod oscilloscope;
 mod spectrogram_flow;
 mod visuals;
 mod waveform;
@@ -14,7 +15,7 @@ pub(super) use waveform::{Waveform, WaveformEvent};
 use crate::{config::AudioVisualizerStyle, i18n::Localizer};
 use gpui::{Div, SharedString, div, prelude::*, rgb};
 
-pub(super) const AUDIO_VISUALIZER_STYLES: [AudioVisualizerStyle; 7] = [
+pub(super) const AUDIO_VISUALIZER_STYLES: [AudioVisualizerStyle; 8] = [
     AudioVisualizerStyle::Bars,
     AudioVisualizerStyle::Rings,
     AudioVisualizerStyle::BarsRings,
@@ -22,6 +23,7 @@ pub(super) const AUDIO_VISUALIZER_STYLES: [AudioVisualizerStyle; 7] = [
     AudioVisualizerStyle::SpatialSpectrum,
     AudioVisualizerStyle::FractalBeams,
     AudioVisualizerStyle::FractalFlow,
+    AudioVisualizerStyle::Oscilloscope,
 ];
 
 fn visualization_status(message: impl Into<SharedString>) -> Div {
@@ -42,6 +44,7 @@ pub(super) fn audio_visualizer_style_id(style: AudioVisualizerStyle) -> &'static
         AudioVisualizerStyle::SpatialSpectrum => "settings-spatial-spectrum",
         AudioVisualizerStyle::FractalBeams => "settings-fractal-beams",
         AudioVisualizerStyle::FractalFlow => "settings-fractal-flow",
+        AudioVisualizerStyle::Oscilloscope => "settings-oscilloscope",
     }
 }
 

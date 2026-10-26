@@ -1077,13 +1077,23 @@ labels that would overlap. Available styles:
   these are not detected beats.
 * `fractal_flow` maps low, mid, and high energy to filament motion;
   energy rises brighten the trails.
+* `oscilloscope` displays unwindowed stereo PCM with fixed ±1 amplitude: left
+  above right, using the primary and secondary colors as solid traces. A rising
+  zero crossing on the left triggers a sweep of at most 10 ms; right-only audio
+  triggers on the right. Short FFT windows show the available half-window.
+  Each physical-pixel bucket preserves its minimum and maximum. Reference lines
+  mark the channel centers and ±1 limits; labels state the channel order and scale.
+  Sensitivity, dB range, Bloom, radial effects, and idle fade do not apply.
 
 Both fractal styles are generative art, not amplitude or phase measurements.
 
-All styles share `visualizations.analysis_fft_size`, `visualizations.analysis_window`, `visualizations.analysis_fps`, and the
-two `visualizations.audio_visualizer.*_color` endpoints. `visualizations.audio_visualizer.db_range` inherits
-`visualizations.db_range` when omitted; it controls color mapping, not playback
-volume or measured amplitude. The two analysis styles retain a 0.5-second
+All styles use `visualizations.analysis_fft_size` and `visualizations.analysis_fps`
+and share the two `visualizations.audio_visualizer.*_color` endpoints.
+`visualizations.analysis_window` affects FFT measurements, not Oscilloscope PCM;
+changing it still clears the view. `visualizations.audio_visualizer.db_range`
+inherits `visualizations.db_range` when omitted; it controls analysis color
+mapping and radial/fractal level normalization, not playback volume or the
+Oscilloscope's fixed amplitude scale. The two analysis styles retain a 0.5-second
 exponential trail measured in accepted audio time, so pausing freezes the field.
 Seeking, signal gaps, style changes, and FFT size/window changes clear the trail.
 

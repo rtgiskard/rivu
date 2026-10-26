@@ -259,6 +259,7 @@ impl Presentation {
                     match options.style {
                         AudioVisualizerStyle::StereoDensity => visualizer.stereo_density = true,
                         AudioVisualizerStyle::SpatialSpectrum => visualizer.spatial_spectrum = true,
+                        AudioVisualizerStyle::Oscilloscope => visualizer.pcm = true,
                         AudioVisualizerStyle::FractalBeams | AudioVisualizerStyle::FractalFlow => {
                             visualizer.band_energy = true;
                         }
@@ -475,6 +476,7 @@ impl Presentation {
                             options.style,
                             AudioVisualizerStyle::StereoDensity
                                 | AudioVisualizerStyle::SpatialSpectrum
+                                | AudioVisualizerStyle::Oscilloscope
                         )
                 }
                 _ => false,
@@ -611,6 +613,10 @@ pub(super) fn retain_analysis_staging(frame: &mut AnalysisFrame, demand: Display
     if !demand.visualizer.band_energy {
         visualizer.demand.band_energy = false;
         visualizer.band_rms = [0.0; 3];
+    }
+    if !demand.visualizer.pcm {
+        visualizer.demand.pcm = false;
+        visualizer.pcm = rivu_audio::analysis::PcmSnapshot::default();
     }
 }
 
