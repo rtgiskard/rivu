@@ -3,35 +3,6 @@ use anyhow::{bail, ensure};
 
 impl Core {
     pub(in crate::core) fn command(&mut self, command: Command) -> Result<()> {
-        if self.queue_ids_stale
-            && matches!(
-                &command,
-                Command::TransferCollection {
-                    destination: CollectionDestination::Queue { .. },
-                    ..
-                } | Command::Play { .. }
-                    | Command::PlayQueue { .. }
-                    | Command::PlayPlaylist { .. }
-                    | Command::Resume
-                    | Command::Next
-                    | Command::Previous
-                    | Command::PlayAlbum { .. }
-                    | Command::EnqueueAlbum { .. }
-                    | Command::Enqueue { .. }
-                    | Command::EnqueueSources { .. }
-                    | Command::InsertQueue { .. }
-                    | Command::InsertQueueSources { .. }
-                    | Command::RemoveQueue { .. }
-                    | Command::RemoveQueueEntries { .. }
-                    | Command::MoveQueue { .. }
-                    | Command::MoveQueueEntries { .. }
-                    | Command::ClearQueue
-                    | Command::RandomizeQueue
-                    | Command::DeduplicateQueue
-            )
-        {
-            self.ensure_queue_control_ready()?;
-        }
         if self.database_maintenance_active() && self.maintenance_control(&command)? {
             return Ok(());
         }
@@ -44,6 +15,9 @@ impl Core {
                 source,
                 destination,
             } => {
+                if matches!(destination, CollectionDestination::Queue { .. }) {
+                    self.ensure_queue_control_ready()?;
+                }
                 use rivu_protocol::model::CollectionDestination;
                 match &source {
                     CollectionSource::Album { revision, .. } => {
@@ -117,6 +91,7 @@ impl Core {
                 self.start(self.queue_ids[0], true)?;
             }
             Command::EnqueueAlbum { key } => {
+                self.ensure_queue_control_ready()?;
                 self.store.queue_album(&key, false)?;
                 self.advance_queue_revision();
                 self.append_queue_ids()?;
@@ -199,6 +174,7 @@ impl Core {
             }
             Command::Resume => {
                 if self.state.playback.status == PlaybackStatus::Stopped {
+                    self.ensure_queue_control_ready()?;
                     let id = self
                         .state
                         .queue
@@ -267,6 +243,7 @@ impl Core {
                 directories,
                 track_ids,
             } => {
+                self.ensure_queue_control_ready()?;
                 let roots =
                     other_tracks.then_some(self.state.system.config.library_roots.as_slice());
                 if self
@@ -282,6 +259,7 @@ impl Core {
                 index,
                 expected_revision,
             } => {
+                self.ensure_queue_control_ready()?;
                 self.check_queue_insertion(index, expected_revision)?;
                 let inserted = self.store.insert_queue_tracks(&track_ids, index)?;
                 self.insert_queue_ids(index, inserted)?;
@@ -293,6 +271,7 @@ impl Core {
                 index,
                 expected_revision,
             } => {
+                self.ensure_queue_control_ready()?;
                 self.check_queue_insertion(index, expected_revision)?;
                 let inserted = self.store.insert_queue_sources(
                     &directories,
@@ -305,6 +284,7 @@ impl Core {
             Command::RemoveQueue { queue_id } => self.remove_queue_entries(&[queue_id])?,
             Command::RemoveQueueEntries { queue_ids } => self.remove_queue_entries(&queue_ids)?,
             Command::MoveQueue { queue_id, index } => {
+                self.ensure_queue_control_ready()?;
                 ensure!(
                     index < self.queue_ids.len(),
                     "Queue target position out of range"

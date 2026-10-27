@@ -459,3 +459,79 @@ fn external_media_waits_share_scan_identity_and_report_all_terminal_paths() {
         }
     }
 }
+
+#[test]
+fn stale_queue_external_paths_command_recovers_before_accepting_task() {
+    let (directory, mut core) = admission_fixture();
+    let path = directory.path().join("external.wav");
+    write_pcm_frames(&path, 1);
+    let connection = committed_queue_id_refresh_failure(&mut core, directory.path());
+    repair_queue_ids(&connection);
+    core.command(Command::QueueExternalPaths {
+        paths: vec![path],
+        index: None,
+        expected_revision: None,
+    })
+    .unwrap();
+    assert!(!core.queue_ids_stale);
+    finish_admission(&mut core);
+    assert_eq!(core.state.queue.total, 4);
+    assert_eq!(core.queue_ids, core.store.queue_ids().unwrap());
+}
+
+#[test]
+fn stale_queue_external_saving_rechecks_recovery_before_capturing_queue_snapshot() {
+    for repaired in [false, true] {
+        let (directory, mut core) = admission_fixture();
+        let path = directory.path().join("external.wav");
+        write_pcm_frames(&path, 1);
+        core.store.set_queue_current(Some(1)).unwrap();
+        core.refresh_queue_tracks().unwrap();
+        core.start_external_admission(vec![path.clone()], None, None)
+            .unwrap();
+        let prepared = loop {
+            let event = next_admission_event(&mut core);
+            if matches!(&event, crate::core::admission::Event::Prepared(_)) {
+                break event;
+            }
+            core.external_admission_event(event);
+        };
+        let id = core.active_external_admission.as_ref().unwrap().status.id;
+        let connection = committed_queue_id_refresh_failure(&mut core, directory.path());
+        if repaired {
+            repair_queue_ids(&connection);
+        }
+        core.external_admission_event(prepared);
+        finish_admission(&mut core);
+        let ViewResponse::ScanTask(status) = core.view(&Query::ScanTask { id }).unwrap() else {
+            panic!("expected retained admission result");
+        };
+        assert_eq!(status.library_committed, repaired);
+        assert_eq!(
+            status.progress.phase,
+            if repaired {
+                ScanPhase::Completed
+            } else {
+                ScanPhase::Failed
+            }
+        );
+        assert_eq!(core.queue_ids_stale, !repaired);
+        assert_eq!(
+            core.store.track_count().unwrap(),
+            if repaired { 4 } else { 3 }
+        );
+        assert_eq!(core.state.queue.current_id, Some(1));
+        if repaired {
+            assert_eq!(core.state.queue.total, 4);
+            assert_eq!(core.queue_ids, core.store.queue_ids().unwrap());
+            assert_eq!(&core.queue_ids[..3], &[1, 4, 5]);
+        } else {
+            assert!(
+                core.store
+                    .track_id_for_identity(crate::store::TrackIdentity::File(&path))
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+}

@@ -203,6 +203,7 @@ impl Core {
         record_history: bool,
         status: PlaybackStatus,
     ) -> Result<()> {
+        self.ensure_queue_control_ready()?;
         let track = self.track(self.store.queue_track_id(queue_id)?)?;
         if status != PlaybackStatus::Stopped && !track.path.is_file() {
             bail!("Missing audio file: {}", track.path.display());
@@ -523,6 +524,7 @@ impl Core {
             }
             bail!("Database maintenance is in progress; navigation was not executed");
         }
+        self.ensure_queue_control_ready()?;
         if self.queue_ids.is_empty() {
             return self.stop();
         }
@@ -561,6 +563,7 @@ impl Core {
         if self.state.playback.position > 3.0 {
             return self.seek(0.0);
         }
+        self.ensure_queue_control_ready()?;
         if self.state.playback.shuffle
             && let Some(index) =
                 self.played_cursor

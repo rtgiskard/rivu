@@ -317,6 +317,34 @@ fn write_pcm_frames(path: &Path, frames: u32) {
     file.write_all(&vec![0; data_len as usize]).unwrap();
 }
 
+// Commit a deletion, then fail the queue identity refresh independently of
+// decoding or audio output. The retained connection can repair each read stage.
+fn committed_queue_id_refresh_failure(core: &mut Core, directory: &Path) -> rusqlite::Connection {
+    let connection = rusqlite::Connection::open(directory.join("library.db")).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fail_delete_queue_ids AFTER DELETE ON tracks WHEN OLD.id=2
+         BEGIN UPDATE playlist_entries SET id=-5 WHERE playlist_id=0 AND id=5; END;",
+        )
+        .unwrap();
+    let error = core
+        .command(Command::RemoveTracks { track_ids: vec![2] })
+        .unwrap_err();
+    assert!(error.to_string().contains("Track deletion committed"));
+    assert!(core.store.track(2).unwrap().is_none());
+    assert!(core.queue_ids_stale);
+    connection
+}
+
+fn repair_queue_ids(connection: &rusqlite::Connection) {
+    connection
+        .execute_batch(
+            "DROP TRIGGER fail_delete_queue_ids;
+         UPDATE playlist_entries SET id=5 WHERE playlist_id=0 AND id=-5;",
+        )
+        .unwrap();
+}
+
 fn pending(core: &mut Core, queue_id: u64) {
     core.state.queue.current_id = Some(queue_id);
     core.save_queue().unwrap();

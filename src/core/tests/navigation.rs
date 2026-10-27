@@ -759,3 +759,84 @@ fn delayed_keyboard_seeks_cannot_target_next_duplicate_occurrence_or_stopped_pla
     assert_eq!(core.state.playback.position, 0.0);
     assert_eq!(core.state.playback.seek_revision, revision);
 }
+
+#[test]
+fn stale_queue_toggle_recovers_before_stopped_selection() {
+    let (directory, mut core) = navigation_fixture(PlaybackStatus::Stopped);
+    // Select a surviving occurrence; the old cache still includes both removed
+    // duplicates and must not supply the total saved by Toggle's Resume path.
+    core.state.queue.current_id = Some(1);
+    core.save_queue().unwrap();
+    core.refresh_queue_tracks().unwrap();
+    let connection = committed_queue_id_refresh_failure(&mut core, directory.path());
+    let _commands = recording_audio(&mut core);
+    assert!(core.command(Command::Toggle).is_err());
+    assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+    repair_queue_ids(&connection);
+    core.command(Command::Toggle).unwrap();
+    assert!(!core.queue_ids_stale);
+    assert_eq!(core.queue_ids, [1, 4, 5]);
+    assert_eq!(core.state.queue.total, 3);
+    assert_eq!(core.state.queue.current_id, Some(1));
+    assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
+}
+
+#[test]
+fn stale_queue_navigation_operation_recovers_order_before_selecting() {
+    let (directory, mut core) = navigation_fixture(PlaybackStatus::Stopped);
+    core.state.queue.current_id = Some(1);
+    core.save_queue().unwrap();
+    core.refresh_queue_tracks().unwrap();
+    let connection = committed_queue_id_refresh_failure(&mut core, directory.path());
+    repair_queue_ids(&connection);
+    let _commands = recording_audio(&mut core);
+    let (handle, control, worker, _publications) = navigation_runtime(core);
+    let ack = futures::executor::block_on(handle.navigate(Navigation::Next));
+    assert!(ack.is_success(), "{:?}", ack.error);
+    let state = handle.mpris_snapshot();
+    assert_eq!(state.queue.current_id, Some(4));
+    assert_eq!(state.queue.total, 3);
+    assert_eq!(state.playback.status, PlaybackStatus::Stopped);
+    control.request_shutdown().unwrap();
+    let core = worker.join().unwrap();
+    assert!(!core.queue_ids_stale);
+    assert_eq!(core.queue_ids, [1, 4, 5]);
+}
+
+#[test]
+fn stale_queue_natural_eof_recovers_order_and_keeps_paused_intent() {
+    for status in [PlaybackStatus::Playing, PlaybackStatus::Paused] {
+        let (directory, mut core) = navigation_fixture(status);
+        pending(&mut core, 1);
+        core.state.playback.status = status;
+        let connection = committed_queue_id_refresh_failure(&mut core, directory.path());
+        repair_queue_ids(&connection);
+        let _commands = recording_audio(&mut core);
+        core.audio_event(AudioEvent::Ended {
+            generation: core.generation,
+            bitrate_bps: None,
+        })
+        .unwrap();
+        assert!(!core.queue_ids_stale);
+        assert_eq!(core.state.queue.current_id, Some(4));
+        assert_eq!(core.state.queue.total, 3);
+        assert_eq!(core.state.playback.status, status);
+    }
+}
+
+#[test]
+fn stale_queue_shuffle_previous_prunes_deleted_occurrences_before_reading_cursor() {
+    let (directory, mut core) = navigation_fixture(PlaybackStatus::Stopped);
+    core.state.queue.current_id = Some(4);
+    core.save_queue().unwrap();
+    core.refresh_queue_tracks().unwrap();
+    core.state.playback.shuffle = true;
+    core.played = vec![1, 2, 3, 4, 5];
+    core.played_cursor = 4;
+    let connection = committed_queue_id_refresh_failure(&mut core, directory.path());
+    repair_queue_ids(&connection);
+    core.navigate(Navigation::Previous).unwrap();
+    assert_eq!(core.state.queue.current_id, Some(1));
+    assert_eq!(core.played, [1, 4, 5]);
+    assert_eq!(core.played_cursor, 1);
+}

@@ -245,6 +245,7 @@ impl Core {
             !self.database_maintenance_active(),
             "Database maintenance is in progress; external audio admission was not started"
         );
+        self.ensure_queue_control_ready()?;
         if let Some(index) = index {
             self.check_queue_insertion(
                 index,
@@ -380,12 +381,17 @@ impl Core {
             self.retain_external(task.status.clone());
             return;
         }
-        let baseline = match task.expected_revision {
-            Some(expected) => {
-                self.check_queue_insertion(task.index.unwrap_or(self.queue_ids.len()), expected)
-            }
-            None => Ok(()),
-        };
+        // Preparation may outlive a committed deletion whose ID refresh failed.
+        // Recover before validating an insertion or capturing Saving's snapshot.
+        let baseline =
+            self.ensure_queue_control_ready()
+                .and_then(|()| match task.expected_revision {
+                    Some(expected) => self.check_queue_insertion(
+                        task.index.unwrap_or(self.queue_ids.len()),
+                        expected,
+                    ),
+                    None => Ok(()),
+                });
         if let Err(error) = baseline {
             task.status.progress.phase = ScanPhase::Failed;
             task.status.message = error.to_string();

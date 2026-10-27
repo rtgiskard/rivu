@@ -2441,3 +2441,40 @@ fn playback_bypass_revokes_late_mix_selection_but_keeps_completed_audio() {
             .collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn stale_queue_graph_audition_recovers_source_context_before_selecting_occurrence() {
+    let (directory, mut core) = fixture();
+    source(directory.path());
+    core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Offline)
+        .unwrap();
+    complete(&mut core);
+    assert_eq!(
+        core.processing_status(1).unwrap().phase,
+        ProcessingPhase::Complete
+    );
+    let connection = committed_queue_id_refresh_failure(&mut core, directory.path());
+    let generation = core.generation;
+    let _commands = recording_audio(&mut core);
+    assert!(
+        core.command(Command::ProcessingGraphAudition {
+            id: 1,
+            node: graph_port(2, 0)
+        })
+        .is_err()
+    );
+    assert_eq!(core.generation, generation);
+    assert!(core.queue_ids_stale);
+    repair_queue_ids(&connection);
+    core.command(Command::ProcessingGraphAudition {
+        id: 1,
+        node: graph_port(2, 0),
+    })
+    .unwrap();
+    assert!(!core.queue_ids_stale);
+    assert_eq!(core.queue_ids, [1, 4, 5]);
+    assert_eq!(core.state.queue.total, 3);
+    assert_eq!(core.state.queue.current_id, Some(1));
+    assert_eq!(core.state.current_track().unwrap().id, 1);
+    assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
+}

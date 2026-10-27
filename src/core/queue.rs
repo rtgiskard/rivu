@@ -44,6 +44,7 @@ impl Core {
             !self.database_unavailable,
             "Database outcome is uncertain; restart Rivu before saving"
         );
+        self.ensure_queue_control_ready()?;
         self.store.set_queue_current(self.state.queue.current_id)?;
         self.state.queue = self
             .store
@@ -74,14 +75,18 @@ impl Core {
         Ok(())
     }
     pub(in crate::core) fn reload_queue(&mut self) -> Result<()> {
-        let ids = self.store.queue_ids()?;
-        self.queue_ids = ids;
-        self.queue_ids_stale = false;
+        self.queue_ids_stale = true;
+        self.queue_ids = self.store.queue_ids()?;
+        self.prune_queue_history();
         self.refresh_queue_tracks()?;
+        self.queue_ids_stale = false;
         Ok(())
     }
 
     pub(in crate::core) fn append_queue_ids(&mut self) -> Result<()> {
+        if self.queue_ids_stale {
+            return self.reload_queue();
+        }
         self.store.extend_queue_ids(&mut self.queue_ids)?;
         self.state.queue = self
             .store
@@ -125,6 +130,7 @@ impl Core {
         if queue_ids.is_empty() {
             return Ok(());
         }
+        self.ensure_queue_control_ready()?;
         let ids = queue_ids.iter().copied().collect::<HashSet<_>>();
         self.validate_queue_ids(&ids)?;
         if self
@@ -164,6 +170,7 @@ impl Core {
         if ids.is_empty() {
             return Ok(());
         }
+        self.ensure_queue_control_ready()?;
         let mut selected = Vec::with_capacity(ids.len());
         for (position, &id) in self.queue_ids.iter().enumerate() {
             if ids.contains(&id) {
@@ -216,6 +223,7 @@ impl Core {
         if ids.is_empty() {
             return Ok(());
         }
+        self.ensure_queue_control_ready()?;
         if self.store.enqueue_tracks(ids)? {
             self.advance_queue_revision();
             self.append_queue_ids()?;
@@ -224,6 +232,7 @@ impl Core {
     }
 
     pub(in crate::core) fn randomize_queue(&mut self, rng: &mut impl rand::Rng) -> Result<()> {
+        self.ensure_queue_control_ready()?;
         if self.queue_ids.len() < 2 {
             return Ok(());
         }
@@ -243,10 +252,10 @@ impl Core {
     }
 
     pub(in crate::core) fn deduplicate_queue(&mut self) -> Result<()> {
+        self.ensure_queue_control_ready()?;
         if self.store.deduplicate_queue()? {
             self.advance_queue_revision();
             self.reload_queue()?;
-            self.prune_queue_history();
         }
         Ok(())
     }

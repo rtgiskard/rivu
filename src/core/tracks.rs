@@ -255,18 +255,7 @@ impl Core {
         // Only a fresh ID set can supply the queue projection's total. Retain
         // the previous queue snapshot if reading the committed IDs fails.
         let queue = if queue_changed {
-            match self.store.queue_ids() {
-                Ok(ids) => {
-                    self.queue_ids = ids;
-                    self.queue_ids_stale = false;
-                    self.prune_queue_history();
-                    self.refresh_queue_tracks()
-                }
-                Err(error) => {
-                    self.queue_ids_stale = true;
-                    Err(error)
-                }
-            }
+            self.reload_queue()
         } else {
             Ok(())
         };

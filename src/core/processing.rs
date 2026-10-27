@@ -146,6 +146,7 @@ impl Core {
     }
 
     fn establish_graph_source_context(&mut self, track_id: i64) -> Result<()> {
+        self.ensure_queue_control_ready()?;
         if self
             .state
             .current_track
@@ -1028,6 +1029,7 @@ impl Core {
         path: Option<PathBuf>,
         graph: Option<audio::GraphRunner>,
     ) -> Result<()> {
+        self.ensure_queue_control_ready()?;
         let status = self
             .processing_status(id)
             .context("Processing run is no longer retained")?;

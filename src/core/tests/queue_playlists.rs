@@ -1844,3 +1844,107 @@ fn committed_playlist_creation_registers_tokens_and_refreshes_count() {
         );
     }
 }
+
+#[test]
+fn stale_queue_recovery_retries_projection_and_prunes_shuffle_history_without_replacing_audio() {
+    let (directory, mut core) = fixture();
+    let track = core.track(1).unwrap();
+    write_pcm_frames(&track.path, 1);
+    let metadata = std::fs::metadata(&track.path).unwrap();
+    let media = core
+        .store
+        .known_source(&track.path)
+        .unwrap()
+        .unwrap()
+        .media
+        .unwrap();
+    let impacts = core
+        .store
+        .apply_scan(&ScanResult {
+            records: vec![Arc::new(ScanRecord {
+                path: track.path,
+                size: metadata.len(),
+                modified_ns: metadata
+                    .modified()
+                    .unwrap()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos() as i64,
+                fingerprint: None,
+                media,
+            })],
+            ..ScanResult::default()
+        })
+        .unwrap();
+    core.apply_scan_impacts(impacts).unwrap();
+    pending(&mut core, 1);
+    let source = core.playback.as_ref().unwrap().source.as_ref().unwrap();
+    let source_facts = (
+        source.0.id,
+        source.0.path.clone(),
+        source.0.file_size,
+        source.0.modified_ns,
+    );
+    core.played = vec![1, 2, 3, 4, 5];
+    core.played_cursor = 4;
+    let connection = committed_queue_id_refresh_failure(&mut core, directory.path());
+    let generation = core.generation;
+    let revision = core.state.queue.revision;
+    let commands = recording_audio(&mut core);
+    assert!(core.ensure_queue_control_ready().is_err());
+    assert!(core.queue_ids_stale);
+    assert_eq!(core.played, [1, 2, 3, 4, 5]);
+    repair_queue_ids(&connection);
+    connection
+        .execute_batch("UPDATE tracks SET channels='unreadable' WHERE id=1;")
+        .unwrap();
+    // This raw SQL fault bypasses Store's mutation-owned cache invalidation.
+    // Evict the surviving track so recovery actually decodes the corrupt row.
+    core.store.invalidate_caches();
+    assert!(core.ensure_queue_control_ready().is_err());
+    assert!(core.queue_ids_stale);
+    assert_eq!(core.queue_ids, [1, 4, 5]);
+    assert_eq!(core.played, [1, 4, 5]);
+    assert_eq!(core.played_cursor, 2);
+    connection
+        .execute_batch("UPDATE tracks SET channels=2 WHERE id=1;")
+        .unwrap();
+    core.ensure_queue_control_ready().unwrap();
+    assert!(!core.queue_ids_stale);
+    assert_eq!(core.state.queue.total, 3);
+    assert_eq!(core.state.queue.current_id, Some(1));
+    assert_eq!(core.state.current_track().unwrap().id, 1);
+    assert_eq!(core.state.queue.revision, revision);
+    assert_eq!(core.generation, generation);
+    assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
+    assert_eq!(core.playback.as_ref().unwrap().track_id, 1);
+    let source = core.playback.as_ref().unwrap().source.as_ref().unwrap();
+    assert_eq!(
+        (
+            source.0.id,
+            source.0.path.clone(),
+            source.0.file_size,
+            source.0.modified_ns
+        ),
+        source_facts
+    );
+    assert!(commands.try_recv().is_err());
+}
+
+#[test]
+fn stale_queue_does_not_block_pause_toggle_pause_or_stop() {
+    let (directory, mut core) = fixture();
+    pending(&mut core, 1);
+    let _connection = committed_queue_id_refresh_failure(&mut core, directory.path());
+    let _commands = recording_audio(&mut core);
+    core.command(Command::Pause).unwrap();
+    assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
+    // Resume of an existing owner is independent of queue identity recovery.
+    core.command(Command::Toggle).unwrap();
+    assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
+    core.command(Command::Toggle).unwrap();
+    assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
+    core.command(Command::Stop).unwrap();
+    assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+    assert!(core.queue_ids_stale);
+}
