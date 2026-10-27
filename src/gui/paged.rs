@@ -141,6 +141,7 @@ impl<T> PagedRows<T> {
     pub(super) fn demand(&mut self, range: Range<usize>, page_size: usize) -> Option<usize> {
         self.configure_page_size(page_size);
         self.visible = range;
+        self.trim();
         if self.pending.is_some() || self.visible.is_empty() {
             return None;
         }
@@ -218,6 +219,8 @@ mod tests {
         assert_eq!(rows.len(), 10_000);
         assert_eq!(rows.get(0), None);
         assert_eq!(rows.demand(0..10, 20), Some(0));
+        assert!(rows.pages.len() <= MAX_PAGES);
+        assert!(rows.iter().count() <= 160);
         fill(&mut rows, 0, 10_000);
         assert_eq!(rows.position(|row| *row == 3), Some(3));
     }
