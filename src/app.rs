@@ -169,11 +169,13 @@ impl AppHandle {
     pub(crate) async fn request_ack_async(&self, command: AppCommand) -> Ack {
         match command {
             AppCommand::Core(command) => self.core.request_ack(command).await,
-            AppCommand::ShowWindow => Ack::from_result(self.raise(), self.core.revision()),
+            AppCommand::ShowWindow => {
+                Ack::from_result(self.raise(), self.core.publication_revision())
+            }
             AppCommand::Shutdown => {
                 let _ = self.request_shutdown();
                 self.runtime
-                    .shutdown_ack_async(|| self.core.revision())
+                    .shutdown_ack_async(|| self.core.publication_revision())
                     .await
             }
         }

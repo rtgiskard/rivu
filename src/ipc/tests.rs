@@ -47,7 +47,7 @@ fn app_commands_route_over_ipc_without_changing_business_state() {
     assert!(ack.is_success());
     runtime.join().unwrap();
     assert!(runtime.handle.is_shutting_down());
-    assert!(ack.revision <= runtime.handle.revision());
+    assert!(ack.revision <= runtime.handle.publication_revision());
     drop(server);
     assert!(SocketOwner::acquire(directory.path()).is_err());
     drop(owner);

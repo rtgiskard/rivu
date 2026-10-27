@@ -401,6 +401,11 @@ System sections. They are equality tokens, not ordered clocks. A Watch request
 waits until the current revisions differ from the expected revisions. The
 response contains the latest revisions rather than an event log.
 
+The `system` token in `StateRevisions` invalidates the System section. It is
+distinct from `SystemState.revision` and acknowledgement `revision`, which are
+the Core publication/wakeup sequence used to detect a newer assembled snapshot;
+neither token is a query-data freshness clock.
+
 Clients initialize from a state read, watch for revision changes, then read only
 the invalidated sections. State reads capture selected sections and all revision
 tokens under one shared-state lock. Omitted sections preserve the client's

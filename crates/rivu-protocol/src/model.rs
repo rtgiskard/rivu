@@ -454,6 +454,7 @@ pub struct SystemState {
     pub last_error: Option<String>,
     pub devices: Arc<Vec<String>>,
     pub selected_device: Option<String>,
+    /// In-process publication/wakeup sequence; not a query-domain invalidation token.
     pub revision: u64,
     pub config: Arc<rivu_format::config::Config>,
     pub config_path: PathBuf,

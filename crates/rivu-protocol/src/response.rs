@@ -7,12 +7,13 @@ use crate::model::{
 use serde::{Deserialize, Serialize};
 use std::{fmt, sync::Arc};
 
-/// Independent invalidation domains. Tokens are compared for equality, never ordered.
+/// Independent query/state-section invalidation domains. Tokens are compared for equality, never ordered.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StateRevisions {
     pub playback: u64,
     pub queue: u64,
     pub library: u64,
+    /// System-section revision; distinct from `SystemState::revision`, which is a publication sequence.
     pub system: u64,
 }
 

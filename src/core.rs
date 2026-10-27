@@ -263,7 +263,8 @@ impl CoreHandle {
             shutting_down: state.system.shutting_down,
         }
     }
-    pub fn revision(&self) -> u64 {
+    /// In-process publication/wakeup sequence; not a query-domain revision.
+    pub fn publication_revision(&self) -> u64 {
         self.state.read().system.revision
     }
     pub fn mpris_snapshot(&self) -> MprisSnapshot {
@@ -448,7 +449,7 @@ impl CoreHandle {
             return Ack::new(
                 AckStatus::NotAdmitted,
                 Some(format!("Core command not admitted: {error}")),
-                self.revision(),
+                self.publication_revision(),
             );
         }
         match rivu_protocol::transport::timeout(duration, rx).await {
@@ -464,7 +465,7 @@ impl CoreHandle {
                         Ok(Ok(_)) => unreachable!("successful responses matched above"),
                     }
                 )),
-                self.revision(),
+                self.publication_revision(),
             ),
         }
     }

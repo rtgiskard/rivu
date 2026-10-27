@@ -60,6 +60,7 @@ pub struct GuiSystemSnapshot {
     pub last_error: Option<String>,
     pub devices: Arc<Vec<String>>,
     pub selected_device: Option<String>,
+    /// Mirrors `SystemState::revision`: publication/wakeup sequence, not query freshness.
     pub revision: u64,
     pub config: Arc<Config>,
     pub mpris_status: String,

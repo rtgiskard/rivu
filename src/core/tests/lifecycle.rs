@@ -283,7 +283,9 @@ fn final_queue_failure_still_attempts_config_and_retains_all_failures() {
         core.command(Command::Volume { value: 0.25 }).unwrap();
         core.database_unavailable = true;
         let (handle, control, worker, _) = navigation_runtime(core);
-        let ack = futures::executor::block_on(control.shutdown_ack_async(|| handle.revision()));
+        let ack = futures::executor::block_on(
+            control.shutdown_ack_async(|| handle.publication_revision()),
+        );
         assert!(ack.is_success());
         let core = worker.join().unwrap();
         assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
@@ -312,7 +314,8 @@ fn accepted_shutdown_reports_stop_failure_without_rejecting_the_request() {
         )
         .unwrap();
     let (handle, control, worker, _) = navigation_runtime(core);
-    let ack = futures::executor::block_on(control.shutdown_ack_async(|| handle.revision()));
+    let ack =
+        futures::executor::block_on(control.shutdown_ack_async(|| handle.publication_revision()));
     assert_eq!(ack.status, AckStatus::Succeeded);
     let core = worker.join().unwrap();
     assert!(core.state.system.shutting_down);
