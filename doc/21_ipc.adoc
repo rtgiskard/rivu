@@ -152,7 +152,7 @@ The frame header is six bytes. `body_length` excludes the four-byte length field
 and includes the version, message type, and serialized body.
 
 Bodies use Postcard serialization without COBS framing. The current protocol
-version is `11`; clients and servers must use matching wire schemas. The four-byte
+version is `14`; clients and servers must use matching wire schemas. The four-byte
 frame length remains little-endian; body integers follow Postcard's encoding.
 Restart clients and hosts together after upgrading: incompatible versions are
 rejected before decoding the body. There is no compatibility alias or schema
@@ -274,8 +274,9 @@ Response types:
 * `Hello` (`0`) — returns the server instance ID and selected state
 * `State` (`1`) — returns selected state sections
 * `Query` (`2`) — returns query revisions and the query result
-* `Ack` (`3`) — returns command outcome, error, publication revision, and optional
-  `scan_id`, `relocation_id`, or `processing_id`
+* `Ack` (`3`) — returns command outcome, error, publication revision, optional
+  `scan_id`, `relocation_id`, or `processing_id`, and the completed operation's
+  optional database-optimization report
 * `Watch` (`4`) — returns changed state revisions
 * `Error` (`255`) — returns a protocol or request error
 
@@ -310,7 +311,8 @@ link:26_migration.adoc#_version_authority[Database and configuration migration].
 Processing task status distinguishes the task `id` from `graph_run_id`, the retained
 graph snapshot accepted by audition and export commands. Export receipts carry
 the source run ID rather than becoming retained audition results or command aliases.
-This positional status-schema change requires protocol version 13 on both peers.
+The current positional schemas, including the optimization report in Ack, require
+protocol version 14 on both peers.
 
 `EditTrack` carries optional title, artist, and album fields. `None` leaves a
 field untouched; `Some("")` explicitly overrides it with empty text. The core

@@ -397,7 +397,13 @@ fn async_replies_and_admission_do_not_need_a_blocking_pool_slot() {
     assert!(!optimizing.is_finished());
     release.send(()).unwrap();
     futures::executor::block_on(blocker).unwrap();
-    assert!(futures::executor::block_on(optimizing).is_success());
+    let ack = futures::executor::block_on(optimizing);
+    assert!(ack.is_success());
+    assert_eq!(
+        ack.database_optimization,
+        handle.state.read().system.database_optimization
+    );
+    assert!(ack.database_optimization.is_some());
     control.request_shutdown().unwrap();
     worker.join().unwrap();
 }

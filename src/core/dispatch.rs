@@ -165,7 +165,7 @@ impl Core {
             }
             BusinessEvent::Optimization(result) => {
                 let (reply, result) = self.finish_optimization(result);
-                self.complete_background(reply, result);
+                self.complete_optimization(reply, result);
             }
             BusinessEvent::FfmpegStatus => {
                 if audio::ffmpeg_load_attempted() {
@@ -370,7 +370,7 @@ impl Core {
         self.shutdown_relocation();
         self.processing.shutdown();
         if let Some((reply, result)) = self.shutdown_optimization() {
-            self.complete_background(reply, result);
+            self.complete_optimization(reply, result);
         }
         // Every persistence domain gets its final attempt, even after a failure.
         let deferred = self
@@ -399,6 +399,23 @@ impl Core {
         self.state.system.shutting_down = true;
         self.publish();
         result
+    }
+
+    pub(in crate::core) fn complete_optimization(
+        &mut self,
+        reply: Option<oneshot::Sender<CoreResponse>>,
+        result: Result<DatabaseOptimization>,
+    ) {
+        let report = result.as_ref().ok().cloned();
+        if let Err(error) = &result {
+            self.state.system.last_error = Some(format!("{error:#}"));
+        }
+        self.publish();
+        if let Some(reply) = reply {
+            let mut ack = Ack::from_result(result.map(|_| ()), self.state.system.revision);
+            ack.database_optimization = report;
+            let _ = reply.send(CoreResponse::Ack(ack));
+        }
     }
 
     pub(in crate::core) fn complete_background(

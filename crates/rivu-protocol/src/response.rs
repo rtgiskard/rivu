@@ -1,7 +1,8 @@
 use crate::model::{
-    Batch, BatchContinuation, ClientSnapshot, DirectoryRow, LibraryRootCount, LibraryRow,
-    LibrarySnapshot, LibraryStats, Page, PlaybackState, PlaylistEntryCursor, PlaylistEntryLocation,
-    PlaylistEntryRow, PlaylistSummary, QueueCursor, QueueRow, QueueState, SystemState, Track,
+    Batch, BatchContinuation, ClientSnapshot, DatabaseOptimization, DirectoryRow, LibraryRootCount,
+    LibraryRow, LibrarySnapshot, LibraryStats, Page, PlaybackState, PlaylistEntryCursor,
+    PlaylistEntryLocation, PlaylistEntryRow, PlaylistSummary, QueueCursor, QueueRow, QueueState,
+    SystemState, Track,
 };
 use serde::{Deserialize, Serialize};
 use std::{fmt, sync::Arc};
@@ -303,6 +304,8 @@ pub struct Ack {
     /// Present only when this command accepted a manual relocation task.
     pub relocation_id: Option<u64>,
     pub processing_id: Option<u64>,
+    /// Present only after successful database optimization and physical worker retirement.
+    pub database_optimization: Option<DatabaseOptimization>,
 }
 
 impl Ack {
@@ -321,6 +324,7 @@ impl Ack {
             scan_id: None,
             relocation_id: None,
             processing_id: None,
+            database_optimization: None,
         }
     }
 

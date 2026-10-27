@@ -1877,14 +1877,7 @@ fn committed_impacts_refresh_current_track_activity_and_probe_metadata() {
 fn database_optimization_requires_stopped_playback_and_no_scan() {
     let (_directory, mut core) = fixture_with_database(Some(10.0));
     playing(&mut core, 1);
-    core.state.system.database_optimization = Some(DatabaseOptimization {
-        database_bytes_before: 1,
-        database_bytes_after: 1,
-        wal_bytes_before: 1,
-        wal_bytes_after: 0,
-    });
     assert!(core.command(Command::OptimizeDatabase).is_err());
-    assert!(core.state.system.database_optimization.is_none());
     core.command(Command::Pause).unwrap();
     assert!(core.command(Command::OptimizeDatabase).is_err());
     core.stop().unwrap();
@@ -1893,7 +1886,6 @@ fn database_optimization_requires_stopped_playback_and_no_scan() {
     core.state.system.scanning = false;
     core.enqueue(&[4]).unwrap();
     core.command(Command::OptimizeDatabase).unwrap();
-    assert!(core.state.system.database_optimization.is_none());
     settle_optimization(&mut core).unwrap();
     assert!(core.state.system.database_optimization.is_some());
     assert_eq!(core.store.history(200).unwrap()[0].track_id, 1);
@@ -2176,7 +2168,7 @@ fn settle_optimization(core: &mut Core) -> Result<()> {
     let (reply, result) = core.finish_optimization(result);
     assert!(reply.is_none());
     assert!(core.active_optimization.is_none());
-    result
+    result.map(|_| ())
 }
 
 #[test]
@@ -2241,12 +2233,35 @@ fn database_optimization_checkpoint_failure_retires_owner_and_allows_explicit_re
 fn database_optimization_shutdown_waits_for_final_worker_result() {
     let (_directory, mut core) = fixture_with_database(Some(10.0));
     core.command(Command::OptimizeDatabase).unwrap();
+    let (reply, receiver) = oneshot::channel();
+    core.active_optimization.as_mut().unwrap().reply = Some(reply);
     let (reply, result) = core.shutdown_optimization().unwrap();
-    result.unwrap();
-    assert!(reply.is_none());
     assert!(core.active_optimization.is_none());
-    assert!(core.state.system.database_optimization.is_some());
+    let report = result.as_ref().unwrap().clone();
+    core.complete_optimization(reply, result);
+    let CoreResponse::Ack(ack) = futures::executor::block_on(receiver).unwrap() else {
+        panic!("expected optimization acknowledgment");
+    };
+    assert!(ack.is_success());
+    assert_eq!(ack.database_optimization, Some(report.clone()));
+    assert_eq!(core.state.system.database_optimization, Some(report));
     assert!(core.shutdown_optimization().is_none());
+}
+
+#[test]
+fn database_optimization_failed_ack_never_uses_a_previous_report() {
+    let (_directory, mut core) = fixture_with_database(Some(10.0));
+    core.command(Command::OptimizeDatabase).unwrap();
+    settle_optimization(&mut core).unwrap();
+    assert!(core.state.system.database_optimization.is_some());
+    let (reply, receiver) = oneshot::channel();
+    core.complete_optimization(Some(reply), Err(anyhow::anyhow!("optimization failed")));
+    let CoreResponse::Ack(ack) = futures::executor::block_on(receiver).unwrap() else {
+        panic!("expected optimization acknowledgment");
+    };
+    assert_eq!(ack.status, rivu_protocol::response::AckStatus::Failed);
+    assert!(ack.database_optimization.is_none());
+    assert!(core.state.system.database_optimization.is_some());
 }
 
 fn prepare_other_check(core: &mut Core, force: bool) -> ScanFinished {

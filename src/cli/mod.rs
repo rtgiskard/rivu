@@ -406,17 +406,9 @@ fn execute(args: Args, i18n: Localizer) -> Result<()> {
             if args.json || !ack.is_success() {
                 return show_ack(&i18n, &ack, args.json);
             }
-            let response = rivu_client::get_state(
-                &data_dir,
-                StateSections {
-                    system: true,
-                    ..StateSections::default()
-                },
-            )?;
-            let report = response
-                .system
+            let report = ack
+                .database_optimization
                 .as_ref()
-                .and_then(|state| state.database_optimization.as_ref())
                 .context("Database optimization returned no size report")?;
             let before = report
                 .database_bytes_before

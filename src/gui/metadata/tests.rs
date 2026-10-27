@@ -203,6 +203,7 @@ fn ack(ok: bool) -> Ack {
         scan_id: None,
         relocation_id: None,
         processing_id: None,
+        database_optimization: None,
     }
 }
 

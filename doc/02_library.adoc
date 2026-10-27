@@ -901,12 +901,14 @@ Result shapes follow the queried resource:
   `--limit` in the same retained order as text output.
 * Ordinary command acknowledgements, including `library optimize`, contain
   `status`, `error`, `revision`,
-  `scan_id`, `relocation_id`, and `processing_id`. Status is `Succeeded`, `Failed`,
+  `scan_id`, `relocation_id`, `processing_id`, and `database_optimization`. Status is `Succeeded`, `Failed`,
   `NotAdmitted`, or `Unknown`. Failed authoritative acknowledgements are printed
   before an unsuccessful exit. `Failed` does not guarantee rollback; `Unknown`
   must not be automatically retried.
-  After optimization, use `rivu --json status` to read the size report from
-  `system.database_optimization`.
+  Successful optimization replies carry their own size report in
+  `database_optimization`; failed or unknown replies do not claim a report.
+  The System snapshot retains the latest successful report for observation,
+  not for correlating command results.
 * `scan_id` identifies media-task startup: scanning, Other checks, playlist import,
   or external-file queue admission. `task status scan ID` and media commands with
   `--wait` return `{id, progress, message, library_committed, playlist_id, error}`.

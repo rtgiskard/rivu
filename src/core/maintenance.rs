@@ -29,7 +29,6 @@ impl Drop for OptimizationTask {
 
 impl Core {
     pub(in crate::core) fn optimize_database(&mut self) -> Result<()> {
-        self.state.system.database_optimization = None;
         ensure!(
             self.active_optimization.is_none(),
             "Database optimization is already running"
@@ -95,7 +94,10 @@ impl Core {
     pub(in crate::core) fn finish_optimization(
         &mut self,
         result: Result<DatabaseOptimization>,
-    ) -> (Option<oneshot::Sender<CoreResponse>>, Result<()>) {
+    ) -> (
+        Option<oneshot::Sender<CoreResponse>>,
+        Result<DatabaseOptimization>,
+    ) {
         let Some(mut task) = self.active_optimization.take() else {
             return (
                 None,
@@ -107,15 +109,18 @@ impl Core {
         let result = task.join().and(result);
         // VACUUM may have committed even when optimize/checkpoint later failed.
         self.store.invalidate_caches();
-        let result = result.map(|optimization| {
-            self.state.system.database_optimization = Some(optimization);
+        let result = result.inspect(|optimization| {
+            self.state.system.database_optimization = Some(optimization.clone());
         });
         (task.reply.take(), result)
     }
 
     pub(in crate::core) fn shutdown_optimization(
         &mut self,
-    ) -> Option<(Option<oneshot::Sender<CoreResponse>>, Result<()>)> {
+    ) -> Option<(
+        Option<oneshot::Sender<CoreResponse>>,
+        Result<DatabaseOptimization>,
+    )> {
         let task = self.active_optimization.as_mut()?;
         // VACUUM is not cancellable here. Shutdown waits for physical completion,
         // with no hard duration bound and no replay after an unknown outcome.

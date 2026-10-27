@@ -1387,6 +1387,7 @@ fn ack_wire_round_trip_has_explicit_response_type() {
         scan_id: Some(u64::MAX),
         relocation_id: Some(42),
         processing_id: Some(7),
+        database_optimization: None,
     };
     let mut encoded = Vec::new();
     encode_response_frame_into(&WireResponse::Ack(ack.clone()), &mut encoded).unwrap();
@@ -1398,6 +1399,7 @@ fn ack_wire_round_trip_has_explicit_response_type() {
     assert_eq!(decoded.revision, ack.revision);
     assert_eq!(decoded.error, ack.error);
     assert_eq!(decoded.scan_id, ack.scan_id);
+    assert_eq!(decoded.database_optimization, ack.database_optimization);
 }
 
 #[test]
@@ -2193,6 +2195,7 @@ fn client_session_reuses_connection_after_command_and_request_rejections() {
                 scan_id: None,
                 relocation_id: None,
                 processing_id: None,
+                database_optimization: None,
             },
         );
         assert!(matches!(
@@ -2261,6 +2264,7 @@ fn client_session_discards_partial_failed_response_before_next_explicit_request(
                 scan_id: None,
                 relocation_id: None,
                 processing_id: None,
+                database_optimization: None,
             }),
             &mut frame,
         )
@@ -2283,6 +2287,7 @@ fn client_session_discards_partial_failed_response_before_next_explicit_request(
                 scan_id: None,
                 relocation_id: None,
                 processing_id: None,
+                database_optimization: None,
             },
         );
     });
@@ -2487,6 +2492,7 @@ fn independent_cli_session_can_explicitly_reconnect_to_a_new_instance() {
                 scan_id: None,
                 relocation_id: None,
                 processing_id: None,
+                database_optimization: None,
             },
         );
     });
