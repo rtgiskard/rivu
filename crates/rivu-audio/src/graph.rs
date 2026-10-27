@@ -68,8 +68,12 @@ struct StreamingDenoise {
 impl StreamingDenoise {
     fn new(denoiser: Denoiser, channels: usize) -> Self {
         let delay_samples = denoiser.lookahead_frames() * channels;
-        let burst =
-            denoiser.config().fft_size.max(denoiser.lookahead_frames()) + GRAPH_BLOCK_FRAMES;
+        let spectral_frames = if denoiser.config().mode == DenoiseMode::Off {
+            0
+        } else {
+            denoiser.config().fft_size
+        };
+        let burst = spectral_frames.max(denoiser.lookahead_frames()) + GRAPH_BLOCK_FRAMES;
         let mut queue = VecDeque::with_capacity(delay_samples + burst * channels);
         queue.resize(delay_samples, 0.0);
         Self {
@@ -713,12 +717,20 @@ fn estimate(kind: &GraphNodeKind, channels: usize) -> (usize, u64) {
                 )
             }
         },
-        GraphNodeKind::Denoise { config, .. } => (
-            config.fft_size * (channels * 64 + 128),
-            channels as u64 * (config.fft_size.ilog2() as u64 * 32 + 128)
-                + config.smoothing_bins as u64 * 16
-                + 256,
-        ),
+        GraphNodeKind::Denoise { config, .. } => {
+            let spectral = config.mode != DenoiseMode::Off;
+            let fft_size = if spectral { config.fft_size } else { 0 };
+            (
+                fft_size * (channels * 64 + 128),
+                channels as u64 * (fft_size.checked_ilog2().unwrap_or(0) as u64 * 32 + 128)
+                    + if spectral {
+                        config.smoothing_bins as u64 * 16
+                    } else {
+                        0
+                    }
+                    + 256,
+            )
+        }
         _ => (0, 0),
     };
     (state, work)
