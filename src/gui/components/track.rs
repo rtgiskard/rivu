@@ -127,6 +127,7 @@ fn metadata_text(
             .w(gpui::rems(0.75))
             .flex_shrink_0()
             .text_center()
+            .text_color(rgb(theme.muted))
             .font_family(fonts::SYMBOLS_FAMILY)
             .font_size_scale(1.)
             .tooltip(rivu_ui::text_tooltip(missing_label.to_owned()))
