@@ -279,13 +279,6 @@ impl Core {
                 let starts_export = matches!(&command, Command::ExportPlaylist { .. });
                 let starts_external = matches!(&command, Command::QueueExternalPaths { .. });
                 let starts_optimization = matches!(&command, Command::OptimizeDatabase);
-                let starts_processing = matches!(
-                    &command,
-                    Command::StartProcessing { .. }
-                        | Command::ProcessingGraphRun { .. }
-                        | Command::ProcessingGraphExport { .. }
-                        | Command::ProcessingGraphAudition { .. }
-                );
                 let result = self.command(command);
                 if let Err(error) = &result
                     && (!library_owned || request.reply.is_none())
@@ -311,11 +304,7 @@ impl Core {
                 } else {
                     None
                 };
-                let processing_id = if result.is_ok() && starts_processing {
-                    self.processing.active.as_ref().map(|task| task.id)
-                } else {
-                    None
-                };
+                let processing_id = result.as_ref().ok().copied().flatten();
                 if result.is_ok() && starts_export {
                     self.active_export
                         .as_mut()
@@ -335,7 +324,7 @@ impl Core {
                         scan_id,
                         relocation_id,
                         processing_id,
-                        ..Ack::from_result(result, self.state.system.revision)
+                        ..Ack::from_result(result.map(|_| ()), self.state.system.revision)
                     }));
                 }
             }

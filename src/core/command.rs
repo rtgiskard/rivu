@@ -2,14 +2,14 @@ use super::*;
 use anyhow::{bail, ensure};
 
 impl Core {
-    pub(in crate::core) fn command(&mut self, command: Command) -> Result<()> {
+    pub(in crate::core) fn command(&mut self, command: Command) -> Result<Option<u64>> {
         if self.database_maintenance_active() && self.maintenance_control(&command)? {
-            return Ok(());
+            return Ok(None);
         }
         self.apply_command(command)
     }
 
-    fn apply_command(&mut self, command: Command) -> Result<()> {
+    fn apply_command(&mut self, command: Command) -> Result<Option<u64>> {
         match command {
             Command::TransferCollection {
                 source,
@@ -53,7 +53,7 @@ impl Core {
                 }
                 let (count, inserted) = self.store.transfer_collection(&source, destination)?;
                 if count == 0 {
-                    return Ok(());
+                    return Ok(None);
                 }
                 if count != 0
                     && matches!(
@@ -96,7 +96,7 @@ impl Core {
                 self.advance_queue_revision();
                 self.append_queue_ids()?;
             }
-            Command::Scan { paths, force } => return self.scan(paths, force),
+            Command::Scan { paths, force } => self.scan(paths, force)?,
             Command::CheckOtherTracks { force } => {
                 self.start_other_tracks_check(force)?;
             }
@@ -111,7 +111,7 @@ impl Core {
             Command::RelocateTrack {
                 source_id,
                 target_id,
-            } => return self.relocate_track(source_id, target_id),
+            } => self.relocate_track(source_id, target_id)?,
             Command::CancelRelocation { id } => self.cancel_relocation(id)?,
             Command::KeepTrackIndependent { track_id } => self.keep_track_independent(track_id)?,
             Command::ProcessingBypass => self.processing_bypass()?,
@@ -126,25 +126,29 @@ impl Core {
                 track_id,
                 target,
                 mode,
-            } => self.processing_graph_run(track_id, target, mode)?,
+            } => return self.processing_graph_run(track_id, target, mode).map(Some),
             Command::ProcessingGraphAudition { id, node } => {
-                self.processing_graph_audition(id, node)?
+                return self.processing_graph_audition(id, node);
             }
             Command::ProcessingGraphExport { id, node, path } => {
-                self.processing_graph_export(id, node, path)?
+                return self.processing_graph_export(id, node, path).map(Some);
             }
             Command::StartProcessing {
                 track_id,
                 operation,
                 profile,
-            } => self.start_processing(track_id, operation, profile)?,
+            } => {
+                return self
+                    .start_processing(track_id, operation, profile)
+                    .map(Some);
+            }
             Command::CancelProcessing { id } => self.cancel_processing(id)?,
             Command::AuditionProcessing {
                 id,
                 mode,
                 vocal_gain_db,
                 accompaniment_gain_db,
-            } => self.audition_processing(id, mode, vocal_gain_db, accompaniment_gain_db)?,
+            } => return self.audition_processing(id, mode, vocal_gain_db, accompaniment_gain_db),
             Command::Play { track_id } => {
                 self.track(track_id)?;
                 let existing = self.store.queued_track(track_id)?;
@@ -222,7 +226,7 @@ impl Core {
                 {
                     self.seek((self.state.playback.position + delta).max(0.0))?;
                 }
-                return Ok(());
+                return Ok(None);
             }
             Command::Volume { value } => {
                 if !value.is_finite() || !(0.0..=1.0).contains(&value) {
@@ -426,7 +430,7 @@ impl Core {
                         .into_owned()
                 });
                 Store::validate_playlist_name(&name)?;
-                return self.import_playlist(path, name);
+                self.import_playlist(path, name)?;
             }
             Command::ExportPlaylist { playlist_id, path } => {
                 self.export_playlist(playlist_id, &path)?;
@@ -457,11 +461,11 @@ impl Core {
             }
             Command::Analysis { enabled } => {
                 self.engine.analysis_control.set_display_enabled(enabled);
-                return Ok(());
+                return Ok(None);
             }
             Command::DismissError => {
                 self.state.system.last_error = None;
-                return Ok(());
+                return Ok(None);
             }
             Command::DismissScanResult => {
                 if !self.state.system.scanning {
@@ -470,21 +474,21 @@ impl Core {
                     self.state.system.scan_task_id = None;
                     self.state.system.scan_message.clear();
                 }
-                return Ok(());
+                return Ok(None);
             }
             Command::Configure { config } => self.configure(config)?,
             Command::MprisStatus { status } => {
                 self.state.system.mpris_status = status;
-                return Ok(());
+                return Ok(None);
             }
             Command::SeekQueue { queue_id, seconds } => {
                 if self.state.queue.current_id == Some(queue_id) {
                     self.seek(seconds)?;
                 }
-                return Ok(());
+                return Ok(None);
             }
-            Command::OptimizeDatabase => return self.optimize_database(),
+            Command::OptimizeDatabase => self.optimize_database()?,
         }
-        Ok(())
+        Ok(None)
     }
 }

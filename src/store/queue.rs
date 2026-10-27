@@ -130,10 +130,18 @@ impl Store {
             )?;
             ensure!(exists, "Queue entry not found");
         }
-        self.conn.execute(
+        let changed = self.conn.execute(
             "UPDATE rivu_meta SET current_queue_entry_id=?1 WHERE singleton=1 AND current_queue_entry_id IS NOT ?1",
             [current],
         )?;
+        if changed == 0 {
+            let saved: bool = self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM rivu_meta WHERE singleton=1 AND current_queue_entry_id IS ?1)",
+                [current],
+                |row| row.get(0),
+            )?;
+            ensure!(saved, "Queue current selection was not saved");
+        }
         Ok(())
     }
 

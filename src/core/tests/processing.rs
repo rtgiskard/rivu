@@ -196,26 +196,8 @@ fn native_and_mix_worker_panics_commit_failure_finish_waits_and_release_admissio
         if mixing {
             let result = &core.processing.results[0];
             assert!(result.mix.is_none());
-            assert!(
-                !std::fs::read_dir(result.directory.path())
-                    .unwrap()
-                    .any(|entry| {
-                        entry
-                            .unwrap()
-                            .file_name()
-                            .to_string_lossy()
-                            .starts_with("mix-")
-                    })
-            );
         } else {
             assert!(core.processing.results.is_empty());
-            assert!(!std::fs::read_dir(directory.path()).unwrap().any(|entry| {
-                entry
-                    .unwrap()
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with("processing-")
-            }));
         }
         core.start_processing(1, ProcessingOperation::Denoise, None)
             .unwrap();
@@ -2477,4 +2459,332 @@ fn stale_queue_graph_audition_recovers_source_context_before_selecting_occurrenc
     assert_eq!(core.state.queue.current_id, Some(1));
     assert_eq!(core.state.current_track().unwrap().id, 1);
     assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
+}
+
+#[test]
+fn graph_exports_reject_every_owned_scratch_directory_and_alias() {
+    let (directory, mut core) = fixture();
+    source(directory.path());
+    for _ in 0..3 {
+        core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Offline)
+            .unwrap();
+        complete(&mut core);
+    }
+    let runs = core
+        .processing
+        .results
+        .iter()
+        .map(|result| result.directory.path().to_path_buf())
+        .collect::<Vec<_>>();
+    let scratch = runs[0].parent().unwrap().to_path_buf();
+    for (index, run) in runs.iter().enumerate() {
+        let nested = run.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let alias = directory.path().join(format!("scratch-alias-{index}"));
+        std::os::unix::fs::symlink(&nested, &alias).unwrap();
+        for parent in [run, &nested, &alias, &scratch] {
+            let path = parent.join("must-not-export.wav");
+            let error = core
+                .processing_graph_export(1, graph_port(2, 0), path.clone())
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("automatically reclaimed"),
+                "{error:#}"
+            );
+            assert!(!path.exists());
+            assert!(core.processing.active.is_none());
+        }
+    }
+    // Retirement does not make a session-owned location a durable destination.
+    let retired = core.processing.results.pop_front().unwrap();
+    core.processing.retire(Box::new(retired));
+    let error = core
+        .processing_graph_export(2, graph_port(2, 0), scratch.join("retiring.wav"))
+        .unwrap_err();
+    assert!(error.to_string().contains("automatically reclaimed"));
+}
+
+#[test]
+fn graph_exports_reject_scratch_after_ancestor_rename_with_old_path_alias() {
+    let (directory, mut core) = fixture();
+    let expected = source(directory.path());
+    let data = directory.path().join("data");
+    core.processing = crate::processing::Service::new(data.clone());
+    core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Offline)
+        .unwrap();
+    complete(&mut core);
+    let scratch = core.processing.results[0]
+        .directory
+        .path()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let moved = directory.path().join("moved-data");
+    std::fs::rename(&data, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &data).unwrap();
+    let moved_scratch = moved.join(scratch.strip_prefix(&data).unwrap());
+    for parent in [&scratch, &moved_scratch] {
+        let destination = parent.join("must-not-export.wav");
+        let error = core
+            .processing_graph_export(1, graph_port(2, 0), destination.clone())
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("automatically reclaimed"),
+            "{error:#}"
+        );
+        assert!(!destination.exists());
+        assert!(core.processing.active.is_none());
+    }
+    let destination = directory.path().join("durable.wav");
+    core.processing_graph_export(1, graph_port(2, 0), destination.clone())
+        .unwrap();
+    complete(&mut core);
+    let status = core.processing_status(2).unwrap();
+    assert_eq!(status.phase, ProcessingPhase::Complete);
+    assert_eq!(status.graph_exported_path, Some(destination.clone()));
+    drop(core);
+    assert!(!moved_scratch.exists());
+    let actual = hound::WavReader::open(destination)
+        .unwrap()
+        .samples::<f32>()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn graph_exports_reject_unresolvable_owned_scratch_root() {
+    let (directory, mut core) = fixture();
+    source(directory.path());
+    let data = directory.path().join("data");
+    core.processing = crate::processing::Service::new(data.clone());
+    core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Offline)
+        .unwrap();
+    complete(&mut core);
+    std::fs::rename(&data, directory.path().join("moved-data")).unwrap();
+    let destination = directory.path().join("durable.wav");
+    let error = core
+        .processing_graph_export(1, graph_port(2, 0), destination.clone())
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("Cannot resolve processing scratch root"),
+        "{error:#}"
+    );
+    assert!(!destination.exists());
+    assert!(core.processing.active.is_none());
+}
+
+#[test]
+fn graph_export_freezes_external_alias_and_survives_processing_owner_drop() {
+    let (directory, mut core) = fixture();
+    let expected = source(directory.path());
+    core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Offline)
+        .unwrap();
+    complete(&mut core);
+    let output = directory.path().join("durable");
+    std::fs::create_dir(&output).unwrap();
+    let alias = directory.path().join("destination-alias");
+    std::os::unix::fs::symlink(&output, &alias).unwrap();
+    core.processing_graph_export(1, graph_port(2, 0), alias.join("export.wav"))
+        .unwrap();
+    let event = completion(&mut core);
+    let scratch = core.processing.results[0]
+        .directory
+        .path()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    std::fs::remove_file(&alias).unwrap();
+    std::os::unix::fs::symlink(&scratch, &alias).unwrap();
+    core.processing_event(event);
+    let destination = output.join("export.wav");
+    assert_eq!(
+        core.processing_status(2).unwrap().graph_exported_path,
+        Some(destination.clone())
+    );
+    assert!(!scratch.join("export.wav").exists());
+    drop(core);
+    assert!(!scratch.exists());
+    let actual = hound::WavReader::open(destination)
+        .unwrap()
+        .samples::<f32>()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn graph_export_rechecks_canonical_parent_before_publication() {
+    let (directory, mut core) = fixture();
+    source(directory.path());
+    core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Offline)
+        .unwrap();
+    complete(&mut core);
+    let parent = directory.path().join("export-parent");
+    std::fs::create_dir(&parent).unwrap();
+    core.processing_graph_export(1, graph_port(2, 0), parent.join("export.wav"))
+        .unwrap();
+    let event = completion(&mut core);
+    let crate::processing::Event::Finished {
+        result: Ok(result), ..
+    } = &event
+    else {
+        panic!("expected staged export completion");
+    };
+    let scratch = result.directory.path().to_path_buf();
+    std::fs::rename(&parent, directory.path().join("moved-parent")).unwrap();
+    std::os::unix::fs::symlink(&scratch, &parent).unwrap();
+    core.processing_event(event);
+    let status = core.processing_status(2).unwrap();
+    assert_eq!(status.phase, ProcessingPhase::Failed);
+    assert!(status.graph_exported_path.is_none());
+    assert!(!scratch.join("export.wav").exists());
+}
+
+fn processing_command_ack(core: &mut Core, command: Command) -> Ack {
+    let (reply, response) = oneshot::channel();
+    assert!(
+        core.business_event(dispatch::BusinessEvent::Request(Request {
+            operation: Operation::Command(command),
+            reply: Some(reply),
+        }))
+    );
+    let CoreResponse::Ack(ack) = futures::executor::block_on(response).unwrap() else {
+        panic!("expected command acknowledgement");
+    };
+    assert!(ack.is_success(), "{ack:?}");
+    ack
+}
+
+#[test]
+fn processing_acks_identify_only_the_task_admitted_by_that_command() {
+    let (directory, mut core) = fixture();
+    source(directory.path());
+    let _commands = recording_audio(&mut core);
+    let run = || Command::ProcessingGraphRun {
+        track_id: 1,
+        target: graph_port(1, 0),
+        mode: GraphExecutionMode::Offline,
+    };
+    assert_eq!(
+        processing_command_ack(&mut core, run()).processing_id,
+        Some(1)
+    );
+    complete(&mut core);
+    assert_eq!(
+        processing_command_ack(&mut core, run()).processing_id,
+        Some(2)
+    );
+    let event = completion(&mut core);
+    let cached = processing_command_ack(
+        &mut core,
+        Command::ProcessingGraphAudition {
+            id: 1,
+            node: graph_port(1, 0),
+        },
+    );
+    assert_eq!(cached.processing_id, None);
+    assert_eq!(core.processing.active.as_ref().unwrap().id, 2);
+    core.processing_event(event);
+    let uncached = processing_command_ack(
+        &mut core,
+        Command::ProcessingGraphAudition {
+            id: 1,
+            node: graph_port(2, 0),
+        },
+    );
+    assert_eq!(uncached.processing_id, Some(3));
+    core.processing_bypass().unwrap();
+    complete(&mut core);
+    let export = processing_command_ack(
+        &mut core,
+        Command::ProcessingGraphExport {
+            id: 1,
+            node: graph_port(1, 0),
+            path: directory.path().join("ack-export.wav"),
+        },
+    );
+    assert_eq!(export.processing_id, Some(4));
+    complete(&mut core);
+    let native = processing_command_ack(
+        &mut core,
+        Command::StartProcessing {
+            track_id: 1,
+            operation: ProcessingOperation::Denoise,
+            profile: None,
+        },
+    );
+    assert_eq!(native.processing_id, Some(5));
+    complete(&mut core);
+}
+
+#[test]
+fn playback_bypass_does_not_relax_mix_source_admission() {
+    for change in ["file", "decoder", "database"] {
+        let (directory, mut core) = fixture();
+        source(directory.path());
+        core.edit_track(1, None, None, None, Some(DecoderHint::Auto))
+            .unwrap();
+        prepare_mix(&mut core);
+        let _commands = recording_audio(&mut core);
+        core.audition_processing(1, AuditionMode::Mix, 0.0, 0.0)
+            .unwrap();
+        let event = mix_completion(&mut core);
+        let crate::processing::Event::MixFinished {
+            result: Ok(path), ..
+        } = &event
+        else {
+            panic!("expected rendered mix");
+        };
+        let path = path.clone();
+        core.processing_bypass().unwrap();
+        match change {
+            "file" => std::fs::write(directory.path().join("1.wav"), b"changed source").unwrap(),
+            "decoder" => core
+                .edit_track(1, None, None, None, Some(DecoderHint::Native))
+                .unwrap(),
+            "database" => core.database_outcome_uncertain(),
+            _ => unreachable!(),
+        }
+        let generation = core.generation;
+        core.processing_event(event);
+        assert_eq!(
+            core.processing_status(1).unwrap().phase,
+            ProcessingPhase::Failed,
+            "{change}"
+        );
+        assert!(core.processing.results[0].mix.is_none());
+        assert!(!path.exists());
+        assert!(core.processing.audition.is_none());
+        assert_eq!(core.generation, generation);
+    }
+}
+
+#[test]
+fn processing_mix_ack_reports_admission_but_synchronous_audition_does_not() {
+    let (directory, mut core) = fixture();
+    source(directory.path());
+    prepare_mix(&mut core);
+    let _commands = recording_audio(&mut core);
+    for (mode, expected) in [(AuditionMode::Original, None), (AuditionMode::Mix, Some(1))] {
+        let ack = processing_command_ack(
+            &mut core,
+            Command::AuditionProcessing {
+                id: 1,
+                mode,
+                vocal_gain_db: 0.0,
+                accompaniment_gain_db: 0.0,
+            },
+        );
+        assert_eq!(ack.processing_id, expected);
+    }
+    let event = mix_completion(&mut core);
+    core.processing_bypass().unwrap();
+    core.processing_event(event);
+    assert_eq!(
+        core.processing_status(1).unwrap().phase,
+        ProcessingPhase::Complete
+    );
 }

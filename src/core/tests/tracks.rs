@@ -756,7 +756,9 @@ fn failed_track_deletion_retains_persisted_current_occurrence_and_fences_audio()
             playing(&mut core, 3);
             match status {
                 PlaybackStatus::Stopped => core.stop().unwrap(),
-                PlaybackStatus::Paused => core.command(Command::Pause).unwrap(),
+                PlaybackStatus::Paused => {
+                    core.command(Command::Pause).unwrap();
+                }
                 PlaybackStatus::Playing => {}
             }
             core.save_queue().unwrap();
@@ -853,7 +855,9 @@ fn unrelated_track_deletion_preserves_current_occurrence_and_playback_status() {
             playing(&mut core, 3);
             match status {
                 PlaybackStatus::Stopped => core.stop().unwrap(),
-                PlaybackStatus::Paused => core.command(Command::Pause).unwrap(),
+                PlaybackStatus::Paused => {
+                    core.command(Command::Pause).unwrap();
+                }
                 PlaybackStatus::Playing => {}
             }
             let generation = core.generation;

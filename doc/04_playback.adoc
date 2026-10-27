@@ -111,6 +111,12 @@ wait for Settings Apply, layout sync, or window close. The implementation is in
 link:../src/core.rs[initial-state loading] and
 link:../src/core/queue.rs[queue persistence and refresh].
 
+If a queue mutation commits but refreshing its control state fails, later queue
+operations recover that state before using it. A failed current-selection save
+keeps the runtime selection pending: operations that depend on database current,
+including deduplication, must persist it first rather than restore an older
+selection. Pause and Stop remain available while queue recovery is blocked.
+
 Desktop Queue rows use the shared
 link:02_library.adoc#_track_information[track information and hover rules].
 

@@ -19,9 +19,11 @@ impl Core {
             // Only explicit draft changes override the owner's execution-time state.
             let mut config = self.effective_config();
             patch.apply_to(&mut config);
-            return self.command(Command::Configure {
-                config: std::sync::Arc::new(config),
-            });
+            return self
+                .command(Command::Configure {
+                    config: std::sync::Arc::new(config),
+                })
+                .map(|_| ());
         }
         let mut config = self.effective_config();
         let still_mode = matches!(change, GuiConfigChange::ToggleStillMode);

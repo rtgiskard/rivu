@@ -35,7 +35,7 @@ impl Core {
         track_id: i64,
         target: GraphPort,
         mode: GraphExecutionMode,
-    ) -> Result<()> {
+    ) -> Result<u64> {
         let track = self.track(track_id)?;
         let request = crate::processing::GraphRequest {
             target,
@@ -52,14 +52,14 @@ impl Core {
         if mode != GraphExecutionMode::Offline {
             self.processing.pending_audition = Some((id, self.generation));
         }
-        Ok(())
+        Ok(id)
     }
 
     pub(in crate::core) fn processing_graph_audition(
         &mut self,
         id: u64,
         node: GraphPort,
-    ) -> Result<()> {
+    ) -> Result<Option<u64>> {
         let result = self
             .processing
             .results
@@ -73,15 +73,7 @@ impl Core {
             .clone()
             .context("Not a graph run")?;
         graph.ancestors(node)?;
-        let track = self.track(result.track.id)?;
-        ensure!(
-            track.path == result.track.path
-                && track.cue == result.track.cue
-                && track.decoder_hint == result.track.decoder_hint
-                && track.fingerprint == result.track.fingerprint
-                && crate::processing::SourceStamp::read(&track.path)? == result.stamp,
-            "Graph source changed; preview requires the original immutable source"
-        );
+        let track = self.processing_source(result)?;
         if let Some(output) = result.status.graph_outputs.iter().find(|o| o.port == node) {
             let path = output.path.clone();
             let track_id = result.track.id;
@@ -92,7 +84,7 @@ impl Core {
                 output: Some(node),
                 mode: Some(GraphExecutionMode::Offline),
             });
-            return Ok(());
+            return Ok(None);
         }
         let mut config = self.effective_config();
         config.processing_graph = graph;
@@ -106,9 +98,10 @@ impl Core {
         let status = self
             .processing
             .start_graph(track, Arc::new(config), request)?;
+        let task_id = status.id;
         self.processing.pending_audition = Some((status.id, self.generation));
         self.state.system.processing = Some(status);
-        Ok(())
+        Ok(Some(task_id))
     }
 
     fn processing_graph_audition_prepared(
@@ -183,7 +176,7 @@ impl Core {
         id: u64,
         node: GraphPort,
         path: PathBuf,
-    ) -> Result<()> {
+    ) -> Result<u64> {
         let result = self
             .processing
             .results
@@ -197,19 +190,7 @@ impl Core {
             .clone()
             .context("Not a graph run")?;
         graph.ancestors(node)?;
-        let track = self.track(result.track.id)?;
-        ensure!(
-            track.path == result.track.path
-                && track.cue == result.track.cue
-                && track.decoder_hint == result.track.decoder_hint
-                && track.fingerprint == result.track.fingerprint
-                && crate::processing::SourceStamp::read(&track.path)? == result.stamp,
-            "Graph source changed; export requires the original immutable source"
-        );
-        ensure!(
-            path.is_absolute() && !path.exists() && path.parent().is_some_and(|p| p.is_dir()),
-            "Export requires an absolute, new file in an existing directory"
-        );
+        let track = self.processing_source(result)?;
         let cached_output = result
             .status
             .graph_outputs
@@ -239,8 +220,9 @@ impl Core {
         let status = self
             .processing
             .start_graph(track, Arc::new(config), request)?;
+        let task_id = status.id;
         self.state.system.processing = Some(status);
-        Ok(())
+        Ok(task_id)
     }
 
     pub(in crate::core) fn cancel_processing(&mut self, id: u64) -> Result<()> {
@@ -476,13 +458,14 @@ impl Core {
         track_id: i64,
         operation: ProcessingOperation,
         profile: Option<NoiseSelection>,
-    ) -> Result<()> {
+    ) -> Result<u64> {
         let track = self.track(track_id)?;
         let status =
             self.processing
                 .start(track, self.state.system.config.clone(), operation, profile)?;
+        let id = status.id;
         self.state.system.processing = Some(status);
-        Ok(())
+        Ok(id)
     }
     pub(in crate::core) fn processing_status(&self, id: u64) -> Option<ProcessingTaskStatus> {
         self.processing_status_ref(id).cloned()
@@ -551,12 +534,7 @@ impl Core {
         }
     }
 
-    fn admit_processing_result(
-        &self,
-        result: &crate::processing::ProcessingResult,
-        cancelled: bool,
-    ) -> Result<()> {
-        ensure!(!cancelled, "Processing cancelled");
+    fn processing_source(&self, result: &crate::processing::ProcessingResult) -> Result<Track> {
         ensure!(
             !self.database_unavailable,
             "Database outcome is uncertain; restart Rivu before publishing processing results"
@@ -567,12 +545,22 @@ impl Core {
                 && track.cue == result.track.cue
                 && track.decoder_hint == result.track.decoder_hint
                 && track.fingerprint == result.track.fingerprint,
-            "Source identity changed before publication"
+            "Processing result is stale: source identity changed before publication"
         );
         ensure!(
             crate::processing::SourceStamp::read(&track.path)? == result.stamp,
-            "Source file changed before publication"
+            "Processing result is stale: source file changed before publication"
         );
+        Ok(track)
+    }
+
+    fn admit_processing_result(
+        &self,
+        result: &crate::processing::ProcessingResult,
+        cancelled: bool,
+    ) -> Result<()> {
+        ensure!(!cancelled, "Processing cancelled");
+        self.processing_source(result)?;
         if result.retains_audio() {
             let pinned_bytes = self
                 .processing
@@ -729,6 +717,20 @@ impl Core {
                 let _ = task.worker.join();
                 let result = result.and_then(|mut result| {
                     if let Some((temporary, destination)) = result.pending_export.take() {
+                        if let Err(error) = self
+                            .processing
+                            .export_destination(&destination)
+                            .and_then(|canonical| {
+                                ensure!(
+                                    canonical == destination,
+                                    "Export destination parent changed after admission"
+                                );
+                                Ok(())
+                            })
+                        {
+                            self.processing.retire(result);
+                            return Err(error);
+                        }
                         if let Err(error) = temporary.persist_noclobber(&destination) {
                             self.processing.retire(result);
                             return Err(error.error.into());
@@ -768,7 +770,7 @@ impl Core {
                                     .as_ref()
                                     .and_then(|status| status.settings.graph_target);
                                 target.map_or(Ok(()), |target| {
-                                    self.processing_graph_audition(id, target)
+                                    self.processing_graph_audition(id, target).map(|_| ())
                                 })
                             };
                             if let Err(error) = outcome {
@@ -836,6 +838,13 @@ impl Core {
                     Ok(path) if !cancelled && (!requested || generation == self.generation) => {
                         let bytes = std::fs::metadata(&path).map(|metadata| metadata.len());
                         let outcome = bytes.map_err(anyhow::Error::from).and_then(|bytes| {
+                            let source = self
+                                .processing
+                                .results
+                                .iter()
+                                .find(|r| r.status.id == id)
+                                .context("Processing result is no longer retained")?;
+                            self.processing_source(source)?;
                             let retained = self
                                 .processing
                                 .results
@@ -912,22 +921,14 @@ impl Core {
         mode: AuditionMode,
         vocal_gain_db: f32,
         accompaniment_gain_db: f32,
-    ) -> Result<()> {
+    ) -> Result<Option<u64>> {
         let result = self
             .processing
             .results
             .iter()
             .find(|r| r.status.id == id)
             .context("Processing result is no longer retained")?;
-        let track = self.track(result.track.id)?;
-        ensure!(
-            track.path == result.track.path
-                && track.cue == result.track.cue
-                && track.decoder_hint == result.track.decoder_hint
-                && track.fingerprint == result.track.fingerprint
-                && crate::processing::SourceStamp::read(&track.path)? == result.stamp,
-            "Processing result is stale"
-        );
+        let track = self.processing_source(result)?;
         let outputs = result
             .status
             .outputs
@@ -992,7 +993,7 @@ impl Core {
             status.phase = ProcessingPhase::Processing;
             status.error = None;
             self.state.system.processing = Some(status);
-            return Ok(());
+            return Ok(Some(id));
         }
         let result = self
             .processing
@@ -1017,7 +1018,7 @@ impl Core {
             ),
             AuditionMode::Mix => unreachable!(),
         };
-        self.audition_path(id, path)
+        self.audition_path(id, path).map(|_| None)
     }
     fn audition_path(&mut self, id: u64, path: Option<PathBuf>) -> Result<()> {
         self.audition_path_with_graph(id, path, None)
@@ -1041,7 +1042,13 @@ impl Core {
             .context("Audition requires the processing source to be the current queue track")?
             .as_ref()
             .clone();
-        let admitted_source = crate::processing::SourceStamp::read(&track.path)?;
+        let admitted_source =
+            if let Some(result) = self.processing.results.iter().find(|r| r.status.id == id) {
+                self.processing_source(result)?;
+                result.stamp
+            } else {
+                crate::processing::SourceStamp::read(&track.path)?
+            };
         ensure!(
             track.path == status.source_path
                 && track.cue == status.source_cue

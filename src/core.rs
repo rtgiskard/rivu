@@ -735,6 +735,8 @@ impl Runtime {
             next_playlist_token: 0,
             database_unavailable: false,
             queue_ids_stale: false,
+            queue_projection_stale: false,
+            queue_current_pending: false,
             queue_ids: Vec::new(),
             playback: None,
             retired_playback: None,
@@ -912,6 +914,10 @@ struct Core {
     queue_ids: Vec<u64>,
     /// True after a committed mutation whose queue occurrence IDs could not be refreshed.
     queue_ids_stale: bool,
+    // IDs can be current while the position/current-track projection is not.
+    queue_projection_stale: bool,
+    // A runtime selection must reach the database before accepting its projection.
+    queue_current_pending: bool,
     playback: Option<PlaybackStats>,
     // At most one playback can retire while database writes are excluded.
     retired_playback: Option<RetiredPlayback>,

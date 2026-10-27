@@ -9,9 +9,7 @@ impl Core {
         self.state.queue.revision = self.state.queue.revision.wrapping_add(1);
     }
     pub(in crate::core) fn refresh_queue_tracks(&mut self) -> Result<()> {
-        self.state.queue = self
-            .store
-            .queue_projection(self.queue_ids.len(), self.state.queue.revision)?;
+        self.refresh_queue_projection()?;
         let track = self
             .state
             .queue
@@ -44,12 +42,12 @@ impl Core {
             !self.database_unavailable,
             "Database outcome is uncertain; restart Rivu before saving"
         );
-        self.ensure_queue_control_ready()?;
-        self.store.set_queue_current(self.state.queue.current_id)?;
-        self.state.queue = self
-            .store
-            .queue_projection(self.queue_ids.len(), self.state.queue.revision)?;
-        Ok(())
+        self.queue_current_pending = true;
+        if self.queue_ids_stale {
+            self.reload_queue()
+        } else {
+            self.refresh_queue_projection()
+        }
     }
     pub(in crate::core) fn random_queue_id(&self, rng: &mut impl rand::Rng) -> Option<u64> {
         if self.queue_ids.is_empty() {
@@ -71,12 +69,58 @@ impl Core {
     pub(in crate::core) fn ensure_queue_control_ready(&mut self) -> Result<()> {
         if self.queue_ids_stale {
             self.reload_queue()?;
+        } else {
+            self.persist_queue_current()?;
+            if self.queue_projection_stale {
+                self.refresh_queue_tracks()?;
+            }
         }
         Ok(())
     }
+
+    fn persist_queue_current(&mut self) -> Result<()> {
+        if self.queue_current_pending {
+            self.store.set_queue_current(self.state.queue.current_id)?;
+            self.queue_current_pending = false;
+        }
+        Ok(())
+    }
+
+    pub(in crate::core) fn accept_queue_projection(
+        &mut self,
+        projection: Result<QueueState>,
+    ) -> Result<()> {
+        self.queue_projection_stale = true;
+        let mut projection = projection?;
+        projection.revision = self.state.queue.revision;
+        self.state.queue = projection;
+        self.queue_projection_stale = false;
+        Ok(())
+    }
+
+    fn refresh_queue_projection(&mut self) -> Result<()> {
+        self.queue_projection_stale = true;
+        self.persist_queue_current()?;
+        let projection = self
+            .store
+            .queue_projection(self.queue_ids.len(), self.state.queue.revision);
+        self.accept_queue_projection(projection)
+    }
+
     pub(in crate::core) fn reload_queue(&mut self) -> Result<()> {
         self.queue_ids_stale = true;
         self.queue_ids = self.store.queue_ids()?;
+        // A committed removal or replacement owns the disappearance of a
+        // selection. Otherwise retry the runtime intent before reading DB current.
+        if self.queue_current_pending
+            && self
+                .state
+                .queue
+                .current_id
+                .is_some_and(|id| !self.queue_ids.contains(&id))
+        {
+            self.queue_current_pending = false;
+        }
         self.prune_queue_history();
         self.refresh_queue_tracks()?;
         self.queue_ids_stale = false;
@@ -87,11 +131,12 @@ impl Core {
         if self.queue_ids_stale {
             return self.reload_queue();
         }
+        // Extending can fail after adding a prefix, so only a full reload can
+        // recover identities on failure. Projection failures need no ID reload.
+        self.queue_ids_stale = true;
         self.store.extend_queue_ids(&mut self.queue_ids)?;
-        self.state.queue = self
-            .store
-            .queue_projection(self.queue_ids.len(), self.state.queue.revision)?;
-        Ok(())
+        self.queue_ids_stale = false;
+        self.refresh_queue_projection()
     }
 
     pub(in crate::core) fn check_queue_insertion(
@@ -119,11 +164,21 @@ impl Core {
             return Ok(());
         }
         self.advance_queue_revision();
+        let projection = self.store.queue_projection(
+            self.queue_ids.len() + inserted.len(),
+            self.state.queue.revision,
+        );
+        self.accept_queue_insertion(index, inserted, projection)
+    }
+
+    pub(in crate::core) fn accept_queue_insertion(
+        &mut self,
+        index: usize,
+        inserted: Vec<u64>,
+        projection: Result<QueueState>,
+    ) -> Result<()> {
         self.queue_ids.splice(index..index, inserted);
-        self.state.queue = self
-            .store
-            .queue_projection(self.queue_ids.len(), self.state.queue.revision)?;
-        Ok(())
+        self.accept_queue_projection(projection)
     }
 
     pub(in crate::core) fn remove_queue_entries(&mut self, queue_ids: &[u64]) -> Result<()> {
@@ -145,10 +200,8 @@ impl Core {
             self.advance_queue_revision();
         }
         self.queue_ids.retain(|id| !ids.contains(id));
-        self.state.queue = self
-            .store
-            .queue_projection(self.queue_ids.len(), self.state.queue.revision)?;
         self.prune_queue_history();
+        self.refresh_queue_projection()?;
         if self.state.queue.current_id.is_none() {
             self.state.current_track = None;
         }
@@ -213,9 +266,7 @@ impl Core {
         {
             *slot = id as u64;
         }
-        self.state.queue = self
-            .store
-            .queue_projection(self.queue_ids.len(), self.state.queue.revision)?;
+        self.refresh_queue_projection()?;
         Ok(())
     }
 
@@ -245,9 +296,7 @@ impl Core {
             self.advance_queue_revision();
         }
         self.queue_ids = order;
-        self.state.queue = self
-            .store
-            .queue_projection(self.queue_ids.len(), self.state.queue.revision)?;
+        self.refresh_queue_projection()?;
         Ok(())
     }
 

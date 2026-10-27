@@ -1948,3 +1948,165 @@ fn stale_queue_does_not_block_pause_toggle_pause_or_stop() {
     assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
     assert!(core.queue_ids_stale);
 }
+
+#[test]
+fn incremental_queue_commits_recover_projection_before_previous() {
+    let cases = [
+        ("INSERT", Command::Enqueue { track_ids: vec![1] }),
+        (
+            "INSERT",
+            Command::EnqueueSources {
+                other_tracks: false,
+                directories: vec![],
+                track_ids: vec![1],
+            },
+        ),
+        (
+            "INSERT",
+            Command::InsertQueue {
+                track_ids: vec![1],
+                index: 0,
+                expected_revision: 0,
+            },
+        ),
+        (
+            "INSERT",
+            Command::InsertQueueSources {
+                other_tracks: false,
+                directories: vec![],
+                track_ids: vec![1],
+                index: 0,
+                expected_revision: 0,
+            },
+        ),
+        (
+            "DELETE",
+            Command::RemoveQueueEntries {
+                queue_ids: vec![1, 2],
+            },
+        ),
+        (
+            "UPDATE OF position",
+            Command::MoveQueueEntries {
+                queue_ids: vec![5],
+                index: 0,
+            },
+        ),
+        ("UPDATE OF position", Command::RandomizeQueue),
+    ];
+    for (event, command) in cases {
+        let (directory, mut core) = fixture();
+        core.state.queue.current_id = Some(5);
+        core.save_queue().unwrap();
+        core.refresh_queue_tracks().unwrap();
+        let command = match command {
+            Command::InsertQueue {
+                track_ids, index, ..
+            } => Command::InsertQueue {
+                track_ids,
+                index,
+                expected_revision: core.state.queue.revision,
+            },
+            Command::InsertQueueSources {
+                other_tracks,
+                directories,
+                track_ids,
+                index,
+                ..
+            } => Command::InsertQueueSources {
+                other_tracks,
+                directories,
+                track_ids,
+                index,
+                expected_revision: core.state.queue.revision,
+            },
+            command => command,
+        };
+        let connection = fail_queue_projection_after(directory.path(), event);
+        let commands = recording_audio(&mut core);
+        // Seed randomization so the mutation is deterministic, not a possible no-op.
+        if matches!(command, Command::RandomizeQueue) {
+            use rand::SeedableRng;
+            assert!(
+                core.randomize_queue(&mut rand::rngs::StdRng::seed_from_u64(42))
+                    .is_err()
+            );
+        } else {
+            assert!(core.command(command).is_err());
+        }
+        assert!(core.navigate(Navigation::Previous).is_err());
+        assert!(commands.try_recv().is_err());
+        repair_queue_projection(&connection);
+        let ids = core.store.queue_ids().unwrap();
+        let position = ids.iter().position(|&id| id == 5).unwrap();
+        let expected = ids[position.saturating_sub(1)];
+        core.navigate(Navigation::Previous).unwrap();
+        assert_eq!(core.state.queue.current_id, Some(expected));
+        assert_eq!(core.state.queue.total, ids.len());
+        assert_eq!(core.queue_ids, ids);
+        assert_queue_saved(&core);
+    }
+}
+
+#[test]
+fn removal_projection_failure_recovers_two_entry_position_and_shuffle_history() {
+    for shuffle in [false, true] {
+        let (directory, mut core) = fixture();
+        core.command(Command::RemoveQueue { queue_id: 5 }).unwrap();
+        core.state.queue.current_id = Some(4);
+        core.save_queue().unwrap();
+        core.refresh_queue_tracks().unwrap();
+        core.state.playback.shuffle = shuffle;
+        core.played = vec![3, 1, 2, 4];
+        core.played_cursor = 4;
+        let connection = fail_queue_projection_after(directory.path(), "DELETE");
+        let _commands = recording_audio(&mut core);
+        assert!(
+            core.command(Command::RemoveQueueEntries {
+                queue_ids: vec![1, 2]
+            })
+            .is_err()
+        );
+        assert_eq!(core.store.queue_ids().unwrap(), [3, 4]);
+        assert!(core.navigate(Navigation::Previous).is_err());
+        repair_queue_projection(&connection);
+        core.navigate(Navigation::Previous).unwrap();
+        assert_eq!(core.state.queue.current_id, Some(3));
+        assert_eq!(core.state.queue.current_position, Some(0));
+        assert_eq!(core.state.queue.total, 2);
+        assert!(!core.played.contains(&1));
+        assert!(!core.played.contains(&2));
+        assert_queue_saved(&core);
+    }
+}
+
+#[test]
+fn failed_incremental_id_read_reloads_occurrences_before_navigation() {
+    let (directory, mut core) = fixture();
+    core.state.queue.current_id = Some(5);
+    core.save_queue().unwrap();
+    core.refresh_queue_tracks().unwrap();
+    let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER corrupt_appended_id AFTER INSERT ON playlist_entries
+         WHEN NEW.playlist_id=0 BEGIN UPDATE playlist_entries SET id=-NEW.id WHERE id=NEW.id; END;",
+        )
+        .unwrap();
+    assert!(
+        core.command(Command::Enqueue { track_ids: vec![1] })
+            .is_err()
+    );
+    let _commands = recording_audio(&mut core);
+    assert!(core.navigate(Navigation::Previous).is_err());
+    connection
+        .execute_batch(
+            "DROP TRIGGER corrupt_appended_id;
+         UPDATE playlist_entries SET id=-id WHERE playlist_id=0 AND id<0;",
+        )
+        .unwrap();
+    core.navigate(Navigation::Previous).unwrap();
+    assert_eq!(core.state.queue.current_id, Some(4));
+    assert_eq!(core.queue_ids, [1, 2, 3, 4, 5, 6]);
+    assert_queue_saved(&core);
+}

@@ -10,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command as Process, Stdio},
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
     thread::{self, JoinHandle},
@@ -68,11 +68,74 @@ pub(crate) struct CachedGraphOutput {
     pub frames: u64,
 }
 
+pub(crate) struct ScratchDirectory {
+    directory: tempfile::TempDir,
+    root: Arc<tempfile::TempDir>,
+}
+
+impl ScratchDirectory {
+    fn new(data_dir: &Path, root: &OnceLock<Arc<tempfile::TempDir>>) -> Result<Self> {
+        let root = if let Some(root) = root.get() {
+            Arc::clone(root)
+        } else {
+            fs::create_dir_all(data_dir)?;
+            let parent = fs::canonicalize(data_dir)?;
+            let directory = tempfile::Builder::new()
+                .prefix("processing-session-")
+                .tempdir_in(parent)?;
+            let directory = Arc::new(directory);
+            root.set(Arc::clone(&directory))
+                .map_err(|_| anyhow::anyhow!("Processing scratch owner already initialized"))?;
+            directory
+        };
+        let directory = tempfile::Builder::new()
+            .prefix("run-")
+            .tempdir_in(root.path())?;
+        Ok(Self { directory, root })
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        self.directory.path()
+    }
+}
+
+fn export_destination(destination: &Path, scratch: Option<&Path>) -> Result<PathBuf> {
+    ensure!(
+        destination.is_absolute(),
+        "Export destination must be an absolute path"
+    );
+    ensure!(
+        !destination.try_exists()?,
+        "Export destination already exists; choose a new file"
+    );
+    let parent = fs::canonicalize(
+        destination
+            .parent()
+            .context("Export destination has no parent")?,
+    )?;
+    ensure!(
+        parent.is_dir(),
+        "Export destination parent must be a directory"
+    );
+    if let Some(root) = scratch {
+        let root = fs::canonicalize(root).context("Cannot resolve processing scratch root")?;
+        ensure!(
+            !parent.starts_with(root),
+            "Export destination must be outside automatically reclaimed processing scratch"
+        );
+    }
+    Ok(parent.join(
+        destination
+            .file_name()
+            .context("Export destination has no file name")?,
+    ))
+}
+
 pub(crate) struct ProcessingResult {
     pub track: Track,
     pub stamp: SourceStamp,
     pub status: ProcessingTaskStatus,
-    pub directory: tempfile::TempDir,
+    pub directory: ScratchDirectory,
     pub mix: Option<PathBuf>,
     pub cache_bytes: u64,
     pub pending_export: Option<(tempfile::NamedTempFile, PathBuf)>,
@@ -126,6 +189,7 @@ pub(crate) struct Service {
     pub pending_audition: Option<(u64, u64)>,
     reclaimer: Option<reclaim::Reclaimer>,
     data_dir: PathBuf,
+    scratch_root: Arc<OnceLock<Arc<tempfile::TempDir>>>,
     #[cfg(test)]
     pub(crate) panic_after_processing: bool,
     #[cfg(test)]
@@ -144,6 +208,7 @@ impl Service {
             next_id: 1,
             reclaimer: None,
             data_dir,
+            scratch_root: Arc::new(OnceLock::new()),
             audition: None,
             audition_generation: None,
             pending_audition: None,
@@ -211,6 +276,10 @@ impl Service {
             !self.sender.is_closed(),
             "Processing service is shutting down"
         );
+        let export_path = export_path
+            .as_deref()
+            .map(|destination| self.export_destination(destination))
+            .transpose()?;
         config.validate()?;
         if let Some(selection) = profile {
             ensure!(
@@ -284,6 +353,7 @@ impl Service {
             self.reclaimer = Some(reclaim::Reclaimer::new(self.sender.clone())?);
         }
         let data_dir = self.data_dir.clone();
+        let scratch_root = Arc::clone(&self.scratch_root);
         #[cfg(test)]
         let panic_after_processing = std::mem::take(&mut self.panic_after_processing);
         #[cfg(test)]
@@ -320,12 +390,8 @@ impl Service {
                             config.neural.worker.display()
                         );
                     }
-                    fs::create_dir_all(&data_dir)?;
-                    let parent = fs::canonicalize(&data_dir)?;
                     check_cancel(&flag)?;
-                    let directory = tempfile::Builder::new()
-                        .prefix("processing-")
-                        .tempdir_in(parent)?;
+                    let directory = ScratchDirectory::new(&data_dir, &scratch_root)?;
                     let result = if let Some(cached_output) = cached_output {
                         run_cached_export(
                             track,
@@ -397,6 +463,10 @@ impl Service {
             reclaimer.shutdown();
         }
     }
+    pub(crate) fn export_destination(&self, destination: &Path) -> Result<PathBuf> {
+        export_destination(destination, self.scratch_root.get().map(|root| root.path()))
+    }
+
     pub fn retiring_bytes(&self) -> u64 {
         self.reclaimer.as_ref().map_or(0, |worker| worker.bytes())
     }
@@ -450,7 +520,7 @@ fn report(tx: &Sender<Event>, id: u64, phase: ProcessingPhase, completed: u64, t
 fn run_cached_export(
     track: Track,
     stamp: SourceStamp,
-    directory: tempfile::TempDir,
+    directory: ScratchDirectory,
     mut status: ProcessingTaskStatus,
     cached: CachedGraphOutput,
     cancel: &AtomicBool,
@@ -472,6 +542,7 @@ fn run_cached_export(
     let pending_export = Some(prepare_export(
         &cached.path,
         destination,
+        directory.root.path(),
         cancel,
         |done, total| {
             report(
@@ -510,7 +581,7 @@ fn run(
     track: Track,
     stamp: SourceStamp,
     config: Arc<Config>,
-    directory: tempfile::TempDir,
+    directory: ScratchDirectory,
     mut status: ProcessingTaskStatus,
     cancel: &AtomicBool,
     tx: &Sender<Event>,
@@ -661,6 +732,7 @@ fn run(
             Some(prepare_export(
                 source,
                 destination,
+                directory.root.path(),
                 cancel,
                 |done, total| {
                     report(
@@ -764,18 +836,16 @@ fn run(
 fn prepare_export(
     source: &Path,
     destination: &Path,
+    scratch: &Path,
     cancel: &AtomicBool,
     mut progress: impl FnMut(u64, u64),
 ) -> Result<(tempfile::NamedTempFile, PathBuf)> {
+    let canonical = export_destination(destination, Some(scratch))?;
     ensure!(
-        destination.is_absolute(),
-        "Export destination must be an absolute path"
+        canonical == destination,
+        "Export destination parent changed after admission"
     );
-    ensure!(
-        !destination.exists(),
-        "Export destination already exists; choose a new file"
-    );
-    let parent = destination
+    let parent = canonical
         .parent()
         .context("Export destination has no parent")?;
     let mut temporary = tempfile::NamedTempFile::new_in(parent)?;

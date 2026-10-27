@@ -15,8 +15,7 @@ pub(in crate::core) struct Saved {
     committed: bool,
     uncertain: bool,
     impacts: Option<crate::store::ScanImpacts>,
-    inserted: Option<Vec<u64>>,
-    queue: Option<Result<QueueState>>,
+    queue: Option<(Vec<u64>, Result<QueueState>)>,
     track_total: Option<Result<usize>>,
     history: Option<Result<Vec<HistoryEntry>>>,
     current_track: Option<Result<Option<Track>>>,
@@ -31,7 +30,6 @@ impl Saved {
             committed: false,
             uncertain: false,
             impacts: None,
-            inserted: None,
             queue: None,
             track_total: None,
             history: None,
@@ -104,12 +102,12 @@ fn save_external(
     saved.committed = true;
     saved.impacts = Some(impacts);
     let total = queue_total.checked_add(inserted.len());
-    saved.inserted = Some(inserted);
-    saved.queue = Some(
+    saved.queue = Some((
+        inserted,
         total
             .context("Queue count overflow after external admission")
             .and_then(|total| store.queue_projection(total, 0)),
-    );
+    ));
     let dependencies = impacts.dependencies(false);
     if dependencies.refresh_track_total {
         saved.track_total = Some(store.track_count());
@@ -460,20 +458,16 @@ impl Core {
         if let Some(error) = saved.error {
             errors.push(format!("{error:#}"));
         }
-        let queued = saved.inserted.as_ref().map_or(0, Vec::len);
-        if let Some(inserted) = saved.inserted {
+        let queued = saved
+            .queue
+            .as_ref()
+            .map_or(0, |(inserted, _)| inserted.len());
+        if let Some((inserted, queue)) = saved.queue {
             let index = task.index.unwrap_or(self.queue_ids.len());
-            self.queue_ids.splice(index..index, inserted);
-        }
-        if let Some(queue) = saved.queue {
-            match queue {
-                Ok(mut queue) => {
-                    queue.revision = self.state.queue.revision;
-                    self.state.queue = queue;
-                }
-                Err(error) => errors.push(format!(
+            if let Err(error) = self.accept_queue_insertion(index, inserted, queue) {
+                errors.push(format!(
                     "Queue committed but refreshing its projection failed: {error:#}"
-                )),
+                ));
             }
         }
         if let Some(total) = saved.track_total {

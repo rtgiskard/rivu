@@ -52,6 +52,8 @@ audio from any live, hybrid or cached audition. EQ parameters, graph and restora
 settings, queue and retained results remain available; rendering and export jobs
 continue. Pending automatic audition is revoked, so a late result cannot undo the
 bypass. Re-enabling EQ or selecting a retained output is an explicit later action.
+Revoking automatic audition does not waive completion-time source validation,
+including for a stem mix that finishes after bypass.
 
 === Node graph desktop workflow
 
@@ -515,8 +517,9 @@ Current task status, bounded task history and still-retained audio agree on the
 terminal phase and error for a task ID, including later stem-mix and audition
 failures. History eviction does not expose an older status through retained audio.
 
-Scratch lives in session-owned `processing-*` directories under the data
-directory. Up to four retained audition results share 4 GiB; the selected audition
+Scratch lives below one session-owned root under the data directory. Active,
+retained and retiring runs share that ownership. Up to four retained audition
+results share 4 GiB; the selected audition
 stays protected, so a result too large to coexist with it fails. Export jobs keep
 only a terminal receipt and the destination WAV, not another audition result;
 repeated exports do not evict their source run. Task status keeps the export job's
@@ -654,7 +657,8 @@ not that an offline file was rendered: `graph_outputs` is empty. Automatic
 admission still depends on the captured playback generation; confirm the actual
 selection in the selected-audio line. Offline and hybrid tasks can retain rendered
 node outputs separately from later graph edits. Cached node/port audition is
-immediate; uncached snapshot audition prepares a new run and returns its own task ID.
+immediate and returns no processing task ID; uncached snapshot audition prepares
+a new run and returns its own task ID.
 To render a selected output from any retained graph snapshot, including realtime,
 use `graph export` with the actual instance-qualified run reference and node/port from that snapshot:
 
@@ -678,13 +682,19 @@ source. Neither path uses the subsequently edited graph. The acknowledgement
 supplies a new `processing_id`; `--wait` returns that export's terminal task result.
 Without `--wait`, query the new task ID, not the
 original run, to determine completion.
-`settings.graph_export_path` records the requested destination;
+`settings.graph_export_path` records the admitted destination with its parent resolved;
 `graph_exported_path` is populated only after the completed export is published.
 Export accepts a real filesystem path, including spaces; relative destinations
 are anchored to the invoking client's working directory, not the core's. Choose
 a new file in an existing directory; existing destinations are never overwritten.
-Retained temporary outputs remain session-owned; an exported file is the durable
-result. Source files are not modified.
+The parent is resolved at admission so retargeting a directory alias cannot redirect
+the export. Destinations inside automatically reclaimed session scratch, including
+directory aliases into it, are rejected. Both the destination parent and owned
+scratch root are resolved for the boundary check; an unresolvable scratch root
+rejects export. These checks do not guarantee safety against arbitrary concurrent
+directory replacement. Other locations under the application data directory
+remain valid. Retained temporary outputs remain session-owned; an exported file
+is the durable result. Source files are not modified.
 
 == Ownership and invariants
 

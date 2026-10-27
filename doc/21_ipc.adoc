@@ -356,6 +356,10 @@ Do not automatically repeat a mutation; inspect authoritative state or the outpu
 If startup timed out before its task ID arrived and reconciliation is unavailable,
 keep the result unknown rather than guessing that no task started.
 
+An acknowledgement's `processing_id` identifies processing work admitted by that
+command, not another active task. Cached graph audition and synchronous audition
+omit it; callers must not infer task creation from the command type alone.
+
 IPC command failures before handshake/encoding completes are `NotAdmitted`.
 After successful encoding, the client marks `write_started` before attempting the
 socket write. From that point, write, flush, response, and cancellation failures

@@ -255,7 +255,14 @@ impl Core {
         if record_history {
             self.record_queue_history(queue_id);
         }
-        self.save_queue()
+        let saved = self.save_queue();
+        if saved.is_err() {
+            // The failed write leaves runtime selection authoritative. Repair
+            // its position locally; successful saves use the indexed projection.
+            self.state.queue.current_position =
+                self.queue_ids.iter().position(|&id| id == queue_id);
+        }
+        saved
     }
     pub(in crate::core) fn count_play(&mut self) -> Result<()> {
         if self.database_maintenance_active() {

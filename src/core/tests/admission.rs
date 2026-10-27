@@ -535,3 +535,41 @@ fn stale_queue_external_saving_rechecks_recovery_before_capturing_queue_snapshot
         }
     }
 }
+
+#[test]
+fn committed_external_queue_projection_failure_recovers_before_navigation() {
+    for index in [None, Some(0)] {
+        let (directory, mut core) = admission_fixture();
+        core.state.queue.current_id = Some(5);
+        core.save_queue().unwrap();
+        core.refresh_queue_tracks().unwrap();
+        let path = directory.path().join("external.wav");
+        write_pcm_frames(&path, 1);
+        let connection = fail_queue_projection_after(directory.path(), "INSERT");
+        let expected_revision = index.map(|_| core.state.queue.revision);
+        core.start_external_admission(vec![path], index, expected_revision)
+            .unwrap();
+        let id = core.active_external_admission.as_ref().unwrap().status.id;
+        finish_admission(&mut core);
+        let ViewResponse::ScanTask(status) = core.view(&Query::ScanTask { id }).unwrap() else {
+            panic!("expected retained admission result");
+        };
+        assert!(status.library_committed);
+        assert_eq!(status.progress.phase, ScanPhase::Failed);
+        assert!(
+            status
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("refreshing its projection")
+        );
+        let commands = recording_audio(&mut core);
+        assert!(core.navigate(Navigation::Previous).is_err());
+        assert!(commands.try_recv().is_err());
+        repair_queue_projection(&connection);
+        core.navigate(Navigation::Previous).unwrap();
+        assert_eq!(core.state.queue.current_id, Some(4));
+        assert_eq!(core.state.queue.total, 6);
+        assert_queue_saved(&core);
+    }
+}

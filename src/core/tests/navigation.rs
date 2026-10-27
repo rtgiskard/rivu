@@ -840,3 +840,84 @@ fn stale_queue_shuffle_previous_prunes_deleted_occurrences_before_reading_cursor
     assert_eq!(core.played, [1, 4, 5]);
     assert_eq!(core.played_cursor, 1);
 }
+
+#[test]
+fn stopped_navigation_write_failure_preserves_new_occurrence_until_dedup_can_commit() {
+    let (directory, mut core) = navigation_fixture(PlaybackStatus::Stopped);
+    let commands = recording_audio(&mut core);
+    let lock = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    assert!(core.navigate(Navigation::Next).is_err());
+    assert_eq!(core.state.queue.current_id, Some(3));
+    assert_eq!(core.state.queue.current_position, Some(2));
+    assert_eq!(core.state.current_track().unwrap().id, 2);
+    assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+    assert_eq!(core.store.queue_state().unwrap().current_id, Some(2));
+    assert!(core.command(Command::DeduplicateQueue).is_err());
+    assert_eq!(core.state.queue.current_id, Some(3));
+    assert_eq!(core.store.queue_ids().unwrap(), [1, 2, 3, 4, 5]);
+    // A pending database write cannot prevent releasing the audio owner.
+    core.command(Command::Stop).unwrap();
+    assert_eq!(core.state.queue.current_id, Some(3));
+    lock.execute_batch("ROLLBACK").unwrap();
+    core.command(Command::DeduplicateQueue).unwrap();
+    assert_eq!(queue_entries(&core), [(1, 1), (3, 2), (4, 3), (5, 4)]);
+    assert_eq!(core.state.queue.current_id, Some(3));
+    assert_eq!(core.state.queue.current_position, Some(1));
+    assert_queue_saved(&core);
+    assert!(
+        commands
+            .try_iter()
+            .all(|command| matches!(command, AudioCommand::StopAndSnapshot(_)))
+    );
+}
+
+#[test]
+fn authoritative_queue_removal_retires_unsaved_selection_without_resurrecting_it() {
+    for clear in [false, true] {
+        let (directory, mut core) = navigation_fixture(PlaybackStatus::Stopped);
+        let _commands = recording_audio(&mut core);
+        let lock = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+        lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+        assert!(core.navigate(Navigation::Next).is_err());
+        assert_eq!(core.state.queue.current_id, Some(3));
+        lock.execute_batch("ROLLBACK").unwrap();
+        core.command(if clear {
+            Command::ClearQueue
+        } else {
+            Command::RemoveTracks { track_ids: vec![2] }
+        })
+        .unwrap();
+        core.ensure_queue_control_ready().unwrap();
+        assert_eq!(core.state.queue.current_id, None);
+        assert!(core.state.current_track().is_none());
+        assert_eq!(core.queue_ids, if clear { vec![] } else { vec![1, 4, 5] });
+        assert_queue_saved(&core);
+    }
+}
+#[test]
+fn authoritative_queue_replacement_supersedes_unsaved_old_selection() {
+    let (directory, mut core) = navigation_fixture(PlaybackStatus::Stopped);
+    let playlist_id = core
+        .store
+        .create_playlist_with_tracks("Replacement", &[1, 4])
+        .unwrap();
+    let _commands = recording_audio(&mut core);
+    let lock = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    assert!(core.navigate(Navigation::Next).is_err());
+    assert_eq!(core.state.queue.current_id, Some(3));
+    lock.execute_batch("ROLLBACK").unwrap();
+    core.command(Command::PlayPlaylist { playlist_id }).unwrap();
+    assert_eq!(
+        queue_entries(&core)
+            .iter()
+            .map(|&(_, id)| id)
+            .collect::<Vec<_>>(),
+        [1, 4]
+    );
+    assert_eq!(core.state.queue.current_id, core.queue_ids.first().copied());
+    assert_ne!(core.state.queue.current_id, Some(3));
+    assert_eq!(core.state.current_track().unwrap().id, 1);
+    assert_queue_saved(&core);
+}

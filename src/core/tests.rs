@@ -116,6 +116,8 @@ pub(super) fn fixture_with_database(duration: Option<f64>) -> (tempfile::TempDir
         next_playlist_token: 0,
         database_unavailable: false,
         queue_ids_stale: false,
+        queue_projection_stale: false,
+        queue_current_pending: false,
         playback: None,
         retired_playback: None,
         playback_write_deferred: false,
@@ -341,6 +343,29 @@ fn repair_queue_ids(connection: &rusqlite::Connection) {
         .execute_batch(
             "DROP TRIGGER fail_delete_queue_ids;
          UPDATE playlist_entries SET id=5 WHERE playlist_id=0 AND id=-5;",
+        )
+        .unwrap();
+}
+
+fn fail_queue_projection_after(directory: &Path, event: &str) -> rusqlite::Connection {
+    let connection = rusqlite::Connection::open(directory.join("library.db")).unwrap();
+    let row = if event == "INSERT" { "NEW" } else { "OLD" };
+    connection
+        .execute_batch(&format!(
+            "CREATE TABLE saved_queue_meta AS SELECT * FROM rivu_meta;
+             CREATE TRIGGER fail_queue_projection AFTER {event} ON playlist_entries
+             WHEN {row}.playlist_id=0 BEGIN DELETE FROM rivu_meta; END;"
+        ))
+        .unwrap();
+    connection
+}
+
+fn repair_queue_projection(connection: &rusqlite::Connection) {
+    connection
+        .execute_batch(
+            "DROP TRIGGER fail_queue_projection;
+             INSERT INTO rivu_meta SELECT * FROM saved_queue_meta;
+             DROP TABLE saved_queue_meta;",
         )
         .unwrap();
 }
