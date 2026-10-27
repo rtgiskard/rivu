@@ -270,10 +270,11 @@ extension; untitled CUE entries also include their track number.
 Hover the text to see the full title and cached audio specifications: codec,
 sample rate, source bit depth, channels, and bitrate. Unknown specifications are
 omitted, estimated bitrate uses `≈`, and lossy decoding does not invent source
-bit depth. Library tree hover instead puts title, artist, and album on the first
-line, then duration and specifications on the second. Directory hover shows its
-complete path. Hover formatting uses already loaded page data, without opening
-the media or submitting another metadata query.
+bit depth. Library track hover puts title, artist, and album on the first line,
+duration and specifications on the second, and the full source path on a separate
+third line in both views, including Other tracks. Long content wraps as needed.
+Directory hover shows its complete path. Hover formatting uses already loaded
+page data, without opening the media or submitting another metadata query.
 
 
 == Albums

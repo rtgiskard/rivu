@@ -78,13 +78,11 @@ pub(super) fn track_detail(
         detail.push_str(" · ");
         detail.push_str(&specs);
     }
-    if let Some(parent) = track.path.parent() {
-        detail.push_str(" · ");
-        detail.push_str(&parent.to_string_lossy());
-    }
     if track.missing {
         detail.push_str(i18n.text("gl-file-missing-suffix"));
     }
+    detail.push('\n');
+    detail.push_str(&track.path.to_string_lossy());
     detail
 }
 
@@ -863,7 +861,6 @@ impl Library {
                             {
                                 let entry = visible.row;
                                 let i18n = Arc::clone(&this.i18n);
-                                let other_tracks = visible.other_tracks;
                                 let title = title.clone();
                                 move || match &entry {
                                     DirectoryRow::Track(track) => {
@@ -876,11 +873,7 @@ impl Library {
                                             heading.push_str(if track.artist.trim().is_empty() { " · " } else { " / " });
                                             heading.push_str(&track.album);
                                         }
-                                        let mut detail = track_detail(&i18n, track);
-                                        if other_tracks {
-                                            detail.push('\n');
-                                            detail.push_str(&track.path.to_string_lossy());
-                                        }
+                                        let detail = track_detail(&i18n, track);
                                         (heading.into(), detail.into())
                                     }
                                     DirectoryRow::Directory { path } => (path.display().to_string().into(), detail.clone().into()),

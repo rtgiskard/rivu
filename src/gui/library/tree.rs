@@ -96,7 +96,6 @@ pub(in crate::gui) struct VisibleDirectoryRow {
     pub(in crate::gui) depth: usize,
     pub(in crate::gui) expanded: bool,
     pub(in crate::gui) status: BranchStatus,
-    pub(in crate::gui) other_tracks: bool,
     pub(in crate::gui) branch: Option<TreeBranch>,
 }
 
@@ -899,7 +898,6 @@ impl DirectoryTree {
                 depth: segment.depth,
                 expanded,
                 status,
-                other_tracks: segment.branch.is_other_tracks(),
                 branch,
             }))
         } else {
