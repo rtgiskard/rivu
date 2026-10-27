@@ -147,6 +147,8 @@ struct VisualizerData {
     presentations: [bool; 6],
     displayed: Vec<f32>,
     targets: Vec<f32>,
+    // Unmapped peaks for at most 32 bands; range edits need no new audio or FFT.
+    levels_db: [f32; FANCY_BANDS],
     mapping: RadialMapping,
     last_sample_time: Option<Duration>,
     last_presentation_time: Option<Duration>,
@@ -181,6 +183,7 @@ impl AudioVisualizer {
                 presentations: [true; 6],
                 displayed: Vec::with_capacity(FANCY_BANDS),
                 targets: Vec::with_capacity(FANCY_BANDS),
+                levels_db: [f32::NEG_INFINITY; FANCY_BANDS],
                 mapping: RadialMapping::default(),
                 last_sample_time: None,
                 last_presentation_time: None,
@@ -277,6 +280,10 @@ impl AudioVisualizer {
         let mut data = self.data.borrow_mut();
         let db_range = config.audio_visualizer_db_range();
         let expected_settings = AnalysisSettings::from(config);
+        let incompatible = data.expected_settings.fft_size != expected_settings.fft_size
+            || data.expected_settings.window != expected_settings.window
+            || data.expected_settings.signal != expected_settings.signal;
+        let remap = data.db_range != db_range;
         let changed = data.background != config.visual_background.rgb()
             || data.sensitivity != config.audio_visualizer_sensitivity
             || data.rotation_speed != config.audio_visualizer_rotation_speed
@@ -288,10 +295,8 @@ impl AudioVisualizer {
             || data.fade_when_idle != config.audio_visualizer_fade_when_idle
             || data.primary_color != config.audio_visualizer_primary_color.rgb()
             || data.secondary_color != config.audio_visualizer_secondary_color.rgb()
-            || data.db_range != db_range
-            || data.expected_settings.fft_size != expected_settings.fft_size
-            || data.expected_settings.window != expected_settings.window
-            || data.expected_settings.signal != expected_settings.signal;
+            || remap
+            || incompatible;
         if !changed {
             return false;
         }
@@ -308,12 +313,22 @@ impl AudioVisualizer {
         data.secondary_color = config.audio_visualizer_secondary_color.rgb();
         data.db_range = db_range;
         data.expected_settings = expected_settings;
-        data.displayed.clear();
-        data.retained = false;
-        data.targets.clear();
-        data.last_presentation_time = None;
-        data.last_sample_time = None;
-        data.time = 0.0;
+        if incompatible {
+            drop(data);
+            self.clear_radial();
+        } else if remap {
+            let count = data.displayed.len();
+            for index in 0..count {
+                data.displayed[index] =
+                    ((data.levels_db[index] + db_range) / db_range).clamp(0.0, 1.0);
+            }
+            if !data.targets.is_empty() {
+                let VisualizerData {
+                    displayed, targets, ..
+                } = &mut *data;
+                targets.clone_from(displayed);
+            }
+        }
         true
     }
 
@@ -425,14 +440,18 @@ impl AudioVisualizer {
         let db_range = data.db_range;
         data.targets.resize(count, 0.0);
         let VisualizerData {
-            targets, mapping, ..
+            targets,
+            mapping,
+            levels_db,
+            ..
         } = &mut *data;
-        for (range, target) in mapping.ranges.iter().zip(targets) {
+        for ((range, target), retained) in mapping.ranges.iter().zip(targets).zip(levels_db) {
             let level = frame.spectrum_db[range.clone()]
                 .iter()
                 .copied()
                 .filter(|level| level.is_finite())
                 .fold(f32::NEG_INFINITY, f32::max);
+            *retained = level;
             *target = ((level + db_range) / db_range).clamp(0.0, 1.0);
         }
         if data.displayed.len() != count || mapping_changed || data.last_presentation_time.is_none()
@@ -1032,6 +1051,50 @@ mod tests {
     }
 
     #[test]
+    fn appearance_edits_preserve_frozen_levels_and_animation_time() {
+        let mut radial = AudioVisualizer::new();
+        let audio = frame();
+        accept(&mut radial, &audio);
+        let (displayed, targets, time, sample_time, presentation_time) = {
+            let data = radial.data.borrow();
+            (
+                data.displayed.clone(),
+                data.targets.clone(),
+                data.time,
+                data.last_sample_time,
+                data.last_presentation_time,
+            )
+        };
+        radial.configure(&Config {
+            audio_visualizer_primary_color: "#ff0000".parse().unwrap(),
+            audio_visualizer_bar_width: 0.9,
+            audio_visualizer_sensitivity: 2.0,
+            ..Config::default()
+        });
+        {
+            let data = radial.data.borrow();
+            assert_eq!(data.displayed, displayed);
+            assert_eq!(data.targets, targets);
+            assert_eq!(data.time, time);
+            assert_eq!(data.last_sample_time, sample_time);
+            assert_eq!(data.last_presentation_time, presentation_time);
+        }
+        // A narrow range can clip input. Widening must recover the original
+        // peak, not attempt to invert the clipped display value.
+        for (range, expected) in [(20.0, 0.0), (100.0, 0.65)] {
+            radial.configure(&Config {
+                audio_visualizer_db_range: Some(range),
+                ..Config::default()
+            });
+            let data = radial.data.borrow();
+            assert_eq!(data.displayed, vec![expected; 4]);
+            assert_eq!(data.time, time);
+            assert_eq!(data.last_sample_time, sample_time);
+            assert_eq!(data.last_presentation_time, presentation_time);
+        }
+    }
+
+    #[test]
     fn idle_fade_starts_before_paint_and_finishes_without_restarting() {
         let mut radial = AudioVisualizer::new();
         radial.configure(&Config {
@@ -1317,8 +1380,6 @@ mod tests {
             audio_visualizer_db_range: Some(50.0),
             ..Config::default()
         }));
-        assert!(radial.data.borrow().last_sample_time.is_none());
-        accept(&mut radial, &audio);
         assert_eq!(radial.data.borrow().displayed, vec![0.3; 4]);
         audio.frequencies_hz = vec![20.0, 100.0, 20_000.0];
         audio.spectrum_db = vec![-50.0; 3];
@@ -1480,7 +1541,7 @@ mod tests {
     }
 
     #[test]
-    fn common_range_changes_reset_only_inherited_radial_display() {
+    fn common_range_changes_remap_only_inherited_radial_display() {
         for range_override in [None, Some(70.0)] {
             let mut radial = AudioVisualizer::new();
             let mut config = Config {
@@ -1491,25 +1552,15 @@ mod tests {
             accept(&mut radial, &frame());
             config.visualization_db_range = 100.0;
             radial.configure(&config);
-            {
-                let data = radial.data.borrow();
-                if range_override.is_some() {
-                    assert_eq!(data.displayed, vec![0.5; 4]);
-                    assert_eq!(data.last_sample_time, Some(Duration::from_secs(1)));
-                } else {
-                    assert!(data.displayed.is_empty());
-                    assert!(data.last_sample_time.is_none());
-                }
-            }
-            accept(&mut radial, &frame());
             let data = radial.data.borrow();
+            assert_eq!(data.last_sample_time, Some(Duration::from_secs(1)));
             let expected = if range_override.is_some() { 0.5 } else { 0.65 };
             assert_eq!(data.displayed, vec![expected; 4]);
         }
     }
 
     #[test]
-    fn radial_override_uses_its_own_range_and_reset() {
+    fn radial_override_remaps_frozen_input_without_new_publication() {
         let mut radial = AudioVisualizer::new();
         accept(&mut radial, &frame());
         radial.configure(&Config {
@@ -1518,8 +1569,6 @@ mod tests {
             audio_visualizer_db_range: Some(50.0),
             ..Config::default()
         });
-        assert!(radial.data.borrow().displayed.is_empty());
-        accept(&mut radial, &frame());
         let data = radial.data.borrow();
         assert_eq!(data.displayed, vec![0.3; 4]);
     }
