@@ -25,6 +25,11 @@ mod tests;
 const MAX_SOURCE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const MAX_OUTPUT_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 
+#[cfg(test)]
+thread_local! {
+    static PANIC_ON_NEURAL_PROGRESS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct SourceStamp(audio::SourceIdentity);
 impl SourceStamp {
@@ -121,6 +126,12 @@ pub(crate) struct Service {
     pub pending_audition: Option<(u64, u64)>,
     reclaimer: Option<reclaim::Reclaimer>,
     data_dir: PathBuf,
+    #[cfg(test)]
+    pub(crate) panic_after_processing: bool,
+    #[cfg(test)]
+    pub(crate) panic_after_mix: bool,
+    #[cfg(test)]
+    pub(crate) panic_on_neural_progress: bool,
 }
 impl Service {
     pub fn new(data_dir: PathBuf) -> Self {
@@ -136,6 +147,12 @@ impl Service {
             audition: None,
             audition_generation: None,
             pending_audition: None,
+            #[cfg(test)]
+            panic_after_processing: false,
+            #[cfg(test)]
+            panic_after_mix: false,
+            #[cfg(test)]
+            panic_on_neural_progress: false,
         }
     }
     pub fn start(
@@ -267,12 +284,19 @@ impl Service {
             self.reclaimer = Some(reclaim::Reclaimer::new(self.sender.clone())?);
         }
         let data_dir = self.data_dir.clone();
+        #[cfg(test)]
+        let panic_after_processing = std::mem::take(&mut self.panic_after_processing);
+        #[cfg(test)]
+        let panic_on_neural_progress = std::mem::take(&mut self.panic_on_neural_progress);
         let worker = self
             .reclaimer
             .as_ref()
             .unwrap()
             .spawn("rivu-processing", move |retired| {
-                let result = (|| {
+                // This new thread executes only this task.
+                #[cfg(test)]
+                PANIC_ON_NEURAL_PROGRESS.set(panic_on_neural_progress);
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     retired?;
                     check_cancel(&flag)?;
                     if matches!(
@@ -302,7 +326,7 @@ impl Service {
                     let directory = tempfile::Builder::new()
                         .prefix("processing-")
                         .tempdir_in(parent)?;
-                    if let Some(cached_output) = cached_output {
+                    let result = if let Some(cached_output) = cached_output {
                         run_cached_export(
                             track,
                             stamp,
@@ -314,8 +338,14 @@ impl Service {
                         )
                     } else {
                         run(track, stamp, config, directory, initial, &flag, &tx)
+                    }?;
+                    #[cfg(test)]
+                    if panic_after_processing {
+                        panic!("injected native processing worker panic");
                     }
-                })();
+                    Ok(result)
+                }))
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("Audio processing worker panicked")));
                 let _ = tx.send_blocking(Event::Finished {
                     id,
                     result: result.map(Box::new),
@@ -912,6 +942,30 @@ fn classical(
     writer.finalize()?;
     Ok(latency)
 }
+struct NeuralChild {
+    process: std::process::Child,
+    reaped: bool,
+}
+
+impl NeuralChild {
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        let exit = self.process.try_wait()?;
+        self.reaped = exit.is_some();
+        Ok(exit)
+    }
+}
+
+impl Drop for NeuralChild {
+    fn drop(&mut self) {
+        // Unwind must retire the interpreter before the outer worker reports
+        // failure. An observed exit is already reaped and needs no more syscalls.
+        if !self.reaped {
+            let _ = self.process.kill();
+            let _ = self.process.wait();
+        }
+    }
+}
+
 fn neural(
     input: &Path,
     dir: &Path,
@@ -952,20 +1006,31 @@ fn neural(
     } else {
         &neural.separation_interpreter
     };
-    let mut child = Process::new(interpreter)
-        .arg(&neural.worker)
-        .arg("--request")
-        .arg(&request_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("Starting local neural interpreter")?;
+    let mut child = NeuralChild {
+        process: Process::new(interpreter)
+            .arg(&neural.worker)
+            .arg("--request")
+            .arg(&request_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("Starting local neural interpreter")?,
+        reaped: false,
+    };
     // Read both pipes on this worker with finite nonblocking rounds. In particular,
     // stdout EOF is not process completion and must not bypass cancellation.
-    let result = (|| -> Result<ProcessingOutputs> {
-        let mut diagnostics = child.stderr.take().context("Missing worker stderr")?;
-        let mut stdout = child.stdout.take().context("Missing worker stdout")?;
+    (|| -> Result<ProcessingOutputs> {
+        let mut diagnostics = child
+            .process
+            .stderr
+            .take()
+            .context("Missing worker stderr")?;
+        let mut stdout = child
+            .process
+            .stdout
+            .take()
+            .context("Missing worker stdout")?;
         set_pipe_nonblocking(&diagnostics)?;
         set_pipe_nonblocking(&stdout)?;
         let mut diagnostics_output = stderr;
@@ -983,13 +1048,19 @@ fn neural(
                 "Neural event identity/version mismatch"
             );
             match event["type"].as_str() {
-                Some("progress") => report(
-                    tx,
-                    id,
-                    ProcessingPhase::Processing,
-                    event["completed"].as_u64().unwrap_or(0),
-                    event["total"].as_u64(),
-                ),
+                Some("progress") => {
+                    #[cfg(test)]
+                    if PANIC_ON_NEURAL_PROGRESS.replace(false) {
+                        panic!("injected neural worker progress panic");
+                    }
+                    report(
+                        tx,
+                        id,
+                        ProcessingPhase::Processing,
+                        event["completed"].as_u64().unwrap_or(0),
+                        event["total"].as_u64(),
+                    );
+                }
                 Some("error") => bail!("Neural processing failed: {}", event["message"]),
                 Some("complete") => {
                     ensure!(complete.is_none(), "Duplicate neural completion");
@@ -1106,12 +1177,7 @@ fn neural(
                 ..Default::default()
             }
         })
-    })();
-    if result.is_err() {
-        let _ = child.kill();
-        let _ = child.wait();
-    }
-    result
+    })()
 }
 
 fn set_pipe_nonblocking(pipe: &impl std::os::fd::AsRawFd) -> Result<()> {
@@ -1170,42 +1236,52 @@ pub(crate) fn mix(
     let cancelled = Arc::new(AtomicBool::new(false));
     let cancel = cancelled.clone();
     let tx = service.sender.clone();
+    #[cfg(test)]
+    let panic_after_mix = std::mem::take(&mut service.panic_after_mix);
     let worker = reclaimer.spawn("rivu-stem-mix", move |retired| {
-        let outcome = (|| -> Result<PathBuf> {
-            retired?;
-            check_cancel(&cancel)?;
-            let mut file = tempfile::Builder::new()
-                .prefix("mix-")
-                .suffix(".wav")
-                .tempfile_in(directory)?;
-            let mut vocals = hound::WavReader::open(vocals)?;
-            let mut accompaniment = hound::WavReader::open(accompaniment)?;
-            ensure!(
-                vocals.spec() == accompaniment.spec()
-                    && vocals.duration() == accompaniment.duration(),
-                "Stem alignment mismatch"
-            );
-            let mut writer =
-                hound::WavWriter::new(std::io::BufWriter::new(file.as_file_mut()), vocals.spec())?;
-            let vg = 10.0_f32.powf(vocal_gain_db / 20.0);
-            let ag = 10.0_f32.powf(accompaniment_gain_db / 20.0);
-            for (index, (v, a)) in vocals
-                .samples::<f32>()
-                .zip(accompaniment.samples::<f32>())
-                .enumerate()
-            {
-                if index % 8192 == 0 {
-                    check_cancel(&cancel)?;
+        let outcome =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<PathBuf> {
+                retired?;
+                check_cancel(&cancel)?;
+                let mut file = tempfile::Builder::new()
+                    .prefix("mix-")
+                    .suffix(".wav")
+                    .tempfile_in(directory)?;
+                let mut vocals = hound::WavReader::open(vocals)?;
+                let mut accompaniment = hound::WavReader::open(accompaniment)?;
+                ensure!(
+                    vocals.spec() == accompaniment.spec()
+                        && vocals.duration() == accompaniment.duration(),
+                    "Stem alignment mismatch"
+                );
+                let mut writer = hound::WavWriter::new(
+                    std::io::BufWriter::new(file.as_file_mut()),
+                    vocals.spec(),
+                )?;
+                let vg = 10.0_f32.powf(vocal_gain_db / 20.0);
+                let ag = 10.0_f32.powf(accompaniment_gain_db / 20.0);
+                for (index, (v, a)) in vocals
+                    .samples::<f32>()
+                    .zip(accompaniment.samples::<f32>())
+                    .enumerate()
+                {
+                    if index % 8192 == 0 {
+                        check_cancel(&cancel)?;
+                    }
+                    let sample = v? * vg + a? * ag;
+                    ensure!(sample.is_finite(), "Nonfinite mixed sample");
+                    writer.write_sample(sample)?;
                 }
-                let sample = v? * vg + a? * ag;
-                ensure!(sample.is_finite(), "Nonfinite mixed sample");
-                writer.write_sample(sample)?;
-            }
-            writer.finalize()?;
-            check_cancel(&cancel)?;
-            let (_, path) = file.keep().map_err(|error| error.error)?;
-            Ok(path)
-        })();
+                writer.finalize()?;
+                check_cancel(&cancel)?;
+                #[cfg(test)]
+                if panic_after_mix {
+                    panic!("injected stem mix worker panic");
+                }
+                let (_, path) = file.keep().map_err(|error| error.error)?;
+                Ok(path)
+            }))
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("Stem mix worker panicked")));
         if let Err(error) = tx.send_blocking(Event::MixFinished {
             id,
             generation,

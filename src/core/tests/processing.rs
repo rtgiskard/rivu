@@ -158,6 +158,78 @@ fn mix_terminal_replaces_history_and_survives_current_and_history_eviction() {
 }
 
 #[test]
+fn native_and_mix_worker_panics_commit_failure_finish_waits_and_release_admission() {
+    for mixing in [false, true] {
+        let (directory, mut core) = fixture();
+        source(directory.path());
+        if mixing {
+            prepare_mix(&mut core);
+            core.processing.panic_after_mix = true;
+            begin_mix(&mut core, 1);
+        } else {
+            core.processing.panic_after_processing = true;
+            core.start_processing(1, ProcessingOperation::Denoise, None)
+                .unwrap();
+        }
+        let event = if mixing {
+            mix_completion(&mut core)
+        } else {
+            completion(&mut core)
+        };
+        let (handle, requests) = super::task_wait::wait_handle(&core);
+        let mut wait = Box::pin(handle.wait_task(TaskTarget::Processing { id: 1 }));
+        assert!(wait.as_mut().now_or_never().is_none());
+        core.business_event(dispatch::BusinessEvent::Request(
+            requests.try_recv().unwrap(),
+        ));
+        // The real worker has unwound and sent its error, but the owner still
+        // holds admission and must commit before any waiter can finish.
+        assert!(wait.as_mut().now_or_never().is_none());
+        core.processing_event(event);
+        let TaskOutcome::Processing(status) = wait.as_mut().now_or_never().unwrap().unwrap() else {
+            panic!("expected failed processing outcome");
+        };
+        assert_eq!(status.phase, ProcessingPhase::Failed);
+        assert!(status.error.as_deref().unwrap().contains("worker panicked"));
+        assert!(core.processing.active.is_none());
+        assert_eq!(terminal_wait(&mut core, 1), *status);
+        if mixing {
+            let result = &core.processing.results[0];
+            assert!(result.mix.is_none());
+            assert!(
+                !std::fs::read_dir(result.directory.path())
+                    .unwrap()
+                    .any(|entry| {
+                        entry
+                            .unwrap()
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with("mix-")
+                    })
+            );
+        } else {
+            assert!(core.processing.results.is_empty());
+            assert!(!std::fs::read_dir(directory.path()).unwrap().any(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("processing-")
+            }));
+        }
+        core.start_processing(1, ProcessingOperation::Denoise, None)
+            .unwrap();
+        assert_eq!(core.processing_status(1).unwrap(), *status);
+        complete(&mut core);
+        assert_eq!(
+            core.processing_status(2).unwrap().phase,
+            ProcessingPhase::Complete
+        );
+        assert_eq!(terminal_wait(&mut core, 1), *status);
+    }
+}
+
+#[test]
 fn shutdown_mix_retires_queued_output_and_keeps_latest_retained_outcome() {
     let (directory, mut core) = fixture();
     source(directory.path());
@@ -1120,6 +1192,80 @@ fn neural_cancellation_reaps_interpreter_that_closed_stdout_without_exiting() {
     assert!(
         !Path::new("/proc").join(pid).exists(),
         "Interpreter was not reaped"
+    );
+}
+
+#[test]
+fn neural_unwind_reaps_live_interpreter_before_failure_event_and_owner_retirement() {
+    let (directory, mut core) = fixture();
+    source(directory.path());
+    let worker = directory.path().join("panic_progress.sh");
+    std::fs::write(
+        &worker,
+        "printf '%s' \"$$\" > \"${0%/*}/worker.ready\"\nprintf '%s\\n' '{\"version\":2,\"task_id\":\"1\",\"type\":\"progress\",\"completed\":0}'\nwhile :; do :; done\n",
+    )
+    .unwrap();
+    let manifest = directory.path().join("manifest.json");
+    std::fs::write(&manifest, "{}").unwrap();
+    let config = Arc::make_mut(&mut core.state.system.config);
+    config.neural.worker = worker;
+    config.neural.speech_interpreter = "/bin/sh".into();
+    config.neural.speech_manifest = Some(manifest);
+    core.processing.panic_on_neural_progress = true;
+    core.command(Command::StartProcessing {
+        track_id: 1,
+        operation: ProcessingOperation::Speech,
+        profile: None,
+    })
+    .unwrap();
+    let (handle, requests) = super::task_wait::wait_handle(&core);
+    let mut wait = Box::pin(handle.wait_task(TaskTarget::Processing { id: 1 }));
+    assert!(wait.as_mut().now_or_never().is_none());
+    core.business_event(dispatch::BusinessEvent::Request(
+        requests.try_recv().unwrap(),
+    ));
+    let event = completion(&mut core);
+    // The shell cannot exit by itself: its real progress event triggers unwind
+    // while it is alive. Reaping must precede sending this failure event, not
+    // merely precede the next owner admission or happen during final shutdown.
+    let pid = std::fs::read_to_string(directory.path().join("worker.ready"))
+        .unwrap()
+        .parse::<libc::pid_t>()
+        .unwrap();
+    let mut exit = 0;
+    // SAFETY: pid identifies this task's child and exit is writable; WNOHANG
+    // never blocks if a regression leaves the interpreter running.
+    let observed = unsafe { libc::waitpid(pid, &mut exit, libc::WNOHANG) };
+    let error = std::io::Error::last_os_error();
+    if observed == 0 {
+        // Do not leave a live child behind when the regression fails.
+        // SAFETY: the unreaped child is still owned by this test process.
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+            libc::waitpid(pid, &mut exit, 0);
+        }
+    }
+    assert_eq!(
+        observed, -1,
+        "interpreter remained live or unreaped at failure delivery"
+    );
+    assert_eq!(error.raw_os_error(), Some(libc::ECHILD));
+    assert!(core.processing.active.is_some());
+    assert!(wait.as_mut().now_or_never().is_none());
+    core.processing_event(event);
+    let TaskOutcome::Processing(status) = wait.as_mut().now_or_never().unwrap().unwrap() else {
+        panic!("expected processing failure");
+    };
+    assert_eq!(status.phase, ProcessingPhase::Failed);
+    assert!(status.error.as_deref().unwrap().contains("worker panicked"));
+    assert!(core.processing.active.is_none());
+    assert!(core.processing.results.is_empty());
+    core.start_processing(1, ProcessingOperation::Denoise, None)
+        .unwrap();
+    complete(&mut core);
+    assert_eq!(
+        core.processing_status(2).unwrap().phase,
+        ProcessingPhase::Complete
     );
 }
 

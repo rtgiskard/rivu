@@ -486,6 +486,11 @@ during preparation; no terminal result is published until Core rechecks source
 identity and cancellation. Queued can also mean waiting for retired cache files
 to be deleted before preparation or final publication proceeds.
 
+Unwinding processing and stem-mix workers deliver a failed result to Core instead
+of leaving the task active indefinitely. Neural interpreter children are
+terminated and reaped before failure delivery. Core applies cancellation and
+source validation, commits the terminal status, and only then completes task waits.
+
 Processing and stem-mix workers are established before their retirement barrier
 enters the bounded reclamation mailbox. A thread-spawn failure returns to Core
 without leaving queued work, so repeated retries cannot consume retirement
