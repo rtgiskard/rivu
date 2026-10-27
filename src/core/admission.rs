@@ -178,13 +178,8 @@ impl ExternalAdmissionTask {
     }
 
     fn join(&mut self) -> Result<()> {
-        if let Some(worker) = self.worker.take() {
-            futures::executor::block_on(std::panic::AssertUnwindSafe(worker).catch_unwind())
-                .map_err(|_| anyhow::anyhow!("External audio worker panicked"))?;
-        }
-        Ok(())
+        super::retire_optional_worker(&mut self.worker, "External audio worker panicked")
     }
-
     fn retire(&mut self) -> Result<()> {
         if !self.is_saving() {
             self.cancellation.cancel();

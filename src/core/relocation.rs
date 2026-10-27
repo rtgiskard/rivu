@@ -265,10 +265,10 @@ impl Core {
             return;
         }
         let mut task = self.active_relocation.take().unwrap();
-        if let Some(worker) = task.worker.take() {
-            let _ =
-                futures::executor::block_on(std::panic::AssertUnwindSafe(worker).catch_unwind());
-        }
+        let _ = super::retire_optional_worker(
+            &mut task.worker,
+            "Relocation verification worker panicked",
+        );
         if task.cancellation.is_cancelled() {
             task.status.phase = RelocationPhase::Cancelled;
         } else {

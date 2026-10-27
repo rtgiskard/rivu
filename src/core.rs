@@ -45,6 +45,26 @@ use rivu_protocol::{ADMISSION_TIMEOUT, REPLY_TIMEOUT, command_reply_timeout};
 
 type Wakeup = Arc<dyn Fn() + Send + Sync>;
 type QueryTimeout = Arc<dyn Fn(QueryResponse) + Send + Sync>;
+
+/// Retire an admitted async worker exactly once and convert panics to a task error.
+/// Callers retain ownership of the task-specific completion and uncertainty policy.
+pub(super) fn retire_worker(
+    worker: async_executor::Task<()>,
+    panic_message: &'static str,
+) -> Result<()> {
+    futures::executor::block_on(std::panic::AssertUnwindSafe(worker).catch_unwind())
+        .map_err(|_| anyhow::anyhow!(panic_message))?;
+    Ok(())
+}
+
+pub(super) fn retire_optional_worker(
+    worker: &mut Option<async_executor::Task<()>>,
+    panic_message: &'static str,
+) -> Result<()> {
+    worker
+        .take()
+        .map_or(Ok(()), |worker| retire_worker(worker, panic_message))
+}
 #[expect(
     clippy::large_enum_variant,
     reason = "Keep one-shot query replies inline instead of allocating a response box"

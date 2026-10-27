@@ -10,14 +10,10 @@ pub(in crate::core) struct OptimizationTask {
 
 impl OptimizationTask {
     fn join(&mut self) -> Result<()> {
-        if let Some(worker) = self.worker.take() {
-            futures::executor::block_on(std::panic::AssertUnwindSafe(worker).catch_unwind()).map_err(|_| {
-                anyhow::anyhow!(
-                    "Database optimization worker panicked; the database may already have changed"
-                )
-            })?;
-        }
-        Ok(())
+        super::retire_optional_worker(
+            &mut self.worker,
+            "Database optimization worker panicked; the database may already have changed",
+        )
     }
 }
 

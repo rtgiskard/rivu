@@ -11,15 +11,10 @@ pub(in crate::core) struct ExportTask {
 
 impl ExportTask {
     fn join(&mut self) -> Result<()> {
-        if let Some(worker) = self.worker.take() {
-            futures::executor::block_on(std::panic::AssertUnwindSafe(worker).catch_unwind())
-                .map_err(|_| {
-                    anyhow::anyhow!(
-                        "Playlist export worker panicked; inspect the destination before retrying"
-                    )
-                })?;
-        }
-        Ok(())
+        super::retire_optional_worker(
+            &mut self.worker,
+            "Playlist export worker panicked; inspect the destination before retrying",
+        )
     }
 }
 

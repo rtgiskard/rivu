@@ -759,8 +759,7 @@ impl Core {
     }
 
     fn complete_unsaved_scan(&mut self, mut task: ScanTask, result: Result<()>, cancelled: bool) {
-        let _ =
-            futures::executor::block_on(std::panic::AssertUnwindSafe(task.worker).catch_unwind());
+        let _ = super::retire_worker(task.worker, "Scan worker panicked");
         if cancelled {
             task.status.progress.phase = ScanPhase::Cancelled;
             task.status.message = "Scan cancelled".into();
@@ -781,8 +780,7 @@ impl Core {
             return;
         }
         let mut task = self.active_scan.take().unwrap();
-        let retired =
-            futures::executor::block_on(std::panic::AssertUnwindSafe(task.worker).catch_unwind());
+        let retired = super::retire_worker(task.worker, "Scan worker panicked");
         // Confirmed commits remain facts even if later worker retirement fails.
         // Publish only their tokens here; uncertain outcomes must not read views.
         if let Some(playlist_id) = saved.playlist_id {
