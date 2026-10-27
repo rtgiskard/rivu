@@ -472,11 +472,35 @@ impl GuiApp {
                 cx,
             )
         });
+        fn visible_metadata(node: &layout::Node, consumers: &mut Vec<u64>) {
+            match node {
+                layout::Node::Split { children, .. } => {
+                    for child in children {
+                        visible_metadata(child, consumers);
+                    }
+                }
+                layout::Node::Tabs { panels, active, .. } => {
+                    if let Some(panel) = panels.iter().find(|panel| panel.id == *active)
+                        && panel.kind == "metadata"
+                    {
+                        consumers.push(panel.id);
+                    }
+                }
+            }
+        }
+        let mut artwork_consumers = Vec::new();
+        if self.window_visible
+            && !self.state.system.shutting_down
+            && let Some(root) = self.workspace.layouts.current().root.as_ref()
+        {
+            visible_metadata(root, &mut artwork_consumers);
+        }
         self.metadata.update(cx, |owner, cx| {
             owner.set_visible(
                 self.panel_demand("metadata") || self.panel_demand("audio_processing"),
                 cx,
-            )
+            );
+            owner.retain_artwork_consumers(&artwork_consumers);
         });
     }
 

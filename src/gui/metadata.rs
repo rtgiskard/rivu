@@ -192,6 +192,10 @@ impl Metadata {
         cx.notify();
     }
 
+    pub(in crate::gui) fn retain_artwork_consumers(&self, visible: &[u64]) {
+        self.artwork_view.retain_consumers(visible);
+    }
+
     pub(in crate::gui) fn input_focused(&self, window: &Window, cx: &App) -> bool {
         self.inputs
             .values()
@@ -1252,11 +1256,11 @@ impl Metadata {
                             ))
                             .child(metadata_rows(theme, tags, label_widths, copy_hint, cx).gap_2())
                             .when(track.is_some(), |tags| {
-                                tags.child(match self.artwork_view.image(cx) {
+                                tags.child(match self.artwork_view.measured_image(panel_id, cx) {
                                     Some(image) => artwork_preview(
                                         theme,
                                         self.tr("shell-panel-album-artwork"),
-                                        image.size_full(),
+                                        image,
                                         self.artwork_view.aspect_ratio(cx),
                                     ),
                                     None => artwork_preview(

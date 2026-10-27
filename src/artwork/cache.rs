@@ -8,6 +8,16 @@ pub(crate) fn original_path(cache_root: &Path, hash: blake3::Hash, extension: &s
         .join(format!("{}.{extension}", &hex[2..32]))
 }
 
+/// A thumbnail lives beside its source and retains only its pixel-size suffix.
+pub(crate) fn thumbnail_path(source: &Path, hash: blake3::Hash, tier: u32) -> Option<PathBuf> {
+    let hex = hash.to_hex();
+    Some(
+        source
+            .parent()?
+            .join(format!("{}-{tier}.webp", &hex[2..32])),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -23,5 +33,15 @@ mod tests {
             source,
             root.join("ab").join("ababababababababababababababab.png")
         );
+        for tier in [256, 512, 1024] {
+            assert_eq!(
+                thumbnail_path(&source, hash, tier),
+                Some(
+                    root.join("ab")
+                        .join(format!("ababababababababababababababab-{tier}.webp"))
+                )
+            );
+        }
+        assert_eq!(thumbnail_path(Path::new("/"), hash, 256), None);
     }
 }

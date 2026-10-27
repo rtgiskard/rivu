@@ -3,12 +3,9 @@
 //! The retained budget counts BGRA pixels plus conservative frame/vector overhead.
 //! Workspace is a separate pre-decode estimate, not a codec allocator or RSS cap:
 //! codecs, encoded input, temporary conversions and GPU textures have other costs.
-use std::{
-    fs::File,
-    io::{Cursor, Read},
-    path::Path,
-    sync::Arc,
-};
+mod thumbnail;
+
+use std::{io::Cursor, path::Path, sync::Arc};
 
 use gpui::{ImageCacheError, RenderImage};
 use image::{
@@ -20,7 +17,7 @@ const MIB: u64 = 1024 * 1024;
 const MAX_ENCODED_BYTES: u64 = 8 * MIB;
 const FRAME_OVERHEAD: u64 = 2 * std::mem::size_of::<Frame>() as u64 + 64;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
 pub(super) struct Budget {
     retained: u64,
     workspace: u64,
@@ -100,18 +97,30 @@ impl Budget {
     }
 }
 
-pub(super) fn load(path: &Path, budget: Budget) -> Result<Arc<RenderImage>, ImageCacheError> {
-    // The immutable cache normally already enforces this source cap. Bound the
-    // read too, including a file changed outside the artwork manager.
-    let mut bytes = Vec::new();
-    File::open(path)?
-        .take(MAX_ENCODED_BYTES + 1)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_ENCODED_BYTES {
-        return Err(limit_error().into());
+/// Resolve a physical-pixel demand to a shared discrete decode tier.
+pub(super) fn requested_tier(side: u32) -> u32 {
+    match side {
+        0..=256 => 256,
+        257..=512 => 512,
+        513..=1024 => 1024,
+        _ => u32::MAX,
     }
-    let frames = decode(&bytes, budget)?;
-    Ok(Arc::new(RenderImage::new(frames)))
+}
+
+pub(super) struct DecodedArtwork {
+    pub(super) image: Arc<RenderImage>,
+    /// Format-level animation policy, including a one-frame GIF or WebP.
+    pub(super) animated: bool,
+    pub(super) source_side: u32,
+}
+
+/// Blocking background work; never call this from the UI thread.
+pub(super) fn load(
+    path: &Path,
+    budget: Budget,
+    requested_side: u32,
+) -> Result<DecodedArtwork, ImageCacheError> {
+    thumbnail::load(path, budget, requested_tier(requested_side))
 }
 
 fn decode(bytes: &[u8], budget: Budget) -> image::ImageResult<Vec<Frame>> {
@@ -324,7 +333,7 @@ pub(super) mod tests {
         }
     }
 
-    fn webp() -> Vec<u8> {
+    pub(in crate::gui::artwork) fn webp() -> Vec<u8> {
         // Lossless still frames wrapped in the standard animation container;
         // no external encoder or large binary fixture is needed.
         let mut body = b"WEBP".to_vec();

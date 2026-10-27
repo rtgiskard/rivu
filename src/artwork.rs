@@ -398,7 +398,10 @@ impl ArtworkManager {
         clean: bool,
         report: &mut ArtworkCacheReport,
     ) {
-        // Serialize original-file creation/registration with removal.
+        // Serialize original-file creation/registration with removal. A decoded
+        // thumbnail holds pixels, not a URI lease: its disposable disk file can
+        // expire independently of a resident original, and a worker racing
+        // cleanup regenerates it on a cache-open miss.
         let _removal = clean.then(|| self.maintenance.write());
         let metadata = match fs::symlink_metadata(path) {
             Ok(metadata) if metadata.is_file() => metadata,
@@ -616,7 +619,31 @@ fn managed_filename(name: &std::ffi::OsStr, bucket: bool) -> bool {
     let Some((stem, extension)) = name.to_str().and_then(|name| name.rsplit_once('.')) else {
         return false;
     };
-    lowercase_hex(stem, if bucket { 30 } else { 64 })
+    let hash = if bucket {
+        if let Some((hash, tier)) = stem.split_once('-') {
+            if extension != "webp" || !matches!(tier, "256" | "512" | "1024") {
+                return false;
+            }
+            hash
+        } else {
+            stem
+        }
+    } else if let Some((hash, thumbnail)) = stem.split_once("-thumb-") {
+        // Legacy root files are inventory/cleanup only, never a read fallback.
+        let mut parts = thumbnail.split('-');
+        let components = (parts.next(), parts.next(), parts.next(), parts.next());
+        if extension != "webp"
+            || !matches!(components, (Some(version), Some(quality), Some("256" | "512" | "1024"), None)
+                if version.strip_prefix('v').is_some_and(decimal)
+                    && (quality == "lossless" || quality.strip_prefix('q').is_some_and(decimal)))
+        {
+            return false;
+        }
+        hash
+    } else {
+        stem
+    };
+    lowercase_hex(hash, if bucket { 30 } else { 64 })
         && matches!(
             extension,
             "png" | "jpg" | "gif" | "webp" | "bmp" | "tiff" | "ico"
@@ -628,6 +655,10 @@ fn lowercase_hex(value: &str, length: usize) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn decimal(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn file_uri(path: &Path) -> io::Result<String> {
@@ -1981,6 +2012,47 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn thumbnail_cleanup_includes_both_layouts_without_pinning_to_resident_originals() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = ArtworkManager::new(directory.path());
+        let original = manager.export_default().unwrap();
+        let source = original.path();
+        let bucket = source.parent().unwrap();
+        let cache = bucket.parent().unwrap();
+        let hash = blake3::hash(DEFAULT_IMAGE);
+        let legacy = cache.join(format!("{hash}.png"));
+        fs::write(&legacy, DEFAULT_IMAGE).unwrap();
+        let thumbnails =
+            [256, 512, 1024].map(|tier| cache::thumbnail_path(&source, hash, tier).unwrap());
+        let old_thumbnails = ["v2-lossless-256", "v1-q80-512", "v0-q85-1024"]
+            .map(|suffix| cache.join(format!("{hash}-thumb-{suffix}.webp")));
+        for thumbnail in thumbnails.iter().chain(&old_thumbnails) {
+            fs::write(thumbnail, b"thumbnail").unwrap();
+        }
+        for name in [
+            format!("{hash}-thumb-v1-q80-128.webp"),
+            format!("{hash}-thumb-v1-q80-256.png"),
+            format!("{hash}-thumb-v-q80-256.webp"),
+            format!("{hash}-thumb-v1-q-256.webp"),
+            format!("{hash}-thumb-v1-q80-256-extra.webp"),
+        ] {
+            assert!(!managed_filename(std::ffi::OsStr::new(&name), false));
+        }
+        let report = manager.maintain(Duration::ZERO, true).unwrap();
+        assert_eq!(report.files, 8);
+        assert_eq!(report.protected_files, 1);
+        assert_eq!(report.removed_files, 7);
+        assert!(source.is_file());
+        assert!(!legacy.exists());
+        assert!(
+            thumbnails
+                .iter()
+                .chain(&old_thumbnails)
+                .all(|path| !path.exists())
+        );
+    }
+
+    #[test]
     fn maintenance_excludes_unmanaged_names_symlinks_and_nested_directories() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("artwork/cache");
@@ -1990,8 +2062,16 @@ pub(crate) mod tests {
         let full_hash = "2".repeat(64);
         let mut excluded = vec![
             root.join(format!("{short_hash}.png")),
+            root.join(format!("{short_hash}-256.webp")),
             bucket.join(format!("{full_hash}.png")),
+            bucket.join(format!("{full_hash}-thumb-v2-lossless-256.webp")),
             bucket.join(format!("{}{}.png", "A", "1".repeat(29))),
+            bucket.join(format!("{short_hash}-128.webp")),
+            bucket.join(format!("{short_hash}-2048.webp")),
+            bucket.join(format!("{short_hash}-0256.webp")),
+            bucket.join(format!("{short_hash}-256.png")),
+            bucket.join(format!("{short_hash}-256-extra.webp")),
+            bucket.join(format!("{short_hash}-thumb-v2-lossless-256.webp")),
             bucket.join(format!("{short_hash}.PNG")),
             bucket.join("notes.txt"),
         ];
@@ -2017,11 +2097,11 @@ pub(crate) mod tests {
             fs::write(&external, b"keep").unwrap();
             excluded.push(external.clone());
             std::os::unix::fs::symlink(&outside, root.join("ef")).unwrap();
-            std::os::unix::fs::symlink(&external, bucket.join(format!("{}.png", "3".repeat(30))))
+            std::os::unix::fs::symlink(&external, bucket.join(format!("{short_hash}-512.webp")))
                 .unwrap();
             std::os::unix::fs::symlink(&external, root.join(format!("{full_hash}.png"))).unwrap();
         }
-        let managed = bucket.join(format!("{}.png", "4".repeat(30)));
+        let managed = bucket.join(format!("{short_hash}-256.webp"));
         fs::write(&managed, b"remove").unwrap();
         let manager = ArtworkManager::new(directory.path());
         let inventory = manager.maintain(Duration::ZERO, false).unwrap();

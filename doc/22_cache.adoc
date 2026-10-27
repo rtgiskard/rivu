@@ -545,9 +545,10 @@ releases these negative records; the shared 64-entry retention target is unchang
 Encoded images use immutable content-derived paths under `artwork/cache`.
 Disk names use the first 128 bits of BLAKE3 as 32 lowercase hexadecimal characters:
 the first two form a bucket directory and the remaining 30 form the filename.
-For example, originals use `ab/<30-hex>.png`. Runtime content identity retains the
-full hash. Existing originals are compared with the incoming bytes before reuse;
-mismatches fail without overwriting the existing file.
+For example, originals use `ab/<30-hex>.png` and thumbnails use
+`ab/<30-hex>-256.webp`, `-512.webp`, or `-1024.webp`. Runtime content identity
+retains the full hash. Existing originals are compared with the incoming bytes
+before reuse; mismatches fail without overwriting the existing file.
 Identical bytes reuse an existing file, independent of track identity; files
 provide paths for GPUI and URLs for external MPRIS consumers. Embedded and directory
 images share byte-sniffed, content-hash storage. Each encoded image is limited by
@@ -559,15 +560,31 @@ There is no automatic file-count or total-byte budget, startup directory invento
 or automatic cleanup. No persistent track-to-image index is restored after restart:
 the first source probe discovers the image hash, then reuses its file if present.
 
+Static GUI covers also generate lossless WebP thumbnails on demand, with longest
+edges of 256, 512, or 1024 physical pixels. Originals remain unchanged; GIF and
+animated WebP keep their original frame path. Thumbnail filenames include only
+the source's shortened hash and numeric size tier, without a processing-version
+or encoding-policy suffix. Future processing-rule changes require explicit cache
+invalidation. Small originals are not enlarged or duplicated into equivalent
+tiers. Background loads coalesce same-source decoding and publish complete files
+atomically; missing or damaged thumbnails are regenerated. A disk-cache write
+failure does not prevent display. Reuse does not rewrite a cached thumbnail or
+refresh its age.
+
+Maintenance counts and cleans thumbnail files as well as originals. Unlike
+resident source files, thumbnails are disposable even while a source lookup is
+resident: displayed pixels do not depend on keeping the thumbnail file. Each
+source has at most three generated tiers; this is not a global disk-capacity limit.
+
 The MPRIS default export uses the same content-hash directory and is protected
 once exported; later sessions can clean it when it is no longer resident.
 
 Maintenance scans only legacy managed files at the cache root and managed files
 within one level of two-character lowercase-hex buckets. It does not follow
-symlinks or descend into nested directories. Old flat, full-hash originals remain
-included in statistics and age-based cleanup, but are not read as fallbacks or
-moved at startup. The first access after this layout change recreates the
-requested cache files.
+symlinks or descend into nested directories. Old flat, full-hash originals and
+versioned thumbnails remain included in statistics and age-based cleanup, but
+are not read as fallbacks or moved at startup. The first access after this layout
+change recreates the requested cache files.
 
 Only explicit link:01_config.adoc#_artwork_cache_maintenance[Settings maintenance]
 enumerates disposable files. Statistics and cleanup use modification age, not
@@ -595,6 +612,16 @@ when different tracks reference the same bytes. Each consumer retains its own
 lookup identity and source-file protection. Loading starts only when a preview
 requests the image and runs the artwork-specific bounded decoder on GPUI's
 background executor, not render-time file I/O.
+
+Static-image demand uses the actual display size and window scale, rounded up to
+the smallest sufficient tier; demands above 1024 use the original. Cover/cropped
+surfaces also account for aspect ratio so the short edge retains enough pixels.
+Visible consumers share the largest required tier. An upgrade retains the old
+image until the replacement is ready; shrinking demand is debounced for 300 ms.
+Cached consumers are invalidated after painting and acknowledge the new image
+generation before old textures retire at a frame boundary. Ordinary within-tier
+resizing does not decode again. Resizing uses premultiplied-alpha filtering to
+avoid colored fringes without copying the full source image.
 
 Replaced or hidden consumers retire through a window-owned queue after scene
 replacement; removed panels need not paint again. Releasing one consumer cannot
@@ -640,10 +667,10 @@ with the existing default cover in metadata previews, album cards and the artwor
 panel. No partial animation or silent first-frame fallback is published. Accepted
 GIF/WebP animations retain all frames and original delays. Stable element IDs
 retain their playback cursors; multiple artwork panels share decoded pixels but
-not cursor state. GPUI still handles display scaling; Rivu does not resize
-real-cover buffers or generate thumbnails. Trusted decorations and generated
-default artwork keep their separate policies. Encoded-file maintenance does not
-measure or reclaim decoded images; the encoded-file limit is not a pixel budget.
+not cursor state. GPUI handles final display scaling of the selected image tier.
+Trusted decorations and generated default artwork keep their separate policies.
+Encoded-file maintenance does not measure or reclaim decoded images; the
+encoded-file limit is not a pixel budget.
 
 === Generated defaults and decorations
 

@@ -674,7 +674,7 @@ impl AlbumBrowser {
         let image = self
             .covers
             .get(&index)
-            .and_then(|cover| cover.view.image(cx));
+            .and_then(|cover| cover.view.measured_image(0, cx));
         let directory = key.directory.to_string_lossy().into_owned();
         let title = key.title.clone();
         let drag_label: SharedString = title.clone().into();
@@ -784,9 +784,7 @@ impl AlbumBrowser {
                     .h(self.grid_layout.artwork_size)
                     .flex_shrink_0()
                     .map(|view| match image {
-                        Some(image) => {
-                            view.child(image.absolute().size_full().object_fit(ObjectFit::Contain))
-                        }
+                        Some(image) => view.child(div().absolute().size_full().child(image)),
                         None => view.child(self.default_album.clone()),
                     })
                     .child(

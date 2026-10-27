@@ -532,6 +532,9 @@ protect their files, including results still used by GUI or MPRIS. Protected
 files are skipped even when expired; the bundled icon and audio files are never
 removed. A removed cover is regenerated on demand.
 
+Usage and cleanup also include generated lossless WebP thumbnails. These derived
+files are not protected by a resident original; they can be regenerated while
+the original cover and decoded display remain available.
 The cache uses one level of two-hex-character buckets. Maintenance also counts
 and cleans managed files left in the old flat layout; it does not follow symlinks
 or scan arbitrary subdirectories. Old files are not migrated or reused as load

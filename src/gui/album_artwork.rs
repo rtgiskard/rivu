@@ -325,6 +325,12 @@ impl AlbumArtwork {
             );
         }
         self.instances.retain(|_, instance| instance.retained);
+        let visible_consumers: Vec<_> = self
+            .instances
+            .iter()
+            .filter_map(|(id, instance)| instance.visible.then_some(*id))
+            .collect();
+        self.view.retain_consumers(&visible_consumers);
         let mut visible_styles = [false; 6];
         for instance in self.instances.values().filter(|instance| instance.visible) {
             if let Some(index) = decoration_index(instance.options.style) {
@@ -558,6 +564,16 @@ fn artwork_image_ratio(style: AlbumArtworkStyle) -> f32 {
     }
 }
 
+fn artwork_decode_side(side: Pixels, style: AlbumArtworkStyle, aspect: Option<f32>) -> Pixels {
+    if style == AlbumArtworkStyle::Card {
+        return side;
+    }
+    let aspect = aspect.unwrap_or(1.);
+    // Cover scales the shorter source edge to the circular surface, so its
+    // uncropped long edge needs proportionally more pixels than Contain.
+    side * aspect.max(1. / aspect)
+}
+
 impl AlbumArtwork {
     fn render_panel(
         &mut self,
@@ -573,6 +589,8 @@ impl AlbumArtwork {
             image = image.with_automatic_animation_frames(false);
             image
         });
+        let sizing = self.view.sizing(id);
+        let image_aspect = self.view.aspect_ratio(cx);
         let default_album = self.default_album.clone();
         let instance = self
             .instances
@@ -592,6 +610,13 @@ impl AlbumArtwork {
                 // Even device-pixel diameters keep all concentric layers on the
                 // same center after pixel snapping, including fractional scale.
                 let image_side = px((f32::from(side) * scale * ratio / 2.0).floor() * 2.0 / scale);
+                if let Some(sizing) = sizing {
+                    sizing.request(
+                        artwork_decode_side(image_side, style, image_aspect),
+                        window,
+                        cx,
+                    );
+                }
                 let inset = (side - image_side) / 2.0;
                 let image = image
                     .unwrap_or_else(|| default_album.read(cx).image(theme, image_side, window));
@@ -708,6 +733,32 @@ mod tests {
 
     fn assert_angle(rotation: &Rotation, expected: f64) {
         assert!((rotation.angle - expected).abs() < 1e-10);
+    }
+
+    #[test]
+    fn cover_decode_demand_preserves_short_edge_density() {
+        for aspect in [2., 0.5] {
+            assert_eq!(
+                artwork_decode_side(px(512.), AlbumArtworkStyle::Plain, Some(aspect)),
+                px(1024.)
+            );
+            assert_eq!(
+                artwork_decode_side(px(512.), AlbumArtworkStyle::Vinyl, Some(aspect)),
+                px(1024.)
+            );
+            assert_eq!(
+                artwork_decode_side(px(512.), AlbumArtworkStyle::Card, Some(aspect)),
+                px(512.)
+            );
+        }
+        assert_eq!(
+            artwork_decode_side(px(512.), AlbumArtworkStyle::Plain, Some(1.)),
+            px(512.)
+        );
+        assert_eq!(
+            artwork_decode_side(px(512.), AlbumArtworkStyle::Plain, None),
+            px(512.)
+        );
     }
 
     #[test]
