@@ -219,10 +219,11 @@ fn save_scan(
     // Counts and history can scan substantial DB state. Prepare them here;
     // Core only applies these projections and performs indexed queue reads.
     let refresh_started = Instant::now();
-    if impacts.structure {
+    let dependencies = impacts.dependencies(saved.playlist_id.is_some());
+    if dependencies.refresh_track_total {
         saved.library_total = Some(store.track_count());
     }
-    if impacts.library {
+    if dependencies.refresh_history {
         saved.history = Some(store.history(MAX_QUERY_ROWS));
     }
     if saved.playlist_id.is_some() {
@@ -837,7 +838,8 @@ impl Core {
                     ),
                 }
             }
-            if (impacts.library || impacts.queue)
+            let dependencies = impacts.dependencies(saved.playlist_id.is_some());
+            if dependencies.refresh_queue
                 && let Err(error) = self.refresh_queue_tracks()
             {
                 errors.push(error.context(if saved.library_committed {

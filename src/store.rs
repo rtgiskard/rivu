@@ -181,23 +181,26 @@ impl Store {
     }
 
     pub(crate) fn invalidate_scan_caches(&self, impacts: ScanImpacts, playlist_created: bool) {
-        if impacts.library {
+        let dependencies = impacts.dependencies(playlist_created);
+        if dependencies.clear_track_cache {
             self.track_cache.borrow_mut().entries.clear();
+        }
+        if dependencies.clear_filtered_track_count {
             self.invalidate_filtered_track_count();
         }
-        if impacts.library || impacts.structure {
+        if dependencies.clear_catalog_counts {
             self.invalidate_scalar_count_domains(&[CountDomain::Other, CountDomain::Directory]);
         }
-        if impacts.library || impacts.queue {
+        if dependencies.clear_queue_count {
             self.invalidate_scalar_count_domains(&[CountDomain::Queue]);
         }
-        if impacts.library || playlist_created {
+        if dependencies.clear_playlist_count {
             self.invalidate_scalar_count_domains(&[CountDomain::PlaylistEntries]);
         }
-        if impacts.albums {
+        if dependencies.clear_album_counts {
             self.invalidate_scalar_count_domains(&[CountDomain::Albums, CountDomain::AlbumTracks]);
         }
-        if impacts.duplicate_groups {
+        if dependencies.clear_duplicate_group_count {
             self.invalidate_duplicate_group_count();
         }
     }

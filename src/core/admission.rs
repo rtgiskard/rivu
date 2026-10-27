@@ -110,10 +110,11 @@ fn save_external(
             .context("Queue count overflow after external admission")
             .and_then(|total| store.queue_projection(total, 0)),
     );
-    if impacts.structure {
+    let dependencies = impacts.dependencies(false);
+    if dependencies.refresh_track_total {
         saved.track_total = Some(store.track_count());
     }
-    if impacts.library {
+    if dependencies.refresh_history {
         saved.history = Some(store.history(MAX_QUERY_ROWS));
         saved.current_track = Some((|| {
             current_id

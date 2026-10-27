@@ -325,19 +325,23 @@ impl Core {
 
     /// Publish committed facts without reading potentially large projections.
     pub(in crate::core) fn invalidate_scan_impacts(&mut self, impacts: crate::store::ScanImpacts) {
-        self.invalidate_collection_impacts(impacts.queue, impacts.albums);
-        if impacts.library {
+        let dependencies = impacts.dependencies(false);
+        self.invalidate_collection_impacts(
+            dependencies.queue_revision,
+            dependencies.album_revision,
+        );
+        if dependencies.library_revision {
             self.state.library.revision = self.state.library.revision.wrapping_add(1);
         }
-        if impacts.structure {
+        if dependencies.structure_revision {
             self.state.library.structure_revision =
                 self.state.library.structure_revision.wrapping_add(1);
         }
-        if impacts.duplicate_groups {
+        if dependencies.duplicate_group_revision {
             self.state.library.duplicate_groups_revision =
                 self.state.library.duplicate_groups_revision.wrapping_add(1);
         }
-        if impacts.duplicate_members {
+        if dependencies.duplicate_member_revision {
             self.state.library.duplicate_members_revision = self
                 .state
                 .library
@@ -354,7 +358,8 @@ impl Core {
         self.invalidate_scan_impacts(impacts);
         let catalog = self.refresh_scan_catalog(impacts);
         // A failed projection read cannot hide another committed domain.
-        let queue = if impacts.library || impacts.queue {
+        let dependencies = impacts.dependencies(false);
+        let queue = if dependencies.refresh_queue {
             self.refresh_queue_tracks()
         } else {
             Ok(())
@@ -363,7 +368,8 @@ impl Core {
     }
 
     fn refresh_scan_catalog(&mut self, impacts: crate::store::ScanImpacts) -> Result<()> {
-        let library = if impacts.structure {
+        let dependencies = impacts.dependencies(false);
+        let library = if dependencies.refresh_track_total {
             self.store
                 .track_count()
                 .map(|total| self.state.library.track_total = total)
@@ -371,7 +377,7 @@ impl Core {
         } else {
             Ok(())
         };
-        let history = if impacts.library {
+        let history = if dependencies.refresh_history {
             self.store
                 .history(MAX_QUERY_ROWS)
                 .map(|history| self.replace_history(history))

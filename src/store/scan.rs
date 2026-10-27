@@ -38,6 +38,51 @@ pub struct ScanImpacts {
     /// Successfully scanned new identities excluded by the duration threshold.
     pub skipped_short_tracks: usize,
 }
+/// Derived invalidation and projection responsibilities for one committed scan.
+/// Keep these rules beside the producer facts so callers cannot invent divergent
+/// `library || queue` or cache-domain combinations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ScanImpactDependencies {
+    pub library_revision: bool,
+    pub structure_revision: bool,
+    pub queue_revision: bool,
+    pub album_revision: bool,
+    pub duplicate_group_revision: bool,
+    pub duplicate_member_revision: bool,
+    pub refresh_history: bool,
+    pub refresh_track_total: bool,
+    pub refresh_queue: bool,
+    pub clear_track_cache: bool,
+    pub clear_filtered_track_count: bool,
+    pub clear_catalog_counts: bool,
+    pub clear_queue_count: bool,
+    pub clear_playlist_count: bool,
+    pub clear_album_counts: bool,
+    pub clear_duplicate_group_count: bool,
+}
+
+impl ScanImpacts {
+    pub(crate) fn dependencies(self, playlist_created: bool) -> ScanImpactDependencies {
+        ScanImpactDependencies {
+            library_revision: self.library,
+            structure_revision: self.structure,
+            queue_revision: self.queue,
+            album_revision: self.albums,
+            duplicate_group_revision: self.duplicate_groups,
+            duplicate_member_revision: self.duplicate_members,
+            refresh_history: self.library,
+            refresh_track_total: self.structure,
+            refresh_queue: self.library || self.queue,
+            clear_track_cache: self.library,
+            clear_filtered_track_count: self.library,
+            clear_catalog_counts: self.library || self.structure,
+            clear_queue_count: self.library || self.queue,
+            clear_playlist_count: self.library || playlist_created,
+            clear_album_counts: self.albums,
+            clear_duplicate_group_count: self.duplicate_groups,
+        }
+    }
+}
 
 /// Compare staged values before updating tracks; hidden raw changes are excluded.
 pub(super) fn staged_projection_columns(cue: bool) -> String {
@@ -922,7 +967,7 @@ impl Store {
             "library_scan_transaction_committed"
         );
         impacts.changed = changed_tracks != 0;
-        if impacts.library {
+        if impacts.dependencies(false).clear_track_cache {
             self.track_cache.borrow_mut().entries.clear();
         }
         Ok(impacts)
