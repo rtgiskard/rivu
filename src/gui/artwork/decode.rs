@@ -14,7 +14,6 @@ use image::{
 };
 
 const MIB: u64 = 1024 * 1024;
-const MAX_ENCODED_BYTES: u64 = 8 * MIB;
 const FRAME_OVERHEAD: u64 = 2 * std::mem::size_of::<Frame>() as u64 + 64;
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
@@ -117,10 +116,16 @@ pub(super) struct DecodedArtwork {
 /// Blocking background work; never call this from the UI thread.
 pub(super) fn load(
     path: &Path,
+    max_encoded_bytes: usize,
     budget: Budget,
     requested_side: u32,
 ) -> Result<DecodedArtwork, ImageCacheError> {
-    thumbnail::load(path, budget, requested_tier(requested_side))
+    thumbnail::load(
+        path,
+        max_encoded_bytes,
+        budget,
+        requested_tier(requested_side),
+    )
 }
 
 fn decode(bytes: &[u8], budget: Budget) -> image::ImageResult<Vec<Frame>> {
@@ -275,6 +280,53 @@ fn webp_chunks(mut bytes: &[u8], budget: Budget, subframe: bool) -> image::Image
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+
+    /// Valid 800x400 BMP with a legal gap before its pixels, not trailing junk.
+    /// Large encoded size must not be confused with decoded pixel/workspace size.
+    pub(in crate::gui::artwork) fn large_encoded_bmp() -> Vec<u8> {
+        let pixels = image::RgbImage::from_pixel(800, 400, image::Rgb([210, 30, 40]));
+        let mut encoded = Cursor::new(Vec::new());
+        DynamicImage::ImageRgb8(pixels)
+            .write_to(&mut encoded, ImageFormat::Bmp)
+            .unwrap();
+        let mut bytes = encoded.into_inner();
+        let offset = u32::from_le_bytes(bytes[10..14].try_into().unwrap()) as usize;
+        let padding = 9 * MIB as usize - bytes.len();
+        bytes.splice(offset..offset, std::iter::repeat_n(0, padding));
+        let length = bytes.len() as u32;
+        bytes[2..6].copy_from_slice(&length.to_le_bytes());
+        bytes[10..14].copy_from_slice(&((offset + padding) as u32).to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn encoded_session_limit_is_independent_of_retained_pixels_and_workspace() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("large-encoded.bmp");
+        let bytes = large_encoded_bmp();
+        assert_eq!(bytes.len(), 9 * MIB as usize);
+        std::fs::write(&path, bytes).unwrap();
+        // The decoded canvas is only 1.22 MiB and fits a 2 MiB retained budget.
+        let budget = Budget::new(2);
+        assert!(load(&path, 8 * MIB as usize, budget, 2048).is_err());
+        let decoded = load(&path, crate::artwork::DEFAULT_MAX_IMAGE_BYTES, budget, 2048).unwrap();
+        assert_eq!(u32::from(decoded.image.size(0).width), 800);
+        assert_eq!(u32::from(decoded.image.size(0).height), 400);
+        assert_eq!(
+            &decoded.image.as_bytes(0).unwrap()[..4],
+            &[40, 30, 210, 255]
+        );
+        assert!(
+            load(
+                &path,
+                crate::artwork::DEFAULT_MAX_IMAGE_BYTES,
+                Budget::new(1),
+                2048
+            )
+            .is_err()
+        );
+        assert!(load(&path, 8 * MIB as usize, budget, 2048).is_err());
+    }
 
     pub(in crate::gui::artwork) fn budget(frames: u64) -> Budget {
         Budget {

@@ -31,6 +31,7 @@ pub(crate) const DEFAULT_MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 struct ArtworkFile {
     uri: String,
     path: Arc<Path>,
+    max_image_bytes: usize,
 }
 
 /// Holds a published file and protects its URI until it is released.
@@ -44,6 +45,11 @@ impl Artwork {
 
     pub(crate) fn path(&self) -> Arc<Path> {
         Arc::clone(&self.0.path)
+    }
+
+    /// Immutable encoded admission policy of the session that published this file.
+    pub(crate) fn max_image_bytes(&self) -> usize {
+        self.0.max_image_bytes
     }
 }
 
@@ -249,7 +255,7 @@ impl ArtworkManager {
                     "png",
                 );
                 match write_image(&path, DEFAULT_IMAGE) {
-                    Ok(uri) => Some(Artwork(artwork_file(uri))),
+                    Ok(uri) => Some(Artwork(artwork_file(uri, self.max_image_bytes))),
                     Err(error) => {
                         tracing::warn!(%error, "mpris_default_artwork_export_failed");
                         None
@@ -591,7 +597,7 @@ impl ArtworkManager {
         let hash = blake3::hash(bytes);
         let path = cache::original_path(&self.directory.join("cache"), hash, extension);
         let uri = write_image(&path, bytes).ok()?;
-        Some(artwork_file(uri))
+        Some(artwork_file(uri, self.max_image_bytes))
     }
 }
 
@@ -604,7 +610,7 @@ fn directory_image_priority(path: &Path) -> Option<u8> {
     }
 }
 
-fn artwork_file(uri: String) -> Arc<ArtworkFile> {
+fn artwork_file(uri: String, max_image_bytes: usize) -> Arc<ArtworkFile> {
     let path = url::Url::parse(&uri)
         .expect("artwork file URI")
         .to_file_path()
@@ -612,6 +618,7 @@ fn artwork_file(uri: String) -> Arc<ArtworkFile> {
     Arc::new(ArtworkFile {
         uri,
         path: Arc::from(path),
+        max_image_bytes,
     })
 }
 

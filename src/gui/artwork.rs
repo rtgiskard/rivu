@@ -22,7 +22,7 @@ mod decode;
 #[derive(Default)]
 struct ArtworkImagesState {
     budget: decode::Budget,
-    entries: HashMap<Arc<Path>, Weak<ArtworkImageOwner>>,
+    entries: HashMap<(Arc<Path>, usize), Weak<ArtworkImageOwner>>,
     decorations: [Weak<DecorationImageOwner>; 6],
     retired: Vec<RetiredArtworkImage>,
     pending_retired: Option<Vec<RetiredArtworkImage>>,
@@ -86,10 +86,10 @@ impl ArtworkImages {
     }
 
     fn acquire(&self, artwork: LoadedArtwork, cx: &mut App) -> Rc<ArtworkImageOwner> {
-        let path = artwork.path();
+        let key = (artwork.path(), artwork.max_image_bytes());
         let budget = {
             let state = self.0.borrow();
-            if let Some(owner) = state.entries.get(&path).and_then(Weak::upgrade) {
+            if let Some(owner) = state.entries.get(&key).and_then(Weak::upgrade) {
                 return owner;
             }
             state.budget
@@ -97,12 +97,12 @@ impl ArtworkImages {
         let owner = Rc::new(ArtworkImageOwner {
             image: ArtworkImage::new(artwork, budget, Rc::downgrade(&self.0), cx),
             registry: Rc::downgrade(&self.0),
-            path: Arc::clone(&path),
+            key: key.clone(),
         });
         self.0
             .borrow_mut()
             .entries
-            .insert(path, Rc::downgrade(&owner));
+            .insert(key, Rc::downgrade(&owner));
         owner
     }
 
@@ -358,7 +358,7 @@ impl DecorationImage {
 struct ArtworkImageOwner {
     image: Entity<ArtworkImage>,
     registry: Weak<RefCell<ArtworkImagesState>>,
-    path: Arc<Path>,
+    key: (Arc<Path>, usize),
 }
 
 impl ArtworkImageOwner {
@@ -372,7 +372,7 @@ impl ArtworkImageOwner {
 impl Drop for ArtworkImageOwner {
     fn drop(&mut self) {
         if let Some(registry) = self.registry.upgrade() {
-            registry.borrow_mut().entries.remove(&self.path);
+            registry.borrow_mut().entries.remove(&self.key);
         }
     }
 }
@@ -719,7 +719,7 @@ impl ArtworkImage {
         ImageCacheItem::from_future(
             async move {
                 // Hold the source lease throughout background I/O/decode.
-                let result = decode::load(&artwork.path(), budget, tier);
+                let result = decode::load(&artwork.path(), artwork.max_image_bytes(), budget, tier);
                 if let Err(error) = &result {
                     tracing::error!(?error, "artwork_decode_failed");
                 }
@@ -1738,6 +1738,139 @@ mod tests {
                 assert!(cache.read(cx).released);
             });
         }
+    }
+
+    #[gpui::test]
+    fn artwork_actual_loader_uses_published_session_encoded_limit(cx: &mut gpui::TestAppContext) {
+        std::fs::create_dir_all(".cache").unwrap();
+        let directory = tempfile::tempdir_in(".cache").unwrap();
+        let path = directory.path().join("large-encoded.wav");
+        cover_wave(&path, &decode::tests::large_encoded_bmp());
+        let track = crate::artwork::tests::track(path);
+        let manager = crate::artwork::ArtworkManager::new(directory.path());
+        let loaded = manager.load(&track).unwrap();
+        assert_eq!(loaded.max_image_bytes(), 16 * 1024 * 1024);
+        assert_eq!(
+            std::fs::metadata(loaded.path()).unwrap().len(),
+            9 * 1024 * 1024
+        );
+        let lower = crate::artwork::ArtworkManager::new(directory.path())
+            .with_max_image_bytes(8 * 1024 * 1024);
+        assert!(lower.load(&track).is_none());
+        let images = ArtworkImages::new(2);
+        let view = ArtworkView::new(images.clone());
+        let window = cx.add_empty_window();
+        let cache = window.update(|_, cx| {
+            view.replace(Some(loaded), cx);
+            view.state
+                .borrow()
+                .current
+                .as_ref()
+                .unwrap()
+                .owner
+                .image
+                .clone()
+        });
+        request_cover_size(window, &view, 1, 200.);
+        draw_cover(window, &view);
+        window.run_until_parked();
+        window.update(|window, cx| {
+            let pixels = cache
+                .read(cx)
+                .item
+                .as_ref()
+                .unwrap()
+                .get()
+                .unwrap()
+                .unwrap();
+            assert_eq!(u32::from(pixels.size(0).width), 256);
+            assert_eq!(u32::from(pixels.size(0).height), 128);
+            assert_eq!(&pixels.as_bytes(0).unwrap()[..4], &[40, 30, 210, 255]);
+            view.release_all_images(window, cx);
+            images.release_all_retired(window, cx);
+        });
+    }
+
+    #[gpui::test]
+    fn artwork_encoded_policy_separates_failed_and_admitted_shared_paths(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (directory, admitted) = loaded_cover(&static_cover(800, 211));
+        let manager = crate::artwork::ArtworkManager::new(directory.path())
+            .with_max_image_bytes(8 * 1024 * 1024);
+        let track = crate::artwork::tests::track(directory.path().join("cover.wav"));
+        let lower = manager.load(&track).unwrap();
+        assert_eq!(lower.path(), admitted.path());
+        // Simulate an external cache-file change: the background reader must
+        // still enforce each immutable session policy, including remembered errors.
+        std::fs::write(admitted.path(), decode::tests::large_encoded_bmp()).unwrap();
+        let images = ArtworkImages::new(2);
+        let rejected = ArtworkView::new(images.clone());
+        let accepted = ArtworkView::new(images.clone());
+        let window = cx.add_empty_window();
+        let (rejected_cache, accepted_cache) = window.update(|_, cx| {
+            rejected.replace(Some(lower), cx);
+            accepted.replace(Some(admitted), cx);
+            let rejected = rejected
+                .state
+                .borrow()
+                .current
+                .as_ref()
+                .unwrap()
+                .owner
+                .clone();
+            let accepted = accepted
+                .state
+                .borrow()
+                .current
+                .as_ref()
+                .unwrap()
+                .owner
+                .clone();
+            assert!(!Rc::ptr_eq(&rejected, &accepted));
+            (rejected.image.clone(), accepted.image.clone())
+        });
+        draw_cover(window, &rejected);
+        window.run_until_parked();
+        window.update(|_, cx| {
+            assert!(
+                rejected_cache
+                    .read(cx)
+                    .item
+                    .as_ref()
+                    .unwrap()
+                    .get()
+                    .unwrap()
+                    .is_err()
+            );
+        });
+        draw_cover(window, &accepted);
+        window.run_until_parked();
+        window.update(|window, cx| {
+            assert!(
+                accepted_cache
+                    .read(cx)
+                    .item
+                    .as_ref()
+                    .unwrap()
+                    .get()
+                    .unwrap()
+                    .is_ok()
+            );
+            assert!(
+                rejected_cache
+                    .read(cx)
+                    .item
+                    .as_ref()
+                    .unwrap()
+                    .get()
+                    .unwrap()
+                    .is_err()
+            );
+            rejected.release_all_images(window, cx);
+            accepted.release_all_images(window, cx);
+            images.release_all_retired(window, cx);
+        });
     }
 
     #[gpui::test]

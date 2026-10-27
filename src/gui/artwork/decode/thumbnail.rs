@@ -12,9 +12,13 @@ use parking_lot::Mutex;
 
 use crate::artwork::cache::thumbnail_path;
 
-use super::{Budget, MAX_ENCODED_BYTES, decode, limit_error, preflight_webp, to_bgra};
+use super::{Budget, decode, limit_error, preflight_webp, to_bgra};
 
-type SourceKey = (blake3::Hash, Budget);
+// A disposable tier is at most 1024px; its file-safety cap is not the source's
+// configurable encoded admission limit.
+const MAX_THUMBNAIL_BYTES: usize = 8 * 1024 * 1024;
+
+type SourceKey = (blake3::Hash, usize, Budget);
 type Sources = HashMap<SourceKey, Weak<Mutex<Source>>>;
 
 #[derive(Default)]
@@ -30,29 +34,32 @@ struct SourceInfo {
     animated: bool,
 }
 
-fn read_bounded(path: &Path) -> Result<Vec<u8>, ImageCacheError> {
+fn read_bounded(path: &Path, max_bytes: usize) -> Result<Vec<u8>, ImageCacheError> {
     // Bound the read even if a file was changed outside the artwork manager.
     let mut bytes = Vec::new();
     File::open(path)?
-        .take(MAX_ENCODED_BYTES + 1)
+        .take(max_bytes as u64 + 1)
         .read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_ENCODED_BYTES {
+    if bytes.len() > max_bytes {
         return Err(limit_error().into());
     }
     Ok(bytes)
 }
 
-fn source(hash: blake3::Hash, budget: Budget) -> Arc<Mutex<Source>> {
+fn source(hash: blake3::Hash, max_encoded_bytes: usize, budget: Budget) -> Arc<Mutex<Source>> {
     static SOURCES: LazyLock<Mutex<Sources>> = LazyLock::new(Mutex::default);
     let mut sources = SOURCES.lock();
     // Only active background loads own these entries: neither original pixels
     // nor locks accumulate after the last waiter leaves.
     sources.retain(|_, source| source.strong_count() != 0);
-    if let Some(source) = sources.get(&(hash, budget)).and_then(Weak::upgrade) {
+    if let Some(source) = sources
+        .get(&(hash, max_encoded_bytes, budget))
+        .and_then(Weak::upgrade)
+    {
         return source;
     }
     let source = Arc::new(Mutex::new(Source::default()));
-    sources.insert((hash, budget), Arc::downgrade(&source));
+    sources.insert((hash, max_encoded_bytes, budget), Arc::downgrade(&source));
     source
 }
 
@@ -84,7 +91,7 @@ fn inspect(bytes: &[u8], budget: Budget) -> image::ImageResult<SourceInfo> {
 fn cached(path: &Path, budget: Budget, tier: u32) -> Option<Arc<RenderImage>> {
     // NotFound also covers manual cleanup between path construction and open.
     // Corrupt disposable thumbnails are regenerated from the admitted source.
-    let bytes = read_bounded(path).ok()?;
+    let bytes = read_bounded(path, MAX_THUMBNAIL_BYTES).ok()?;
     let info = inspect(&bytes, budget).ok()?;
     if info.animated || info.longest != tier {
         return None;
@@ -186,12 +193,13 @@ fn resize_bgra(
 
 pub(super) fn load(
     path: &Path,
+    max_encoded_bytes: usize,
     budget: Budget,
     tier: u32,
 ) -> Result<super::DecodedArtwork, ImageCacheError> {
-    let bytes = read_bounded(path)?;
+    let bytes = read_bounded(path, max_encoded_bytes)?;
     let hash = blake3::hash(&bytes);
-    let source = source(hash, budget);
+    let source = source(hash, max_encoded_bytes, budget);
     // This mutex is taken only by existing background decode jobs. Same-source
     // requests share one original decode and one result per requested tier.
     let mut source = source.lock();
@@ -275,6 +283,41 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn encoded_session_limit_admits_large_small_canvas_before_thumbnail_reuse() {
+        let directory = tempfile::tempdir().unwrap();
+        let bytes = super::super::tests::large_encoded_bmp();
+        let hash = blake3::hash(&bytes);
+        let path = crate::artwork::cache::original_path(directory.path(), hash, "bmp");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, bytes).unwrap();
+        let admitted = crate::artwork::DEFAULT_MAX_IMAGE_BYTES;
+        let lower = 8 * 1024 * 1024;
+        let budget = Budget::new(2);
+        // Keep the shared source alive so later requests exercise resident reuse.
+        let source = source(hash, admitted, budget);
+        let lower_source = super::source(hash, lower, budget);
+        assert!(!Arc::ptr_eq(&source, &lower_source));
+        assert!(load(&path, lower, budget, 256).is_err());
+        let first = load(&path, admitted, budget, 256).unwrap().image;
+        assert_eq!(size(&first), (256, 128));
+        let thumbnail = thumbnail_path(&path, hash, 256).unwrap();
+        assert!(thumbnail.is_file());
+        assert_eq!(&first.as_bytes(0).unwrap()[..4], &[40, 30, 210, 255]);
+        assert!(load(&path, lower, budget, 256).is_err());
+        let shared = load(&path, admitted, budget, 256).unwrap().image;
+        assert!(Arc::ptr_eq(&first, &shared));
+        drop(source);
+        drop(lower_source);
+        drop(first);
+        drop(shared);
+        // A new source lease now uses the disk tier, still after source admission.
+        let cached = load(&path, admitted, budget, 256).unwrap().image;
+        assert_eq!(size(&cached), (256, 128));
+        assert_eq!(&cached.as_bytes(0).unwrap()[..4], &[40, 30, 210, 255]);
+        assert!(load(&path, lower, budget, 256).is_err());
+    }
+
     fn png(width: u32, height: u32, pixel: [u8; 4]) -> Vec<u8> {
         let pixels = image::RgbaImage::from_pixel(width, height, image::Rgba(pixel));
         let mut bytes = Vec::new();
@@ -319,7 +362,13 @@ mod tests {
         let path = crate::artwork::cache::original_path(directory.path(), hash, "png");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, &bytes).unwrap();
-        let loaded = load(&path, Budget::default(), 256).unwrap();
+        let loaded = load(
+            &path,
+            crate::artwork::DEFAULT_MAX_IMAGE_BYTES,
+            Budget::default(),
+            256,
+        )
+        .unwrap();
         assert!(!loaded.animated);
         assert_eq!(loaded.source_side, 800);
         let image = loaded.image;
@@ -344,7 +393,14 @@ mod tests {
         assert!(encoded.windows(4).any(|bytes| bytes == b"VP8L"));
         assert!(!encoded.windows(4).any(|bytes| bytes == b"VP8 "));
         assert_eq!(fs::read(&path).unwrap(), bytes);
-        let cached = load(&path, Budget::default(), 256).unwrap().image;
+        let cached = load(
+            &path,
+            crate::artwork::DEFAULT_MAX_IMAGE_BYTES,
+            Budget::default(),
+            256,
+        )
+        .unwrap()
+        .image;
         assert_eq!(image.as_bytes(0), cached.as_bytes(0));
         assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 2);
     }
@@ -381,7 +437,14 @@ mod tests {
             .write_image(pixels.as_raw(), 512, 64, image::ExtendedColorType::Rgba8)
             .unwrap();
         fs::write(&path, &bytes).unwrap();
-        let image = load(&path, Budget::default(), 256).unwrap().image;
+        let image = load(
+            &path,
+            crate::artwork::DEFAULT_MAX_IMAGE_BYTES,
+            Budget::default(),
+            256,
+        )
+        .unwrap()
+        .image;
         let mut edge_pixels = 0;
         for pixel in image.as_bytes(0).unwrap().as_chunks::<4>().0 {
             if pixel[3] != 0 && pixel[3] != 255 {
@@ -394,7 +457,14 @@ mod tests {
         }
         assert!(edge_pixels > 0);
         assert_eq!(fs::read(&path).unwrap(), bytes);
-        let cached = load(&path, Budget::default(), 256).unwrap().image;
+        let cached = load(
+            &path,
+            crate::artwork::DEFAULT_MAX_IMAGE_BYTES,
+            Budget::default(),
+            256,
+        )
+        .unwrap()
+        .image;
         assert_eq!(image.as_bytes(0), cached.as_bytes(0));
     }
 
@@ -404,7 +474,13 @@ mod tests {
         let path = directory.path().join("source.png");
         fs::write(&path, png(120, 80, [200, 10, 20, 128])).unwrap();
         for tier in [256, 512, 1024, u32::MAX] {
-            let loaded = load(&path, Budget::default(), tier).unwrap();
+            let loaded = load(
+                &path,
+                crate::artwork::DEFAULT_MAX_IMAGE_BYTES,
+                Budget::default(),
+                tier,
+            )
+            .unwrap();
             assert!(!loaded.animated);
             assert_eq!(loaded.source_side, 120);
             let image = loaded.image;
@@ -422,7 +498,16 @@ mod tests {
         fs::write(&path, &bytes).unwrap();
         for (tier, expected) in [(256, (256, 128)), (512, (512, 256)), (1024, (800, 400))] {
             assert_eq!(
-                size(&load(&path, Budget::default(), tier).unwrap().image),
+                size(
+                    &load(
+                        &path,
+                        crate::artwork::DEFAULT_MAX_IMAGE_BYTES,
+                        Budget::default(),
+                        tier
+                    )
+                    .unwrap()
+                    .image
+                ),
                 expected
             );
         }
@@ -438,7 +523,14 @@ mod tests {
         }
         let replacement = png(800, 400, [12, 20, 240, 255]);
         fs::write(&path, &replacement).unwrap();
-        let image = load(&path, Budget::default(), 256).unwrap().image;
+        let image = load(
+            &path,
+            crate::artwork::DEFAULT_MAX_IMAGE_BYTES,
+            Budget::default(),
+            256,
+        )
+        .unwrap()
+        .image;
         assert!(image.as_bytes(0).unwrap()[0] > 220);
         assert_ne!(
             thumbnail_path(&path, blake3::hash(&bytes), 256),
@@ -451,7 +543,13 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("source.gif");
         fs::write(&path, super::super::tests::gif()).unwrap();
-        let loaded = load(&path, Budget::default(), 256).unwrap();
+        let loaded = load(
+            &path,
+            crate::artwork::DEFAULT_MAX_IMAGE_BYTES,
+            Budget::default(),
+            256,
+        )
+        .unwrap();
         assert!(loaded.animated);
         let image = loaded.image;
         assert_eq!(image.frame_count(), 2);
@@ -484,7 +582,13 @@ mod tests {
         for (name, bytes) in [("single.gif", gif), ("single.webp", webp)] {
             let path = directory.path().join(name);
             fs::write(&path, bytes).unwrap();
-            let loaded = load(&path, Budget::default(), 256).unwrap();
+            let loaded = load(
+                &path,
+                crate::artwork::DEFAULT_MAX_IMAGE_BYTES,
+                Budget::default(),
+                256,
+            )
+            .unwrap();
             assert!(loaded.animated);
             assert_eq!(loaded.source_side, 2);
             assert_eq!(loaded.image.frame_count(), 1);
@@ -502,14 +606,29 @@ mod tests {
         fs::write(&path, &bytes).unwrap();
         let thumbnail = thumbnail_path(&path, hash, 256).unwrap();
         for damaged in [true, false] {
-            load(&path, Budget::default(), 256).unwrap();
+            load(
+                &path,
+                crate::artwork::DEFAULT_MAX_IMAGE_BYTES,
+                Budget::default(),
+                256,
+            )
+            .unwrap();
             if damaged {
                 fs::write(&thumbnail, b"partial webp").unwrap();
             } else {
                 fs::remove_file(&thumbnail).unwrap();
             }
             assert_eq!(
-                size(&load(&path, Budget::default(), 256).unwrap().image),
+                size(
+                    &load(
+                        &path,
+                        crate::artwork::DEFAULT_MAX_IMAGE_BYTES,
+                        Budget::default(),
+                        256
+                    )
+                    .unwrap()
+                    .image
+                ),
                 (256, 128)
             );
         }
@@ -518,6 +637,7 @@ mod tests {
         assert!(
             load(
                 &path,
+                crate::artwork::DEFAULT_MAX_IMAGE_BYTES,
                 Budget {
                     max_side: 512,
                     ..Budget::default()
@@ -534,14 +654,42 @@ mod tests {
         let path = directory.path().join("source.png");
         let bytes = png(800, 400, [210, 30, 40, 255]);
         fs::write(&path, &bytes).unwrap();
-        let first = source(blake3::hash(&bytes), Budget::default());
-        let second = source(blake3::hash(&bytes), Budget::default());
+        let first = source(
+            blake3::hash(&bytes),
+            crate::artwork::DEFAULT_MAX_IMAGE_BYTES,
+            Budget::default(),
+        );
+        let second = source(
+            blake3::hash(&bytes),
+            crate::artwork::DEFAULT_MAX_IMAGE_BYTES,
+            Budget::default(),
+        );
         assert!(Arc::ptr_eq(&first, &second));
-        let image = load(&path, Budget::default(), 256).unwrap().image;
-        let repeated = load(&path, Budget::default(), 256).unwrap().image;
+        let image = load(
+            &path,
+            crate::artwork::DEFAULT_MAX_IMAGE_BYTES,
+            Budget::default(),
+            256,
+        )
+        .unwrap()
+        .image;
+        let repeated = load(
+            &path,
+            crate::artwork::DEFAULT_MAX_IMAGE_BYTES,
+            Budget::default(),
+            256,
+        )
+        .unwrap()
+        .image;
         assert!(Arc::ptr_eq(&image, &repeated));
         let original = Arc::clone(first.lock().original.as_ref().unwrap());
-        load(&path, Budget::default(), 512).unwrap();
+        load(
+            &path,
+            crate::artwork::DEFAULT_MAX_IMAGE_BYTES,
+            Budget::default(),
+            512,
+        )
+        .unwrap();
         assert!(Arc::ptr_eq(
             first.lock().original.as_ref().unwrap(),
             &original
