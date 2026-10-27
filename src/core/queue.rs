@@ -67,12 +67,17 @@ impl Core {
         self.played_cursor = self.played.len();
     }
 
+    pub(in crate::core) fn ensure_queue_control_ready(&mut self) -> Result<()> {
+        if self.queue_ids_stale {
+            self.reload_queue()?;
+        }
+        Ok(())
+    }
     pub(in crate::core) fn reload_queue(&mut self) -> Result<()> {
-        self.queue_ids = self.store.queue_ids()?;
-        self.state.queue = self
-            .store
-            .queue_projection(self.queue_ids.len(), self.state.queue.revision)?;
-        self.prune_queue_history();
+        let ids = self.store.queue_ids()?;
+        self.queue_ids = ids;
+        self.queue_ids_stale = false;
+        self.refresh_queue_tracks()?;
         Ok(())
     }
 
@@ -241,6 +246,7 @@ impl Core {
         if self.store.deduplicate_queue()? {
             self.advance_queue_revision();
             self.reload_queue()?;
+            self.prune_queue_history();
         }
         Ok(())
     }

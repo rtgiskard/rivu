@@ -837,7 +837,7 @@ impl Core {
                     ),
                 }
             }
-            if impacts.library
+            if (impacts.library || impacts.queue)
                 && let Err(error) = self.refresh_queue_tracks()
             {
                 errors.push(error.context(if saved.library_committed {

@@ -112,6 +112,7 @@ pub(super) fn fixture_with_database(duration: Option<f64>) -> (tempfile::TempDir
         queue_ids: Vec::new(),
         next_playlist_token: 0,
         database_unavailable: false,
+        queue_ids_stale: false,
         playback: None,
         retired_playback: None,
         playback_write_deferred: false,

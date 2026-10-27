@@ -255,11 +255,18 @@ impl Core {
         // Only a fresh ID set can supply the queue projection's total. Retain
         // the previous queue snapshot if reading the committed IDs fails.
         let queue = if queue_changed {
-            self.store.queue_ids().and_then(|ids| {
-                self.queue_ids = ids;
-                self.prune_queue_history();
-                self.refresh_queue_tracks()
-            })
+            match self.store.queue_ids() {
+                Ok(ids) => {
+                    self.queue_ids = ids;
+                    self.queue_ids_stale = false;
+                    self.prune_queue_history();
+                    self.refresh_queue_tracks()
+                }
+                Err(error) => {
+                    self.queue_ids_stale = true;
+                    Err(error)
+                }
+            }
         } else {
             Ok(())
         };
@@ -347,7 +354,7 @@ impl Core {
         self.invalidate_scan_impacts(impacts);
         let catalog = self.refresh_scan_catalog(impacts);
         // A failed projection read cannot hide another committed domain.
-        let queue = if impacts.library {
+        let queue = if impacts.library || impacts.queue {
             self.refresh_queue_tracks()
         } else {
             Ok(())

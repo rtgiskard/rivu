@@ -3,6 +3,35 @@ use anyhow::{bail, ensure};
 
 impl Core {
     pub(in crate::core) fn command(&mut self, command: Command) -> Result<()> {
+        if self.queue_ids_stale
+            && matches!(
+                &command,
+                Command::TransferCollection {
+                    destination: CollectionDestination::Queue { .. },
+                    ..
+                } | Command::Play { .. }
+                    | Command::PlayQueue { .. }
+                    | Command::PlayPlaylist { .. }
+                    | Command::Resume
+                    | Command::Next
+                    | Command::Previous
+                    | Command::PlayAlbum { .. }
+                    | Command::EnqueueAlbum { .. }
+                    | Command::Enqueue { .. }
+                    | Command::EnqueueSources { .. }
+                    | Command::InsertQueue { .. }
+                    | Command::InsertQueueSources { .. }
+                    | Command::RemoveQueue { .. }
+                    | Command::RemoveQueueEntries { .. }
+                    | Command::MoveQueue { .. }
+                    | Command::MoveQueueEntries { .. }
+                    | Command::ClearQueue
+                    | Command::RandomizeQueue
+                    | Command::DeduplicateQueue
+            )
+        {
+            self.ensure_queue_control_ready()?;
+        }
         if self.database_maintenance_active() && self.maintenance_control(&command)? {
             return Ok(());
         }

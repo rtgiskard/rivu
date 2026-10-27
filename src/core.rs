@@ -698,6 +698,7 @@ impl Runtime {
             output_settings_request: 0,
             next_playlist_token: 0,
             database_unavailable: false,
+            queue_ids_stale: false,
             queue_ids: Vec::new(),
             playback: None,
             retired_playback: None,
@@ -871,6 +872,8 @@ struct Core {
     database_unavailable: bool,
     // The only full queue projection: compact occurrence IDs, never shared with clients.
     queue_ids: Vec<u64>,
+    /// True after a committed mutation whose queue occurrence IDs could not be refreshed.
+    queue_ids_stale: bool,
     playback: Option<PlaybackStats>,
     // At most one playback can retire while database writes are excluded.
     retired_playback: Option<RetiredPlayback>,
