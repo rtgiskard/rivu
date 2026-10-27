@@ -111,109 +111,111 @@ struct RequestReader {
 
 impl RequestReader {
     async fn read(&mut self, stream: &mut (impl AsyncRead + Unpin)) -> Result<Result<WireRequest>> {
-        if self.complete != 0 {
-            let before = self.pending.len();
-            let frame = read_request_frame(stream, &mut self.pending).await?;
-            self.complete -= before - self.pending.len();
-            return Ok(frame);
+        while self.complete == 0 {
+            self.read_ahead(stream).await?;
         }
-        // Idle sessions have no expiry. Start one absolute deadline at the first
-        // byte, retaining it when Watch updates cancel and resume this future.
-        if self.pending.is_empty() {
-            let mut prefix = [0; 4];
-            let read = stream
-                .read(&mut prefix)
-                .await
-                .context("Reading IPC frame")?;
-            if read == 0 {
-                bail!("IPC connection closed while reading frame");
-            }
-            self.deadline = Some(Instant::now() + FRAME_TIMEOUT);
-            self.pending.extend_from_slice(&prefix[..read]);
-        }
-        let deadline = self
-            .deadline
-            .expect("started IPC frame must have a deadline");
-        if Instant::now() >= deadline {
-            bail!("IPC request frame completion timed out");
-        }
-        let frame = timeout_at(deadline, read_request_frame(stream, &mut self.pending))
-            .await
-            .context("IPC request frame completion timed out")??;
-        self.deadline = None;
+        let before = self.pending.len();
+        let frame = read_request_frame(stream, &mut self.pending).await?;
+        self.complete -= before - self.pending.len();
         Ok(frame)
     }
 
     async fn read_ahead(&mut self, stream: &mut (impl AsyncRead + Unpin)) -> Result<()> {
-        // Keep pipelined bytes in the existing receive buffer without decoding or
-        // executing the next request before the current query has replied. Once
-        // full, apply backpressure; EOF behind a full buffer is observed later.
-        let previous = self.pending.len();
-        let available = 4 + MAX_REQUEST - previous;
-        if available == 0 {
-            return std::future::pending().await;
+        // Complete frames wait untimed for earlier replies. Only the trailing
+        // incomplete frame owns a deadline, even when the receive buffer is full.
+        let deadline = self.deadline;
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            bail!("IPC request frame completion timed out");
         }
-        if previous == self.complete {
-            // Most serial queries have no following frame. Observe EOF without
-            // allocating receive storage or initializing an unused body buffer.
-            let mut prefix = [0; 4];
-            let count = available.min(prefix.len());
-            let read = stream
-                .read(&mut prefix[..count])
-                .await
-                .context("Reading IPC frame")?;
-            assert!(
-                read <= count,
-                "AsyncRead returned more bytes than its buffer"
-            );
-            if read == 0 {
-                bail!("IPC connection closed while reading frame");
-            }
-            self.pending.extend_from_slice(&prefix[..read]);
+        let tail = self.pending.len() - self.complete;
+        let need = if tail < 4 {
+            4 - tail
         } else {
-            let count = available.min(8192);
-            self.pending.reserve(count);
-            let spare = self.pending.chunk_mut();
-            // SAFETY: reserve supplies count writable bytes. AsyncRead requires
-            // initialized memory; Pending reads do not advance visible length.
-            let bytes = unsafe {
-                std::ptr::write_bytes(spare.as_mut_ptr(), 0, count);
-                std::slice::from_raw_parts_mut(spare.as_mut_ptr(), count)
-            };
-            let read = stream.read(bytes).await.context("Reading IPC frame")?;
-            assert!(
-                read <= count,
-                "AsyncRead returned more bytes than its buffer"
-            );
-            if read == 0 {
-                bail!("IPC connection closed while reading frame");
-            }
-            // SAFETY: the count check bounds these initialized received bytes.
-            unsafe { self.pending.advance_mut(read) };
-        }
-        let now = Instant::now();
-        let next_deadline = now + FRAME_TIMEOUT;
-        if previous == self.complete {
-            self.deadline = Some(next_deadline);
-        }
-        if self.deadline.is_some_and(|deadline| now >= deadline) {
-            // Late bytes must not promote an expired tail to an untimed complete
-            // frame. Earlier complete frames can still be consumed in order.
-            return Ok(());
-        }
-        while self.pending.len() - self.complete >= 4 {
             let length = u32::from_le_bytes(
                 self.pending[self.complete..self.complete + 4]
                     .try_into()
                     .unwrap(),
             ) as usize;
-            if length > MAX_REQUEST || self.pending.len() - self.complete < 4 + length {
-                break;
+            if length > MAX_REQUEST {
+                bail!("IPC frame exceeds maximum size");
             }
-            self.complete += 4 + length;
-            self.deadline = (self.complete < self.pending.len()).then_some(next_deadline);
+            4 + length - tail
+        };
+        let available = 4 + MAX_REQUEST - self.pending.len();
+        // Never read past the missing prefix or this frame's body boundary.
+        // A fragmented oversized prefix is rejected before any body is read.
+        let count = available.min(need).min(8192);
+        let receive = async {
+            if count == 0 {
+                // Full buffers apply backpressure, but a partial tail must still
+                // expire without socket activity. Complete-only buffers are idle.
+                return std::future::pending().await;
+            }
+            let read = if tail < 4 {
+                // Serial queries without a following frame need no allocation
+                // merely to observe EOF or wait for the first request byte.
+                let mut prefix = [0; 4];
+                let read = stream
+                    .read(&mut prefix[..count])
+                    .await
+                    .context("Reading IPC frame")?;
+                assert!(
+                    read <= count,
+                    "AsyncRead returned more bytes than its buffer"
+                );
+                self.pending.extend_from_slice(&prefix[..read]);
+                read
+            } else {
+                self.pending.reserve(count);
+                let spare = self.pending.chunk_mut();
+                // SAFETY: reserve supplies count writable bytes. AsyncRead requires
+                // initialized memory; Pending reads do not advance visible length.
+                let bytes = unsafe {
+                    std::ptr::write_bytes(spare.as_mut_ptr(), 0, count);
+                    std::slice::from_raw_parts_mut(spare.as_mut_ptr(), count)
+                };
+                let read = stream.read(bytes).await.context("Reading IPC frame")?;
+                assert!(
+                    read <= count,
+                    "AsyncRead returned more bytes than its buffer"
+                );
+                // SAFETY: the count check bounds these initialized received bytes.
+                unsafe { self.pending.advance_mut(read) };
+                read
+            };
+            if read == 0 {
+                bail!("IPC connection closed while reading frame");
+            }
+            let now = Instant::now();
+            // Start at the first byte, never renew on bytes or cancelled waits.
+            let deadline = *self.deadline.get_or_insert_with(|| now + FRAME_TIMEOUT);
+            if now >= deadline {
+                bail!("IPC request frame completion timed out");
+            }
+            let tail = self.pending.len() - self.complete;
+            if tail >= 4 {
+                let length = u32::from_le_bytes(
+                    self.pending[self.complete..self.complete + 4]
+                        .try_into()
+                        .unwrap(),
+                ) as usize;
+                if length > MAX_REQUEST {
+                    bail!("IPC frame exceeds maximum size");
+                }
+                if tail == 4 + length {
+                    self.complete = self.pending.len();
+                    self.deadline = None;
+                }
+            }
+            Ok(())
+        };
+        if let Some(deadline) = deadline {
+            timeout_at(deadline, receive)
+                .await
+                .context("IPC request frame completion timed out")?
+        } else {
+            receive.await
         }
-        Ok(())
     }
 }
 
@@ -806,6 +808,162 @@ mod tests {
     }
 
     #[test]
+    fn query_read_ahead_never_crosses_a_prefix_or_body_boundary() {
+        async_io::block_on(async {
+            let mut first = Vec::new();
+            encode_request_frame_into(&WireRequest::State(StateSections::ALL), &mut first).unwrap();
+            let mut second = Vec::new();
+            encode_request_frame_into(&WireRequest::Watch(StateRevisions::default()), &mut second)
+                .unwrap();
+            let mut pipeline = first.clone();
+            pipeline.extend_from_slice(&second);
+            let mut input = pipeline.as_slice();
+            let mut reader = RequestReader::default();
+            reader.read_ahead(&mut input).await.unwrap();
+            assert_eq!(reader.pending.len(), 4);
+            let deadline = reader.deadline.unwrap();
+            reader.read_ahead(&mut input).await.unwrap();
+            assert_eq!(reader.pending.as_ref(), first.as_slice());
+            assert_eq!(input, second.as_slice());
+            assert_eq!(reader.complete, first.len());
+            assert!(reader.deadline.is_none());
+            // A complete first frame is untimed, including while the next prefix
+            // is received, and decoding it cannot consume that partial prefix.
+            reader.read_ahead(&mut input).await.unwrap();
+            assert_eq!(reader.pending.len(), first.len() + 4);
+            assert!(reader.deadline.unwrap() >= deadline);
+            assert!(matches!(
+                reader.read(&mut input).await.unwrap().unwrap(),
+                WireRequest::State(_)
+            ));
+            assert_eq!(reader.pending.as_ref(), &second[..4]);
+            assert!(matches!(
+                reader.read(&mut input).await.unwrap().unwrap(),
+                WireRequest::Watch(_)
+            ));
+            assert!(reader.deadline.is_none());
+        });
+    }
+
+    #[test]
+    fn query_wait_fragmented_oversized_prefix_rejects_without_reading_its_body() {
+        for split in 1..4 {
+            async_io::block_on(async {
+                let (handle, queries) = CoreHandle::test_query_port();
+                let (mut peer, mut stream) = socket_pair();
+                let mut reader = RequestReader::default();
+                let (_stop, shutdown) = async_channel::bounded(1);
+                let mut waiting = Box::pin(wait_for_query(
+                    &mut stream,
+                    &mut reader,
+                    &handle,
+                    Query::LibraryStats,
+                    &shutdown,
+                ));
+                assert!(waiting.as_mut().now_or_never().is_none());
+                let reply = timeout(Duration::from_secs(2), queries.receive())
+                    .await
+                    .unwrap();
+                let prefix = (MAX_REQUEST as u32 + 1).to_le_bytes();
+                peer.write_all(&prefix[..split]).await.unwrap();
+                assert!(waiting.as_mut().now_or_never().is_none());
+                assert!(!reply.is_cancelled());
+                let body = [0x5a; 16];
+                let mut remaining = prefix[split..].to_vec();
+                remaining.extend_from_slice(&body);
+                peer.write_all(&remaining).await.unwrap();
+                assert!(
+                    timeout(Duration::from_secs(2), waiting)
+                        .await
+                        .unwrap()
+                        .unwrap_err()
+                        .to_string()
+                        .contains("exceeds maximum size")
+                );
+                assert!(reply.is_cancelled());
+                assert_eq!(reader.pending.as_ref(), prefix.as_slice());
+                let mut unread = [0; 16];
+                timeout(Duration::from_secs(2), stream.read_exact(&mut unread))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(unread, body);
+            });
+        }
+    }
+
+    #[test]
+    fn query_wait_silent_partial_expiry_releases_reply_even_with_a_full_buffer() {
+        for full in [false, true] {
+            async_io::block_on(async {
+                let (handle, queries) = CoreHandle::test_query_port();
+                let (_peer, mut stream) = socket_pair();
+                let mut reader = RequestReader::default();
+                let mut complete = Vec::new();
+                encode_request_frame_into(&WireRequest::State(StateSections::ALL), &mut complete)
+                    .unwrap();
+                let bytes = if full {
+                    let mut bytes = complete.clone();
+                    bytes.extend_from_slice(&(MAX_REQUEST as u32).to_le_bytes());
+                    bytes.resize(4 + MAX_REQUEST, 0);
+                    bytes
+                } else {
+                    vec![1]
+                };
+                let mut input = bytes.as_slice();
+                while !input.is_empty() {
+                    reader.read_ahead(&mut input).await.unwrap();
+                }
+                assert_eq!(reader.pending.len(), bytes.len());
+                assert_eq!(reader.complete, if full { complete.len() } else { 0 });
+                // Shorten only the test's first-byte deadline. Keep the peer open
+                // and silent: no new bytes or EOF may be required to wake expiry.
+                reader.deadline = Some(Instant::now() + Duration::from_millis(100));
+                let deadline = reader.deadline;
+                let (_stop, shutdown) = async_channel::bounded(1);
+                let mut waiting = Box::pin(wait_for_query(
+                    &mut stream,
+                    &mut reader,
+                    &handle,
+                    Query::LibraryStats,
+                    &shutdown,
+                ));
+                assert!(waiting.as_mut().now_or_never().is_none());
+                let reply = timeout(Duration::from_secs(2), queries.receive())
+                    .await
+                    .unwrap();
+                assert!(
+                    timeout(Duration::from_secs(2), waiting)
+                        .await
+                        .unwrap()
+                        .unwrap_err()
+                        .to_string()
+                        .contains("completion timed out")
+                );
+                assert!(reply.is_cancelled());
+                assert_eq!(reader.deadline, deadline);
+                assert_eq!(reader.pending.len(), bytes.len());
+                if full {
+                    // Expiry never reclassifies or decodes the complete prefix.
+                    assert!(matches!(
+                        reader.read(&mut stream).await.unwrap().unwrap(),
+                        WireRequest::State(_)
+                    ));
+                }
+                assert!(
+                    reader
+                        .read(&mut stream)
+                        .await
+                        .err()
+                        .expect("an expired partial frame must fail")
+                        .to_string()
+                        .contains("completion timed out")
+                );
+            });
+        }
+    }
+
+    #[test]
     fn late_completed_pipelined_frame_cannot_erase_its_deadline() {
         async_io::block_on(async {
             let (mut peer, mut stream) = socket_pair();
@@ -822,9 +980,15 @@ mod tests {
             reader.deadline = Some(Instant::now() - FRAME_TIMEOUT);
             peer.write_all(&encoded[1..]).await.unwrap();
             peer.write_all(&encoded).await.unwrap();
-            while reader.pending.len() < encoded.len() * 3 {
-                reader.read_ahead(&mut stream).await.unwrap();
-            }
+            assert!(
+                reader
+                    .read_ahead(&mut stream)
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("completion timed out")
+            );
+            assert_eq!(reader.pending.len(), encoded.len() + 1);
             assert!(matches!(
                 reader.read(&mut stream).await.unwrap().unwrap(),
                 WireRequest::State(_)
@@ -857,11 +1021,12 @@ mod tests {
             peer.write_all(&encoded[..1]).await.unwrap();
             reader.read_ahead(&mut stream).await.unwrap();
             assert!(reader.deadline.is_some());
-            let expired = Instant::now() - FRAME_TIMEOUT;
-            reader.deadline = Some(expired);
+            let deadline = Instant::now() + FRAME_TIMEOUT;
+            reader.deadline = Some(deadline);
             peer.write_all(&encoded[1..2]).await.unwrap();
             reader.read_ahead(&mut stream).await.unwrap();
-            assert_eq!(reader.deadline, Some(expired));
+            assert_eq!(reader.deadline, Some(deadline));
+            reader.deadline = Some(Instant::now() - FRAME_TIMEOUT);
             // The earlier complete frame is still usable; only the unfinished
             // frame expires, and additional read-ahead bytes cannot renew it.
             assert!(matches!(
