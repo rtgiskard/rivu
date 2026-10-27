@@ -141,7 +141,6 @@ struct VisualizerData {
     secondary_color: u32,
     db_range: f32,
     visible: bool,
-    retained: bool,
     // Layout ownership outlives visibility: radial, density, spatial, beams,
     // flow, scope. Only a layout removal retires these slots.
     presentations: [bool; 6],
@@ -179,7 +178,6 @@ impl AudioVisualizer {
                 secondary_color: 0xbb9af7,
                 db_range: 70.0,
                 visible: true,
-                retained: false,
                 presentations: [true; 6],
                 displayed: Vec::with_capacity(FANCY_BANDS),
                 targets: Vec::with_capacity(FANCY_BANDS),
@@ -313,6 +311,11 @@ impl AudioVisualizer {
         data.secondary_color = config.audio_visualizer_secondary_color.rgb();
         data.db_range = db_range;
         data.expected_settings = expected_settings;
+        if !data.fade_when_idle && data.fade_started.is_some() {
+            drop(data);
+            self.clear_radial();
+            return true;
+        }
         if incompatible {
             drop(data);
             self.clear_radial();
@@ -333,13 +336,13 @@ impl AudioVisualizer {
     }
 
     fn set_visible(&self, visible: bool) -> bool {
+        if !visible && self.data.borrow().fade_started.is_some() {
+            self.clear_radial();
+        }
         let mut data = self.data.borrow_mut();
         let restored = visible && !data.visible;
         if data.visible != visible {
             data.visible = visible;
-            if !visible {
-                data.retained = true;
-            }
             data.targets = Vec::new();
             data.last_presentation_time = None;
             data.mapping = RadialMapping::default();
@@ -351,9 +354,9 @@ impl AudioVisualizer {
 
     fn clear_radial(&self) {
         let mut data = self.data.borrow_mut();
-        data.displayed.clear();
-        data.retained = false;
+        data.displayed = Vec::new();
         data.targets = Vec::new();
+        data.levels_db = [f32::NEG_INFINITY; FANCY_BANDS];
         data.mapping = RadialMapping::default();
         data.last_sample_time = None;
         data.last_presentation_time = None;
@@ -374,7 +377,52 @@ impl AudioVisualizer {
         self.oscilloscope.clear();
     }
 
+    /// Stop retires input immediately; only bounded radial drawing survives.
+    pub(in crate::gui) fn stop(&self, now: Instant, fade_when_idle: bool) {
+        let retired = {
+            let mut data = self.data.borrow_mut();
+            data.fade_when_idle = fade_when_idle;
+            (data.visible && data.fade_when_idle && !data.displayed.is_empty()).then(|| {
+                (
+                    std::mem::take(&mut data.displayed),
+                    data.levels_db,
+                    data.time,
+                )
+            })
+        };
+        self.clear();
+        if let Some((displayed, levels_db, time)) = retired {
+            let mut data = self.data.borrow_mut();
+            data.displayed = displayed;
+            data.levels_db = levels_db;
+            data.time = time;
+            drop(data);
+            self.begin_idle_fade(now);
+        }
+    }
+
+    pub(in crate::gui) fn retire_idle_fade(&self) {
+        if self.data.borrow().fade_started.is_some() {
+            self.clear_radial();
+        }
+    }
+
+    pub(in crate::gui) fn advance_idle_fade(&self, now: Instant) {
+        if self
+            .data
+            .borrow()
+            .fade_started
+            .is_some_and(|start| now.saturating_duration_since(start) >= IDLE_FADE_DURATION)
+        {
+            self.clear_radial();
+        }
+    }
+
     pub(in crate::gui) fn update(&mut self, frame: &AnalysisFrame, presentation_time: Duration) {
+        if frame.settings.is_none() {
+            self.clear();
+            return;
+        }
         for renderer in &self.analysis {
             renderer.update(frame);
         }
@@ -382,6 +430,10 @@ impl AudioVisualizer {
             renderer.update(frame, presentation_time);
         }
         self.oscilloscope.update(frame);
+        self.update_radial(frame, presentation_time);
+    }
+
+    fn update_radial(&mut self, frame: &AnalysisFrame, presentation_time: Duration) {
         let mut data = self.data.borrow_mut();
         if !data.visible {
             return;
@@ -394,12 +446,8 @@ impl AudioVisualizer {
                     && settings.signal == data.expected_settings.signal
             })
         {
-            if !data.retained
-                || data.source_generation != Some(frame.generation)
-                || data.source_sample_rate != frame.sample_rate
-            {
-                data.displayed.clear();
-            }
+            data.displayed.clear();
+            data.fade_started = None;
             data.targets.clear();
             data.last_sample_time = None;
             data.last_presentation_time = None;
@@ -425,9 +473,8 @@ impl AudioVisualizer {
             data.mapping
                 .prepare(frame.sample_rate, fft_size, &frame.frequencies_hz)
         else {
-            if !data.retained {
-                data.displayed.clear();
-            }
+            data.displayed.clear();
+            data.fade_started = None;
             data.targets.clear();
             data.last_sample_time = None;
             data.last_presentation_time = None;
@@ -465,7 +512,6 @@ impl AudioVisualizer {
                 .rem_euclid(TWO_PI as f64) as f32;
         }
         data.last_sample_time = Some(frame.sample_time);
-        data.retained = false;
     }
 
     pub(in crate::gui) fn animate(&mut self, presentation_time: Duration) -> bool {
@@ -507,14 +553,10 @@ impl AudioVisualizer {
         }
     }
 
-    pub(in crate::gui) fn idle_fading(&self, now: Instant) -> bool {
+    pub(in crate::gui) fn idle_fading(&self, _now: Instant) -> bool {
         let data = self.data.borrow();
-        data.visible
-            && data.fade_when_idle
-            && !data.displayed.is_empty()
-            && data
-                .fade_started
-                .is_some_and(|start| now.saturating_duration_since(start) < IDLE_FADE_DURATION)
+        // Keep the final cleanup tick scheduled even if its deadline has passed.
+        data.visible && data.fade_started.is_some()
     }
 
     pub(in crate::gui) fn view(
@@ -563,7 +605,7 @@ impl AudioVisualizer {
                 canvas(
                     |_, _, _| (),
                     move |bounds, _, window, cx| {
-                        let mut data = data.borrow_mut();
+                        let data = data.borrow();
                         window.paint_quad(gpui::fill(bounds, rgb(data.background)));
                         if data.displayed.is_empty() {
                             paint_guides(
@@ -576,16 +618,7 @@ impl AudioVisualizer {
                             );
                             return;
                         }
-                        let fade_alpha =
-                            if status != PlaybackStatus::Stopped || !data.fade_when_idle {
-                                data.fade_started = None;
-                                1.0
-                            } else {
-                                let started = *data.fade_started.get_or_insert_with(Instant::now);
-                                let elapsed = started.elapsed();
-                                1.0 - (elapsed.as_secs_f32() / IDLE_FADE_DURATION.as_secs_f32())
-                                    .clamp(0.0, 1.0)
-                            };
+                        let fade_alpha = radial_opacity(&data, status, Instant::now());
                         if fade_alpha == 0.0 {
                             paint_guides(
                                 data.guide_labels.as_ref().expect("localized guide labels"),
@@ -630,6 +663,20 @@ impl AudioVisualizer {
             )
             .into_any_element()
     }
+}
+
+fn radial_opacity(data: &VisualizerData, status: PlaybackStatus, now: Instant) -> f32 {
+    if data.displayed.is_empty() {
+        return 0.0;
+    }
+    if status != PlaybackStatus::Stopped {
+        return 1.0;
+    }
+    data.fade_started.map_or(0.0, |started| {
+        1.0 - (now.saturating_duration_since(started).as_secs_f32()
+            / IDLE_FADE_DURATION.as_secs_f32())
+        .clamp(0.0, 1.0)
+    })
 }
 
 // Normalized post-sensitivity, clipped bar level, not dB or frequency. Decorative
@@ -1046,7 +1093,7 @@ fn mix_color(first: u32, second: u32, fraction: f32) -> u32 {
 mod tests {
     use super::*;
     fn accept(radial: &mut AudioVisualizer, frame: &AnalysisFrame) {
-        radial.update(frame, frame.sample_time);
+        radial.update_radial(frame, frame.sample_time);
         radial.animate(frame.sample_time);
     }
 
@@ -1095,21 +1142,84 @@ mod tests {
     }
 
     #[test]
-    fn idle_fade_starts_before_paint_and_finishes_without_restarting() {
+    fn stop_retires_only_drawing_and_fades_the_painted_opacity() {
         let mut radial = AudioVisualizer::new();
-        radial.configure(&Config {
-            audio_visualizer_fade_when_idle: true,
-            ..Config::default()
-        });
         accept(&mut radial, &frame());
         let start = Instant::now();
-        radial.begin_idle_fade(start);
+        radial.stop(start, true);
         assert!(radial.idle_fading(start));
-        radial.begin_idle_fade(start + Duration::from_secs(1));
-        assert!(!radial.idle_fading(start + IDLE_FADE_DURATION));
+        {
+            let data = radial.data.borrow();
+            assert_eq!(data.displayed, vec![0.5; 4]);
+            assert!(data.targets.is_empty());
+            assert!(data.mapping.ranges.is_empty());
+            assert!(data.source_generation.is_none());
+            assert!(data.last_sample_time.is_none());
+            assert!(data.last_presentation_time.is_none());
+            // This is the alpha used by the radial paint overlay, not just a timer.
+            for (elapsed, expected) in [(0, 1.0), (500, 0.75), (1000, 0.5), (2000, 0.0)] {
+                assert_eq!(
+                    radial_opacity(
+                        &data,
+                        PlaybackStatus::Stopped,
+                        start + Duration::from_millis(elapsed),
+                    ),
+                    expected
+                );
+            }
+        }
+        assert!(!radial.animate(Duration::from_secs(100)));
+        radial.advance_idle_fade(start + Duration::from_secs(1));
+        assert!(radial.idle_fading(start + Duration::from_secs(1)));
+        // A delayed frame must still wake once to release the expired picture.
+        assert!(radial.idle_fading(start + Duration::from_secs(3)));
+        radial.advance_idle_fade(start + Duration::from_secs(3));
+        assert!(!radial.idle_fading(start + Duration::from_secs(3)));
+        assert_eq!(radial.data.borrow().displayed.capacity(), 0);
+        radial.begin_idle_fade(start + Duration::from_secs(4));
+        assert!(!radial.idle_fading(start + Duration::from_secs(4)));
+    }
+
+    #[test]
+    fn disabled_fade_resume_hide_and_invalid_signal_discard_retired_drawing() {
+        for boundary in 0..5 {
+            let mut radial = AudioVisualizer::new();
+            accept(&mut radial, &frame());
+            let start = Instant::now();
+            radial.stop(start, boundary != 0);
+            match boundary {
+                0 => {}
+                1 => {
+                    radial.configure(&Config::default());
+                }
+                2 => radial.retire_idle_fade(),
+                3 => {
+                    radial.set_visible(false);
+                }
+                _ => {
+                    let mut invalid = frame();
+                    invalid.settings = None;
+                    radial.update(&invalid, invalid.sample_time);
+                }
+            }
+            assert!(!radial.idle_fading(start));
+            assert!(radial.data.borrow().displayed.is_empty());
+            assert!(!radial.animate(Duration::from_secs(100)));
+        }
+    }
+
+    #[test]
+    fn restored_radial_keeps_picture_only_until_validity_is_known() {
+        let mut radial = AudioVisualizer::new();
+        accept(&mut radial, &frame());
         radial.set_visible(false);
-        radial.begin_idle_fade(start + IDLE_FADE_DURATION);
-        assert!(!radial.idle_fading(start + IDLE_FADE_DURATION));
+        radial.set_visible(true);
+        assert_eq!(radial.data.borrow().displayed, vec![0.5; 4]);
+        let mut invalid = frame();
+        invalid.settings = None;
+        radial.update_radial(&invalid, invalid.sample_time);
+        assert!(radial.data.borrow().displayed.is_empty());
+        assert!(!radial.animate(Duration::from_secs(100)));
     }
 
     #[test]
@@ -1117,11 +1227,11 @@ mod tests {
         let mut radial = AudioVisualizer::new();
         let mut audio = frame();
         let start = audio.sample_time;
-        radial.update(&audio, start);
+        radial.update_radial(&audio, start);
         let initial_rotation = radial.data.borrow().time;
         audio.sample_time += Duration::from_millis(200);
         audio.spectrum_db.fill(-70.0);
-        radial.update(&audio, start);
+        radial.update_radial(&audio, start);
         assert_eq!(radial.data.borrow().displayed, vec![0.5; 4]);
         let rebuilds = radial.data.borrow().mapping.rebuilds;
         let capacity = radial.data.borrow().displayed.capacity();
@@ -1142,7 +1252,7 @@ mod tests {
         assert_eq!(radial.data.borrow().mapping.rebuilds, rebuilds);
         assert_eq!(radial.data.borrow().displayed.capacity(), capacity);
         audio.spectrum_db.fill(0.0);
-        radial.update(&audio, start + Duration::from_millis(192));
+        radial.update_radial(&audio, start + Duration::from_millis(192));
         assert!(
             radial
                 .data
@@ -1157,13 +1267,13 @@ mod tests {
     fn invalid_and_hidden_radial_inputs_retire_animation() {
         let mut radial = AudioVisualizer::new();
         let mut audio = frame();
-        radial.update(&audio, audio.sample_time);
+        radial.update_radial(&audio, audio.sample_time);
         audio.spectrum_db.clear();
-        radial.update(&audio, audio.sample_time);
+        radial.update_radial(&audio, audio.sample_time);
         assert!(!radial.animate(audio.sample_time + Duration::from_millis(16)));
         assert!(radial.data.borrow().displayed.is_empty());
         let audio = frame();
-        radial.update(&audio, audio.sample_time);
+        radial.update_radial(&audio, audio.sample_time);
         radial.set_visible(false);
         assert!(!radial.animate(audio.sample_time + Duration::from_millis(16)));
     }
@@ -1180,7 +1290,7 @@ mod tests {
                 _ => audio.sample_time += Duration::from_millis(501),
             }
             audio.spectrum_db.fill(-70.0);
-            radial.update(&audio, audio.sample_time);
+            radial.update_radial(&audio, audio.sample_time);
             assert_eq!(radial.data.borrow().displayed, vec![0.0; 4]);
             assert!(!radial.animate(audio.sample_time));
         }
@@ -1449,7 +1559,7 @@ mod tests {
         let mut unavailable = frame();
         unavailable.spectrum_db.clear();
         accept(&mut radial, &unavailable);
-        assert_eq!(radial.data.borrow().displayed, vec![0.5; 4]);
+        assert!(radial.data.borrow().displayed.is_empty());
         let mut latest = frame();
         latest.spectrum_db.fill(-70.0);
         accept(&mut radial, &latest);

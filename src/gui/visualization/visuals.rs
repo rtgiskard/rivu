@@ -663,19 +663,20 @@ impl Visuals {
                 && settings.window == data.analysis_window
                 && settings.signal == data.visualization_signal
         }) {
-            if !data.latest_levels.is_empty() {
-                data.latest_levels.clear();
-                data.peaks.clear();
-                data.peak_deadlines.clear();
-                data.bar_levels.clear();
-                data.bar_deadlines.clear();
-                data.smoothed_levels.clear();
-                data.spectrum_geometry.clear();
-                data.spectrum_geometry_revision = data.spectrum_geometry_revision.wrapping_add(1);
-                data.envelope_initialized = false;
-                data.last_analysis_sequence = None;
-            }
+            data.latest_levels.clear();
+            data.peaks.clear();
+            data.peak_deadlines.clear();
+            data.bar_levels.clear();
+            data.bar_deadlines.clear();
+            data.smoothed_levels.clear();
+            data.spectrum_geometry.clear();
+            data.spectrum_presentations.clear();
+            // Continuity loss revokes live Spectrum output, not compatible
+            // historical Spectrogram buckets or their last publication.
             data.display_time = None;
+            data.spectrum_geometry_revision = data.spectrum_geometry_revision.wrapping_add(1);
+            data.envelope_initialized = false;
+            data.last_analysis_sequence = None;
             data.last_update = None;
             return;
         }
@@ -3182,6 +3183,48 @@ mod tests {
         assert_eq!(data.peaks, vec![-60.0; 4]);
         assert_eq!(data.bar_levels, vec![-60.0; 4]);
         assert_eq!(data.smoothed_levels, vec![-60.0; 4]);
+    }
+
+    #[test]
+    fn playing_signal_invalidation_releases_final_bodies_and_peaks_without_a_source_change() {
+        for cache in [false, true] {
+            let mut visuals = configured_visuals();
+            visuals.configure(&Config {
+                visualization_cache: cache,
+                ..Config::default()
+            });
+            let mut audio = frame(1.0, -10.0);
+            visuals.update(&audio, audio.sample_time);
+            visuals.update(&frame(1.1, -20.0), Duration::from_millis(1100));
+            publish_analysis_views(&visuals, 1);
+            let (body, tile) = {
+                let data = visuals.data.borrow();
+                assert!(!data.spectrum_presentations[&1].peaks.is_empty());
+                (
+                    Arc::downgrade(data.spectrum_presentations[&1].body.as_ref().unwrap()),
+                    Arc::downgrade(&data.spectrogram_presentations[&1].layers[0].1),
+                )
+            };
+            // Worker continuity loss can invalidate settings while the GUI's
+            // playback/source/seek/config identities remain unchanged.
+            audio.settings = None;
+            visuals.update(&audio, audio.sample_time);
+            publish_analysis_views(&visuals, 1);
+            assert!(body.upgrade().is_none());
+            assert!(tile.upgrade().is_some());
+            {
+                let data = visuals.data.borrow();
+                assert!(data.spectrum_presentations.is_empty());
+                assert!(!data.spectrogram_presentations.is_empty());
+            }
+            let fresh = frame(1.2, -60.0);
+            visuals.update(&fresh, fresh.sample_time);
+            publish_analysis_views(&visuals, 1);
+            let data = visuals.data.borrow();
+            assert!(data.spectrum_presentations[&1].body.is_some());
+            assert_eq!(data.peaks, vec![-60.0; 4]);
+            assert_eq!(data.len, 3);
+        }
     }
 
     #[test]

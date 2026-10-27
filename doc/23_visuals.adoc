@@ -184,9 +184,15 @@ The presentation owner does not dispatch the worker's pause-reset publication
 to renderers, including during resume before fresh input is ready. A paused
 business update can request one refresh, but does not advance animation or start
 the optional Audio Visualizer idle fade; that fade applies only to stopped playback.
-Source replacement, seek intent, analysis-setting changes, Stop, and Still Mode
-invalidate incompatible retained results even while paused or hidden. These
-semantic facts are independent of producer continuity generation and seek previews.
+Source replacement, seek intent, analysis-setting changes and Still Mode clear
+incompatible retained results even while paused or hidden. These semantic facts
+are independent of producer continuity generation and seek previews.
+Stop retires all analysis input. With `fade_when_idle` enabled, an ordinary Stop
+on the same actual playback track can fade the last bounded radial drawing for
+two seconds, then release it; no worker audio is consumed while stopped.
+Clearing the queue or changing the playback track clears that drawing immediately,
+even if Metadata still displays the same track. Additional source/seek boundaries
+observed together with Stop also clear it rather than preserve an uncertain fade.
 Still Mode discards the views rather than freezing them.
 Radial color, geometry, sensitivity, and rotation-speed edits preserve the frozen
 signal and animation time. A dB-range edit remaps the last accepted band peaks

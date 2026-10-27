@@ -56,7 +56,8 @@ pub(super) struct PresentationState<'a> {
     pub(super) seek_revision: u64,
     pub(super) visible: bool,
     pub(super) shutting_down: bool,
-    pub(super) track: Option<&'a Track>,
+    pub(super) current_track_id: Option<i64>,
+    pub(super) waveform_track: Option<&'a Track>,
     pub(super) position: f64,
     pub(super) duration: Option<f64>,
 }
@@ -127,6 +128,7 @@ pub(super) struct Presentation {
     status: PlaybackStatus,
     source_generation: u64,
     seek_revision: u64,
+    current_track_id: Option<i64>,
     awaiting_replacement: bool,
     position: f64,
     duration: Option<f64>,
@@ -170,6 +172,7 @@ impl Presentation {
             status: PlaybackStatus::Stopped,
             source_generation: 0,
             seek_revision: 0,
+            current_track_id: None,
             awaiting_replacement: false,
             position: 0.0,
             duration: None,
@@ -193,7 +196,8 @@ impl Presentation {
             seek_revision,
             visible,
             shutting_down,
-            track,
+            current_track_id,
+            waveform_track,
             position,
             duration,
         } = state;
@@ -203,14 +207,26 @@ impl Presentation {
         let visibility_changed = self.visible != visible || self.shutting_down != shutting_down;
         let status_changed = self.status != status;
         let position_changed = self.position != position || self.duration != duration;
+        let settings_changed = rivu_audio::analysis::AnalysisSettings::from(self.config.as_ref())
+            != rivu_audio::analysis::AnalysisSettings::from(config.as_ref());
         let signal_changed = self.source_generation != source_generation
             || self.seek_revision != seek_revision
-            || rivu_audio::analysis::AnalysisSettings::from(self.config.as_ref())
-                != rivu_audio::analysis::AnalysisSettings::from(config.as_ref());
-        let invalidate = signal_changed
-            || still_changed
-            || shutting_down
-            || (status_changed && status == PlaybackStatus::Stopped);
+            || settings_changed;
+        let track_changed = self.current_track_id != current_track_id;
+        let stopping = status_changed && status == PlaybackStatus::Stopped;
+        // Only an exact Core Stop fence may retire the old picture with a fade.
+        // Coalesced seeks or source changes must not cross this boundary.
+        let fade_on_stop = stopping
+            && current_track_id.is_some()
+            && !track_changed
+            && source_generation == self.source_generation.wrapping_add(1)
+            && seek_revision == self.seek_revision.wrapping_add(1)
+            && !still_changed
+            && !config.still_mode
+            && !shutting_down
+            && !settings_changed;
+        let invalidate =
+            signal_changed || track_changed || still_changed || shutting_down || stopping;
         let mut panel_count = 0;
         let mut panels_changed = false;
         if let Some(root) = &layout.root {
@@ -241,6 +257,7 @@ impl Presentation {
         self.status = status;
         self.source_generation = source_generation;
         self.seek_revision = seek_revision;
+        self.current_track_id = current_track_id;
         self.position = position;
         self.duration = duration;
         if status_changed && status == PlaybackStatus::Paused {
@@ -275,7 +292,15 @@ impl Presentation {
             self.needs_refresh = false;
             self.animation_clock = AnimationClock::default();
             self.visuals.clear_presentation();
-            self.audio_visualizer.clear();
+            if fade_on_stop {
+                self.audio_visualizer
+                    .stop(Instant::now(), self.config.audio_visualizer_fade_when_idle);
+            } else {
+                self.audio_visualizer.clear();
+            }
+        }
+        if status_changed && status != PlaybackStatus::Stopped {
+            self.audio_visualizer.retire_idle_fade();
         }
         if invalidate || panels_changed || visibility_changed || status_changed {
             // A suspension retires input, not its bounded last presentation.
@@ -374,7 +399,7 @@ impl Presentation {
             waveform.set_enabled(waveform_enabled);
             waveform.set_seek_enabled(waveform_visible && self.config.waveform_seek_enabled);
             if waveform_enabled {
-                waveform.sync(track, cx);
+                waveform.sync(waveform_track, cx);
             }
         });
         if config_changed || panels_changed || visibility_changed || status_changed || invalidate {
@@ -509,10 +534,7 @@ impl Presentation {
                     this.request_frame(window, cx);
                 } else {
                     this.animation_clock.suspend();
-                    this.consume_analysis(now, cx);
-                    if this.status == PlaybackStatus::Stopped {
-                        this.audio_visualizer.begin_idle_fade(now);
-                    }
+                    this.audio_visualizer.advance_idle_fade(now);
                     this.notify_animation(false, true, cx);
                     this.request_frame(window, cx);
                 }
@@ -523,9 +545,9 @@ impl Presentation {
     }
 
     fn consume_analysis(&mut self, now: Instant, cx: &mut Context<Self>) {
-        // Pausing preserves the last accepted picture. Semantic invalidations
-        // are handled by sync even while the worker is suspended.
-        if self.status == PlaybackStatus::Paused {
+        // Suspended playback never consumes audio, including the retired Stop
+        // fade. Semantic invalidations are handled by sync.
+        if self.status != PlaybackStatus::Playing {
             return;
         }
         let frame = self.handle.analysis.read();
@@ -914,7 +936,28 @@ mod tests {
             owner.staging.visualizer.pcm = vec![[0.25, -0.5]; 512].into();
             owner.staging.visualizer.band_rms = [0.25, 0.5, 0.75];
             owner.sequence = owner.staging.sequence;
-            owner.status = PlaybackStatus::Paused;
+            owner.status = PlaybackStatus::Playing;
+            let layout = layout::Layout {
+                root: None,
+                next_id: 1,
+                locked: false,
+            };
+            owner.sync(
+                PresentationState {
+                    config: Arc::clone(&owner.config),
+                    layout: &layout,
+                    status: PlaybackStatus::Paused,
+                    source_generation: owner.source_generation,
+                    seek_revision: owner.seek_revision,
+                    visible: owner.visible,
+                    shutting_down: false,
+                    current_track_id: None,
+                    waveform_track: None,
+                    position: owner.position,
+                    duration: owner.duration,
+                },
+                cx,
+            );
             owner.needs_refresh = true;
             owner.consume_analysis(Instant::now(), cx);
             assert_eq!(owner.sequence, 7);
@@ -933,13 +976,13 @@ mod tests {
             assert_eq!(owner.staging.spectrum_db, [-12.0, -24.0]);
             assert_eq!(owner.sequence, 7);
 
-            // Stop is not pause: it must admit the current empty publication.
+            // Stop does not consume even a still-current worker publication;
+            // sync owns retirement and discards staged input at the boundary.
             owner.awaiting_replacement = false;
             owner.status = PlaybackStatus::Stopped;
             owner.consume_analysis(Instant::now(), cx);
-            assert!(owner.staging.settings.is_none());
-            assert!(owner.staging.spectrum_db.is_empty());
-            assert!(owner.staging.visualizer.pcm.is_empty());
+            assert_eq!(owner.staging.spectrum_db, [-12.0, -24.0]);
+            assert_eq!(owner.sequence, 7);
         });
     }
 
@@ -993,7 +1036,8 @@ mod tests {
                         seek_revision: 1,
                         visible: false,
                         shutting_down: false,
-                        track: None,
+                        current_track_id: None,
+                        waveform_track: None,
                         position: 25.0,
                         duration: Some(100.0),
                     },
@@ -1013,7 +1057,8 @@ mod tests {
             seek_revision,
             visible: false,
             shutting_down: false,
-            track: None,
+            current_track_id: None,
+            waveform_track: None,
             position: 25.0,
             duration: Some(100.0),
         };
@@ -1086,7 +1131,8 @@ mod tests {
                         status: PlaybackStatus::Paused,
                         visible: true,
                         shutting_down: false,
-                        track: None,
+                        current_track_id: None,
+                        waveform_track: None,
                         position: 0.0,
                         duration: None,
                         source_generation: 0,
@@ -1111,7 +1157,8 @@ mod tests {
                         status: PlaybackStatus::Paused,
                         visible: false,
                         shutting_down: false,
-                        track: None,
+                        current_track_id: None,
+                        waveform_track: None,
                         position: 0.0,
                         duration: None,
                         source_generation: 0,
@@ -1137,7 +1184,8 @@ mod tests {
                         status: PlaybackStatus::Paused,
                         visible: true,
                         shutting_down: false,
-                        track: None,
+                        current_track_id: None,
+                        waveform_track: None,
                         position: 0.0,
                         duration: None,
                         source_generation: 0,
@@ -1163,7 +1211,8 @@ mod tests {
                         status: PlaybackStatus::Playing,
                         visible: true,
                         shutting_down: false,
-                        track: None,
+                        current_track_id: None,
+                        waveform_track: None,
                         position: 0.0,
                         duration: None,
                         source_generation: 0,
@@ -1189,7 +1238,8 @@ mod tests {
                         status: PlaybackStatus::Playing,
                         visible: true,
                         shutting_down: false,
-                        track: None,
+                        current_track_id: None,
+                        waveform_track: None,
                         position: 0.0,
                         duration: None,
                         source_generation: 0,
@@ -1224,7 +1274,8 @@ mod tests {
                         status: PlaybackStatus::Playing,
                         visible: true,
                         shutting_down: false,
-                        track: None,
+                        current_track_id: None,
+                        waveform_track: None,
                         position: 0.0,
                         duration: None,
                         source_generation: 0,
@@ -1245,7 +1296,8 @@ mod tests {
                         status: PlaybackStatus::Playing,
                         visible: true,
                         shutting_down: false,
-                        track: None,
+                        current_track_id: None,
+                        waveform_track: None,
                         position: 0.0,
                         duration: None,
                         source_generation: 0,
@@ -1261,7 +1313,8 @@ mod tests {
                         status: PlaybackStatus::Playing,
                         visible: true,
                         shutting_down: true,
-                        track: None,
+                        current_track_id: None,
+                        waveform_track: None,
                         position: 0.0,
                         duration: None,
                         source_generation: 0,
@@ -1278,7 +1331,8 @@ mod tests {
                         status: PlaybackStatus::Stopped,
                         visible: true,
                         shutting_down: false,
-                        track: None,
+                        current_track_id: None,
+                        waveform_track: None,
                         position: 0.0,
                         duration: None,
                         source_generation: 0,
@@ -1295,7 +1349,8 @@ mod tests {
                         status: PlaybackStatus::Paused,
                         visible: true,
                         shutting_down: false,
-                        track: None,
+                        current_track_id: None,
+                        waveform_track: None,
                         position: 12.0,
                         duration: Some(120.0),
                         source_generation: 0,
@@ -1313,7 +1368,8 @@ mod tests {
                         status: PlaybackStatus::Paused,
                         visible: true,
                         shutting_down: false,
-                        track: None,
+                        current_track_id: None,
+                        waveform_track: None,
                         position: 13.0,
                         duration: Some(120.0),
                         source_generation: 0,
@@ -1335,7 +1391,8 @@ mod tests {
                         status: PlaybackStatus::Paused,
                         visible: true,
                         shutting_down: false,
-                        track: None,
+                        current_track_id: None,
+                        waveform_track: None,
                         position: 13.0,
                         duration: Some(120.0),
                         source_generation: 0,
@@ -1351,5 +1408,379 @@ mod tests {
                 assert_eq!(owner.demand, DisplayDemand::default());
             });
         });
+    }
+
+    #[gpui::test]
+    fn core_stop_fences_audio_but_keeps_a_bounded_fade_until_cleanup(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        Config {
+            volume: 0.0,
+            ffmpeg_enabled: false,
+            mpris_enabled: false,
+            audio_visualizer_fade_when_idle: true,
+            ..Config::default()
+        }
+        .save(&config_path)
+        .unwrap();
+        let runtime = Runtime::start(directory.path(), &config_path).unwrap();
+        let config = runtime.handle.config_snapshot();
+        let mut layout = layout::Layout {
+            root: None,
+            next_id: 1,
+            locked: false,
+        };
+        layout.add("audio_visualizer", None);
+        let waveform =
+            cx.new(|_| visualization::Waveform::new(Arc::clone(&runtime.handle.waveform)));
+        let owner = cx.new(|cx| {
+            Presentation::new(
+                runtime.handle.clone(),
+                Arc::new(Localizer::new("en-US")),
+                waveform,
+                cx,
+            )
+        });
+        let before = runtime.handle.gui_snapshot();
+        let track = crate::artwork::tests::track(directory.path().join("track.wav"));
+        let state = |status, source_generation, seek_revision| PresentationState {
+            config: Arc::clone(&config),
+            layout: &layout,
+            status,
+            source_generation,
+            seek_revision,
+            visible: true,
+            shutting_down: false,
+            current_track_id: Some(track.id),
+            waveform_track: Some(&track),
+            position: 0.0,
+            duration: None,
+        };
+        owner.update(cx, |owner, cx| {
+            owner.sync(
+                state(
+                    PlaybackStatus::Playing,
+                    before.source_generation,
+                    before.playback.seek_revision,
+                ),
+                cx,
+            );
+            let frame = AnalysisFrame {
+                generation: before.source_generation,
+                sample_rate: 48_000,
+                sample_time: Duration::from_secs(1),
+                settings: Some(config.as_ref().into()),
+                frequencies_hz: vec![20.0, 200.0, 2000.0, 20_000.0],
+                spectrum_db: vec![-12.0; 4],
+                ..Default::default()
+            };
+            owner.audio_visualizer.update(&frame, frame.sample_time);
+            owner.staging = frame;
+        });
+        // Execute the real Core Stop command: it advances both source and seek
+        // identities, unlike a synthetic status-only presentation transition.
+        let ack = futures::executor::block_on(
+            runtime
+                .handle
+                .request_ack(rivu_protocol::model::Command::Stop),
+        );
+        assert!(ack.is_success(), "{:?}", ack.error);
+        let stopped = runtime.handle.gui_snapshot();
+        assert_ne!(stopped.source_generation, before.source_generation);
+        assert_ne!(
+            stopped.playback.seek_revision,
+            before.playback.seek_revision
+        );
+        owner.update(cx, |owner, cx| {
+            owner.sync(
+                state(
+                    stopped.playback.status,
+                    stopped.source_generation,
+                    stopped.playback.seek_revision,
+                ),
+                cx,
+            );
+            assert!(owner.audio_visualizer.idle_fading(Instant::now()));
+            assert!(owner.staging.settings.is_none());
+            assert!(owner.staging.spectrum_db.is_empty());
+            assert!(owner.analysis_interval().is_none());
+            owner.consume_analysis(Instant::now(), cx);
+            assert!(owner.audio_visualizer.idle_fading(Instant::now()));
+            assert!(owner.staging.settings.is_none());
+            owner
+                .audio_visualizer
+                .advance_idle_fade(Instant::now() + Duration::from_secs(3));
+            assert!(!owner.audio_visualizer.idle_fading(Instant::now()));
+            owner.frame_requested = false;
+        });
+        let window = cx.add_empty_window();
+        window.update(|window, cx| {
+            owner.update(cx, |owner, cx| {
+                owner.request_frame(window, cx);
+                assert!(!owner.frame_pending);
+                assert!(owner.frame_timer.is_none());
+                assert!(owner.analysis_timer.is_none());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn stopped_fade_does_not_cross_resume_source_seek_still_or_shutdown(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        Config {
+            volume: 0.0,
+            ffmpeg_enabled: false,
+            mpris_enabled: false,
+            audio_visualizer_fade_when_idle: true,
+            ..Config::default()
+        }
+        .save(&config_path)
+        .unwrap();
+        let runtime = Runtime::start(directory.path(), &config_path).unwrap();
+        let config = runtime.handle.config_snapshot();
+        let mut layout = layout::Layout {
+            root: None,
+            next_id: 1,
+            locked: false,
+        };
+        layout.add("audio_visualizer", None);
+        let track = crate::artwork::tests::track(directory.path().join("track.wav"));
+        let mut replacement = track.clone();
+        replacement.id += 1;
+        for boundary in 0..7 {
+            let waveform =
+                cx.new(|_| visualization::Waveform::new(Arc::clone(&runtime.handle.waveform)));
+            let owner = cx.new(|cx| {
+                Presentation::new(
+                    runtime.handle.clone(),
+                    Arc::new(Localizer::new("en-US")),
+                    waveform,
+                    cx,
+                )
+            });
+            let mut state = PresentationState {
+                config: Arc::clone(&config),
+                layout: &layout,
+                status: PlaybackStatus::Playing,
+                source_generation: 1,
+                seek_revision: 1,
+                visible: true,
+                shutting_down: false,
+                current_track_id: Some(track.id),
+                waveform_track: Some(&track),
+                position: 1.0,
+                duration: None,
+            };
+            owner.update(cx, |owner, cx| {
+                owner.sync(
+                    PresentationState {
+                        config: Arc::clone(&state.config),
+                        ..state
+                    },
+                    cx,
+                );
+                let frame = AnalysisFrame {
+                    generation: 1,
+                    sample_rate: 48_000,
+                    sample_time: Duration::from_secs(1),
+                    settings: Some(config.as_ref().into()),
+                    frequencies_hz: vec![20.0, 200.0, 2000.0, 20_000.0],
+                    spectrum_db: vec![-12.0; 4],
+                    ..Default::default()
+                };
+                owner.audio_visualizer.update(&frame, frame.sample_time);
+                state.status = PlaybackStatus::Stopped;
+                state.source_generation += 1;
+                state.seek_revision += 1;
+                if boundary >= 5 {
+                    state.waveform_track = if boundary == 5 {
+                        None
+                    } else {
+                        Some(&replacement)
+                    };
+                    state.current_track_id = state.waveform_track.map(|track| track.id);
+                }
+                owner.sync(
+                    PresentationState {
+                        config: Arc::clone(&state.config),
+                        ..state
+                    },
+                    cx,
+                );
+                if boundary >= 5 {
+                    assert!(!owner.audio_visualizer.idle_fading(Instant::now()));
+                    return;
+                }
+                assert!(owner.audio_visualizer.idle_fading(Instant::now()));
+                match boundary {
+                    0 => state.status = PlaybackStatus::Playing,
+                    1 => state.source_generation += 1,
+                    2 => state.seek_revision += 1,
+                    3 => {
+                        state.config = Arc::new(Config {
+                            still_mode: true,
+                            ..config.as_ref().clone()
+                        });
+                    }
+                    _ => state.shutting_down = true,
+                }
+                owner.sync(state, cx);
+                assert!(!owner.audio_visualizer.idle_fading(Instant::now()));
+                assert!(owner.staging.settings.is_none());
+                assert!(owner.staging.spectrum_db.is_empty());
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn stop_fade_requires_a_single_fence_and_retained_actual_current(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        Config {
+            volume: 0.0,
+            ffmpeg_enabled: false,
+            mpris_enabled: false,
+            audio_visualizer_fade_when_idle: true,
+            ..Config::default()
+        }
+        .save(&config_path)
+        .unwrap();
+        let runtime = Runtime::start(directory.path(), &config_path).unwrap();
+        let config = runtime.handle.config_snapshot();
+        let mut layout = layout::Layout {
+            root: None,
+            next_id: 1,
+            locked: false,
+        };
+        layout.add("audio_visualizer", None);
+        let track = crate::artwork::tests::track(directory.path().join("track.wav"));
+        let current = Some(track.id);
+        let wrap = u64::MAX;
+        for (case, before_current, after_current, (generation, revision), steps, fades) in [
+            ("ordinary Stop", current, current, (10, 20), (1, 1), true),
+            (
+                "wrapping Stop",
+                current,
+                current,
+                (wrap, wrap),
+                (1, 1),
+                true,
+            ),
+            (
+                "coalesced Seek Stop",
+                current,
+                current,
+                (10, 20),
+                (1, 2),
+                false,
+            ),
+            (
+                "coalesced source Stop",
+                current,
+                current,
+                (10, 20),
+                (2, 1),
+                false,
+            ),
+            (
+                "unconfirmed Stop",
+                current,
+                current,
+                (10, 20),
+                (0, 0),
+                false,
+            ),
+            (
+                "ClearQueue, selected metadata",
+                current,
+                None,
+                (10, 20),
+                (1, 1),
+                false,
+            ),
+            (
+                "metadata without current",
+                None,
+                None,
+                (10, 20),
+                (1, 1),
+                false,
+            ),
+        ] {
+            let waveform =
+                cx.new(|_| visualization::Waveform::new(Arc::clone(&runtime.handle.waveform)));
+            let owner = cx.new(|cx| {
+                Presentation::new(
+                    runtime.handle.clone(),
+                    Arc::new(Localizer::new("en-US")),
+                    waveform,
+                    cx,
+                )
+            });
+            owner.update(cx, |owner, cx| {
+                let state = |status, current_track_id, source_generation, seek_revision| {
+                    PresentationState {
+                        config: Arc::clone(&config),
+                        layout: &layout,
+                        status,
+                        source_generation,
+                        seek_revision,
+                        visible: true,
+                        shutting_down: false,
+                        current_track_id,
+                        // Explicit metadata selection stays the waveform fallback
+                        // after ClearQueue, but cannot become a playback owner.
+                        waveform_track: Some(&track),
+                        position: 0.0,
+                        duration: track.duration,
+                    }
+                };
+                owner.sync(
+                    state(
+                        PlaybackStatus::Playing,
+                        before_current,
+                        generation,
+                        revision,
+                    ),
+                    cx,
+                );
+                assert_eq!(owner.current_track_id, before_current, "{case}");
+                let frame = AnalysisFrame {
+                    generation,
+                    sample_rate: 48_000,
+                    sample_time: Duration::from_secs(1),
+                    settings: Some(config.as_ref().into()),
+                    frequencies_hz: vec![20.0, 200.0, 2000.0, 20_000.0],
+                    spectrum_db: vec![-12.0; 4],
+                    ..Default::default()
+                };
+                owner.audio_visualizer.update(&frame, frame.sample_time);
+                owner.staging = frame;
+                owner.sync(
+                    state(
+                        PlaybackStatus::Stopped,
+                        after_current,
+                        generation.wrapping_add(steps.0),
+                        revision.wrapping_add(steps.1),
+                    ),
+                    cx,
+                );
+                assert_eq!(owner.current_track_id, after_current, "{case}");
+                assert_eq!(
+                    owner.audio_visualizer.idle_fading(Instant::now()),
+                    fades,
+                    "{case}"
+                );
+                assert!(owner.staging.settings.is_none(), "{case}");
+                assert!(owner.staging.spectrum_db.is_empty(), "{case}");
+            });
+        }
     }
 }
