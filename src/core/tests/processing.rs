@@ -950,10 +950,8 @@ fn neural_cancellation_reaps_interpreter_that_closed_stdout_without_exiting() {
             Instant::now() < deadline,
             "Interpreter did not reach the closed-stdout fixture"
         );
-        thread::sleep(Duration::from_millis(5));
+        thread::yield_now();
     };
-    // Give the consumer more than one receive round after the descriptor closes.
-    thread::sleep(Duration::from_millis(100));
     core.command(Command::CancelProcessing { id: 1 }).unwrap();
     let deadline = Instant::now() + Duration::from_secs(2);
     let event = loop {

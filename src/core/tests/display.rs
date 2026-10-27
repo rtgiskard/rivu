@@ -35,7 +35,7 @@ fn display_wait(ready: impl Fn() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(3);
     while !ready() {
         assert!(Instant::now() < deadline, "display transition timed out");
-        thread::sleep(Duration::from_millis(1));
+        thread::yield_now();
     }
 }
 

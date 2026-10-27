@@ -1625,7 +1625,7 @@ mod state_tests {
                 }
                 drop(frame);
                 assert!(Instant::now() < deadline, "analysis publication timed out");
-                thread::sleep(Duration::from_millis(1));
+                thread::yield_now();
             }
         };
         let publication = publish(0.5);
