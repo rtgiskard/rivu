@@ -10,6 +10,109 @@ use rivu_protocol::{
 use std::{path::PathBuf, sync::Arc};
 
 #[test]
+fn pending_query_preserves_pipelined_responses_and_disconnected_clients_release_slots() {
+    use std::io::{Read, Write};
+    use std::time::Duration;
+
+    fn read_response(stream: &mut std::os::unix::net::UnixStream) -> WireResponse {
+        let mut prefix = [0; 4];
+        stream.read_exact(&mut prefix).unwrap();
+        let length = u32::from_le_bytes(prefix) as usize;
+        assert!(length <= MAX_RESPONSE);
+        let mut frame = vec![0; length];
+        stream.read_exact(&mut frame).unwrap();
+        decode_response_frame(&frame).unwrap()
+    }
+
+    let directory = socket_test_directory();
+    let config_path = directory.path().join("config.toml");
+    crate::config::Config {
+        media_read_buffer_mb: 1,
+        ffmpeg_enabled: false,
+        ..Default::default()
+    }
+    .save(&config_path)
+    .unwrap();
+    let mut runtime = crate::core::Runtime::start(directory.path(), &config_path).unwrap();
+    let (handle, queries) = crate::core::CoreHandle::test_query_port();
+    let owner = SocketOwner::acquire(directory.path()).unwrap();
+    let app = AppHandle::new(&runtime, false);
+    let server = Server::start(&owner, handle.clone(), app).unwrap();
+    let address = rivu_protocol::protocol::address(directory.path()).unwrap();
+    let connect = || {
+        let mut stream = std::os::unix::net::UnixStream::connect_addr(&address).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut frame = Vec::new();
+        encode_request_frame_into(&WireRequest::Hello(StateSections::ALL), &mut frame).unwrap();
+        stream.write_all(&frame).unwrap();
+        assert!(matches!(read_response(&mut stream), WireResponse::Hello(_)));
+        stream
+    };
+    let receive_query =
+        || async_io::block_on(timeout(Duration::from_secs(2), queries.receive())).unwrap();
+    let response = || QueryResponse {
+        revisions: Default::default(),
+        result: Ok(rivu_protocol::response::ViewResponse::Track(None)),
+    };
+    let mut stream = connect();
+    let mut frame = Vec::new();
+    encode_request_frame_into(
+        &WireRequest::Query(WireQuery::from(Query::Track { track_id: 1 })),
+        &mut frame,
+    )
+    .unwrap();
+    stream.write_all(&frame).unwrap();
+    let reply = receive_query();
+    encode_request_frame_into(&WireRequest::State(StateSections::ALL), &mut frame).unwrap();
+    stream.write_all(&frame).unwrap();
+    encode_request_frame_into(
+        &WireRequest::Query(WireQuery::from(Query::Track { track_id: 2 })),
+        &mut frame,
+    )
+    .unwrap();
+    stream.write_all(&frame[..1]).unwrap();
+    stream.set_nonblocking(true).unwrap();
+    assert_eq!(
+        stream.read(&mut [0; 1]).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    stream.set_nonblocking(false).unwrap();
+    assert!(!reply.is_cancelled());
+    reply.respond(response());
+    assert!(matches!(read_response(&mut stream), WireResponse::Query(_)));
+    assert!(matches!(read_response(&mut stream), WireResponse::State(_)));
+    stream.write_all(&frame[1..]).unwrap();
+    receive_query().respond(response());
+    assert!(matches!(read_response(&mut stream), WireResponse::Query(_)));
+    drop(stream);
+
+    // More than MAX_CLIENTS abandoned reads must still admit another Hello
+    // without waiting for the controlled query consumer to send any response.
+    for _ in 0..=MAX_CLIENTS {
+        let mut stream = connect();
+        encode_request_frame_into(
+            &WireRequest::Query(WireQuery::from(Query::LibraryStats)),
+            &mut frame,
+        )
+        .unwrap();
+        stream.write_all(&frame).unwrap();
+        let mut reply = receive_query();
+        drop(stream);
+        async_io::block_on(timeout(Duration::from_secs(2), reply.cancelled())).unwrap();
+    }
+    drop(connect());
+    assert_eq!(handle.test_revision_subscriptions(), (0, 0));
+    drop(server);
+    runtime.control.request_shutdown().unwrap();
+    runtime.join().unwrap();
+}
+
+#[test]
 fn app_commands_route_over_ipc_without_changing_business_state() {
     let directory = socket_test_directory();
     let config_path = directory.path().join("config.toml");

@@ -253,7 +253,10 @@ impl ClientSession {
         }
         match unpack_error(self.exchange(&WireRequest::State(sections), query_wait_timeout())?)? {
             WireResponse::State(state) => Ok(state_response(state)),
-            _ => bail!("IPC response was not a state response"),
+            _ => {
+                self.disconnect();
+                bail!("IPC response was not a state response")
+            }
         }
     }
 
@@ -262,7 +265,10 @@ impl ClientSession {
         let request = WireRequest::Query(WireQuery::from(query));
         match unpack_error(self.exchange(&request, query_wait_timeout())?)? {
             WireResponse::Query(response) => Ok(response),
-            _ => bail!("IPC response was not a query response"),
+            _ => {
+                self.disconnect();
+                bail!("IPC response was not a query response")
+            }
         }
     }
 
@@ -358,7 +364,10 @@ impl ClientSession {
         };
         match unpack_error(response)? {
             WireResponse::Watch(revisions) => Ok(Some(revisions)),
-            _ => bail!("IPC response was not a watch response"),
+            _ => {
+                self.disconnect();
+                bail!("IPC response was not a watch response")
+            }
         }
     }
 }
@@ -879,6 +888,66 @@ mod tests {
         assert!(client.stream.is_none());
         server.join().unwrap();
     }
+    #[test]
+    fn read_protocol_errors_reconnect_without_discarding_business_errors() {
+        use rivu_protocol::response::{QueryError, QueryRevisions};
+        use std::{io::Read, os::unix::net::UnixListener};
+
+        for kind in 0..3 {
+            let directory = socket_test_directory();
+            let listener = UnixListener::bind_addr(
+                &rivu_protocol::protocol::address(directory.path()).unwrap(),
+            )
+            .unwrap();
+            let server = std::thread::spawn(move || {
+                let mut stream = listener.accept().unwrap().0;
+                complete_test_handshake(&mut stream);
+                if kind == 1 {
+                    assert!(matches!(
+                        read_test_request(&mut stream),
+                        WireRequest::Query(_)
+                    ));
+                    write_test_response(
+                        &mut stream,
+                        WireResponse::Query(QueryResponse {
+                            revisions: QueryRevisions::default(),
+                            result: Err(QueryError::RevisionChanged),
+                        }),
+                    );
+                }
+                let _request = read_test_request(&mut stream);
+                write_test_response(&mut stream, WireResponse::Ack(Ack::from_result(Ok(()), 1)));
+                assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+                let mut stream = listener.accept().unwrap().0;
+                complete_test_handshake(&mut stream);
+            });
+            let mut client = client_session(directory.path()).unwrap();
+            client.get_state(StateSections::default()).unwrap();
+            if kind == 1 {
+                assert_eq!(
+                    client
+                        .query(Query::LibraryStats)
+                        .unwrap()
+                        .result
+                        .unwrap_err(),
+                    QueryError::RevisionChanged
+                );
+                assert_eq!(client.instance_id(), Some(1));
+            }
+            let failed = match kind {
+                0 => client.get_state(StateSections::default()).is_err(),
+                1 => client.query(Query::LibraryStats).is_err(),
+                _ => client.watch(StateRevisions::default()).is_err(),
+            };
+            assert!(failed);
+            assert!(client.stream.is_none());
+            assert_eq!(client.instance_id(), None);
+            client.get_state(StateSections::default()).unwrap();
+            assert_eq!(client.instance_id(), Some(1));
+            server.join().unwrap();
+        }
+    }
+
     #[test]
     fn task_wait_disconnects_for_wrong_id_or_nonterminal_outcome() {
         use rivu_protocol::{

@@ -1,5 +1,76 @@
 use super::*;
 
+pub(crate) struct TestQueryPort {
+    requests: mpsc::Receiver<Request>,
+    _analysis: rivu_audio::analysis::AnalysisWorker,
+}
+
+pub(crate) struct TestQueryReply {
+    reply: oneshot::Sender<CoreResponse>,
+}
+
+impl TestQueryPort {
+    pub(crate) async fn receive(&self) -> TestQueryReply {
+        let request = self.requests.recv().await.unwrap();
+        assert!(matches!(request.operation, Operation::Query { .. }));
+        TestQueryReply {
+            reply: request.reply.unwrap(),
+        }
+    }
+}
+
+impl TestQueryReply {
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.reply.is_canceled()
+    }
+
+    pub(crate) async fn cancelled(&mut self) {
+        self.reply.cancellation().await;
+    }
+
+    pub(crate) fn respond(self, response: QueryResponse) {
+        self.reply.send(CoreResponse::Query(response)).unwrap();
+    }
+}
+
+impl CoreHandle {
+    // The production query port with a controlled consumer, sharing the existing
+    // test executor and analysis fixture rather than introducing a mock transport.
+    pub(crate) fn test_query_port() -> (Self, TestQueryPort) {
+        let (handle, analysis, requests) = display_fixture();
+        (
+            handle,
+            TestQueryPort {
+                requests,
+                _analysis: analysis,
+            },
+        )
+    }
+
+    pub(crate) fn test_revision_subscriptions(&self) -> (usize, usize) {
+        let subscribers = self.revision_updates.read();
+        (
+            subscribers.len(),
+            subscribers
+                .iter()
+                .filter(|sender| !sender.is_closed())
+                .count(),
+        )
+    }
+
+    pub(crate) fn test_advance_revision(&self, notify: bool) -> StateRevisions {
+        let revisions = {
+            let mut state = self.state.write();
+            state.revisions.library += 1;
+            state.revisions
+        };
+        if notify {
+            self.notify_revisions();
+        }
+        revisions
+    }
+}
+
 #[test]
 fn cancelled_queued_read_skips_store_and_does_not_cancel_another_owner() {
     let (directory, core) = fixture_with_database(Some(10.0));

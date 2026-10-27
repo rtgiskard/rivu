@@ -105,10 +105,12 @@ their respective data-domain revisions; maintenance waits for physical snapshot 
 Requests capture shared configuration, query revisions (also used for count-cache
 invalidation), and the shared playlist-entry revision map; playback and task-status
 payloads are not copied into the read queue.
-Queued reads whose reply receiver has disappeared are skipped before database
-admission. Revoking a queued read does not interrupt SQL already executing or
-release its physical snapshot lease early; accepted commands retain their own
-completion semantics independently of the caller's reply receiver.
+While waiting for a Query reply, IPC observes peer EOF and shutdown and drops the
+Core reply receiver when the connection retires. Queued reads whose receiver has
+disappeared are skipped before database admission. Revoking a queued read does
+not interrupt SQL already executing or release its physical snapshot lease early;
+accepted commands retain their own completion semantics independently of the
+caller's reply receiver.
 
 App retains the application-level execution resources through Core and IPC retirement.
 Core and library jobs share these resources without library depending on Core internals.
@@ -165,10 +167,11 @@ and response frame content to 16 MiB, including the version and message type but
 excluding the length prefix. The server accepts at most 16 concurrent clients;
 additional connections receive `IPC server is busy` and close. An unbound client
 has one second to complete each incoming frame while waiting for Hello. After
-binding, each request frame must complete within five seconds of its first byte;
-additional bytes and revision updates do not restart that deadline. Incomplete
-frames close the connection and release its session slot. Normal idle sessions
-and Watch waits have no inactivity expiry.
+binding, each request frame must complete within five seconds of its first byte,
+including frames received while a Query reply is pending. Additional bytes and
+revision updates do not restart that deadline. A late completion cannot make an
+expired frame valid; a completion timeout closes the connection and releases its
+session slot. Normal idle sessions and Watch waits have no inactivity expiry.
 
 Frame limits bound encoded bytes, not decoded heap usage. The current Postcard
 decoder checks string lengths and suppresses collection size hints larger than
@@ -182,6 +185,11 @@ An oversized frame prefix closes the connection before its body is consumed.
 Invalid headers, unknown message types, incompatible versions, malformed
 Postcard payloads, and trailing payload bytes within the frame limit receive an
 Error response and close that connection; other client sessions remain usable.
+
+Pipelined requests received during a Query wait stay ordered behind its reply.
+Read-ahead is bounded to one maximum request frame plus its length prefix; a full
+buffer applies socket backpressure. Frames completed before their deadline remain
+valid while waiting for earlier replies, even if a following partial frame expires.
 
 IPC uses one Linux abstract Unix stream socket for both communication and
 exclusive data-directory ownership. No `rivu.sock` or `rivu.sock.lock` file is
@@ -386,9 +394,9 @@ The earlier successful shutdown acknowledgement is not changed by that result.
 If read-worker startup fails, the host still attempts final persistence and retains
 both the startup cause and any finalization failure in its returned error.
 
-Failed exchanges discard the client connection. A later explicit request can
-reconnect and perform a fresh Hello, but clients never automatically replay a
-failed command.
+Failed exchanges, including an unexpected response type, discard the client
+connection and its bound instance identity. A later explicit request can reconnect
+and perform a fresh Hello, but clients never automatically replay a failed command.
 
 Client session stopping shares one handle for the stop state and waiter wakeup.
 Stopping is permanent and wakes all registered waits; a later wait also observes
@@ -416,6 +424,9 @@ tokens under one shared-state lock. Omitted sections preserve the client's
 previous values; the client advances tokens only for sections actually read,
 otherwise it could acknowledge an unseen change. Notifications coalesce to the
 latest state. A server restart requires a fresh Hello and state read.
+
+Each in-flight Watch owns its revision subscription. Reply, disconnection or
+cancellation releases that registration without waiting for another publication.
 
 The Queue state section is constant-size: `{total, current_id, current_position,
 revision}`. It never embeds all occurrence IDs or track metadata. Queue content

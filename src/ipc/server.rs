@@ -3,7 +3,7 @@ use crate::core::CoreHandle;
 use anyhow::{Context, Error, Result, bail};
 use async_channel::{Receiver, Sender};
 use async_io::Async;
-use bytes::BytesMut;
+use bytes::{BufMut, BytesMut};
 use futures::{
     FutureExt, StreamExt,
     io::{AsyncRead, AsyncReadExt},
@@ -11,8 +11,8 @@ use futures::{
 };
 use rand::RngExt;
 use rivu_protocol::protocol::{
-    HELLO_TIMEOUT, HelloResponse, MAX_CLIENTS, SessionState, UNKNOWN_INSTANCE, WireRequest,
-    WireResponse, wire_state,
+    HELLO_TIMEOUT, HelloResponse, MAX_CLIENTS, MAX_REQUEST, SessionState, UNKNOWN_INSTANCE,
+    WireRequest, WireResponse, wire_state,
 };
 use rivu_protocol::transport::{
     bridge_timeout, read_request_frame, timeout, timeout_at, write_error_frame,
@@ -105,11 +105,18 @@ const FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Default)]
 struct RequestReader {
     pending: BytesMut,
+    complete: usize,
     deadline: Option<Instant>,
 }
 
 impl RequestReader {
     async fn read(&mut self, stream: &mut (impl AsyncRead + Unpin)) -> Result<Result<WireRequest>> {
+        if self.complete != 0 {
+            let before = self.pending.len();
+            let frame = read_request_frame(stream, &mut self.pending).await?;
+            self.complete -= before - self.pending.len();
+            return Ok(frame);
+        }
         // Idle sessions have no expiry. Start one absolute deadline at the first
         // byte, retaining it when Watch updates cancel and resume this future.
         if self.pending.is_empty() {
@@ -127,11 +134,104 @@ impl RequestReader {
         let deadline = self
             .deadline
             .expect("started IPC frame must have a deadline");
+        if Instant::now() >= deadline {
+            bail!("IPC request frame completion timed out");
+        }
         let frame = timeout_at(deadline, read_request_frame(stream, &mut self.pending))
             .await
             .context("IPC request frame completion timed out")??;
         self.deadline = None;
         Ok(frame)
+    }
+
+    async fn read_ahead(&mut self, stream: &mut (impl AsyncRead + Unpin)) -> Result<()> {
+        // Keep pipelined bytes in the existing receive buffer without decoding or
+        // executing the next request before the current query has replied. Once
+        // full, apply backpressure; EOF behind a full buffer is observed later.
+        let previous = self.pending.len();
+        let available = 4 + MAX_REQUEST - previous;
+        if available == 0 {
+            return std::future::pending().await;
+        }
+        if previous == self.complete {
+            // Most serial queries have no following frame. Observe EOF without
+            // allocating receive storage or initializing an unused body buffer.
+            let mut prefix = [0; 4];
+            let count = available.min(prefix.len());
+            let read = stream
+                .read(&mut prefix[..count])
+                .await
+                .context("Reading IPC frame")?;
+            assert!(
+                read <= count,
+                "AsyncRead returned more bytes than its buffer"
+            );
+            if read == 0 {
+                bail!("IPC connection closed while reading frame");
+            }
+            self.pending.extend_from_slice(&prefix[..read]);
+        } else {
+            let count = available.min(8192);
+            self.pending.reserve(count);
+            let spare = self.pending.chunk_mut();
+            // SAFETY: reserve supplies count writable bytes. AsyncRead requires
+            // initialized memory; Pending reads do not advance visible length.
+            let bytes = unsafe {
+                std::ptr::write_bytes(spare.as_mut_ptr(), 0, count);
+                std::slice::from_raw_parts_mut(spare.as_mut_ptr(), count)
+            };
+            let read = stream.read(bytes).await.context("Reading IPC frame")?;
+            assert!(
+                read <= count,
+                "AsyncRead returned more bytes than its buffer"
+            );
+            if read == 0 {
+                bail!("IPC connection closed while reading frame");
+            }
+            // SAFETY: the count check bounds these initialized received bytes.
+            unsafe { self.pending.advance_mut(read) };
+        }
+        let now = Instant::now();
+        let next_deadline = now + FRAME_TIMEOUT;
+        if previous == self.complete {
+            self.deadline = Some(next_deadline);
+        }
+        if self.deadline.is_some_and(|deadline| now >= deadline) {
+            // Late bytes must not promote an expired tail to an untimed complete
+            // frame. Earlier complete frames can still be consumed in order.
+            return Ok(());
+        }
+        while self.pending.len() - self.complete >= 4 {
+            let length = u32::from_le_bytes(
+                self.pending[self.complete..self.complete + 4]
+                    .try_into()
+                    .unwrap(),
+            ) as usize;
+            if length > MAX_REQUEST || self.pending.len() - self.complete < 4 + length {
+                break;
+            }
+            self.complete += 4 + length;
+            self.deadline = (self.complete < self.pending.len()).then_some(next_deadline);
+        }
+        Ok(())
+    }
+}
+
+async fn wait_for_query(
+    stream: &mut UnixStream,
+    reader: &mut RequestReader,
+    handle: &CoreHandle,
+    query: Query,
+    shutdown: &Receiver<()>,
+) -> Result<Option<Result<QueryResponse>>> {
+    let query = run_query(handle, query).fuse();
+    futures::pin_mut!(query);
+    loop {
+        futures::select! {
+            response = query => return Ok(Some(response)),
+            _ = shutdown.recv().fuse() => return Ok(None),
+            read = reader.read_ahead(stream).fuse() => read?,
+        }
     }
 }
 
@@ -140,27 +240,36 @@ enum WatchResult {
     Request,
 }
 
-async fn wait_for_revisions(
-    stream: &mut UnixStream,
-    reader: &mut RequestReader,
-    pending_request: &mut Option<Result<WireRequest>>,
-    handle: &CoreHandle,
+fn wait_for_revisions<'a>(
+    stream: &'a mut UnixStream,
+    reader: &'a mut RequestReader,
+    pending_request: &'a mut Option<Result<WireRequest>>,
+    handle: &'a CoreHandle,
     expected: StateRevisions,
-    updates: &Receiver<()>,
-    shutdown: &Receiver<()>,
-) -> Result<Option<WatchResult>> {
-    loop {
-        let current = handle.state_revisions();
-        if current != expected {
+    shutdown: &'a Receiver<()>,
+) -> impl Future<Output = Result<Option<WatchResult>>> + 'a {
+    let current = handle.state_revisions();
+    // Register only a live Watch. The future rechecks after registration so a
+    // publish before subscription cannot leave this wait asleep. On exit the
+    // next subscription/publication prunes the dropped receiver's sender.
+    let updates = (current == expected).then(|| handle.subscribe_revisions());
+    async move {
+        let Some(updates) = updates else {
             return Ok(Some(WatchResult::Revisions(current)));
-        }
-        futures::select! {
-            changed = updates.recv().fuse() => { if changed.is_err() { return Ok(None); } }
-            _ = shutdown.recv().fuse() => return Ok(None),
-            frame = reader.read(stream).fuse() => {
-                *pending_request = Some(frame?);
-                return Ok(Some(WatchResult::Request));
-            },
+        };
+        loop {
+            let current = handle.state_revisions();
+            if current != expected {
+                return Ok(Some(WatchResult::Revisions(current)));
+            }
+            futures::select! {
+                changed = updates.recv().fuse() => { if changed.is_err() { return Ok(None); } }
+                _ = shutdown.recv().fuse() => return Ok(None),
+                frame = reader.read(stream).fuse() => {
+                    *pending_request = Some(frame?);
+                    return Ok(Some(WatchResult::Request));
+                },
+            }
         }
     }
 }
@@ -170,7 +279,6 @@ async fn serve_connection(
     handle: CoreHandle,
     app: AppHandle,
     instance_id: u32,
-    updates: Receiver<()>,
     shutdown: Receiver<()>,
 ) -> Result<()> {
     let mut reader = RequestReader::default();
@@ -264,7 +372,12 @@ async fn serve_connection(
                         continue;
                     }
                 };
-                let response = match run_query(&handle, query).await {
+                let Some(response) =
+                    wait_for_query(&mut stream, &mut reader, &handle, query, &shutdown).await?
+                else {
+                    return Ok(());
+                };
+                let response = match response {
                     Ok(response) => WireResponse::Query(response),
                     Err(error) => {
                         tracing::warn!(error = %error, "ipc_query_failed");
@@ -336,7 +449,6 @@ async fn serve_connection(
                     &mut pending_request,
                     &handle,
                     expected,
-                    &updates,
                     &shutdown,
                 )
                 .await?
@@ -417,7 +529,6 @@ async fn run_server(
                         handle.clone(),
                         app.clone(),
                         instance_id,
-                        handle.subscribe_revisions(),
                         shutdown.clone(),
                     );
                     clients.push(handle.executor().spawn(async move {
@@ -450,9 +561,9 @@ async fn run_server(
             }
         }
     }
-    // Idle sessions observe shutdown; accepted operations drain their replies.
-    // Dropping remaining owned Tasks after the deadline cancels their transport,
-    // never the business operation already accepted by Core.
+    // Idle sessions and query waits observe shutdown. Accepted commands drain
+    // their replies; cancelling query transport never interrupts its SQL owner.
+    // The deadline bounds transport retirement, not physical Core ownership.
     let _ = timeout(Duration::from_secs(120), async {
         while let Some(result) = clients.next().await {
             log_connection_result(result);
@@ -569,5 +680,333 @@ mod tests {
                 WireRequest::State(sections) if sections == StateSections::ALL
             ));
         });
+    }
+
+    #[test]
+    fn query_wait_eof_and_shutdown_cancel_the_core_reply_receiver() {
+        for (shutdown_connection, pipeline) in [(false, false), (true, false), (false, true)] {
+            async_io::block_on(async {
+                let (handle, queries) = CoreHandle::test_query_port();
+                let (mut peer, mut stream) = socket_pair();
+                let mut reader = RequestReader::default();
+                let (stop, shutdown) = async_channel::bounded(1);
+                let mut waiting = Box::pin(wait_for_query(
+                    &mut stream,
+                    &mut reader,
+                    &handle,
+                    Query::LibraryStats,
+                    &shutdown,
+                ));
+                assert!(waiting.as_mut().now_or_never().is_none());
+                let reply = timeout(Duration::from_secs(2), queries.receive())
+                    .await
+                    .unwrap();
+                assert!(!reply.is_cancelled());
+                if pipeline {
+                    let mut encoded = Vec::new();
+                    encode_request_frame_into(
+                        &WireRequest::State(StateSections::ALL),
+                        &mut encoded,
+                    )
+                    .unwrap();
+                    encoded.push(1); // A partial frame after the complete request.
+                    peer.write_all(&encoded).await.unwrap();
+                    assert!(waiting.as_mut().now_or_never().is_none());
+                    assert!(!reply.is_cancelled());
+                }
+                if shutdown_connection {
+                    stop.close();
+                } else {
+                    drop(peer);
+                }
+                let result = timeout(Duration::from_secs(2), waiting).await.unwrap();
+                if shutdown_connection {
+                    assert!(result.unwrap().is_none());
+                } else {
+                    assert!(
+                        result
+                            .unwrap_err()
+                            .to_string()
+                            .contains("connection closed")
+                    );
+                }
+                assert!(reply.is_cancelled());
+            });
+        }
+    }
+
+    #[test]
+    fn query_wait_keeps_complete_and_partial_following_requests_in_order() {
+        async_io::block_on(async {
+            let (handle, queries) = CoreHandle::test_query_port();
+            let (mut peer, mut stream) = socket_pair();
+            let mut reader = RequestReader::default();
+            let (_stop, shutdown) = async_channel::bounded(1);
+            let mut waiting = Box::pin(wait_for_query(
+                &mut stream,
+                &mut reader,
+                &handle,
+                Query::LibraryStats,
+                &shutdown,
+            ));
+            assert!(waiting.as_mut().now_or_never().is_none());
+            let reply = timeout(Duration::from_secs(2), queries.receive())
+                .await
+                .unwrap();
+            let mut encoded = Vec::new();
+            encode_request_frame_into(&WireRequest::State(StateSections::ALL), &mut encoded)
+                .unwrap();
+            peer.write_all(&encoded).await.unwrap();
+            encode_request_frame_into(&WireRequest::Watch(StateRevisions::default()), &mut encoded)
+                .unwrap();
+            peer.write_all(&encoded).await.unwrap();
+            encode_request_frame_into(&WireRequest::Hello(StateSections::ALL), &mut encoded)
+                .unwrap();
+            peer.write_all(&encoded[..1]).await.unwrap();
+            assert!(waiting.as_mut().now_or_never().is_none());
+            assert!(!reply.is_cancelled());
+            reply.respond(QueryResponse {
+                revisions: Default::default(),
+                result: Ok(rivu_protocol::response::ViewResponse::Track(None)),
+            });
+            assert!(waiting.await.unwrap().unwrap().is_ok());
+            let deadline = reader.deadline.unwrap();
+            assert!(matches!(
+                reader.read(&mut stream).await.unwrap().unwrap(),
+                WireRequest::State(sections) if sections == StateSections::ALL
+            ));
+            assert!(matches!(
+                reader.read(&mut stream).await.unwrap().unwrap(),
+                WireRequest::Watch(revisions) if revisions == StateRevisions::default()
+            ));
+            assert_eq!(reader.deadline, Some(deadline));
+            peer.write_all(&encoded[1..]).await.unwrap();
+            assert!(matches!(
+                reader.read(&mut stream).await.unwrap().unwrap(),
+                WireRequest::Hello(sections) if sections == StateSections::ALL
+            ));
+            assert!(reader.deadline.is_none());
+        });
+    }
+
+    #[test]
+    fn query_read_ahead_applies_backpressure_at_the_existing_frame_limit() {
+        async_io::block_on(async {
+            let mut bytes = vec![0; 4 + MAX_REQUEST + 1];
+            bytes[..4].copy_from_slice(&(MAX_REQUEST as u32).to_le_bytes());
+            let mut input = bytes.as_slice();
+            let mut reader = RequestReader::default();
+            while reader.pending.len() < 4 + MAX_REQUEST {
+                reader.read_ahead(&mut input).await.unwrap();
+            }
+            assert_eq!(input.len(), 1);
+            assert!(reader.read_ahead(&mut input).now_or_never().is_none());
+            assert_eq!(input.len(), 1);
+        });
+    }
+
+    #[test]
+    fn late_completed_pipelined_frame_cannot_erase_its_deadline() {
+        async_io::block_on(async {
+            let (mut peer, mut stream) = socket_pair();
+            let mut reader = RequestReader::default();
+            let mut encoded = Vec::new();
+            encode_request_frame_into(&WireRequest::State(StateSections::ALL), &mut encoded)
+                .unwrap();
+            peer.write_all(&encoded).await.unwrap();
+            while reader.pending.len() < encoded.len() {
+                reader.read_ahead(&mut stream).await.unwrap();
+            }
+            peer.write_all(&encoded[..1]).await.unwrap();
+            reader.read_ahead(&mut stream).await.unwrap();
+            reader.deadline = Some(Instant::now() - FRAME_TIMEOUT);
+            peer.write_all(&encoded[1..]).await.unwrap();
+            peer.write_all(&encoded).await.unwrap();
+            while reader.pending.len() < encoded.len() * 3 {
+                reader.read_ahead(&mut stream).await.unwrap();
+            }
+            assert!(matches!(
+                reader.read(&mut stream).await.unwrap().unwrap(),
+                WireRequest::State(_)
+            ));
+            assert!(
+                reader
+                    .read(&mut stream)
+                    .await
+                    .err()
+                    .expect("a late complete frame must retain its timeout")
+                    .to_string()
+                    .contains("completion timed out")
+            );
+        });
+    }
+
+    #[test]
+    fn read_ahead_assigns_and_retains_the_trailing_partial_frame_deadline() {
+        async_io::block_on(async {
+            let (mut peer, mut stream) = socket_pair();
+            let mut reader = RequestReader::default();
+            let mut encoded = Vec::new();
+            encode_request_frame_into(&WireRequest::State(StateSections::ALL), &mut encoded)
+                .unwrap();
+            peer.write_all(&encoded).await.unwrap();
+            while reader.pending.len() < encoded.len() {
+                reader.read_ahead(&mut stream).await.unwrap();
+            }
+            assert!(reader.deadline.is_none());
+            peer.write_all(&encoded[..1]).await.unwrap();
+            reader.read_ahead(&mut stream).await.unwrap();
+            assert!(reader.deadline.is_some());
+            let expired = Instant::now() - FRAME_TIMEOUT;
+            reader.deadline = Some(expired);
+            peer.write_all(&encoded[1..2]).await.unwrap();
+            reader.read_ahead(&mut stream).await.unwrap();
+            assert_eq!(reader.deadline, Some(expired));
+            // The earlier complete frame is still usable; only the unfinished
+            // frame expires, and additional read-ahead bytes cannot renew it.
+            assert!(matches!(
+                reader.read(&mut stream).await.unwrap().unwrap(),
+                WireRequest::State(_)
+            ));
+            assert!(
+                reader
+                    .read(&mut stream)
+                    .await
+                    .err()
+                    .expect("an expired partial frame must fail")
+                    .to_string()
+                    .contains("completion timed out")
+            );
+        });
+    }
+
+    #[test]
+    fn watch_rechecks_revision_after_registration_without_a_notification() {
+        async_io::block_on(async {
+            let (handle, _queries) = CoreHandle::test_query_port();
+            let (_peer, mut stream) = socket_pair();
+            let mut reader = RequestReader::default();
+            let mut pending = None;
+            let (_stop, shutdown) = async_channel::bounded(1);
+            let baseline = handle.state_revisions();
+            let waiting = wait_for_revisions(
+                &mut stream,
+                &mut reader,
+                &mut pending,
+                &handle,
+                baseline,
+                &shutdown,
+            );
+            // Simulate publication whose wakeup was missed at registration. The
+            // state recheck must complete even though no channel item exists.
+            let current = handle.test_advance_revision(false);
+            assert!(matches!(
+                timeout(Duration::from_secs(2), waiting).await.unwrap().unwrap(),
+                Some(WatchResult::Revisions(revisions)) if revisions == current
+            ));
+            assert_eq!(handle.test_revision_subscriptions(), (1, 0));
+            // An already changed baseline replies without another subscription.
+            assert!(matches!(
+                wait_for_revisions(
+                    &mut stream, &mut reader, &mut pending, &handle, baseline, &shutdown,
+                ).await.unwrap(),
+                Some(WatchResult::Revisions(revisions)) if revisions == current
+            ));
+            assert_eq!(handle.test_revision_subscriptions(), (1, 0));
+            handle.test_advance_revision(true);
+            assert_eq!(handle.test_revision_subscriptions(), (0, 0));
+        });
+    }
+
+    #[test]
+    fn watch_coalesces_notifications_and_releases_on_each_exit() {
+        for exit in 0..4 {
+            async_io::block_on(async {
+                let (handle, _queries) = CoreHandle::test_query_port();
+                let (mut peer, mut stream) = socket_pair();
+                let mut reader = RequestReader::default();
+                let mut pending = None;
+                let (stop, shutdown) = async_channel::bounded(1);
+                let baseline = handle.state_revisions();
+                let mut waiting = Box::pin(wait_for_revisions(
+                    &mut stream,
+                    &mut reader,
+                    &mut pending,
+                    &handle,
+                    baseline,
+                    &shutdown,
+                ));
+                assert!(waiting.as_mut().now_or_never().is_none());
+                match exit {
+                    0 => {
+                        handle.test_advance_revision(true);
+                        let current = handle.test_advance_revision(true);
+                        assert!(matches!(
+                            timeout(Duration::from_secs(2), waiting).await.unwrap().unwrap(),
+                            Some(WatchResult::Revisions(revisions)) if revisions == current
+                        ));
+                    }
+                    1 => {
+                        let mut encoded = Vec::new();
+                        encode_request_frame_into(
+                            &WireRequest::State(StateSections::ALL),
+                            &mut encoded,
+                        )
+                        .unwrap();
+                        peer.write_all(&encoded).await.unwrap();
+                        assert!(matches!(
+                            timeout(Duration::from_secs(2), waiting)
+                                .await
+                                .unwrap()
+                                .unwrap(),
+                            Some(WatchResult::Request)
+                        ));
+                        assert!(matches!(pending, Some(Ok(WireRequest::State(_)))));
+                    }
+                    2 => {
+                        stop.close();
+                        assert!(
+                            timeout(Duration::from_secs(2), waiting)
+                                .await
+                                .unwrap()
+                                .unwrap()
+                                .is_none()
+                        );
+                    }
+                    _ => {
+                        drop(peer);
+                        assert!(
+                            timeout(Duration::from_secs(2), waiting)
+                                .await
+                                .unwrap()
+                                .is_err()
+                        );
+                    }
+                }
+                assert_eq!(handle.test_revision_subscriptions(), (1, 0));
+                // A subsequent active Watch prunes the old closed sender and
+                // still receives the next real revision, without registry growth.
+                let baseline = handle.state_revisions();
+                let mut pending = None;
+                let (_peer, mut stream) = socket_pair();
+                let (_stop, shutdown) = async_channel::bounded(1);
+                let waiting = wait_for_revisions(
+                    &mut stream,
+                    &mut reader,
+                    &mut pending,
+                    &handle,
+                    baseline,
+                    &shutdown,
+                );
+                assert_eq!(handle.test_revision_subscriptions(), (1, 1));
+                let current = handle.test_advance_revision(true);
+                assert!(matches!(
+                    timeout(Duration::from_secs(2), waiting).await.unwrap().unwrap(),
+                    Some(WatchResult::Revisions(revisions)) if revisions == current
+                ));
+                handle.test_advance_revision(true);
+                assert_eq!(handle.test_revision_subscriptions(), (0, 0));
+            });
+        }
     }
 }
