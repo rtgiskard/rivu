@@ -354,9 +354,10 @@ it does not replay frames received while hidden. This is independent of the cach
 === Resource boundaries
 
 Caches are local to current panel owners or bounded shared history, not an
-unbounded record of earlier render states. Hiding a window releases its derived
-visualization publications, Spectrogram history and stereo/generative results.
-Base waveform previews retain their independent bounded lifetime; see
+unbounded record of earlier render states. Hiding a window releases visualization
+working state, Spectrogram history and stereo/generative simulation resources,
+while bounded final drawings follow the suspension rules above. Base waveform
+previews retain their independent bounded lifetime; see
 link:23_visuals.adoc#_waveform[Waveform].
 Waveform numerical payloads grow with effective display-column count and panel
 count, not panel pixel area: four f32 values (16 bytes) per column, at most 1024
@@ -552,7 +553,12 @@ before reuse; mismatches fail without overwriting the existing file.
 Identical bytes reuse an existing file, independent of track identity; files
 provide paths for GPUI and URLs for external MPRIS consumers. Embedded and directory
 images share byte-sniffed, content-hash storage. Each encoded image is limited by
-`interface.artwork_file_limit_mb`, independently of the decoded-image budget.
+the session's active `interface.artwork_file_limit_mb` (default 16 MiB, range
+1–64 MiB). The manager captures it at startup; changing or drafting the setting
+does not change admission until restart. Published artwork leases carry that
+immutable limit through GUI reads, independently of decoded-image budgets. A
+shared content path alone cannot authorize reuse under a different encoded policy;
+both successful decodes and remembered failures are policy-keyed.
 Directory discovery checks only the source's immediate directory and exact
 `cover`, `folder`, or `front` stems; full candidate rules are documented in
 link:04_playback.adoc#_mpris_and_artwork[MPRIS and artwork].
@@ -570,6 +576,9 @@ tiers. Background loads coalesce same-source decoding and publish complete files
 atomically; missing or damaged thumbnails are regenerated. A disk-cache write
 failure does not prevent display. Reuse does not rewrite a cached thumbnail or
 refresh its age.
+Thumbnail-file reads have their own fixed 8 MiB safety cap, independent of the
+source's encoded admission limit. Every reuse still admits the original source
+under the active session policy before reading its disposable thumbnail.
 
 Maintenance counts and cleans thumbnail files as well as originals. Unlike
 resident source files, thumbnails are disposable even while a source lookup is
@@ -579,12 +588,11 @@ source has at most three generated tiers; this is not a global disk-capacity lim
 The MPRIS default export uses the same content-hash directory and is protected
 once exported; later sessions can clean it when it is no longer resident.
 
-Maintenance scans only legacy managed files at the cache root and managed files
-within one level of two-character lowercase-hex buckets. It does not follow
-symlinks or descend into nested directories. Old flat, full-hash originals and
-versioned thumbnails remain included in statistics and age-based cleanup, but
-are not read as fallbacks or moved at startup. The first access after this layout
-change recreates the requested cache files.
+Maintenance scans managed files at the cache root and within one level of
+two-character lowercase-hex buckets. It does not follow symlinks or descend into
+nested directories. Recognized flat full-hash originals and version-suffixed
+thumbnails are included in statistics and age-based cleanup; runtime lookup uses
+only the content paths described above.
 
 Only explicit link:01_config.adoc#_artwork_cache_maintenance[Settings maintenance]
 enumerates disposable files. Statistics and cleanup use modification age, not
@@ -607,11 +615,13 @@ inspection/deletion failures, and leaves audio sources untouched.
 
 GUI previews keep decoded images separate from this session-wide lookup cache.
 Within one window, metadata previews, album cards, and the large artwork panel
-share one pending load or completed decode per immutable content path, even
-when different tracks reference the same bytes. Each consumer retains its own
-lookup identity and source-file protection. Loading starts only when a preview
-requests the image and runs the artwork-specific bounded decoder on GPUI's
-background executor, not render-time file I/O.
+share one pending load or completed decode per immutable content path and active
+encoded admission policy, even when different tracks reference the same bytes.
+Background same-source sharing also keys the encoded policy and decoded budget;
+neither admitted images nor remembered failures cross policy identities. Each
+consumer retains its own lookup identity and source-file protection. Loading
+starts only when a preview requests the image and runs the artwork-specific
+bounded decoder on GPUI's background executor, not render-time file I/O.
 
 Static-image demand uses the actual display size and window scale, rounded up to
 the smallest sufficient tier; demands above 1024 use the original. Cover/cropped

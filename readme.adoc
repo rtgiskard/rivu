@@ -25,8 +25,8 @@ access to a shared playback instance that can also run headless.
   execution, auditioning, and WAV export without changing source media.
   Neural backends require prepared local models; see
   link:doc/27_audio_processing.adoc#_practical_workflow[workflow and quality limits]
-* *Visualizations and artwork:* waveform, spectrum, spectrogram, audio visualizers,
-  and album artwork
+* *Visualizations and artwork:* waveform, spectrum, spectrogram, eight audio
+  visualizer styles, and album artwork
 
 Rivu plays local files; it does not fetch network media or cover art.
 The desktop requires Wayland; audio output requires a running PipeWire 1.2 or newer server.
@@ -84,6 +84,9 @@ selects startup/probe configuration, not settings in an already running core.
 `--json` writes one result to stdout and runtime diagnostics as JSON to stderr;
 it is not available for GUI, serve, or TUI. Usage errors retain ordinary diagnostics.
 Use `rivu --help` or a subcommand's `--help` for exact arguments.
+The link:src/cli/args.rs[argument definitions] and
+link:src/cli/mod.rs[command dispatch] define these entrypoints; application/window
+ownership is implemented in link:src/app.rs[`App`].
 
 [source,sh]
 ----
@@ -118,14 +121,16 @@ typical Linux installation: `~/.local/share/rivu`) and
 
 The data directory contains `library.db` (library and playback state),
 `layout.json` (desktop layouts), the `artwork/` cache, and optional `logs/`.
+The core owns shared library, queue, playback, and configuration state; GUI and
+TUI clients browse and control that state rather than maintaining separate players.
+Closing a client is not a persistence boundary for the core. See
+link:doc/01_config.adoc#_saving_configuration[configuration saving] and
+link:doc/04_playback.adoc#_queue[queue restoration] for their independent guarantees.
 Stop the core before operating on `library.db`; external writes while Rivu runs
-are unsupported. The application rejects incompatible formats rather than migrating
-or resetting them. The separate `rivu-migrate` tool,
-installed alongside `rivu`, validates current configuration and database formats
-without starting the player; historical format conversion is not implemented.
-See link:doc/02_library.adoc#_sqlite_maintenance[SQLite maintenance] for commands,
-backups, and what rescanning cannot restore.
-IPC access and upgrade constraints are described in link:doc/21_ipc.adoc[IPC].
+are unsupported. See link:doc/02_library.adoc#_sqlite_maintenance[SQLite maintenance]
+for supported formats and offline inspection, and
+link:doc/26_migration.adoc[the independent migration tool] for its ownership contract.
+Client access and wire schemas are described in link:doc/21_ipc.adoc[IPC].
 
 
 == Documentation
@@ -196,7 +201,7 @@ toolchains must match the pinned version and provide `rustfmt` and `clippy` for 
 
 Keep `Cargo.lock` to retain the resolved dependency versions. Run `make lint`
 to check formatting and all workspace targets with all features, including
-font embedding.
+font embedding; install its additional prerequisites below first.
 
 The install command builds the workspace and installs `rivu`, `rivu-migrate`,
 the desktop entry, and icons. Ensure `~/.local/bin` is on `PATH`.

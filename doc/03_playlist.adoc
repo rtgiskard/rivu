@@ -7,11 +7,10 @@ more than once; each occurrence has its own entry ID and position. Explicit trac
 additions, imports, queue saves, and collection transfers preserve duplicates and
 source order, as does the link:04_playback.adoc#_queue[playback queue].
 
-The queue is the protected system playlist `0`, with an empty name, in shared
-`playlist_entries` storage. Ordinary playlists have positive IDs; catalog and
-playlist-management APIs hide or reject `0`. Loading a playlist into the queue
-and saving a queue create independent copies, not live links. Core retains
-playback ownership and separate collection validity tokens.
+The queue is a separate system-managed collection, excluded from ordinary
+playlist management. Loading a playlist into the queue and saving a queue create
+independent copies, not live links. Playback follows queue occurrences; editing
+the source playlist does not change an already loaded queue.
 
 == Management
 
@@ -30,6 +29,9 @@ Use `rivu playlist` for command-line management. `playlist list` shows collectio
 IDs and summaries; `playlist show PLAYLIST_ID` lists that collection's entries.
 Entry IDs identify individual occurrences for removal or movement, even when they
 share a track ID. Move indices start at zero.
+Arguments are defined in link:../src/cli/args.rs[the CLI reference implementation];
+link:../src/cli/mod.rs[dispatch] maps them to
+link:../src/core/playlists.rs[core playlist operations].
 
 [source,sh]
 ----
@@ -209,21 +211,15 @@ to `rivu library scan`. M3U input is limited to 16 MiB, each CUE sheet to 1 MiB,
 and aggregate input to 64 MiB (each distinct CUE sheet is read once). Expansion is
 limited to 100,000 entries, counting repeated occurrences.
 
-Expanded entries, parsed sheets, and shared source/segment data each have an
-independent 64 MiB accounting limit, including retained paths, names and vector
-capacity. Shared source and sheet payloads are charged once. Replaced or discarded
-metadata and temporary parsing/staging workspaces release their reservations with
-their owners; raw input is not permanently charged against later retained data.
-Staging charges scope indexes, owned path prefixes, and serialized query buffers
-to the source/segment domain, including JSON escaping and buffer capacity. This
-cost depends on requested scopes, not only on successfully probed tracks.
-These are bounded-data limits, not a combined process-RSS limit. They apply to
-imports, not playlist sizes for other operations. Preparation or retention-limit
-failures abort before any scan or playlist commit instead of saving partial results.
-Prepared CUE data is reused by scanning so the import keeps the sheet version and
-track order it read. Cancellation is checked during reads and parsing; the reader
-does not reopen an admitted path. Internal scheduling and ownership are described
-in link:21_ipc.adoc#_core_and_client_boundary[Core and client boundary].
+Import preparation also has independent 64 MiB accounting limits for expanded
+entries, parsed sheets, and shared source/segment data. These bound retained
+data, including paths and metadata, rather than combined process memory. They
+apply to imports, not to playlist sizes for other operations. Exceeding a limit
+aborts preparation before scan or playlist commits instead of saving partial
+results. Prepared CUE data is reused by scanning so the import keeps the sheet
+version and track order it read. Cancellation is checked during reads and parsing;
+already started work must retire before another media task is admitted. Resource
+ownership is described in link:21_ipc.adoc#_core_and_client_boundary[Core and client boundary].
 
 === Commit and export lifecycle
 

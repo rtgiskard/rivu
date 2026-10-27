@@ -4,8 +4,8 @@
 
 Rivu reads `~/.config/rivu/config.toml` by default (or the XDG configuration
 directory); path overrides are described in link:../readme.adoc[the README].
-A missing file uses the existing defaults. Existing files may omit top-level
-`schema_version`; omission means the current schema (`1`).
+A missing file uses defaults. The optional top-level `schema_version` defaults
+to the current schema (`1`).
 Omitted setting groups and fields use their defaults. Unreadable files, malformed
 TOML, unknown keys, misplaced fields, unsupported explicit schema versions, and
 invalid values are errors, not a reason to fall back to defaults.
@@ -83,6 +83,11 @@ file without forcing a storage flush, so success is not a power-loss guarantee.
 After Apply saves successfully, an audio-command delivery failure does not roll
 back the committed configuration. Resolve the audio failure before retrying or
 restarting.
+The save/merge boundary is implemented in
+link:../src/core/settings.rs[core settings]; the format-preserving file adapter is
+link:../crates/rivu-format/src/config/file.rs[the configuration file schema].
+This is independent of queue transactions and manual layout sync: Apply does not
+save a layout, and layout sync does not save configuration.
 
 === File access and external editors
 
@@ -535,10 +540,9 @@ removed. A removed cover is regenerated on demand.
 Usage and cleanup also include generated lossless WebP thumbnails. These derived
 files are not protected by a resident original; they can be regenerated while
 the original cover and decoded display remain available.
-The cache uses one level of two-hex-character buckets. Maintenance also counts
-and cleans managed files left in the old flat layout; it does not follow symlinks
-or scan arbitrary subdirectories. Old files are not migrated or reused as load
-fallbacks.
+The cache uses one level of two-hex-character buckets. Maintenance also handles
+managed files directly in the cache directory; it does not follow symlinks or
+scan arbitrary subdirectories.
 
 Inspect reported errors and retry after fixing access or permissions. Maintenance
 has no automatic schedule or total-capacity guarantee, and the age input is not
@@ -1139,20 +1143,16 @@ always preserves the last displayed frame. `primary_color` and `secondary_color`
 default to `"#7AA2F7"` and `"#BB9AF7"`. These parameters remain saved even when the
 selected instance style does not use them.
 
-== Configuration upgrades
+== Configuration schema
 
-The application reads only the current configuration schema. A valid unversioned
-file needs no migration; normal application saves preserve an omitted
-`schema_version` rather than adding it.
+The application reads configuration schema `1`; explicit noncurrent versions are
+rejected. Normal saves preserve an omitted `schema_version` rather than adding it.
+Declaring the current schema does not bypass field or value validation. Malformed
+TOML and file-access errors retain their specific causes.
 
-Parsing and validation failures retain their specific causes. Malformed TOML must
-be corrected before a version can be read. File-access errors are not version
-errors. Declaring the current version does not bypass field or value validation.
-
-Explicit noncurrent versions are rejected.
-The current `rivu-migrate` validates configuration but does not convert or rewrite
-it. See link:02_library.adoc#_sqlite_maintenance[SQLite maintenance] for the tool's
-commands, supported inputs, backups, and retry guarantees. Configuration and
-database schemas evolve independently; neither is an application release number.
-Layout files are outside this migration scope.
+`rivu-migrate` validates the selected configuration without rewriting it. Its
+commands and offline ownership requirements are documented in
+link:26_migration.adoc[Database and configuration migration]. Configuration and
+database schemas are independent of the application release number; layout files
+have their own contract under <<_layout_file,Layout file>>.
 

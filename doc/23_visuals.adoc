@@ -188,6 +188,18 @@ Source replacement, seek intent, analysis-setting changes, Stop, and Still Mode
 invalidate incompatible retained results even while paused or hidden. These
 semantic facts are independent of producer continuity generation and seek previews.
 Still Mode discards the views rather than freezing them.
+Radial color, geometry, sensitivity, and rotation-speed edits preserve the frozen
+signal and animation time. A dB-range edit remaps the last accepted band peaks
+without consuming another audio publication or advancing smoothing. Narrowing
+then widening the range therefore recovers peaks clipped only for display.
+
+Presentation changes are not new audio: Spectrum and Spectrogram appearance,
+range and axis settings invalidate their retained drawing and rebuild from any
+compatible working levels/history. A suspended panel whose working data has been
+released cannot reconstruct that data from its final drawing. It waits for fresh
+input after an incompatible mapping change. Source/seek and FFT/window/signal
+changes instead clear incompatible signal state, including when paused; they
+must not redraw the prior source under the new identity.
 
 Only affected visual panel entities are invalidated by analysis or waveform
 updates. Cached scenes retain their measured panel dimensions until geometry or
@@ -668,25 +680,21 @@ for the available schemas, consumer cutover and resource limits. Radial Bars,
 Rings and Bars + Rings retain ordinary GPUI paths. The general `Program` and
 generated-schema interfaces remain proposals.
 
-GPUI also captures entity dependencies independently for each cached-view scope,
-including entities already accessed by a caller or enclosing cached view. On
-scope exit, local dependencies are merged back into the caller's set; cache
-reuse must retain them for later notifications. This keeps children created
-during render and nested cached consumers live after parent-only redraws,
-without refreshing the whole window or rerendering unrelated cached siblings.
-Its notification and cache-reuse regressions are included under
-<<_vendor_regression_checks,Vendor regression checks>>.
+Shared images retain their normal image and atlas lifetimes.
+
+Cached views track their own entity dependencies, including dependencies shared
+with enclosing views. Parent redraw and scene replay must not sever a child's
+notifications or force unrelated cached siblings to rerender. Regression commands
+are listed under <<_vendor_regression_checks,Vendor regression checks>>.
 
 === Why the patch is needed
 
 Album artwork reuses its decoded image and atlas texture while the GPU transforms
 the already-cropped sprite. Rounded clipping follows image-local coordinates;
 the surrounding content mask remains in screen coordinates. No rotated pixel
-buffers or angle-indexed image cache are created. `Img` forwards its existing
-transformation matrix through image painting to the WGPU sprite shader.
-Edge coverage uses the analytic local edge normal projected through screen-to-local
-coordinate derivatives, so scaling and rotation do not widen the antialiasing ramp
-in screen pixels. No additional sprite fields or transformed textures are needed.
+buffers or angle-indexed image cache are created. Image transforms pass through
+the existing sprite rendering path, with antialiasing coverage kept in screen
+pixels under scaling and rotation.
 
 Spectrum fills its geometry with the shared GPU palette material. Its full
 authored cubic palette is retained rather than approximated by two stops or

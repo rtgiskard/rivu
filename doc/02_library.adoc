@@ -11,6 +11,10 @@ database, not the audio files.
 CLI paths are relative to the invoking client's working directory; absolute paths
 are accepted. Except for the local `library probe` and independent migration tool,
 library commands address the running host for the selected data directory.
+Command arguments and dispatch are defined in link:../src/cli/args.rs[CLI arguments]
+and link:../src/cli/mod.rs[CLI execution]. Scans and imports are coordinated by
+link:../src/core/catalog.rs[the core catalog owner]; they update the same database
+used by every connected client.
 
 == Other
 
@@ -789,30 +793,21 @@ rivu library keep-independent DESTINATION_ID
 
 == SQLite maintenance
 
-Rivu opens database format `2` only. The singleton `rivu_meta` row contains the
-format version and current queue occurrence; runtime revisions remain in Core
-memory. Populated databases with missing or noncurrent metadata are rejected
-without resetting or deleting user data. Empty databases are initialized directly
-with current tables and triggers; existing databases are not upgraded or repaired.
-Stop Rivu before editing the database externally. See
-link:26_migration.adoc[Database and configuration migration] for format and ownership.
+Rivu opens database format `2` only. Existing databases must contain valid current
+format metadata; empty databases are initialized with current tables and triggers.
+The database stores library records, user edits and statistics, ordinary playlists,
+and the queue's occurrences and selection. Runtime query revisions are not saved.
+Stop Rivu before editing the database externally. Queue restoration is described
+in link:04_playback.adoc#_queue[Playback].
 
 === Independent migration tool
 
-Run `rivu-migrate check` to inspect existing resources without modifying user data
-or configuration; SQLite may update reader-coordination sidecars. Stop the host
-and external database writers before `apply`. The application does not invoke the
-tool automatically. This release baseline has no migration steps: `apply` validates
-current resources under offline ownership without rewriting them or creating a
-backup. Configuration is validated, not rewritten. Missing resources are not
-created, and an explicitly selected missing database is an error.
-
-`check` exits with `0` when current and `2` on error; exit `1` is reserved for
-supported migration steps when introduced. `apply` exits with `0` on success and
-`2` on error, reporting resource status and any backup paths already created.
-
-Use the same data directory and configuration path that select the intended host.
-For an explicitly selected existing library, for example:
+`rivu-migrate check` inspects selected configuration and database formats without
+starting the player or changing their contents; SQLite may update coordination
+sidecars. `apply` validates those resources under exclusive offline ownership;
+stop the host and external database writers first. It does not rewrite current
+resources, create backups, initialize missing resources, or start Rivu. An
+explicitly selected missing database is an error.
 
 [source,sh]
 ----
@@ -820,28 +815,19 @@ rivu-migrate --data-dir /path/to/rivu-data --config /path/to/config.toml check
 rivu-migrate --data-dir /path/to/rivu-data --config /path/to/config.toml apply
 ----
 
-`--config` alone does not select the database directory. `check` does not reserve
-the resources: `apply` reinspects them under the application's directory-identity
-ownership, including aliases. Future released database conversions use a
-non-overwriting SQLite backup beside the database, including committed WAL contents;
-copying a live `.db` alone is not equivalent. A failed migration transaction rolls
-back without changing configuration.
-
-After failure, inspect the reported state and explicitly rerun with the same
-target paths. Already-current resources are skipped and backups are not
-overwritten. Keep those backups for manual restoration: there is no automatic
-downgrade or paired restore. Successful apply does not start Rivu. Backup naming,
-ownership and reentry design are documented in
-link:26_migration.adoc#_apply_protocol[the migration protocol].
+Use the same paths as the intended host: `--config` alone does not select the
+database directory. Both commands exit `0` for current valid resources and `2`
+on error. After a failure, inspect its cause and correct the selected resources
+before explicitly retrying. The authoritative ownership, format and command
+reference is link:26_migration.adoc[Database and configuration migration].
 
 === Database operations
 
-If you choose to rebuild, stop the core and retain a separate backup of
-`library.db` and any `-wal`/`-shm` sidecars before using a fresh database and
-rescanning the music files. Do not overwrite or delete the original database.
-A fresh library does not retain playlists, saved queue, favorites, metadata
-overrides, decoder hints, or playback statistics. Audio files, `config.toml`, and
-`layout.json` are independent.
+Keep backups of `library.db` and its committed WAL contents: scanning media
+cannot reconstruct playlists, saved queue, favorites, metadata overrides,
+decoder hints, or playback statistics. Audio files, `config.toml`, and
+`layout.json` are independent. Do not copy a running database's `.db` alone as
+a complete backup; stop all connections before making a file-level copy.
 
 Graceful core shutdown (`rivu quit`, `SIGINT`, or `SIGTERM`) closes its database
 connection. SQLite normally checkpoints and removes the WAL/SHM sidecars when

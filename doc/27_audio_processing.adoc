@@ -470,7 +470,11 @@ describe preparation/work; `complete`, `failed` and `cancelled` are terminal
 task states. Not every task visits every work phase: realtime preparation need
 not render a file. Start acceptance is not completion; `--wait` waits for that
 task and fails on cancellation/error. Use `task status processing INSTANCE:ID` and
-`task cancel processing INSTANCE:ID` for an asynchronous start. A cancellation acknowledgement
+`task cancel processing INSTANCE:ID` for an asynchronous start. `INSTANCE:ID` is
+the nonzero decimal instance/task reference returned by the accepting service;
+the client binds subsequent status, cancel, audition and export requests to that
+instance. A bare task number is not sufficient, and restarting the service does
+not make a saved reference address a new task. A cancellation acknowledgement
 accepts the request, not proof that the worker has already retired. Cancellation
 invalidates publication, terminates/reaps neural workers and retires partial
 scratch; it does not publish a partial result. Source identity and job settings
@@ -562,8 +566,10 @@ rivu processing audition INSTANCE:2 accompaniment
 rivu processing audition INSTANCE:2 mix --vocal-gain-db -3 --accompaniment-gain-db 0
 ----
 
-Use references actually returned by Start, including the instance identity. A speech result uses the `denoised` audition
-mode. Audition starts the result's original queue source if necessary, then hands
+Use references actually returned by Start, including the instance identity. The
+`INSTANCE` tokens above are placeholders, not literal command arguments. A speech
+result uses the `denoised` audition mode. Audition starts the result's original
+queue source if necessary, then hands
 off to aligned rendered audio; Original returns to source audio. Separation Mix
 renders the retained stems with independent gains; it is not a second inference.
 Do not mistake source-preserving audition/remix for a stem export feature. EQ
@@ -722,10 +728,8 @@ so replacing a pathname with same-format media cannot substitute another source.
 
 === DSP crate features
 
-`rivu-dsp::equalizer` groups shared parameters and implementation selection in
-`config`, the recursive processor in `iir::Equalizer`, and the linear-phase
-processor in `fir::FirEqualizer`. Both implementations consume the same
-`config::EqualizerConfig`; `config::EqImplementation` selects between them.
+`rivu-dsp` exposes shared equalizer configuration and validation independently
+of its IIR and linear-phase FIR execution implementations.
 
 Configuration and validation remain available without execution support. The
 default feature set is empty; the optional `execution` feature enables `iir`,
@@ -740,11 +744,9 @@ unification can still enable execution when these crates share a dependency
 graph with an execution consumer. The `equalizer_benchmark` and `denoise_render`
 examples require `--features execution`.
 
-Disabled FIR constructs no FFT plans or convolution storage.
-Active FIR construction shares its frequency grid, inverse design FFT plan and
-scratch, window and impulse workspace across channels of that construction.
-Each channel still evaluates its own target response; the workspace is released
-before streaming and is not a global kernel cache.
+Disabled FIR allocates no FFT plans or convolution storage. Active FIR prepares
+channel-specific responses before streaming, sharing construction workspace
+within that preparation rather than retaining a global kernel cache.
 
 Classical restoration prepares only the required path: exact bypass for zero Wet or an entirely disabled
 chain, time-domain state for hum/repair without spectral denoising, and FFT/STFT

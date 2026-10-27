@@ -10,6 +10,10 @@ saves outlive a window. The playback core owns playback, queue state, global
 configuration, and audio analysis; layout edits must not replace that ownership.
 User operations and file syntax are documented in
 link:01_config.adoc#_layout[Configuration and layout].
+Layout management is a desktop-local surface: select, duplicate, rename and delete
+operate on the session collection; Sync requests persistence. These are GUI
+actions, not `rivu` CLI subcommands or Core IPC commands. Closing Settings is
+required before layout management can proceed.
 
 The first half of this chapter follows the layout lifecycle: tree invariants,
 coordinates, edits, geometry and persistence. <<_instance_preferences_and_visibility>>
@@ -558,39 +562,18 @@ Rivu's composition layer adapts host appearance and localized presentation; its
 cross-feature coordinator arbitrates manual intents and confirmations. Generic
 controls do not absorb those responsibilities or feature-owned models and requests.
 
-Track compositions share the favorite action's icon, tooltip, accessible toggle
-state, and pointer isolation. Owners choose visibility: Playback keeps the action
-visible while track lists reveal it on hover. Feature owners send the command for
-the current track. `rivu_ui::loading::paged_loading_row` supplies list-placeholder presentation
-and exposes explicit retry and full-error copy buttons only while an error is
-displayed. Owners supply `LoadingRowLabels`, error details, text visibility and
-the retry callback, retaining request identity and recovery responsibility.
-Recovery buttons support Tab and Enter/Space, and native accessible activation;
-copying leaves the failed request unchanged. Tree and album placeholders retain
-their specialized layouts. `copyable_message` likewise takes a localized action
-name, exposes the full message as its description and supports keyboard copying.
+Shared track controls provide consistent favorite state, tooltips and pointer
+isolation; feature owners choose visibility and submit commands for the current
+track. Loading rows expose explicit retry and full-error copying with keyboard
+and accessible activation. Copying an error does not retry it. Delayed loading
+text is presentation only: Rivu uses 150 ms, while request identity, physical
+worker slots and recovery stay with feature owners. Tree and album placeholders
+retain their specialized layouts.
 
-`loading::LoadingText` owns only delayed text visibility, with a host-provided
-delay and at most one timer per instance. Its tokens match presentation updates;
-they do not validate query results or release worker slots. Hosts decide when
-waiting begins and when to retain or clear presentation state. Rivu uses 150 ms
-and preserves each feature's existing queueing, hiding and cancellation policy.
-
-`two_line_text` supplies two independently truncated lines without input behavior
-or a tooltip. Both lines use a compact line height of 1.28 times their own font
-size, without an extra inter-line gap; callers do not set leading on the entire
-row. Existing list row heights are retained, leaving the remaining space above
-and below the centered text block. Its primary text color can be overridden on
-the returned element.
-Track numbering, playback markers and selection remain application composition.
-`row_tooltip` can be attached separately and is not gated on measured overflow.
-Recent tracks is a single-line table and uses the shared single-line row height:
-at least 2rem, growing with its text when necessary. It does not reserve the
-two-line list height used by playlist catalog and track entries.
-
-`text_tooltip` captures resolved text and builds the tooltip when opened. Dynamic
-content that must read current input or defer formatting keeps a native tooltip
-builder; neither helper introduces subscriptions or eager data reads.
+Two-line list text truncates each line independently and keeps numbering,
+playback markers and selection in application composition. Recent tracks uses
+single-line rows, at least 2rem high. Tooltips do not introduce data subscriptions;
+content requiring fresh input is resolved when the tooltip opens.
 
 ==== Appearance and semantic controls
 
@@ -609,75 +592,28 @@ rejecting pointer and keyboard activation; business guards still belong to owner
 Rich menu content requires a separate textual name. Decorative `icon` glyphs do
 not create duplicate accessible controls; their owning action supplies the name.
 
-`checkbox` is controlled: the host provides checked/enabled state and receives
-the requested next value. The state owner updates its draft and synchronizes
-dependent controls. Checkbox notifies its owner after an enabled activation,
-as icon switches do. Menu actions and choice callbacks retain owner-managed
-notification; generic activation helpers do not implicitly notify owners.
-Settings retains icon switches and its existing Apply/Discard transaction;
-the shared checkbox does not dictate application presentation. The component
-neither stores configuration nor saves.
+Checkboxes and choices are controlled: the owner supplies current state, accepts
+changes and updates dependent controls. They neither store configuration nor
+save it. Settings retains its Apply/Discard transaction. Visual selection alone
+does not imply a toggle or switch role; semantic state must describe the action.
 
-Button composition uses the base surface, then a visual variant, selected styling
-and finally disabled state. These style decorators are not commutative.
-`active_control` is visual only: the semantic role and checked/selected/value state
-must match the actual operation. `input_aligned_control` opts text buttons and
-select triggers into form geometry. Icon buttons and independent `toggle_button`
-switches use the same centered square glyph slot, growing with configured
-typography and UI scale. Padding and minimum hit areas remain density-specific;
-glyph and state changes do not change a button's width. Standalone controls and
-groups inherit their parent's cross-axis alignment; column compositions opt into
-content width at the callsite instead of forcing top alignment in centered rows.
-Text buttons remain bounded by the parent's available width; overlong labels
-truncate on one line and expose their full text in a tooltip.
-Within each icon-button density, Quiet and Bare retain the Surface hit area.
-Uniform single-line tree rows use compact, typography-scaled height with a floor
-that contains the text line and row borders. Library Tree and List rows share this
-geometry. Their inline icon actions fit inside the row's borders without imposing
-the standalone button's vertical minimum; standalone controls keep their existing
-hit areas. Two-line text gap and line height remain separate from outer row spacing.
+Icon actions keep stable glyph slots and hit areas across state changes, following
+typography and UI scale. Text labels truncate within available width and expose
+their full text through tooltips. Single-line tree actions fit inside row borders;
+standalone controls retain their normal hit areas.
 
-`IconButtonGroup` constructs related actions with one visual style and density;
-it does not own their state or commands. Surface uses the control material,
-Quiet reveals it on hover, and Bare emphasizes the glyph without a hover fill.
-Regular keeps the standard icon-button geometry and group gap; Compact reduces
-horizontal padding and minimum width, retains vertical padding and minimum
-height, and has no group gap. Both follow configured icon typography.
-Groups remain single-line and non-shrinking by default. `wrap()` bounds the group
-to its parent's width and allows reflow without compressing individual buttons.
-Callers own overflow policy: toolbars can wrap, inline list actions stay on one
-line, and playback retains its outer horizontal scroller. Playlist catalog hover
-actions overlay the row, leaving its full text width available while hidden.
-Disabled items reject activation and leave the Tab order while preserving their
-selected appearance; Quiet and Bare do not acquire a disabled border.
-Tab suppression belongs to the rendered disabled item, not its owner's focus
-handle; re-enabling preserves the handle's original Tab participation policy.
-`IconButton::selected` changes appearance only, `toggled` exposes a toggle Button,
-and `switch` exposes a Switch. Standalone items can use the same construction.
-`selected_fill(false)` retains the selected accent and semantic state without a
-selected background. All track-favorite actions use this policy, including the
-Track details surface; filters, switches and playback modes retain their fills.
-`hover_reveal` owns row-hover and descendant-focus visibility on a separate,
-non-Tab-stop container. Child buttons retain their own hover and focus styles.
-`hover_actions` applies that reveal to out-of-flow actions. Its opaque background
-matches the row's selection and pointer-hover state; keyboard-only reveal keeps
-the unhovered row material.
-The reveal container uses descendant-aware `focus_within`, not `in_focus`
-(which styles descendants of a focused ancestor). Focus on a list itself must
-not reveal every row's actions. Checked menu indicators reserve a centered slot
-in both checked and unchecked states so labels and popup widths stay stable.
+Action groups share appearance and density, not state or commands. Owners choose
+overflow: toolbars may wrap, inline actions stay on one line, and Playback retains
+horizontal scrolling. Disabled items reject all activation and leave the Tab
+order without losing their focus identity. Favorite controls show selected accent
+without a selected fill; filters and playback modes keep their fills.
 
-Settings keeps independent configuration switches; only its Apply/Discard footer
-actions form a group.
-
-`IconButton::build_with` customizes a standalone item's geometry or emphasis
-without introducing a second construction path. State and disabled behavior are
-applied by the same builder used by grouped items. Disabled native-activation
-barriers remain intact; the window observes left release in Capture and defers
-gesture finalization until child handlers finish. An unconsumed catalog drag
-re-enters the ordinary validated docking commit; an already-consumed session is
-not committed again. Cleanup also covers a waveform drag whose Preview did not
-acquire a workspace interaction session.
+Row actions appear on row hover or descendant focus, not when the entire list
+gains focus. Hidden overlay actions leave the full text width available. Checked
+menu indicators reserve the same space in either state. Pointer release completes
+gestures only after child handlers: a consumed docking session cannot commit
+twice, and cancellation also cleans up previews that never acquired a workspace
+interaction session.
 
 ==== Editors and choice popups
 
@@ -686,10 +622,8 @@ Text replacement, including IME preedit, invalidates its shaped-text hit-test
 cache. Pointer events arriving before the next paint cannot use offsets from
 the previous text; fresh geometry is published when the new text is painted.
 All editing paths keep single-line text by replacing line breaks with spaces.
-Caret movement and deletion follow extended grapheme boundaries, queried from
-the current offset with the complete text as Unicode context. Text replacement
-plans the resulting string capacity once; preedit shaping uses at most three
-stack-resident runs without retaining a cross-edit boundary cache.
+Caret movement and deletion follow extended grapheme boundaries using the complete
+text as context.
 `InputEvent::Changed` reports both edit origin and whether IME composition is
 active. Preedit is visible but is not a committed
 configuration value; unmarking emits a committed change even when the text is

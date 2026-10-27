@@ -23,36 +23,22 @@ stable embedding SDK. Storage transactions, mutable analysis publication, and
 frontend implementation modules are crate-internal capabilities. External
 clients use the protocol rather than bypassing Core validation through storage.
 
-`rivu-protocol` owns the shared Rust contracts: `model` contains commands,
-queries, and shared snapshots; `response` contains revisions, acknowledgements,
-and sectioned results; `protocol` contains the versioned wire schemas and
-endpoint identity helpers; `transport` contains bounded framing and transport
-deadlines. `AppCommand` and the operation waiting policy are shared without a
-dependency on App or Core. Configuration and the decoder-routing enum come from
-`rivu-format`, with database support disabled; numerical configuration uses
-`rivu-dsp` without its execution feature. These client dependencies do not require
-GPUI, audio execution, PipeWire, SQLite, or FFT execution.
-These are standalone dependency requirements; a workspace consumer can enable
-database or DSP execution features through Cargo feature unification.
+`rivu-protocol` owns commands, queries, snapshots, positional wire schemas, and
+bounded transport. `rivu-client` adds session handling without depending on App
+or Core. Their standalone dependency graph does not require GPUI, audio execution,
+PipeWire, SQLite, or FFT execution; a workspace consumer can enable database or
+DSP execution through Cargo feature unification.
 
 `rivu-client` exposes `ClientSession`, cancellation, instance binding,
 `ClientSession::wait_task(TaskTarget)`, command failure evidence, and the one-shot
 `get_state`, `query`, and `request_ack` helpers. Task waiting returns a task-specific
 `TaskOutcome`; processing, relocation, and scan results keep their own payloads.
 The session API is synchronous and drives its I/O futures on the calling thread;
-async callers must keep it off their executor thread. Both session and one-shot
-`query` consume a `Query`; `request_ack` consumes a value convertible to
-`AppCommand`. Callers clone explicitly only when retaining a request for later use.
-External Rust clients depend on `rivu-client` and `rivu-protocol` directly, not on
-the root application crate. A retained session reuses its socket and framing
-buffers; the package boundary adds no worker, channel, state copy, or
-serialization pass. The GUI still calls Core directly,
-and GUI-only projections and admitted processing-audition state remain in the
-application.
-
-CLI task queries, cancellation, terminal waiting, and task rendering share
-link:../src/cli/tasks.rs[one task-handling module] for scans, relocation, and audio
-processing. Processing settings reads and command translation remain separate.
+async callers must keep it off their executor thread. Requests are owned values;
+callers retain their own copy only when needed. External Rust clients depend on
+`rivu-client` and `rivu-protocol`, not the root application crate. A retained
+session reuses its socket and framing buffers. The GUI calls Core directly and
+keeps its view and audition state inside the application.
 
 === Consumer and application lifetimes
 
@@ -88,13 +74,10 @@ closing a window is not framework teardown or a promise of headless-equivalent m
 
 === Owner execution and retirement
 
-Core waits for events and applies state transitions on one persistent dedicated
-thread. Bounded runtime-neutral async channels carry requests, audio facts,
-processing, scan and relocation events; one-shot channels carry replies and
-export and optimization completion. The owner selects one event per turn with
-randomized selection. IPC and in-process async consumers await the same business
-ports without an ambient runtime. Revision subscriptions coalesce notifications;
-consumers read the current authoritative projection after a wakeup.
+Core applies state transitions on one persistent dedicated thread. Bounded
+channels carry requests and worker facts; replies and revision subscriptions
+wake consumers without polling. Notifications coalesce, so consumers read the
+current authoritative projection after a wakeup rather than replaying events.
 
 Synchronous SQLite writes and their business transitions stay atomic on Core.
 A separate bounded query owner reuses one read connection and prepared statements,
@@ -102,9 +85,6 @@ pins a SQLite snapshot for each request, and validates the captured query scope
 against published Core state. A transition fence prevents a committed database
 change from being read with the preceding publication. Reader count caches follow
 their respective data-domain revisions; maintenance waits for physical snapshot retirement.
-Requests capture shared configuration, query revisions (also used for count-cache
-invalidation), and the shared playlist-entry revision map; playback and task-status
-payloads are not copied into the read queue.
 While waiting for a Query reply, IPC observes peer EOF and shutdown and drops the
 Core reply receiver when the connection retires. Queued reads whose receiver has
 disappeared are skipped before database admission. Revoking a queued read does
@@ -155,11 +135,10 @@ body
 The frame header is six bytes. `body_length` excludes the four-byte length field
 and includes the version, message type, and serialized body.
 
-Bodies use Postcard serialization without COBS framing. The current protocol
-version is `15`; clients and servers must use matching wire schemas. The four-byte
-frame length remains little-endian; body integers follow Postcard's encoding.
-Restart clients and hosts together after upgrading: incompatible versions are
-rejected before decoding the body. There is no compatibility alias or schema
+Bodies use Postcard serialization without COBS framing. The protocol version is
+`7`; both peers must use the same positional wire schemas. The four-byte frame
+length remains little-endian; body integers follow Postcard's encoding.
+Version mismatches are rejected before decoding the body. There is no schema
 negotiation. See <<_wire_schemas,Wire schemas>> for positional fields and adapters.
 
 Request frame content is limited to 4 MiB
@@ -168,10 +147,12 @@ excluding the length prefix. The server accepts at most 16 concurrent clients;
 additional connections receive `IPC server is busy` and close. An unbound client
 has one second to complete each incoming frame while waiting for Hello. After
 binding, each request frame must complete within five seconds of its first byte,
-including frames received while a Query reply is pending. Additional bytes and
-revision updates do not restart that deadline. A late completion cannot make an
-expired frame valid; a completion timeout closes the connection and releases its
-session slot. Normal idle sessions and Watch waits have no inactivity expiry.
+including frames received while a Query reply is pending. The reader's timer wakes
+even if the peer sends nothing further or a full read-ahead buffer prevents more
+reads. Additional bytes and revision updates do not restart that deadline. A late
+completion cannot make an expired frame valid; a completion timeout closes the
+connection and releases its session slot. Normal idle sessions, Watch waits, and
+Query waits with no incomplete following frame have no frame-completion expiry.
 
 Frame limits bound encoded bytes, not decoded heap usage. The current Postcard
 decoder checks string lengths and suppresses collection size hints larger than
@@ -181,15 +162,20 @@ not arbitrary declared lengths. Decoded objects can still exceed the encoded
 size. Recursive types, zero-byte elements, or custom deserializers would require
 reassessing that bound.
 
-An oversized frame prefix closes the connection before its body is consumed.
-Invalid headers, unknown message types, incompatible versions, malformed
+An oversized frame prefix closes the connection as soon as its fourth byte is
+received, before any body is consumed, including fragmented prefixes during a
+Query wait. Reads stop at each prefix and body boundary. Invalid headers, unknown
+message types, incompatible versions, malformed
 Postcard payloads, and trailing payload bytes within the frame limit receive an
 Error response and close that connection; other client sessions remain usable.
 
 Pipelined requests received during a Query wait stay ordered behind its reply.
 Read-ahead is bounded to one maximum request frame plus its length prefix; a full
-buffer applies socket backpressure. Frames completed before their deadline remain
-valid while waiting for earlier replies, even if a following partial frame expires.
+buffer applies socket backpressure without suspending an incomplete tail's timer.
+Frames completed before their deadline wait untimed and remain ordered while
+earlier replies are pending. Framing failures during a Query wait drop the reply
+receiver and close the connection; they do not interrupt the SQL owner or replay
+the query.
 
 IPC uses one Linux abstract Unix stream socket for both communication and
 exclusive data-directory ownership. No `rivu.sock` or `rivu.sock.lock` file is
@@ -294,8 +280,6 @@ Response types:
 
 These numbers are the frame's `message_type` byte, not Postcard enum ordinals
 inside a body. Wire enum variant and field order are part of the binary schema.
-Incompatible schema changes require a new protocol version and coordinated
-client and host updates; there is no obligation to preserve earlier schemas.
 
 === Wire schemas
 
@@ -323,21 +307,15 @@ link:26_migration.adoc#_version_authority[Database and configuration migration].
 Processing task status distinguishes the task `id` from `graph_run_id`, the retained
 graph snapshot accepted by audition and export commands. Export receipts carry
 the source run ID rather than becoming retained audition results or command aliases.
-The current positional schemas, including task completion waiting, require
-protocol version 15 on both peers.
 
 `EditTrack` carries optional title, artist, and album fields. `None` leaves a
 field untouched; `Some("")` explicitly overrides it with empty text. The core
 merges these field intents into the current track rather than replacing it
 with a client snapshot.
 
-The source of truth for exact schemas and adapters is
-link:../crates/rivu-protocol/src/protocol.rs[protocol.rs].
-link:../crates/rivu-protocol/src/transport.rs[Transport tests] cover framing,
-buffer retention, and deadlines; link:../crates/rivu-client/src/lib.rs[client tests]
-cover client transport failures and cancellation. The
-link:../src/ipc/tests.rs[application IPC tests] retain byte-compatibility fixtures,
-session behavior, ownership aliases, and real Core dispatch coverage.
+Exact positional schemas and adapters are defined in
+link:../crates/rivu-protocol/src/protocol.rs[protocol.rs];
+link:../crates/rivu-protocol/src/transport.rs[transport.rs] owns framing and deadlines.
 
 === Request failures and completion
 
@@ -475,14 +453,10 @@ are admitted under the existing save gate. Direct external database writes while
 Rivu runs are unsupported.
 
 Confirmed commits advance affected tokens before any fallible count or view
-refresh; rollback and no-op operations advance none. Creation and deletion publish
-their lifetime/catalog validity before refreshing `playlist_total`. Renames and
-membership edits retain that total without a catalog count read. Playlist maps
-use copy-on-write only when a token or presence changes. Background completion
-applies confirmed commit facts even if later worker retirement fails. Unknown
-outcomes retain the database operation gate until restart, including final saves;
-that isolated completion neither applies prepared views nor reads the database.
-It never authorizes replay or discards confirmed revision changes.
+refresh; rollback and no-op operations advance none. A refresh or worker-retirement
+failure cannot discard confirmed commit facts. Unknown outcomes keep database
+operations and final saves blocked until restart; they authorize neither prepared
+views nor automatic mutation replay.
 
 Playback-statistics writes return count and activity time directly to the Core.
 The bounded track cache and current/recent snapshots receive these scalar changes
@@ -561,10 +535,9 @@ still require their complete query stamp. Metadata reads synchronize playback-fo
 identity before preparing demand. Current transport failures are displayed without
 automatic retry; only stale work or revision-change responses retire for fresh demand.
 
-Playback statistics retain their existing scoped metadata semantics and do not
-advance the bitrate revision. No historical guard carry-forward is needed when
-EOF and final statistics share a publication. The positional wire payload uses
-protocol 13; clients and servers must be upgraded together.
+Playback statistics use the scoped metadata revisions and do not advance the
+bitrate revision. EOF and final statistics share a publication, so their query
+guards refer to that same published state.
 
 Whole-collection transfers carry an album key plus its `album` revision, or a
 playlist ID plus its content/lifetime revision. Destination playlists carry their
@@ -676,9 +649,10 @@ or entry identities, not filtered offsets.
 
 `Albums {query, sort, offset, limit}` returns `Page<AlbumSummary>`;
 `AlbumTracks {key, query, offset, limit}` returns `Page<LibraryRow>`. Both use the
-interactive page limit and carry library-content revisions. An album key is the
-exact effective title plus its immediate parent directory (no trailing slash,
-except `/`). Blank/Unicode-whitespace-only titles are ineligible; explicit empty
+interactive page limit and the Core-owned `album` token, with the bitrate token
+for their track payloads. An album key is the exact effective title plus its
+immediate parent directory (no trailing slash, except `/`).
+Blank/Unicode-whitespace-only titles are ineligible; explicit empty
 overrides remain authoritative, and nonblank keys are not normalized. Artist
 differences do not split an album and child directories never merge. Blank/stale
 keys return empty member pages with total zero.
@@ -720,7 +694,7 @@ subtree independently, even though configured roots must not overlap. Clients ke
 distinct from zero, split larger root sets into bounded requests, and discard
 results when their roots, request generation, or structure revision have changed.
 Library-content-only changes do not invalidate these unfiltered root totals.
-These requests run on the same core owner and revision boundary as other queries;
+These requests use the bounded query owner and Core's revision boundary;
 frontends must not query storage from rendering.
 
 `LibraryRootStats` accepts the same bounded root list and returns one
@@ -751,28 +725,15 @@ rows and revisions for the queue. Entry IDs are globally unique occurrence
 identities, not track identities, and remain stable across moves. Shared storage
 does not transfer playback ownership or merge collection validity tokens.
 
-Queue and playlist positions are contiguous and zero-based. Deletion captures
-removed positions and closes gaps in ascending disjoint original-position
-intervals within the same transaction. Each affected survivor is updated at most
-once; the preceding prefix and a tail-only deletion need no position writes.
-Temporary position storage scales with removed references, not survivors.
-Library deletion compacts the queue and each affected playlist separately.
+Queue and playlist positions are contiguous and zero-based. Deletions close gaps
+inside the same transaction; moves preserve occurrence identities and the current
+selection. Storage work is scoped to affected collections and position ranges,
+but widely scattered moves can touch a list-length span. Business owners retain
+validation, playback effects, and revision publication.
 
-Single and selection moves share interval displacement: only the selection-to-
-destination span is updated, and changed entries are written once. Selected IDs
-and original positions are captured before mutation; queue moves reuse Core's
-existing ID order. Identities and the current occurrence remain stable. Widely
-scattered selections cost more local SQL executions and can touch a list-length
-span, but require no survivor mapping or size/density strategy thresholds.
-Arbitrary permutations such as shuffle use a separate order writer that skips
-unchanged rows, rather than repeated moves.
-
-These operations share scoped storage primitives, not a generic list controller.
-Business owners retain validation, playback effects, transaction ownership, and
-revision publication. Structural queue changes advance content revision once
-inside the changing Store transaction; rollback restores both content and token.
-Metadata invalidation remains field-sensitive, and an already-unique deduplication
-does not invalidate content or projections.
+Structural queue changes advance content revision once inside the changing Store
+transaction; rollback restores both content and token. Metadata invalidation is
+field-sensitive, and an already-unique deduplication changes no revision.
 
 `RemovePlaylistEntries {playlist_id, entry_ids, expected_revision}` removes a
 selection atomically and closes its position gaps. `MovePlaylistEntries
@@ -892,11 +853,9 @@ link:01_config.adoc[Configuration] and link:02_library.adoc[Library].
 === Scanning and metadata ownership
 
 Core owns task admission and retirement; library workers prepare filesystem facts,
-and Store commits database facts. link:../src/library/source.rs[Source preparation]
-is shared by scans and external queue admission: it owns descriptor identity,
-metadata reuse, probing and incremental hashing. Directory traversal, CUE expansion
-and scan coverage remain in `library::scan`; sharing source preparation does not
-apply those scan policies to external queue inputs.
+and Store commits database facts. Scans and external queue admission share source
+identity checks, metadata reuse, probing, and hashing. Directory traversal, CUE
+expansion, and coverage detection apply only to scans.
 
 Scan-backed metadata and user overrides skip unchanged stored values. An override
 equal to the raw value still records editing intent; an omitted field continues
@@ -907,37 +866,22 @@ identities. Successfully validated CUE sheets exempt their subtracks and referen
 whole-file identities; failed sheets grant no exemption. See
 link:02_library.adoc#_minimum_duration_for_new_tracks[Library].
 
-Raw source reuse requires the current probe version (`1`), independently of schema
-and protocol versions; a mismatch reprobes metadata without invalidating the
-fingerprint. Scans obtain cached metadata on demand through task-ID-tagged Core
-events of at most 32 admitted source paths, not a whole-library startup snapshot.
-Each exact-path lookup decodes at most one identity, preferring ordinary files to
-CUE segments. Only unchanged ordinary identities authorize full-source probe
-reuse; CUE identities can supply fingerprints. New/retargeted CUE sheets may use
-sources outside the scanned subtree but within configured roots. Up to 32 sheets
-are prepared together, and shared sources reuse one result or error per scan.
-Force scans bypass reuse.
+Source reuse requires the current probe version, independently of schema and
+protocol versions; a mismatch reprobes metadata without invalidating the
+fingerprint. Metadata lookups and CUE preparation use batches of at most 32
+sources/sheets rather than a whole-library snapshot. Unchanged ordinary identities
+authorize full-source reuse; CUE identities can supply fingerprints. Shared CUE
+sources reuse preparation within the scan and may lie outside the scanned subtree
+but must remain within configured roots. Force scans bypass reuse.
 
-Preparation keeps whole-file source snapshots separate from CUE subtracks.
-Both sheet scans and Other checks stage subtracks through the same borrowed
-metadata view, sharing source facts instead of copying them per subtrack.
-Sheet scans retain parsed-sheet metadata; Other checks retain registered raw
-labels, track/disc numbers, release dates and bounds without reopening the sheet.
+Task identity and cancellation are checked before each batch. Submission and reply
+waits wake on cancellation without holding a blocking-pool slot. Stale tasks cannot
+obtain metadata or commit for a replacement scan.
 
-Task identity and cancellation are checked before each batch. Submission and
-reply waits wake on cancellation without polling or holding a blocking-pool slot;
-at most 32 source descriptors survive a lookup. Owner round trips and reply
-channels are per bounded batch, while indexed reads remain per encountered source,
-not unrelated library row. Stale task IDs cannot obtain metadata or commit for a
-replacement scan.
-
-Merge-local indexes use fingerprint, segment number and frame bounds to find
-relocations and check each eligible old CUE sheet's absence once. Exact identity
-wins; multiple compatible old identities stay ambiguous, and only `NotFound`
-permits relocation. Incomplete scans disable relocation and missing detection,
-so they omit global fingerprint candidates while retaining exact input identities.
-Complete scans retain scope-external missing-source discovery. Fingerprints are
-validated before commit; these indexes are not persistent probe caches.
+Relocation matching uses fingerprint and CUE segment identity. Exact identity wins;
+multiple compatible candidates remain ambiguous, and only a confirmed missing
+source permits relocation. Incomplete scans disable relocation and missing
+detection. Fingerprints are validated before commit.
 
 `CheckOtherTracks {force}` checks only registered sources outside current roots,
 or all registered sources with no roots. It does not discover, relocate, or delete
@@ -1010,6 +954,14 @@ projection is refreshed once. If reading IDs fails, the previous queue and
 navigation snapshots remain intact. A projection error reports the committed
 deletion without rollback or preventing other domains from refreshing.
 
+Queue consumers recover stale IDs before using occurrence order, insertion
+boundaries, or navigation history. Recovery reloads IDs, prunes removed history
+entries and reconciles its cursor, then refreshes queue/current-track projections.
+The queue becomes ready only when all required refreshes succeed; a later consumer
+retries an incomplete recovery. Existing playback Pause and Stop do not require
+queue recovery. External admission repeats the readiness and insertion-baseline
+check before authorizing Saving, since preparation can outlive queue changes.
+
 Count-only pages omit row projection; queue/playlist totals do not join metadata.
 Unfiltered entry pages seek contiguous positions, and playlist totals use the
 indexed maximum position. Filtered random-access pages count and skip matches in
@@ -1021,40 +973,26 @@ to continue. A stable traversal searches each interval at most twice plus indexe
 keyset seeks, rather than recounting every preceding prefix. No retained SQLite
 snapshot, per-client map, or full-list cache is introduced.
 
-Directory/root queries use BINARY component ranges: a normalized nonempty prefix
-ends in `/`; replacing that delimiter with `0` gives the exclusive upper bound.
-The unique expression index `tracks_path` uses
-`(path, CASE WHEN cue_sheet IS NULL THEN 0 ELSE NULL END)`. Ordinary identities
-have key `(path, 0)`, enforcing one whole-file track per path; CUE identities
-have a NULL second key and can share the source path. The separate `tracks_cue`
-index enforces sheet/track-number identity. Path-range queries cover both kinds
-without altering literal characters, case, or Unicode; ordinary source lookups
-match the expression's zero key directly. Equivalent normalized root prefixes
-are counted once, then expanded to input order with request-local state bounded
-by 256 roots.
-Directory pages derive one temporary child relation for exact count and ordered
-page selection; track payloads join only for selected track children. Its size
-follows matching children, not page limit. Count-only requests avoid that relation;
+Directory/root queries use indexed, case-sensitive component ranges, preserving
+literal path characters and Unicode. Storage enforces one ordinary whole-file
+identity per path while allowing CUE segments to share their source. Equivalent
+root ranges are counted once and expanded to the requested order, bounded by
+256 roots.
+
+Directory pages count and select children before projecting track payloads.
+Temporary work scales with matching children; count-only requests omit it, and
 empty/out-of-range pages still report exact totals. OFFSET traversal retains its
-preceding-match cost. Exact filtered-track and duplicate-group count retention is
-described in link:22_cache.adoc#_core_owned_lookup_retention[Core lookup retention].
+preceding-match cost. Count retention is described under
+link:22_cache.adoc#_core_owned_lookup_retention[Core lookup retention].
 
-Album summaries and member-artist reference counts are persistent SQLite
-projections, maintained by triggers in the same transaction as track changes,
-including rollback and other-connection writes. Effective grouping changes
-transfer membership; artist-only changes transfer artist counts without replacing
-the album row or member count. Unchanged effective values do no summary work.
-Indexed counters avoid rescanning an album per changed member; the ordered member
-index supplies representatives and member ranges. This trades summary/index
-storage and write maintenance for cheaper reads; substring search and OFFSET
-still scale with matching summaries. Only schema version 2 is supported; other
-or unversioned databases are rejected without migration, reset, or deletion.
-Fresh databases create these summaries and triggers directly.
-
-Playlist reverse-reference lookup uses `(track_id,playlist_id)`, avoiding unrelated
-entries for sparse library deletion. Excluding position requires table lookups
-when capturing removed positions but avoids rewriting that reverse index during
-every move/compaction; it favors the complete mutation cost over dense capture alone.
+Album summaries and artist counts are persistent SQLite projections maintained
+in the same transaction as track changes. Unchanged effective metadata does no
+summary work. Indexed membership avoids rescanning an album per changed member;
+substring search and OFFSET still scale with matching summaries. Reverse-reference
+indexes keep sparse library deletion scoped to affected queue/playlist entries.
+These indexes trade storage and write maintenance for scoped lookup work.
+Database format validation is described in
+link:26_migration.adoc#_version_authority[Database and configuration migration].
 
 === Background commits and maintenance
 
@@ -1240,8 +1178,9 @@ Realtime tasks are `complete` when live-ready, without cached files; a nonplayin
 source opens paused/live-ready and cannot replace newer playback intent. Planning
 and execution algorithms belong to link:27_audio_processing.adoc[Audio processing].
 
-`ProcessingGraphAudition { id, node: {node,port} }` selects retained PCM directly,
-or queues a new preparation task using the frozen snapshot when that output has
+`ProcessingGraphAudition { id, node: {node,port} }` takes the retained `graph_run_id`,
+not an export task ID. It selects retained PCM directly, or queues a new preparation
+task using the frozen snapshot when that output has
 no cache. `ProcessingGraphExport { id, node: {node,port}, path }` starts a distinct,
 cancellable offline task using that same graph and original source. Existing
 cached PCM is copied without re-decoding or running DSP again; an unrendered port

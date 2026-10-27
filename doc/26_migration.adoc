@@ -10,18 +10,17 @@ execution boundary. The separate <<_future_historical_conversion>> and
 additional supported inputs or startup behavior.
 Operational commands belong in
 link:02_library.adoc#_sqlite_maintenance[SQLite maintenance] and
-link:01_config.adoc#_configuration_upgrades[Configuration upgrades].
+link:01_config.adoc#_saving_configuration[Saving configuration].
 
 === Current implementation
 
 The database format is `2`; the independent configuration schema is `1`.
 
 * `rivu-migrate check` validates existing current configuration and database formats.
-* `rivu-migrate apply` repeats validation under offline ownership. The current
-  release baseline has no migration steps, so current resources are left unchanged
-  and no backup is created.
-* Populated databases with missing or noncurrent format metadata are rejected,
-  not upgraded or reset. No historical conversion is implemented.
+* `rivu-migrate apply` repeats validation under offline ownership. No registered
+  conversion steps are available: current resources are left unchanged and no
+  backup is created.
+* Populated databases with missing or noncurrent format metadata are rejected.
   A valid configuration without an explicit version is current and left untouched.
 
 
@@ -120,9 +119,9 @@ version failures. Explicit noncurrent versions are rejected before decoding
 current fields; no decoder guessing or historical aliases are allowed.
 
 The current migration tool validates configuration without conversion, backups,
-writer locks, or replacement. `format_version` is not an alias. User-facing loading,
-saving and upgrade guidance is authoritative in
-link:01_config.adoc#_configuration_upgrades[Configuration upgrades].
+writer locks, or replacement. `format_version` is not an alias. Configuration
+loading and persistence behavior is described in
+link:01_config.adoc#_saving_configuration[Saving configuration].
 
 == Persistent summaries and runtime authority
 
@@ -199,6 +198,12 @@ escapes do not change literal filesystem paths; help and version output retain
 their normal formatting.
 
 == Apply protocol
+
+The supported `apply` command acquires ownership and validates the selected
+resources, then returns without mutation. The database-change execution helper
+`apply_database_change` implements the backup/transaction protocol below for a
+supplied change; it is not a CLI option or a registered format conversion.
+Configuration is read-only in both paths.
 
 . Acquire data-directory ownership and select the fixed targets.
 . Reinspect versions, database structure, and readability; strictly validate existing

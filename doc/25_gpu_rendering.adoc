@@ -181,8 +181,8 @@ Admission reserves the complete slab together with any new immutable data and pa
 
 === Different consumers and interface extraction
 
-The vendor interface now covers numerical fields and existing path coloring,
-alongside rectangles, without introducing application analysis or style state.
+The vendor interface covers numerical fields, existing path coloring and
+rectangles without introducing application analysis or style state.
 Fields use explicit linear or logarithmic scalar-to-palette mapping. Coordinates
 use `uv * extent - 0.5` and clamp neighboring indices; empty extents emit no draw,
 and one-cell dimensions repeat their only sample. Ordinary fields map nonfinite
@@ -192,19 +192,17 @@ under <<_internal_led_vertical_slice>>.
 Each neighbor selects `floor(coordinate * (palette_length - 1) + 0.5)` before
 straight RGBA interpolation. Moving coloring into the shader does not eliminate
 its cost: enlarged or static draws still evaluate four mappings per output fragment.
-The field upload remains four bytes per source cell, just like the old BGRA image;
-the intended benefit is removing CPU recoloring, not automatically reducing bytes.
+Field upload uses four bytes per source cell. Shader coloring avoids CPU
+recoloring; it does not by itself reduce upload size or fragment work.
 
 Paths reuse existing tessellated vertices and coverage coordinates, not a filled
 bounding rectangle. Their original bounds map into the recorded placement bounds;
 the palette spans those full bounds, independently of clipping. Embedded path
 color, texture, order and content mask do not override the material or scene
 placement. Palette ownership is shared; path geometry remains immutable.
-These Paths share the local multisample scratch described below; they do not
-restore the old palette-image API or require a separate offscreen attachment.
-
-The migrated consumers' colored-image intermediates and application-specific
-image-retirement queues are removed. Artwork remains an image consumer.
+These Paths share the local multisample scratch described below rather than
+owning a separate offscreen attachment. Numerical consumers use the renderer's
+publication lifecycle; artwork keeps its independent image lifecycle.
 
 === Shared local multisample scratch
 

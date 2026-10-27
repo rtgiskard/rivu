@@ -16,6 +16,14 @@ Volume uses a dB-linear control curve rather than linear amplitude: 0% mutes,
 change the level by five percentage points (3 dB away from mute). See
 link:01_config.adoc#volume[Volume configuration] for fractional values.
 
+`playback play` resumes a paused decoder. When stopped, it opens the selected
+queue occurrence from the beginning, or the first occurrence if none is selected;
+an empty queue is an error. Stop resets the position to zero but retains queue
+selection. Pause only changes playing playback; it does not select or open a
+track while stopped. These controls are dispatched by
+link:../src/cli/mod.rs[the CLI] and executed by
+link:../src/core/command.rs[core transport commands].
+
 Keyboard volume steps, repeat cycling, and shuffle toggles are applied in order
 against the core's current state, so rapid repeated inputs accumulate even before
 the next display update. The Playback panel's repeat/shuffle buttons and slider
@@ -79,6 +87,10 @@ Listening statistics use confirmed heard time; see link:02_library.adoc[Library]
 
 Pausing lets already submitted audio finish, then makes the output stream inactive.
 Unread audio is retained for resume; paused wall time does not advance playback.
+The displayed Paused state records the accepted intent, not an instantaneous
+hardware mute. Late heard-audio confirmations can still update statistics, with
+activity timestamps bounded by the pause boundary; see
+link:../src/core/playback.rs[playback lifecycle and accounting].
 
 == Queue
 
@@ -89,6 +101,15 @@ library database. Restart preserves occurrence identities, duplicates, and order
 clearing the queue does not reuse occurrence IDs. Later scans do not automatically
 append newly discovered tracks. Removing library tracks removes their queue and
 playlist references in the same database transaction.
+
+Restoring the queue does not resume audio: startup restores the selected
+occurrence and its track metadata in Stopped state, at position zero, without
+opening its decoder. Playback position, playing/paused status, and shuffle
+navigation history are not saved. Use Play explicitly to start the selected
+occurrence from its beginning. Queue mutations save as they execute; they do not
+wait for Settings Apply, layout sync, or window close. The implementation is in
+link:../src/core.rs[initial-state loading] and
+link:../src/core/queue.rs[queue persistence and refresh].
 
 Desktop Queue rows use the shared
 link:02_library.adoc#_track_information[track information and hover rules].
@@ -135,6 +156,10 @@ have registered files and inserted occurrences, for example when some input file
 were skipped or a refresh failed after commit. Inspect its result and the queue
 before retrying: replaying a committed addition creates more occurrences.
 
+Queue state is checked again when prepared files enter Saving, including after
+a concurrent track deletion. If the committed queue cannot be read, no external
+files are registered or inserted by that attempt.
+
 === Queue controls
 
 The Queue panel displays occurrences in order and marks the current occurrence.
@@ -147,6 +172,12 @@ the visible occurrences without changing playback order. Selection actions apply
 to the matching occurrences; repeated tracks remain distinct queue entries.
 Background refreshes preserve the browsing position with or without a search
 filter; a shorter result set clamps scrolling only when its new total arrives.
+
+After a track deletion commits but refreshing Queue fails, actions that select
+or reorder occurrences retry the committed queue refresh before using it. This
+also applies to automatic next-track selection and processing-graph audition.
+The refresh removes deleted occurrences from shuffle history without restarting
+the current audio source; Pause and Stop remain independent controls.
 
 Use the crosshair button (*Locate playing entry in Queue*) in the Queue toolbar
 or beside the Playback title to scroll to the current occurrence and briefly
@@ -294,51 +325,20 @@ decoder and are converted in bounded fragments, preserving all samples and seek
 timestamps. This bounds Rivu's conversion work, not the codec's internal memory
 or the duration of a decode call.
 
-Native and FFmpeg Matroska/WebM Vorbis decoding share timestamp normalization
-before exposing PCM to playback, waveform generation or analysis.
-The startup probe retains at most 64 selected-track packets and 256 KiB of PCM;
-it requires two timestamp transitions that distinguish the conventions within
-the container's timestamp precision. The initial discarded overlap packet can
-anchor a transition but cannot select a convention alone. Conflicting evidence,
-an exhausted probe budget or early EOF retains start-stamp semantics.
-Initial selections beyond preroll resolve this same bounded probe at the stream
-origin before seeking, so a steady-size late packet region cannot change the
-chosen convention. Probe PCM is not published for that deferred selection;
-opening controls can replace the pending seek or cancel the opening.
-End stamps are converted using the represented sample count before codec trims,
-then leading trim is applied. The selected convention survives seeks; buffered
-startup audio does not. Later gaps and overlaps remain discontinuities, including
-an inconsistent final timestamp. This is not general timestamp repair and does
-not enlarge analysis or waveform gap tolerances.
+Native and FFmpeg Matroska/WebM Vorbis decoding normalize timestamps before
+publishing audio to playback, waveform, or analysis. Detection uses a bounded
+origin probe (at most 64 selected-track packets and 256 KiB of PCM); ambiguous
+input retains start-stamp interpretation. The chosen interpretation survives
+seeks. Container gaps and overlaps remain discontinuities rather than being
+silently repaired. Decoder priming is not published as newly played audio.
 
-PCM delivery has a separate frame-count position and explicit discontinuity
-marker. Media timestamps drive seek/crop and waveform placement, not tap FIFO
-alignment or repeated FFT continuity guesses. Seek switches the PCM traversal
-only after the source accepts it; decoder priming is never published as new audio.
-Matroska packet timestamps and trims use nanoseconds so signed DiscardPadding
-is applied at the first/last laced frame boundary without losing sub-tick padding.
-Trim durations are converted to the nearest decoded sample; continuity tolerance
-still reflects the original container timestamp precision.
-`BlockDuration` may already describe the trimmed presentation span; it is not
-an upper bound on `DiscardPadding` and is not trimmed a second time.
-
-FFmpeg receives the stream packet timebase so automatic codec trims also move
-decoded-frame timestamps. Preroll that reaches the origin reopens the held file
-object to restore initial codec skip/overlap state rather than synthesizing PCM.
-
-Before a duration-guided initial FFmpeg seek, opening validates real origin PCM
-without publishing it as selection audio. The whole-source duration is only a
-soft seek anchor, not an EOF boundary or the CUE segment duration. Unknown-duration
-selections decode forward from origin. If the demuxer refuses seeking with
-`EPERM` or `ENOSYS`, Rivu reopens the held file object and decodes forward instead;
-other seek errors propagate. Opening work remains bounded per round and
-cancellable, but reaching a distant target may require reading to real EOF.
-A valid source exhausted by its selection returns EOF; a source with no
-decodable PCM still fails opening.
-
-Seekable native Matroska sources support backward seeks with or without Cues,
-including after EOF. A successful seek discards queued old packets; a rejected
-seek restores pending laced frames. Unseekable sources retain forward-only scanning.
+Opening a selection can require decoding forward from the source origin when
+duration is unknown or seeking is unavailable. The work remains cancellable,
+but reaching a distant target can require reading to actual EOF. Estimated
+whole-source duration is only a seek aid, never a playback cutoff. A valid source
+exhausted by its selection returns EOF; a source with no decodable PCM fails
+opening. Seekable native Matroska supports backward seeking, including after EOF;
+unseekable sources retain forward-only scanning.
 
 
 == Optional FFmpeg decoder
