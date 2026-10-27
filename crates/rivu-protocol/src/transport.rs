@@ -88,6 +88,9 @@ pub fn decode_request_frame(bytes: &[u8]) -> Result<WireRequest> {
             WireRequest::Command(decode_body(body, "Decoding IPC command request")?)
         }
         RequestType::Watch => WireRequest::Watch(decode_body(body, "Decoding IPC watch request")?),
+        RequestType::WaitTask => {
+            WireRequest::WaitTask(decode_body(body, "Decoding IPC task wait request")?)
+        }
     };
     Ok(request)
 }
@@ -109,6 +112,7 @@ pub fn decode_response_frame(bytes: &[u8]) -> Result<WireResponse> {
         ResponseType::Watch => {
             WireResponse::Watch(decode_body(body, "Decoding IPC watch response")?)
         }
+        ResponseType::Task => WireResponse::Task(decode_body(body, "Decoding IPC task response")?),
         ResponseType::Error => {
             WireResponse::Error(decode_body(body, "Decoding IPC error response")?)
         }
@@ -179,6 +183,7 @@ pub fn encode_request_frame_into(request: &WireRequest, bytes: &mut Vec<u8>) -> 
         WireRequest::Query(value) => writer.encode(RequestType::Query as u8, value),
         WireRequest::Command(value) => writer.encode(RequestType::Command as u8, value),
         WireRequest::Watch(value) => writer.encode(RequestType::Watch as u8, value),
+        WireRequest::WaitTask(value) => writer.encode(RequestType::WaitTask as u8, value),
     }
 }
 
@@ -193,6 +198,7 @@ pub fn encode_response_frame_into(response: &WireResponse, bytes: &mut Vec<u8>) 
         WireResponse::Query(value) => writer.encode(ResponseType::Query as u8, value),
         WireResponse::Ack(value) => writer.encode(ResponseType::Ack as u8, value),
         WireResponse::Watch(value) => writer.encode(ResponseType::Watch as u8, value),
+        WireResponse::Task(value) => writer.encode(ResponseType::Task as u8, value),
         WireResponse::Error(value) => writer.encode(ResponseType::Error as u8, value),
     }
 }

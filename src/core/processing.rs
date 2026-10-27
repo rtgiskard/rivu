@@ -297,6 +297,9 @@ impl Core {
             for result in &mut self.processing.results {
                 stop_status(&mut result.status);
             }
+            if !active {
+                self.task_completed(TaskTarget::Processing { id });
+            }
         }
         Ok(())
     }
@@ -481,21 +484,72 @@ impl Core {
         Ok(())
     }
     pub(in crate::core) fn processing_status(&self, id: u64) -> Option<ProcessingTaskStatus> {
+        self.processing_status_ref(id).cloned()
+    }
+
+    pub(in crate::core) fn processing_status_ref(&self, id: u64) -> Option<&ProcessingTaskStatus> {
         self.state
             .system
             .processing
             .as_ref()
-            .filter(|s| s.id == id)
-            .cloned()
-            .or_else(|| self.processing_results.iter().find(|s| s.id == id).cloned())
+            .filter(|status| status.id == id)
+            .or_else(|| {
+                self.processing_results
+                    .iter()
+                    .find(|status| status.id == id)
+            })
             .or_else(|| {
                 self.processing
                     .results
                     .iter()
-                    .find(|r| r.status.id == id)
-                    .map(|r| r.status.clone())
+                    .find(|result| result.status.id == id)
+                    .map(|result| &result.status)
             })
     }
+
+    fn retain_processing_terminal(&mut self, id: u64) {
+        let Some(status) = self.state.system.processing.as_ref().filter(|s| s.id == id) else {
+            return;
+        };
+        if let Some(result) = self
+            .processing
+            .results
+            .iter_mut()
+            .find(|r| r.status.id == id)
+        {
+            // Mix changes the task outcome, not the frozen processing recipe or
+            // the identity of the retained source/stem/graph outputs.
+            result.status.phase = status.phase;
+            result.status.error.clone_from(&status.error);
+        }
+        if let Some(retained) = self.processing_results.iter_mut().find(|s| s.id == id) {
+            retained.clone_from(status);
+        } else {
+            self.processing_results.push_back(status.clone());
+            while self.processing_results.len() > MAX_RETAINED_SCAN_RESULTS {
+                self.processing_results.pop_front();
+            }
+        }
+    }
+
+    pub(in crate::core) fn shutdown_processing(&mut self) {
+        let active = self.processing.active.as_ref().map(|task| task.id);
+        self.processing.shutdown();
+        if let Some(id) = active {
+            let retains_audio = self.processing.results.iter().any(|r| r.status.id == id);
+            if let Some(status) = self.state.system.processing.as_mut().filter(|s| s.id == id) {
+                status.phase = ProcessingPhase::Cancelled;
+                status.error = Some("Processing cancelled during shutdown".into());
+                if !retains_audio {
+                    status.outputs = None;
+                    status.graph_outputs.clear();
+                }
+            }
+            self.retain_processing_terminal(id);
+            self.task_completed(TaskTarget::Processing { id });
+        }
+    }
+
     fn admit_processing_result(
         &self,
         result: &crate::processing::ProcessingResult,
@@ -725,15 +779,6 @@ impl Core {
                                     status.phase = ProcessingPhase::Failed;
                                     status.error = Some(error.clone());
                                 }
-                                if let Some(result) = self
-                                    .processing
-                                    .results
-                                    .iter_mut()
-                                    .find(|r| r.status.id == id)
-                                {
-                                    result.status.phase = ProcessingPhase::Failed;
-                                    result.status.error = Some(error);
-                                }
                             }
                         }
                     }
@@ -759,12 +804,8 @@ impl Core {
                         }
                     }
                 }
-                if let Some(status) = self.state.system.processing.as_ref() {
-                    self.processing_results.push_back(status.clone());
-                    while self.processing_results.len() > 32 {
-                        self.processing_results.pop_front();
-                    }
-                }
+                self.retain_processing_terminal(id);
+                self.task_completed(TaskTarget::Processing { id });
             }
             Event::MixFinished {
                 id,
@@ -857,6 +898,8 @@ impl Core {
                 {
                     self.state.system.last_error = Some(format!("{error:#}"));
                 }
+                self.retain_processing_terminal(id);
+                self.task_completed(TaskTarget::Processing { id });
             }
             Event::ReadyToPublish { .. } => unreachable!("normalized before dispatch"),
         }

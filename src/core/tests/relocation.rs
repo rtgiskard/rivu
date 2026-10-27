@@ -372,3 +372,65 @@ fn cancellation_keeps_relocation_admission_until_the_async_worker_retires() {
         RelocationPhase::Completed
     );
 }
+
+#[test]
+fn relocation_waits_for_owner_commit_on_success_failure_cancellation_and_shutdown() {
+    for expected in [
+        RelocationPhase::Completed,
+        RelocationPhase::Failed,
+        RelocationPhase::Cancelled,
+    ] {
+        for shutdown in [false, true] {
+            if shutdown && expected != RelocationPhase::Cancelled {
+                continue;
+            }
+            let (_directory, mut core, source, target) = relocation_fixture();
+            core.relocate_track(source, target).unwrap();
+            let id = core.active_relocation.as_ref().unwrap().status.id;
+            let event = receive_relocation(&mut core);
+            let (handle, requests) = task_wait::wait_handle(&core);
+            let mut wait = Box::pin(handle.wait_task(TaskTarget::Relocation { id }));
+            assert!(wait.as_mut().now_or_never().is_none());
+            core.business_event(dispatch::BusinessEvent::Request(
+                requests.try_recv().unwrap(),
+            ));
+            assert!(wait.as_mut().now_or_never().is_none());
+            match expected {
+                RelocationPhase::Failed => {
+                    std::fs::write(core.track(target).unwrap().path, b"changed target").unwrap();
+                }
+                RelocationPhase::Cancelled => core.cancel_relocation(id).unwrap(),
+                _ => {}
+            }
+            if shutdown {
+                core.shutdown_relocation();
+                assert!(wait.as_mut().now_or_never().is_none());
+                core.publish();
+            } else {
+                core.relocation_event(event);
+            }
+            let TaskOutcome::Relocation(status) = futures::executor::block_on(wait).unwrap() else {
+                panic!("Expected relocation outcome");
+            };
+            assert_eq!(status.id, id);
+            assert_eq!(status.phase, expected);
+            assert_eq!(
+                core.shared
+                    .read()
+                    .system
+                    .relocation_task
+                    .as_ref()
+                    .unwrap()
+                    .phase,
+                expected
+            );
+            let mut retained = Box::pin(handle.wait_task(TaskTarget::Relocation { id }));
+            assert!(retained.as_mut().now_or_never().is_none());
+            core.business_event(dispatch::BusinessEvent::Request(
+                requests.try_recv().unwrap(),
+            ));
+            assert!(matches!(retained.as_mut().now_or_never(),
+                Some(Ok(TaskOutcome::Relocation(status))) if status.phase == expected));
+        }
+    }
+}

@@ -355,6 +355,11 @@ impl Service {
                     result: Ok(result), ..
                 }
                 | Event::ReadyToPublish { result, .. } => self.retire(result),
+                Event::MixFinished {
+                    result: Ok(path), ..
+                } => {
+                    let _ = fs::remove_file(path);
+                }
                 _ => {}
             }
         }

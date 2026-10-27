@@ -25,7 +25,7 @@ use rivu_protocol::{
     model::*,
     response::{
         Ack, AckStatus, PlaybackSnapshot, QueryError, QueryResponse, QueryRevisions, StateResponse,
-        StateRevisions, StateSections, ViewResponse,
+        StateRevisions, StateSections, TaskOutcome, ViewResponse,
     },
 };
 use std::{
@@ -40,6 +40,9 @@ mod query_worker;
 
 mod query_epoch;
 pub(crate) use query_epoch::{QueryEpoch, QueryTicket};
+
+mod task_wait;
+use task_wait::TaskWaiters;
 
 use rivu_protocol::{ADMISSION_TIMEOUT, REPLY_TIMEOUT, command_reply_timeout};
 
@@ -85,6 +88,10 @@ enum Operation {
     WaveformSnapshot(
         oneshot::Sender<std::result::Result<Option<audio::WaveformScanSnapshot>, String>>,
     ),
+    WaitTask {
+        target: TaskTarget,
+        registration: u64,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -200,6 +207,7 @@ pub struct CoreHandle {
     workers: Arc<BlockingPool>,
     revision_updates: Arc<RwLock<Vec<mpsc::Sender<()>>>>,
     wakeup: Arc<RwLock<Option<Wakeup>>>,
+    task_waiters: Arc<Mutex<TaskWaiters>>,
     // Window-scoped: cloning a GUI handle must not change IPC/CLI query policy.
     query_timeout: Option<QueryTimeout>,
     #[cfg(test)]
@@ -688,6 +696,7 @@ impl Runtime {
         };
         *shared.write() = initial.clone();
         let revision_updates = Arc::new(RwLock::new(Vec::new()));
+        let task_waiters = Arc::new(Mutex::new(TaskWaiters::default()));
         let handle = CoreHandle {
             state: shared.clone(),
             analysis: engine.analysis.clone(),
@@ -698,6 +707,7 @@ impl Runtime {
             workers: Arc::clone(&tasks.workers),
             revision_updates: Arc::clone(&revision_updates),
             wakeup: wakeup.clone(),
+            task_waiters: Arc::clone(&task_waiters),
             query_timeout: None,
             #[cfg(test)]
             _test_tasks: None,
@@ -715,6 +725,8 @@ impl Runtime {
             state: initial,
             shared,
             wakeup,
+            task_waiters,
+            task_completions_pending: false,
             generation: 0,
             output_settings_request: 0,
             next_playlist_token: 0,
@@ -887,6 +899,8 @@ struct Core {
     state: CoreState,
     shared: Arc<RwLock<CoreState>>,
     wakeup: Arc<RwLock<Option<Wakeup>>>,
+    task_waiters: Arc<Mutex<TaskWaiters>>,
+    task_completions_pending: bool,
     generation: u64,
     output_settings_request: u64,
     next_playlist_token: u64,
@@ -930,6 +944,7 @@ impl Drop for Core {
     fn drop(&mut self) {
         // Runs on the dedicated Core owner (or a synchronous test owner),
         // including unwind. Cancellation is intent, never retirement.
+        self.close_task_waiters();
         if let Some(reads) = &self.read_queries {
             reads.fence.transition().finish(true);
         }

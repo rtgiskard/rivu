@@ -7,11 +7,11 @@ use rivu::i18n::Localizer;
 use rivu_protocol::{
     model::{
         Command, ProcessingPhase, ProcessingTaskStatus, Query, RelocationPhase,
-        RelocationTaskStatus, ScanPhase, ScanTaskStatus,
+        RelocationTaskStatus, ScanPhase, ScanTaskStatus, TaskTarget,
     },
-    response::ViewResponse,
+    response::{TaskOutcome, ViewResponse},
 };
-use std::{path::Path, thread, time::Duration};
+use std::path::Path;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct TaskReference {
@@ -285,16 +285,13 @@ pub(super) fn wait_scan(
     id: u64,
     json: bool,
 ) -> Result<()> {
-    loop {
-        let task = scan_status(session, id)?;
-        match task.progress.phase {
-            ScanPhase::Completed => return emit_scan(i18n, instance_id(session)?, &task, json),
-            ScanPhase::Failed | ScanPhase::Cancelled => {
-                emit_scan(i18n, instance_id(session)?, &task, json)?;
-                bail!("{}", task.error.as_deref().unwrap_or(&task.message));
-            }
-            _ => thread::sleep(Duration::from_millis(200)),
-        }
+    let TaskOutcome::Scan(task) = session.wait_task(TaskTarget::Scan { id })? else {
+        bail!("IPC returned an unexpected task outcome");
+    };
+    emit_scan(i18n, instance_id(session)?, &task, json)?;
+    match task.progress.phase {
+        ScanPhase::Completed => Ok(()),
+        _ => bail!("{}", task.error.as_deref().unwrap_or(&task.message)),
     }
 }
 
@@ -304,21 +301,16 @@ pub(super) fn wait_relocation(
     id: u64,
     json: bool,
 ) -> Result<()> {
-    loop {
-        let task = relocation_status(session, id)?;
-        match task.phase {
-            RelocationPhase::Verifying => thread::sleep(Duration::from_millis(200)),
-            RelocationPhase::Completed => {
-                return emit_relocation(i18n, instance_id(session)?, &task, json);
-            }
-            RelocationPhase::Failed | RelocationPhase::Cancelled => {
-                emit_relocation(i18n, instance_id(session)?, &task, json)?;
-                bail!(
-                    "{}",
-                    task.error.as_deref().unwrap_or("Relocation cancelled")
-                );
-            }
-        }
+    let TaskOutcome::Relocation(task) = session.wait_task(TaskTarget::Relocation { id })? else {
+        bail!("IPC returned an unexpected task outcome");
+    };
+    emit_relocation(i18n, instance_id(session)?, &task, json)?;
+    match task.phase {
+        RelocationPhase::Completed => Ok(()),
+        _ => bail!(
+            "{}",
+            task.error.as_deref().unwrap_or("Relocation cancelled")
+        ),
     }
 }
 
@@ -328,19 +320,16 @@ pub(super) fn wait_processing(
     id: u64,
     json: bool,
 ) -> Result<()> {
-    loop {
-        let task = processing_status(session, id)?;
-        if task.phase.is_terminal() {
-            emit_processing(i18n, instance_id(session)?, &task, json)?;
-            return match task.phase {
-                ProcessingPhase::Complete => Ok(()),
-                _ => bail!(
-                    "{}",
-                    task.error.as_deref().unwrap_or("Processing cancelled")
-                ),
-            };
-        }
-        thread::sleep(Duration::from_millis(150));
+    let TaskOutcome::Processing(task) = session.wait_task(TaskTarget::Processing { id })? else {
+        bail!("IPC returned an unexpected task outcome");
+    };
+    emit_processing(i18n, instance_id(session)?, &task, json)?;
+    match task.phase {
+        ProcessingPhase::Complete => Ok(()),
+        _ => bail!(
+            "{}",
+            task.error.as_deref().unwrap_or("Processing cancelled")
+        ),
     }
 }
 

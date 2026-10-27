@@ -612,6 +612,7 @@ impl Core {
         if self.scan_results.len() == MAX_RETAINED_SCAN_RESULTS {
             self.scan_results.pop_front();
         }
+        self.task_completed(TaskTarget::Scan { id: status.id });
         self.scan_results.push_back(status);
     }
 

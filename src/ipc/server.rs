@@ -308,6 +308,27 @@ async fn serve_connection(
                 };
                 write_frame_buffered(&mut stream, &response, &mut write_buffer).await?;
             }
+            WireRequest::WaitTask(target) => {
+                let outcome = futures::select! {
+                    outcome = handle.wait_task(target).fuse() => Some(outcome),
+                    _ = shutdown.recv().fuse() => return Ok(()),
+                    frame = reader.read(&mut stream).fuse() => {
+                        let _ = frame?;
+                        None
+                    }
+                };
+                let Some(outcome) = outcome else {
+                    write_error_frame(
+                        &mut stream,
+                        &mut write_buffer,
+                        "Concurrent IPC requests are not allowed during a task wait",
+                    )
+                    .await?;
+                    return Ok(());
+                };
+                write_frame_buffered(&mut stream, &WireResponse::Task(outcome), &mut write_buffer)
+                    .await?;
+            }
             WireRequest::Watch(expected) => {
                 let Some(result) = wait_for_revisions(
                     &mut stream,

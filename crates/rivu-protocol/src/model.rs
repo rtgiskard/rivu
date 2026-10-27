@@ -391,6 +391,14 @@ pub struct PlaybackState {
     pub seek_revision: u64,
 }
 
+/// Identity of a task whose owner-committed terminal outcome can be awaited.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum TaskTarget {
+    Scan { id: u64 },
+    Relocation { id: u64 },
+    Processing { id: u64 },
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScanPhase {

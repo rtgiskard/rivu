@@ -311,6 +311,7 @@ impl Core {
         if self.relocation_results.len() == MAX_RETAINED_SCAN_RESULTS {
             self.relocation_results.pop_front();
         }
+        self.task_completed(TaskTarget::Relocation { id: status.id });
         self.relocation_results.push_back(status);
     }
 

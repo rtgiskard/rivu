@@ -11,7 +11,7 @@ use rivu_format::media::DecoderHint;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub const PROTOCOL_VERSION: u8 = 14;
+pub const PROTOCOL_VERSION: u8 = 15;
 pub const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub const MAX_CLIENTS: usize = 16;
@@ -26,6 +26,7 @@ pub enum RequestType {
     Query = 2,
     Command = 3,
     Watch = 4,
+    WaitTask = 5,
 }
 
 impl TryFrom<u8> for RequestType {
@@ -38,6 +39,7 @@ impl TryFrom<u8> for RequestType {
             2 => Self::Query,
             3 => Self::Command,
             4 => Self::Watch,
+            5 => Self::WaitTask,
             _ => bail!("Unknown IPC request type {value}"),
         })
     }
@@ -51,6 +53,7 @@ pub enum ResponseType {
     Query = 2,
     Ack = 3,
     Watch = 4,
+    Task = 5,
     Error = 255,
 }
 
@@ -64,6 +67,7 @@ impl TryFrom<u8> for ResponseType {
             2 => Self::Query,
             3 => Self::Ack,
             4 => Self::Watch,
+            5 => Self::Task,
             255 => Self::Error,
             _ => bail!("Unknown IPC response type {value}"),
         })
@@ -86,6 +90,7 @@ pub enum WireRequest {
     Query(WireQuery),
     Command(WireCommand),
     Watch(StateRevisions),
+    WaitTask(crate::model::TaskTarget),
 }
 
 /// Binary query wire format. Variant order belongs to the versioned wire schema.
@@ -1608,6 +1613,7 @@ pub enum WireResponse {
     State(WireStateResponse),
     Ack(Ack),
     Watch(StateRevisions),
+    Task(Result<crate::response::TaskOutcome, crate::response::QueryError>),
     Error(String),
 }
 

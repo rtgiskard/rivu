@@ -203,7 +203,7 @@ impl ClientSession {
                     let stream = self.stream.as_mut().unwrap();
                     write_request_frame_buffered(stream, request, &mut self.write_buffer, write_started).await?;
                     let response = read_response_frame(stream, &mut self.read_buffer);
-                    let response = if matches!(request, WireRequest::Watch(_)) {
+                    let response = if matches!(request, WireRequest::Watch(_) | WireRequest::WaitTask(_)) {
                         response.await
                     } else {
                         let deadline = rivu_protocol::transport::response_timeout(wait_timeout);
@@ -263,6 +263,56 @@ impl ClientSession {
         match unpack_error(self.exchange(&request, query_wait_timeout())?)? {
             WireResponse::Query(response) => Ok(response),
             _ => bail!("IPC response was not a query response"),
+        }
+    }
+
+    pub fn wait_task(
+        &mut self,
+        target: rivu_protocol::model::TaskTarget,
+    ) -> Result<rivu_protocol::response::TaskOutcome> {
+        self.ensure_handshake()?;
+        let response = self.exchange(&WireRequest::WaitTask(target), query_wait_timeout())?;
+        match response {
+            WireResponse::Task(Ok(outcome)) => {
+                use rivu_protocol::{
+                    model::{RelocationPhase, ScanPhase, TaskTarget},
+                    response::TaskOutcome,
+                };
+                let valid = match (target, &outcome) {
+                    (TaskTarget::Scan { id }, TaskOutcome::Scan(task)) => {
+                        id == task.id
+                            && matches!(
+                                task.progress.phase,
+                                ScanPhase::Completed | ScanPhase::Cancelled | ScanPhase::Failed
+                            )
+                    }
+                    (TaskTarget::Relocation { id }, TaskOutcome::Relocation(task)) => {
+                        id == task.id
+                            && matches!(
+                                task.phase,
+                                RelocationPhase::Completed
+                                    | RelocationPhase::Cancelled
+                                    | RelocationPhase::Failed
+                            )
+                    }
+                    (TaskTarget::Processing { id }, TaskOutcome::Processing(task)) => {
+                        id == task.id && task.phase.is_terminal()
+                    }
+                    _ => false,
+                };
+                if valid {
+                    Ok(outcome)
+                } else {
+                    self.disconnect();
+                    bail!("IPC response contained an unexpected task outcome")
+                }
+            }
+            WireResponse::Task(Err(error)) => Err(error.into()),
+            response => {
+                self.disconnect();
+                unpack_error(response)?;
+                bail!("IPC response was not a task response")
+            }
         }
     }
 
@@ -754,5 +804,125 @@ mod tests {
         assert!(client.stream.is_none());
         cancellation.join().unwrap();
         server.join().unwrap();
+    }
+    #[test]
+    fn cancelling_a_task_wait_closes_the_existing_session() {
+        use std::{io::Read, os::unix::net::UnixListener, sync::mpsc};
+        let directory = socket_test_directory();
+        let listener =
+            UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
+                .unwrap();
+        let (started, waiting) = mpsc::sync_channel(0);
+        let server = std::thread::spawn(move || {
+            let mut stream = listener.accept().unwrap().0;
+            complete_test_handshake(&mut stream);
+            assert!(matches!(
+                read_test_request(&mut stream),
+                WireRequest::WaitTask(rivu_protocol::model::TaskTarget::Scan { id: 7 })
+            ));
+            started.send(()).unwrap();
+            assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+        });
+        let mut client = client_session(directory.path()).unwrap();
+        let stop = client.cancellation();
+        let cancellation = std::thread::spawn(move || {
+            waiting.recv().unwrap();
+            stop.cancel();
+        });
+        assert!(
+            client
+                .wait_task(rivu_protocol::model::TaskTarget::Scan { id: 7 })
+                .is_err()
+        );
+        assert!(client.stream.is_none());
+        cancellation.join().unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn task_wait_preserves_typed_error_but_disconnects_wrong_response() {
+        use std::{io::Read, os::unix::net::UnixListener};
+        let directory = socket_test_directory();
+        let listener =
+            UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
+                .unwrap();
+        let server = std::thread::spawn(move || {
+            let mut stream = listener.accept().unwrap().0;
+            complete_test_handshake(&mut stream);
+            assert!(matches!(
+                read_test_request(&mut stream),
+                WireRequest::WaitTask(_)
+            ));
+            write_test_response(
+                &mut stream,
+                WireResponse::Task(Err(rivu_protocol::response::QueryError::Message(
+                    "expired".into(),
+                ))),
+            );
+            assert!(matches!(
+                read_test_request(&mut stream),
+                WireRequest::WaitTask(_)
+            ));
+            write_test_response(&mut stream, WireResponse::Watch(StateRevisions::default()));
+            assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+        });
+        let mut client = client_session(directory.path()).unwrap();
+        let target = rivu_protocol::model::TaskTarget::Scan { id: 7 };
+        let error = client.wait_task(target).unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<rivu_protocol::response::QueryError>()
+                .is_some()
+        );
+        assert_eq!(client.instance_id(), Some(1));
+        assert!(client.wait_task(target).is_err());
+        assert!(client.stream.is_none());
+        server.join().unwrap();
+    }
+    #[test]
+    fn task_wait_disconnects_for_wrong_id_or_nonterminal_outcome() {
+        use rivu_protocol::{
+            model::{ScanPhase, ScanProgress, ScanTaskStatus, TaskTarget},
+            response::TaskOutcome,
+        };
+        use std::{io::Read, os::unix::net::UnixListener};
+        for (id, phase) in [(8, ScanPhase::Completed), (7, ScanPhase::Saving)] {
+            let directory = socket_test_directory();
+            let listener = UnixListener::bind_addr(
+                &rivu_protocol::protocol::address(directory.path()).unwrap(),
+            )
+            .unwrap();
+            let server = std::thread::spawn(move || {
+                let mut stream = listener.accept().unwrap().0;
+                complete_test_handshake(&mut stream);
+                assert!(matches!(
+                    read_test_request(&mut stream),
+                    WireRequest::WaitTask(TaskTarget::Scan { id: 7 })
+                ));
+                write_test_response(
+                    &mut stream,
+                    WireResponse::Task(Ok(TaskOutcome::Scan(ScanTaskStatus {
+                        id,
+                        progress: ScanProgress {
+                            phase,
+                            processed: 0,
+                            total: None,
+                            errors: 0,
+                            path: None,
+                        },
+                        message: String::new(),
+                        library_committed: false,
+                        playlist_id: None,
+                        error: None,
+                    }))),
+                );
+                assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+            });
+            let mut client = client_session(directory.path()).unwrap();
+            assert!(client.wait_task(TaskTarget::Scan { id: 7 }).is_err());
+            assert!(client.stream.is_none());
+            assert_eq!(client.instance_id(), None);
+            server.join().unwrap();
+        }
     }
 }

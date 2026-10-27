@@ -17,6 +17,7 @@ mod query;
 mod queue_playlists;
 mod relocation;
 mod settings;
+mod task_wait;
 mod tracks;
 
 // Bound synchronous test waits while exercising production task ports.
@@ -107,6 +108,8 @@ pub(super) fn fixture_with_database(duration: Option<f64>) -> (tempfile::TempDir
         shared: Arc::new(RwLock::new(state.clone())),
         state,
         wakeup: Arc::new(RwLock::new(None)),
+        task_waiters: Arc::new(Mutex::new(TaskWaiters::default())),
+        task_completions_pending: false,
         generation: 1,
         output_settings_request: 0,
         queue_ids: Vec::new(),
@@ -225,6 +228,7 @@ fn navigation_runtime(
         workers: core.workers.clone(),
         revision_updates: core.revision_updates.clone(),
         wakeup: core.wakeup.clone(),
+        task_waiters: core.task_waiters.clone(),
         query_timeout: None,
         _test_tasks: None,
     };
@@ -283,6 +287,7 @@ fn display_fixture() -> (
         workers: tasks.workers.clone(),
         revision_updates: Arc::new(RwLock::new(Vec::new())),
         wakeup: Arc::new(RwLock::new(None)),
+        task_waiters: Arc::new(Mutex::new(TaskWaiters::default())),
         query_timeout: None,
         _test_tasks: Some(tasks),
     };

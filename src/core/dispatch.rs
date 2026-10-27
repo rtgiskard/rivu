@@ -255,6 +255,12 @@ impl Core {
                     }
                 }
             }
+            Operation::WaitTask {
+                target,
+                registration,
+            } => {
+                self.register_task_wait(target, registration);
+            }
             Operation::WaveformSnapshot(reply) => {
                 let _ = self.engine.send(AudioCommand::WaveformSnapshot(reply));
             }
@@ -368,7 +374,7 @@ impl Core {
         self.shutdown_external_admission();
         self.shutdown_scan();
         self.shutdown_relocation();
-        self.processing.shutdown();
+        self.shutdown_processing();
         if let Some((reply, result)) = self.shutdown_optimization() {
             self.complete_optimization(reply, result);
         }
@@ -398,6 +404,7 @@ impl Core {
         self.state.playback.status = PlaybackStatus::Stopped;
         self.state.system.shutting_down = true;
         self.publish();
+        self.close_task_waiters();
         result
     }
 
@@ -476,6 +483,7 @@ impl Core {
             shared.revisions = *revisions;
             revisions_changed
         };
+        self.flush_task_completions();
         if revisions_changed {
             self.revision_updates.write().retain(|sender| {
                 !matches!(sender.try_send(()), Err(mpsc::TrySendError::Closed(_)))

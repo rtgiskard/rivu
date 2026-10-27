@@ -502,6 +502,10 @@ its preparation task has completed. For realtime/hybrid graph runs it additional
 marks the task `cancelled`; stopping a cached offline audition leaves its completed
 task status intact. Completion of preparation is not the lifetime of live audio.
 
+Current task status, bounded task history and still-retained audio agree on the
+terminal phase and error for a task ID, including later stem-mix and audition
+failures. History eviction does not expose an older status through retained audio.
+
 Scratch lives in session-owned `processing-*` directories under the data
 directory. Up to four retained audition results share 4 GiB; the selected audition
 stays protected, so a result too large to coexist with it fails. Export jobs keep

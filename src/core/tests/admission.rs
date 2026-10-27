@@ -400,3 +400,62 @@ fn committed_queue_and_task_facts_survive_current_track_projection_failure() {
             .contains("Refreshing current track")
     );
 }
+
+#[test]
+fn external_media_waits_share_scan_identity_and_report_all_terminal_paths() {
+    for expected in [
+        ScanPhase::Completed,
+        ScanPhase::Failed,
+        ScanPhase::Cancelled,
+    ] {
+        for shutdown in [false, true] {
+            if shutdown && expected != ScanPhase::Cancelled {
+                continue;
+            }
+            let (directory, mut core) = admission_fixture();
+            let path = directory.path().join("external.wav");
+            if expected != ScanPhase::Failed {
+                write_pcm(&path);
+            }
+            let before_queue = core.queue_ids.len();
+            core.start_external_admission(vec![path], None, None)
+                .unwrap();
+            let id = core.active_external_admission.as_ref().unwrap().status.id;
+            let (handle, requests) = task_wait::wait_handle(&core);
+            let mut wait = Box::pin(handle.wait_task(TaskTarget::Scan { id }));
+            assert!(wait.as_mut().now_or_never().is_none());
+            core.business_event(dispatch::BusinessEvent::Request(
+                requests.try_recv().unwrap(),
+            ));
+            assert!(wait.as_mut().now_or_never().is_none());
+            if shutdown {
+                core.shutdown_external_admission();
+            } else {
+                if expected == ScanPhase::Cancelled {
+                    core.cancel_external_admission(id).unwrap();
+                    assert!(wait.as_mut().now_or_never().is_none());
+                }
+                finish_admission(&mut core);
+            }
+            let TaskOutcome::Scan(status) = futures::executor::block_on(wait).unwrap() else {
+                panic!("Expected media task outcome");
+            };
+            assert_eq!(status.id, id);
+            assert_eq!(status.progress.phase, expected);
+            assert_eq!(
+                core.shared
+                    .read()
+                    .system
+                    .scan_progress
+                    .as_ref()
+                    .unwrap()
+                    .phase,
+                expected
+            );
+            assert_eq!(
+                core.queue_ids.len(),
+                before_queue + usize::from(expected == ScanPhase::Completed)
+            );
+        }
+    }
+}

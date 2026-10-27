@@ -35,8 +35,10 @@ GPUI, audio execution, PipeWire, SQLite, or FFT execution.
 These are standalone dependency requirements; a workspace consumer can enable
 database or DSP execution features through Cargo feature unification.
 
-`rivu-client` exposes `ClientSession`, cancellation, instance binding, command
-failure evidence, and the one-shot `get_state`, `query`, and `request_ack` helpers.
+`rivu-client` exposes `ClientSession`, cancellation, instance binding,
+`ClientSession::wait_task(TaskTarget)`, command failure evidence, and the one-shot
+`get_state`, `query`, and `request_ack` helpers. Task waiting returns a task-specific
+`TaskOutcome`; processing, relocation, and scan results keep their own payloads.
 The session API is synchronous and drives its I/O futures on the calling thread;
 async callers must keep it off their executor thread. Both session and one-shot
 `query` consume a `Query`; `request_ack` consumes a value convertible to
@@ -152,7 +154,7 @@ The frame header is six bytes. `body_length` excludes the four-byte length field
 and includes the version, message type, and serialized body.
 
 Bodies use Postcard serialization without COBS framing. The current protocol
-version is `14`; clients and servers must use matching wire schemas. The four-byte
+version is `15`; clients and servers must use matching wire schemas. The four-byte
 frame length remains little-endian; body integers follow Postcard's encoding.
 Restart clients and hosts together after upgrading: incompatible versions are
 rejected before decoding the body. There is no compatibility alias or schema
@@ -268,6 +270,7 @@ Request types:
 * `Query` (`2`) — execute a read-only query
 * `Command` (`3`) — execute a state-changing command
 * `Watch` (`4`) — wait for a revision change
+* `WaitTask` (`5`) — wait for a specific scan, relocation, or processing task's terminal result
 
 Response types:
 
@@ -278,6 +281,7 @@ Response types:
   `scan_id`, `relocation_id`, or `processing_id`, and the completed operation's
   optional database-optimization report
 * `Watch` (`4`) — returns changed state revisions
+* `Task` (`5`) — returns the task-specific terminal status or a task-wait error
 * `Error` (`255`) — returns a protocol or request error
 
 These numbers are the frame's `message_type` byte, not Postcard enum ordinals
@@ -311,8 +315,8 @@ link:26_migration.adoc#_version_authority[Database and configuration migration].
 Processing task status distinguishes the task `id` from `graph_run_id`, the retained
 graph snapshot accepted by audition and export commands. Export receipts carry
 the source run ID rather than becoming retained audition results or command aliases.
-The current positional schemas, including the optimization report in Ack, require
-protocol version 14 on both peers.
+The current positional schemas, including task completion waiting, require
+protocol version 15 on both peers.
 
 `EditTrack` carries optional title, artist, and album fields. `None` leaves a
 field untouched; `Some("")` explicitly overrides it with empty text. The core
@@ -345,7 +349,7 @@ Shutdown operations have a twelve-second budget without queue admission.
 Each server response write, including Hello, Error, busy replies, and shutdown
 acknowledgements, has a five-second completion deadline covering write and flush.
 Client request writes use the same five-second write-and-flush deadline, including
-Hello and Watch requests. Serialization precedes that deadline; the client response
+Hello, Watch, and WaitTask requests. Serialization precedes that deadline; the client response
 read deadline starts only after the request write and flush complete. A stalled
 write discards that connection; server writes cannot block teardown indefinitely.
 Accepted operations still finish their replies during shutdown rather than
@@ -354,8 +358,8 @@ Client response reads cover the operation budget, bridge allowance, response-wri
 deadline and one additional second for transport: 21 seconds for queries, state
 reads (including Hello) and ordinary commands, 129 seconds for database optimization,
 and 19 seconds for ShowWindow or Shutdown. Persistent and one-shot sessions use
-the same policy. Watch still has no response deadline. These are waiting limits,
-not guarantees on operation execution time or system scheduling.
+the same policy. Watch and WaitTask have no response deadline. These are waiting
+limits, not guarantees on operation execution time or system scheduling.
 
 `Ack.status` is `Succeeded`, `Failed`, `NotAdmitted`, or `Unknown`. `Succeeded`
 means the owner returned success; scan/import/relocation startup still requires
@@ -931,11 +935,11 @@ and external queue admission share the scan task slot, saving boundary, cancella
 and shutdown joining contract.
 
 Accepted scan, playlist-import, file-check, and external-admission commands return
-`Ack.scan_id` with their `u64` task ID. Acceptance is not completion. The CLI polls
-`Query::ScanTask { id }` and waits for that exact task's result: only `Completed`
-succeeds; `Failed` and `Cancelled` report the task's error or message. Global
-scanning state and `last_error` are presentation fields, not evidence that a
-particular task finished.
+`Ack.scan_id` with their `u64` task ID. Acceptance is not completion. The CLI sends
+`WaitTask` on the same session and receives that exact task's terminal result:
+only `Completed` succeeds; `Failed` and `Cancelled` report the task's error or
+message. Global scanning state and `last_error` are presentation fields, not
+evidence that a particular task finished.
 JSON completion output contains the task status rather than a global state snapshot.
 Startup and waiting share one connection; disconnection fails the wait rather
 than binding the same numeric task ID to a newly started instance.
@@ -944,6 +948,19 @@ kind. It obtains INSTANCE from the same Hello session that starts the task;
 independent task status and cancellation bind to that instance before sending a
 business request. References from an earlier instance are rejected after restart.
 The reference does not extend task retention or persist tasks across restarts.
+
+Task completion waiting belongs to Core, not to a socket-side revision observer.
+The owner atomically checks retained terminal results or registers a completion
+waiter, then continues processing business operations. At most 256 waits may be
+reserved, including requests still queued for owner admission; dropping the wait
+releases its reservation immediately. Ordinary progress does not inspect waiting
+clients or clone their result payloads. Completion
+returns the task-specific final object directly, without an intermediate
+notification or a follow-up query. `task status` remains an immediate query.
+Disconnecting or cancelling a wait releases its registration without cancelling
+the task; task cancellation remains an explicit command. A waiting connection
+cannot pipeline another request. Unknown or expired tasks fail rather than wait
+for a future task with the same numeric ID.
 
 `ViewResponse::ScanTask` contains `{id, progress, message, library_committed,
 playlist_id, error}`. The phases are `Discovering`, `ReadingMetadata`, `Saving`,

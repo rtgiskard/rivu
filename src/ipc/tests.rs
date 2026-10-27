@@ -27,6 +27,20 @@ fn app_commands_route_over_ipc_without_changing_business_state() {
     let mut client = client_session(directory.path()).unwrap();
     // A query fences asynchronous startup before comparing published state.
     client.query(Query::ScanTask { id: 0 }).unwrap();
+    for target in [
+        rivu_protocol::model::TaskTarget::Scan { id: u64::MAX },
+        rivu_protocol::model::TaskTarget::Relocation { id: u64::MAX },
+        rivu_protocol::model::TaskTarget::Processing { id: u64::MAX },
+    ] {
+        let instance = client.instance_id();
+        let error = client.wait_task(target).unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<rivu_protocol::response::QueryError>()
+                .is_some()
+        );
+        assert_eq!(client.instance_id(), instance);
+    }
     let before = client.get_state(StateSections::ALL).unwrap();
     let rejected = client.request_ack(AppCommand::ShowWindow).unwrap();
     assert!(!rejected.is_success());
@@ -1563,6 +1577,7 @@ fn request_round_trip_uses_explicit_message_types() {
             library: 3,
             system: 4,
         }),
+        WireRequest::WaitTask(rivu_protocol::model::TaskTarget::Scan { id: 42 }),
     ];
     for request in requests {
         let expected_type = match &request {
@@ -1571,6 +1586,7 @@ fn request_round_trip_uses_explicit_message_types() {
             WireRequest::Query(_) => RequestType::Query,
             WireRequest::Command(_) => RequestType::Command,
             WireRequest::Watch(_) => RequestType::Watch,
+            WireRequest::WaitTask(_) => RequestType::WaitTask,
         };
         let mut encoded = Vec::new();
         encode_request_frame_into(&request, &mut encoded).unwrap();
@@ -1581,6 +1597,9 @@ fn request_round_trip_uses_explicit_message_types() {
                 assert_eq!((offset, limit), (7, 11))
             }
             WireRequest::State(_) | WireRequest::Hello(_) => {}
+            WireRequest::WaitTask(target) => {
+                assert_eq!(target, rivu_protocol::model::TaskTarget::Scan { id: 42 })
+            }
             WireRequest::Command(WireCommand::MoveQueue { queue_id, index }) => {
                 assert_eq!((queue_id, index), (4, 9))
             }

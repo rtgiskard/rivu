@@ -703,6 +703,9 @@ are not accepted by task status or cancellation; a reference from a stopped
 instance is rejected before a request can address a replacement instance's task.
 A successful status query means the result was retrieved, not that the task
 succeeded; inspect its phase and error. Later tasks do not change a retained result.
+`--wait` uses one completion request on the startup session rather than periodic
+status queries. Closing the waiting client stops waiting, not the accepted task;
+use the explicit cancellation command to request that the task stop.
 
 In the desktop, the owning panel shows phase, counts, current path, and message.
 Completed, failed, and cancelled results stay visible until dismissed or replaced

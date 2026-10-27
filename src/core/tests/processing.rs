@@ -1,6 +1,6 @@
 use super::*;
 
-fn source(directory: &Path) -> Vec<f32> {
+pub(super) fn source(directory: &Path) -> Vec<f32> {
     let samples = (0..4096)
         .flat_map(|i| {
             let v = (i as f32 * 0.07).sin() * 1.2;
@@ -48,6 +48,142 @@ fn complete(core: &mut Core) {
             break;
         }
     }
+}
+
+fn terminal_wait(core: &mut Core, id: u64) -> ProcessingTaskStatus {
+    let (handle, requests) = super::task_wait::wait_handle(core);
+    let mut wait = Box::pin(handle.wait_task(TaskTarget::Processing { id }));
+    assert!(wait.as_mut().now_or_never().is_none());
+    core.business_event(dispatch::BusinessEvent::Request(
+        requests.try_recv().unwrap(),
+    ));
+    let TaskOutcome::Processing(status) = wait.as_mut().now_or_never().unwrap().unwrap() else {
+        panic!("expected processing outcome");
+    };
+    *status
+}
+
+fn prepare_mix(core: &mut Core) {
+    core.start_processing(1, ProcessingOperation::Denoise, None)
+        .unwrap();
+    let mut event = completion(core);
+    let crate::processing::Event::Finished {
+        result: Ok(result), ..
+    } = &mut event
+    else {
+        panic!("native processing did not produce PCM");
+    };
+    // Use real native PCM for both stems without requiring a prepared neural model.
+    let stem = result
+        .status
+        .outputs
+        .as_ref()
+        .unwrap()
+        .denoised
+        .clone()
+        .unwrap();
+    result.status.outputs = Some(ProcessingOutputs {
+        vocals: Some(stem.clone()),
+        accompaniment: Some(stem),
+        ..Default::default()
+    });
+    core.processing_event(event);
+}
+
+fn begin_mix(core: &mut Core, id: u64) {
+    let mut status = core.processing_status(id).unwrap();
+    crate::processing::mix(&mut core.processing, id, core.generation, 0.0, 0.0).unwrap();
+    status.phase = ProcessingPhase::Processing;
+    status.error = None;
+    core.state.system.processing = Some(status);
+}
+
+fn mix_completion(core: &mut Core) -> crate::processing::Event {
+    let event = next_processing_event(core, Duration::from_secs(10)).unwrap();
+    assert!(matches!(
+        event,
+        crate::processing::Event::MixFinished { .. }
+    ));
+    event
+}
+
+#[test]
+fn mix_terminal_replaces_history_and_survives_current_and_history_eviction() {
+    let (directory, mut core) = fixture();
+    source(directory.path());
+    prepare_mix(&mut core);
+    let frozen = core.processing_status(1).unwrap();
+    begin_mix(&mut core, 1);
+    let event = mix_completion(&mut core);
+    core.processing.cancel(1).unwrap();
+    core.processing_event(event);
+    let cancelled = core.processing_status(1).unwrap();
+    assert_eq!(cancelled.phase, ProcessingPhase::Cancelled);
+    assert_eq!(terminal_wait(&mut core, 1), cancelled);
+    assert_eq!(cancelled.outputs, frozen.outputs);
+    assert_eq!(cancelled.settings, frozen.settings);
+    assert_eq!(core.processing_results.len(), 1);
+
+    // A later successful Mix replaces the same receipt, rather than leaving the
+    // old cancellation in history or creating another receipt for the same ID.
+    begin_mix(&mut core, 1);
+    complete(&mut core);
+    let complete_status = core.processing_status(1).unwrap();
+    assert_eq!(complete_status.phase, ProcessingPhase::Complete);
+    assert!(complete_status.error.is_none());
+    assert_eq!(core.processing_results.len(), 1);
+    assert_eq!(core.processing_results[0], complete_status);
+
+    // Cancel once more so falling back to the original Complete is observable.
+    begin_mix(&mut core, 1);
+    let event = mix_completion(&mut core);
+    core.processing.cancel(1).unwrap();
+    core.processing_event(event);
+    let latest = core.processing_status(1).unwrap();
+    core.start_processing(1, ProcessingOperation::Speech, None)
+        .unwrap();
+    assert_eq!(core.processing_status(1).unwrap(), latest);
+    assert_eq!(terminal_wait(&mut core, 1), latest);
+    complete(&mut core);
+    // Failed native jobs age the receipt without evicting retained audio.
+    for _ in 1..MAX_RETAINED_SCAN_RESULTS {
+        core.start_processing(1, ProcessingOperation::Speech, None)
+            .unwrap();
+        complete(&mut core);
+    }
+    assert!(!core.processing_results.iter().any(|status| status.id == 1));
+    assert_eq!(core.processing.results.len(), 1);
+    assert_eq!(core.processing_status(1).unwrap(), latest);
+    assert_eq!(terminal_wait(&mut core, 1), latest);
+}
+
+#[test]
+fn shutdown_mix_retires_queued_output_and_keeps_latest_retained_outcome() {
+    let (directory, mut core) = fixture();
+    source(directory.path());
+    prepare_mix(&mut core);
+    let frozen = core.processing_status(1).unwrap();
+    begin_mix(&mut core, 1);
+    let event = mix_completion(&mut core);
+    let crate::processing::Event::MixFinished {
+        result: Ok(path), ..
+    } = &event
+    else {
+        panic!("mix did not produce output");
+    };
+    let path = path.clone();
+    assert!(core.processing.sender.try_send(event).is_ok());
+    core.shutdown_processing();
+    assert!(!path.exists());
+    let cancelled = core.processing_status(1).unwrap();
+    assert_eq!(cancelled.phase, ProcessingPhase::Cancelled);
+    assert_eq!(cancelled.outputs, frozen.outputs);
+    assert_eq!(cancelled.settings, frozen.settings);
+    assert_eq!(core.processing_results.len(), 1);
+    core.state.system.processing = None;
+    assert_eq!(terminal_wait(&mut core, 1), cancelled);
+    core.processing_results.clear();
+    assert_eq!(terminal_wait(&mut core, 1), cancelled);
 }
 
 fn recording_final_snapshot(
@@ -1781,6 +1917,17 @@ fn auto_graph_prepares_off_thread_and_opens_stopped_source_paused() {
     );
     assert!(core.processing.audition.is_none());
     assert!(core.state.processing_audition.is_none());
+    let cancelled = core.processing_status(1).unwrap();
+    assert_eq!(core.processing_results[0], cancelled);
+    assert_eq!(core.processing.results[0].status, cancelled);
+    core.start_processing(1, ProcessingOperation::Denoise, None)
+        .unwrap();
+    assert_eq!(core.processing_status(1).unwrap(), cancelled);
+    assert_eq!(terminal_wait(&mut core, 1), cancelled);
+    complete(&mut core);
+    core.processing_results.retain(|status| status.id != 1);
+    assert_eq!(core.processing_status(1).unwrap(), cancelled);
+    assert_eq!(terminal_wait(&mut core, 1), cancelled);
 }
 
 #[test]
