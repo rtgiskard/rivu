@@ -4,7 +4,7 @@ use crate::{
     i18n::Localizer,
 };
 use gpui::{
-    AnyElement, App, Bounds, GpuFieldParams, GpuFrame, GpuLimits, GpuPalette, GpuSource, GpuState,
+    AnyElement, App, Bounds, GpuFieldParams, GpuLimits, GpuPalette, GpuSchema, GpuSource, GpuState,
     GpuValueMapping, Hsla, Pixels, Point, SharedString, TextAlign, Window, canvas, div, fill,
     point, prelude::*, px, rgb, size,
 };
@@ -112,7 +112,7 @@ impl AnalysisVisualizer {
             config.audio_visualizer_primary_color.rgb(),
             config.audio_visualizer_secondary_color.rgb(),
         );
-        let gpu = palette.as_ref().and_then(|palette| {
+        let gpu = palette.as_ref().map(|_| {
             let (width, height) = field_dimensions(style);
             let limits = GpuLimits {
                 max_field_width: width,
@@ -121,22 +121,7 @@ impl AnalysisVisualizer {
                 max_palette_colors: FIELD_COLOR_COUNT,
                 ..GpuLimits::default()
             };
-            GpuFrame::field(
-                0,
-                0,
-                &[],
-                Arc::clone(palette),
-                GpuFieldParams {
-                    mapping: GpuValueMapping::Logarithmic {
-                        db_range: config.audio_visualizer_db_range(),
-                    },
-                },
-                limits,
-            )
-            .and_then(|frame| GpuState::new(frame, limits))
-            .inspect(|state| state.clear())
-            .map_err(|error| eprintln!("rivu analysis visualizer GPU initialization: {error}"))
-            .ok()
+            GpuState::empty(GpuSchema::Field, limits)
         });
         Self {
             data: Rc::new(RefCell::new(PlotData {
@@ -888,6 +873,7 @@ fn label(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::GpuFrame;
     use rivu_audio::analysis::{SpatialBin, VisualizerDemand, VisualizerFrame};
 
     fn frame(style: AudioVisualizerStyle) -> AnalysisFrame {

@@ -693,6 +693,14 @@ impl GpuState {
             limits,
         }))
     }
+    /// Create an unpublished slot with a fixed schema and capacities.
+    pub fn empty(schema: GpuSchema, limits: GpuLimits) -> Arc<Self> {
+        Arc::new(Self {
+            current: RwLock::new(None),
+            limits,
+            schema,
+        })
+    }
 
     /// Validate a rectangle update against this slot before allocating its snapshot.
     /// Failure preserves the current publication; success does not schedule repaint.
