@@ -693,11 +693,14 @@ use `--wait` to wait for its result, or query and cancel that task explicitly:
 
 [source,sh]
 ----
-rivu task status scan TASK_ID
-rivu task cancel scan TASK_ID
+rivu task status scan INSTANCE:TASK_ID
+rivu task cancel scan INSTANCE:TASK_ID
 ----
 
 The running core retains the latest 32 media-task results, not persistent history.
+Use the instance-qualified reference printed by the command. Bare numeric IDs
+are not accepted by task status or cancellation; a reference from a stopped
+instance is rejected before a request can address a replacement instance's task.
 A successful status query means the result was retrieved, not that the task
 succeeded; inspect its phase and error. Later tasks do not change a retained result.
 
@@ -775,8 +778,8 @@ retains the latest 32 task results, not persistent task history.
 rivu library duplicates
 rivu library duplicates --fingerprint FULL_BLAKE3 --offset 0 --limit 100
 rivu library relocate OLD_ID DESTINATION_ID --wait
-rivu task status relocation TASK_ID
-rivu task cancel relocation TASK_ID
+rivu task status relocation INSTANCE:TASK_ID
+rivu task cancel relocation INSTANCE:TASK_ID
 rivu library keep-independent DESTINATION_ID
 ----
 
@@ -910,20 +913,27 @@ Result shapes follow the queried resource:
   The System snapshot retains the latest successful report for observation,
   not for correlating command results.
 * `scan_id` identifies media-task startup: scanning, Other checks, playlist import,
-  or external-file queue admission. `task status scan ID` and media commands with
-  `--wait` return `{id, progress, message, library_committed, playlist_id, error}`.
+  or external-file queue admission. `task status scan INSTANCE:ID` and media commands
+  with `--wait` return `{id, progress, message, library_committed, playlist_id, error}`
+  together with `instance_id` and the reusable `task_ref` string.
   Confirmed commits survive later refresh failures; lack of confirmation after an
   uncertain worker failure is not proof of zero effects.
-* `relocation_id` identifies relocation verification. `task status relocation ID`
-  and `library relocate --wait` return `{id, source_id, target_id, phase, error}`;
+* `relocation_id` identifies relocation verification. `task status relocation INSTANCE:ID`
+  and `library relocate --wait` return `{id, source_id, target_id, phase, error}`
+  together with `instance_id` and `task_ref`;
   phases are `verifying`, `completed`, `cancelled`, or `failed`.
-* `processing_id` identifies audio-processing work. `task status processing ID`
+* `processing_id` identifies audio-processing work. `task status processing INSTANCE:ID`
   and processing commands with `--wait` return the full processing task object,
-  including its phase, captured settings, outputs, and optional error.
+  including its phase, captured settings, outputs, optional error, `instance_id`
+  and `task_ref`.
+* Task-start acknowledgements add `instance_id` and `task_refs`, whose `scan`,
+  `relocation`, and `processing` fields contain the accepted task references when
+  present. References use nonzero decimal `INSTANCE:ID`; obtain them from output
+  rather than constructing them from a current instance and an old numeric ID.
 * A successful task-status query confirms retrieval, not task success. Inspect
   its phase/error. By contrast, `--wait` exits unsuccessfully for failed or
   cancelled tasks, while retaining the terminal result on stdout. Use
-  `task cancel scan|relocation|processing ID` to request cancellation; acceptance
+  `task cancel scan|relocation|processing INSTANCE:ID` to request cancellation; acceptance
   is not proof that work has already retired and never undoes a committed result.
 * `library other list` and both `library duplicates` variants return one
   `{total, rows}` page. `--fingerprint` selects duplicate members instead of group

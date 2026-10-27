@@ -1,6 +1,6 @@
 use super::{
     args::{TaskAction, TaskKind},
-    output::{Terminal, show_ack, show_scan},
+    output::{Terminal, show_scan},
 };
 use anyhow::{Context, Result, bail, ensure};
 use rivu::i18n::Localizer;
@@ -13,26 +13,99 @@ use rivu_protocol::{
 };
 use std::{path::Path, thread, time::Duration};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct TaskReference {
+    pub(super) instance_id: u32,
+    pub(super) id: u64,
+}
+
+impl std::str::FromStr for TaskReference {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        let (instance, id) = value.split_once(':').context("Expected INSTANCE:TASK_ID")?;
+        ensure!(
+            !instance.is_empty()
+                && !id.is_empty()
+                && instance.bytes().all(|byte| byte.is_ascii_digit())
+                && id.bytes().all(|byte| byte.is_ascii_digit()),
+            "Expected decimal INSTANCE:TASK_ID"
+        );
+        let reference = Self {
+            instance_id: instance.parse()?,
+            id: id.parse()?,
+        };
+        ensure!(
+            reference.instance_id != 0 && reference.id != 0,
+            "Task identity must be nonzero"
+        );
+        Ok(reference)
+    }
+}
+
+impl std::fmt::Display for TaskReference {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.instance_id, self.id)
+    }
+}
+
+pub(super) fn instance_id(session: &rivu_client::ClientSession) -> Result<u32> {
+    session
+        .instance_id()
+        .context("Task response omitted instance identity")
+}
+
+pub(super) fn task_json<T: serde::Serialize>(
+    instance_id: u32,
+    id: u64,
+    task: &T,
+) -> Result<serde_json::Value> {
+    let mut value = serde_json::to_value(task)?;
+    let fields = value.as_object_mut().context("Expected task object")?;
+    fields.insert("instance_id".into(), instance_id.into());
+    fields.insert(
+        "task_ref".into(),
+        TaskReference { instance_id, id }.to_string().into(),
+    );
+    Ok(value)
+}
+
 pub(super) fn run(i18n: &Localizer, data_dir: &Path, action: TaskAction, json: bool) -> Result<()> {
     let mut session = rivu_client::client_session(data_dir)?;
+    let reference = match &action {
+        TaskAction::Status { id, .. } | TaskAction::Cancel { id, .. } => *id,
+    };
+    session.bind_instance(reference.instance_id)?;
+    let id = reference.id;
     match action {
-        TaskAction::Status { kind, id } => match kind {
-            TaskKind::Scan => emit_scan(i18n, &scan_status(&mut session, id)?, json),
-            TaskKind::Relocation => {
-                emit_relocation(i18n, &relocation_status(&mut session, id)?, json)
-            }
-            TaskKind::Processing => {
-                emit_processing(i18n, &processing_status(&mut session, id)?, json)
-            }
+        TaskAction::Status { kind, .. } => match kind {
+            TaskKind::Scan => emit_scan(
+                i18n,
+                reference.instance_id,
+                &scan_status(&mut session, id)?,
+                json,
+            ),
+            TaskKind::Relocation => emit_relocation(
+                i18n,
+                reference.instance_id,
+                &relocation_status(&mut session, id)?,
+                json,
+            ),
+            TaskKind::Processing => emit_processing(
+                i18n,
+                reference.instance_id,
+                &processing_status(&mut session, id)?,
+                json,
+            ),
         },
-        TaskAction::Cancel { kind, id } => {
+        TaskAction::Cancel { kind, .. } => {
             let command = match kind {
                 TaskKind::Scan => Command::CancelScan { id },
                 TaskKind::Relocation => Command::CancelRelocation { id },
                 TaskKind::Processing => Command::CancelProcessing { id },
             };
             let ack = session.request_ack(command)?;
-            show_ack(i18n, &ack, json)
+            super::output::show_task_ack(i18n, &session, &ack, json)
         }
     }
 }
@@ -59,11 +132,15 @@ fn processing_status(
 }
 pub(super) fn emit_processing(
     i18n: &Localizer,
+    instance_id: u32,
     task: &ProcessingTaskStatus,
     json: bool,
 ) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string_pretty(task)?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&task_json(instance_id, task.id, task)?)?
+        );
     } else {
         let phase = match task.phase {
             ProcessingPhase::Queued => "processing-queued",
@@ -78,7 +155,15 @@ pub(super) fn emit_processing(
             i18n.format(
                 "core-processing-task",
                 &[
-                    ("id", task.id.to_string().into()),
+                    (
+                        "id",
+                        TaskReference {
+                            instance_id,
+                            id: task.id
+                        }
+                        .to_string()
+                        .into()
+                    ),
                     ("phase", i18n.text(phase).into()),
                     ("completed", task.completed.to_string().into()),
                     (
@@ -127,10 +212,20 @@ fn relocation_status(
     Ok(task)
 }
 
-fn emit_scan(i18n: &Localizer, task: &ScanTaskStatus, json: bool) -> Result<()> {
+fn emit_scan(i18n: &Localizer, instance_id: u32, task: &ScanTaskStatus, json: bool) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string_pretty(task)?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&task_json(instance_id, task.id, task)?)?
+        );
     } else {
+        println!(
+            "{}",
+            TaskReference {
+                instance_id,
+                id: task.id
+            }
+        );
         show_scan(i18n, &task.progress);
         if let Some(error) = &task.error {
             println!("{}", Terminal(error));
@@ -139,9 +234,17 @@ fn emit_scan(i18n: &Localizer, task: &ScanTaskStatus, json: bool) -> Result<()> 
     Ok(())
 }
 
-fn emit_relocation(i18n: &Localizer, task: &RelocationTaskStatus, json: bool) -> Result<()> {
+fn emit_relocation(
+    i18n: &Localizer,
+    instance_id: u32,
+    task: &RelocationTaskStatus,
+    json: bool,
+) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string_pretty(task)?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&task_json(instance_id, task.id, task)?)?
+        );
     } else {
         let phase = i18n.text(match task.phase {
             RelocationPhase::Verifying => "core-verifying",
@@ -154,7 +257,15 @@ fn emit_relocation(i18n: &Localizer, task: &RelocationTaskStatus, json: bool) ->
             i18n.format(
                 "core-relocation-status",
                 &[
-                    ("id", task.id.to_string().into()),
+                    (
+                        "id",
+                        TaskReference {
+                            instance_id,
+                            id: task.id
+                        }
+                        .to_string()
+                        .into()
+                    ),
                     ("source", task.source_id.to_string().into()),
                     ("target", task.target_id.to_string().into()),
                     ("phase", phase.into()),
@@ -177,9 +288,9 @@ pub(super) fn wait_scan(
     loop {
         let task = scan_status(session, id)?;
         match task.progress.phase {
-            ScanPhase::Completed => return emit_scan(i18n, &task, json),
+            ScanPhase::Completed => return emit_scan(i18n, instance_id(session)?, &task, json),
             ScanPhase::Failed | ScanPhase::Cancelled => {
-                emit_scan(i18n, &task, json)?;
+                emit_scan(i18n, instance_id(session)?, &task, json)?;
                 bail!("{}", task.error.as_deref().unwrap_or(&task.message));
             }
             _ => thread::sleep(Duration::from_millis(200)),
@@ -197,9 +308,11 @@ pub(super) fn wait_relocation(
         let task = relocation_status(session, id)?;
         match task.phase {
             RelocationPhase::Verifying => thread::sleep(Duration::from_millis(200)),
-            RelocationPhase::Completed => return emit_relocation(i18n, &task, json),
+            RelocationPhase::Completed => {
+                return emit_relocation(i18n, instance_id(session)?, &task, json);
+            }
             RelocationPhase::Failed | RelocationPhase::Cancelled => {
-                emit_relocation(i18n, &task, json)?;
+                emit_relocation(i18n, instance_id(session)?, &task, json)?;
                 bail!(
                     "{}",
                     task.error.as_deref().unwrap_or("Relocation cancelled")
@@ -218,7 +331,7 @@ pub(super) fn wait_processing(
     loop {
         let task = processing_status(session, id)?;
         if task.phase.is_terminal() {
-            emit_processing(i18n, &task, json)?;
+            emit_processing(i18n, instance_id(session)?, &task, json)?;
             return match task.phase {
                 ProcessingPhase::Complete => Ok(()),
                 _ => bail!(
@@ -228,5 +341,63 @@ pub(super) fn wait_processing(
             };
         }
         thread::sleep(Duration::from_millis(150));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::args::{Action, Args};
+    use clap::Parser;
+
+    #[test]
+    fn task_commands_require_complete_bounded_identity() {
+        for verb in ["status", "cancel"] {
+            for kind in ["scan", "relocation", "processing"] {
+                for invalid in [
+                    "9",
+                    "0:9",
+                    "1:0",
+                    "4294967296:9",
+                    "1:18446744073709551616",
+                    "1:2:3",
+                    "+1:2",
+                    "1:-2",
+                ] {
+                    assert!(
+                        Args::try_parse_from(["rivu", "task", verb, kind, invalid]).is_err(),
+                        "{verb} {kind} {invalid}"
+                    );
+                }
+                let args = Args::try_parse_from([
+                    "rivu",
+                    "task",
+                    verb,
+                    kind,
+                    "4294967295:18446744073709551615",
+                ])
+                .unwrap();
+                let Some(Action::Task(action)) = args.action else {
+                    panic!("expected task command")
+                };
+                let reference = match action {
+                    TaskAction::Status { id, .. } | TaskAction::Cancel { id, .. } => id,
+                };
+                assert_eq!(reference.instance_id, u32::MAX);
+                assert_eq!(reference.id, u64::MAX);
+                assert_eq!(reference.to_string(), "4294967295:18446744073709551615");
+            }
+        }
+    }
+
+    #[test]
+    fn retained_processing_consumers_reject_bare_ids() {
+        for arguments in [
+            vec!["rivu", "processing", "audition", "9", "original"],
+            vec!["rivu", "processing", "graph", "audition", "9", "1"],
+            vec!["rivu", "processing", "graph", "export", "9", "1", "out.wav"],
+        ] {
+            assert!(Args::try_parse_from(arguments).is_err());
+        }
     }
 }

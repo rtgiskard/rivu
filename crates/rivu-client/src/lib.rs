@@ -29,7 +29,8 @@ pub struct InstanceChanged;
 
 impl std::fmt::Display for InstanceChanged {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("Rivu instance changed; reopen the TUI to use the new instance")
+        formatter
+            .write_str("Rivu instance changed; connection does not match the expected instance")
     }
 }
 
@@ -612,6 +613,37 @@ mod tests {
         assert!(client.read_buffer.is_empty());
         assert!(client.read_buffer.capacity() <= rivu_protocol::transport::RETAINED_BUFFER_LIMIT);
         assert!(client.write_buffer.capacity() <= rivu_protocol::transport::RETAINED_BUFFER_LIMIT);
+    }
+
+    #[test]
+    fn bound_task_instance_mismatch_sends_neither_query_nor_cancel() {
+        use std::{io::Read, os::unix::net::UnixListener};
+
+        for cancel in [false, true] {
+            let directory = socket_test_directory();
+            let listener = UnixListener::bind_addr(
+                &rivu_protocol::protocol::address(directory.path()).unwrap(),
+            )
+            .unwrap();
+            let server = std::thread::spawn(move || {
+                let mut stream = listener.accept().unwrap().0;
+                complete_test_handshake_for_instance(&mut stream, 22);
+                // A mismatched Hello must close the connection, not emit a task frame.
+                assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+            });
+            let mut client = client_session(directory.path()).unwrap();
+            client.bind_instance(21).unwrap();
+            let error = if cancel {
+                client
+                    .request_ack(Command::CancelScan { id: 7 })
+                    .unwrap_err()
+            } else {
+                client.query(Query::ScanTask { id: 7 }).unwrap_err()
+            };
+            assert!(error.downcast_ref::<InstanceChanged>().is_some());
+            assert_eq!(client.instance_id(), None);
+            server.join().unwrap();
+        }
     }
 
     #[test]

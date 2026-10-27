@@ -386,19 +386,12 @@ fn execute(args: Args, i18n: Localizer) -> Result<()> {
                 source_id,
                 target_id,
             })?;
-            if !ack.is_success() || (!wait && args.json) {
-                return show_ack(&i18n, &ack, args.json);
+            if !ack.is_success() || !wait {
+                return output::show_task_ack(&i18n, &session, &ack, args.json);
             }
             let id = ack
                 .relocation_id
                 .context("Relocation startup omitted task ID")?;
-            if !wait {
-                println!(
-                    "{}",
-                    i18n.format("core-relocation-accepted", &[("id", id.to_string().into())])
-                );
-                return Ok(());
-            }
             tasks::wait_relocation(&i18n, &mut session, id, args.json)
         }
         Action::Library(LibraryAction::Optimize) => {
@@ -440,13 +433,13 @@ fn execute(args: Args, i18n: Localizer) -> Result<()> {
             let mut session = rivu_client::client_session(&data_dir)?;
             let ack = session.request_ack(command)?;
             if !ack.is_success() {
-                return show_ack(&i18n, &ack, args.json);
+                return output::show_task_ack(&i18n, &session, &ack, args.json);
             }
             if wait_scan {
                 let id = ack.scan_id.context("Scan startup omitted task ID")?;
                 return tasks::wait_scan(&i18n, &mut session, id, args.json);
             }
-            show_ack(&i18n, &ack, args.json)
+            output::show_task_ack(&i18n, &session, &ack, args.json)
         }
     }
 }

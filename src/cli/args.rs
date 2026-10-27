@@ -118,8 +118,8 @@ pub(super) enum ProcessingAction {
     },
     /// Audition retained outputs, starting their original source queue item if needed.
     Audition {
-        #[arg(value_name = "TASK_ID")]
-        id: u64,
+        #[arg(value_name = "INSTANCE:TASK_ID")]
+        id: super::tasks::TaskReference,
         #[arg(value_enum)]
         mode: ProcessingAudition,
         #[arg(long, default_value_t = 0.0, allow_negative_numbers = true, value_parser = parse_gain)]
@@ -154,8 +154,8 @@ pub(super) enum ProcessingGraphAction {
     },
     /// Audition a node output retained by a completed graph run.
     Audition {
-        #[arg(value_name = "TASK_ID")]
-        id: u64,
+        #[arg(value_name = "INSTANCE:TASK_ID")]
+        id: super::tasks::TaskReference,
         #[arg(value_name = "NODE_ID")]
         node: u64,
         #[arg(long, default_value_t = 0)]
@@ -163,8 +163,8 @@ pub(super) enum ProcessingGraphAction {
     },
     /// Render a retained graph snapshot offline to a path in this client's directory.
     Export {
-        #[arg(value_name = "TASK_ID")]
-        id: u64,
+        #[arg(value_name = "INSTANCE:TASK_ID")]
+        id: super::tasks::TaskReference,
         #[arg(value_name = "NODE_ID")]
         node: u64,
         path: PathBuf,
@@ -203,15 +203,15 @@ pub(super) enum TaskAction {
     Status {
         #[arg(value_enum)]
         kind: TaskKind,
-        #[arg(value_name = "TASK_ID")]
-        id: u64,
+        #[arg(value_name = "INSTANCE:TASK_ID")]
+        id: super::tasks::TaskReference,
     },
     /// Request cancellation without undoing committed work.
     Cancel {
         #[arg(value_enum)]
         kind: TaskKind,
-        #[arg(value_name = "TASK_ID")]
-        id: u64,
+        #[arg(value_name = "INSTANCE:TASK_ID")]
+        id: super::tasks::TaskReference,
     },
 }
 
@@ -776,7 +776,7 @@ mod tests {
                         "rivu",
                         "processing",
                         "audition",
-                        "1",
+                        "1:1",
                         "mix",
                         gain,
                         value
@@ -795,7 +795,7 @@ mod tests {
                 "rivu",
                 "processing",
                 "audition",
-                "1",
+                "1:1",
                 "mix",
                 "--vocal-gain-db",
                 "-96",
@@ -899,10 +899,10 @@ mod tests {
             assert!(parse_and_validate(&argv).is_err(), "accepted {argv:?}");
         }
         for mode in ["original", "denoised", "vocals", "accompaniment"] {
-            assert!(parse_and_validate(&["rivu", "processing", "audition", "1", mode]).is_ok());
+            assert!(parse_and_validate(&["rivu", "processing", "audition", "1:1", mode]).is_ok());
             for gain in ["--vocal-gain-db", "--accompaniment-gain-db"] {
                 assert!(
-                    parse_and_validate(&["rivu", "processing", "audition", "1", mode, gain, "0"])
+                    parse_and_validate(&["rivu", "processing", "audition", "1:1", mode, gain, "0"])
                         .is_err()
                 );
             }
@@ -964,8 +964,8 @@ mod graph_tests {
             vec!["run", "42"],
             vec!["run", "42", "7", "--mode", "automatic"],
             vec!["run", "42", "7", "--port", "65536"],
-            vec!["audition", "9", "7", "--port", "-1"],
-            vec!["export", "9", "7"],
+            vec!["audition", "1:9", "7", "--port", "-1"],
+            vec!["export", "1:9", "7"],
         ] {
             assert!(
                 Args::try_parse_from(["rivu", "processing", "graph"].into_iter().chain(arguments))

@@ -435,6 +435,63 @@ pub(super) fn show_duplicates(output: &mut impl Write, view: &ViewResponse) -> R
     Ok(())
 }
 
+pub(super) fn show_task_ack(
+    i18n: &Localizer,
+    session: &rivu_client::ClientSession,
+    ack: &rivu_protocol::response::Ack,
+    json: bool,
+) -> Result<()> {
+    let ids = [
+        ("scan", ack.scan_id),
+        ("relocation", ack.relocation_id),
+        ("processing", ack.processing_id),
+    ];
+    if !ids.iter().any(|(_, id)| id.is_some()) {
+        return show_ack(i18n, ack, json);
+    }
+    let instance_id = super::tasks::instance_id(session)?;
+    if json {
+        let mut value = serde_json::to_value(ack)?;
+        let fields = value
+            .as_object_mut()
+            .context("Expected acknowledgement object")?;
+        fields.insert("instance_id".into(), instance_id.into());
+        let references: serde_json::Map<String, serde_json::Value> = ids
+            .into_iter()
+            .filter_map(|(kind, id)| {
+                id.map(|id| {
+                    (
+                        kind.into(),
+                        super::tasks::TaskReference { instance_id, id }
+                            .to_string()
+                            .into(),
+                    )
+                })
+            })
+            .collect();
+        fields.insert("task_refs".into(), references.into());
+        println!("{}", serde_json::to_string_pretty(&value)?);
+        if !ack.is_success() {
+            bail!(
+                "{:?}: {}",
+                ack.status,
+                ack.error.as_deref().unwrap_or("Command failed")
+            );
+        }
+    } else {
+        show_ack(i18n, ack, false)?;
+        for (kind, id) in ids {
+            if let Some(id) = id {
+                println!(
+                    "{kind}: {}",
+                    super::tasks::TaskReference { instance_id, id }
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn show_ack(
     i18n: &Localizer,
     ack: &rivu_protocol::response::Ack,

@@ -96,15 +96,15 @@ rivu playback toggle
 rivu playback volume 50
 ----
 
-Use `rivu status` for instance state and `rivu task status KIND ID` or
-`rivu task cancel KIND ID` for tasks (`KIND`: `scan`, `relocation`, `processing`).
+Use `rivu status` for instance state and `rivu task status KIND INSTANCE:ID` or
+`rivu task cancel KIND INSTANCE:ID` for tasks (`KIND`: `scan`, `relocation`, `processing`).
 For scan/import/relocation/processing commands, `--wait` returns the terminal
 result rather than an acceptance acknowledgement. A timeout can leave a mutation's
 result unknown; do not repeat it blindly. See
 link:doc/02_library.adoc#_cli_output[CLI output] for result and failure semantics.
 
-Task queries and cancellation use `rivu task status KIND ID` and
-`rivu task cancel KIND ID`, where `KIND` is `scan`, `relocation`, or `processing`.
+Use the task reference printed by startup or completion output; its instance
+identity prevents a saved reference from addressing a different task after restart.
 Playlist commands separate summaries (`playlist list`) from entries (`playlist show ID`).
 CLI preset, playlist, and graph export paths resolve against the invoking client's
 working directory, not the host's; absolute paths are unchanged.

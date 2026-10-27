@@ -469,8 +469,8 @@ Only one processing task runs at a time. `queued`, `rendering` and `processing`
 describe preparation/work; `complete`, `failed` and `cancelled` are terminal
 task states. Not every task visits every work phase: realtime preparation need
 not render a file. Start acceptance is not completion; `--wait` waits for that
-task and fails on cancellation/error. Use `task status processing ID` and
-`task cancel processing ID` for an asynchronous start. A cancellation acknowledgement
+task and fails on cancellation/error. Use `task status processing INSTANCE:ID` and
+`task cancel processing INSTANCE:ID` for an asynchronous start. A cancellation acknowledgement
 accepts the request, not proof that the worker has already retired. Cancellation
 invalidates publication, terminates/reaps neural workers and retires partial
 scratch; it does not publish a partial result. Source identity and job settings
@@ -497,7 +497,7 @@ Native source preparation checks cancellation between decoder calls; a backend
 call or filesystem operation has no hard cancellation-time guarantee. A retained
 audition or stem mix is rejected if the registered source's decoder hint changed,
 as well as when its media identity no longer matches.
-`task cancel processing ID` also returns a matching selected audition to Original after
+`task cancel processing INSTANCE:ID` also returns a matching selected audition to Original after
 its preparation task has completed. For realtime/hybrid graph runs it additionally
 marks the task `cancelled`; stopping a cached offline audition leaves its completed
 task status intact. Completion of preparation is not the lifetime of live audio.
@@ -545,15 +545,15 @@ rendering and retained-cache limits still apply.
 
 [source,shell]
 ----
-rivu task status processing 1
-rivu processing audition 1 denoised
-rivu processing audition 1 original
-rivu processing audition 2 vocals
-rivu processing audition 2 accompaniment
-rivu processing audition 2 mix --vocal-gain-db -3 --accompaniment-gain-db 0
+rivu task status processing INSTANCE:1
+rivu processing audition INSTANCE:1 denoised
+rivu processing audition INSTANCE:1 original
+rivu processing audition INSTANCE:2 vocals
+rivu processing audition INSTANCE:2 accompaniment
+rivu processing audition INSTANCE:2 mix --vocal-gain-db -3 --accompaniment-gain-db 0
 ----
 
-Use IDs actually returned by Start. A speech result uses the `denoised` audition
+Use references actually returned by Start, including the instance identity. A speech result uses the `denoised` audition
 mode. Audition starts the result's original queue source if necessary, then hands
 off to aligned rendered audio; Original returns to source audio. Separation Mix
 renders the retained stems with independent gains; it is not a second inference.
@@ -631,8 +631,8 @@ another separation output cannot be substituted by the same cached stream.
 Planning and FFT preparation run on the processing worker, not Core dispatch or
 the device callback. `--wait` prints one terminal task result and returns failure
 for failed or cancelled jobs; without it, an accepted acknowledgement is not proof
-of completion. Use `task status processing RUN_ID` and
-`task cancel processing RUN_ID` for the same task.
+of completion. Use `task status processing INSTANCE:RUN_ID` and
+`task cancel processing INSTANCE:RUN_ID` for the same task.
 
 A realtime task reaching `complete` means its immutable live plan is prepared,
 not that an offline file was rendered: `graph_outputs` is empty. Automatic
@@ -641,13 +641,13 @@ selection in the selected-audio line. Offline and hybrid tasks can retain render
 node outputs separately from later graph edits. Cached node/port audition is
 immediate; uncached snapshot audition prepares a new run and returns its own task ID.
 To render a selected output from any retained graph snapshot, including realtime,
-use `graph export` with the actual run ID and node/port from that snapshot:
+use `graph export` with the actual instance-qualified run reference and node/port from that snapshot:
 
 [source,shell]
 ----
-rivu task status processing 7
-rivu processing graph audition 7 3 --port 0
-rivu processing graph export 7 3 'rendered outputs/mix -6 dB.wav' --port 0 --wait
+rivu task status processing INSTANCE:7
+rivu processing graph audition INSTANCE:7 3 --port 0
+rivu processing graph export INSTANCE:7 3 'rendered outputs/mix -6 dB.wav' --port 0 --wait
 ----
 
 Audition uses the retained snapshot, not subsequently edited settings.

@@ -934,6 +934,11 @@ particular task finished.
 JSON completion output contains the task status rather than a global state snapshot.
 Startup and waiting share one connection; disconnection fails the wait rather
 than binding the same numeric task ID to a newly started instance.
+The CLI represents saved task references as `INSTANCE:ID`, paired with the task
+kind. It obtains INSTANCE from the same Hello session that starts the task;
+independent task status and cancellation bind to that instance before sending a
+business request. References from an earlier instance are rejected after restart.
+The reference does not extend task retention or persist tasks across restarts.
 
 `ViewResponse::ScanTask` contains `{id, progress, message, library_committed,
 playlist_id, error}`. The phases are `Discovering`, `ReadingMetadata`, `Saving`,

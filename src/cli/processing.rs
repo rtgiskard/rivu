@@ -11,6 +11,7 @@ fn show_settings(
     i18n: &Localizer,
     config: &rivu::config::Config,
     task: Option<&ProcessingTaskStatus>,
+    instance_id: u32,
     graph_only: bool,
 ) -> Result<()> {
     if !graph_only {
@@ -123,7 +124,7 @@ fn show_settings(
         }
     }
     if let Some(task) = task {
-        super::tasks::emit_processing(i18n, task, false)?;
+        super::tasks::emit_processing(i18n, instance_id, task, false)?;
     } else {
         println!("{}", i18n.text("core-processing-latest"));
     }
@@ -172,7 +173,7 @@ fn graph_command(action: ProcessingGraphAction) -> Result<(Command, bool)> {
             }
         }
         ProcessingGraphAction::Audition { id, node, port } => Command::ProcessingGraphAudition {
-            id,
+            id: id.id,
             node: GraphPort { node, port },
         },
         ProcessingGraphAction::Export {
@@ -184,7 +185,7 @@ fn graph_command(action: ProcessingGraphAction) -> Result<(Command, bool)> {
         } => {
             wait = requested;
             Command::ProcessingGraphExport {
-                id,
+                id: id.id,
                 node: GraphPort { node, port },
                 path: super::client_path(path)?,
             }
@@ -205,28 +206,48 @@ pub(super) fn run(
         ProcessingAction::Graph(ProcessingGraphAction::Show)
     );
     if graph_show || matches!(&action, ProcessingAction::Show) {
-        let state = rivu_client::get_state(
-            data_dir,
-            StateSections {
+        let mut session = rivu_client::client_session(data_dir)?;
+        let state = session
+            .get_state(StateSections {
                 system: true,
                 ..Default::default()
-            },
-        )?
-        .system
-        .context("Missing system state")?;
+            })?
+            .system
+            .context("Missing system state")?;
+        let instance_id = super::tasks::instance_id(&session)?;
         if json {
+            let processing = state
+                .processing
+                .as_ref()
+                .map(|task| super::tasks::task_json(instance_id, task.id, task))
+                .transpose()?;
             let value = if graph_show {
-                serde_json::json!({"graph":state.config.processing_graph,"latest_task":state.processing})
+                serde_json::json!({"graph":state.config.processing_graph,"latest_task":processing})
             } else {
-                serde_json::json!({"equalizer":state.config.equalizer,"presets":state.config.equalizer_presets,"equalizer_ab":state.config.equalizer_ab,"denoise":state.config.denoise,"neural":state.config.neural,"processing_graph":state.config.processing_graph,"processing":state.processing})
+                serde_json::json!({"equalizer":state.config.equalizer,"presets":state.config.equalizer_presets,"equalizer_ab":state.config.equalizer_ab,"denoise":state.config.denoise,"neural":state.config.neural,"processing_graph":state.config.processing_graph,"processing":processing})
             };
             println!("{}", serde_json::to_string_pretty(&value)?);
         } else {
-            show_settings(i18n, &state.config, state.processing.as_ref(), graph_show)?;
+            show_settings(
+                i18n,
+                &state.config,
+                state.processing.as_ref(),
+                instance_id,
+                graph_show,
+            )?;
         }
         return Ok(());
     }
     let mut session = rivu_client::client_session(data_dir)?;
+    let reference = match &action {
+        ProcessingAction::Audition { id, .. }
+        | ProcessingAction::Graph(ProcessingGraphAction::Audition { id, .. })
+        | ProcessingAction::Graph(ProcessingGraphAction::Export { id, .. }) => Some(*id),
+        _ => None,
+    };
+    if let Some(reference) = reference {
+        session.bind_instance(reference.instance_id)?;
+    }
     let mut wait = false;
     let command = match action {
         ProcessingAction::Bypass => Command::ProcessingBypass,
@@ -273,7 +294,7 @@ pub(super) fn run(
             vocal_gain_db,
             accompaniment_gain_db,
         } => Command::AuditionProcessing {
-            id,
+            id: id.id,
             mode: match mode {
                 ProcessingAudition::Original => AuditionMode::Original,
                 ProcessingAudition::Denoised => AuditionMode::Denoised,
@@ -288,7 +309,7 @@ pub(super) fn run(
     };
     let ack = session.request_ack(command)?;
     if !wait || !ack.is_success() {
-        return super::output::show_ack(i18n, &ack, json);
+        return super::output::show_task_ack(i18n, &session, &ack, json);
     }
     let id = ack
         .processing_id
@@ -405,7 +426,7 @@ mod tests {
 
     #[test]
     fn retained_graph_output_commands_preserve_run_port_and_client_path() {
-        let (command, wait) = parse_graph_command(&["audition", "91", "7", "--port", "1"]);
+        let (command, wait) = parse_graph_command(&["audition", "8:91", "7", "--port", "1"]);
         assert!(matches!(
             command,
             Command::ProcessingGraphAudition {
@@ -420,7 +441,7 @@ mod tests {
         for path in [PathBuf::from(relative), absolute.clone()] {
             for requested_wait in [false, true] {
                 let mut arguments =
-                    vec!["export", "91", "7", path.to_str().unwrap(), "--port", "1"];
+                    vec!["export", "8:91", "7", path.to_str().unwrap(), "--port", "1"];
                 if requested_wait {
                     arguments.push("--wait");
                 }
