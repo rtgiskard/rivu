@@ -503,6 +503,8 @@ The Album artwork panel initiates acquisition only while visible. Hiding it
 clears queued demand without cancelling a submitted shared load; completion may
 warm the cache but cannot start another hidden lookup. Revealing it acquires the
 latest track. Other consumers, including MPRIS, retain their own acquisition demand.
+A path change updates the panel's source snapshot and retires the previous cover
+even when track ID and fingerprint are unchanged; it does not reset track rotation.
 
 The content key is track ID plus source fingerprint. Resident requests for the
 same content share one probe outside the lookup lock. In-flight loads retain the

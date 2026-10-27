@@ -264,8 +264,10 @@ impl AlbumArtwork {
             (None, None) => false,
             _ => true,
         };
+        let source_changed = switched
+            || matches!((&self.track, track), (Some(previous), Some(next)) if previous.path != next.path);
         let stopped = status == PlaybackStatus::Stopped && self.status != status;
-        let mut changed = switched || self.status != status;
+        let mut changed = source_changed || self.status != status;
         for instance in self.instances.values_mut() {
             instance.retained = false;
         }
@@ -350,12 +352,12 @@ impl AlbumArtwork {
         }
         let visible = self.instances.values().any(|instance| instance.visible);
         changed |= self.visible != visible || self.pacing.fps != config.album_artwork_fps;
-        if switched {
+        if source_changed {
             self.track = track.cloned();
         }
-        if switched || self.visible && !visible {
-            // Neither a track switch nor the last panel hiding may retain the
-            // previous display owner. Rendering retires its old scene safely.
+        if source_changed || self.visible && !visible {
+            // Source changes retire old pixels without resetting track rotation.
+            // Hiding the last panel also releases its display owner.
             self.view.replace(None, cx);
         }
         self.status = status;
@@ -722,6 +724,68 @@ impl Render for AlbumArtworkPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[gpui::test]
+    fn relocation_replaces_display_without_resetting_rotation(cx: &mut gpui::TestAppContext) {
+        use super::super::layout::{Node, Panel};
+
+        let directory = tempfile::tempdir_in(".cache").unwrap();
+        for (name, colour) in [("before", [255, 0, 0]), ("after", [0, 255, 0])] {
+            let path = directory.path().join(name);
+            std::fs::create_dir(&path).unwrap();
+            image::RgbImage::from_pixel(2, 2, image::Rgb(colour))
+                .save(path.join("cover.png"))
+                .unwrap();
+        }
+        let original = crate::artwork::tests::track(directory.path().join("before/track.wav"));
+        let mut relocated = original.clone();
+        relocated.path = directory.path().join("after/track.wav");
+        let manager = Arc::new(ArtworkManager::new(directory.path()));
+        let old = manager.load(&original).unwrap();
+        let new = manager.load(&relocated).unwrap();
+        assert_ne!(old, new);
+        let config = Config::default();
+        let root = Node::Tabs {
+            id: 1,
+            active: 2,
+            panels: vec![Panel {
+                id: 2,
+                kind: "album_artwork".into(),
+                show_tab_bar: false,
+                audio_visualizer: None,
+                album_artwork: Some(AlbumArtworkOptions {
+                    mode: AlbumArtworkMode::Rotating,
+                    ..(&config).into()
+                }),
+            }],
+        };
+        let owner = cx.update(|cx| {
+            let default = cx.new(|cx| Artwork::new(&Localizer::new("en"), cx));
+            cx.new(|_| AlbumArtwork::new(manager, default, ArtworkImages::default()))
+        });
+        owner.update(cx, |owner, cx| {
+            owner.sync(
+                Some(&original),
+                PlaybackStatus::Paused,
+                &config,
+                Some(&root),
+                true,
+                cx,
+            );
+            assert!(!owner.view.replace(Some(old.clone()), cx));
+            owner.instances.get_mut(&2).unwrap().rotation.angle = 0.75;
+            owner.sync(
+                Some(&relocated),
+                PlaybackStatus::Paused,
+                &config,
+                Some(&root),
+                true,
+                cx,
+            );
+            assert!(!owner.view.replace(Some(new), cx));
+            assert_eq!(owner.instances[&2].rotation.angle, 0.75);
+            assert!(!ArtworkIdentity::for_track(&original).matches(owner.track.as_ref().unwrap()));
+        });
+    }
 
     fn rotating() -> RotationSettings {
         RotationSettings {
