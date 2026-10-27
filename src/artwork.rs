@@ -2,6 +2,8 @@
 //! reads never probe media; blocking loads belong on existing background workers.
 //! No decoder or audio output is opened; failures never propagate into playback.
 
+pub(crate) mod cache;
+
 use parking_lot::{Mutex, RwLock};
 use rivu_protocol::model::Track;
 use std::{
@@ -241,10 +243,11 @@ impl ArtworkManager {
         let _acquisition = self.maintenance.read();
         self.default
             .get_or_init(|| {
-                let path = self
-                    .directory
-                    .join("cache")
-                    .join(format!("{}.png", blake3::hash(DEFAULT_IMAGE)));
+                let path = cache::original_path(
+                    &self.directory.join("cache"),
+                    blake3::hash(DEFAULT_IMAGE),
+                    "png",
+                );
                 match write_image(&path, DEFAULT_IMAGE) {
                     Ok(uri) => Some(Artwork(artwork_file(uri))),
                     Err(error) => {
@@ -351,60 +354,97 @@ impl ArtworkManager {
                     continue;
                 }
             };
-            if !managed_filename(&entry.file_name()) {
-                continue;
-            }
-            // Serializes the first load's existence check/write/registration with
-            // removal. Cached reads can still acquire any resident entry here.
-            let _removal = clean.then(|| self.maintenance.write());
+            let name = entry.file_name();
             let path = entry.path();
-            let metadata = match fs::symlink_metadata(&path) {
-                Ok(metadata) if metadata.is_file() => metadata,
-                Ok(_) => continue,
-                Err(error) => {
-                    report.failure(&path, error);
-                    continue;
-                }
-            };
-            report.files += 1;
-            report.bytes += metadata.len();
-            let modified = match metadata.modified() {
-                Ok(modified) => modified,
-                Err(error) => {
-                    report.failure(&path, error);
-                    continue;
-                }
-            };
-            if !now
-                .duration_since(modified)
-                .is_ok_and(|age| age >= older_than)
-            {
-                continue;
-            }
-            report.expired_files += 1;
-            report.expired_bytes += metadata.len();
-            if self.entries.lock().protects(&path)
-                || self
-                    .default
-                    .get()
-                    .and_then(Option::as_ref)
-                    .is_some_and(|artwork| artwork.0.path.as_ref() == path)
-            {
-                report.protected_files += 1;
-                report.protected_bytes += metadata.len();
-                continue;
-            }
-            if clean {
-                match fs::remove_file(&path) {
-                    Ok(()) => {
-                        report.removed_files += 1;
-                        report.removed_bytes += metadata.len();
+            if managed_filename(&name, false) {
+                self.maintain_file(&path, now, older_than, clean, &mut report);
+            } else if name.to_str().is_some_and(|name| lowercase_hex(name, 2)) {
+                // Exactly one real bucket level; never follow directory symlinks
+                // or descend into arbitrary directories or nested buckets.
+                match entry.file_type() {
+                    Ok(kind) if kind.is_dir() => {}
+                    Ok(_) => continue,
+                    Err(error) => {
+                        report.failure(&path, error);
+                        continue;
                     }
-                    Err(error) => report.failure(&path, error),
+                }
+                let children = match fs::read_dir(&path) {
+                    Ok(children) => children,
+                    Err(error) => {
+                        report.failure(&path, error);
+                        continue;
+                    }
+                };
+                for child in children {
+                    match child {
+                        Ok(child) if managed_filename(&child.file_name(), true) => {
+                            self.maintain_file(&child.path(), now, older_than, clean, &mut report);
+                        }
+                        Ok(_) => {}
+                        Err(error) => report.failure(&path, error),
+                    }
                 }
             }
         }
         Ok(report)
+    }
+
+    fn maintain_file(
+        &self,
+        path: &Path,
+        now: SystemTime,
+        older_than: Duration,
+        clean: bool,
+        report: &mut ArtworkCacheReport,
+    ) {
+        // Serialize original-file creation/registration with removal.
+        let _removal = clean.then(|| self.maintenance.write());
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.is_file() => metadata,
+            Ok(_) => return,
+            Err(error) => {
+                report.failure(path, error);
+                return;
+            }
+        };
+        report.files += 1;
+        report.bytes += metadata.len();
+        let modified = match metadata.modified() {
+            Ok(modified) => modified,
+            Err(error) => {
+                report.failure(path, error);
+                return;
+            }
+        };
+        if !now
+            .duration_since(modified)
+            .is_ok_and(|age| age >= older_than)
+        {
+            return;
+        }
+        report.expired_files += 1;
+        report.expired_bytes += metadata.len();
+        if self.entries.lock().protects(path)
+            || self
+                .default
+                .get()
+                .and_then(Option::as_ref)
+                .is_some_and(|artwork| artwork.0.path.as_ref() == path)
+        {
+            report.protected_files += 1;
+            report.protected_bytes += metadata.len();
+            return;
+        }
+        if clean {
+            match fs::remove_file(path) {
+                Ok(()) => {
+                    report.removed_files += 1;
+                    report.removed_bytes += metadata.len();
+                }
+                Err(error) => report.failure(path, error),
+            }
+        }
     }
 
     fn source_uri(&self, path: &Path, limit: usize) -> ArtworkSource {
@@ -546,10 +586,7 @@ impl ArtworkManager {
             _ => return None,
         };
         let hash = blake3::hash(bytes);
-        let path = self
-            .directory
-            .join("cache")
-            .join(format!("{hash}.{extension}"));
+        let path = cache::original_path(&self.directory.join("cache"), hash, extension);
         let uri = write_image(&path, bytes).ok()?;
         Some(artwork_file(uri))
     }
@@ -575,18 +612,22 @@ fn artwork_file(uri: String) -> Arc<ArtworkFile> {
     })
 }
 
-fn managed_filename(name: &std::ffi::OsStr) -> bool {
-    let Some((hash, extension)) = name.to_str().and_then(|name| name.rsplit_once('.')) else {
+fn managed_filename(name: &std::ffi::OsStr, bucket: bool) -> bool {
+    let Some((stem, extension)) = name.to_str().and_then(|name| name.rsplit_once('.')) else {
         return false;
     };
-    hash.len() == 64
-        && hash
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    lowercase_hex(stem, if bucket { 30 } else { 64 })
         && matches!(
             extension,
             "png" | "jpg" | "gif" | "webp" | "bmp" | "tiff" | "ico"
         )
+}
+
+fn lowercase_hex(value: &str, length: usize) -> bool {
+    value.len() == length
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn file_uri(path: &Path) -> io::Result<String> {
@@ -597,15 +638,50 @@ fn file_uri(path: &Path) -> io::Result<String> {
 }
 
 fn write_image(path: &Path, data: &[u8]) -> io::Result<String> {
-    if !path.is_file() {
-        let parent = path
-            .parent()
-            .ok_or_else(|| io::Error::other("Artwork has no directory"))?;
-        fs::create_dir_all(parent)?;
-        // Rename a complete file into place. The cache is disposable: no fsync.
-        let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-        temporary.write_all(data)?;
-        temporary.persist(path).map_err(|error| error.error)?;
+    match fs::symlink_metadata(path) {
+        Ok(_) => return reuse_image(path, data),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("Artwork has no directory"))?;
+    fs::create_dir_all(parent)?;
+    // Publish only a complete file and never clobber another publisher. The
+    // cache is disposable: no fsync. A race winner still needs a content check.
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    temporary.write_all(data)?;
+    match temporary.persist_noclobber(path) {
+        Ok(_) => file_uri(path),
+        Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => reuse_image(path, data),
+        Err(error) => Err(error.error),
+    }
+}
+
+fn reuse_image(path: &Path, data: &[u8]) -> io::Result<String> {
+    let mismatch = || io::Error::new(io::ErrorKind::InvalidData, "Artwork cache content mismatch");
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_file() || metadata.len() != data.len() as u64 {
+        return Err(mismatch());
+    }
+    let file = rivu_format::input::open_regular_file(path)?;
+    // Stream at most the expected length plus one byte, including if the file
+    // grows after metadata. Comparison uses fixed stack space, not a second image.
+    let mut reader = file.take(data.len() as u64 + 1);
+    let mut buffer = [0; 8192];
+    let mut offset = 0;
+    loop {
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        if data.get(offset..offset + count) != Some(&buffer[..count]) {
+            return Err(mismatch());
+        }
+        offset += count;
+    }
+    if offset != data.len() {
+        return Err(mismatch());
     }
     file_uri(path)
 }
@@ -616,6 +692,157 @@ pub(crate) mod tests {
     use std::fs::File;
 
     const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+
+    #[test]
+    fn originals_use_bucketed_128_bit_names_without_reusing_or_migrating_legacy_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = ArtworkManager::new(directory.path());
+        let root = directory.path().join("artwork/cache");
+        fs::create_dir_all(&root).unwrap();
+        let hash = blake3::hash(DEFAULT_IMAGE).to_hex();
+        let legacy = root.join(format!("{hash}.png"));
+        fs::write(&legacy, DEFAULT_IMAGE).unwrap();
+        let image = manager.image_uri(DEFAULT_IMAGE, MAX_IMAGE_BYTES).unwrap();
+        let expected = root.join(&hash[..2]).join(format!("{}.png", &hash[2..32]));
+        assert_eq!(image.path.as_ref(), expected.as_path());
+        assert_eq!(
+            manager.export_default().unwrap().path().as_ref(),
+            expected.as_path()
+        );
+        assert_eq!(fs::read(&expected).unwrap(), DEFAULT_IMAGE);
+        assert_eq!(fs::read(&legacy).unwrap(), DEFAULT_IMAGE);
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 2);
+        assert_eq!(fs::read_dir(expected.parent().unwrap()).unwrap().count(), 1);
+        // Removing the new original cannot turn the legacy copy into a fallback.
+        fs::remove_file(&expected).unwrap();
+        fs::create_dir(&expected).unwrap();
+        assert!(
+            ArtworkManager::new(directory.path())
+                .export_default()
+                .is_none()
+        );
+        assert_eq!(fs::read(legacy).unwrap(), DEFAULT_IMAGE);
+    }
+
+    #[test]
+    fn existing_originals_require_bounded_content_equality_without_overwriting() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = ArtworkManager::new(directory.path());
+        let path = cache::original_path(
+            &directory.path().join("artwork/cache"),
+            blake3::hash(DEFAULT_IMAGE),
+            "png",
+        );
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut collision = DEFAULT_IMAGE.to_vec();
+        *collision.last_mut().unwrap() ^= 1;
+        fs::write(&path, &collision).unwrap();
+        assert_eq!(
+            write_image(&path, DEFAULT_IMAGE).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert!(manager.image_uri(DEFAULT_IMAGE, MAX_IMAGE_BYTES).is_none());
+        assert!(manager.export_default().is_none());
+        assert_eq!(fs::read(&path).unwrap(), collision);
+        // A length mismatch is rejected before reading any existing content.
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(MAX_IMAGE_BYTES as u64 + 1)
+            .unwrap();
+        assert_eq!(
+            write_image(&path, DEFAULT_IMAGE).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            fs::metadata(&path).unwrap().len(),
+            MAX_IMAGE_BYTES as u64 + 1
+        );
+        fs::write(&path, DEFAULT_IMAGE).unwrap();
+        age_file(&path);
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        assert_eq!(file_path(&write_image(&path, DEFAULT_IMAGE).unwrap()), path);
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
+    }
+
+    #[test]
+    fn racing_different_publishers_never_clobber_the_winner() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("collision.png");
+        let barrier = std::sync::Barrier::new(2);
+        let results = std::thread::scope(|scope| {
+            let left = scope.spawn(|| {
+                barrier.wait();
+                write_image(&path, b"left")
+            });
+            let right = scope.spawn(|| {
+                barrier.wait();
+                write_image(&path, b"rght")
+            });
+            [left.join().unwrap(), right.join().unwrap()]
+        });
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        let winner = if results[0].is_ok() { b"left" } else { b"rght" };
+        assert_eq!(fs::read(&path).unwrap(), winner);
+        assert_eq!(
+            results.into_iter().find_map(Result::err).unwrap().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn independent_managers_racing_identical_publications_share_a_complete_original() {
+        let directory = tempfile::tempdir().unwrap();
+        let barrier = std::sync::Barrier::new(4);
+        let images = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..4)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let manager = ArtworkManager::new(directory.path());
+                        barrier.wait();
+                        manager.export_default().unwrap()
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        for image in &images {
+            assert_eq!(image.uri(), images[0].uri());
+            assert_eq!(fs::read(image.path()).unwrap(), DEFAULT_IMAGE);
+        }
+        assert_eq!(
+            fs::read_dir(images[0].path().parent().unwrap())
+                .unwrap()
+                .count(),
+            1
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn original_publication_never_reuses_a_symlink() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("outside.png");
+        fs::write(&target, DEFAULT_IMAGE).unwrap();
+        let path = directory.path().join("cached.png");
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        assert_eq!(
+            write_image(&path, DEFAULT_IMAGE).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert!(
+            fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read(target).unwrap(), DEFAULT_IMAGE);
+    }
 
     #[test]
     fn startup_and_negative_lookups_never_export_default_artwork() {
@@ -666,7 +893,7 @@ pub(crate) mod tests {
         });
         assert!(held.iter().all(|image| image == &held[0]));
         let path = file_path(held[0].uri());
-        assert!(managed_filename(path.file_name().unwrap()));
+        assert!(managed_filename(path.file_name().unwrap(), true));
         assert_eq!(manager.cached_default(), Some(held[0].clone()));
         age_file(&path);
         let report = manager.maintain(Duration::ZERO, true).unwrap();
@@ -1754,6 +1981,64 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn maintenance_excludes_unmanaged_names_symlinks_and_nested_directories() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("artwork/cache");
+        let bucket = root.join("ab");
+        fs::create_dir_all(&bucket).unwrap();
+        let short_hash = "1".repeat(30);
+        let full_hash = "2".repeat(64);
+        let mut excluded = vec![
+            root.join(format!("{short_hash}.png")),
+            bucket.join(format!("{full_hash}.png")),
+            bucket.join(format!("{}{}.png", "A", "1".repeat(29))),
+            bucket.join(format!("{short_hash}.PNG")),
+            bucket.join("notes.txt"),
+        ];
+        for name in ["AB", "a", "abc", "g1", "unmanaged"] {
+            let unmanaged = root.join(name);
+            fs::create_dir_all(&unmanaged).unwrap();
+            excluded.push(unmanaged.join(format!("{short_hash}.png")));
+        }
+        let nested = bucket.join("cd");
+        fs::create_dir(&nested).unwrap();
+        excluded.push(nested.join(format!("{short_hash}.png")));
+        let named_directory = bucket.join(format!("{short_hash}.png"));
+        fs::create_dir(&named_directory).unwrap();
+        excluded.push(named_directory.join(format!("{short_hash}.png")));
+        for path in &excluded {
+            fs::write(path, b"keep").unwrap();
+        }
+        #[cfg(unix)]
+        {
+            let outside = directory.path().join("outside");
+            fs::create_dir(&outside).unwrap();
+            let external = outside.join(format!("{short_hash}.png"));
+            fs::write(&external, b"keep").unwrap();
+            excluded.push(external.clone());
+            std::os::unix::fs::symlink(&outside, root.join("ef")).unwrap();
+            std::os::unix::fs::symlink(&external, bucket.join(format!("{}.png", "3".repeat(30))))
+                .unwrap();
+            std::os::unix::fs::symlink(&external, root.join(format!("{full_hash}.png"))).unwrap();
+        }
+        let managed = bucket.join(format!("{}.png", "4".repeat(30)));
+        fs::write(&managed, b"remove").unwrap();
+        let manager = ArtworkManager::new(directory.path());
+        let inventory = manager.maintain(Duration::ZERO, false).unwrap();
+        assert_eq!((inventory.files, inventory.bytes), (1, 6));
+        assert!(managed.is_file());
+        let cleaned = manager.maintain(Duration::ZERO, true).unwrap();
+        assert_eq!(
+            (cleaned.files, cleaned.removed_files, cleaned.failed_files),
+            (1, 1, 0)
+        );
+        assert!(!managed.exists());
+        for path in excluded {
+            assert_eq!(fs::read(path).unwrap(), b"keep");
+        }
+    }
+
+    #[test]
     fn cleanup_waits_for_first_acquisition_and_preserves_newly_registered_file() {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("track.wav");
@@ -1761,8 +2046,8 @@ pub(crate) mod tests {
         let manager = ArtworkManager::new(directory.path());
         let selected = track(source);
         let cache = directory.path().join("artwork/cache");
-        fs::create_dir_all(&cache).unwrap();
-        let path = cache.join(format!("{}.png", blake3::hash(DEFAULT_IMAGE)));
+        let path = cache::original_path(&cache, blake3::hash(DEFAULT_IMAGE), "png");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, DEFAULT_IMAGE).unwrap();
         age_file(&path);
         let (started, loading) = std::sync::mpsc::channel();

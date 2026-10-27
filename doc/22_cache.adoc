@@ -542,7 +542,12 @@ releases these negative records; the shared 64-entry retention target is unchang
 
 === Encoded files and maintenance
 
-Encoded images use immutable content-hash filenames under `artwork/cache`.
+Encoded images use immutable content-derived paths under `artwork/cache`.
+Disk names use the first 128 bits of BLAKE3 as 32 lowercase hexadecimal characters:
+the first two form a bucket directory and the remaining 30 form the filename.
+For example, originals use `ab/<30-hex>.png`. Runtime content identity retains the
+full hash. Existing originals are compared with the incoming bytes before reuse;
+mismatches fail without overwriting the existing file.
 Identical bytes reuse an existing file, independent of track identity; files
 provide paths for GPUI and URLs for external MPRIS consumers. Embedded and directory
 images share byte-sniffed, content-hash storage. Each encoded image is limited by
@@ -553,8 +558,16 @@ link:04_playback.adoc#_mpris_and_artwork[MPRIS and artwork].
 There is no automatic file-count or total-byte budget, startup directory inventory,
 or automatic cleanup. No persistent track-to-image index is restored after restart:
 the first source probe discovers the image hash, then reuses its file if present.
+
 The MPRIS default export uses the same content-hash directory and is protected
 once exported; later sessions can clean it when it is no longer resident.
+
+Maintenance scans only legacy managed files at the cache root and managed files
+within one level of two-character lowercase-hex buckets. It does not follow
+symlinks or descend into nested directories. Old flat, full-hash originals remain
+included in statistics and age-based cleanup, but are not read as fallbacks or
+moved at startup. The first access after this layout change recreates the
+requested cache files.
 
 Only explicit link:01_config.adoc#_artwork_cache_maintenance[Settings maintenance]
 enumerates disposable files. Statistics and cleanup use modification age, not
