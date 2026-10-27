@@ -324,6 +324,18 @@ pub enum AudioCommand {
     StopAndSnapshot(oneshot::Sender<AudioSnapshot>),
     Shutdown,
 }
+
+impl AudioCommand {
+    fn changes_analysis_source(&self) -> bool {
+        matches!(
+            self,
+            Self::Load { .. }
+                | Self::Audition { .. }
+                | Self::GraphAudition { .. }
+                | Self::Seek { .. }
+        )
+    }
+}
 #[derive(Clone, Debug)]
 pub enum AudioEvent {
     Started {
@@ -422,8 +434,22 @@ impl AudioEngine {
             self.shutdown.lock().take();
             return Ok(());
         }
+        let changes_analysis = command.changes_analysis_source();
+        if changes_analysis {
+            self.ensure_command_capacity(1)?;
+            self.analysis_control
+                .desired_intent
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }
         self.commands
             .try_send(command)
+            .inspect_err(|_| {
+                if changes_analysis {
+                    self.analysis_control
+                        .desired_intent
+                        .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                }
+            })
             .map_err(|error| match error {
                 async_channel::TrySendError::Full(_) => {
                     anyhow::anyhow!("Audio command queue is full; command not queued")

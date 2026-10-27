@@ -120,6 +120,13 @@ Playback activity and Still Mode remain separate execution gates; requesting a
 display never resumes playback or overrides Still Mode. Destructive demand
 transitions invalidate queued input and late frame publication.
 
+Admission of Load, audition-source replacement, and Seek reserves a monotonic
+audio intent. The serialized audio worker applies each intent before executing
+its matching command; tap capture carries the applied epoch, and the accepted
+analysis publication records that epoch and intent. Presentation requires the
+current display token, actual epoch, and matching desired/applied intent.
+Queued newer intents therefore cannot relabel old audio as a ready replacement.
+
 Stream resets, analysis restarts, dropped samples, FFT/window changes, and
 display-demand transitions break signal continuity. Views reject stale frames
 and reset envelopes or simulations rather than smoothing across unrelated audio.

@@ -29,6 +29,8 @@ struct CommandInbox {
     receiver: async_channel::Receiver<AudioCommand>,
     // A non-seek read ahead is an ordering barrier, not a command to discard.
     pending: Option<AudioCommand>,
+    // Discarding a seek target must still settle its admitted analysis intent.
+    coalesced_intents: usize,
 }
 
 impl CommandInbox {
@@ -61,6 +63,7 @@ impl CommandInbox {
                 }) => {
                     *remaining -= 1;
                     seconds = target;
+                    self.coalesced_intents += 1;
                     revision = target_revision;
                 }
                 Ok(barrier) => {
@@ -163,6 +166,7 @@ impl Worker {
             commands: CommandInbox {
                 receiver: commands,
                 pending: None,
+                coalesced_intents: 0,
             },
             commands_ready,
             events,
@@ -208,6 +212,9 @@ impl Worker {
         );
     }
     fn command(&mut self, command: AudioCommand) -> bool {
+        if command.changes_analysis_source() {
+            self.analyzer.control.apply_audio_intents(1);
+        }
         match command {
             AudioCommand::Shutdown => {
                 self.stop();
@@ -637,6 +644,9 @@ impl Worker {
                 self.stop();
                 return false;
             }
+            self.analyzer
+                .control
+                .apply_audio_intents(std::mem::take(&mut self.commands.coalesced_intents) as u64);
             if !self.command(command) {
                 return false;
             }
@@ -780,6 +790,33 @@ mod tests {
     use crate::{AudioShutdown, AudioStop, shutdown_channel};
     use crossbeam_channel::bounded;
     use futures::channel::oneshot;
+
+    #[test]
+    fn coalesced_seeks_settle_every_admitted_analysis_intent() {
+        use std::sync::atomic::Ordering;
+        let (mut worker, commands, _events, _shutdown) = opening_worker();
+        let control = Arc::clone(&worker.analyzer.control);
+        let count = MAX_COMMANDS_PER_ROUND as u64;
+        let epoch = control.epoch.load(Ordering::Acquire);
+        control.desired_intent.store(count, Ordering::Release);
+        for revision in 1..=count {
+            commands
+                .try_send(AudioCommand::Seek {
+                    seconds: revision as f64,
+                    revision,
+                })
+                .unwrap();
+        }
+        assert!(!control.frame_is_current(&crate::analysis::AnalysisFrame::default()));
+        assert!(worker.control_round());
+        assert_eq!(control.epoch.load(Ordering::Acquire), epoch + 4);
+        let current = crate::analysis::AnalysisFrame {
+            audio_epoch: control.epoch.load(Ordering::Acquire),
+            audio_intent: count,
+            ..crate::analysis::AnalysisFrame::default()
+        };
+        assert!(control.frame_is_current(&current));
+    }
 
     fn opening_worker() -> (
         Worker,
@@ -1689,6 +1726,7 @@ mod tests {
             let mut inbox = CommandInbox {
                 receiver,
                 pending: None,
+                coalesced_intents: 0,
             };
             let mut remaining = MAX_COMMANDS_PER_ROUND;
             assert!(matches!(
@@ -1730,6 +1768,7 @@ mod tests {
         let mut inbox = CommandInbox {
             receiver,
             pending: None,
+            coalesced_intents: 0,
         };
         let mut remaining = MAX_COMMANDS_PER_ROUND;
         assert!(matches!(
@@ -1764,6 +1803,7 @@ mod tests {
         let mut inbox = CommandInbox {
             receiver,
             pending: None,
+            coalesced_intents: 0,
         };
         let mut handled = 0;
         for _ in 0..3 {
@@ -1803,6 +1843,7 @@ mod tests {
         let mut inbox = CommandInbox {
             receiver,
             pending: None,
+            coalesced_intents: 0,
         };
         let mut remaining = MAX_COMMANDS_PER_ROUND;
         assert!(matches!(
@@ -1838,6 +1879,7 @@ mod tests {
             let mut inbox = CommandInbox {
                 receiver,
                 pending: None,
+                coalesced_intents: 0,
             };
             let mut remaining = MAX_COMMANDS_PER_ROUND;
             done.send(inbox.try_recv_round(&mut remaining).unwrap())

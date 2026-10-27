@@ -233,6 +233,9 @@ impl DensityField {
 pub struct AnalysisFrame {
     pub sequence: u64,
     pub display_token: u64,
+    /// Actual reset epoch and admitted source/seek intent producing this publication.
+    pub audio_epoch: u64,
+    pub audio_intent: u64,
     /// Changes whenever a window cannot continue the preceding signal.
     pub generation: u64,
     /// Absent until the first publication; identifies the FFT producing this frame.
@@ -293,6 +296,8 @@ pub struct AnalysisControl {
     pub(crate) sample_rate: AtomicU32,
     /// Even epochs are stable; odd epochs mark sample-rate reset in progress.
     pub(crate) epoch: AtomicU64,
+    pub(crate) desired_intent: AtomicU64,
+    applied_intent: AtomicU64,
     shutdown: AtomicBool,
     // Complete display demand and its transition identity are one snapshot.
     display_demand: AtomicU64,
@@ -306,12 +311,39 @@ pub struct AnalysisControl {
 }
 
 impl AnalysisControl {
+    pub fn frame_is_current(&self, frame: &AnalysisFrame) -> bool {
+        frame.display_token == self.display_token()
+            && frame.audio_epoch == self.epoch.load(Ordering::Acquire)
+            && frame.audio_intent == self.desired_intent.load(Ordering::Acquire)
+            && frame.audio_intent == self.applied_intent.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn apply_audio_intents(&self, count: u64) {
+        if count == 0 {
+            return;
+        }
+        let applied = self.applied_intent.load(Ordering::Acquire);
+        let pending = self
+            .desired_intent
+            .load(Ordering::Acquire)
+            .wrapping_sub(applied);
+        if pending != 0 {
+            // One fence suffices for an already coalesced prefix: no PCM can
+            // be admitted between these serialized discarded seek intents.
+            self.epoch.fetch_add(2, Ordering::AcqRel);
+            self.applied_intent
+                .store(applied.wrapping_add(count.min(pending)), Ordering::Release);
+        }
+    }
+
     fn new() -> Self {
         Self {
             playback_active: AtomicBool::new(false),
             settings: RwLock::new(AnalysisSettings::from(&Config::default())),
             sample_rate: AtomicU32::new(48_000),
             epoch: AtomicU64::new(0),
+            desired_intent: AtomicU64::new(0),
+            applied_intent: AtomicU64::new(0),
             shutdown: AtomicBool::new(false),
             display_demand: AtomicU64::new(0),
             frame_requested: AtomicBool::new(false),
@@ -1101,6 +1133,7 @@ fn analyze(
         still_token = current_still_token;
         demand_token = current_demand_token;
         let current_epoch = control.epoch.load(Ordering::Acquire);
+        let current_intent = control.applied_intent.load(Ordering::Acquire);
         let settings = *control.settings.read();
         let sample_rate = control.sample_rate.load(Ordering::Acquire);
         if !current_epoch.is_multiple_of(2)
@@ -1162,6 +1195,8 @@ fn analyze(
             let mut frame = shared.write();
             let published = rms.is_some_and(|rms| {
                 control.epoch.load(Ordering::Acquire) == current_epoch
+                    && current_intent == control.desired_intent.load(Ordering::Acquire)
+                    && current_intent == control.applied_intent.load(Ordering::Acquire)
                     && control.accepts_audio()
                     && *control.settings.read() == settings
                     && control.display_token() == current_demand_token
@@ -1176,6 +1211,8 @@ fn analyze(
             });
             if published {
                 frame.display_token = current_demand_token;
+                frame.audio_epoch = current_epoch;
+                frame.audio_intent = current_intent;
             } else if runtime.generation != previous_generation {
                 // A ready replacement and its generation commit together. Only
                 // a genuine wait for fresh analysis exposes an invalid frame.
@@ -1184,6 +1221,8 @@ fn analyze(
                     ..VisualizerFrame::default()
                 };
                 frame.display_token = current_demand_token;
+                frame.audio_epoch = current_epoch;
+                frame.audio_intent = current_intent;
                 frame.generation = runtime.generation;
                 frame.settings = None;
             }
@@ -1211,6 +1250,39 @@ fn analyze(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retired_actual_epoch_is_rejected_without_a_display_transition() {
+        let control = AnalysisControl::new();
+        let frame = AnalysisFrame::default();
+        assert!(control.frame_is_current(&frame));
+        control.epoch.fetch_add(2, Ordering::AcqRel);
+        assert!(!control.frame_is_current(&frame));
+    }
+
+    #[test]
+    fn queued_source_and_seek_intents_cannot_resurrect_old_publications() {
+        let control = AnalysisControl::new();
+        let held = AnalysisFrame::default();
+        control.desired_intent.fetch_add(2, Ordering::AcqRel);
+        assert!(!control.frame_is_current(&held));
+        control.apply_audio_intents(1);
+        let intermediate = AnalysisFrame {
+            audio_epoch: control.epoch.load(Ordering::Acquire),
+            audio_intent: 1,
+            ..AnalysisFrame::default()
+        };
+        assert!(!control.frame_is_current(&intermediate));
+        control.apply_audio_intents(1);
+        assert!(!control.frame_is_current(&held));
+        assert!(!control.frame_is_current(&intermediate));
+        let current = AnalysisFrame {
+            audio_epoch: control.epoch.load(Ordering::Acquire),
+            audio_intent: 2,
+            ..AnalysisFrame::default()
+        };
+        assert!(control.frame_is_current(&current));
+    }
 
     #[test]
     fn retained_audio_cannot_acquire_a_new_capture_identity() {

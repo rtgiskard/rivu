@@ -634,6 +634,8 @@ pub(super) fn stage_analysis_frame(
         && frame.generation == staging.generation
         && frame.settings == staging.settings
         && frame.display_token == staging.display_token
+        && frame.audio_epoch == staging.audio_epoch
+        && frame.audio_intent == staging.audio_intent
     {
         return needs_refresh && staging.settings.is_some();
     }
@@ -641,6 +643,8 @@ pub(super) fn stage_analysis_frame(
     staging.spectrum_db.clone_from(&frame.spectrum_db);
     staging.sequence = frame.sequence;
     staging.display_token = frame.display_token;
+    staging.audio_epoch = frame.audio_epoch;
+    staging.audio_intent = frame.audio_intent;
     staging.sample_rate = frame.sample_rate;
     staging.sample_time = frame.sample_time;
     staging.generation = frame.generation;

@@ -226,7 +226,7 @@ impl CoreHandle {
     }
 
     pub(crate) fn analysis_frame_is_current(&self, frame: &AnalysisFrame) -> bool {
-        frame.display_token == self.analysis_control.display_token()
+        self.analysis_control.frame_is_current(frame)
     }
 
     /// Coalesce a GUI consumer frame into at most one pending analysis job.
