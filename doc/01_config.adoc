@@ -814,17 +814,22 @@ Set it under Settings → Visualizations → General → Animation, separately f
 Frequency analysis. Spectrum release, Spectrogram scrolling, radial motion, and
 generative light advance between accepted audio updates at this display cadence.
 Display time never advances beyond received audio. Pause stops analysis and
-audio-driven animation; the optional idle fade continues at the display cap.
+audio-driven animation, preserving the last displayed frame in every style.
+The optional idle fade applies only to stopped playback, not pause.
 Hidden windows and Still Mode stop both clocks; losing focus alone does not.
 Stereo Density and Spatial Spectrum refresh from the latest analysis result,
 bounded by the display cap rather than replaying skipped publications.
 
-When no matching panel remains visible, Spectrum drops derived geometry and
-resets its envelopes, Spectrogram releases its history, and Audio Visualizer
-releases the hidden style's fields or scene. Reopening starts from fresh analysis,
-not a replay of hidden time. This differs from ordinary playback pause, which
-freezes visible results. Waveform retains its track preview when hidden; Still
-Mode discards it. Resource boundaries are documented in
+Switching tabs or temporarily hiding the window preserves the last displayed
+visualization until a new drawable result is ready. Hidden views do not analyze
+or animate: Spectrum resets its envelopes, Spectrogram releases its history,
+and Audio Visualizer releases working fields, PCM, and simulations.
+Only bounded final drawing data remains; reopening never replays hidden time.
+Stop, seek, source replacement, incompatible analysis settings, and Still Mode
+invalidate the old display, including while hidden or paused. Closing the actual
+window releases its retained presentation; reopening a window does not restore
+screenshots from the previous one. Waveform retains its track preview when hidden;
+Still Mode discards it. Resource boundaries are documented in
 link:22_cache.adoc#_visualization_caching[Visualization caching].
 
 `visualizations.palette` accepts `tokyo_night` or `deadbeef` (default `deadbeef`).
@@ -1057,7 +1062,7 @@ both overlay defaults are `false`.
 Reference lines and labels are independently optional. Radial guides show
 normalized bar levels; analysis views use their measured axes; fractal guides
 show normalized scene coordinates, not audio measurements. Small views omit
-labels that would overlap. Available styles:
+labels that would overlap. Eight styles are available:
 
 * `bars`, `rings`, and `bars_rings` use the radial Spectrum presentation.
   Rotation, bar width/glow, ring opacity, inner diameter, and idle fade apply
@@ -1087,10 +1092,11 @@ labels that would overlap. Available styles:
 
 Both fractal styles are generative art, not amplitude or phase measurements.
 
-All styles use `visualizations.analysis_fft_size` and `visualizations.analysis_fps`
-and share the two `visualizations.audio_visualizer.*_color` endpoints.
-`visualizations.analysis_window` affects FFT measurements, not Oscilloscope PCM;
-changing it still clears the view. `visualizations.audio_visualizer.db_range`
+All styles use `visualizations.analysis_fft_size` and `visualizations.analysis_fps`.
+All styles share the two `visualizations.audio_visualizer.*_color` endpoints.
+`visualizations.analysis_window` affects FFT measurements, not Oscilloscope
+PCM; changing it still clears this view.
+`visualizations.audio_visualizer.db_range`
 inherits `visualizations.db_range` when omitted; it controls analysis color
 mapping and radial/fractal level normalization, not playback volume or the
 Oscilloscope's fixed amplitude scale. The two analysis styles retain a 0.5-second
@@ -1120,7 +1126,8 @@ values in these ranges (integer for `bar_glow_layers`):
 |`inner_diameter` |0–2 |0.7
 |===
 
-`fade_when_idle` defaults to `false`. `primary_color` and `secondary_color`
+`fade_when_idle` defaults to `false` and applies only to stopped playback; pause
+always preserves the last displayed frame. `primary_color` and `secondary_color`
 default to `"#7AA2F7"` and `"#BB9AF7"`. These parameters remain saved even when the
 selected instance style does not use them.
 

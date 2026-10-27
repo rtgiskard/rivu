@@ -2776,7 +2776,7 @@ mod tests {
             labels: true,
         };
         let defaults = AudioVisualizerOptions {
-            style: AudioVisualizerStyle::Bars,
+            style: AudioVisualizerStyle::FractalFlow,
             reference_lines: true,
             labels: false,
         };
@@ -2794,6 +2794,7 @@ mod tests {
         let value = encoded(&set);
         let panels = &value["layouts"]["Default"]["root"]["panels"];
         assert_eq!(panels[0]["style"], "oscilloscope");
+        assert_eq!(panels[1]["style"], "fractal_flow");
         assert_eq!(panels[0]["reference_lines"], false);
         assert_eq!(panels[0]["labels"], true);
         assert!(panels[0].get("audio_visualizer").is_none());

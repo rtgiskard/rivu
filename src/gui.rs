@@ -900,8 +900,9 @@ impl GuiApp {
                 this.sync_analysis(cx);
                 if !this.window_visible {
                     // Hidden windows may never deliver another paint/frame.
-                    // Release display publications and artwork without a cleanup frame.
-                    this.release_display_resources(window, cx);
+                    // Visualization sync suspends work but retains its bounded
+                    // window-local presentation. Artwork lifetimes are unchanged.
+                    this.release_artwork_resources(window, cx);
                 }
                 this.presentation.update(cx, |presentation, cx| {
                     presentation.request_frame(window, cx)
@@ -1046,6 +1047,9 @@ impl GuiApp {
         self.presentation.update(cx, |presentation, cx| {
             presentation.release_display_resources(cx);
         });
+        self.release_artwork_resources(window, cx);
+    }
+    fn release_artwork_resources(&self, window: &mut Window, cx: &mut App) {
         self.metadata.update(cx, |metadata, cx| {
             metadata.release_render_images(window, cx)
         });
@@ -1379,6 +1383,8 @@ impl GuiApp {
                     config: Arc::clone(&self.state.system.config),
                     layout: self.workspace.layouts.current(),
                     status: self.state.playback.status,
+                    source_generation: self.state.source_generation,
+                    seek_revision: self.state.playback.seek_revision,
                     visible: self.window_visible,
                     shutting_down: self.state.system.shutting_down,
                     track,

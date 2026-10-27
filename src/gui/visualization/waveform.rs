@@ -3287,6 +3287,8 @@ mod tests {
                 track: Some(&track),
                 position: 0.0,
                 duration: track.duration,
+                source_generation: 0,
+                seek_revision: 0,
             };
             owner.update(cx, |owner, cx| owner.sync(state(true, true), cx));
             for complete in [false, true] {

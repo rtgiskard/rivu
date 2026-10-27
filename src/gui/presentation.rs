@@ -52,6 +52,8 @@ pub(super) struct PresentationState<'a> {
     pub(super) config: Arc<Config>,
     pub(super) layout: &'a layout::Layout,
     pub(super) status: PlaybackStatus,
+    pub(super) source_generation: u64,
+    pub(super) seek_revision: u64,
     pub(super) visible: bool,
     pub(super) shutting_down: bool,
     pub(super) track: Option<&'a Track>,
@@ -114,6 +116,7 @@ pub(super) struct Presentation {
     audio_visualizer: visualization::AudioVisualizer,
     waveform: Entity<visualization::Waveform>,
     panels: HashMap<u64, PanelKind>,
+    layout_panels: HashMap<u64, PanelKind>,
     views: HashMap<u64, Entity<PresentationPanel>>,
     demand: DisplayDemand,
     sequence: u64,
@@ -122,6 +125,9 @@ pub(super) struct Presentation {
     visible: bool,
     shutting_down: bool,
     status: PlaybackStatus,
+    source_generation: u64,
+    seek_revision: u64,
+    awaiting_replacement: bool,
     position: f64,
     duration: Option<f64>,
     frame_requested: bool,
@@ -153,6 +159,7 @@ impl Presentation {
             audio_visualizer: visualization::AudioVisualizer::new(),
             waveform,
             panels: HashMap::new(),
+            layout_panels: HashMap::new(),
             views: HashMap::new(),
             demand: DisplayDemand::default(),
             sequence: 0,
@@ -161,6 +168,9 @@ impl Presentation {
             visible: false,
             shutting_down: false,
             status: PlaybackStatus::Stopped,
+            source_generation: 0,
+            seek_revision: 0,
+            awaiting_replacement: false,
             position: 0.0,
             duration: None,
             frame_requested: false,
@@ -179,6 +189,8 @@ impl Presentation {
             config,
             layout,
             status,
+            source_generation,
+            seek_revision,
             visible,
             shutting_down,
             track,
@@ -191,6 +203,14 @@ impl Presentation {
         let visibility_changed = self.visible != visible || self.shutting_down != shutting_down;
         let status_changed = self.status != status;
         let position_changed = self.position != position || self.duration != duration;
+        let signal_changed = self.source_generation != source_generation
+            || self.seek_revision != seek_revision
+            || rivu_audio::analysis::AnalysisSettings::from(self.config.as_ref())
+                != rivu_audio::analysis::AnalysisSettings::from(config.as_ref());
+        let invalidate = signal_changed
+            || still_changed
+            || shutting_down
+            || (status_changed && status == PlaybackStatus::Stopped);
         let mut panel_count = 0;
         let mut panels_changed = false;
         if let Some(root) = &layout.root {
@@ -202,13 +222,31 @@ impl Presentation {
             });
         }
         let panels_changed = panels_changed || self.panels.len() != panel_count;
+        let mut layout_panel_count = 0;
+        let mut layout_panels_changed = false;
+        if let Some(root) = &layout.root {
+            root.visit_panels(false, &mut |panel| {
+                if let Some(kind) = PanelKind::from_panel(panel, &config) {
+                    layout_panel_count += 1;
+                    layout_panels_changed |= self.layout_panels.get(&panel.id) != Some(&kind);
+                }
+            });
+        }
+        let layout_panels_changed =
+            layout_panels_changed || self.layout_panels.len() != layout_panel_count;
         let was_running = self.analysis_interval();
         self.config = config;
         self.visible = visible;
         self.shutting_down = shutting_down;
         self.status = status;
+        self.source_generation = source_generation;
+        self.seek_revision = seek_revision;
         self.position = position;
         self.duration = duration;
+        if status_changed && status == PlaybackStatus::Paused {
+            self.awaiting_replacement = true;
+            self.animation_clock.suspend();
+        }
 
         if panels_changed {
             self.panels.clear();
@@ -221,14 +259,48 @@ impl Presentation {
             }
             self.views.retain(|id, _| self.panels.contains_key(id));
         }
-        if still_changed {
-            // A mode transition must never redisplay the pre-suspension signal.
+        if layout_panels_changed {
+            self.layout_panels.clear();
+            if let Some(root) = &layout.root {
+                root.visit_panels(false, &mut |panel| {
+                    if let Some(kind) = PanelKind::from_panel(panel, &self.config) {
+                        self.layout_panels.insert(panel.id, kind);
+                    }
+                });
+            }
+        }
+        if invalidate {
             self.staging = AnalysisFrame::default();
             self.sequence = self.handle.analysis.read().sequence;
             self.needs_refresh = false;
+            self.animation_clock = AnimationClock::default();
+            self.visuals.clear_presentation();
+            self.audio_visualizer.clear();
         }
-        if config_changed || panels_changed || visibility_changed {
+        if invalidate || panels_changed || visibility_changed || status_changed {
+            // A suspension retires input, not its bounded last presentation.
+            // Do not animate old targets while acquiring replacement audio.
+            self.awaiting_replacement = status != PlaybackStatus::Stopped;
+        }
+        if config_changed || panels_changed || layout_panels_changed || visibility_changed {
             let enabled = self.active();
+            let mut retained_spectrum = Vec::new();
+            let mut retained_spectrogram = Vec::new();
+            let mut retained_audio = Vec::new();
+            if let Some(root) = &layout.root {
+                root.visit_panels(false, &mut |panel| match PanelKind::from_panel(
+                    panel,
+                    &self.config,
+                ) {
+                    Some(PanelKind::Spectrum) => retained_spectrum.push(panel.id),
+                    Some(PanelKind::Spectrogram) => retained_spectrogram.push(panel.id),
+                    Some(PanelKind::Audio(options)) => retained_audio.push(options),
+                    _ => {}
+                });
+            }
+            self.visuals
+                .retain_presentation_panels(&retained_spectrum, &retained_spectrogram);
+            self.audio_visualizer.retain_presentations(retained_audio);
             self.visuals.set_enabled(enabled);
             let spectrum_ids = self
                 .panels
@@ -305,7 +377,7 @@ impl Presentation {
                 waveform.sync(track, cx);
             }
         });
-        if config_changed || panels_changed || visibility_changed || status_changed {
+        if config_changed || panels_changed || visibility_changed || status_changed || invalidate {
             self.frame_requested = self.demand.enabled;
             self.notify_panels(true, cx);
             self.notify_panels(false, cx);
@@ -427,16 +499,20 @@ impl Presentation {
                 this.frame_requested = false;
                 let now = Instant::now();
                 if this.analysis_interval().is_some() {
-                    let time = this.animation_clock.advance(now);
-                    let visuals_changed = this.visuals.animate(time);
-                    let audio_changed = this.audio_visualizer.animate(time);
-                    this.notify_animation(visuals_changed, audio_changed, cx);
                     this.consume_analysis(now, cx);
+                    if !this.awaiting_replacement {
+                        let time = this.animation_clock.advance(now);
+                        let visuals_changed = this.visuals.animate(time);
+                        let audio_changed = this.audio_visualizer.animate(time);
+                        this.notify_animation(visuals_changed, audio_changed, cx);
+                    }
                     this.request_frame(window, cx);
                 } else {
                     this.animation_clock.suspend();
                     this.consume_analysis(now, cx);
-                    this.audio_visualizer.begin_idle_fade(now);
+                    if this.status == PlaybackStatus::Stopped {
+                        this.audio_visualizer.begin_idle_fade(now);
+                    }
                     this.notify_animation(false, true, cx);
                     this.request_frame(window, cx);
                 }
@@ -447,7 +523,15 @@ impl Presentation {
     }
 
     fn consume_analysis(&mut self, now: Instant, cx: &mut Context<Self>) {
+        // Pausing preserves the last accepted picture. Semantic invalidations
+        // are handled by sync even while the worker is suspended.
+        if self.status == PlaybackStatus::Paused {
+            return;
+        }
         let frame = self.handle.analysis.read();
+        if self.awaiting_replacement && frame.settings.is_none() {
+            return;
+        }
         if !stage_analysis_frame(
             &mut self.staging,
             &mut self.sequence,
@@ -459,11 +543,18 @@ impl Presentation {
         }
         drop(frame);
         self.needs_refresh = false;
+        self.awaiting_replacement = false;
         self.animation_clock.accept(&self.staging, now);
         let time = self.animation_clock.advance(now);
         self.visuals.update(&self.staging, time);
         self.audio_visualizer.update(&self.staging, time);
-        self.notify_panels(true, cx);
+        for (id, view) in &self.views {
+            if let Some(kind) = self.panels.get(id)
+                && kind.analysis()
+            {
+                view.update(cx, |_, cx| cx.notify());
+            }
+        }
     }
 
     fn notify_animation(&self, visuals: bool, audio: bool, cx: &mut Context<Self>) {
@@ -520,12 +611,10 @@ impl Presentation {
         match self.panels.get(&id).copied() {
             Some(PanelKind::Spectrum) => self.visuals.spectrum(theme, &self.i18n, id),
             Some(PanelKind::Spectrogram) => self.visuals.spectrogram(theme, &self.i18n, id),
-            Some(PanelKind::Audio(options)) => self.audio_visualizer.view(
-                &self.i18n,
-                id,
-                self.status == PlaybackStatus::Playing,
-                options,
-            ),
+            Some(PanelKind::Audio(options)) => {
+                self.audio_visualizer
+                    .view(&self.i18n, id, self.status, options)
+            }
             Some(PanelKind::Waveform) => self.waveform.update(cx, |waveform, cx| {
                 waveform.view(
                     &self.i18n,
@@ -553,7 +642,7 @@ impl Presentation {
         }
     }
 
-    /// Release display publications when the window is hidden or destroyed.
+    /// Destroy the window-local presentation; temporary hide goes through sync.
     pub(super) fn release_display_resources(&mut self, cx: &mut Context<Self>) {
         self.visible = false;
         self.cancel_clock();
@@ -561,6 +650,9 @@ impl Presentation {
         self.handle.set_display_demand(self.demand);
         self.staging = AnalysisFrame::default();
         self.needs_refresh = false;
+        self.awaiting_replacement = false;
+        self.visuals.clear_presentation();
+        self.audio_visualizer.clear();
         self.visuals.set_enabled(false);
         self.visuals.retain_spectrogram_panels(&[]);
         self.visuals.retain_spectrum_panels(&[]);
@@ -783,6 +875,171 @@ mod tests {
     }
 
     #[gpui::test]
+    fn pause_preserves_displayed_publication_instead_of_consuming_worker_reset(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        let config = Config {
+            volume: 0.0,
+            ffmpeg_enabled: false,
+            mpris_enabled: false,
+            ..Config::default()
+        };
+        config.save(&config_path).unwrap();
+        let runtime = Runtime::start(directory.path(), &config_path).unwrap();
+        let waveform =
+            cx.new(|_| visualization::Waveform::new(Arc::clone(&runtime.handle.waveform)));
+        let owner = cx.new(|cx| {
+            Presentation::new(
+                runtime.handle.clone(),
+                Arc::new(Localizer::new("en-US")),
+                waveform,
+                cx,
+            )
+        });
+        owner.update(cx, |owner, cx| {
+            // Cached input is the last publication already drawn by the renderers.
+            owner.staging = AnalysisFrame {
+                sequence: 7,
+                generation: 1,
+                sample_rate: 48_000,
+                sample_time: Duration::from_secs(1),
+                settings: Some((&config).into()),
+                frequencies_hz: vec![100.0, 1000.0],
+                spectrum_db: vec![-12.0, -24.0],
+                ..Default::default()
+            };
+            owner.staging.visualizer.demand.pcm = true;
+            owner.staging.visualizer.pcm = vec![[0.25, -0.5]; 512].into();
+            owner.staging.visualizer.band_rms = [0.25, 0.5, 0.75];
+            owner.sequence = owner.staging.sequence;
+            owner.status = PlaybackStatus::Paused;
+            owner.needs_refresh = true;
+            owner.consume_analysis(Instant::now(), cx);
+            assert_eq!(owner.sequence, 7);
+            assert_eq!(owner.staging.spectrum_db, [-12.0, -24.0]);
+            assert_eq!(owner.staging.visualizer.pcm[0], [0.25, -0.5]);
+            assert_eq!(owner.staging.visualizer.band_rms, [0.25, 0.5, 0.75]);
+            assert_eq!(owner.staging.sample_time, Duration::from_secs(1));
+            assert_eq!(owner.staging.settings, Some((&config).into()));
+
+            // Resume can observe the worker's pause-reset before fresh FFT data.
+            // Keep the accepted picture and do not restart animation from it.
+            owner.status = PlaybackStatus::Playing;
+            owner.awaiting_replacement = true;
+            owner.consume_analysis(Instant::now(), cx);
+            assert!(owner.awaiting_replacement);
+            assert_eq!(owner.staging.spectrum_db, [-12.0, -24.0]);
+            assert_eq!(owner.sequence, 7);
+
+            // Stop is not pause: it must admit the current empty publication.
+            owner.awaiting_replacement = false;
+            owner.status = PlaybackStatus::Stopped;
+            owner.consume_analysis(Instant::now(), cx);
+            assert!(owner.staging.settings.is_none());
+            assert!(owner.staging.spectrum_db.is_empty());
+            assert!(owner.staging.visualizer.pcm.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn hidden_and_paused_semantic_changes_discard_retained_input(cx: &mut gpui::TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        let config = Config {
+            volume: 0.0,
+            ffmpeg_enabled: false,
+            mpris_enabled: false,
+            ..Config::default()
+        };
+        config.save(&config_path).unwrap();
+        let runtime = Runtime::start(directory.path(), &config_path).unwrap();
+        let config = Arc::new(config);
+        let mut layout = layout::Layout {
+            root: None,
+            next_id: 1,
+            locked: false,
+        };
+        let panel_id = layout.add("spectrum", None);
+        let waveform =
+            cx.new(|_| visualization::Waveform::new(Arc::clone(&runtime.handle.waveform)));
+        let owner = cx.new(|cx| {
+            Presentation::new(
+                runtime.handle.clone(),
+                Arc::new(Localizer::new("en-US")),
+                waveform,
+                cx,
+            )
+        });
+        owner.update(cx, |owner, cx| {
+            owner.status = PlaybackStatus::Paused;
+            for transition in 0..4 {
+                owner.staging.settings = Some(config.as_ref().into());
+                owner.staging.spectrum_db = vec![-12.0];
+                let mut changed = config.as_ref().clone();
+                if transition == 2 {
+                    changed.analysis_fft_size = 4096;
+                }
+                if transition == 3 {
+                    changed.still_mode = true;
+                }
+                owner.sync(
+                    PresentationState {
+                        config: Arc::new(changed),
+                        layout: &layout,
+                        status: PlaybackStatus::Paused,
+                        source_generation: u64::from(transition >= 1),
+                        seek_revision: 1,
+                        visible: false,
+                        shutting_down: false,
+                        track: None,
+                        position: 25.0,
+                        duration: Some(100.0),
+                    },
+                    cx,
+                );
+                assert!(owner.staging.settings.is_none());
+                assert!(owner.staging.spectrum_db.is_empty());
+                assert!(owner.analysis_timer.is_none());
+                assert_eq!(owner.demand, DisplayDemand::default());
+            }
+        });
+        let state = |seek_revision| PresentationState {
+            config: Arc::clone(&config),
+            layout: &layout,
+            status: PlaybackStatus::Paused,
+            source_generation: 1,
+            seek_revision,
+            visible: false,
+            shutting_down: false,
+            track: None,
+            position: 25.0,
+            duration: Some(100.0),
+        };
+        let panel = owner.update(cx, |owner, cx| {
+            owner.sync(state(1), cx);
+            owner.panel(panel_id, cx)
+        });
+        cx.run_until_parked();
+        let notifications = std::rc::Rc::new(std::cell::Cell::new(0));
+        let observed = notifications.clone();
+        let _subscription = cx.update(|cx| {
+            cx.observe(&panel, move |_, _| {
+                observed.set(observed.get() + 1);
+            })
+        });
+        // No config/visibility/status/position change can mask this redraw.
+        owner.update(cx, |owner, cx| owner.sync(state(2), cx));
+        cx.run_until_parked();
+        assert_eq!(
+            notifications.get(),
+            1,
+            "semantic clear must invalidate cached panel scenes"
+        );
+    }
+
+    #[gpui::test]
     fn presentation_bounds_frames_and_cancels_hidden_still_and_shutdown_demand(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -832,6 +1089,8 @@ mod tests {
                         track: None,
                         position: 0.0,
                         duration: None,
+                        source_generation: 0,
+                        seek_revision: 0,
                     },
                     cx,
                 );
@@ -855,6 +1114,8 @@ mod tests {
                         track: None,
                         position: 0.0,
                         duration: None,
+                        source_generation: 0,
+                        seek_revision: 0,
                     },
                     cx,
                 );
@@ -879,6 +1140,8 @@ mod tests {
                         track: None,
                         position: 0.0,
                         duration: None,
+                        source_generation: 0,
+                        seek_revision: 0,
                     },
                     cx,
                 );
@@ -903,6 +1166,8 @@ mod tests {
                         track: None,
                         position: 0.0,
                         duration: None,
+                        source_generation: 0,
+                        seek_revision: 0,
                     },
                     cx,
                 );
@@ -927,6 +1192,8 @@ mod tests {
                         track: None,
                         position: 0.0,
                         duration: None,
+                        source_generation: 0,
+                        seek_revision: 0,
                     },
                     cx,
                 );
@@ -960,6 +1227,8 @@ mod tests {
                         track: None,
                         position: 0.0,
                         duration: None,
+                        source_generation: 0,
+                        seek_revision: 0,
                     },
                     cx,
                 );
@@ -979,6 +1248,8 @@ mod tests {
                         track: None,
                         position: 0.0,
                         duration: None,
+                        source_generation: 0,
+                        seek_revision: 0,
                     },
                     cx,
                 );
@@ -993,6 +1264,8 @@ mod tests {
                         track: None,
                         position: 0.0,
                         duration: None,
+                        source_generation: 0,
+                        seek_revision: 0,
                     },
                     cx,
                 );
@@ -1008,6 +1281,8 @@ mod tests {
                         track: None,
                         position: 0.0,
                         duration: None,
+                        source_generation: 0,
+                        seek_revision: 0,
                     },
                     cx,
                 );
@@ -1023,6 +1298,8 @@ mod tests {
                         track: None,
                         position: 12.0,
                         duration: Some(120.0),
+                        source_generation: 0,
+                        seek_revision: 0,
                     },
                     cx,
                 );
@@ -1039,11 +1316,37 @@ mod tests {
                         track: None,
                         position: 13.0,
                         duration: Some(120.0),
+                        source_generation: 0,
+                        seek_revision: 0,
                     },
                     cx,
                 );
                 assert_eq!(owner.position, 13.0);
                 assert_eq!(owner.duration, Some(120.0));
+                // Removing an inactive tab changes retained ownership even
+                // though config, active demand, status and position are stable.
+                assert!(owner.layout_panels.contains_key(&panel_id));
+                assert!(layout.remove(panel_id));
+                let generation = owner.frame_generation;
+                owner.sync(
+                    PresentationState {
+                        config: Arc::clone(&config),
+                        layout: &layout,
+                        status: PlaybackStatus::Paused,
+                        visible: true,
+                        shutting_down: false,
+                        track: None,
+                        position: 13.0,
+                        duration: Some(120.0),
+                        source_generation: 0,
+                        seek_revision: 0,
+                    },
+                    cx,
+                );
+                assert!(!owner.layout_panels.contains_key(&panel_id));
+                assert_eq!(owner.layout_panels.len(), 1);
+                assert_eq!(owner.panels.len(), 1);
+                assert_eq!(owner.frame_generation, generation);
                 owner.release_display_resources(cx);
                 assert_eq!(owner.demand, DisplayDemand::default());
             });

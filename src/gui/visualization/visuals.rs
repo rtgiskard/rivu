@@ -6,8 +6,8 @@
 //! frames are max-pooled so narrow transients survive; Spectrum separately
 //! retains the latest frame. The available history expands until that dynamic
 //! limit; unavailable history is left blank, including long gaps in publication.
-//! History and derived numerical publications are released when no Spectrogram
-//! panel is visible. Range and axis changes remap cached levels while paused;
+//! Hidden panels release history and numerical working data, retaining only their
+//! last bounded drawable publications. Range and axis changes remap cached levels while paused;
 //! unchanged buckets reuse immutable GPU fields. Sampling rows follow panel height
 //! and visible frequency points, capped by configuration and the startup GPU budget.
 //! Accepted audio alone changes history; native display ticks evolve Spectrum
@@ -296,6 +296,19 @@ struct SpectrumGeometry {
     body: Option<Arc<GpuFrame>>,
 }
 
+struct SpectrumPresentation {
+    body: Option<Arc<GpuFrame>>,
+    peaks: Vec<(Bounds<f32>, u32)>,
+    labels: [SharedString; 2],
+    db_labels: [SharedString; 4],
+    grid: bool,
+}
+
+struct SpectrogramPresentation {
+    layers: Vec<(Bounds<f32>, Arc<GpuFrame>)>,
+    labels: [SharedString; 2],
+}
+
 struct VisualData {
     enabled: bool,
     spectrogram_visible: bool,
@@ -327,6 +340,9 @@ struct VisualData {
     spectrum_points: Vec<Point<Pixels>>,
     spectrum_rectangles: Vec<GpuRectangle>,
     spectrum_geometry: HashMap<u64, SpectrumGeometry>,
+    spectrum_presentations: HashMap<u64, SpectrumPresentation>,
+    spectrogram_presentations: HashMap<u64, SpectrogramPresentation>,
+    spectrogram_draws: Vec<(Bounds<f32>, Arc<GpuFrame>)>,
     spectrum_geometry_revision: u64,
     visualization_cache: bool,
     last_update: Option<Duration>,
@@ -414,6 +430,9 @@ impl Visuals {
                 spectrum_points: Vec::new(),
                 spectrum_rectangles: Vec::new(),
                 spectrum_geometry: HashMap::new(),
+                spectrum_presentations: HashMap::new(),
+                spectrogram_presentations: HashMap::new(),
+                spectrogram_draws: Vec::new(),
                 spectrum_geometry_revision: 0,
                 visualization_cache: true,
                 last_update: None,
@@ -463,8 +482,8 @@ impl Visuals {
         }
     }
 
-    /// Suspend analysis views and release display publications without changing
-    /// their settings. Framework scenes detach their owners when hidden.
+    /// Suspend analysis and release working data, retaining the last drawable
+    /// publications until fresh output is ready or explicitly invalidated.
     pub(in crate::gui) fn set_enabled(&mut self, enabled: bool) {
         let mut data = self.data.borrow_mut();
         if data.enabled == enabled {
@@ -497,10 +516,19 @@ impl Visuals {
         data.source_generation = None;
         data.stream_generation = data.stream_generation.wrapping_add(1);
         data.spectrum_geometry_revision = data.spectrum_geometry_revision.wrapping_add(1);
+    }
+
+    /// Clear both retained output and analysis state at a semantic boundary.
+    pub(in crate::gui) fn clear_presentation(&mut self) {
+        let enabled = self.data.borrow().enabled;
+        self.set_enabled(false);
+        let mut data = self.data.borrow_mut();
+        data.spectrum_presentations = HashMap::new();
+        data.spectrogram_presentations = HashMap::new();
+        data.enabled = enabled;
         data.top_db = 0.0;
         data.refresh_db_labels();
     }
-
     pub(in crate::gui) fn configure(&mut self, config: &Config) -> bool {
         let mut data = self.data.borrow_mut();
         data.material_budget_bytes
@@ -510,8 +538,7 @@ impl Visuals {
         let palette_changed = data.palette_lut.palette != config.visual_palette;
         let cache_changed = data.visualization_cache != config.visualization_cache;
         let history_missing = data.enabled && data.spectrogram_visible && data.history_columns == 0;
-        let changed = history_missing
-            || palette_changed
+        let settings_changed = palette_changed
             || data.visual_background != config.visual_background.rgb()
             || data.spectrum_db_range != spectrum_db_range
             || data.spectrogram_db_range != spectrogram_db_range
@@ -540,6 +567,7 @@ impl Visuals {
             || data.spectrogram_accumulation != config.spectrogram_accumulation
             || data.analysis_fps != config.analysis_fps
             || cache_changed;
+        let changed = history_missing || settings_changed;
         if !changed {
             return false;
         }
@@ -554,6 +582,11 @@ impl Visuals {
             || data.spectrogram_interpolate != config.spectrogram_interpolate
             || data.spectrogram_interpolation_points != config.spectrogram_interpolation_points
             || data.spectrogram_sampling_points_scale != config.spectrogram_sampling_points_scale;
+        // Allocation of missing visible history is not a settings change.
+        if settings_changed {
+            data.spectrum_presentations.clear();
+            data.spectrogram_presentations.clear();
+        }
         if palette_changed {
             data.palette_lut = active_palette_lut(config.visual_palette);
         }
@@ -859,15 +892,35 @@ impl Visuals {
             data.spectrum_visible = visible;
             data.envelope_initialized = false;
             data.last_update = None;
+            if !visible {
+                data.release_spectrum();
+            }
         }
         restored
     }
 
     pub(in crate::gui) fn retain_spectrum_panels(&mut self, panel_ids: &[u64]) {
+        if panel_ids.is_empty() {
+            self.data.borrow_mut().spectrum_geometry = HashMap::new();
+            return;
+        }
         self.data
             .borrow_mut()
             .spectrum_geometry
             .retain(|panel_id, _| panel_ids.contains(panel_id));
+    }
+
+    /// Keep publications for every layout panel, including inactive tabs.
+    pub(in crate::gui) fn retain_presentation_panels(
+        &mut self,
+        spectrum_ids: &[u64],
+        spectrogram_ids: &[u64],
+    ) {
+        let mut data = self.data.borrow_mut();
+        data.spectrum_presentations
+            .retain(|panel_id, _| spectrum_ids.contains(panel_id));
+        data.spectrogram_presentations
+            .retain(|panel_id, _| spectrogram_ids.contains(panel_id));
     }
 
     // The root's first paint runs after every panel's prepaint. Size shared
@@ -954,7 +1007,7 @@ impl Visuals {
                                         data.paint_spectrum(panel_id, bounds, window, cx)
                                     }
                                     VisualMode::Spectrogram => {
-                                        data.paint_spectrogram(bounds, window, cx)
+                                        data.paint_spectrogram(panel_id, bounds, window, cx)
                                     }
                                 }
                             };
@@ -1228,6 +1281,22 @@ impl VisualData {
         self.heat_samples = Vec::new();
         self.spectrogram_tiles = Vec::new();
         self.tile_values = Vec::new();
+        self.spectrogram_draws = Vec::new();
+    }
+
+    fn release_spectrum(&mut self) {
+        self.peaks = Vec::new();
+        self.peak_deadlines = Vec::new();
+        self.bar_levels = Vec::new();
+        self.bar_deadlines = Vec::new();
+        self.smoothed_levels = Vec::new();
+        self.spectrum_bins = Vec::new();
+        self.spectrum_samples = Vec::new();
+        self.spectrum_points = Vec::new();
+        self.spectrum_rectangles = Vec::new();
+        self.spectrum_geometry = HashMap::new();
+        self.envelope_initialized = false;
+        self.last_update = None;
     }
 
     fn visible_range(&self) -> Option<(usize, usize, f32, f32)> {
@@ -1588,6 +1657,92 @@ impl VisualData {
         Ok(body)
     }
 
+    fn prepare_spectrum_presentation(
+        &mut self,
+        panel_id: u64,
+        plot: Bounds<Pixels>,
+    ) -> Result<(), String> {
+        let Some((_, _, low, high)) = self.spectrum_render_range() else {
+            return Ok(());
+        };
+        let bars = spectrum_bar_count(
+            plot.size.width / px(1.0),
+            self.spectrum_style == SpectrumStyle::Solid,
+            self.spectrum_bars,
+            self.spectrum_bar_width,
+            self.spectrum_gap,
+        );
+        let body = self.prepare_spectrum_body(panel_id, plot, bars, low, high)?;
+        let mut peaks = self
+            .spectrum_presentations
+            .get_mut(&panel_id)
+            .map(|presentation| std::mem::take(&mut presentation.peaks))
+            .unwrap_or_default();
+        peaks.clear();
+        if self.spectrum_peaks {
+            for bar in 0..bars {
+                let left_t = bar as f32 / bars as f32;
+                let right_t = (bar + 1) as f32 / bars as f32;
+                let mut peak = f32::NEG_INFINITY;
+                for index in self.spectrum_bin(panel_id, bar) {
+                    peak = peak.max(finite_level(self.peaks[index]));
+                }
+                if self.spectrum_interpolate {
+                    peak =
+                        peak.max(self.interpolate_level(self.spectrum_sample(panel_id, bar), true));
+                }
+                let fraction = db_height(peak, self.top_db, self.spectrum_db_range);
+                if fraction <= 0.0 {
+                    continue;
+                }
+                let slot_width = plot.size.width * (right_t - left_t);
+                let gap = px(self.spectrum_gap)
+                    .max(px(0.0))
+                    .min((slot_width - px(1.0)).max(px(0.0)));
+                let (x, width) = match self.spectrum_style {
+                    SpectrumStyle::Line | SpectrumStyle::Solid => {
+                        (plot.size.width * left_t, slot_width)
+                    }
+                    _ => (
+                        plot.size.width * left_t + gap * 0.5,
+                        (slot_width - gap).max(px(1.0)),
+                    ),
+                };
+                let peak_width = match self.spectrum_style {
+                    SpectrumStyle::Solid => px(1.0),
+                    SpectrumStyle::Line => (slot_width - gap).max(px(1.0)),
+                    _ => width,
+                };
+                let peak_x = (x + (width - peak_width) * 0.5)
+                    .clamp(px(0.0), (plot.size.width - peak_width).max(px(0.0)));
+                let peak_y = (plot.size.height * (1.0 - fraction))
+                    .clamp(px(0.0), plot.size.height - px(1.0));
+                peaks.push((
+                    Bounds::new(
+                        point(peak_x / plot.size.width, peak_y / plot.size.height),
+                        size(peak_width / plot.size.width, px(1.0) / plot.size.height),
+                    ),
+                    stop_color(self.palette_lut.lookup_mapped_rgb(fraction)),
+                ));
+            }
+        }
+        self.spectrum_presentations.insert(
+            panel_id,
+            SpectrumPresentation {
+                body,
+                peaks,
+                labels: self.spectrum_labels.clone(),
+                db_labels: self.db_labels.clone(),
+                grid: self.spectrum_grid,
+            },
+        );
+        if !self.visualization_cache {
+            self.spectrum_bins.clear();
+            self.spectrum_samples.clear();
+        }
+        Ok(())
+    }
+
     fn paint_spectrum(
         &mut self,
         panel_id: u64,
@@ -1596,7 +1751,12 @@ impl VisualData {
         cx: &mut App,
     ) -> Result<(), String> {
         let show_labels = spectrum_labels_visible(self.spectrum_show_labels, bounds.size.height);
-        let left_margin = axis_label_margin(show_labels, &self.spectrum_labels);
+        let labels = self
+            .spectrum_presentations
+            .get(&panel_id)
+            .map(|presentation| &presentation.labels)
+            .unwrap_or(&self.spectrum_labels);
+        let left_margin = axis_label_margin(show_labels, labels);
         let bottom_margin = if show_labels { 22.0 } else { 8.0 };
         let plot = Bounds::new(
             point(bounds.left() + px(left_margin), bounds.top() + px(8.0)),
@@ -1605,34 +1765,24 @@ impl VisualData {
                 (bounds.size.height - px(bottom_margin + 8.0)).max(px(1.0)),
             ),
         );
-        let Some((_, _, low, high)) = self.spectrum_render_range() else {
-            return Ok(());
-        };
         if plot.size.width <= px(2.0) || plot.size.height <= px(2.0) {
             return Ok(());
         }
-        // Auto density follows pixel pitch, not the analysis band's count.
-        // Empty display slots can interpolate between adjacent musical centers.
-        let bars = spectrum_bar_count(
-            plot.size.width / px(1.0),
-            self.spectrum_style == SpectrumStyle::Solid,
-            self.spectrum_bars,
-            self.spectrum_bar_width,
-            self.spectrum_gap,
-        );
+        let prepared = self.prepare_spectrum_presentation(panel_id, plot);
+        let Some(presentation) = self.spectrum_presentations.get(&panel_id) else {
+            return prepared;
+        };
         let mut grid_path = PathBuilder::stroke(px(1.0));
-        let mut has_grid = false;
-        for step in 0..self.db_labels.len() {
-            let fraction = step as f32 / (self.db_labels.len() - 1) as f32;
+        for (step, label) in presentation.db_labels.iter().enumerate() {
+            let fraction = step as f32 / (presentation.db_labels.len() - 1) as f32;
             let y = plot.top() + plot.size.height * fraction;
-            if self.spectrum_grid {
+            if presentation.grid {
                 grid_path.move_to(point(plot.left(), y));
                 grid_path.line_to(point(plot.right(), y));
-                has_grid = true;
             }
             if show_labels {
                 paint_aligned_label(
-                    self.db_labels[step].clone(),
+                    label.clone(),
                     point(plot.left() - px(5.0), y - px(5.0)),
                     1.0,
                     window,
@@ -1640,111 +1790,45 @@ impl VisualData {
                 );
             }
         }
-        if has_grid {
+        if presentation.grid {
             let path = grid_path
                 .build()
                 .map_err(|error| format!("Cannot tessellate spectrum grid: {error}"))?;
             window.paint_path(path, rgb(0x14161b));
         }
-
-        window.with_content_mask(
-            Some(gpui::ContentMask { bounds: plot }),
-            |window| -> Result<(), String> {
-                if let Some(body) = self.prepare_spectrum_body(panel_id, plot, bars, low, high)? {
-                    window
-                        .paint_gpu(plot, GpuSource::Fixed(body))
-                        .map_err(|error| format!("Cannot paint spectrum GPU body: {error}"))?;
-                }
-                Ok(())
-            },
-        )?;
-        if self.spectrum_peaks {
-            window.with_content_mask(Some(gpui::ContentMask { bounds: plot }), |window| {
-                for bar in 0..bars {
-                    let left_t = bar as f32 / bars as f32;
-                    let right_t = (bar + 1) as f32 / bars as f32;
-                    let mut peak = f32::NEG_INFINITY;
-                    for index in self.spectrum_bin(panel_id, bar) {
-                        peak = peak.max(finite_level(self.peaks[index]));
-                    }
-                    if self.spectrum_interpolate {
-                        peak = peak
-                            .max(self.interpolate_level(self.spectrum_sample(panel_id, bar), true));
-                    }
-                    let peak_fraction = db_height(peak, self.top_db, self.spectrum_db_range);
-                    if peak_fraction <= 0.0 {
-                        continue;
-                    }
-                    let slot_width = plot.size.width * (right_t - left_t);
-                    let slot_gap = px(self.spectrum_gap)
-                        .max(px(0.0))
-                        .min((slot_width - px(1.0)).max(px(0.0)));
-                    let (x, width) = match self.spectrum_style {
-                        SpectrumStyle::Line | SpectrumStyle::Solid => {
-                            (plot.left() + plot.size.width * left_t, slot_width)
-                        }
-                        _ => (
-                            plot.left() + plot.size.width * left_t + slot_gap * 0.5,
-                            (slot_width - slot_gap).max(px(1.0)),
-                        ),
-                    };
-                    let peak_width = match self.spectrum_style {
-                        SpectrumStyle::Solid => px(1.0),
-                        SpectrumStyle::Line => (slot_width - slot_gap).max(px(1.0)),
-                        _ => width,
-                    };
-                    let peak_x = (x + (width - peak_width) * 0.5)
-                        .clamp(plot.left(), (plot.right() - peak_width).max(plot.left()));
-                    let peak_y = (plot.bottom() - plot.size.height * peak_fraction)
-                        .clamp(plot.top(), plot.bottom() - px(1.0));
-                    window.paint_quad(fill(
-                        Bounds::new(point(peak_x, peak_y), size(peak_width, px(1.0))),
-                        rgb(stop_color(
-                            self.palette_lut.lookup_mapped_rgb(peak_fraction),
-                        )),
-                    ));
-                }
-            });
-        }
-        if !self.visualization_cache {
-            self.spectrum_bins.clear();
-            self.spectrum_samples.clear();
-        }
+        window.with_content_mask(Some(gpui::ContentMask { bounds: plot }), |window| {
+            if let Some(body) = &presentation.body {
+                window
+                    .paint_gpu(plot, GpuSource::Fixed(body.clone()))
+                    .map_err(|error| format!("Cannot paint spectrum GPU body: {error}"))?;
+            }
+            for (bounds, color) in &presentation.peaks {
+                window.paint_quad(fill(plot_bounds(plot, *bounds), rgb(*color)));
+            }
+            Ok::<(), String>(())
+        })?;
         if show_labels {
-            let labels_y = plot.bottom() + px(3.0);
+            let y = plot.bottom() + px(3.0);
             paint_label(
-                self.spectrum_labels[0].clone(),
-                point(plot.left(), labels_y),
+                presentation.labels[0].clone(),
+                point(plot.left(), y),
                 0xb1bbc5,
                 window,
                 cx,
             );
             paint_aligned_label(
-                self.spectrum_labels[1].clone(),
-                point(plot.right(), labels_y),
+                presentation.labels[1].clone(),
+                point(plot.right(), y),
                 1.0,
                 window,
                 cx,
             );
         }
-        Ok(())
+        prepared
     }
 
-    fn paint_spectrogram(
-        &mut self,
-        bounds: Bounds<Pixels>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Result<(), String> {
-        let left_margin = axis_label_margin(self.spectrogram_show_labels, &self.frequency_labels);
-        let plot = Bounds::new(
-            point(bounds.left() + px(left_margin), bounds.top() + px(6.0)),
-            size(
-                bounds.size.width - px(left_margin + 8.0),
-                bounds.size.height - px(12.0),
-            ),
-        );
-        if plot.size.width <= px(2.0) || plot.size.height <= px(2.0) {
+    fn prepare_spectrogram_presentation(&mut self, panel_id: u64) -> Result<(), String> {
+        if !self.enabled || !self.spectrogram_visible || self.len == 0 {
             return Ok(());
         }
         let Some(latest_time) = self.display_time else {
@@ -1781,6 +1865,7 @@ impl VisualData {
         }
         let tiles = self.history_columns.div_ceil(SPECTROGRAM_TILE_COLUMNS);
         self.spectrogram_tiles.resize_with(tiles, || None);
+        self.spectrogram_draws.clear();
         for tile_index in 0..tiles {
             let first = tile_index * SPECTROGRAM_TILE_COLUMNS;
             let last = (first + SPECTROGRAM_TILE_COLUMNS).min(self.history_columns);
@@ -1865,15 +1950,13 @@ impl VisualData {
             let left = mapping.position(tile.start, latest_time);
             let width =
                 (tile.end.saturating_sub(tile.start).as_secs_f64() * mapping.scale()) as f32;
-            let bounds = Bounds::new(
-                point(plot.left() + plot.size.width * left, plot.top()),
-                size(plot.size.width * width, plot.size.height),
-            );
-            window
-                .with_content_mask(Some(gpui::ContentMask { bounds: plot }), |window| {
-                    window.paint_gpu(bounds, GpuSource::Fixed(tile.publication.clone()))
-                })
-                .map_err(|error| format!("Cannot paint spectrogram tile: {error}"))?;
+            if width <= 0.0 || left >= 1.0 || left + width <= 0.0 {
+                continue;
+            }
+            self.spectrogram_draws.push((
+                Bounds::new(point(left, 0.0), size(width, 1.0)),
+                tile.publication.clone(),
+            ));
         }
         if !self.visualization_cache {
             self.heat_samples.clear();
@@ -1881,24 +1964,91 @@ impl VisualData {
             self.spectrogram_sample_height = 0;
             self.spectrogram_tiles.clear();
         }
+        // Do not retire a restored publication for a frame with no drawable span.
+        if !self.spectrogram_draws.is_empty() {
+            let presentation = self
+                .spectrogram_presentations
+                .entry(panel_id)
+                .or_insert_with(|| SpectrogramPresentation {
+                    layers: Vec::new(),
+                    labels: self.frequency_labels.clone(),
+                });
+            std::mem::swap(&mut presentation.layers, &mut self.spectrogram_draws);
+            presentation.labels = self.frequency_labels.clone();
+            self.spectrogram_draws.clear();
+        }
+        Ok(())
+    }
+
+    fn paint_spectrogram(
+        &mut self,
+        panel_id: u64,
+        bounds: Bounds<Pixels>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<(), String> {
+        let labels = self
+            .spectrogram_presentations
+            .get(&panel_id)
+            .map(|presentation| &presentation.labels)
+            .unwrap_or(&self.frequency_labels);
+        let left_margin = axis_label_margin(self.spectrogram_show_labels, labels);
+        let plot = Bounds::new(
+            point(bounds.left() + px(left_margin), bounds.top() + px(6.0)),
+            size(
+                bounds.size.width - px(left_margin + 8.0),
+                bounds.size.height - px(12.0),
+            ),
+        );
+        if plot.size.width <= px(2.0) || plot.size.height <= px(2.0) {
+            return Ok(());
+        }
+        let prepared = self.prepare_spectrogram_presentation(panel_id);
+        let Some(presentation) = self.spectrogram_presentations.get(&panel_id) else {
+            return prepared;
+        };
+        window.with_content_mask(Some(gpui::ContentMask { bounds: plot }), |window| {
+            for (bounds, publication) in &presentation.layers {
+                window
+                    .paint_gpu(
+                        plot_bounds(plot, *bounds),
+                        GpuSource::Fixed(publication.clone()),
+                    )
+                    .map_err(|error| format!("Cannot paint spectrogram tile: {error}"))?;
+            }
+            Ok::<(), String>(())
+        })?;
         if self.spectrogram_show_labels {
             paint_aligned_label(
-                self.frequency_labels[1].clone(),
+                presentation.labels[1].clone(),
                 point(plot.left() - px(5.0), plot.top()),
                 1.0,
                 window,
                 cx,
             );
             paint_aligned_label(
-                self.frequency_labels[0].clone(),
+                presentation.labels[0].clone(),
                 point(plot.left() - px(5.0), plot.bottom() - px(12.0)),
                 1.0,
                 window,
                 cx,
             );
         }
-        Ok(())
+        prepared
     }
+}
+
+fn plot_bounds(plot: Bounds<Pixels>, normalized: Bounds<f32>) -> Bounds<Pixels> {
+    Bounds::new(
+        point(
+            plot.left() + plot.size.width * normalized.origin.x,
+            plot.top() + plot.size.height * normalized.origin.y,
+        ),
+        size(
+            plot.size.width * normalized.size.width,
+            plot.size.height * normalized.size.height,
+        ),
+    )
 }
 
 /// Ballistic fall in dB/s², integrating only the portion beyond the hold.
@@ -2873,7 +3023,7 @@ mod tests {
     }
 
     #[test]
-    fn gpu_spectrum_cache_off_pruning_and_disable_release_publications() {
+    fn gpu_spectrum_cache_off_and_pruning_release_working_cache_not_final_output() {
         let mut visuals = configured_visuals();
         visuals.configure(&Config {
             spectrum_style: SpectrumStyle::Bars,
@@ -2911,11 +3061,24 @@ mod tests {
             spectrum_style: SpectrumStyle::Bars,
             ..Config::default()
         });
-        let cached = Arc::downgrade(&rectangle_frame(prepared_body(&visuals, 1, 100.0, 100.0)));
+        let plot = Bounds::new(point(px(0.0), px(0.0)), size(px(100.0), px(100.0)));
+        visuals
+            .data
+            .borrow_mut()
+            .prepare_spectrum_presentation(1, plot)
+            .unwrap();
+        let cached = Arc::downgrade(
+            visuals.data.borrow().spectrum_presentations[&1]
+                .body
+                .as_ref()
+                .unwrap(),
+        );
         visuals.set_enabled(false);
-        assert!(cached.upgrade().is_none());
+        assert!(cached.upgrade().is_some());
         assert!(visuals.data.borrow().spectrum_geometry.is_empty());
         assert_eq!(visuals.data.borrow().spectrum_rectangles.capacity(), 0);
+        visuals.clear_presentation();
+        assert!(cached.upgrade().is_none());
     }
 
     #[test]
@@ -3216,7 +3379,9 @@ mod tests {
         visuals.update(&frame(1.1, -60.0), Duration::from_secs_f64(1.1));
         {
             let data = visuals.data.borrow();
-            assert_eq!(data.peaks, vec![-10.0; 4]);
+            assert_eq!(data.peaks.capacity(), 0);
+            assert_eq!(data.bar_levels.capacity(), 0);
+            assert_eq!(data.smoothed_levels.capacity(), 0);
             assert_eq!(data.latest_levels, vec![-60.0; 4]);
             assert_eq!(data.len, 2);
         }
@@ -3367,6 +3532,155 @@ mod tests {
             assert_eq!(data.peaks, vec![-60.0; 4]);
             assert_eq!(data.bar_levels, vec![-60.0; 4]);
             assert_eq!(data.smoothed_levels, vec![-60.0; 4]);
+        }
+    }
+
+    fn retention_plot() -> Bounds<Pixels> {
+        Bounds::new(point(px(0.0), px(0.0)), size(px(200.0), px(100.0)))
+    }
+
+    fn publish_analysis_views(visuals: &Visuals, panel_id: u64) {
+        let mut data = visuals.data.borrow_mut();
+        data.prepare_spectrum_presentation(panel_id, retention_plot())
+            .unwrap();
+        data.prepare_spectrogram_presentation(panel_id).unwrap();
+    }
+
+    #[test]
+    fn hidden_views_keep_only_final_output_until_fresh_drawable_publication() {
+        for cache in [false, true] {
+            let mut visuals = configured_visuals();
+            let config = Config {
+                visualization_cache: cache,
+                ..Config::default()
+            };
+            visuals.configure(&config);
+            visuals.update(&frame(1.0, -10.0), Duration::from_secs_f64(1.0));
+            visuals.update(&frame(1.1, -20.0), Duration::from_secs_f64(1.1));
+            publish_analysis_views(&visuals, 1);
+            let (body, tile, peaks, placement) = {
+                let data = visuals.data.borrow();
+                let spectrum = &data.spectrum_presentations[&1];
+                let spectrogram = &data.spectrogram_presentations[&1];
+                assert!(!spectrum.peaks.is_empty());
+                assert!(spectrum.peaks.len() <= MAX_SPECTRUM_BARS);
+                assert!(
+                    spectrogram.layers.len()
+                        <= data.history_columns.div_ceil(SPECTROGRAM_TILE_COLUMNS)
+                );
+                (
+                    Arc::downgrade(spectrum.body.as_ref().unwrap()),
+                    Arc::downgrade(&spectrogram.layers[0].1),
+                    spectrum.peaks.clone(),
+                    spectrogram.layers[0].0,
+                )
+            };
+            visuals.retain_spectrum_panels(&[]);
+            visuals.set_spectrum_visible(false);
+            visuals.retain_spectrogram_panels(&[]);
+            visuals.set_enabled(false);
+            visuals.set_enabled(false);
+            visuals.update(&frame(2.0, -60.0), Duration::from_secs(2));
+            assert!(!visuals.animate(Duration::from_secs(2)));
+            publish_analysis_views(&visuals, 1);
+            {
+                let data = visuals.data.borrow();
+                assert_eq!(data.columns.capacity(), 0);
+                assert_eq!(data.heat_samples.capacity(), 0);
+                assert_eq!(data.spectrogram_tiles.capacity(), 0);
+                assert_eq!(data.tile_values.capacity(), 0);
+                assert_eq!(data.spectrogram_draws.capacity(), 0);
+                assert_eq!(data.latest_levels.capacity(), 0);
+                assert_eq!(data.frequencies.capacity(), 0);
+                assert_eq!(data.peak_deadlines.capacity(), 0);
+                assert_eq!(data.bar_deadlines.capacity(), 0);
+                assert_eq!(data.spectrum_points.capacity(), 0);
+                assert!(data.spectrum_geometry.is_empty());
+                assert_eq!(data.spectrum_presentations[&1].peaks, peaks);
+                assert_eq!(data.spectrogram_presentations[&1].layers[0].0, placement);
+            }
+            visuals.set_enabled(true);
+            visuals.set_spectrum_visible(true);
+            visuals.retain_spectrogram_panels(&[1]);
+            assert!(visuals.configure(&config));
+            publish_analysis_views(&visuals, 1);
+            assert!(body.upgrade().is_some());
+            assert!(tile.upgrade().is_some());
+            visuals.update(&frame(3.0, -60.0), Duration::from_secs(3));
+            publish_analysis_views(&visuals, 1);
+            assert!(body.upgrade().is_none());
+            // A newly accepted bucket is not drawable until flow has a span.
+            assert!(tile.upgrade().is_some());
+            visuals.update(&frame(3.1, -50.0), Duration::from_secs_f64(3.1));
+            publish_analysis_views(&visuals, 1);
+            assert!(tile.upgrade().is_none());
+            let data = visuals.data.borrow();
+            assert_eq!(data.len, 2);
+            assert_eq!(
+                data.columns[data.latest.unwrap()].sample_time,
+                Some(Duration::from_secs_f64(3.1))
+            );
+        }
+    }
+
+    #[test]
+    fn inactive_tab_publications_survive_other_tabs_and_removed_panels_are_released() {
+        let mut visuals = configured_visuals();
+        visuals.update(&frame(1.0, -10.0), Duration::from_secs(1));
+        visuals.update(&frame(1.1, -20.0), Duration::from_secs_f64(1.1));
+        publish_analysis_views(&visuals, 1);
+        publish_analysis_views(&visuals, 2);
+        let (body, tile) = {
+            let data = visuals.data.borrow();
+            (
+                Arc::downgrade(data.spectrum_presentations[&1].body.as_ref().unwrap()),
+                Arc::downgrade(&data.spectrogram_presentations[&1].layers[0].1),
+            )
+        };
+        visuals.retain_spectrum_panels(&[2]);
+        visuals.retain_spectrogram_panels(&[2]);
+        visuals.retain_presentation_panels(&[1, 2], &[1, 2]);
+        assert_eq!(visuals.data.borrow().spectrum_presentations.len(), 2);
+        assert_eq!(visuals.data.borrow().spectrogram_presentations.len(), 2);
+        visuals.set_enabled(false);
+        visuals.retain_presentation_panels(&[2], &[2]);
+        assert!(body.upgrade().is_none());
+        // Shared immutable Spectrogram tiles remain referenced by panel 2.
+        assert!(tile.upgrade().is_some());
+        assert!(
+            !visuals
+                .data
+                .borrow()
+                .spectrogram_presentations
+                .contains_key(&1)
+        );
+        visuals.retain_presentation_panels(&[], &[]);
+        assert!(tile.upgrade().is_none());
+    }
+
+    #[test]
+    fn hidden_semantic_invalidation_clears_both_publications_without_restarting_work() {
+        for explicit in [false, true] {
+            let mut visuals = configured_visuals();
+            visuals.update(&frame(1.0, -10.0), Duration::from_secs(1));
+            visuals.update(&frame(1.1, -20.0), Duration::from_secs_f64(1.1));
+            publish_analysis_views(&visuals, 1);
+            visuals.set_enabled(false);
+            if explicit {
+                visuals.clear_presentation();
+                visuals.clear_presentation();
+            } else {
+                visuals.configure(&Config {
+                    analysis_fft_size: 4096,
+                    ..Config::default()
+                });
+            }
+            let data = visuals.data.borrow();
+            assert!(!data.enabled);
+            assert!(data.spectrum_presentations.is_empty());
+            assert!(data.spectrogram_presentations.is_empty());
+            assert_eq!(data.columns.capacity(), 0);
+            assert_eq!(data.latest_levels.capacity(), 0);
         }
     }
 

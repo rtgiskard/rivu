@@ -90,6 +90,7 @@ struct PlotData {
     // CPU acceptance is independent of GPU success. Retry pending content at
     // most once per existing update opportunity, without advancing sample time.
     publication_pending: bool,
+    retained: bool,
     stereo_metrics: [Option<f32>; 3],
     readout: SharedString,
     range_label: SharedString,
@@ -145,6 +146,7 @@ impl AnalysisVisualizer {
                 gpu,
                 gpu_error_reported: false,
                 publication_pending: false,
+                retained: false,
                 stereo_metrics: [None; 3],
                 readout: "".into(),
                 range_label: "".into(),
@@ -192,9 +194,15 @@ impl AnalysisVisualizer {
         let restored = visible && !data.visible;
         if data.visible != visible {
             data.visible = visible;
-            data.clear();
+            if !visible {
+                data.retire();
+            }
         }
         restored
+    }
+
+    pub(super) fn clear(&self) {
+        self.data.borrow_mut().clear();
     }
 
     pub(super) fn update(&self, frame: &AnalysisFrame) {
@@ -238,6 +246,17 @@ impl AnalysisVisualizer {
 }
 
 impl PlotData {
+    fn retire(&mut self) {
+        self.density = DensitySnapshot::default();
+        self.field = Vec::new();
+        self.spatial_next = Vec::new();
+        self.spatial_mapping = SpatialMapping::default();
+        self.sample_time = None;
+        self.sequence = None;
+        self.publication_pending = false;
+        self.retained = true;
+    }
+
     fn clear(&mut self) {
         self.density = DensitySnapshot::default();
         if let Some(gpu) = &self.gpu {
@@ -256,6 +275,7 @@ impl PlotData {
         self.sample_time = None;
         self.sequence = None;
         self.publication_pending = false;
+        self.retained = false;
         self.stereo_metrics = [None; 3];
         self.readout = "".into();
         self.high_label = "".into();
@@ -415,6 +435,7 @@ impl PlotData {
         ) {
             Ok(()) => {
                 self.publication_pending = false;
+                self.retained = false;
                 self.gpu_error_reported = false;
             }
             Err(error) => self.publication_failed("publication", &error),
@@ -422,9 +443,11 @@ impl PlotData {
     }
 
     fn publication_failed(&mut self, operation: &str, error: &impl std::fmt::Display) {
-        // A failed replacement/paint must not leave stale power or palette
-        // under new labels. Keep accepted CPU values and their sample clock.
-        if let Some(gpu) = &self.gpu {
+        // Retired presentation remains valid until replacement succeeds. Outside
+        // restoration, a failure must not show stale power under new labels.
+        if !self.retained
+            && let Some(gpu) = &self.gpu
+        {
             gpu.clear();
         }
         self.publication_pending = true;
@@ -1285,7 +1308,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_panel_slot_revokes_content_and_reuses_identity_after_reopening() {
+    fn shared_panel_slot_retains_one_frame_until_replacement_or_clear() {
         let plot = plot(AudioVisualizerStyle::StereoDensity);
         let sibling = plot.clone();
         let mut frame = frame(AudioVisualizerStyle::StereoDensity);
@@ -1307,13 +1330,45 @@ mod tests {
         ));
         let latest = Arc::downgrade(&publication(&plot).unwrap());
         plot.set_visible(false);
-        assert!(slot.snapshot().is_none());
-        assert!(latest.upgrade().is_none());
+        assert!(slot.snapshot().is_some());
+        assert!(latest.upgrade().is_some());
         assert!(sibling.data.borrow().density.is_empty());
         plot.set_visible(true);
+        assert!(Arc::ptr_eq(
+            &slot.snapshot().unwrap(),
+            &latest.upgrade().unwrap()
+        ));
         plot.update(&frame);
         assert!(slot.snapshot().is_some());
         assert!(Arc::ptr_eq(&slot, plot.data.borrow().gpu.as_ref().unwrap()));
+        assert!(latest.upgrade().is_none());
+        plot.clear();
+        assert!(slot.snapshot().is_none());
+    }
+
+    #[test]
+    fn restored_field_survives_rejected_replacement_until_publication_succeeds() {
+        for style in [
+            AudioVisualizerStyle::StereoDensity,
+            AudioVisualizerStyle::SpatialSpectrum,
+        ] {
+            let plot = plot(style);
+            let mut frame = frame(style);
+            plot.update(&frame);
+            let retained = publication(&plot).unwrap();
+            plot.set_visible(false);
+            plot.set_visible(true);
+            plot.data.borrow_mut().db_range = f32::NAN;
+            frame.sequence += 1;
+            frame.sample_time += Duration::from_millis(100);
+            plot.update(&frame);
+            assert!(plot.data.borrow().publication_pending);
+            assert!(Arc::ptr_eq(&retained, &publication(&plot).unwrap()));
+            plot.data.borrow_mut().db_range = 70.0;
+            plot.update(&frame);
+            assert!(!plot.data.borrow().publication_pending);
+            assert!(!Arc::ptr_eq(&retained, &publication(&plot).unwrap()));
+        }
     }
 
     #[test]
@@ -1427,6 +1482,7 @@ mod tests {
             let plot = plot(style);
             plot.update(&frame(style));
             assert!(!plot.data.borrow().field().is_empty());
+            let retained = publication(&plot).unwrap();
             plot.set_visible(false);
             assert_eq!(plot.data.borrow().field.capacity(), 0);
             assert!(plot.data.borrow().density.is_empty());
@@ -1438,16 +1494,21 @@ mod tests {
                 ..Config::default()
             });
             plot.update(&frame(style));
-            assert!(publication(&plot).is_none());
+            assert!(Arc::ptr_eq(&retained, &publication(&plot).unwrap()));
             assert_eq!(plot.data.borrow().field.capacity(), 0);
             plot.set_visible(true);
+            assert!(Arc::ptr_eq(&retained, &publication(&plot).unwrap()));
             plot.update(&frame(style));
             assert!(publication(&plot).is_some());
+            assert!(!Arc::ptr_eq(&retained, &publication(&plot).unwrap()));
+            plot.set_visible(false);
+            plot.clear();
+            assert!(publication(&plot).is_none());
         }
     }
 
     #[test]
-    fn simultaneous_analysis_styles_keep_independent_fields_and_clear_only_hidden_slots() {
+    fn simultaneous_analysis_styles_keep_independent_retained_slots() {
         let density = plot(AudioVisualizerStyle::StereoDensity);
         let spatial = plot(AudioVisualizerStyle::SpatialSpectrum);
         let mut frame = frame(AudioVisualizerStyle::StereoDensity);
@@ -1467,7 +1528,7 @@ mod tests {
         assert!(!density.configure(&config));
         assert!(!spatial.configure(&config));
         density.set_visible(false);
-        assert!(density_slot.snapshot().is_none());
+        assert!(density_slot.snapshot().is_some());
         assert_eq!(density.data.borrow().field.capacity(), 0);
         assert!(Arc::ptr_eq(
             &spatial_publication,
@@ -1478,7 +1539,7 @@ mod tests {
         frame.visualizer.spatial[0].power = 0.1;
         density.update(&frame);
         spatial.update(&frame);
-        assert!(publication(&density).is_none());
+        assert!(publication(&density).is_some());
         assert!(!Arc::ptr_eq(
             &spatial_publication,
             &publication(&spatial).unwrap()

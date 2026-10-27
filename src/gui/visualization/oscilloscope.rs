@@ -6,17 +6,21 @@ use crate::{
 use gpui::{
     AnyElement, PathBuilder, SharedString, TextAlign, canvas, div, point, prelude::*, px, rgb,
 };
-use rivu_audio::analysis::{AnalysisFrame, AnalysisSettings, PcmSnapshot};
+use rivu_audio::analysis::{AnalysisFrame, AnalysisSettings};
 use std::{cell::RefCell, ops::Range, rc::Rc, sync::Arc};
+
+// Retain normalized sweep geometry, never the worker's full PCM snapshot.
+const MAX_SWEEP_POINTS: usize = 2048;
 
 #[derive(Clone)]
 pub(super) struct Oscilloscope(Rc<RefCell<Data>>);
 
 struct Data {
     visible: bool,
+    retained: bool,
     settings: AnalysisSettings,
-    samples: PcmSnapshot,
-    range: Range<usize>,
+    source: Option<(u64, u32)>,
+    points: Vec<[f32; 2]>,
     background: u32,
     colors: [u32; 2],
     label: Option<SharedString>,
@@ -24,8 +28,9 @@ struct Data {
 
 impl Data {
     fn clear(&mut self) {
-        self.samples = PcmSnapshot::default();
-        self.range = 0..0;
+        self.points.clear();
+        self.retained = false;
+        self.source = None;
     }
 }
 
@@ -34,9 +39,10 @@ impl Oscilloscope {
         let config = Config::default();
         Self(Rc::new(RefCell::new(Data {
             visible: false,
+            retained: false,
             settings: AnalysisSettings::from(&config),
-            samples: PcmSnapshot::default(),
-            range: 0..0,
+            source: None,
+            points: Vec::new(),
             background: config.visual_background.rgb(),
             colors: [
                 config.audio_visualizer_primary_color.rgb(),
@@ -57,7 +63,10 @@ impl Oscilloscope {
             || data.settings != settings
             || data.background != config.visual_background.rgb()
             || data.colors != colors;
-        if data.visible != visible || data.settings != settings {
+        if data.visible && !visible {
+            data.retained = true;
+        }
+        if data.settings != settings {
             data.clear();
         }
         data.visible = visible;
@@ -67,23 +76,38 @@ impl Oscilloscope {
         changed
     }
 
-    // Presentation rejects retired display tokens before dispatching a frame.
-    // A reset or unavailable PCM must also erase the last visible sweep.
+    pub(super) fn clear(&self) {
+        self.0.borrow_mut().clear();
+    }
+
+    // Presentation rejects retired display tokens and freezes updates on pause.
+    // Restoration keeps the compact sweep until usable PCM replaces it.
     pub(super) fn update(&self, frame: &AnalysisFrame) {
         let mut data = self.0.borrow_mut();
         if !data.visible {
             return;
+        }
+        if data
+            .source
+            .is_some_and(|source| source != (frame.generation, frame.sample_rate))
+        {
+            data.clear();
         }
         if frame.settings != Some(data.settings)
             || !frame.visualizer.demand.pcm
             || frame.sample_rate == 0
             || frame.visualizer.pcm.len() < 2
         {
-            data.clear();
+            if !data.retained || frame.settings != Some(data.settings) {
+                data.clear();
+            }
             return;
         }
-        data.range = triggered_range(&frame.visualizer.pcm, frame.sample_rate);
-        data.samples.clone_from(&frame.visualizer.pcm);
+        let samples = &frame.visualizer.pcm;
+        let range = triggered_range(samples, frame.sample_rate);
+        compact_sweep(&samples[range], &mut data.points);
+        data.retained = false;
+        data.source = Some((frame.generation, frame.sample_rate));
     }
 
     pub(super) fn view(
@@ -100,7 +124,6 @@ impl Oscilloscope {
                 data.label = Some(label.to_owned().into());
             }
         }
-        let has_samples = !data.borrow().range.is_empty();
         div()
             .id(("oscilloscope", panel_id))
             .relative()
@@ -115,7 +138,7 @@ impl Oscilloscope {
                         let data = data.borrow();
                         let width = f32::from(bounds.size.width);
                         let height = f32::from(bounds.size.height);
-                        let samples = &data.samples[data.range.clone()];
+                        let samples = &data.points;
                         let columns =
                             physical_columns(width, height, window.scale_factor(), samples.len());
                         if !f32::from(bounds.left()).is_finite()
@@ -201,18 +224,23 @@ impl Oscilloscope {
                 )
                 .size_full(),
             )
-            .when(!has_samples, |panel| {
-                panel.child(
-                    div()
-                        .absolute()
-                        .top_6()
-                        .left_2()
-                        .text_sm()
-                        .text_color(rgb(0xb1bbc5))
-                        .child(i18n.text("visual-awaiting-audio").to_owned()),
-                )
-            })
             .into_any_element()
+    }
+}
+
+fn compact_sweep(samples: &[[f32; 2]], points: &mut Vec<[f32; 2]>) {
+    points.clear();
+    points.reserve_exact(samples.len().min(MAX_SWEEP_POINTS));
+    if samples.len() <= MAX_SWEEP_POINTS {
+        points.extend_from_slice(samples);
+        return;
+    }
+    let columns = MAX_SWEEP_POINTS / 2;
+    for bucket in 0..columns {
+        let group = &samples[bucket_range(samples.len(), columns, bucket)];
+        let ranges = [extrema(group, 0), extrema(group, 1)];
+        points.push(ranges.map(|range| range.map_or(f32::NAN, |(low, _)| low)));
+        points.push(ranges.map(|range| range.map_or(f32::NAN, |(_, high)| high)));
     }
 }
 
@@ -285,6 +313,7 @@ fn extrema(samples: &[[f32; 2]], channel: usize) -> Option<(f32, f32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rivu_audio::analysis::PcmSnapshot;
 
     #[test]
     fn scope_triggers_on_real_stereo_pcm_and_bounds_short_windows() {
@@ -379,29 +408,47 @@ mod tests {
     }
 
     #[test]
-    fn hidden_settings_and_invalid_publications_release_pcm() {
+    fn compact_sweeps_bound_storage_and_preserve_channel_extrema() {
+        let mut samples = vec![[0.0; 2]; MAX_SWEEP_POINTS * 8];
+        samples[17] = [-0.8, 0.9];
+        samples[18] = [0.7, -0.6];
+        samples[20] = [f32::NAN, f32::INFINITY];
+        let mut points = Vec::new();
+        compact_sweep(&samples, &mut points);
+        assert_eq!(points.len(), MAX_SWEEP_POINTS);
+        assert_eq!(extrema(&points, 0), Some((-0.8, 0.7)));
+        assert_eq!(extrema(&points, 1), Some((-0.6, 0.9)));
+    }
+
+    #[test]
+    fn hiding_retains_compact_points_and_semantic_changes_clear() {
         let scope = Oscilloscope::new();
         let mut config = Config::default();
         scope.configure(&config, true);
         let frame = frame(&config);
         scope.update(&frame);
-        assert_eq!(scope.0.borrow().samples[0], [0.25, -0.5]);
-        assert_eq!(
-            scope.0.borrow().samples.as_ptr(),
+        assert_eq!(scope.0.borrow().points[0], [0.25, -0.5]);
+        assert_ne!(
+            scope.0.borrow().points.as_ptr(),
             frame.visualizer.pcm.as_ptr()
         );
+        let points = scope.0.borrow().points.clone();
         scope.configure(&config, false);
-        assert!(scope.0.borrow().samples.is_empty());
+        assert_eq!(scope.0.borrow().points, points);
         scope.update(&frame);
-        assert!(scope.0.borrow().samples.is_empty());
+        assert_eq!(scope.0.borrow().points, points);
         scope.configure(&config, true);
-        assert!(scope.0.borrow().samples.is_empty());
+        assert_eq!(scope.0.borrow().points, points);
+        let mut unavailable = frame.clone();
+        unavailable.visualizer.pcm = PcmSnapshot::default();
+        scope.update(&unavailable);
+        assert_eq!(scope.0.borrow().points, points);
         scope.update(&frame);
         config.analysis_fft_size = 512;
         scope.configure(&config, true);
-        assert!(scope.0.borrow().samples.is_empty());
+        assert!(scope.0.borrow().points.is_empty());
         scope.update(&frame);
-        assert!(scope.0.borrow().samples.is_empty());
+        assert!(scope.0.borrow().points.is_empty());
         let valid = self::frame(&config);
         for invalid in 0..5 {
             scope.update(&valid);
@@ -414,15 +461,13 @@ mod tests {
                 _ => rejected.visualizer.pcm = vec![[0.0; 2]].into(),
             }
             scope.update(&rejected);
-            assert!(scope.0.borrow().samples.is_empty());
-            assert!(scope.0.borrow().range.is_empty());
+            assert!(scope.0.borrow().points.is_empty());
         }
         scope.update(&valid);
         config.audio_visualizer_primary_color = "#123456".parse().unwrap();
         scope.configure(&config, true);
-        assert_eq!(
-            scope.0.borrow().samples.as_ptr(),
-            valid.visualizer.pcm.as_ptr()
-        );
+        assert_eq!(scope.0.borrow().points[0], [0.25, -0.5]);
+        scope.clear();
+        assert!(scope.0.borrow().points.is_empty());
     }
 }

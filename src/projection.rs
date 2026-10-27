@@ -22,6 +22,7 @@ pub struct GuiSnapshot {
     pub queue: QueueState,
     pub current_track: Option<Arc<Track>>,
     pub playback: PlaybackState,
+    pub(crate) source_generation: u64,
     pub system: GuiSystemSnapshot,
     pub revisions: rivu_protocol::response::StateRevisions,
 }
@@ -99,6 +100,7 @@ impl GuiSnapshot {
             queue: state.queue.clone(),
             current_track: state.current_track.clone(),
             playback: state.playback.clone(),
+            source_generation: state.source_generation,
             system: GuiSystemSnapshot {
                 scanning: state.system.scanning,
                 scan_message: state.system.scan_message.clone(),

@@ -444,6 +444,7 @@ impl Core {
 
     /// Publish observations already captured by the serialized owner.
     pub(in crate::core) fn publish(&mut self) {
+        self.state.source_generation = self.generation;
         self.state.system.revision = self.state.system.revision.wrapping_add(1);
         let revisions_changed = {
             let mut shared = self.shared.write();
@@ -463,6 +464,7 @@ impl Core {
             }
             if changed.playback {
                 shared.playback = self.state.playback.clone();
+                shared.source_generation = self.state.source_generation;
                 shared.current_track = self.state.current_track.clone();
                 shared.processing_audition = self.state.processing_audition;
             }

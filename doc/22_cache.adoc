@@ -309,8 +309,11 @@ the body. Bars/Outline/LED retain rectangle publications, Line/Solid retain Path
 publications; LED segments do not require individual CPU contours.
 
 Cache-off releases the reusable body, not signal envelopes or the shared palette.
-Hidden-panel restoration waits for a valid frame before drawing; envelope and
-palette semantics are in link:23_visuals.adoc#_spectrum[Spectrum rendering].
+Suspension retains the final immutable body, normalized peak markers, and display
+labels for each current layout panel, independently of rebuilding caches. Envelopes,
+frequency mappings, and scratch are released. Restoration draws that presentation
+until a current drawable result replaces it; semantic invalidation discards it.
+Envelope and palette semantics are in link:23_visuals.adoc#_spectrum[Spectrum rendering].
 
 ==== Spectrogram
 
@@ -341,10 +344,12 @@ without losing those columns. This size-only transition does not change analysis
 demand; drawable geometry is specified in link:24_layout.adoc[GUI layout].
 
 When no Spectrogram panel is visible, including when the window is hidden,
-its numerical publications and CPU history and derived storage are released.
-Other analysis views can continue updating without accumulating Spectrogram
-history. Restoring demand starts with a new analysis publication, not the
-frames received while hidden. This lifetime is independent of the cache setting.
+CPU history, pooling/scroll state, and derived working storage are released.
+Each current layout panel may retain only the immutable tiles and normalized
+placements in its last actual drawing, not the full historical column store.
+Other analysis views can continue updating without accumulating hidden history.
+Restoration shows that frozen drawing until fresh analysis produces a replacement;
+it does not replay frames received while hidden. This is independent of the cache setting.
 
 === Resource boundaries
 
@@ -372,17 +377,22 @@ in-flight limits, including pressure behavior, are documented in
 link:25_gpu_rendering.adoc#_internal_led_vertical_slice[GPU rendering].
 
 These are CPU and renderer resources: publication payload alone does not describe
-total process or GPU memory. Removed panel entries are pruned. Hiding detaches
-recorded visualization ownership without requiring another paint. GPU uploads
-may remain charged until completion and a later renderer preparation, or renderer
-destruction; hiding does not force a cleanup frame or promise immediate VRAM release.
+total process or GPU memory. Removed panel entries are pruned. Suspension retains
+only final drawing data: radial styles have at most 32 levels and rotation, stereo
+styles keep their immutable fixed-size field, fractals keep their bounded segment
+publication rather than their simulation, and Oscilloscope retains at most 2048
+normalized stereo sweep points (16 KiB), never its PCM owner. There is no general
+screenshot cache. Destroying the window releases all these publications.
+GPU uploads may remain charged until completion and a later renderer preparation,
+or renderer destruction; hiding does not promise immediate VRAM release.
 
 The GUI staging frame releases optional Density, Spatial Spectrum, metrics, and
 band-energy payloads when their last display demand disappears; losing all
 analysis demand also discards the spectrum copy. Reuse requires the same
-publication, generation, FFT settings, and display token. Continuity loss revokes
-reuse even before the next publication, and restoration waits for current data
-rather than reviving hidden results. The continuity contract belongs to
+publication, generation, FFT settings, and display token. Retained final drawing
+data is not analysis staging and cannot seed restored history or simulation.
+Source/seek identity and analysis settings govern semantic invalidation even while
+hidden or paused. The continuity contract belongs to
 link:23_visuals.adoc[Visualization Rendering Design].
 
 The audio worker's processed Before tap owns a separate stereo FIFO for

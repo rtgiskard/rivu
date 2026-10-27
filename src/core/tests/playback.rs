@@ -1,6 +1,22 @@
 use super::*;
 use crate::core::dispatch::BusinessEvent;
 
+#[test]
+fn published_source_generation_tracks_audio_owner_not_pause_state() {
+    let (_directory, mut core) = fixture();
+    playing(&mut core, 1);
+    core.publish();
+    let generation = core.shared.read().source_generation;
+    assert_eq!(generation, core.generation);
+    core.command(Command::Pause).unwrap();
+    core.publish();
+    assert_eq!(core.shared.read().source_generation, generation);
+    core.command(Command::Stop).unwrap();
+    core.publish();
+    assert_eq!(core.shared.read().source_generation, core.generation);
+    assert_ne!(core.shared.read().source_generation, generation);
+}
+
 fn add_test_album(core: &mut Core) {
     core.command(Command::EditTrack {
         track_id: 1,

@@ -94,6 +94,7 @@ struct Data {
     gpu_palette: Option<Arc<GpuPalette>>,
     gpu_segments: Vec<GpuSegment>,
     gpu_error_reported: bool,
+    retained: bool,
 }
 
 impl FractalVisualizer {
@@ -126,6 +127,7 @@ impl FractalVisualizer {
                 gpu_palette: None,
                 gpu_segments: Vec::new(),
                 gpu_error_reported: false,
+                retained: false,
             })),
         }
     }
@@ -170,12 +172,15 @@ impl FractalVisualizer {
         let restored = visible && !data.visible;
         if data.visible != visible {
             data.visible = visible;
-            data.scene = None;
-            data.gpu_segments = Vec::new();
-            data.gpu_palette = None;
-            data.reset();
+            if !visible {
+                data.retire();
+            }
         }
         restored
+    }
+
+    pub(super) fn clear(&self) {
+        self.data.borrow_mut().reset();
     }
 
     pub(super) fn update(&self, frame: &AnalysisFrame, presentation_time: Duration) {
@@ -223,8 +228,22 @@ impl FractalVisualizer {
 }
 
 impl Data {
+    fn retire(&mut self) {
+        self.scene = None;
+        self.gpu_segments = Vec::new();
+        self.gpu_palette = None;
+        self.last_time = None;
+        self.last_presentation_time = None;
+        self.target = Drive::default();
+        self.pending_onset = 0.0;
+        self.drive = Drive::default();
+        self.previous_energy = 0.0;
+        self.retained = true;
+    }
+
     fn reset(&mut self) {
         self.gpu_frame = None;
+        self.retained = false;
         self.gpu_segments.clear();
         self.source = None;
         self.last_time = None;
@@ -256,7 +275,12 @@ impl Data {
                     && s.signal == self.settings.signal
             })
         {
-            self.reset();
+            if !self.retained
+                || frame.settings != Some(self.settings)
+                || self.source != Some((frame.generation, frame.sample_rate))
+            {
+                self.reset();
+            }
             return;
         }
         if self.source != Some((frame.generation, frame.sample_rate))
@@ -358,17 +382,22 @@ impl Data {
 
     fn publish(&mut self) {
         if !self.visible || self.last_time.is_none() || self.scene.is_none() {
-            self.gpu_frame = None;
+            if !self.retained {
+                self.gpu_frame = None;
+            }
             return;
         }
         let result = self.publication();
         match result {
             Ok(frame) => {
                 self.gpu_frame = Some(frame);
+                self.retained = false;
                 self.gpu_error_reported = false;
             }
             Err(error) => {
-                self.gpu_frame = None;
+                if !self.retained {
+                    self.gpu_frame = None;
+                }
                 if !self.gpu_error_reported {
                     eprintln!("rivu fractal GPU publication: {error:#}");
                     self.gpu_error_reported = true;
@@ -701,7 +730,7 @@ mod tests {
                 }
                 visual.update(&audio, audio.sample_time);
                 assert!(!visual.animate(audio.sample_time + Duration::from_millis(16)));
-                assert!(visual.data.borrow().gpu_frame.is_none());
+                assert_eq!(visual.data.borrow().gpu_frame.is_some(), invalid == 2);
                 assert!(visual.data.borrow().last_time.is_none());
             }
         }
@@ -1166,6 +1195,28 @@ mod tests {
     }
 
     #[test]
+    fn restored_scene_holds_frame_until_fresh_material_is_drawable() {
+        for style in [
+            AudioVisualizerStyle::FractalBeams,
+            AudioVisualizerStyle::FractalFlow,
+        ] {
+            let visual = plot(style);
+            accept(&visual, &frame(50));
+            let retained = publication(&visual);
+            visual.set_visible(false);
+            visual.set_visible(true);
+            visual.data.borrow_mut().bloom = f32::NAN;
+            accept(&visual, &frame(100));
+            assert!(Arc::ptr_eq(&retained, &publication(&visual)));
+            assert!(visual.data.borrow().gpu_error_reported);
+            visual.data.borrow_mut().bloom = 0.5;
+            assert!(visual.animate(Duration::from_millis(116)));
+            assert!(!Arc::ptr_eq(&retained, &publication(&visual)));
+            assert!(!visual.data.borrow().retained);
+        }
+    }
+
+    #[test]
     fn hidden_scenes_release_storage_and_only_valid_audio_recreates_them() {
         for style in [
             AudioVisualizerStyle::FractalBeams,
@@ -1173,19 +1224,24 @@ mod tests {
         ] {
             let visual = plot(style);
             accept(&visual, &frame(50));
+            let retained = publication(&visual);
             assert!(visual.data.borrow().scene.is_some());
             visual.set_visible(false);
-            assert!(visual.data.borrow().gpu_frame.is_none());
+            assert!(Arc::ptr_eq(&retained, &publication(&visual)));
             assert!(visual.data.borrow().scene.is_none());
+            assert_eq!(visual.data.borrow().gpu_segments.capacity(), 0);
+            assert!(visual.data.borrow().gpu_palette.is_none());
             accept(&visual, &frame(100));
             assert!(visual.data.borrow().scene.is_none());
             visual.set_visible(true);
             assert!(visual.data.borrow().scene.is_none());
+            assert!(Arc::ptr_eq(&retained, &publication(&visual)));
+            assert!(!visual.animate(Duration::from_secs(100)));
             let mut stale = frame(150);
             stale.visualizer.demand.band_energy = false;
             accept(&visual, &stale);
             assert!(visual.data.borrow().scene.is_none());
-            assert!(visual.data.borrow().gpu_frame.is_none());
+            assert!(Arc::ptr_eq(&retained, &publication(&visual)));
             accept(&visual, &frame(200));
             let fresh = plot(style);
             accept(&fresh, &frame(200));
@@ -1193,6 +1249,10 @@ mod tests {
                 visual.data.borrow().segments(),
                 fresh.data.borrow().segments()
             );
+            assert!(!Arc::ptr_eq(&retained, &publication(&visual)));
+            visual.set_visible(false);
+            visual.clear();
+            assert!(visual.data.borrow().gpu_frame.is_none());
         }
     }
 }

@@ -15,6 +15,7 @@ use gpui::{
     px, rgb,
 };
 use rivu_audio::analysis::{AnalysisFrame, AnalysisSettings};
+use rivu_protocol::model::PlaybackStatus;
 use std::{
     cell::RefCell,
     f32::consts::PI,
@@ -140,6 +141,10 @@ struct VisualizerData {
     secondary_color: u32,
     db_range: f32,
     visible: bool,
+    retained: bool,
+    // Layout ownership outlives visibility: radial, density, spatial, beams,
+    // flow, scope. Only a layout removal retires these slots.
+    presentations: [bool; 6],
     displayed: Vec<f32>,
     targets: Vec<f32>,
     mapping: RadialMapping,
@@ -172,6 +177,8 @@ impl AudioVisualizer {
                 secondary_color: 0xbb9af7,
                 db_range: 70.0,
                 visible: true,
+                retained: false,
+                presentations: [true; 6],
                 displayed: Vec::with_capacity(FANCY_BANDS),
                 targets: Vec::with_capacity(FANCY_BANDS),
                 mapping: RadialMapping::default(),
@@ -223,6 +230,49 @@ impl AudioVisualizer {
         changed | self.configure(config)
     }
 
+    pub(in crate::gui) fn retain_presentations(
+        &self,
+        options: impl IntoIterator<Item = AudioVisualizerOptions>,
+    ) {
+        let mut retained = [false; 6];
+        for options in options {
+            let index = match options.style {
+                AudioVisualizerStyle::Bars
+                | AudioVisualizerStyle::Rings
+                | AudioVisualizerStyle::BarsRings => 0,
+                AudioVisualizerStyle::StereoDensity => 1,
+                AudioVisualizerStyle::SpatialSpectrum => 2,
+                AudioVisualizerStyle::FractalBeams => 3,
+                AudioVisualizerStyle::FractalFlow => 4,
+                AudioVisualizerStyle::Oscilloscope => 5,
+            };
+            retained[index] = true;
+        }
+        let removed = {
+            let mut data = self.data.borrow_mut();
+            let removed: [bool; 6] =
+                std::array::from_fn(|index| data.presentations[index] && !retained[index]);
+            data.presentations = retained;
+            removed
+        };
+        if removed[0] {
+            self.clear_radial();
+        }
+        for (renderer, removed) in self.analysis.iter().zip(&removed[1..3]) {
+            if *removed {
+                renderer.clear();
+            }
+        }
+        for (renderer, removed) in self.fractal.iter().zip(&removed[3..5]) {
+            if *removed {
+                renderer.clear();
+            }
+        }
+        if removed[5] {
+            self.oscilloscope.clear();
+        }
+    }
+
     fn configure(&mut self, config: &Config) -> bool {
         let mut data = self.data.borrow_mut();
         let db_range = config.audio_visualizer_db_range();
@@ -259,6 +309,7 @@ impl AudioVisualizer {
         data.db_range = db_range;
         data.expected_settings = expected_settings;
         data.displayed.clear();
+        data.retained = false;
         data.targets.clear();
         data.last_presentation_time = None;
         data.last_sample_time = None;
@@ -271,7 +322,9 @@ impl AudioVisualizer {
         let restored = visible && !data.visible;
         if data.visible != visible {
             data.visible = visible;
-            data.displayed = Vec::new();
+            if !visible {
+                data.retained = true;
+            }
             data.targets = Vec::new();
             data.last_presentation_time = None;
             data.mapping = RadialMapping::default();
@@ -279,6 +332,31 @@ impl AudioVisualizer {
             data.fade_started = None;
         }
         restored
+    }
+
+    fn clear_radial(&self) {
+        let mut data = self.data.borrow_mut();
+        data.displayed.clear();
+        data.retained = false;
+        data.targets = Vec::new();
+        data.mapping = RadialMapping::default();
+        data.last_sample_time = None;
+        data.last_presentation_time = None;
+        data.source_generation = None;
+        data.source_sample_rate = 0;
+        data.time = 0.0;
+        data.fade_started = None;
+    }
+
+    pub(in crate::gui) fn clear(&self) {
+        self.clear_radial();
+        for renderer in &self.analysis {
+            renderer.clear();
+        }
+        for renderer in &self.fractal {
+            renderer.clear();
+        }
+        self.oscilloscope.clear();
     }
 
     pub(in crate::gui) fn update(&mut self, frame: &AnalysisFrame, presentation_time: Duration) {
@@ -301,7 +379,12 @@ impl AudioVisualizer {
                     && settings.signal == data.expected_settings.signal
             })
         {
-            data.displayed.clear();
+            if !data.retained
+                || data.source_generation != Some(frame.generation)
+                || data.source_sample_rate != frame.sample_rate
+            {
+                data.displayed.clear();
+            }
             data.targets.clear();
             data.last_sample_time = None;
             data.last_presentation_time = None;
@@ -327,7 +410,9 @@ impl AudioVisualizer {
             data.mapping
                 .prepare(frame.sample_rate, fft_size, &frame.frequencies_hz)
         else {
-            data.displayed.clear();
+            if !data.retained {
+                data.displayed.clear();
+            }
             data.targets.clear();
             data.last_sample_time = None;
             data.last_presentation_time = None;
@@ -350,7 +435,8 @@ impl AudioVisualizer {
                 .fold(f32::NEG_INFINITY, f32::max);
             *target = ((level + db_range) / db_range).clamp(0.0, 1.0);
         }
-        if data.displayed.len() != count || mapping_changed {
+        if data.displayed.len() != count || mapping_changed || data.last_presentation_time.is_none()
+        {
             let VisualizerData {
                 displayed, targets, ..
             } = &mut *data;
@@ -360,6 +446,7 @@ impl AudioVisualizer {
                 .rem_euclid(TWO_PI as f64) as f32;
         }
         data.last_sample_time = Some(frame.sample_time);
+        data.retained = false;
     }
 
     pub(in crate::gui) fn animate(&mut self, presentation_time: Duration) -> bool {
@@ -396,14 +483,15 @@ impl AudioVisualizer {
 
     pub(in crate::gui) fn begin_idle_fade(&self, now: Instant) {
         let mut data = self.data.borrow_mut();
-        if data.fade_when_idle && !data.displayed.is_empty() {
+        if data.visible && data.fade_when_idle && !data.displayed.is_empty() {
             data.fade_started.get_or_insert(now);
         }
     }
 
     pub(in crate::gui) fn idle_fading(&self, now: Instant) -> bool {
         let data = self.data.borrow();
-        data.fade_when_idle
+        data.visible
+            && data.fade_when_idle
             && !data.displayed.is_empty()
             && data
                 .fade_started
@@ -414,7 +502,7 @@ impl AudioVisualizer {
         &self,
         i18n: &Arc<Localizer>,
         panel_id: u64,
-        playing: bool,
+        status: PlaybackStatus,
         options: AudioVisualizerOptions,
     ) -> AnyElement {
         match options.style {
@@ -469,15 +557,16 @@ impl AudioVisualizer {
                             );
                             return;
                         }
-                        let fade_alpha = if playing || !data.fade_when_idle {
-                            data.fade_started = None;
-                            1.0
-                        } else {
-                            let started = *data.fade_started.get_or_insert_with(Instant::now);
-                            let elapsed = started.elapsed();
-                            1.0 - (elapsed.as_secs_f32() / IDLE_FADE_DURATION.as_secs_f32())
-                                .clamp(0.0, 1.0)
-                        };
+                        let fade_alpha =
+                            if status != PlaybackStatus::Stopped || !data.fade_when_idle {
+                                data.fade_started = None;
+                                1.0
+                            } else {
+                                let started = *data.fade_started.get_or_insert_with(Instant::now);
+                                let elapsed = started.elapsed();
+                                1.0 - (elapsed.as_secs_f32() / IDLE_FADE_DURATION.as_secs_f32())
+                                    .clamp(0.0, 1.0)
+                            };
                         if fade_alpha == 0.0 {
                             paint_guides(
                                 data.guide_labels.as_ref().expect("localized guide labels"),
@@ -1288,14 +1377,91 @@ mod tests {
         accept(&mut radial, &frame());
         radial.set_visible(false);
         accept(&mut radial, &frame());
-        assert!(radial.data.borrow().displayed.is_empty());
+        assert_eq!(radial.data.borrow().displayed, vec![0.5; 4]);
         assert_eq!(radial.data.borrow().mapping.frequencies.capacity(), 0);
         assert_eq!(radial.data.borrow().mapping.ranges.capacity(), 0);
         radial.set_visible(true);
+        assert_eq!(radial.data.borrow().displayed, vec![0.5; 4]);
+        assert!(radial.data.borrow().targets.is_empty());
+        assert_eq!(radial.data.borrow().targets.capacity(), 0);
+        assert!(!radial.animate(Duration::from_secs(100)));
+        let mut unavailable = frame();
+        unavailable.spectrum_db.clear();
+        accept(&mut radial, &unavailable);
+        assert_eq!(radial.data.borrow().displayed, vec![0.5; 4]);
         let mut latest = frame();
         latest.spectrum_db.fill(-70.0);
         accept(&mut radial, &latest);
         assert_eq!(radial.data.borrow().displayed, vec![0.0; 4]);
+    }
+
+    #[test]
+    fn layout_styles_own_independent_presentation_slots() {
+        for (style, slot) in [
+            (AudioVisualizerStyle::Bars, 0),
+            (AudioVisualizerStyle::Rings, 0),
+            (AudioVisualizerStyle::BarsRings, 0),
+            (AudioVisualizerStyle::StereoDensity, 1),
+            (AudioVisualizerStyle::SpatialSpectrum, 2),
+            (AudioVisualizerStyle::FractalBeams, 3),
+            (AudioVisualizerStyle::FractalFlow, 4),
+            (AudioVisualizerStyle::Oscilloscope, 5),
+        ] {
+            let radial = AudioVisualizer::new();
+            radial.retain_presentations([AudioVisualizerOptions {
+                style,
+                reference_lines: false,
+                labels: false,
+            }]);
+            assert_eq!(
+                radial.data.borrow().presentations,
+                std::array::from_fn(|index| index == slot)
+            );
+            assert!(radial.data.borrow().visible);
+        }
+    }
+
+    #[test]
+    fn layout_pruning_keeps_shared_radial_output_and_active_working_state() {
+        let mut radial = AudioVisualizer::new();
+        accept(&mut radial, &frame());
+        radial.set_visible(false);
+        for style in [
+            AudioVisualizerStyle::Bars,
+            AudioVisualizerStyle::Rings,
+            AudioVisualizerStyle::BarsRings,
+        ] {
+            radial.retain_presentations([AudioVisualizerOptions {
+                style,
+                reference_lines: false,
+                labels: false,
+            }]);
+            let data = radial.data.borrow();
+            assert!(!data.visible);
+            assert_eq!(data.displayed, vec![0.5; 4]);
+            assert!(data.targets.is_empty());
+        }
+        radial.set_visible(true);
+        accept(&mut radial, &frame());
+        let targets = radial.data.borrow().targets.clone();
+        let presentation_time = radial.data.borrow().last_presentation_time;
+        radial.retain_presentations([AudioVisualizerOptions {
+            style: AudioVisualizerStyle::BarsRings,
+            reference_lines: false,
+            labels: false,
+        }]);
+        assert_eq!(radial.data.borrow().targets, targets);
+        assert_eq!(
+            radial.data.borrow().last_presentation_time,
+            presentation_time
+        );
+        radial.retain_presentations([]);
+        let data = radial.data.borrow();
+        assert!(data.visible);
+        assert!(data.displayed.is_empty());
+        assert!(data.targets.is_empty());
+        assert_eq!(data.mapping.frequencies.capacity(), 0);
+        assert_eq!(data.mapping.ranges.capacity(), 0);
     }
 
     #[test]

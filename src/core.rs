@@ -120,6 +120,8 @@ pub(crate) struct CoreState {
     pub(crate) queue: QueueState,
     pub(crate) current_track: Option<Arc<Track>>,
     pub(crate) playback: PlaybackState,
+    /// Audio source ownership, independent of metadata and transport state.
+    pub(crate) source_generation: u64,
     pub(crate) processing_audition: Option<crate::projection::ProcessingAudition>,
     pub(crate) system: SystemState,
     pub(crate) scan_owner: Option<crate::projection::MediaTaskOwner>,
@@ -156,6 +158,7 @@ impl CoreState {
         let old = &previous.system;
         StateSections {
             playback: self.playback != previous.playback
+                || self.source_generation != previous.source_generation
                 || current_track_changed
                 || self.processing_audition != previous.processing_audition,
             queue: self.queue != previous.queue,
