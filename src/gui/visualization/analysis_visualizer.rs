@@ -282,31 +282,18 @@ impl PlotData {
     }
 
     fn update(&mut self, frame: &AnalysisFrame) {
-        if !self.visible {
+        if !frame.settings.is_some_and(|settings| {
+            settings.fft_size == self.settings.fft_size
+                && settings.window == self.settings.window
+                && settings.signal == self.settings.signal
+        }) {
+            self.clear();
             return;
         }
         if self.generation != Some(frame.generation) || self.sample_rate != frame.sample_rate {
             self.clear();
             self.generation = Some(frame.generation);
             self.sample_rate = frame.sample_rate;
-        }
-        let demanded = match self.style {
-            AudioVisualizerStyle::StereoDensity => frame.visualizer.demand.stereo_density,
-            AudioVisualizerStyle::SpatialSpectrum => frame.visualizer.demand.spatial_spectrum,
-            _ => false,
-        };
-        if !demanded
-            || !frame.settings.is_some_and(|settings| {
-                settings.fft_size == self.settings.fft_size
-                    && settings.window == self.settings.window
-                    && settings.signal == self.settings.signal
-            })
-        {
-            return;
-        }
-        if self.sequence == Some(frame.sequence) || self.sample_time == Some(frame.sample_time) {
-            self.retry_publication();
-            return;
         }
         if self
             .sample_time
@@ -315,6 +302,28 @@ impl PlotData {
             self.clear();
             self.generation = Some(frame.generation);
             self.sample_rate = frame.sample_rate;
+        }
+        if !self.visible {
+            return;
+        }
+        // Demand describes the request, not readiness. Never decay an old field
+        // or pair its readouts with a frame whose replacement is still absent.
+        let available = match self.style {
+            AudioVisualizerStyle::StereoDensity => {
+                frame.visualizer.demand.stereo_density
+                    && frame.visualizer.density.len() == DENSITY_SIDE * DENSITY_SIDE
+            }
+            AudioVisualizerStyle::SpatialSpectrum => {
+                frame.visualizer.demand.spatial_spectrum && !frame.visualizer.spatial.is_empty()
+            }
+            _ => false,
+        };
+        if !available {
+            return;
+        }
+        if self.sequence == Some(frame.sequence) || self.sample_time == Some(frame.sample_time) {
+            self.retry_publication();
+            return;
         }
         let mut changed = self.sequence.is_none();
         match self.style {
@@ -1185,9 +1194,54 @@ mod tests {
         assert!(Arc::ptr_eq(&published, &publication(&plot).unwrap()));
         frame.sample_time += Duration::from_millis(500);
         frame.sequence += 1;
-        frame.visualizer.spatial.clear();
+        for bin in &mut frame.visualizer.spatial {
+            bin.power = 0.0;
+        }
         plot.update(&frame);
         assert!((plot.data.borrow().field[index] - 0.001 / std::f32::consts::E).abs() < 1e-7);
+    }
+
+    #[test]
+    fn missing_optional_payload_keeps_field_and_matching_metrics_until_replacement() {
+        for style in [
+            AudioVisualizerStyle::StereoDensity,
+            AudioVisualizerStyle::SpatialSpectrum,
+        ] {
+            let plot = plot(style);
+            let accepted = frame(style);
+            plot.update(&accepted);
+            let drawing = publication(&plot).unwrap();
+            let field = plot.data.borrow().field().to_vec();
+            let metrics = plot.data.borrow().stereo_metrics;
+            let mut pending = accepted.clone();
+            pending.sequence += 1;
+            pending.sample_time += Duration::from_secs(1);
+            pending.visualizer.density = DensitySnapshot::default();
+            pending.visualizer.spatial.clear();
+            pending.visualizer.correlation = Some(-1.0);
+            pending.visualizer.balance = Some(1.0);
+            pending.visualizer.side_ratio = Some(1.0);
+            plot.update(&pending);
+            assert!(Arc::ptr_eq(&drawing, &publication(&plot).unwrap()));
+            assert_eq!(plot.data.borrow().field(), field);
+            assert_eq!(plot.data.borrow().stereo_metrics, metrics);
+            assert_eq!(plot.data.borrow().sample_time, Some(accepted.sample_time));
+            assert_eq!(plot.data.borrow().sequence, Some(accepted.sequence));
+            pending.visualizer.clone_from(&accepted.visualizer);
+            pending.visualizer.correlation = Some(-1.0);
+            plot.update(&pending);
+            assert_eq!(plot.data.borrow().sample_time, Some(pending.sample_time));
+            assert_eq!(plot.data.borrow().sequence, Some(pending.sequence));
+            if style == AudioVisualizerStyle::StereoDensity {
+                assert_eq!(plot.data.borrow().stereo_metrics[0], Some(-1.0));
+            }
+            plot.set_visible(false);
+            pending.generation += 1;
+            pending.visualizer.density = DensitySnapshot::default();
+            pending.visualizer.spatial.clear();
+            plot.update(&pending);
+            assert!(publication(&plot).is_none());
+        }
     }
 
     #[test]

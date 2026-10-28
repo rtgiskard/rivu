@@ -685,13 +685,6 @@ impl Visuals {
             data.envelope_initialized = false;
             data.last_update = None;
         }
-        if data
-            .latest_sample_time
-            .is_some_and(|last| frame.sample_time.saturating_sub(last) > Duration::from_millis(500))
-        {
-            data.envelope_initialized = false;
-            data.last_update = None;
-        }
         if frame.spectrum_db.len() != frame.frequencies_hz.len() {
             data.report_error("Analysis frequency and level counts differ".into());
             return;

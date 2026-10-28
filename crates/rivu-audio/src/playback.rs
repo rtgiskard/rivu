@@ -90,6 +90,8 @@ struct VisualizationCapture {
     producer: Option<AnalysisProducer>,
     signal: VisualizationSignal,
     tap_identity: Option<AnalysisAudioIdentity>,
+    // Missing Before samples during capture warmup are not a source gap.
+    before_started: bool,
     // Destructive DSP needs a separate Before signal, bounded by its output
     // latency plus one PCM fragment. Other taps borrow admitted PCM directly.
     before: VecDeque<[f32; 2]>,
@@ -144,9 +146,7 @@ impl VisualizationCapture {
     fn reset_tap(&mut self) {
         self.before = VecDeque::new();
         self.tap_identity = None;
-        if let Some(producer) = &mut self.producer {
-            producer.discontinuity();
-        }
+        self.before_started = false;
     }
 
     fn sync_tap(&mut self) -> Option<AnalysisAudioIdentity> {
@@ -213,12 +213,13 @@ impl VisualizationCapture {
                     .saturating_sub(position)
                     .min(frames as u64) as usize;
                 let count = (frames - lead).min(self.before.len());
-                if lead != 0 || skip != 0 {
+                if self.before_started && (lead != 0 || skip != 0) {
                     producer.discontinuity();
                 }
                 producer.push_samples_for(identity, self.before.drain(..count));
                 self.before_position += count as u64;
-                if count + lead != frames {
+                self.before_started |= count != 0;
+                if self.before_started && count + lead != frames {
                     producer.discontinuity();
                 }
             }
@@ -365,6 +366,7 @@ impl Playback {
                 producer: Some(analyzer.audio_producer()),
                 signal: analyzer.settings().signal,
                 tap_identity: None,
+                before_started: false,
                 before: VecDeque::new(),
                 before_position: 0,
             },
@@ -429,6 +431,11 @@ impl Playback {
         self.pending_position = 0;
         self.pending_discontinuity = false;
         self.visualization.reset_tap();
+        // Seeking the source is a real discontinuity, unlike restarting only
+        // visualization capture after pause or display suspension.
+        if let Some(producer) = &mut self.visualization.producer {
+            producer.discontinuity();
+        }
         self.offset_frames = 0;
         self.base_position = position;
         self.prior_heard = heard;
@@ -917,7 +924,7 @@ pub(super) mod tests {
                 first.samples,
                 playback.visualization.weights[0].map(|w| w * 0.25)
             );
-            assert!(first.gap);
+            assert!(!first.gap);
             assert_eq!(captured.pop_iter().count(), 31);
 
             playback
@@ -929,6 +936,47 @@ pub(super) mod tests {
             playback.fill().unwrap();
             assert_eq!(playback.visualization.before.capacity(), 0);
         }
+    }
+
+    #[test]
+    fn before_staging_survives_optional_demand_changes_without_a_gap() {
+        use crate::analysis::{DisplayDemand, VisualizerDemand};
+        use ringbuf::traits::Consumer;
+
+        let file = pcm();
+        let (mut playback, _) = test_playback_with_waveform(file.path(), None, Arc::default());
+        let worker = AnalysisWorker::new(Arc::default()).unwrap();
+        worker.set_playback_active(true);
+        worker.control.set_display_enabled(true);
+        let (producer, mut captured) = AnalysisProducer::capture_for_test(&worker, 64);
+        playback.visualization.producer = Some(producer);
+        playback.set_signal(VisualizationSignal::Before);
+        playback
+            .visualization
+            .stage_before(0, &[0.5; 32], 1, 32)
+            .unwrap();
+        let identity = playback.visualization.tap_identity;
+        let capacity = playback.visualization.before.capacity();
+        worker.control.set_display_demand(DisplayDemand {
+            enabled: true,
+            visualizer: VisualizerDemand {
+                pcm: true,
+                ..VisualizerDemand::default()
+            },
+        });
+        playback
+            .visualization
+            .submit_tap(PendingTap::Before, 0, &[0.0; 32], 1);
+        assert!(playback.visualization.tap_identity == identity);
+        assert_eq!(playback.visualization.before.capacity(), capacity);
+        let frames: Vec<_> = captured.pop_iter().collect();
+        assert_eq!(frames.len(), 32);
+        assert!(frames.iter().all(|frame| !frame.gap));
+        assert!(
+            frames
+                .iter()
+                .all(|frame| frame.samples == playback.visualization.weights[0].map(|w| w * 0.5))
+        );
     }
 
     pub(crate) fn pcm() -> tempfile::NamedTempFile {
@@ -1077,6 +1125,7 @@ pub(super) mod tests {
                 producer: None,
                 signal: VisualizationSignal::After,
                 tap_identity: None,
+                before_started: false,
                 before: VecDeque::new(),
                 before_position: 0,
             },
@@ -1557,7 +1606,12 @@ pub(super) mod tests {
                         .enumerate()
                         .filter_map(|(index, frame)| frame.gap.then_some(index))
                         .collect();
-                    let expected = if has_gap { vec![0, gap_frame] } else { vec![0] };
+                    // Source traversal starts with a boundary; graphs trim
+                    // boundaries at/before their source preguard.
+                    let mut expected = if processing == 2 { vec![] } else { vec![0] };
+                    if has_gap {
+                        expected.push(gap_frame);
+                    }
                     assert_eq!(
                         gaps, expected,
                         "{name}: processing={processing}, signal={signal:?}"
@@ -1725,11 +1779,10 @@ pub(super) mod tests {
                     .enumerate()
                     .filter_map(|(index, frame)| frame.gap.then_some(index))
                     .collect();
-                let expected = if guard < 1024 {
-                    vec![0, 1024 - guard as usize]
-                } else {
-                    vec![0]
-                };
+                let mut expected = if processing == 2 { vec![] } else { vec![0] };
+                if guard < 1024 {
+                    expected.push(1024 - guard as usize);
+                }
                 assert_eq!(
                     gaps, expected,
                     "processing={processing}, signal={signal:?}, guard={guard}"
@@ -2289,7 +2342,8 @@ pub(super) mod tests {
             playback.fill().unwrap();
             let first: Vec<_> = captured.pop_iter().collect();
             assert_eq!(first.len(), 73);
-            assert_eq!(first.iter().filter(|frame| frame.gap).count(), 1);
+            assert!(first[0].gap);
+            assert!(first[1..].iter().all(|frame| !frame.gap));
             for target in [f64::NAN, f64::INFINITY, -1.0, 1e300, i64::MAX as f64, 1e16] {
                 let rejected = playback.restart_output_with(Some(target), |_, _| {
                     panic!("a rejected seek must not replace output")

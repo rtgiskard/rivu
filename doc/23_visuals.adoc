@@ -48,14 +48,16 @@ fragment has at most 16,384 frames, excluding source preguard. Each stored frame
 contains only two `f32` channels (eight payload bytes); deque capacity slack
 remains, so the frame-count bound is not a byte-exact memory limit.
 
-The FIFO belongs to one capture epoch and complete display-demand token, not
-merely the current enabled flag. Staging and output admission both reconcile that
-identity, and ring submission preserves it. A quick hide/show or pause/resume
-therefore cannot relabel retained samples as current audio, even if the final
-enablement is unchanged. Source replacement, seeking, signal changes, pause and
-Still Mode discard incompatible pending tap state without reprocessing pending
-output. Inactive analysis releases FIFO capacity on the next audio-worker refill,
-even if output admits no PCM; exhausting the final output span also releases it.
+The FIFO belongs to one capture epoch and capture revision, not merely the
+current enabled flag. Staging and output admission both reconcile that identity.
+Changing optional payload demand preserves the FIFO and admitted PCM; publication
+still requires the complete current request token, including its transition revision.
+A quick hide/show or pause/resume cannot relabel retained samples as current
+audio, even if final enablement is unchanged. Source replacement, seeking, signal
+changes, pause and Still Mode discard incompatible pending tap state without
+reprocessing pending output. Inactive analysis releases FIFO capacity on the next
+audio-worker refill, even if output admits no PCM; exhausting the final output
+span also releases it.
 
 Decoded PCM carries a traversal-relative frame position and an explicit source
 discontinuity marker, separately from its media timestamp. Analysis advances by
@@ -92,9 +94,10 @@ beyond one queued prefix.
 FFT plans and analysis working storage are prepared on the analysis worker only
 when it accepts current-identity audio with active playback and display demand,
 outside Still Mode. Startup, configuration changes and metadata invalidation alone
-do not prepare them. Once prepared, hide/Still transitions clear published results
-and continuity but retain reusable working storage. An FFT configuration change
-is prepared when eligible audio next arrives, not while analysis is suspended.
+do not prepare them. Pause and loss of all display demand clear the capture window
+and published input without changing signal-continuity generation. Still Mode
+also breaks semantic continuity. Prepared working storage remains reusable; an
+FFT configuration change is prepared when eligible audio next arrives.
 
 Consumer requests coalesce into one publication permit, retained until a fresh,
 complete FFT window is available. `analysis_fps` caps transforms and publications,
@@ -126,20 +129,21 @@ its matching command; tap capture carries the applied epoch, and the accepted
 analysis publication records that epoch and intent. Presentation requires the
 current display token, actual epoch, and matching desired/applied intent.
 Queued newer intents therefore cannot relabel old audio as a ready replacement.
-Pause and display-demand continuity resets remain separate from semantic source
-identity; a rejected seek can resume fresh actual audio without inventing a
-successful seek or waiting forever on the UI clock-correction revision.
+Pause and display capture restarts remain separate from semantic source identity;
+a rejected seek can resume fresh actual audio without inventing a successful seek
+or waiting forever on the UI clock-correction revision.
 
-Stream resets, analysis restarts, dropped samples, FFT/window changes, and
-display-demand transitions break signal continuity. Views reject stale frames
-and reset envelopes or simulations rather than smoothing across unrelated audio.
-Outside the retained pause/reveal handoff described below, Spectrum withdraws
-its current bars and peak envelopes while analysis is invalid. The next accepted
-window starts fresh envelopes; a retained drawing never seeds those envelopes.
-Spectrogram starts a new pooling interval at a break; compatible historical
-frequency buckets can remain visible. Its sample time follows accepted audio,
-not wall time or the track's seek position; presentation interpolates only within
-the accepted boundary described below.
+Source/seek boundaries, Stop, dropped samples, FFT/window/signal or sample-rate
+changes, and Still Mode break signal continuity. The producer owns its generation;
+neither a delayed publication nor an optional-demand change implies an audio gap.
+Views reject stale frames and reset envelopes or simulations rather than smoothing
+across unrelated audio. Outside the retained pause/reveal handoff described below,
+Spectrum withdraws its current bars and peak envelopes while analysis is invalid.
+The next accepted window starts fresh envelopes; a retained drawing never seeds
+those envelopes. Spectrogram starts a new pooling interval at a break; compatible
+historical frequency buckets can remain visible. Its sample time follows accepted
+audio, not wall time or the track's seek position; presentation interpolates only
+within the accepted boundary described below.
 
 Changing the selected signal resets the analysis sampling window and incompatible
 history. Monitor EQ edits preserve realtime analysis history; new samples reflect
@@ -148,11 +152,17 @@ the rolling waveform. Active audition visualization uses the actual audible
 source and admitted processing graph, not an arbitrary persisted graph recipe.
 
 GUI analysis demand follows visible views. Stereo density, spatial spectrum,
-and integrated band energy are independent requests combined across panels;
-one accepted audio window and stereo FFT supply all requested payloads. This
-avoids separate analyzers for different views while allowing unused result
-storage to be released. A demand transition invalidates the sampling window,
-including a quick hide/show that the worker did not observe as a steady state.
+integrated band energy, and PCM are independent requests combined across panels;
+one accepted audio window and stereo FFT supply all requested payloads. Optional
+demand changes preserve the sampling window, continuity generation, and surviving
+consumers' display clocks. Only losing all demand fences capture, including a quick
+hide/show that the worker did not observe as a steady state.
+
+Demand is not payload readiness. Exhausting a bounded Density or PCM snapshot pool
+omits that payload from the next frame, without blocking Spectrum, RMS, band power,
+or other available payloads. The affected renderer keeps its last drawing and
+matching readouts until a usable replacement arrives; it never pairs an old
+snapshot with newer metrics.
 
 === Presentation scheduling and visibility
 
@@ -177,13 +187,15 @@ accepted audio timestamp. Spectrum hold/release and smoothing, radial rotation
 and smoothing, generative motion, and Spectrogram placement can therefore change
 between analysis publications without another FFT or history insertion. If the
 producer stalls, display time stops at the accepted boundary rather than inventing
-audio. Generation/sample-rate changes, clock rewinds, and accepted gaps longer
-than half a second reset continuity. Pause cancels analysis and audio-driven
-animation, preserving the last displayed frame in every visualization style.
-The presentation owner does not dispatch the worker's pause-reset publication
-to renderers, including during resume before fresh input is ready. A paused
-business update can request one refresh, but does not advance animation or start
-the optional Audio Visualizer idle fade; that fade applies only to stopped playback.
+audio. Generation/sample-rate changes and clock rewinds reset continuity; the
+producer marks real sample gaps independently of publication cadence. Pause
+cancels analysis and audio-driven animation, preserving the last displayed frame
+in every visualization style. The presentation owner does not dispatch the worker's
+pause-reset publication to renderers, including during resume before fresh input
+is ready. Resumption reanchors display time rather than replaying the suspension.
+A paused business update can request one refresh, but does not advance animation
+or start the optional Audio Visualizer idle fade; that fade applies only to stopped
+playback.
 Source replacement, seek intent, analysis-setting changes and Still Mode clear
 incompatible retained results even while paused or hidden. These semantic facts
 are independent of producer continuity generation and seek previews.
@@ -217,10 +229,11 @@ shutdown remain independent of presentation.
 A reliable Hidden notification cancels both clocks and disables analysis.
 The last drawable presentation survives temporary hide and tab changes until a
 current drawable replacement is accepted. Layout membership bounds its lifetime;
-inactive tabs do not accumulate analysis history or run simulations. Hidden work
-and staging are retired immediately, while compact immutable GPU publications or
-renderer-specific final drawing data may remain. Actual window destruction releases
-all of them; no cross-window snapshot cache or additional clock is introduced.
+inactive tabs do not accumulate analysis history or run simulations. Fractal tabs
+retain their bounded scene to resume trajectories; hiding the window instead
+releases that scene and staging, retaining only final drawing data. Actual window
+destruction releases all of them; no cross-window snapshot cache or additional
+clock is introduced. Switching one panel never suspends unaffected visible panels.
 Loss of focus alone never disables analysis. Without a reliable visibility
 notification, compositor throttling limits native animation callbacks but not
 the independent analysis timer; analysis remains bounded by `analysis_fps` and
@@ -432,9 +445,10 @@ Panel instances own presentation options, while analysis and simulation results
 are shared by rendering style. Multiple panels of one style do not duplicate its
 field or advance its simulation independently; distinct styles do not overwrite
 each other's state. Overlay toggles are paint-only and do not reset analysis or
-simulation. Hidden styles release working fields, PCM, and simulation state while
-retaining bounded final drawing data until fresh drawable output is accepted.
-Physical reclamation follows the renderer lifecycle described in
+simulation. Hidden styles release working fields and PCM while retaining bounded
+final drawing data until fresh drawable output is accepted. Fractal scenes have
+the tab/window distinction described under Generative light below. Physical
+reclamation follows the renderer lifecycle described in
 link:22_cache.adoc[Caching and Resource Lifecycles].
 
 === Radial styles
@@ -584,9 +598,12 @@ A first valid frame seeds visible geometry; subsequent simulation advances on
 native display ticks toward the latest accepted band-power targets. Accepted
 energy rises inject each onset once, not once per display tick. Simulation and
 publications remain shared across visible panels. Paint and resize never advance
-the scene. Discontinuities reset simulation. Hidden styles retain only their last
-bounded immutable segment publication, release the scene, and do not request
-optional band-power analysis.
+the scene. Discontinuities reset simulation. Pause and inactive tabs freeze their
+bounded scene, drive and trajectories. The first fresh frame reanchors input and
+display time without catch-up or a synthetic onset. Inactive styles do not request
+optional band-power analysis. Hiding the window releases the scene and retains
+only the last bounded immutable segment publication. Removing a style from the
+layout or crossing a semantic boundary clears both, including inactive styles.
 Glow uses batched, widening translucent strokes rather than image feedback
 history or a blur post-pass. This bounds retained scene storage and submissions,
 at the cost of approximating the light spread. Beams retains 189 branches, 756
@@ -596,8 +613,8 @@ with nine intensity/color groups and three ordered stroke layers per panel,
 instead of rebuilding 27 CPU light paths. Flow limits each integration step to
 1/120 second and each display tick to 60 steps. Integration, history fading, and
 respawn retain those substeps, but render segments are rebuilt only from the
-final state. An accepted-audio gap longer than half a second resets the scene
-instead of attempting unbounded catch-up.
+final state. Real sample gaps reset the scene through the producer's continuity
+generation; sparse publications alone do not reset it.
 FFT/window or Before/After signal changes revoke the scene until compatible audio
 arrives. Color or Bloom changes republish material over the accepted geometry without advancing simulation;
 background changes only repaint. Sensitivity and display-range changes affect future

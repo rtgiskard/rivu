@@ -224,7 +224,7 @@ impl AudioVisualizer {
             changed |= renderer.configure(config);
         }
         for (renderer, visible) in self.fractal.iter().zip(fractal_visible) {
-            changed |= renderer.set_visible(visible);
+            changed |= renderer.set_activity(window_visible, visible);
             changed |= renderer.configure(config);
         }
         changed |= self.oscilloscope.configure(config, oscilloscope_visible);
@@ -366,6 +366,17 @@ impl AudioVisualizer {
         data.fade_started = None;
     }
 
+    /// Freeze bounded simulation state until replacement audio reanchors it.
+    pub(in crate::gui) fn suspend(&self) {
+        let mut data = self.data.borrow_mut();
+        data.last_sample_time = None;
+        data.last_presentation_time = None;
+        drop(data);
+        for renderer in &self.fractal {
+            renderer.suspend();
+        }
+    }
+
     pub(in crate::gui) fn clear(&self) {
         self.clear_radial();
         for renderer in &self.analysis {
@@ -435,9 +446,6 @@ impl AudioVisualizer {
 
     fn update_radial(&mut self, frame: &AnalysisFrame, presentation_time: Duration) {
         let mut data = self.data.borrow_mut();
-        if !data.visible {
-            return;
-        }
         if frame.spectrum_db.is_empty()
             || frame.spectrum_db.len() != frame.frequencies_hz.len()
             || !frame.settings.is_some_and(|settings| {
@@ -455,10 +463,9 @@ impl AudioVisualizer {
         }
         let discontinuity = data.source_generation != Some(frame.generation)
             || data.source_sample_rate != frame.sample_rate
-            || data.last_sample_time.is_some_and(|last| {
-                frame.sample_time < last
-                    || frame.sample_time.saturating_sub(last) > Duration::from_millis(500)
-            });
+            || data
+                .last_sample_time
+                .is_some_and(|last| frame.sample_time < last);
         if discontinuity {
             data.source_generation = Some(frame.generation);
             data.source_sample_rate = frame.sample_rate;
@@ -467,6 +474,9 @@ impl AudioVisualizer {
             data.last_sample_time = None;
             data.last_presentation_time = None;
             data.fade_started = None;
+        }
+        if !data.visible {
+            return;
         }
         let fft_size = data.expected_settings.fft_size;
         let Some(mapping_changed) =
@@ -1287,13 +1297,28 @@ mod tests {
             match discontinuity {
                 0 => audio.sample_rate = 44_100,
                 1 => audio.sample_time -= Duration::from_millis(100),
-                _ => audio.sample_time += Duration::from_millis(501),
+                _ => {
+                    audio.sample_time += Duration::from_millis(501);
+                    audio.generation += 1;
+                }
             }
             audio.spectrum_db.fill(-70.0);
             radial.update_radial(&audio, audio.sample_time);
             assert_eq!(radial.data.borrow().displayed, vec![0.0; 4]);
             assert!(!radial.animate(audio.sample_time));
         }
+    }
+
+    #[test]
+    fn slow_radial_publication_does_not_reset_the_displayed_envelope() {
+        let mut radial = AudioVisualizer::new();
+        let mut audio = frame();
+        accept(&mut radial, &audio);
+        audio.sample_time += Duration::from_secs(1);
+        audio.spectrum_db.fill(-70.0);
+        radial.update_radial(&audio, audio.sample_time);
+        assert_eq!(radial.data.borrow().displayed, vec![0.5; 4]);
+        assert_eq!(radial.data.borrow().targets, vec![0.0; 4]);
     }
 
     fn frame() -> AnalysisFrame {

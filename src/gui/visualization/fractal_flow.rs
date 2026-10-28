@@ -99,6 +99,7 @@ impl Scene {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn reset(&mut self) {
         for (index, particle) in self.particles.iter_mut().enumerate() {
             *particle = Particle::seeded(index, 0);

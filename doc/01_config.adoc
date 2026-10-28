@@ -833,10 +833,13 @@ Stereo Density and Spatial Spectrum refresh from the latest analysis result,
 bounded by the display cap rather than replaying skipped publications.
 
 Switching tabs or temporarily hiding the window preserves the last displayed
-visualization until a new drawable result is ready. Hidden views do not analyze
-or animate: Spectrum resets its envelopes, Spectrogram releases its history,
-and Audio Visualizer releases working fields, PCM, and simulations.
-Only bounded final drawing data remains; reopening never replays hidden time.
+visualization until a new drawable result is ready. Switching one panel does not
+interrupt other visible visualizations. Inactive views do not analyze or animate:
+Spectrum resets its envelopes, Spectrogram releases its history, and Audio
+Visualizer releases working fields and PCM. Fractal Beams and Fractal Flow keep
+their bounded scene while paused or on an inactive tab, resuming the same
+trajectories without replaying elapsed time. Hiding the window releases those
+scenes too, retaining only bounded final drawing data until fresh input arrives.
 Stop, seek, source replacement, incompatible analysis settings, and Still Mode
 invalidate the old display, including while hidden or paused. Closing the actual
 window releases its retained presentation; reopening a window does not restore

@@ -17,7 +17,6 @@ pub(super) struct Oscilloscope(Rc<RefCell<Data>>);
 
 struct Data {
     visible: bool,
-    retained: bool,
     settings: AnalysisSettings,
     source: Option<(u64, u32)>,
     points: Vec<[f32; 2]>,
@@ -29,7 +28,6 @@ struct Data {
 impl Data {
     fn clear(&mut self) {
         self.points.clear();
-        self.retained = false;
         self.source = None;
     }
 }
@@ -39,7 +37,6 @@ impl Oscilloscope {
         let config = Config::default();
         Self(Rc::new(RefCell::new(Data {
             visible: false,
-            retained: false,
             settings: AnalysisSettings::from(&config),
             source: None,
             points: Vec::new(),
@@ -63,9 +60,6 @@ impl Oscilloscope {
             || data.settings != settings
             || data.background != config.visual_background.rgb()
             || data.colors != colors;
-        if data.visible && !visible {
-            data.retained = true;
-        }
         if data.settings != settings {
             data.clear();
         }
@@ -84,7 +78,8 @@ impl Oscilloscope {
     // Restoration keeps the compact sweep until usable PCM replaces it.
     pub(super) fn update(&self, frame: &AnalysisFrame) {
         let mut data = self.0.borrow_mut();
-        if !data.visible {
+        if frame.settings != Some(data.settings) || frame.sample_rate == 0 {
+            data.clear();
             return;
         }
         if data
@@ -93,20 +88,12 @@ impl Oscilloscope {
         {
             data.clear();
         }
-        if frame.settings != Some(data.settings)
-            || !frame.visualizer.demand.pcm
-            || frame.sample_rate == 0
-            || frame.visualizer.pcm.len() < 2
-        {
-            if !data.retained || frame.settings != Some(data.settings) {
-                data.clear();
-            }
+        if !data.visible || !frame.visualizer.demand.pcm || frame.visualizer.pcm.len() < 2 {
             return;
         }
         let samples = &frame.visualizer.pcm;
         let range = triggered_range(samples, frame.sample_rate);
         compact_sweep(&samples[range], &mut data.points);
-        data.retained = false;
         data.source = Some((frame.generation, frame.sample_rate));
     }
 
@@ -461,13 +448,30 @@ mod tests {
                 _ => rejected.visualizer.pcm = vec![[0.0; 2]].into(),
             }
             scope.update(&rejected);
-            assert!(scope.0.borrow().points.is_empty());
+            assert_eq!(
+                scope.0.borrow().points.is_empty(),
+                invalid == 0 || invalid == 2
+            );
         }
         scope.update(&valid);
         config.audio_visualizer_primary_color = "#123456".parse().unwrap();
         scope.configure(&config, true);
         assert_eq!(scope.0.borrow().points[0], [0.25, -0.5]);
         scope.clear();
+        assert!(scope.0.borrow().points.is_empty());
+    }
+
+    #[test]
+    fn inactive_sweeps_are_cleared_by_continuity_loss_even_without_pcm() {
+        let scope = Oscilloscope::new();
+        let config = Config::default();
+        scope.configure(&config, true);
+        let mut frame = frame(&config);
+        scope.update(&frame);
+        scope.configure(&config, false);
+        frame.generation += 1;
+        frame.visualizer.pcm = PcmSnapshot::default();
+        scope.update(&frame);
         assert!(scope.0.borrow().points.is_empty());
     }
 }

@@ -68,6 +68,7 @@ impl Scene {
         scene
     }
 
+    #[cfg(test)]
     pub(super) fn reset(&mut self) {
         self.phases = [0.0; 3];
         self.bands = [0.0; 3];

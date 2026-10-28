@@ -191,7 +191,7 @@ impl Worker {
         send_event(&self.events, &self.shutdown.events, event);
     }
     fn stop(&mut self) -> AudioSnapshot {
-        self.analyzer.set_playback_active(false);
+        self.analyzer.stop();
         if let Some(opening) = self.opening.take() {
             self.last_snapshot = AudioSnapshot {
                 generation: opening.generation,

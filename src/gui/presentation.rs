@@ -80,10 +80,8 @@ impl AnimationClock {
         }
         let source = (frame.generation, frame.sample_rate);
         let discontinuity = self.source != Some(source)
-            || self.latest.is_none_or(|last| {
-                frame.sample_time < last
-                    || frame.sample_time.saturating_sub(last) > Duration::from_millis(500)
-            });
+            || self.last_tick.is_none()
+            || self.latest.is_none_or(|last| frame.sample_time < last);
         if discontinuity {
             self.time = frame.sample_time;
             self.last_tick = Some(now);
@@ -261,7 +259,7 @@ impl Presentation {
         self.position = position;
         self.duration = duration;
         if status_changed && status == PlaybackStatus::Paused {
-            self.awaiting_replacement = true;
+            self.audio_visualizer.suspend();
             self.animation_clock.suspend();
         }
 
@@ -302,7 +300,7 @@ impl Presentation {
         if status_changed && status != PlaybackStatus::Stopped {
             self.audio_visualizer.retire_idle_fade();
         }
-        if invalidate || panels_changed || visibility_changed || status_changed {
+        if invalidate || visibility_changed || status_changed {
             // A suspension retires input, not its bounded last presentation.
             // Do not animate old targets while acquiring replacement audio.
             self.awaiting_replacement = status != PlaybackStatus::Stopped;
@@ -376,7 +374,7 @@ impl Presentation {
             }
             retain_analysis_staging(&mut self.staging, demand);
             self.handle.set_display_demand(demand);
-            if self.demand != demand {
+            if self.demand.enabled != demand.enabled {
                 self.cancel_clock();
             }
             self.demand = demand;
@@ -551,7 +549,12 @@ impl Presentation {
             return;
         }
         let frame = self.handle.analysis.read();
-        if self.awaiting_replacement && frame.settings.is_none() {
+        // Capture restarts may discard an incomplete FFT without breaking the
+        // signal. Only the producer's continuity fence can revoke this picture.
+        if frame.settings.is_none()
+            && (self.awaiting_replacement
+                || self.animation_clock.source == Some((frame.generation, frame.sample_rate)))
+        {
             return;
         }
         if !stage_analysis_frame(
@@ -833,12 +836,11 @@ mod tests {
             clock.advance(start + Duration::from_secs(5)),
             Duration::from_millis(1010)
         );
-        for change in 0..4 {
+        for change in 0..3 {
             match change {
                 0 => frame.generation += 1,
                 1 => frame.sample_rate = 44_100,
-                2 => frame.sample_time = Duration::from_millis(100),
-                _ => frame.sample_time += Duration::from_secs(1),
+                _ => frame.sample_time = Duration::from_millis(100),
             }
             clock.accept(&frame, start + Duration::from_secs(6));
             assert_eq!(
@@ -851,6 +853,32 @@ mod tests {
         assert_eq!(
             clock.advance(start + Duration::from_secs(8)),
             Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn display_clock_large_publication_interval_does_not_imply_discontinuity() {
+        let start = Instant::now();
+        let mut frame = AnalysisFrame {
+            generation: 1,
+            sample_rate: 48_000,
+            sample_time: Duration::from_secs(1),
+            settings: Some((&Config::default()).into()),
+            ..Default::default()
+        };
+        let mut clock = AnimationClock::default();
+        clock.accept(&frame, start);
+        frame.sample_time = Duration::from_secs(3);
+        clock.accept(&frame, start + Duration::from_millis(10));
+        assert_eq!(
+            clock.advance(start + Duration::from_millis(10)),
+            Duration::from_millis(1010)
+        );
+        clock.suspend();
+        clock.accept(&frame, start + Duration::from_secs(10));
+        assert_eq!(
+            clock.advance(start + Duration::from_secs(10)),
+            frame.sample_time
         );
     }
 
@@ -894,6 +922,141 @@ mod tests {
             &frame,
             true
         ));
+    }
+
+    #[gpui::test]
+    fn optional_tab_switch_keeps_other_consumers_running(cx: &mut gpui::TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        Config {
+            volume: 0.0,
+            ffmpeg_enabled: false,
+            mpris_enabled: false,
+            ..Config::default()
+        }
+        .save(&config_path)
+        .unwrap();
+        let runtime = Runtime::start(directory.path(), &config_path).unwrap();
+        let config = runtime.handle.config_snapshot();
+        let waveform =
+            cx.new(|_| visualization::Waveform::new(Arc::clone(&runtime.handle.waveform)));
+        let owner = cx.new(|cx| {
+            Presentation::new(
+                runtime.handle.clone(),
+                Arc::new(Localizer::new("en-US")),
+                waveform,
+                cx,
+            )
+        });
+        let panel = |id, kind: &str, style: Option<AudioVisualizerStyle>| layout::Panel {
+            id,
+            kind: kind.to_owned(),
+            show_tab_bar: true,
+            audio_visualizer: style.map(|style| AudioVisualizerOptions {
+                style,
+                reference_lines: false,
+                labels: false,
+            }),
+            album_artwork: None,
+        };
+        let mut layout = layout::Layout {
+            root: Some(layout::Node::Split {
+                id: 10,
+                axis: layout::Axis::Horizontal,
+                boundaries: vec![0.25, 0.5, 0.75],
+                children: vec![
+                    layout::Node::Tabs {
+                        id: 1,
+                        panels: vec![panel(
+                            2,
+                            "audio_visualizer",
+                            Some(AudioVisualizerStyle::FractalFlow),
+                        )],
+                        active: 2,
+                    },
+                    layout::Node::Tabs {
+                        id: 3,
+                        panels: vec![panel(4, "spectrum", None)],
+                        active: 4,
+                    },
+                    layout::Node::Tabs {
+                        id: 5,
+                        panels: vec![panel(6, "spectrogram", None)],
+                        active: 6,
+                    },
+                    layout::Node::Tabs {
+                        id: 7,
+                        panels: vec![
+                            panel(8, "audio_visualizer", Some(AudioVisualizerStyle::Bars)),
+                            panel(
+                                9,
+                                "audio_visualizer",
+                                Some(AudioVisualizerStyle::Oscilloscope),
+                            ),
+                        ],
+                        active: 8,
+                    },
+                ],
+            }),
+            next_id: 11,
+            locked: false,
+        };
+        owner.update(cx, |owner, cx| {
+            owner.sync(
+                PresentationState {
+                    config: Arc::clone(&config),
+                    layout: &layout,
+                    status: PlaybackStatus::Playing,
+                    source_generation: 0,
+                    seek_revision: 0,
+                    visible: true,
+                    shutting_down: false,
+                    current_track_id: None,
+                    waveform_track: None,
+                    position: 0.0,
+                    duration: None,
+                },
+                cx,
+            );
+            let now = Instant::now();
+            owner.staging = AnalysisFrame {
+                sequence: 7,
+                generation: 1,
+                sample_rate: 48_000,
+                sample_time: Duration::from_secs(1),
+                settings: Some(config.as_ref().into()),
+                ..Default::default()
+            };
+            owner.animation_clock.accept(&owner.staging, now);
+            owner.awaiting_replacement = false;
+            let generation = owner.frame_generation;
+            assert!(!owner.demand.visualizer.pcm);
+            assert!(layout.activate(9));
+            owner.sync(
+                PresentationState {
+                    config: Arc::clone(&config),
+                    layout: &layout,
+                    status: PlaybackStatus::Playing,
+                    source_generation: 0,
+                    seek_revision: 0,
+                    visible: true,
+                    shutting_down: false,
+                    current_track_id: None,
+                    waveform_track: None,
+                    position: 0.0,
+                    duration: None,
+                },
+                cx,
+            );
+            assert!(owner.demand.visualizer.pcm);
+            assert!(owner.demand.visualizer.band_energy);
+            assert!(!owner.awaiting_replacement);
+            assert_eq!(owner.frame_generation, generation);
+            assert_eq!(owner.animation_clock.last_tick, Some(now));
+            assert_eq!(owner.staging.sequence, 7);
+            assert!(owner.panels.get(&4) == Some(&PanelKind::Spectrum));
+            assert!(owner.panels.get(&6) == Some(&PanelKind::Spectrogram));
+        });
     }
 
     #[gpui::test]

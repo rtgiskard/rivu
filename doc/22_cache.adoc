@@ -387,12 +387,14 @@ in-flight limits, including pressure behavior, are documented in
 link:25_gpu_rendering.adoc#_internal_led_vertical_slice[GPU rendering].
 
 These are CPU and renderer resources: publication payload alone does not describe
-total process or GPU memory. Removed panel entries are pruned. Suspension retains
-only final drawing data: radial styles have at most 32 levels and rotation, stereo
-styles keep their immutable fixed-size field, fractals keep their bounded segment
-publication rather than their simulation, and Oscilloscope retains at most 2048
-normalized stereo sweep points (16 KiB), never its PCM owner. There is no general
-screenshot cache. Destroying the window releases all these publications.
+total process or GPU memory. Removed panel entries are pruned. Window suspension
+retains only final drawing data: radial styles have at most 32 levels and rotation,
+stereo styles keep their immutable fixed-size field, fractals keep their bounded
+segment publication rather than their simulation, and Oscilloscope retains at most
+2048 normalized stereo sweep points (16 KiB), never its PCM owner. Pause and
+inactive fractal tabs instead retain the existing bounded scene per style without
+running it; layout removal and semantic invalidation release it. There is no
+general screenshot cache. Destroying the window releases all these publications.
 GPU uploads may remain charged until completion and a later renderer preparation,
 or renderer destruction; hiding does not promise immediate VRAM release.
 
@@ -422,11 +424,12 @@ the shared frame, GUI staging, and Density's source model share that payload
 without copying its cells. GPU publication additionally copies the changed numeric
 field into one immutable snapshot shared by its panels. Spatial Spectrum retains
 its separate decaying field. If slow consumers retain all three worker slots, the
-worker coalesces the whole publication rather than allocating, blocking, or pairing old Density
-with newer metrics. Accepted sample time and accumulated signal continue;
-publication resumes when a slot becomes available. Losing Density demand
-releases its pool and consumer references without stopping a surviving
-Spatial Spectrum consumer.
+worker omits Density from that publication rather than allocating, blocking, or
+pairing old Density with newer metrics. Spectrum and other ready payloads continue;
+the Density renderer keeps its prior drawing and matching readouts until a slot
+becomes available. PCM's bounded snapshot pool follows the same readiness rule.
+Losing Density demand releases its pool and consumer references without stopping
+a surviving Spatial Spectrum consumer or resetting the shared FFT window.
 
 Density/Spatial use revocable dynamic GPU slots rather than retained field images.
 One Density publication contains 256 KiB of numeric cells; one Spatial publication
