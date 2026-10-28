@@ -17,6 +17,15 @@ to link:25_gpu_rendering.adoc[GPU rendering]. The sections below retain the
 invalidation consequences needed to reason about resource use without repeating
 those mechanisms.
 
+== Queue mutation working memory
+
+Queue clearing deletes at most 4096 occurrences per prepared-statement execution
+inside one SQLite transaction. This bounds the foreign-key delete plan's temporary
+row-ID set without exposing partial clears: any failure rolls back all batches
+and current-occurrence changes. Core then replaces its compact queue-ID array,
+releasing the old capacity. Freed SQLite and Rust allocations can remain in the
+allocator; a lower post-restart RSS alone does not establish a live-object leak.
+
 == Query projection retention
 
 List/tree retention is independent of `visualizations.cache`. A projection key

@@ -9,6 +9,8 @@ use rivu_protocol::model::{
 use rusqlite::{OptionalExtension, Transaction, params};
 use std::path::PathBuf;
 
+const CLEAR_BATCH_SIZE: usize = 4096;
+
 pub(super) fn integer<T: TryFrom<i64>>(
     row: &rusqlite::Row<'_>,
     index: usize,
@@ -413,9 +415,19 @@ impl Store {
 
     pub(crate) fn clear_queue(&self) -> Result<bool> {
         let tx = self.conn.unchecked_transaction()?;
-        let changed = tx.execute("DELETE FROM playlist_entries WHERE playlist_id=0", [])?;
+        // Foreign-key actions force SQLite to collect deletion rowids before
+        // removing them. Bound that temporary set, but commit the entire clear
+        // together so a failure still restores every occurrence and selection.
+        let mut delete = tx.prepare(
+            "DELETE FROM playlist_entries WHERE id IN (SELECT id FROM playlist_entries WHERE playlist_id=0 LIMIT ?1)",
+        )?;
+        let mut changed = false;
+        while delete.execute([CLEAR_BATCH_SIZE as i64])? != 0 {
+            changed = true;
+        }
+        drop(delete);
         tx.commit()?;
-        Ok(changed != 0)
+        Ok(changed)
     }
 
     pub(crate) fn deduplicate_queue(&self) -> Result<bool> {
@@ -594,6 +606,59 @@ mod tests {
         assert_eq!(store.queue_state()?.current_id, None);
         assert!(store.clear_queue()?);
         assert!(!store.clear_queue()?);
+        Ok(())
+    }
+
+    #[test]
+    fn clear_spans_batches_without_changing_playlists_or_reusing_occurrences() -> Result<()> {
+        let store = fixture()?;
+        let count = 2 * CLEAR_BATCH_SIZE + 3;
+        store.enqueue_tracks(&vec![1; count])?;
+        let ids = store.queue_ids()?;
+        store.set_queue_current(Some(ids[CLEAR_BATCH_SIZE + 1]))?;
+        let playlist = store.create_playlist("Preserved")?;
+        store.add_playlist(playlist, &[1, 1, 2])?;
+        let saved = store.playlist_entries_page(playlist, None, 0, 10)?;
+
+        assert!(store.clear_queue()?);
+        let state = store.queue_state()?;
+        assert_eq!(state.total, 0);
+        assert_eq!(state.current_id, None);
+        assert_eq!(state.current_position, None);
+        assert_eq!(store.playlist_entries_page(playlist, None, 0, 10)?, saved);
+        assert!(!store.clear_queue()?);
+        store.enqueue_tracks(&[1])?;
+        assert!(store.queue_ids()?[0] > *ids.last().unwrap());
+        Ok(())
+    }
+
+    #[test]
+    fn clear_failure_after_completed_batches_restores_all_occurrences_and_current() -> Result<()> {
+        let store = fixture()?;
+        let count = 2 * CLEAR_BATCH_SIZE + 3;
+        store.enqueue_tracks(&vec![1; count])?;
+        let ids = store.queue_ids()?;
+        store.set_queue_current(Some(ids[0]))?;
+        let before = store.queue_state()?;
+        store.conn.execute_batch(&format!(
+            "CREATE TEMP TABLE clear_count(value INTEGER NOT NULL);
+             INSERT INTO clear_count VALUES(0);
+             CREATE TEMP TRIGGER reject_later_clear AFTER DELETE ON playlist_entries
+             WHEN old.playlist_id=0 BEGIN
+                 UPDATE clear_count SET value=value+1;
+                 SELECT CASE WHEN value={} THEN RAISE(ABORT,'injected later clear failure') END FROM clear_count;
+             END;",
+            2 * CLEAR_BATCH_SIZE + 1,
+        ))?;
+
+        assert!(store.clear_queue().is_err());
+        assert_eq!(store.queue_ids()?, ids);
+        assert_eq!(store.queue_state()?, before);
+        store
+            .conn
+            .execute_batch("DROP TRIGGER reject_later_clear;")?;
+        assert!(store.clear_queue()?);
+        assert_eq!(store.queue_state()?.current_id, None);
         Ok(())
     }
 
