@@ -117,6 +117,13 @@ deadlines, or command acknowledgements. Transport errors carry no payload stamp
 and are not evidence of a changed collection; successful payloads still require
 current data and intent.
 
+Album Browser publishes an accepted page before querying an uncached unfiltered
+total for its search counter. The auxiliary total has independent publication
+checks: failure or timeout leaves the accepted rows intact and the counter
+unavailable. Page loading ends when the page settles, but the same physical slot
+remains occupied through auxiliary-query retirement. Replacement or hiding
+revokes the old counter's publication rights without opening another slot.
+
 [cols="1,3",options="header"]
 |===
 |Owner |Retained demand and execution boundary

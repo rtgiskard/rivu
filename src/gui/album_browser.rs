@@ -336,7 +336,6 @@ impl AlbumBrowser {
     fn request_next(&mut self, cx: &mut Context<Self>) {
         let Some(Request {
             query,
-            count_query,
             generation,
             ticket,
         }) = self.model.prepare()
@@ -349,23 +348,10 @@ impl AlbumBrowser {
         let handle = self.handle.clone();
         cx.spawn(async move |this, cx| {
             let worker_query = query.clone();
-            let (response, count_response) = super::query::run(
-                handle,
+            let response = super::query::run(
+                handle.clone(),
                 cx,
-                move |handle| async move {
-                    let response = handle.query_if_current(worker_query, ticket.clone()).await;
-                    let count = if response.result.is_ok() {
-                        if let Some(query) = count_query {
-                            let response = handle.query_if_current(query.clone(), ticket).await;
-                            Some((query, response))
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    };
-                    (response, count)
-                },
+                move |handle| async move { handle.query_if_current(worker_query, ticket).await },
                 |response, cx| {
                     let _ = this.update(cx, |this, cx| {
                         this.loading_text.finish(&(), generation);
@@ -382,43 +368,75 @@ impl AlbumBrowser {
                 },
             )
             .await;
-            let _ = this.update(cx, |this, cx| {
-                this.loading_text.finish(&(), generation);
-                this.loading_text
-                    .schedule(cx, |this| &mut this.loading_text);
-                let state = this.snapshots.read();
-                let revisions = state.query_revisions(None);
-                if this.model.albums_need_refresh(revisions) {
-                    this.capture_grid_anchor();
-                }
-                let completion = this.model.complete(
-                    &query,
-                    generation,
-                    response,
-                    count_response,
-                    revisions,
-                    this.i18n.text("gl-album-response"),
-                );
-                this.apply_data_change(completion.data, cx);
-                if let Some((matches, total)) = completion.counts {
-                    let search = match completion.published {
-                        Published::Albums => &this.album_search,
-                        Published::Tracks => &this.tracks_search,
-                        Published::None => unreachable!(),
+            let count = this
+                .update(cx, |this, cx| {
+                    this.loading_text.finish(&(), generation);
+                    this.loading_text
+                        .schedule(cx, |this| &mut this.loading_text);
+                    let revisions = this.snapshots.read().query_revisions(None);
+                    if this.model.albums_need_refresh(revisions) {
+                        this.capture_grid_anchor();
+                    }
+                    let completion = this.model.complete_page(
+                        &query,
+                        generation,
+                        response,
+                        revisions,
+                        this.i18n.text("gl-album-response"),
+                    );
+                    let published = completion.published;
+                    this.apply_completion(completion, cx);
+                    if published == Published::Albums {
+                        this.prepare_cover(cx);
+                    }
+                    let count = if published != Published::None {
+                        this.model.prepare_count(&query, generation)
+                    } else {
+                        None
                     };
-                    search.update(cx, |search, cx| {
-                        set_search_counts(search, matches, total, &this.i18n, cx)
-                    });
-                }
-                if completion.published == Published::Albums {
-                    this.prepare_cover(cx);
-                }
+                    cx.notify();
+                    count
+                })
+                .ok()
+                .flatten();
+            if let Some(count) = count {
+                let count_query = count.query.clone();
+                let ticket = count.ticket.clone();
+                // No page feedback is attached to the auxiliary query's deadline.
+                // query_if_current still drains its physical reply after timeout.
+                let response = handle.query_if_current(count_query, ticket).await;
+                let _ = this.update(cx, |this, cx| {
+                    let revisions = this.snapshots.read().query_revisions(None);
+                    if this.model.albums_need_refresh(revisions) {
+                        this.capture_grid_anchor();
+                    }
+                    let completion = this.model.complete_count(&count, response, revisions);
+                    this.apply_completion(completion, cx);
+                    cx.notify();
+                });
+            }
+            let _ = this.update(cx, |this, cx| {
+                this.model.retire_worker();
                 this.request_next(cx);
                 cx.notify();
             });
         })
         .detach();
         cx.notify();
+    }
+
+    fn apply_completion(&mut self, completion: model::Completion, cx: &mut Context<Self>) {
+        self.apply_data_change(completion.data, cx);
+        if let Some((matches, total)) = completion.counts {
+            let search = match completion.published {
+                Published::Albums => &self.album_search,
+                Published::Tracks => &self.tracks_search,
+                Published::None => unreachable!(),
+            };
+            search.update(cx, |search, cx| {
+                set_search_counts(search, matches, total, &self.i18n, cx)
+            });
+        }
     }
 
     pub(super) fn retry(&mut self, cx: &mut Context<Self>) {

@@ -218,6 +218,10 @@ While the search field is open, counts inside its right edge show matches and th
 unfiltered total; counts are hidden when it is folded. No matches is distinct from an empty
 collection. Searching changes the view, not the saved contents or playback order.
 
+Albums and album track lists display available results without waiting for the
+unfiltered total. Until that total is available, the search counter is omitted;
+a total-query failure does not turn the displayed results into a page error.
+
 Desktop list searches and the terminal Search view apply nonempty edits after
 150 ms without further input. Until then, the previous query and results remain
 active. Leading and trailing whitespace is ignored; clearing the text or leaving
