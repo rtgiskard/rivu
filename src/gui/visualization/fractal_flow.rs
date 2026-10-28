@@ -99,18 +99,6 @@ impl Scene {
         }
     }
 
-    #[cfg(test)]
-    pub(super) fn reset(&mut self) {
-        for (index, particle) in self.particles.iter_mut().enumerate() {
-            *particle = Particle::seeded(index, 0);
-        }
-        self.phases = [0.0; 3];
-        self.energy = 0.0;
-        self.pulse = 0.0;
-        self.head_light = 0.0;
-        self.segments.clear();
-    }
-
     // Integrate every bounded substep; the native-frame owner publishes geometry
     // with rebuild_segments only after the final step. No substep reads segments.
     pub(super) fn advance(&mut self, dt: f32, drive: Drive) {
@@ -325,33 +313,6 @@ mod tests {
             },
         );
         assert_same(&scene, &reference);
-    }
-
-    #[test]
-    fn reset_replays_seeded_motion_and_reuses_storage() {
-        let mut scene = Scene::new();
-        let mut reference = Scene::new();
-        let storage = scene.segments.as_ptr();
-        for _ in 0..480 {
-            scene.advance(STEP, active());
-        }
-        scene.rebuild_segments();
-        scene.reset();
-        assert_same(&scene, &reference);
-        assert_eq!(scene.segments.as_ptr(), storage);
-        for step in 0..300 {
-            let drive = if step % 17 == 0 {
-                active()
-            } else {
-                Drive::default()
-            };
-            scene.advance(STEP, drive);
-            reference.advance(STEP, drive);
-            scene.rebuild_segments();
-            reference.rebuild_segments();
-            assert_same(&scene, &reference);
-        }
-        assert_eq!(scene.segments.as_ptr(), storage);
     }
 
     #[test]

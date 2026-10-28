@@ -671,7 +671,6 @@ mod tests {
                 .unwrap();
             let state = std::rc::Rc::make_mut(&mut browser.state);
             state.library.revision += 1;
-            state.library.bitrate_revision += 1;
             let latest = browser.state.query_revisions(None);
             assert!(browser.library.sync_projection(latest));
             assert!(

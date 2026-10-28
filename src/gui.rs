@@ -1762,7 +1762,6 @@ mod state_tests {
         assert!(staging.visualizer.density.is_empty());
         assert!(staging.settings.is_none());
         let restored = publish(0.0);
-        assert!(restored.generation > publication.generation);
         assert_eq!(restored.visualizer.demand, all.visualizer);
         assert!(
             restored

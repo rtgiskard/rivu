@@ -423,6 +423,8 @@ mod tests {
         assert!(history.ordered_selection().is_empty());
         assert!(history.anchor.is_none());
         assert!(!history.commit_selection(before_clear));
+        assert!(history.ordered_selection().is_empty());
+        assert!(history.anchor.is_none());
     }
 
     #[test]

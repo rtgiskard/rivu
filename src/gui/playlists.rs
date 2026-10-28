@@ -2149,6 +2149,21 @@ mod content_menu_keyboard_tests {
         }
         drop(store);
         let runtime = crate::core::Runtime::start(directory.path(), &path).unwrap();
+        // Startup initially publishes only configuration. Wait for the real
+        // catalog before constructing menu state and its enabled tab stops.
+        let ViewResponse::PlaylistSummaries(ready) = runtime
+            .handle
+            .query(Query::PlaylistSummaries {
+                query: None,
+                offset: 0,
+                limit: 1,
+            })
+            .result
+            .unwrap()
+        else {
+            panic!("expected playlist summaries");
+        };
+        assert_eq!(ready.total, 72);
         let save = LayoutSaveOwner::new(directory.path().join("layouts.json"));
         let handle = runtime.handle.clone();
         let save_handle = save.handle();

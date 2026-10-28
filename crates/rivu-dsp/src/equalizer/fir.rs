@@ -459,6 +459,11 @@ mod tests {
         let mut invalid = [1.0, f32::NAN];
         assert!(many.process_interleaved(&mut invalid).is_err());
         assert_eq!(invalid[0], 1.0);
+        let mut expected: Vec<_> = (0..2048).map(|i| (i as f32 * 0.037).cos()).collect();
+        let mut actual = expected.clone();
+        one.process_interleaved(&mut expected).unwrap();
+        many.process_interleaved(&mut actual).unwrap();
+        assert_eq!(actual, expected);
         assert!(FirEqualizer::new(&config, 48_000, 1, 1024).is_err());
     }
 

@@ -2171,9 +2171,17 @@ fn title_patch_keeps_unedited_metadata_live_across_rescans() {
 
 #[test]
 fn moved_id_preserves_override_and_delete_does_not_reuse() {
-    let (_directory, s) = db();
-    s.apply_scan(&scan(vec![rec("/music/a.mp3", "same", "Raw", 100.)]))
-        .unwrap();
+    let (directory, s) = db();
+    let original = directory.path().join("a.mp3");
+    let moved = directory.path().join("b.mp3");
+    let replacement = directory.path().join("c.mp3");
+    s.apply_scan(&scan(vec![rec(
+        original.to_str().unwrap(),
+        "same",
+        "Raw",
+        100.,
+    )]))
+    .unwrap();
     let id = all_tracks(&s)[0].id;
     s.edit_track(
         id,
@@ -2183,15 +2191,32 @@ fn moved_id_preserves_override_and_delete_does_not_reuse() {
         Some(DecoderHint::Ffmpeg),
     )
     .unwrap();
-    s.apply_scan(&scan(vec![rec("/music/b.mp3", "same", "Changed", 100.)]))
-        .unwrap();
-    assert_eq!(all_tracks(&s)[0].id, id);
-    assert_eq!(all_tracks(&s)[0].title, "Override");
-    assert_eq!(all_tracks(&s)[0].decoder_hint, DecoderHint::Ffmpeg);
+    s.apply_scan(&scan(vec![rec(
+        moved.to_str().unwrap(),
+        "same",
+        "Changed",
+        100.,
+    )]))
+    .unwrap();
+    let tracks = all_tracks(&s);
+    assert_eq!(tracks.len(), 1);
+    assert_eq!(tracks[0].path, moved);
+    assert_eq!(tracks[0].id, id);
+    assert_eq!(tracks[0].title, "Override");
+    assert_eq!(tracks[0].decoder_hint, DecoderHint::Ffmpeg);
     s.remove_tracks(&[id]).unwrap();
-    s.apply_scan(&scan(vec![rec("/music/c.mp3", "new", "New", 100.)]))
-        .unwrap();
-    assert_ne!(all_tracks(&s)[0].id, id);
+    assert!(all_tracks(&s).is_empty());
+    s.apply_scan(&scan(vec![rec(
+        replacement.to_str().unwrap(),
+        "new",
+        "New",
+        100.,
+    )]))
+    .unwrap();
+    let tracks = all_tracks(&s);
+    assert_eq!(tracks.len(), 1);
+    assert_eq!(tracks[0].path, replacement);
+    assert_ne!(tracks[0].id, id);
 }
 #[test]
 fn deleting_tracks_keeps_playlist_reordering_contiguous() {
@@ -2862,8 +2887,8 @@ fn incomplete_scan_does_not_relocate_unknown_sources_outside_requested_roots() {
 
 #[test]
 fn fingerprints_never_merge_full_files_or_different_cue_segments() {
-    let root = std::env::temp_dir().join(format!("rivu-cue-matches-{}", std::process::id()));
-    fs::create_dir_all(&root).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
     let cases = [
         (None, Some((1, 0, Some(4500))), false),
         (Some((1, 0, Some(4500))), None, false),
@@ -2878,7 +2903,7 @@ fn fingerprints_never_merge_full_files_or_different_cue_segments() {
             let mut source = rec("", "same-hash", title, 60.0);
             source.path = root.join(format!("{index}-{name}.wav"));
             let mut result = scan(Vec::new());
-            result.roots = vec![root.clone()];
+            result.roots = vec![root.to_path_buf()];
             if let Some((number, start_frame, end_frame)) = value {
                 result.segments.push(CueRecord::registered(
                     std::sync::Arc::new(source),
@@ -2917,13 +2942,12 @@ fn fingerprints_never_merge_full_files_or_different_cue_segments() {
             assert!(tracks.iter().find(|t| t.id == old_id).unwrap().missing);
         }
     }
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn cue_relocation_requires_absent_sheet_not_absent_shared_source() {
-    let root = std::env::temp_dir().join(format!("rivu-cue-move-{}", std::process::id()));
-    fs::create_dir_all(&root).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
     let sheet = root.join("old.cue");
     let source = root.join("shared.wav");
     fs::write(&sheet, b"sheet").unwrap();
@@ -2938,7 +2962,7 @@ fn cue_relocation_requires_absent_sheet_not_absent_shared_source() {
             segments: vec![old.clone()],
             ..scan(Vec::new())
         };
-        result.roots = vec![root.clone()];
+        result.roots = vec![root.to_path_buf()];
         store.apply_scan(&result).unwrap();
         let id = all_tracks(&store)[0].id;
         store
@@ -2962,7 +2986,6 @@ fn cue_relocation_requires_absent_sheet_not_absent_shared_source() {
             assert_eq!(new.title, "Override");
         }
     }
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -3216,6 +3239,10 @@ fn audio_spec_rescans_refresh_queued_projection_without_changing_occurrences() {
         assert!(impacts.library && impacts.queue);
         assert!(!impacts.structure);
         let after = store.queue_page(None, 0, 2).unwrap();
+        assert_eq!(before.total, 2);
+        assert_eq!(before.rows.len(), 2);
+        assert_eq!(after.total, before.total);
+        assert_eq!(after.rows.len(), before.rows.len());
         for (old, new) in before.rows.iter().zip(&after.rows) {
             assert_eq!(
                 (old.id, old.track_id, old.position),

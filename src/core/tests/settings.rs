@@ -905,7 +905,8 @@ fn settings_saved_audio_failure_keeps_committed_desired_configuration() {
 #[test]
 fn configure_failed_save_keeps_desired_settings_and_does_not_deliver_audio() {
     let (_directory, mut core) = fixture();
-    let audio = recording_audio(&mut core);
+    let (commands, audio) = async_channel::bounded(64);
+    let _idle_commands = core.engine.replace_commands(commands);
     let previous = core.state.system.config.clone();
     std::fs::create_dir(&core.state.system.config_path).unwrap();
     let mut config = previous.as_ref().clone();
@@ -937,15 +938,16 @@ fn configure_failed_save_keeps_desired_settings_and_does_not_deliver_audio() {
     assert_eq!(core.played, [1, 2]);
     assert_eq!(core.played_cursor, 2);
     assert!(matches!(
-        audio.recv_timeout(Duration::from_millis(50)),
-        Err(crossbeam_channel::RecvTimeoutError::Timeout)
+        audio.try_recv(),
+        Err(async_channel::TryRecvError::Empty)
     ));
 }
 
 #[test]
 fn configure_rejected_preparation_keeps_saved_and_desired_settings() {
     let (_directory, mut core) = fixture();
-    let audio = recording_audio(&mut core);
+    let (commands, audio) = async_channel::bounded(64);
+    let _idle_commands = core.engine.replace_commands(commands);
     let previous = core.state.system.config.clone();
     previous.save(&core.state.system.config_path).unwrap();
     let mut config = previous.as_ref().clone();
@@ -965,8 +967,8 @@ fn configure_rejected_preparation_keeps_saved_and_desired_settings() {
         *previous
     );
     assert!(matches!(
-        audio.recv_timeout(Duration::from_millis(50)),
-        Err(crossbeam_channel::RecvTimeoutError::Timeout)
+        audio.try_recv(),
+        Err(async_channel::TryRecvError::Empty)
     ));
 }
 

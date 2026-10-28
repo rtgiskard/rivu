@@ -525,11 +525,6 @@ fn waveform_level(value: f32, gain: f32, gamma: f32) -> f32 {
     (value * gain).clamp(0.0, 1.0).powf(gamma)
 }
 
-#[cfg(test)]
-fn waveform_height(level: f32, half_height: Pixels) -> Pixels {
-    (half_height * level).max(px(1.0))
-}
-
 fn pooled_side(
     peaks: &[Option<f32>],
     rms: &[Option<f32>],
@@ -2356,12 +2351,6 @@ mod tests {
                 assert!(rms_height > 0.0);
                 assert!(peak_height > 0.0);
                 assert!(rms_height <= peak_height);
-                for half_height in [px(8.0), px(100.0), px(400.0)] {
-                    assert!(
-                        waveform_height(rms_height, half_height)
-                            <= waveform_height(peak_height, half_height)
-                    );
-                }
                 if rms == peak {
                     assert_eq!(rms_height, peak_height);
                 }

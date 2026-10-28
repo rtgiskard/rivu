@@ -296,6 +296,36 @@ class OutputContainerTests(unittest.TestCase):
                 self.assertEqual(report["metrics"]["input_rms"], report["metrics"]["target_rms"])
                 for metric in ("load_seconds", "inference_seconds", "resampling_seconds"):
                     self.assertEqual(report["metrics"][metric], 0)
+                preserved = {path.name: path.read_bytes() for path in destination.iterdir()}
+                rejected_events = []
+                with patch("worker.deny_network"), patch.dict(os.environ):
+                    with self.assertRaisesRegex(WorkerError, "already exist"):
+                        process(request, lambda kind, **fields: rejected_events.append((kind, fields)))
+                self.assertEqual(rejected_events, [])
+                self.assertEqual({path.name: path.read_bytes() for path in destination.iterdir()}, preserved)
+
+    def test_multichannel_speech_is_rejected_before_model_or_output_creation(self):
+        import numpy as np
+        import soundfile as sf
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            bundle_fixture(base)
+            source = base / "input.wav"
+            sf.write(source, np.zeros((100, 3), dtype="float32"), 48000, subtype="FLOAT")
+            original = source.read_bytes()
+            destination = base / "result"
+            for parameters in ({}, {"wet_mix":0}):
+                with self.subTest(parameters=parameters):
+                    request = {**ProtocolTests().request(), "input_path":str(source),
+                               "output_dir":str(destination), "model_manifest":str(base / "manifest.json"),
+                               "parameters":parameters}
+                    with patch("worker.check_packages"), \
+                         patch("worker.build_engine", side_effect=AssertionError("model loaded")), \
+                         patch("worker.deny_network"), patch.dict(os.environ):
+                        with self.assertRaisesRegex(WorkerError, "multichannel downmix"):
+                            process(request, lambda *args, **kwargs: None)
+                    self.assertFalse(destination.exists())
+                    self.assertEqual(source.read_bytes(), original)
 
     def test_report_capacity_failure_removes_completed_pcm(self):
         import numpy as np
@@ -432,46 +462,7 @@ class OutputContainerTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get("RIVU_SPEECH_MANIFEST"),"explicit prepared real speech model required")
 class RealSpeechTests(unittest.TestCase):
-    def test_real_model_alignment_wet_bypass_and_no_independent_scaling(self):
-        import numpy as np
-        import soundfile as sf
-        scratch = ROOT / ".cache/neural/tests"
-        scratch.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=scratch) as directory:
-            base = Path(directory)
-            rate = 44100
-            audio = np.random.default_rng(123).normal(0,0.1,(rate+37,2)).astype("float32")
-            audio[100,0] = 1.5
-            audio[101,0] = np.float32(-0.0)
-            source = base / "input.wav"
-            sf.write(source,audio,rate,subtype="FLOAT")
-            request = {"version":1,"task_id":"real-bypass","operation":"speech","input_path":str(source),
-                       "output_dir":str(base/"result"),"model_manifest":os.environ["RIVU_SPEECH_MANIFEST"],
-                       "threads":1,"parameters":{"wet_mix":0.0,"attenuation_limit_db":80}}
-            events = []
-            process(request,lambda kind,**fields:events.append((kind,fields)))
-            self.assertEqual(events[-1][0],"complete")
-            output, output_rate = sf.read(base / "result" / events[-1][1]["outputs"]["speech"],dtype="float32",always_2d=True)
-            self.assertEqual(output_rate,rate)
-            np.testing.assert_array_equal(output.view("uint32"),audio.view("uint32"))
-            self.assertGreater(float(output.max()),1)
-            with self.assertRaisesRegex(WorkerError,"already exist"):
-                process(request,lambda *args,**kwargs:None)
 
-    def test_real_model_rejects_multichannel_before_inference(self):
-        import numpy as np
-        import soundfile as sf
-        scratch = ROOT / ".cache/neural/tests"
-        scratch.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=scratch) as directory:
-            base = Path(directory)
-            source = base/"input.wav"
-            sf.write(source,np.zeros((100,3),dtype="float32"),48000,subtype="FLOAT")
-            request = {"version":1,"task_id":"multichannel","operation":"speech","input_path":str(source),
-                       "output_dir":str(base/"result"),"model_manifest":os.environ["RIVU_SPEECH_MANIFEST"]}
-            with self.assertRaisesRegex(WorkerError,"multichannel downmix"):
-                process(request,lambda *args,**kwargs:None)
-            self.assertFalse((base/"result").exists())
 
     def test_full_strength_silence_exact_length_and_source_unchanged(self):
         import subprocess

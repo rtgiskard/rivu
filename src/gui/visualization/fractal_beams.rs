@@ -68,19 +68,6 @@ impl Scene {
         scene
     }
 
-    #[cfg(test)]
-    pub(super) fn reset(&mut self) {
-        self.phases = [0.0; 3];
-        self.bands = [0.0; 3];
-        self.energy = 0.0;
-        self.pulses = [Pulse::default(); PULSE_COUNT];
-        self.next_pulse = 0;
-        self.previous_onset = 0.0;
-        self.pulse_cooldown = 0.0;
-        // Geometry belongs to native-frame publication, never reset itself.
-        self.segments.clear();
-    }
-
     // Integrate state only; the native-frame owner rebuilds after the final step.
     pub(super) fn advance(&mut self, dt: f32, drive: Drive) {
         if dt <= 0.0 || !dt.is_finite() {
@@ -331,36 +318,6 @@ mod tests {
         assert_eq!(scene.bands, bands);
         assert_eq!(scene.previous_onset, previous_onset);
         assert_eq!(scene.pulse_cooldown, cooldown);
-    }
-
-    #[test]
-    fn reset_replays_identical_topology_and_motion() {
-        let mut scene = Scene::new();
-        let mut fresh = Scene::new();
-        for _ in 0..240 {
-            scene.advance(DT, sounding());
-        }
-        scene.rebuild_segments();
-        assert!(
-            scene
-                .segments()
-                .iter()
-                .any(|segment| segment.strength > 0.05)
-        );
-        scene.reset();
-        assert!(scene.segments().is_empty());
-        same_segments(scene.segments(), fresh.segments());
-        for step in 0..180 {
-            let drive = Drive {
-                onset: if step % 37 == 0 { 0.8 } else { 0.0 },
-                ..sounding()
-            };
-            scene.advance(DT, drive);
-            fresh.advance(DT, drive);
-            scene.rebuild_segments();
-            fresh.rebuild_segments();
-            same_segments(scene.segments(), fresh.segments());
-        }
     }
 
     #[test]

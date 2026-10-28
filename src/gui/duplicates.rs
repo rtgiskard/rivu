@@ -2507,9 +2507,7 @@ mod tests {
         assert_eq!(review.close(), None);
         review.open(QueryRevisions::default());
         let late_ack = ack(true, Some(7));
-        let cancellation = late_ack.relocation_id;
         assert!(!review.accept_ack(epoch, false, late_ack));
-        assert_eq!(cancellation, Some(7));
         assert!(review.busy.is_none());
         assert!(review.feedback.is_none());
         assert!(!review.accept_task(&task(7, RelocationPhase::Completed)));
@@ -2553,8 +2551,9 @@ mod tests {
         assert!(review.accept_task(&completed));
         assert!(review.busy.is_none());
         assert!(matches!(
-            review.feedback,
-            Some(ReviewFeedback::Text(_, StatusKind::Info))
+            review.feedback.as_ref(),
+            Some(ReviewFeedback::Text(detail, StatusKind::Info))
+                if detail.contains(completed.error.as_deref().unwrap())
         ));
     }
 
