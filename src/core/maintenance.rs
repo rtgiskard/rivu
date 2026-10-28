@@ -47,7 +47,9 @@ impl Core {
             self.active_export.is_none(),
             "Database optimization requires no active playlist export"
         );
-        let current_id = self.state.queue.current_id;
+        self.ensure_queue_control_ready().context(
+            "Recovering queue before database optimization failed; optimization has not started",
+        )?;
         let path = self.store.database_path()?;
         let (finished_tx, finished) = oneshot::channel();
         let workers = self.workers.clone();
@@ -62,7 +64,6 @@ impl Core {
             // an async waiter cannot retire the connection or undo those facts.
             let result = workers.execute(move || {
                 Store::open(&path).and_then(|store| {
-                    store.set_queue_current(current_id)?;
                     store
                         .optimize()
                         .context("Database optimization failed; the database may already have changed")

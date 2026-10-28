@@ -702,6 +702,18 @@ impl Core {
             );
             return;
         }
+        // Complete runtime selection recovery before another connection owns
+        // Saving's writer; late auditions must not retry that write on Core.
+        if let Err(error) = self.ensure_queue_control_ready() {
+            self.complete_unsaved_scan(
+                task,
+                Err(error.context(
+                    "Recovering queue before committing scan failed; scan has not been saved",
+                )),
+                false,
+            );
+            return;
+        }
         let database_path = match self.store.database_path() {
             Ok(path) => path,
             Err(error) => {

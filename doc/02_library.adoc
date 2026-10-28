@@ -722,6 +722,10 @@ Cancel during preparation to discard its results, including tracks already read.
 Application shutdown also cancels preparation. Cancellation is cooperative; an
 active audio probe must return and started work must join before the task retires.
 
+Before entering Saving, Rivu recovers the queue state and persists any pending
+playback selection. If recovery fails, the scan ends without saving its results;
+existing playback is not rolled back.
+
 Once the task enters Saving, cancellation is refused. The database commit and any
 playlist creation finish in the background; published status and existing-playback
 controls remain available, while database reads and edits report maintenance in
@@ -851,6 +855,9 @@ rivu library optimize
 ----
 
 Optimization requires stopped playback and no active scan, relocation or export.
+Before starting the worker, Rivu recovers queue state and persists any pending
+playback selection. If recovery fails, optimization is not started and prepared
+processing work is left intact.
 It runs in a single background worker; the command waits for its final size report.
 While it runs, database operations are refused promptly, but published state,
 volume and shutdown requests remain available. A waiting timeout does not stop
@@ -858,6 +865,9 @@ the worker or permit a second optimization. Shutdown waits for physical retireme
 without a hard deadline. VACUUM may already have changed the database if a later
 optimization/checkpoint step fails; failure is not a rollback guarantee. Inspect
 the result, close blocking readers, and explicitly retry only when appropriate.
+
+An automatically prepared graph cannot start playback while optimization is active;
+its retained snapshot can be selected again afterward.
 
 == CLI output
 

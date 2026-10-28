@@ -2845,3 +2845,228 @@ fn processing_mix_ack_reports_admission_but_synchronous_audition_does_not() {
         ProcessingPhase::Complete
     );
 }
+
+#[test]
+fn scan_saving_settles_pending_selection_before_mix_handoff() {
+    let (directory, mut core) = fixture();
+    source(directory.path());
+    write_pcm_frames(&directory.path().join("2.wav"), 100);
+    prepare_mix(&mut core);
+    let commands = recording_audio(&mut core);
+    let lock = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+    lock.execute_batch(
+        "CREATE TRIGGER reject_queue_selection BEFORE UPDATE ON rivu_meta
+         BEGIN SELECT RAISE(ABORT, 'queue selection rejected'); END;",
+    )
+    .unwrap();
+    assert!(core.command(Command::Play { track_id: 1 }).is_err());
+    while !matches!(
+        commands.recv_timeout(Duration::from_secs(10)).unwrap(),
+        AudioCommand::Load { .. }
+    ) {}
+    assert!(core.queue_current_pending);
+    lock.execute_batch("DROP TRIGGER reject_queue_selection")
+        .unwrap();
+    core.audition_processing(1, AuditionMode::Mix, 0.0, 0.0)
+        .unwrap();
+    let mix = mix_completion(&mut core);
+    core.command(Command::Scan {
+        paths: vec![directory.path().join("2.wav")],
+        force: true,
+    })
+    .unwrap();
+    let scan = loop {
+        match core.scan_rx.recv_timeout(Duration::from_secs(10)).unwrap() {
+            ScanEvent::Finished(scan) => break scan,
+            event => core.scan_event(event),
+        }
+    };
+    core.scan_event(ScanEvent::Finished(scan));
+    assert_eq!(
+        core.active_scan.as_ref().unwrap().status.progress.phase,
+        ScanPhase::Saving
+    );
+    assert!(!core.queue_current_pending);
+    assert_eq!(core.store.queue_state().unwrap().current_id, Some(1));
+
+    // Saving remains active until Core consumes its completion. Holding another
+    // writer here makes any attempted queue write fail instead of hiding it.
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    core.processing_event(mix);
+    assert_eq!(
+        core.processing_status(1).unwrap().phase,
+        ProcessingPhase::Complete
+    );
+    assert_eq!(core.processing.audition, Some(1));
+    lock.execute_batch("ROLLBACK").unwrap();
+    while core.active_scan.is_some() {
+        let event = core.scan_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        core.scan_event(event);
+    }
+    assert!(core.scan_results.back().unwrap().library_committed);
+}
+
+#[test]
+fn scan_queue_recovery_failure_preserves_playback_and_pending_mix() {
+    let (directory, mut core) = fixture();
+    source(directory.path());
+    let scanned = directory.path().join("new.wav");
+    write_pcm_frames(&scanned, 100);
+    prepare_mix(&mut core);
+    let commands = recording_audio(&mut core);
+    let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+    let saved_current = core.store.queue_state().unwrap().current_id;
+    connection
+        .execute_batch(
+            "CREATE TRIGGER reject_queue_selection BEFORE UPDATE ON rivu_meta
+             BEGIN SELECT RAISE(ABORT, 'queue selection rejected'); END;",
+        )
+        .unwrap();
+    assert!(core.command(Command::Play { track_id: 1 }).is_err());
+    while !matches!(
+        commands.recv_timeout(Duration::from_secs(10)).unwrap(),
+        AudioCommand::Load { .. }
+    ) {}
+    core.audition_processing(1, AuditionMode::Mix, 0.0, 0.0)
+        .unwrap();
+    let mix = mix_completion(&mut core);
+    core.command(Command::Scan {
+        paths: vec![scanned.clone()],
+        force: true,
+    })
+    .unwrap();
+    let scan = loop {
+        match core.scan_rx.recv_timeout(Duration::from_secs(10)).unwrap() {
+            ScanEvent::Finished(scan) => break scan,
+            event => core.scan_event(event),
+        }
+    };
+    let generation = core.generation;
+    core.scan_event(ScanEvent::Finished(scan));
+    assert!(core.active_scan.is_none());
+    let status = core.scan_results.back().unwrap();
+    assert_eq!(status.progress.phase, ScanPhase::Failed);
+    assert!(!status.library_committed);
+    assert!(core.queue_current_pending);
+    assert_eq!(core.store.queue_state().unwrap().current_id, saved_current);
+    let inserted: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM tracks WHERE path=?1)",
+            [scanned.to_str().unwrap()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!inserted);
+    assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
+    assert_eq!(core.state.queue.current_id, Some(1));
+    assert_eq!(core.generation, generation);
+    assert!(core.processing.active.is_some());
+    connection
+        .execute_batch("DROP TRIGGER reject_queue_selection")
+        .unwrap();
+    core.processing_event(mix);
+    assert_eq!(
+        core.processing_status(1).unwrap().phase,
+        ProcessingPhase::Complete
+    );
+    assert_eq!(core.processing.audition, Some(1));
+}
+
+#[test]
+fn optimization_settles_pending_selection_before_stopped_graph_handoff() {
+    let (directory, mut core) = fixture();
+    source(directory.path());
+    let commands = recording_audio(&mut core);
+    let lock = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+    lock.execute_batch(
+        "CREATE TRIGGER reject_queue_selection BEFORE UPDATE ON rivu_meta
+         BEGIN SELECT RAISE(ABORT, 'queue selection rejected'); END;",
+    )
+    .unwrap();
+    assert!(core.command(Command::Play { track_id: 1 }).is_err());
+    while !matches!(
+        commands.recv_timeout(Duration::from_secs(10)).unwrap(),
+        AudioCommand::Load { .. }
+    ) {}
+    core.stop().unwrap();
+    assert!(core.queue_current_pending);
+    lock.execute_batch("DROP TRIGGER reject_queue_selection")
+        .unwrap();
+    let target = graph_port(2, 0);
+    let id = core
+        .processing_graph_run(1, target, GraphExecutionMode::Auto)
+        .unwrap();
+    let graph = completion(&mut core);
+    let generation = core.generation;
+    core.command(Command::OptimizeDatabase).unwrap();
+    assert!(!core.queue_current_pending);
+    assert_eq!(core.store.queue_state().unwrap().current_id, Some(1));
+
+    // Maintenance has not retired on Core, even if its worker has finished.
+    // Any queue write during this handoff would have to wait for this lock.
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    core.processing_event(graph);
+    assert_eq!(
+        core.processing_status(id).unwrap().phase,
+        ProcessingPhase::Failed
+    );
+    assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+    assert_eq!(core.generation, generation);
+    assert!(core.processing.audition.is_none());
+    lock.execute_batch("ROLLBACK").unwrap();
+    let _ = core.shutdown_optimization();
+
+    let audition = core.processing_graph_audition(id, target).unwrap();
+    if audition.is_some() {
+        complete(&mut core);
+    }
+    let selected = core.state.processing_audition.unwrap();
+    assert_eq!(selected.id, audition.unwrap_or(id));
+    assert_eq!(selected.output, Some(target));
+}
+
+#[test]
+fn optimization_queue_recovery_failure_preserves_stopped_graph() {
+    let (directory, mut core) = fixture();
+    source(directory.path());
+    let commands = recording_audio(&mut core);
+    let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+    let saved_current = core.store.queue_state().unwrap().current_id;
+    connection
+        .execute_batch(
+            "CREATE TRIGGER reject_queue_selection BEFORE UPDATE ON rivu_meta
+             BEGIN SELECT RAISE(ABORT, 'queue selection rejected'); END;",
+        )
+        .unwrap();
+    assert!(core.command(Command::Play { track_id: 1 }).is_err());
+    while !matches!(
+        commands.recv_timeout(Duration::from_secs(10)).unwrap(),
+        AudioCommand::Load { .. }
+    ) {}
+    core.stop().unwrap();
+    let target = graph_port(2, 0);
+    let id = core
+        .processing_graph_run(1, target, GraphExecutionMode::Auto)
+        .unwrap();
+    let graph = completion(&mut core);
+    let generation = core.generation;
+    assert!(core.command(Command::OptimizeDatabase).is_err());
+    assert!(core.active_optimization.is_none());
+    assert!(core.queue_current_pending);
+    assert_eq!(core.store.queue_state().unwrap().current_id, saved_current);
+    assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+    assert_eq!(core.generation, generation);
+    assert_eq!(core.processing.active.as_ref().unwrap().id, id);
+    connection
+        .execute_batch("DROP TRIGGER reject_queue_selection")
+        .unwrap();
+    core.processing_event(graph);
+    assert_eq!(
+        core.processing_status(id).unwrap().phase,
+        ProcessingPhase::Complete
+    );
+    let selected = core.state.processing_audition.unwrap();
+    assert_eq!(selected.id, id);
+    assert_eq!(selected.output, Some(target));
+    assert!(!core.queue_current_pending);
+}
