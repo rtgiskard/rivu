@@ -13,6 +13,8 @@ mod results;
 
 mod inspector;
 use inspector::{DraftStamp, SubmittedField};
+mod fields;
+pub(super) use fields::{GraphField, NodeField};
 
 const NODE_WIDTH: f32 = 220.;
 const HEADER: f32 = 36.;
@@ -70,12 +72,12 @@ pub(super) struct GraphUi {
     pending: Option<PendingEdit>,
     pub(super) pointer: Option<GraphPointer>,
     pub(super) bounds: HashMap<u64, MeasuredGraph>,
-    panel_inputs: HashMap<u64, HashMap<String, PanelInput>>,
-    draft_stamps: HashMap<String, DraftStamp>,
+    panel_inputs: HashMap<u64, HashMap<FieldKey, PanelInput>>,
+    draft_stamps: HashMap<FieldKey, DraftStamp>,
     draft_generation: u64,
-    field_errors: HashMap<String, String>,
+    field_errors: HashMap<FieldKey, String>,
     expanded_backends: std::collections::HashSet<u64>,
-    choosing_path: Option<String>,
+    choosing_path: Option<FieldKey>,
     chooser_generation: u64,
     export_draft_generation: u64,
     workbenches: HashMap<u64, WorkbenchPanel>,
@@ -163,35 +165,6 @@ fn node_height(kind: &GraphNodeKind) -> f32 {
     HEADER + PORT_ROW * input_count(kind).max(output_count(kind)) as f32 + 12.
 }
 
-fn scalar_fields(value: &Value, path: &str, fields: &mut Vec<(String, Value)>) {
-    if path.ends_with("/implementation") {
-        let fir = value.pointer("/linear_phase/taps").and_then(Value::as_u64);
-        fields.push((
-            path.to_owned(),
-            json!(if fir.is_some() { "linear_phase" } else { "iir" }),
-        ));
-        fields.push((format!("{path}/taps"), json!(fir.unwrap_or(2049))));
-        return;
-    }
-    if path.ends_with("/channels") {
-        fields.push((path.to_owned(), value.clone()));
-        return;
-    }
-    match value {
-        Value::Object(object) => {
-            for (key, value) in object {
-                scalar_fields(value, &format!("{path}/{key}"), fields);
-            }
-        }
-        Value::Array(array) => {
-            for (index, value) in array.iter().enumerate() {
-                scalar_fields(value, &format!("{path}/{index}"), fields);
-            }
-        }
-        _ => fields.push((path.to_owned(), value.clone())),
-    }
-}
-
 impl AudioProcessing {
     fn graph_output_label(&self, kind: &GraphNodeKind, port: usize) -> String {
         if matches!(kind, GraphNodeKind::Separate { .. }) {
@@ -209,7 +182,7 @@ impl AudioProcessing {
     fn graph_panel_input(
         &mut self,
         panel: u64,
-        key: &str,
+        key: FieldKey,
         label: &str,
         cx: &mut Context<Self>,
     ) -> Entity<Input> {
@@ -217,11 +190,11 @@ impl AudioProcessing {
             .graph_ui
             .panel_inputs
             .get(&panel)
-            .and_then(|fields| fields.get(key))
+            .and_then(|fields| fields.get(&key))
         {
             return field.input.clone();
         }
-        let backing = self.fields[key].input.clone();
+        let backing = self.fields[&key].input.clone();
         let placeholder = self
             .path_placeholder(key)
             .unwrap_or_else(|| label.to_owned().into());
@@ -233,17 +206,17 @@ impl AudioProcessing {
                 cx,
             )
         });
-        let name = key.to_owned();
+        let name = key;
         let edited = cx.subscribe(&input, move |this, input, event, cx| match event {
             InputEvent::Changed {
                 user: true,
                 composing: false,
             } => {
                 let text = input.read(cx).text().to_owned();
-                this.stage_graph_text(&name, text, cx);
+                this.stage_graph_text(name, text, cx);
                 cx.notify();
             }
-            InputEvent::Submit => this.apply_field(&name, cx),
+            InputEvent::Submit => this.apply_field(name, cx),
             _ => {}
         });
         let replica = input.downgrade();
@@ -257,7 +230,7 @@ impl AudioProcessing {
             }
         });
         self.graph_ui.panel_inputs.entry(panel).or_default().insert(
-            key.to_owned(),
+            key,
             PanelInput {
                 input: input.clone(),
                 _subscriptions: [edited, changed],
@@ -373,14 +346,14 @@ impl AudioProcessing {
         }
         let selected = self.graph_ui.selected;
         self.fields.retain(|key, field| {
-            if !key.starts_with("graph.") {
+            let Some(id) = key.graph_node() else {
                 return true;
-            }
-            let id = key
-                .strip_prefix("graph.")
-                .and_then(|s| s.split_once('/'))
-                .and_then(|(id, _)| id.parse::<u64>().ok());
-            graph.nodes.iter().any(|n| Some(n.id) == id) && (id == selected || field.dirty)
+            };
+            graph
+                .nodes
+                .iter()
+                .any(|node| matches!(key, FieldKey::Graph(binding) if binding.matches(node)))
+                && (Some(id) == selected || field.dirty)
         });
         self.graph_ui
             .draft_stamps
@@ -521,7 +494,7 @@ impl AudioProcessing {
         let Some(id) = self.graph_ui.selected else {
             self.graph_ui.fields_revision = None;
             for fields in self.graph_ui.panel_inputs.values_mut() {
-                fields.retain(|key, _| key == "graph_export");
+                fields.retain(|key, _| *key == FieldKey::GraphExport);
             }
             return;
         };
@@ -542,64 +515,27 @@ impl AudioProcessing {
         let Some(node) = node else {
             return;
         };
-        let mut fields = Vec::new();
-        scalar_fields(
-            &serde_json::to_value(&node.kind).expect("serializable graph node"),
-            "",
-            &mut fields,
-        );
-        let mut active_keys = std::collections::HashSet::with_capacity(fields.len());
-        for (path, value) in fields {
-            if path.is_empty()
-                || (matches!(node.kind, GraphNodeKind::Equalizer { .. })
-                    && path.starts_with("/equalizer/config/"))
-                || (path.ends_with("/profile") && value.is_null())
-            {
-                continue;
-            }
-            let text = if path.ends_with("/channels") {
-                match value.get("selected").and_then(Value::as_array) {
-                    Some(channels) => channels
-                        .iter()
-                        .filter_map(Value::as_u64)
-                        .map(|c| (c + 1).to_string())
-                        .collect::<Vec<_>>()
-                        .join(","),
-                    None => "all".to_owned(),
-                }
-            } else {
-                match value {
-                    Value::String(s) => s,
-                    Value::Null => String::new(),
-                    // DSP parameters are f32; source-relative timestamps are f64.
-                    Value::Number(number) if number.is_f64() && !path.ends_with("_seconds") => {
-                        (number.as_f64().expect("floating point number") as f32).to_string()
-                    }
-                    _ => value.to_string(),
-                }
-            };
-            let key = format!("graph.{}{path}", node.id);
-            self.field(&key, &self.graph_parameter_label(&path), text, cx);
+        let fields = fields::node_fields(&node.kind);
+        let mut active_keys = std::collections::HashSet::with_capacity(fields.size_hint().0);
+        for field in fields {
+            let text = field.text(&node.kind);
+            let key = FieldKey::Graph(NodeField::new(&node, field));
+            self.field(key, &self.graph_parameter_label(field), text, cx);
             active_keys.insert(key);
         }
-        let prefix = format!("graph.{id}/");
-        self.fields.retain(|key, field| {
-            if !key.starts_with("graph.") {
-                true
-            } else if key.starts_with(&prefix) {
-                active_keys.contains(key)
-            } else {
-                field.dirty
-            }
+        self.fields.retain(|key, field| match key.graph_node() {
+            None => true,
+            Some(node) if node == id => active_keys.contains(key),
+            Some(_) => field.dirty,
         });
         // Keep only the current inspector's replicas. Drafts for other nodes
         // remain in the backing fields; removed controls drop subscriptions.
         for fields in self.graph_ui.panel_inputs.values_mut() {
-            fields.retain(|key, _| key == "graph_export" || active_keys.contains(key));
+            fields.retain(|key, _| *key == FieldKey::GraphExport || active_keys.contains(key));
         }
-        if !self.fields.contains_key("graph_export") {
+        if !self.fields.contains_key(&FieldKey::GraphExport) {
             self.field(
-                "graph_export",
+                FieldKey::GraphExport,
                 &self.tr("processing-export-path"),
                 String::new(),
                 cx,
@@ -607,57 +543,24 @@ impl AudioProcessing {
         }
     }
 
-    fn graph_parameter_label(&self, path: &str) -> String {
-        let key = path.rsplit('/').next().unwrap_or(path);
-        if let Some((group, index)) = path.rsplit_once('/')
-            && let Ok(index) = index.parse::<usize>()
-        {
-            let id = match group.rsplit('/').next().unwrap_or("") {
-                "gains_db" => Some("processing-graph-input-gain"),
-                "muted" => Some("processing-graph-input-muted"),
-                "solo" => Some("processing-graph-input-solo"),
-                _ => None,
-            };
-            if let Some(id) = id {
-                return format!("{} {}", self.tr(id), index + 1);
+    fn graph_parameter_label(&self, field: GraphField) -> String {
+        let label = self.tr(field.label()).to_string();
+        match field {
+            GraphField::MixGain(index)
+            | GraphField::MixMuted(index)
+            | GraphField::MixSolo(index) => {
+                format!("{label} {}", index + 1)
             }
+            GraphField::Denoise(field) => match fields::denoise_group(field) {
+                Some(group) => format!("{} · {label}", self.tr(group)),
+                None => label,
+            },
+            _ => label,
         }
-        let label = match key {
-            "preamp_db" => self.tr("processing-preamp").to_string(),
-            "output_gain_db" => self.tr("processing-output-gain").to_string(),
-            "gain_db" => self.tr("processing-gain").to_string(),
-            "kind" => self.tr("processing-graph-filter-kind").to_string(),
-            "shelf_slope" => self.tr("processing-shelf-slope").to_string(),
-            "stages" => self.tr("processing-stages").to_string(),
-            "channels" => self.tr("processing-channels").to_string(),
-            "taps" => self.tr("processing-graph-taps").to_string(),
-            "implementation" => self.tr("processing-fields-implementation").to_string(),
-            "mode" => self.tr("processing-denoise-mode").to_string(),
-            "device" => self.tr("processing-device").to_string(),
-            "start_seconds" => self.tr("processing-profile-start").to_string(),
-            "end_seconds" => self.tr("processing-profile-end").to_string(),
-            _ => self.parameter_label(key),
-        };
-        let components = path.trim_start_matches('/').split('/').collect::<Vec<_>>();
-        if let Some(index) = components.iter().position(|p| *p == "bands") {
-            return format!(
-                "{} {} · {label}",
-                self.tr("processing-graph-band"),
-                components
-                    .get(index + 1)
-                    .and_then(|n| n.parse::<usize>().ok())
-                    .unwrap_or(0)
-                    + 1
-            );
-        }
-        if let Some(group) = components.iter().find(|p| matches!(**p, "hum" | "impulse")) {
-            return format!("{} · {label}", self.parameter_label(group));
-        }
-        label
     }
 
-    pub(super) fn apply_graph_field(&mut self, key: &str, cx: &mut Context<Self>) {
-        self.submit_graph_fields(vec![key.to_owned()], cx);
+    pub(super) fn apply_graph_field(&mut self, key: FieldKey, cx: &mut Context<Self>) {
+        self.submit_graph_fields(vec![key], cx);
     }
 
     fn graph_add(&mut self, panel: u64, kind: GraphNodeKind, cx: &mut Context<Self>) {
@@ -1504,6 +1407,87 @@ mod tests {
         .unwrap();
         draw(cx, handle);
     }
+    #[gpui::test]
+    async fn replacing_node_kind_drops_obsolete_drafts_before_new_edits(cx: &mut TestAppContext) {
+        let (_directory, runtime, processing, handle) = fixture(cx);
+        processing.update(cx, |this, cx| this.graph_select(3, cx));
+        for (kind, threads) in [
+            (
+                GraphNodeKind::Speech {
+                    config: rivu_format::config::NeuralConfig {
+                        threads: 2,
+                        ..Default::default()
+                    },
+                },
+                2,
+            ),
+            (
+                GraphNodeKind::Separate {
+                    config: rivu_format::config::NeuralConfig {
+                        threads: 3,
+                        ..Default::default()
+                    },
+                },
+                3,
+            ),
+        ] {
+            processing.update(cx, |this, cx| {
+                let key = *this
+                    .fields
+                    .keys()
+                    .find(|key| {
+                        matches!(
+                            key,
+                            FieldKey::Graph(NodeField {
+                                node: 3,
+                                field: GraphField::Neural(NeuralField::Threads),
+                                ..
+                            })
+                        )
+                    })
+                    .unwrap();
+                this.stage_graph_text(key, "8".into(), cx);
+            });
+            let revision = runtime.handle.config_snapshot().processing_graph.revision;
+            let ack = futures::executor::block_on(runtime.handle.request_ack(
+                Command::ProcessingGraphEdit {
+                    expected_revision: revision,
+                    edit: Box::new(GraphEdit::Replace { id: 3, kind }),
+                },
+            ));
+            assert!(ack.is_success(), "{:?}", ack.error);
+            processing.update(cx, |this, cx| {
+                this.reconcile(this.context.snapshot(), cx);
+                let key = *this
+                    .fields
+                    .keys()
+                    .find(|key| {
+                        matches!(
+                            key,
+                            FieldKey::Graph(NodeField {
+                                node: 3,
+                                field: GraphField::Neural(NeuralField::Threads),
+                                ..
+                            })
+                        )
+                    })
+                    .unwrap();
+                assert_eq!(this.fields[&key].input.read(cx).text(), threads.to_string());
+                assert!(!this.fields[&key].dirty);
+                this.stage_graph_text(key, "4".into(), cx);
+                this.apply_graph_field(key, cx);
+            });
+            wait_for_commands(cx, &processing, handle).await;
+            let snapshot = runtime.handle.config_snapshot();
+            let node = snapshot.processing_graph.node(3).unwrap();
+            let (GraphNodeKind::Speech { config } | GraphNodeKind::Separate { config }) =
+                &node.kind
+            else {
+                panic!("neural node");
+            };
+            assert_eq!(config.threads, 4);
+        }
+    }
 
     #[gpui::test]
     async fn clicking_nodes_moves_keyboard_ownership_and_delete_respects_source_protection(
@@ -1695,7 +1679,7 @@ mod tests {
         let handle = window.into();
         draw(cx, handle);
         let input = processing.read_with(cx, |this, _| {
-            this.graph_ui.panel_inputs[&PANEL]["graph_export"]
+            this.graph_ui.panel_inputs[&PANEL][&FieldKey::GraphExport]
                 .input
                 .clone()
         });
@@ -1715,7 +1699,10 @@ mod tests {
         }
         processing.read_with(cx, |this, cx| {
             assert_eq!(input.read(cx).text(), "out.wav");
-            assert_eq!(this.fields["graph_export"].input.read(cx).text(), "out.wav");
+            assert_eq!(
+                this.fields[&FieldKey::GraphExport].input.read(cx).text(),
+                "out.wav"
+            );
         });
         // The same retained input is no longer a focus owner when its result disappears.
         processing.update(cx, |this, _| {

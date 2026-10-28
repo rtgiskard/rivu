@@ -708,6 +708,12 @@ is the durable result. Source files are not modified.
   inspector, workbench and result-view state; Core owns committed graph state and
   admits processing results. The equalizer editor is a sibling within the same
   GUI feature, not a second configuration owner.
+* Editable processing fields use typed identities and direct configuration edits;
+  widget IDs and serialized field names do not determine which parameter changes.
+  Text remains a draft until parsed. Graph-node batches modify a candidate and
+  validate the complete graph before submitting one revision-checked replacement;
+  failed validation leaves committed settings unchanged. JSON remains a boundary
+  format for IPC, imports and presentation, not an intermediate form-editing tree.
 * Prepared DSP owns its coefficients, history, rate and channel layout. The device
   callback performs no model loading, FFT planning, file I/O or unbounded work.
 * Disabled processing preserves the original signal path. Protection, resampling,

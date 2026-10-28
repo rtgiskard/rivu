@@ -126,14 +126,14 @@ impl AudioProcessing {
         if self.graph_ui.choosing_path.is_some() {
             return;
         }
-        let Some(field) = self.fields.get("graph_export") else {
+        let Some(field) = self.fields.get(&FieldKey::GraphExport) else {
             return;
         };
         let original = field.input.read(cx).text().to_owned();
         let draft_generation = self.graph_ui.export_draft_generation;
         self.graph_ui.chooser_generation += 1;
         let chooser_generation = self.graph_ui.chooser_generation;
-        self.graph_ui.choosing_path = Some("graph_export".to_owned());
+        self.graph_ui.choosing_path = Some(FieldKey::GraphExport);
         let i18n = Arc::clone(&self.context.i18n);
         cx.spawn(async move |this, cx| {
             let result = ashpd::desktop::file_chooser::SelectedFiles::save_file()
@@ -160,7 +160,7 @@ impl AudioProcessing {
                                 .map_or(0, |task| task.id),
                             this.graph_ui.export_draft_generation,
                             this.fields
-                                .get("graph_export")
+                                .get(&FieldKey::GraphExport)
                                 .map(|field| field.input.read(cx).text()),
                         ),
                     )
@@ -172,7 +172,7 @@ impl AudioProcessing {
                         if let Some(path) = crate::gui::chooser_path(&files) {
                             match path.into_os_string().into_string() {
                                 Ok(path) => {
-                                    this.stage_graph_text("graph_export", path, cx);
+                                    this.stage_graph_text(FieldKey::GraphExport, path, cx);
                                     this.graph_ui.result_errors.remove(&panel);
                                 }
                                 Err(_) => {
@@ -211,7 +211,7 @@ impl AudioProcessing {
         {
             Some(self.graph_panel_input(
                 panel,
-                "graph_export",
+                FieldKey::GraphExport,
                 &self.tr("processing-export-path"),
                 cx,
             ))
@@ -364,7 +364,7 @@ impl AudioProcessing {
                             move |this, _, cx| {
                                 let path = this
                                     .fields
-                                    .get("graph_export")
+                                    .get(&FieldKey::GraphExport)
                                     .map(|field| field.input.read(cx).text().to_owned())
                                     .unwrap_or_default();
                                 if !path.is_empty() {
@@ -510,14 +510,63 @@ impl AudioProcessing {
                         theme,
                         format!("#{} · {}", node.id, self.tr(node_label(&node.kind))),
                     ));
-                    let mut fields = Vec::new();
-                    scalar_fields(
-                        &serde_json::to_value(&node.kind).expect("serializable frozen graph node"),
-                        "",
-                        &mut fields,
-                    );
-                    for (path, value) in fields {
-                        content = content.child(caption(theme, format!("{path}: {value}")));
+                    for field in fields::node_fields(&node.kind) {
+                        let text = field.text(&node.kind);
+                        content = content.child(caption(
+                            theme,
+                            format!("{}: {text}", self.graph_parameter_label(field)),
+                        ));
+                    }
+                    if let GraphNodeKind::Equalizer { config, .. } = &node.kind {
+                        use rivu_dsp::equalizer::config::{ChannelTarget, FilterKind};
+                        for (label, text) in [
+                            ("processing-enabled", config.enabled.to_string()),
+                            ("processing-preamp", config.preamp_db.to_string()),
+                            ("processing-output-gain", config.output_gain_db.to_string()),
+                        ] {
+                            content = content
+                                .child(caption(theme, format!("{}: {text}", self.tr(label))));
+                        }
+                        for (index, band) in config.bands.iter().enumerate() {
+                            let kind = self.tr(match band.kind {
+                                FilterKind::Peak => "processing-peak",
+                                FilterKind::LowShelf => "processing-low-shelf",
+                                FilterKind::HighShelf => "processing-high-shelf",
+                                FilterKind::LowPass => "processing-low-pass",
+                                FilterKind::HighPass => "processing-high-pass",
+                                FilterKind::BandPass => "processing-band-pass",
+                                FilterKind::Notch => "processing-notch",
+                            });
+                            let channels = match &band.channels {
+                                ChannelTarget::All => "all".to_owned(),
+                                ChannelTarget::Selected(channels) => channels
+                                    .iter()
+                                    .map(|channel| (channel + 1).to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(","),
+                            };
+                            for (label, text) in [
+                                ("processing-enabled", band.enabled.to_string()),
+                                ("processing-graph-input-solo", band.solo.to_string()),
+                                ("processing-graph-filter-kind", kind.to_string()),
+                                ("processing-frequency", band.frequency_hz.to_string()),
+                                ("processing-gain", band.gain_db.to_string()),
+                                ("processing-q", band.q.to_string()),
+                                ("processing-shelf-slope", band.shelf_slope.to_string()),
+                                ("processing-stages", band.stages.to_string()),
+                                ("processing-channels", channels),
+                            ] {
+                                content = content.child(caption(
+                                    theme,
+                                    format!(
+                                        "{} {} · {}: {text}",
+                                        self.tr("processing-graph-band"),
+                                        index + 1,
+                                        self.tr(label),
+                                    ),
+                                ));
+                            }
+                        }
                     }
                 }
             }

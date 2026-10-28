@@ -67,7 +67,7 @@ impl AudioProcessing {
             .is_some_and(|fields| {
                 fields.iter().any(|(key, field)| {
                     // Results owns its export editor even though graph parameters are hidden.
-                    (key != "graph_export" || !export_visible)
+                    (*key != FieldKey::GraphExport || !export_visible)
                         && field.input.read(cx).is_focused(window)
                 })
             })
@@ -157,7 +157,7 @@ impl AudioProcessing {
             .get(&panel)
             .is_some_and(|fields| {
                 fields.iter().any(|(key, field)| {
-                    (key == "graph_export" || !parameters_visible)
+                    (*key == FieldKey::GraphExport || !parameters_visible)
                         && field.input.read(cx).is_focused(window)
                 })
             })

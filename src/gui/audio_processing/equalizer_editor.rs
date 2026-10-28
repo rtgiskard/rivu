@@ -13,6 +13,58 @@ enum EqTarget {
     Node(u64),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum BandField {
+    FrequencyHz,
+    GainDb,
+    Q,
+    ShelfSlope,
+    Stages,
+    Channels,
+}
+
+impl BandField {
+    fn name(self) -> &'static str {
+        match self {
+            Self::FrequencyHz => "frequency_hz",
+            Self::GainDb => "gain_db",
+            Self::Q => "q",
+            Self::ShelfSlope => "shelf_slope",
+            Self::Stages => "stages",
+            Self::Channels => "channels",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum EqField {
+    PreampDb,
+    OutputGainDb,
+    BandCount,
+    Band(usize, BandField),
+}
+
+impl EqField {
+    fn band_index(self) -> Option<usize> {
+        match self {
+            Self::Band(index, _) => Some(index),
+            _ => None,
+        }
+    }
+}
+
+// Strings are presentation-only widget IDs; bindings never parse them back.
+impl std::fmt::Display for EqField {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PreampDb => output.write_str("preamp_db"),
+            Self::OutputGainDb => output.write_str("output_gain_db"),
+            Self::BandCount => output.write_str("band_count"),
+            Self::Band(index, field) => write!(output, "band.{index}.{}", field.name()),
+        }
+    }
+}
+
 type EqFormat = Option<(i64, u32, u16)>;
 
 struct EqAvailability {
@@ -46,7 +98,7 @@ struct EqualizerField {
 
 pub(super) struct SubmittedField {
     editor: WeakEntity<EqualizerEditor>,
-    key: String,
+    key: EqField,
     input: Entity<Input>,
     generation: u64,
     text: String,
@@ -78,7 +130,7 @@ struct NodeDrag {
 }
 
 struct FieldDrag {
-    key: String,
+    key: EqField,
     bounds: Bounds<Pixels>,
     geometry: DockGeometry,
     geometry_epoch: u64,
@@ -108,7 +160,7 @@ struct EqualizerEditor {
     band: usize,
     band_focus: [Option<BandFocus>; MAX_BANDS],
     response_channel: usize,
-    fields: HashMap<String, EqualizerField>,
+    fields: HashMap<EqField, EqualizerField>,
     channel_choices: rivu_ui::ChoiceState<usize>,
     channel_anchor: Rc<Cell<Option<Bounds<Pixels>>>>,
     live_submission_scheduled: bool,
@@ -223,14 +275,10 @@ impl EqualizerEditor {
             self.take_drag();
         }
         let slider_kind_changed = self.field_drag.as_ref().is_some_and(|drag| {
-            drag.key
-                .strip_prefix("band.")
-                .and_then(|path| path.split('.').next())
-                .and_then(|index| index.parse::<usize>().ok())
-                .is_some_and(|index| {
-                    self.config.bands.get(index).map(|band| band.kind)
-                        != config.bands.get(index).map(|band| band.kind)
-                })
+            drag.key.band_index().is_some_and(|index| {
+                self.config.bands.get(index).map(|band| band.kind)
+                    != config.bands.get(index).map(|band| band.kind)
+            })
         });
         // Ordinary same-length parameter updates preserve native keyboard focus.
         if self.config.bands.len() != config.bands.len() {
@@ -270,7 +318,9 @@ impl EqualizerEditor {
             for (key, field) in &self.fields {
                 field.input.update(cx, |input, cx| {
                     input.set_enabled(
-                        enabled && (key != "band_count" || !self.config_locked() && pending == 0),
+                        enabled
+                            && (key != &EqField::BandCount
+                                || !self.config_locked() && pending == 0),
                         cx,
                     )
                 });
@@ -466,7 +516,7 @@ impl EqualizerEditor {
         self.eq(EqualizerEdit::BandField { index, field }, cx);
     }
 
-    fn field(&mut self, key: &str, label: &str, value: String, cx: &mut Context<Self>) {
+    fn field(&mut self, key: &EqField, label: &str, value: String, cx: &mut Context<Self>) {
         if let Some(field) = self.fields.get_mut(key) {
             if field.committed != value {
                 field.committed.clone_from(&value);
@@ -478,27 +528,21 @@ impl EqualizerEditor {
             }
             return;
         }
-        if !self.active
-            || key
-                .strip_prefix("band.")
-                .and_then(|path| path.split('.').next())
-                .and_then(|index| index.parse::<usize>().ok())
-                .is_some_and(|index| index != self.band)
-        {
+        if !self.active || key.band_index().is_some_and(|index| index != self.band) {
             return;
         }
-        let placeholder = if key.ends_with(".channels") {
+        let placeholder = if matches!(key, EqField::Band(_, BandField::Channels)) {
             self.tr("processing-channels-placeholder")
         } else {
             label.to_owned().into()
         };
         let input = cx.new(|cx| Input::new(label.to_owned(), value.clone(), placeholder, cx));
         let enabled = !self.input_locked()
-            && (key != "band_count" || !self.config_locked() && self.pending == 0);
+            && (key != &EqField::BandCount || !self.config_locked() && self.pending == 0);
         input.update(cx, |input, cx| input.set_enabled(enabled, cx));
-        let subscription = self.subscribe_field(&input, key.to_owned(), cx);
+        let subscription = self.subscribe_field(&input, *key, cx);
         self.fields.insert(
-            key.to_owned(),
+            *key,
             EqualizerField {
                 input,
                 committed: value,
@@ -515,7 +559,7 @@ impl EqualizerEditor {
     fn subscribe_field(
         &self,
         input: &Entity<Input>,
-        name: String,
+        name: EqField,
         cx: &mut Context<Self>,
     ) -> Subscription {
         cx.subscribe(input, move |this, _, event, cx| match event {
@@ -570,8 +614,7 @@ impl EqualizerEditor {
                     return;
                 }
                 let key = this.fields.iter().find_map(|(key, field)| {
-                    (field.auto_pending && !field.input.read(cx).is_composing())
-                        .then(|| key.clone())
+                    (field.auto_pending && !field.input.read(cx).is_composing()).then_some(*key)
                 });
                 if let Some(key) = key {
                     this.fields.get_mut(&key).unwrap().auto_pending = false;
@@ -581,14 +624,14 @@ impl EqualizerEditor {
         });
     }
 
-    fn valid_live_draft(&self, key: &str, text: &str) -> bool {
-        if matches!(key, "preamp_db" | "output_gain_db") {
+    fn valid_live_draft(&self, key: &EqField, text: &str) -> bool {
+        if matches!(key, EqField::PreampDb | EqField::OutputGainDb) {
             return valid_gain_draft(text);
         }
         let Some((minimum, maximum, _)) = self.band_numeric_range(key) else {
             return false;
         };
-        let value = if key.ends_with(".stages") {
+        let value = if matches!(key, EqField::Band(_, BandField::Stages)) {
             text.trim().parse::<u8>().ok().map(f64::from)
         } else {
             text.trim().parse::<f64>().ok()
@@ -596,21 +639,19 @@ impl EqualizerEditor {
         value.is_some_and(|value| value.is_finite() && (minimum..=maximum).contains(&value))
     }
 
-    fn band_numeric_range(&self, key: &str) -> Option<(f64, f64, bool)> {
-        let path = key.strip_prefix("band.")?;
-        let (_, name) = path.split_once('.')?;
-        match name {
-            "frequency_hz" => Some((
+    fn band_numeric_range(&self, key: &EqField) -> Option<(f64, f64, bool)> {
+        match key {
+            EqField::Band(_, BandField::FrequencyHz) => Some((
                 1.,
                 self.format.map_or(96_000., |(_, rate, _)| {
                     (f64::from(rate) * 0.499).min(96_000.)
                 }),
                 true,
             )),
-            "gain_db" => Some((-24., 24., false)),
-            "q" => Some((0.1, 20., true)),
-            "shelf_slope" => Some((0.1, 1., false)),
-            "stages" => Some((1., 4., false)),
+            EqField::Band(_, BandField::GainDb) => Some((-24., 24., false)),
+            EqField::Band(_, BandField::Q) => Some((0.1, 20., true)),
+            EqField::Band(_, BandField::ShelfSlope) => Some((0.1, 1., false)),
+            EqField::Band(_, BandField::Stages) => Some((1., 4., false)),
             _ => None,
         }
     }
@@ -671,23 +712,16 @@ impl EqualizerEditor {
             .flatten()
             .unwrap_or_else(|| self.band.min(next.len().saturating_sub(1)));
         for (key, mut field) in std::mem::take(&mut self.fields) {
-            let Some((index, name)) = key
-                .strip_prefix("band.")
-                .and_then(|path| path.split_once('.'))
-            else {
+            let EqField::Band(index, name) = key else {
                 self.fields.insert(key, field);
                 continue;
             };
-            let Some(new) = index
-                .parse::<usize>()
-                .ok()
-                .and_then(|index| mapping.get(index).copied().flatten())
-            else {
+            let Some(new) = mapping.get(index).copied().flatten() else {
                 continue;
             };
-            let new_key = format!("band.{new}.{name}");
+            let new_key = EqField::Band(new, name);
             if new_key != key {
-                field._subscription = self.subscribe_field(&field.input, new_key.clone(), cx);
+                field._subscription = self.subscribe_field(&field.input, new_key, cx);
             }
             self.fields.insert(new_key, field);
         }
@@ -698,19 +732,19 @@ impl EqualizerEditor {
             return;
         };
         self.field(
-            "preamp_db",
+            &EqField::PreampDb,
             &self.tr("processing-preamp"),
-            equalizer_number_text("preamp_db", eq.preamp_db),
+            equalizer_number_text(&EqField::PreampDb, eq.preamp_db),
             cx,
         );
         self.field(
-            "output_gain_db",
+            &EqField::OutputGainDb,
             &self.tr("processing-output-gain"),
-            equalizer_number_text("output_gain_db", eq.output_gain_db),
+            equalizer_number_text(&EqField::OutputGainDb, eq.output_gain_db),
             cx,
         );
         self.field(
-            "band_count",
+            &EqField::BandCount,
             &self.tr("processing-band-count-label"),
             eq.bands.len().to_string(),
             cx,
@@ -718,24 +752,31 @@ impl EqualizerEditor {
         for (i, b) in eq.bands.iter().enumerate() {
             for (name, label, value) in [
                 (
-                    "frequency_hz",
+                    BandField::FrequencyHz,
                     "processing-frequency",
-                    equalizer_number_text("frequency_hz", b.frequency_hz),
+                    equalizer_number_text(
+                        &EqField::Band(i, BandField::FrequencyHz),
+                        b.frequency_hz,
+                    ),
                 ),
                 (
-                    "gain_db",
+                    BandField::GainDb,
                     "processing-gain",
-                    equalizer_number_text("gain_db", b.gain_db),
+                    equalizer_number_text(&EqField::Band(i, BandField::GainDb), b.gain_db),
                 ),
-                ("q", "processing-q", equalizer_number_text("q", b.q)),
                 (
-                    "shelf_slope",
+                    BandField::Q,
+                    "processing-q",
+                    equalizer_number_text(&EqField::Band(i, BandField::Q), b.q),
+                ),
+                (
+                    BandField::ShelfSlope,
                     "processing-shelf-slope",
-                    equalizer_number_text("shelf_slope", b.shelf_slope),
+                    equalizer_number_text(&EqField::Band(i, BandField::ShelfSlope), b.shelf_slope),
                 ),
-                ("stages", "processing-stages", b.stages.to_string()),
+                (BandField::Stages, "processing-stages", b.stages.to_string()),
                 (
-                    "channels",
+                    BandField::Channels,
                     "processing-channels",
                     match &b.channels {
                         ChannelTarget::All => "all".to_owned(),
@@ -747,7 +788,7 @@ impl EqualizerEditor {
                     },
                 ),
             ] {
-                self.field(&format!("band.{i}.{name}"), &self.tr(label), value, cx);
+                self.field(&EqField::Band(i, name), &self.tr(label), value, cx);
             }
         }
         self.prune_inputs();
@@ -755,18 +796,17 @@ impl EqualizerEditor {
 
     fn prune_inputs(&mut self) {
         self.fields.retain(|key, field| {
-            let index = key
-                .strip_prefix("band.")
-                .and_then(|path| path.split('.').next())
-                .and_then(|index| index.parse::<usize>().ok());
+            let index = key.band_index();
             index.is_none_or(|index| index < self.config.bands.len())
                 && (field.dirty || self.active && index.is_none_or(|index| index == self.band))
         });
     }
-    fn apply_field(&mut self, key: &str, cx: &mut Context<Self>) {
+    fn apply_field(&mut self, key: &EqField, cx: &mut Context<Self>) {
         // Numeric fields are already scheduled by Changed. Enter must neither
         // quantize an untouched display nor enqueue the same generation twice.
-        if matches!(key, "preamp_db" | "output_gain_db") || self.band_numeric_range(key).is_some() {
+        if matches!(key, EqField::PreampDb | EqField::OutputGainDb)
+            || self.band_numeric_range(key).is_some()
+        {
             let Some(field) = self.fields.get(key) else {
                 return;
             };
@@ -783,8 +823,8 @@ impl EqualizerEditor {
         self.submit_field(key, cx);
     }
 
-    fn submit_field(&mut self, key: &str, cx: &mut Context<Self>) {
-        if self.config_locked() || key == "band_count" && self.pending > 0 {
+    fn submit_field(&mut self, key: &EqField, cx: &mut Context<Self>) {
+        if self.config_locked() || key == &EqField::BandCount && self.pending > 0 {
             return;
         }
         if matches!(self.target, EqTarget::Node(_))
@@ -807,7 +847,7 @@ impl EqualizerEditor {
             .map(|f| f.input.read(cx).text().trim().to_owned())
             .unwrap_or_default();
         match self.field_edit(key, &value) {
-            Ok(Some(edit)) => {
+            Ok(edit) => {
                 if let EqualizerEdit::ResizeBands { count } = &edit {
                     self.cancel_pointer(cx);
                     self.pending_added_band = (*count > self.config.bands.len()).then_some((
@@ -817,14 +857,13 @@ impl EqualizerEditor {
                 }
                 let submitted = self.fields.get(key).map(|field| SubmittedField {
                     editor: cx.entity().downgrade(),
-                    key: key.to_owned(),
+                    key: *key,
                     input: field.input.clone(),
                     generation: field.generation,
                     text: value,
                 });
                 self.submit_edit(edit, submitted, cx);
             }
-            Ok(None) => {}
             Err(error) => {
                 self.error = Some(error);
                 cx.notify();
@@ -832,7 +871,7 @@ impl EqualizerEditor {
         }
     }
 
-    fn field_edit(&self, key: &str, value: &str) -> Result<Option<EqualizerEdit>, String> {
+    fn field_edit(&self, key: &EqField, value: &str) -> Result<EqualizerEdit, String> {
         let number = || {
             value
                 .parse::<f64>()
@@ -845,58 +884,65 @@ impl EqualizerEditor {
                         .to_owned()
                 })
         };
-        let edit = if key == "band_count" {
-            let count = value
-                .parse::<usize>()
-                .ok()
-                .filter(|count| *count <= MAX_BANDS)
-                .ok_or_else(|| self.tr("processing-band-count-invalid").to_string())?;
-            Some(EqualizerEdit::ResizeBands { count })
-        } else if matches!(key, "preamp_db" | "output_gain_db") {
-            let gain = number()?;
-            if !(-24.0..=24.0).contains(&gain) {
-                return Err(self.tr("processing-invalid-number").to_string());
+        let edit = match *key {
+            EqField::BandCount => {
+                let count = value
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|count| *count <= MAX_BANDS)
+                    .ok_or_else(|| self.tr("processing-band-count-invalid").to_string())?;
+                EqualizerEdit::ResizeBands { count }
             }
-            Some(if key == "preamp_db" {
-                EqualizerEdit::PreampDb(gain)
-            } else {
-                EqualizerEdit::OutputGainDb(gain)
-            })
-        } else if let Some(path) = key.strip_prefix("band.") {
-            let (index, name) = path.split_once('.').ok_or("Invalid band field")?;
-            let index = index.parse::<usize>().map_err(|e| e.to_string())?;
-            let field = match name {
-                "frequency_hz" => EqBandEdit::FrequencyHz(number()?),
-                "gain_db" => EqBandEdit::GainDb(number()?),
-                "q" => EqBandEdit::Q(number()?),
-                "shelf_slope" => EqBandEdit::ShelfSlope(number()?),
-                "stages" => EqBandEdit::Stages(value.parse::<u8>().map_err(|e| e.to_string())?),
-                "channels" => EqBandEdit::Channels(if value.eq_ignore_ascii_case("all") {
-                    ChannelTarget::All
+            EqField::PreampDb | EqField::OutputGainDb => {
+                let gain = number()?;
+                if !(-24.0..=24.0).contains(&gain) {
+                    return Err(self.tr("processing-invalid-number").to_string());
+                }
+                if *key == EqField::PreampDb {
+                    EqualizerEdit::PreampDb(gain)
                 } else {
-                    let channels = value
-                        .split(',')
-                        .map(|c| {
-                            c.trim()
-                                .parse::<usize>()
-                                .ok()
-                                .and_then(|n| n.checked_sub(1))
-                                .ok_or_else(|| {
-                                    self.context.i18n.text("processing-channel-help").to_owned()
+                    EqualizerEdit::OutputGainDb(gain)
+                }
+            }
+            EqField::Band(index, name) => {
+                let field = match name {
+                    BandField::FrequencyHz => EqBandEdit::FrequencyHz(number()?),
+                    BandField::GainDb => EqBandEdit::GainDb(number()?),
+                    BandField::Q => EqBandEdit::Q(number()?),
+                    BandField::ShelfSlope => EqBandEdit::ShelfSlope(number()?),
+                    BandField::Stages => {
+                        EqBandEdit::Stages(value.parse::<u8>().map_err(|error| error.to_string())?)
+                    }
+                    BandField::Channels => {
+                        EqBandEdit::Channels(if value.eq_ignore_ascii_case("all") {
+                            ChannelTarget::All
+                        } else {
+                            let channels = value
+                                .split(',')
+                                .map(|channel| {
+                                    channel
+                                        .trim()
+                                        .parse::<usize>()
+                                        .ok()
+                                        .and_then(|number| number.checked_sub(1))
+                                        .ok_or_else(|| {
+                                            self.context
+                                                .i18n
+                                                .text("processing-channel-help")
+                                                .to_owned()
+                                        })
                                 })
+                                .collect::<Result<Vec<_>, _>>()?;
+                            ChannelTarget::Selected(channels)
                         })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    ChannelTarget::Selected(channels)
-                }),
-                _ => return Ok(None),
-            };
-            Some(EqualizerEdit::BandField { index, field })
-        } else {
-            None
+                    }
+                };
+                EqualizerEdit::BandField { index, field }
+            }
         };
         Ok(edit)
     }
-    fn step_field(&mut self, key: &str, step: f64, cx: &mut Context<Self>) {
+    fn step_field(&mut self, key: &EqField, step: f64, cx: &mut Context<Self>) {
         if self.input_locked() {
             return;
         }
@@ -917,7 +963,7 @@ impl EqualizerEditor {
         cx.notify();
     }
 
-    fn set_live_value(&mut self, key: &str, value: f64, cx: &mut Context<Self>) {
+    fn set_live_value(&mut self, key: &EqField, value: f64, cx: &mut Context<Self>) {
         let mut text = equalizer_number_text(key, value);
         if !self.valid_live_draft(key, &text) {
             // A rate-dependent endpoint can have more digits than the display
@@ -939,7 +985,7 @@ impl EqualizerEditor {
             field.draft_revision = Some(
                 self.field_drag
                     .as_ref()
-                    .filter(|drag| drag.key == key)
+                    .filter(|drag| drag.key == *key)
                     .map_or(self.revision, |drag| drag.revision),
             );
         }
@@ -993,17 +1039,21 @@ impl EqualizerEditor {
         let Some(fraction) = Slider::value_at(drag.bounds, position) else {
             return;
         };
-        let key = drag.key.clone();
+        let key = drag.key;
         let Some(range) = self.band_numeric_range(&key) else {
             return;
         };
-        let value = slider_number(fraction, range, key.ends_with(".stages"));
+        let value = slider_number(
+            fraction,
+            range,
+            matches!(key, EqField::Band(_, BandField::Stages)),
+        );
         self.set_live_value(&key, value, cx);
     }
 
     fn band_slider(
         &self,
-        key: &str,
+        key: &EqField,
         label: SharedString,
         enabled: bool,
         cx: &mut Context<Self>,
@@ -1020,14 +1070,18 @@ impl EqualizerEditor {
         let fraction = slider_fraction(number, range);
         let bounds = field.slider_bounds.clone();
         let measured = bounds.clone();
-        let name = key.to_owned();
+        let name = *key;
         Slider::new(
             SharedString::from(format!("eq-slider-{key}")),
             fraction,
             label,
         )
         .disabled(!enabled)
-        .dragging(self.field_drag.as_ref().is_some_and(|drag| drag.key == key))
+        .dragging(
+            self.field_drag
+                .as_ref()
+                .is_some_and(|drag| drag.key == *key),
+        )
         .render(cx, move |this, input, window, cx| {
             this.cancel_pointer(cx);
             match input {
@@ -1046,7 +1100,7 @@ impl EqualizerEditor {
                         }),
                     ];
                     this.field_drag = Some(FieldDrag {
-                        key: name.clone(),
+                        key: name,
                         bounds,
                         geometry: DockGeometry::current(window, this.state.system.config.ui_scale),
                         geometry_epoch: this.geometry_epoch,
@@ -1075,7 +1129,7 @@ impl EqualizerEditor {
                         SliderKey::End => range.1,
                         SliderKey::Decrease | SliderKey::Increase => {
                             let direction = if key == SliderKey::Decrease { -1. } else { 1. };
-                            if name.ends_with(".stages") {
+                            if matches!(name, EqField::Band(_, BandField::Stages)) {
                                 (number + direction).clamp(range.0, range.1)
                             } else {
                                 slider_number(fraction + direction as f32 * 0.01, range, false)
@@ -1089,7 +1143,7 @@ impl EqualizerEditor {
         .flex_1()
         .relative()
         .debug_selector({
-            let name = key.to_owned();
+            let name = *key;
             move || format!("eq-slider-{name}")
         })
         .child(
@@ -1103,8 +1157,8 @@ impl EqualizerEditor {
     }
 
     fn restore_position_fields(&mut self, cx: &mut Context<Self>) {
-        for name in ["frequency_hz", "gain_db"] {
-            if let Some(field) = self.fields.get(&format!("band.{}.{name}", self.band))
+        for name in [BandField::FrequencyHz, BandField::GainDb] {
+            if let Some(field) = self.fields.get(&EqField::Band(self.band, name))
                 && !field.dirty
             {
                 let text = field.committed.clone();
@@ -1115,7 +1169,7 @@ impl EqualizerEditor {
 
     fn field_view(
         &self,
-        key: &str,
+        key: &EqField,
         label: impl Into<SharedString>,
         enabled: bool,
         cx: &mut Context<Self>,
@@ -1123,19 +1177,18 @@ impl EqualizerEditor {
         let theme = rivu_ui::theme::palette(cx);
         let field = &self.fields[key];
         let label: SharedString = label.into();
-        let name = key.rsplit('.').next().unwrap_or(key);
-        let compact = matches!(name, "preamp_db" | "output_gain_db");
-        let (unit, step) = match name {
-            "frequency_hz" => ("Hz", Some(1.)),
-            "preamp_db" | "output_gain_db" => ("dB", None),
-            "gain_db" => ("dB", Some(0.5)),
-            "q" | "shelf_slope" => ("", Some(0.1)),
-            "stages" => ("", Some(1.)),
+        let compact = matches!(key, EqField::PreampDb | EqField::OutputGainDb);
+        let (unit, step) = match key {
+            EqField::Band(_, BandField::FrequencyHz) => ("Hz", Some(1.)),
+            EqField::PreampDb | EqField::OutputGainDb => ("dB", None),
+            EqField::Band(_, BandField::GainDb) => ("dB", Some(0.5)),
+            EqField::Band(_, BandField::Q | BandField::ShelfSlope) => ("", Some(0.1)),
+            EqField::Band(_, BandField::Stages) => ("", Some(1.)),
             _ => ("", None),
         };
-        let help = match name {
-            "channels" => Some("processing-channel-help"),
-            "stages" => Some("processing-stage-help"),
+        let help = match key {
+            EqField::Band(_, BandField::Channels) => Some("processing-channel-help"),
+            EqField::Band(_, BandField::Stages) => Some("processing-stage-help"),
             _ => None,
         };
         let mut control = row()
@@ -1177,7 +1230,7 @@ impl EqualizerEditor {
                 ("less", "−", "processing-field-decrease", -step),
                 ("more", "+", "processing-field-increase", step),
             ] {
-                let key_owned = key.to_owned();
+                let key_owned = *key;
                 control = control.child(
                     rivu_ui::IconButton::new(
                         SharedString::from(format!("eq-step-{key}-{suffix}")),
@@ -1195,7 +1248,7 @@ impl EqualizerEditor {
             }
         }
         if !compact && self.band_numeric_range(key).is_none() {
-            let key_owned = key.to_owned();
+            let key_owned = *key;
             control = control.child(
                 rivu_ui::IconButton::new(
                     SharedString::from(format!("apply-{key}")),
@@ -1765,12 +1818,18 @@ impl EqualizerEditor {
                     .clamp(-24., 24.);
             }
             if previous != (drag.frequency, drag.gain) {
-                for (name, value) in [("frequency_hz", drag.frequency), ("gain_db", drag.gain)] {
-                    if let Some(field) = self.fields.get(&format!("band.{}.{name}", drag.band))
+                for (name, value) in [
+                    (BandField::FrequencyHz, drag.frequency),
+                    (BandField::GainDb, drag.gain),
+                ] {
+                    if let Some(field) = self.fields.get(&EqField::Band(drag.band, name))
                         && !field.dirty
                     {
                         field.input.update(cx, |input, cx| {
-                            input.set_text(equalizer_number_text(name, value), cx)
+                            input.set_text(
+                                equalizer_number_text(&EqField::Band(drag.band, name), value),
+                                cx,
+                            )
                         });
                     }
                 }
@@ -1809,13 +1868,13 @@ impl EqualizerEditor {
             .flex_wrap()
             .gap_2()
             .child(self.field_view(
-                "preamp_db",
+                &EqField::PreampDb,
                 self.tr("processing-input-gain-short"),
                 !self.input_locked(),
                 cx,
             ))
             .child(self.field_view(
-                "output_gain_db",
+                &EqField::OutputGainDb,
                 self.tr("processing-output-gain-short"),
                 !self.input_locked(),
                 cx,
@@ -1925,7 +1984,7 @@ impl EqualizerEditor {
                     .id(("eq-band-count", panel))
                     .debug_selector(move || format!("eq-band-count-{panel}"))
                     .tooltip(rivu_ui::text_tooltip(self.tr("processing-band-count-help")))
-                    .child(self.fields["band_count"].input.clone()),
+                    .child(self.fields[&EqField::BandCount].input.clone()),
             );
         let presets =
             row()
@@ -2110,9 +2169,9 @@ impl EqualizerEditor {
             }
             precision = precision.child(types);
             for (name, key, applicable) in [
-                ("frequency_hz", "processing-frequency", true),
+                (BandField::FrequencyHz, "processing-frequency", true),
                 (
-                    "gain_db",
+                    BandField::GainDb,
                     "processing-gain",
                     matches!(
                         band.kind,
@@ -2120,28 +2179,28 @@ impl EqualizerEditor {
                     ),
                 ),
                 (
-                    "q",
+                    BandField::Q,
                     "processing-q",
                     !matches!(band.kind, FilterKind::LowShelf | FilterKind::HighShelf),
                 ),
                 (
-                    "shelf_slope",
+                    BandField::ShelfSlope,
                     "processing-shelf-slope",
                     matches!(band.kind, FilterKind::LowShelf | FilterKind::HighShelf),
                 ),
                 (
-                    "stages",
+                    BandField::Stages,
                     "processing-stages",
                     !matches!(
                         band.kind,
                         FilterKind::Peak | FilterKind::LowShelf | FilterKind::HighShelf
                     ),
                 ),
-                ("channels", "processing-channels", true),
+                (BandField::Channels, "processing-channels", true),
             ] {
                 if applicable {
                     precision = precision.child(self.field_view(
-                        &format!("band.{index}.{name}"),
+                        &EqField::Band(index, name),
                         self.tr(key),
                         !self.input_locked(),
                         cx,
@@ -2269,9 +2328,12 @@ impl AudioProcessing {
             editor.update(cx, |editor, cx| {
                 editor.cancel_pointer(cx);
                 for (key, field) in &mut editor.fields {
-                    if !matches!(key.as_str(), "preamp_db" | "output_gain_db")
-                        && !key.ends_with(".gain_db")
-                    {
+                    if !matches!(
+                        key,
+                        EqField::PreampDb
+                            | EqField::OutputGainDb
+                            | EqField::Band(_, BandField::GainDb)
+                    ) {
                         continue;
                     }
                     field.dirty = false;
@@ -2660,14 +2722,14 @@ impl AudioProcessing {
 }
 
 fn merge_draft_edit(
-    edits: &mut HashMap<String, EqualizerEdit>,
-    key: &str,
+    edits: &mut HashMap<EqField, EqualizerEdit>,
+    key: &EqField,
     edit: EqualizerEdit,
 ) -> bool {
     if let Some(previous) = edits.get(key) {
         return previous == &edit;
     }
-    edits.insert(key.to_owned(), edit);
+    edits.insert(*key, edit);
     true
 }
 
@@ -2729,22 +2791,20 @@ impl AudioProcessing {
                     return Err(self.context.i18n.text("processing-editor-stale").to_owned());
                 }
                 let text = field.input.read(cx).text().trim().to_owned();
-                let edit = editor
-                    .field_edit(key, &text)?
-                    .ok_or_else(|| self.context.i18n.text("processing-editor-stale").to_owned())?;
+                let edit = editor.field_edit(key, &text)?;
                 if !merge_draft_edit(&mut edits, key, edit) {
                     return Err(self
                         .context
                         .i18n
                         .format(
                             "processing-editor-conflict",
-                            &[("field", key.clone().into())],
+                            &[("field", key.to_string().into())],
                         )
                         .to_string());
                 }
                 fields.push(SubmittedField {
                     editor: entity.downgrade(),
-                    key: key.clone(),
+                    key: *key,
                     input: field.input.clone(),
                     generation: field.generation,
                     text,
@@ -2855,7 +2915,6 @@ impl AudioProcessing {
             let still_authoritative = editor
                 .field_edit(&submitted.key, &submitted.text)
                 .ok()
-                .flatten()
                 .is_some_and(|edit| equalizer_field_matches_config(&edit, config));
             if let Some(field) = editor.fields.get_mut(&submitted.key)
                 && field.input.entity_id() == submitted.input.entity_id()
@@ -2921,11 +2980,11 @@ fn equalizer_field_matches_config(edit: &EqualizerEdit, config: &EqualizerConfig
         _ => false,
     }
 }
-fn equalizer_number_text(key: &str, value: f64) -> String {
-    let precision = match key.rsplit('.').next().unwrap_or(key) {
-        "frequency_hz" => 1,
-        "stages" => 0,
-        "q" | "shelf_slope" => 3,
+fn equalizer_number_text(key: &EqField, value: f64) -> String {
+    let precision = match key {
+        EqField::Band(_, BandField::FrequencyHz) => 1,
+        EqField::Band(_, BandField::Stages) => 0,
+        EqField::Band(_, BandField::Q | BandField::ShelfSlope) => 3,
         _ => 2,
     };
     let mut text = format!("{value:.precision$}");
@@ -3122,11 +3181,23 @@ mod tests {
     #[test]
     fn numeric_display_formats_generated_values_without_float_tails() {
         for (key, value, expected) in [
-            ("frequency_hz", 336.758_543_234, "336.8"),
-            ("band.0.gain_db", 12.407_531_738, "12.41"),
-            ("q", std::f64::consts::FRAC_1_SQRT_2, "0.707"),
-            ("shelf_slope", 1., "1"),
-            ("output_gain_db", -0.000_001, "0"),
+            (
+                &EqField::Band(0, BandField::FrequencyHz),
+                336.758_543_234,
+                "336.8",
+            ),
+            (
+                &EqField::Band(0, BandField::GainDb),
+                12.407_531_738,
+                "12.41",
+            ),
+            (
+                &EqField::Band(0, BandField::Q),
+                std::f64::consts::FRAC_1_SQRT_2,
+                "0.707",
+            ),
+            (&EqField::Band(0, BandField::ShelfSlope), 1., "1"),
+            (&EqField::OutputGainDb, -0.000_001, "0"),
         ] {
             assert_eq!(equalizer_number_text(key, value), expected);
         }
@@ -3140,11 +3211,19 @@ mod tests {
         let (_directory, runtime, owner, editor, handle) = fixture_with_owner(cx);
         owner.update(cx, |owner, _| owner.command_active = true);
         let input = editor.read_with(cx, |editor, cx| {
-            assert_eq!(editor.fields["band.0.q"].input.read(cx).text(), "0.707");
+            assert_eq!(
+                editor.fields[&EqField::Band(0, BandField::Q)]
+                    .input
+                    .read(cx)
+                    .text(),
+                "0.707"
+            );
             assert_eq!(editor.config.bands[0].q, std::f64::consts::FRAC_1_SQRT_2);
-            editor.fields["band.0.q"].input.clone()
+            editor.fields[&EqField::Band(0, BandField::Q)].input.clone()
         });
-        editor.update(cx, |editor, cx| editor.apply_field("band.0.q", cx));
+        editor.update(cx, |editor, cx| {
+            editor.apply_field(&EqField::Band(0, BandField::Q), cx)
+        });
         draw(cx, handle);
         assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
         let text = "0.8123456789";
@@ -3166,8 +3245,14 @@ mod tests {
         });
         acknowledge_front(cx, &runtime, &owner, true);
         editor.read_with(cx, |editor, cx| {
-            assert!(!editor.fields["band.0.q"].dirty);
-            assert_eq!(editor.fields["band.0.q"].input.read(cx).text(), text);
+            assert!(!editor.fields[&EqField::Band(0, BandField::Q)].dirty);
+            assert_eq!(
+                editor.fields[&EqField::Band(0, BandField::Q)]
+                    .input
+                    .read(cx)
+                    .text(),
+                text
+            );
             assert_eq!(editor.config.bands[0].q, 0.8123456789);
         });
     }
@@ -3203,7 +3288,9 @@ mod tests {
         use gpui::EntityInputHandler as _;
         let (_directory, _runtime, owner, editor, handle) = fixture_with_owner(cx);
         owner.update(cx, |owner, _| owner.command_active = true);
-        let input = editor.read_with(cx, |editor, _| editor.fields["band.0.q"].input.clone());
+        let input = editor.read_with(cx, |editor, _| {
+            editor.fields[&EqField::Band(0, BandField::Q)].input.clone()
+        });
         for (text, expected) in [("-", 0), ("21", 0), ("1e", 0), ("2.5", 1)] {
             cx.update_window(handle, |_, window, cx| {
                 input.update(cx, |input, cx| {
@@ -3232,7 +3319,7 @@ mod tests {
         editor.read_with(cx, |editor, cx| {
             assert!(editor.field_drag.is_none());
             assert_eq!(editor.pointer_count.get(), 0);
-            let gain = editor.fields["band.0.gain_db"]
+            let gain = editor.fields[&EqField::Band(0, BandField::GainDb)]
                 .input
                 .read(cx)
                 .text()
@@ -3243,7 +3330,13 @@ mod tests {
         assert_eq!(owner.read_with(cx, |owner, _| owner.commands.len()), 1);
         press(cx, handle, "end");
         editor.read_with(cx, |editor, cx| {
-            assert_eq!(editor.fields["band.0.gain_db"].input.read(cx).text(), "24");
+            assert_eq!(
+                editor.fields[&EqField::Band(0, BandField::GainDb)]
+                    .input
+                    .read(cx)
+                    .text(),
+                "24"
+            );
         });
         assert_eq!(owner.read_with(cx, |owner, _| owner.commands.len()), 1);
         acknowledge_front(cx, &runtime, &owner, true);
@@ -3293,13 +3386,13 @@ mod tests {
             editor.update(cx, |editor, cx| {
                 let drag = editor.drag.as_ref().unwrap();
                 assert!(drag.moved);
-                let frequency = editor.fields["band.0.frequency_hz"]
+                let frequency = editor.fields[&EqField::Band(0, BandField::FrequencyHz)]
                     .input
                     .read(cx)
                     .text()
                     .parse::<f64>()
                     .unwrap();
-                let gain = editor.fields["band.0.gain_db"]
+                let gain = editor.fields[&EqField::Band(0, BandField::GainDb)]
                     .input
                     .read(cx)
                     .text()
@@ -3308,7 +3401,10 @@ mod tests {
                 assert!((frequency - drag.frequency).abs() <= 0.05);
                 assert!((gain - drag.gain).abs() <= 0.005);
                 editor.cancel_pointer(cx);
-                for key in ["band.0.frequency_hz", "band.0.gain_db"] {
+                for key in [
+                    &EqField::Band(0, BandField::FrequencyHz),
+                    &EqField::Band(0, BandField::GainDb),
+                ] {
                     assert_eq!(
                         editor.fields[key].input.read(cx).text(),
                         editor.fields[key].committed
@@ -3348,7 +3444,7 @@ mod tests {
                 editor.move_field_slider(position + point(px(40.), px(0.)), window, cx);
                 assert!(editor.field_drag.is_none());
                 assert_eq!(editor.pointer_count.get(), 0);
-                let value = editor.fields["band.0.gain_db"]
+                let value = editor.fields[&EqField::Band(0, BandField::GainDb)]
                     .input
                     .read(cx)
                     .text()
@@ -3412,7 +3508,9 @@ mod tests {
     ) {
         let (_directory, runtime, owner, editor, handle) = fixture_with_owner(cx);
         owner.update(cx, |owner, _| owner.command_active = true);
-        let input = editor.read_with(cx, |editor, _| editor.fields["band.0.q"].input.clone());
+        let input = editor.read_with(cx, |editor, _| {
+            editor.fields[&EqField::Band(0, BandField::Q)].input.clone()
+        });
         for text in ["1.1", "2.2", "3.3"] {
             enter_number(cx, handle, &input, text);
         }
@@ -3428,8 +3526,14 @@ mod tests {
             ));
         });
         editor.read_with(cx, |editor, cx| {
-            assert!(editor.fields["band.0.q"].auto_pending);
-            assert_eq!(editor.fields["band.0.q"].input.read(cx).text(), "3.3");
+            assert!(editor.fields[&EqField::Band(0, BandField::Q)].auto_pending);
+            assert_eq!(
+                editor.fields[&EqField::Band(0, BandField::Q)]
+                    .input
+                    .read(cx)
+                    .text(),
+                "3.3"
+            );
         });
         acknowledge_front(cx, &runtime, &owner, true);
         owner.read_with(cx, |owner, _| {
@@ -3442,12 +3546,18 @@ mod tests {
             ));
         });
         editor.read_with(cx, |editor, cx| {
-            assert!(editor.fields["band.0.q"].dirty);
-            assert_eq!(editor.fields["band.0.q"].input.read(cx).text(), "3.3");
+            assert!(editor.fields[&EqField::Band(0, BandField::Q)].dirty);
+            assert_eq!(
+                editor.fields[&EqField::Band(0, BandField::Q)]
+                    .input
+                    .read(cx)
+                    .text(),
+                "3.3"
+            );
         });
         acknowledge_front(cx, &runtime, &owner, true);
         editor.read_with(cx, |editor, _| {
-            assert!(!editor.fields["band.0.q"].dirty);
+            assert!(!editor.fields[&EqField::Band(0, BandField::Q)].dirty);
             assert_eq!(editor.config.bands[0].q, 3.3);
         });
         assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
@@ -3459,7 +3569,9 @@ mod tests {
     ) {
         let (_directory, runtime, owner, editor, handle) = fixture_with_owner(cx);
         owner.update(cx, |owner, _| owner.command_active = true);
-        let input = editor.read_with(cx, |editor, _| editor.fields["band.0.q"].input.clone());
+        let input = editor.read_with(cx, |editor, _| {
+            editor.fields[&EqField::Band(0, BandField::Q)].input.clone()
+        });
         for (text, external, expected, authoritative) in [
             (
                 "0.8123456789",
@@ -3509,7 +3621,7 @@ mod tests {
             cx.run_until_parked();
             draw(cx, handle);
             editor.read_with(cx, |editor, cx| {
-                assert!(editor.fields["band.0.q"].dirty);
+                assert!(editor.fields[&EqField::Band(0, BandField::Q)].dirty);
                 assert_eq!(input.read(cx).text(), text);
                 assert_eq!(editor.config.bands[0].q, authoritative);
             });
@@ -3522,7 +3634,7 @@ mod tests {
             cx.run_until_parked();
             draw(cx, handle);
             editor.read_with(cx, |editor, cx| {
-                assert!(!editor.fields["band.0.q"].dirty);
+                assert!(!editor.fields[&EqField::Band(0, BandField::Q)].dirty);
                 assert_eq!(input.read(cx).text(), expected);
                 assert_eq!(editor.config.bands[0].q, authoritative);
             });
@@ -3540,16 +3652,18 @@ mod tests {
     ) {
         let (_directory, runtime, owner, editor, handle) = fixture_with_owner(cx);
         owner.update(cx, |owner, _| owner.command_active = true);
-        let input = editor.read_with(cx, |editor, _| editor.fields["band.0.q"].input.clone());
+        let input = editor.read_with(cx, |editor, _| {
+            editor.fields[&EqField::Band(0, BandField::Q)].input.clone()
+        });
         enter_number(cx, handle, &input, "1");
         for (key, text) in [
-            ("preamp_db", "1.25"),
-            ("output_gain_db", "2.5"),
-            ("band.0.frequency_hz", "120"),
-            ("band.0.gain_db", "3.5"),
-            ("band.0.q", "2"),
-            ("band.0.shelf_slope", "0.5"),
-            ("band.0.stages", "2"),
+            (&EqField::PreampDb, "1.25"),
+            (&EqField::OutputGainDb, "2.5"),
+            (&EqField::Band(0, BandField::FrequencyHz), "120"),
+            (&EqField::Band(0, BandField::GainDb), "3.5"),
+            (&EqField::Band(0, BandField::Q), "2"),
+            (&EqField::Band(0, BandField::ShelfSlope), "0.5"),
+            (&EqField::Band(0, BandField::Stages), "2"),
         ] {
             let input = editor.read_with(cx, |editor, _| editor.fields[key].input.clone());
             enter_number(cx, handle, &input, text);
@@ -3562,7 +3676,7 @@ mod tests {
                 .map(|(key, field)| {
                     assert!(field.auto_pending);
                     (
-                        key.clone(),
+                        *key,
                         field.input.clone(),
                         field.input.read(cx).text().to_owned(),
                         field.generation,
@@ -3612,10 +3726,10 @@ mod tests {
         assert_eq!(owner.read_with(cx, |owner, _| owner.commands.len()), 1);
         acknowledge_front(cx, &runtime, &owner, true);
         editor.read_with(cx, |editor, cx| {
-            assert!(!editor.fields["band.0.q"].dirty);
+            assert!(!editor.fields[&EqField::Band(0, BandField::Q)].dirty);
             assert_eq!(editor.config.bands[0].q, 3.);
             assert_eq!(input.read(cx).text(), "3");
-            assert!(editor.fields["preamp_db"].dirty);
+            assert!(editor.fields[&EqField::PreampDb].dirty);
         });
         assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
     }
@@ -3646,7 +3760,10 @@ mod tests {
         draw(cx, handle);
         editor.read_with(cx, |editor, cx| {
             assert_eq!(
-                editor.fields["band.0.gain_db"].input.read(cx).text(),
+                editor.fields[&EqField::Band(0, BandField::GainDb)]
+                    .input
+                    .read(cx)
+                    .text(),
                 "-23.04"
             );
         });
@@ -3670,11 +3787,23 @@ mod tests {
         press(cx, handle, "right");
         press(cx, handle, "up");
         editor.read_with(cx, |editor, cx| {
-            assert_eq!(editor.fields["band.0.stages"].input.read(cx).text(), "3");
+            assert_eq!(
+                editor.fields[&EqField::Band(0, BandField::Stages)]
+                    .input
+                    .read(cx)
+                    .text(),
+                "3"
+            );
         });
         press(cx, handle, "end");
         editor.read_with(cx, |editor, cx| {
-            assert_eq!(editor.fields["band.0.stages"].input.read(cx).text(), "4");
+            assert_eq!(
+                editor.fields[&EqField::Band(0, BandField::Stages)]
+                    .input
+                    .read(cx)
+                    .text(),
+                "4"
+            );
         });
         acknowledge_front(cx, &runtime, &owner, true);
         acknowledge_front(cx, &runtime, &owner, true);
@@ -3698,11 +3827,17 @@ mod tests {
         click(cx, handle, "eq-slider-band.0.frequency_hz");
         press(cx, handle, "end");
         editor.read_with(cx, |editor, cx| {
-            let text = editor.fields["band.0.frequency_hz"].input.read(cx).text();
-            let maximum = editor.band_numeric_range("band.0.frequency_hz").unwrap().1;
+            let text = editor.fields[&EqField::Band(0, BandField::FrequencyHz)]
+                .input
+                .read(cx)
+                .text();
+            let maximum = editor
+                .band_numeric_range(&EqField::Band(0, BandField::FrequencyHz))
+                .unwrap()
+                .1;
             assert_eq!(text.parse::<f64>().unwrap(), maximum);
-            assert!(editor.valid_live_draft("band.0.frequency_hz", text));
-            assert!(editor.fields["band.0.frequency_hz"].auto_pending);
+            assert!(editor.valid_live_draft(&EqField::Band(0, BandField::FrequencyHz), text));
+            assert!(editor.fields[&EqField::Band(0, BandField::FrequencyHz)].auto_pending);
         });
         assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
     }
@@ -3769,7 +3904,9 @@ mod tests {
         let (_directory, runtime, owner, editor, handle) = fixture_with_owner(cx);
         let id = select_node_target(cx, &runtime, &owner, &editor);
         draw(cx, handle);
-        let input = editor.read_with(cx, |editor, _| editor.fields["band.0.q"].input.clone());
+        let input = editor.read_with(cx, |editor, _| {
+            editor.fields[&EqField::Band(0, BandField::Q)].input.clone()
+        });
         enter_number(cx, handle, &input, "1.2");
         // The real parent reconciles while the graph command is still in flight.
         // Its serialization lock must not disable collection of newer native text.
@@ -3790,7 +3927,10 @@ mod tests {
             ));
         });
         editor.read_with(cx, |editor, _| {
-            assert_eq!(editor.fields["band.0.q"].draft_revision, Some(2));
+            assert_eq!(
+                editor.fields[&EqField::Band(0, BandField::Q)].draft_revision,
+                Some(2)
+            );
         });
         enter_number(cx, handle, &input, "3.4");
         assert!(
@@ -3810,9 +3950,18 @@ mod tests {
         draw(cx, handle);
         assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
         editor.read_with(cx, |editor, cx| {
-            assert!(editor.fields["band.0.q"].dirty);
-            assert_eq!(editor.fields["band.0.q"].input.read(cx).text(), "3.4");
-            assert_eq!(editor.fields["band.0.q"].draft_revision, Some(2));
+            assert!(editor.fields[&EqField::Band(0, BandField::Q)].dirty);
+            assert_eq!(
+                editor.fields[&EqField::Band(0, BandField::Q)]
+                    .input
+                    .read(cx)
+                    .text(),
+                "3.4"
+            );
+            assert_eq!(
+                editor.fields[&EqField::Band(0, BandField::Q)].draft_revision,
+                Some(2)
+            );
             assert_eq!(editor.revision, 3);
             assert_eq!(
                 editor.error.as_deref(),
@@ -3822,8 +3971,14 @@ mod tests {
         });
         owner.update(cx, |owner, cx| owner.discard_node_equalizer_drafts(id, cx));
         editor.read_with(cx, |editor, cx| {
-            assert!(!editor.fields["band.0.q"].dirty);
-            assert_eq!(editor.fields["band.0.q"].input.read(cx).text(), "1.2");
+            assert!(!editor.fields[&EqField::Band(0, BandField::Q)].dirty);
+            assert_eq!(
+                editor.fields[&EqField::Band(0, BandField::Q)]
+                    .input
+                    .read(cx)
+                    .text(),
+                "1.2"
+            );
             assert!(editor.error.is_none());
         });
         assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
@@ -3864,7 +4019,7 @@ mod tests {
         editor.read_with(cx, |editor, _| {
             assert_eq!(editor.field_drag.as_ref().unwrap().revision, 2);
             assert_eq!(editor.pointer_count.get(), 1);
-            assert!(!editor.fields["band.0.gain_db"].dirty);
+            assert!(!editor.fields[&EqField::Band(0, BandField::GainDb)].dirty);
         });
         assert!(
             futures::executor::block_on(runtime.handle.request_ack(Command::ProcessingGraphEdit {
@@ -3986,10 +4141,16 @@ mod tests {
                 assert_eq!(editor.field_drag.as_ref().unwrap().revision, 1);
                 assert_eq!(editor.pointer_count.get(), 1);
                 assert_eq!(
-                    editor.fields["band.0.gain_db"].input.read(cx).text(),
+                    editor.fields[&EqField::Band(0, BandField::GainDb)]
+                        .input
+                        .read(cx)
+                        .text(),
                     expected
                 );
-                assert_eq!(editor.fields["band.0.gain_db"].draft_revision, Some(1));
+                assert_eq!(
+                    editor.fields[&EqField::Band(0, BandField::GainDb)].draft_revision,
+                    Some(1)
+                );
             });
             assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
         }
@@ -4027,12 +4188,18 @@ mod tests {
         draw(cx, handle);
         editor.read_with(cx, |editor, cx| {
             assert!(editor.field_drag.is_none());
-            assert_eq!(editor.fields["band.0.gain_db"].draft_revision, Some(2));
             assert_eq!(
-                editor.fields["band.0.gain_db"].input.read(cx).text(),
+                editor.fields[&EqField::Band(0, BandField::GainDb)].draft_revision,
+                Some(2)
+            );
+            assert_eq!(
+                editor.fields[&EqField::Band(0, BandField::GainDb)]
+                    .input
+                    .read(cx)
+                    .text(),
                 "19.2"
             );
-            assert!(editor.fields["band.0.gain_db"].auto_pending);
+            assert!(editor.fields[&EqField::Band(0, BandField::GainDb)].auto_pending);
         });
         assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
         deliver_graph_ack(cx, &owner, success);
@@ -4101,10 +4268,16 @@ mod tests {
         editor.read_with(cx, |editor, cx| {
             assert_eq!(editor.field_drag.as_ref().unwrap().revision, 1);
             assert_eq!(
-                editor.fields["band.0.gain_db"].input.read(cx).text(),
+                editor.fields[&EqField::Band(0, BandField::GainDb)]
+                    .input
+                    .read(cx)
+                    .text(),
                 "14.4"
             );
-            assert_eq!(editor.fields["band.0.gain_db"].draft_revision, Some(1));
+            assert_eq!(
+                editor.fields[&EqField::Band(0, BandField::GainDb)].draft_revision,
+                Some(1)
+            );
         });
         let success = publish_graph_front(cx, &runtime, &owner);
         assert!(!success);
@@ -4127,12 +4300,18 @@ mod tests {
         draw(cx, handle);
         assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
         editor.read_with(cx, |editor, cx| {
-            assert!(editor.fields["band.0.gain_db"].dirty);
+            assert!(editor.fields[&EqField::Band(0, BandField::GainDb)].dirty);
             assert_eq!(
-                editor.fields["band.0.gain_db"].input.read(cx).text(),
+                editor.fields[&EqField::Band(0, BandField::GainDb)]
+                    .input
+                    .read(cx)
+                    .text(),
                 "14.4"
             );
-            assert_eq!(editor.fields["band.0.gain_db"].draft_revision, Some(1));
+            assert_eq!(
+                editor.fields[&EqField::Band(0, BandField::GainDb)].draft_revision,
+                Some(1)
+            );
         });
     }
 
@@ -4279,7 +4458,13 @@ mod tests {
         draw(cx, handle);
         editor.read_with(cx, |editor, cx| {
             assert!(editor.field_drag.is_some());
-            assert_eq!(editor.fields["band.0.gain_db"].input.read(cx).text(), "12");
+            assert_eq!(
+                editor.fields[&EqField::Band(0, BandField::GainDb)]
+                    .input
+                    .read(cx)
+                    .text(),
+                "12"
+            );
         });
         acknowledge_front(cx, &runtime, &owner, true);
         draw(cx, handle);
@@ -4315,7 +4500,9 @@ mod tests {
         let (_directory, runtime, owner, editor, handle) = fixture_with_owner(cx);
         owner.update(cx, |owner, _| owner.command_active = true);
         let input = editor.read_with(cx, |editor, _| {
-            editor.fields["band.0.gain_db"].input.clone()
+            editor.fields[&EqField::Band(0, BandField::GainDb)]
+                .input
+                .clone()
         });
         enter_number(cx, handle, &input, "-");
         let position = VisualTestContext::from_window(handle, cx)
@@ -4343,7 +4530,7 @@ mod tests {
                 cx,
             );
             assert_eq!(
-                editor.read(cx).fields["band.0.gain_db"]
+                editor.read(cx).fields[&EqField::Band(0, BandField::GainDb)]
                     .input
                     .read(cx)
                     .text(),
@@ -4376,8 +4563,14 @@ mod tests {
         editor.read_with(cx, |editor, cx| {
             assert!(editor.drag.is_none());
             assert_eq!(editor.pointer_count.get(), 0);
-            assert_eq!(editor.fields["band.0.gain_db"].input.read(cx).text(), "-");
-            assert!(editor.fields["band.0.gain_db"].dirty);
+            assert_eq!(
+                editor.fields[&EqField::Band(0, BandField::GainDb)]
+                    .input
+                    .read(cx)
+                    .text(),
+                "-"
+            );
+            assert!(editor.fields[&EqField::Band(0, BandField::GainDb)].dirty);
             assert_ne!(editor.config.bands[0].frequency_hz, 80.);
         });
         assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
@@ -4408,13 +4601,17 @@ mod tests {
             sibling
         });
         let gain = editor.read_with(cx, |editor, _| {
-            editor.fields["band.0.gain_db"].input.clone()
+            editor.fields[&EqField::Band(0, BandField::GainDb)]
+                .input
+                .clone()
         });
-        let q = sibling.read_with(cx, |editor, _| editor.fields["band.0.q"].input.clone());
+        let q = sibling.read_with(cx, |editor, _| {
+            editor.fields[&EqField::Band(0, BandField::Q)].input.clone()
+        });
         enter_number(cx, handle, &gain, "1");
         enter_number(cx, handle, &gain, "2");
         sibling.update(cx, |editor, cx| {
-            editor.set_live_value("band.0.gain_db", 3., cx)
+            editor.set_live_value(&EqField::Band(0, BandField::GainDb), 3., cx)
         });
         enter_number(cx, handle, &q, "-");
         owner.update(cx, |owner, cx| {
@@ -4427,7 +4624,7 @@ mod tests {
         });
         for entity in [&editor, &sibling] {
             entity.read_with(cx, |editor, _| {
-                assert!(editor.fields["band.0.gain_db"].auto_pending)
+                assert!(editor.fields[&EqField::Band(0, BandField::GainDb)].auto_pending)
             });
         }
         let issued = owner.update(cx, |owner, _| owner.commands.pop_front().unwrap());
@@ -4453,20 +4650,32 @@ mod tests {
         });
         for entity in [&editor, &sibling] {
             entity.read_with(cx, |editor, _| {
-                assert!(!editor.fields["band.0.gain_db"].dirty);
-                assert!(!editor.fields["band.0.gain_db"].auto_pending);
+                assert!(!editor.fields[&EqField::Band(0, BandField::GainDb)].dirty);
+                assert!(!editor.fields[&EqField::Band(0, BandField::GainDb)].auto_pending);
             });
         }
         sibling.read_with(cx, |editor, cx| {
-            assert!(editor.fields["band.0.q"].dirty);
-            assert_eq!(editor.fields["band.0.q"].input.read(cx).text(), "-");
+            assert!(editor.fields[&EqField::Band(0, BandField::Q)].dirty);
+            assert_eq!(
+                editor.fields[&EqField::Band(0, BandField::Q)]
+                    .input
+                    .read(cx)
+                    .text(),
+                "-"
+            );
         });
         acknowledge_front(cx, &runtime, &owner, true);
         for entity in [&editor, &sibling] {
             entity.read_with(cx, |editor, cx| {
                 assert_eq!(editor.config.bands[0].gain_db, 0.);
-                assert_eq!(editor.fields["band.0.gain_db"].input.read(cx).text(), "0");
-                assert!(!editor.fields["band.0.gain_db"].auto_pending);
+                assert_eq!(
+                    editor.fields[&EqField::Band(0, BandField::GainDb)]
+                        .input
+                        .read(cx)
+                        .text(),
+                    "0"
+                );
+                assert!(!editor.fields[&EqField::Band(0, BandField::GainDb)].auto_pending);
             });
         }
         assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
@@ -4746,7 +4955,7 @@ mod tests {
         press(cx, handle, "enter");
         owner.read_with(cx, |owner, cx| {
             assert!(owner.preset_popup.is_none());
-            assert_eq!(owner.fields["preset_name"].input.read(cx).text(), "Second");
+            assert_eq!(owner.fields[&FieldKey::PresetName].input.read(cx).text(), "Second");
             assert!(matches!(&owner.commands.back().unwrap().command,
                 Command::EqualizerEdit { edit: EqualizerEdit::LoadPreset { name } } if name == "Second"));
         });
@@ -4757,7 +4966,7 @@ mod tests {
             owner.read_with(cx, |owner, cx| {
                 assert!(owner.preset_popup.as_ref().unwrap().manage);
                 assert!(
-                    owner.fields["preset_name"]
+                    owner.fields[&FieldKey::PresetName]
                         .input
                         .read(cx)
                         .is_focused(window)
@@ -4767,7 +4976,9 @@ mod tests {
         .unwrap();
         cx.update_window(handle, |_, window, cx| {
             use gpui::EntityInputHandler as _;
-            let input = owner.read_with(cx, |owner, _| owner.fields["preset_name"].input.clone());
+            let input = owner.read_with(cx, |owner, _| {
+                owner.fields[&FieldKey::PresetName].input.clone()
+            });
             input.update(cx, |input, cx| {
                 input.replace_and_mark_text_in_range(None, "预设", None, window, cx)
             });
@@ -4844,9 +5055,9 @@ mod tests {
         // submissions without sending native commands or replacing the handler.
         owner.update(cx, |owner, _| owner.command_active = true);
         for (key, text, value, unmark) in [
-            ("preamp_db", "6", 6., true),
-            ("output_gain_db", "-3", -3., false),
-            ("band.0.q", "1.25", 1.25, true),
+            (&EqField::PreampDb, "6", 6., true),
+            (&EqField::OutputGainDb, "-3", -3., false),
+            (&EqField::Band(0, BandField::Q), "1.25", 1.25, true),
         ] {
             let input = editor.read_with(cx, |editor, _| editor.fields[key].input.clone());
             let before = owner.read_with(cx, |owner, _| owner.commands.len());
@@ -4881,12 +5092,12 @@ mod tests {
                 match &submission.command {
                     Command::EqualizerEdit {
                         edit: EqualizerEdit::PreampDb(gain),
-                    } if key == "preamp_db" => {
+                    } if key == &EqField::PreampDb => {
                         assert_eq!(*gain, value);
                     }
                     Command::EqualizerEdit {
                         edit: EqualizerEdit::OutputGainDb(gain),
-                    } if key == "output_gain_db" => {
+                    } if key == &EqField::OutputGainDb => {
                         assert_eq!(*gain, value);
                     }
                     Command::EqualizerEdit {
@@ -4895,11 +5106,11 @@ mod tests {
                                 index: 0,
                                 field: EqBandEdit::Q(q),
                             },
-                    } if key == "band.0.q" => assert_eq!(*q, value),
+                    } if key == &EqField::Band(0, BandField::Q) => assert_eq!(*q, value),
                     _ => panic!("unexpected numeric command"),
                 }
                 let field = submission.equalizer_field.as_ref().unwrap();
-                assert_eq!(field.key, key);
+                assert_eq!(field.key, *key);
                 assert_eq!(field.text, text);
             });
             // Repeated unmark, redraw and scheduling do not duplicate the commit.
@@ -4921,7 +5132,9 @@ mod tests {
     fn preedit_interrupts_a_queued_gain_submission_until_unchanged_commit(cx: &mut TestAppContext) {
         let (_directory, _runtime, owner, editor, handle) = fixture_with_owner(cx);
         owner.update(cx, |owner, _| owner.command_active = true);
-        let input = editor.read_with(cx, |editor, _| editor.fields["preamp_db"].input.clone());
+        let input = editor.read_with(cx, |editor, _| {
+            editor.fields[&EqField::PreampDb].input.clone()
+        });
         cx.update_window(handle, |_, window, cx| {
             input.update(cx, |input, cx| {
                 let end = input.text().encode_utf16().count();
@@ -4933,7 +5146,7 @@ mod tests {
             // preedit notification itself has not run when that gain defer runs.
             cx.defer(move |cx| {
                 assert!(editor.read(cx).live_submission_scheduled);
-                assert!(editor.read(cx).fields["preamp_db"].auto_pending);
+                assert!(editor.read(cx).fields[&EqField::PreampDb].auto_pending);
                 handle
                     .update(cx, |_, window, cx| {
                         input.update(cx, |input, cx| {
@@ -5055,7 +5268,9 @@ mod tests {
         // Focusing an input must keep Delete within its native editing path,
         // even though the curve node remains selected.
         let input = editor.read_with(cx, |editor, _| {
-            editor.fields["band.2.frequency_hz"].input.clone()
+            editor.fields[&EqField::Band(2, BandField::FrequencyHz)]
+                .input
+                .clone()
         });
         cx.update_window(handle, |_, window, cx| {
             input.update(cx, |input, cx| input.focus_and_select_all(window, cx));
@@ -5133,13 +5348,16 @@ mod tests {
         );
         editor.read_with(cx, |editor, _| {
             assert_eq!(editor.band, index);
-            for name in ["frequency_hz", "gain_db", "q", "channels"] {
-                assert!(editor.fields.contains_key(&format!("band.{index}.{name}")));
+            for name in [
+                BandField::FrequencyHz,
+                BandField::GainDb,
+                BandField::Q,
+                BandField::Channels,
+            ] {
+                assert!(editor.fields.contains_key(&EqField::Band(index, name)));
             }
             assert!(editor.fields.iter().all(|(key, field)| {
-                !key.starts_with("band.")
-                    || key.starts_with(&format!("band.{index}."))
-                    || field.dirty
+                key.band_index().is_none_or(|band| band == index) || field.dirty
             }));
         });
     }
@@ -5179,12 +5397,12 @@ mod tests {
         let (_directory, _runtime, editor, handle) = fixture(cx);
         let inputs = editor.read_with(cx, |editor, _| {
             [
-                "preamp_db",
-                "output_gain_db",
-                "band.0.frequency_hz",
-                "band.0.gain_db",
-                "band.0.q",
-                "band.0.channels",
+                &EqField::PreampDb,
+                &EqField::OutputGainDb,
+                &EqField::Band(0, BandField::FrequencyHz),
+                &EqField::Band(0, BandField::GainDb),
+                &EqField::Band(0, BandField::Q),
+                &EqField::Band(0, BandField::Channels),
             ]
             .map(|key| (key, editor.fields[key].input.clone()))
         });
@@ -5194,7 +5412,7 @@ mod tests {
                     input.focus_and_select_all(window, cx);
                     input.replace_text_in_range(
                         None,
-                        if *key == "band.0.frequency_hz" {
+                        if *key == &EqField::Band(0, BandField::FrequencyHz) {
                             "invalid"
                         } else {
                             "4.75"
@@ -5238,8 +5456,8 @@ mod tests {
         editor.update(cx, |editor, cx| {
             assert!(editor.config_locked());
             assert!(editor.error.is_none());
-            editor.apply_field("band.0.frequency_hz", cx);
-            editor.step_field("band.0.gain_db", 0.5, cx);
+            editor.apply_field(&EqField::Band(0, BandField::FrequencyHz), cx);
+            editor.step_field(&EqField::Band(0, BandField::GainDb), 0.5, cx);
             assert!(
                 editor.error.is_none(),
                 "locked fields must not even validate drafts"
@@ -5261,14 +5479,17 @@ mod tests {
         draw(cx, handle);
         editor.update(cx, |editor, cx| {
             assert!(!editor.config_locked());
-            editor.apply_field("band.0.frequency_hz", cx);
+            editor.apply_field(&EqField::Band(0, BandField::FrequencyHz), cx);
             assert!(
                 editor.error.is_some(),
                 "reenabled fields validate preserved drafts"
             );
-            editor.step_field("band.0.gain_db", 0.5, cx);
+            editor.step_field(&EqField::Band(0, BandField::GainDb), 0.5, cx);
             assert_eq!(
-                editor.fields["band.0.gain_db"].input.read(cx).text(),
+                editor.fields[&EqField::Band(0, BandField::GainDb)]
+                    .input
+                    .read(cx)
+                    .text(),
                 "5.25"
             );
         });
@@ -5360,7 +5581,9 @@ mod tests {
         click(cx, handle, "eq-node-7-2");
         assert_selected(cx, &editor, handle, 2);
         let input = editor.read_with(cx, |editor, _| {
-            editor.fields["band.2.gain_db"].input.clone()
+            editor.fields[&EqField::Band(2, BandField::GainDb)]
+                .input
+                .clone()
         });
         cx.update_window(handle, |_, window, cx| {
             input.update(cx, |input, cx| input.focus_and_select_all(window, cx));
@@ -5370,14 +5593,14 @@ mod tests {
         cx.simulate_keystrokes(handle, "4 . 7 5");
         draw(cx, handle);
         editor.read_with(cx, |editor, cx| {
-            let field = &editor.fields["band.2.gain_db"];
+            let field = &editor.fields[&EqField::Band(2, BandField::GainDb)];
             assert!(field.dirty);
             assert_eq!(field.input.read(cx).text(), "4.75");
         });
         click(cx, handle, "eq-node-7-0");
         assert_selected(cx, &editor, handle, 0);
         editor.read_with(cx, |editor, cx| {
-            let draft = &editor.fields["band.2.gain_db"];
+            let draft = &editor.fields[&EqField::Band(2, BandField::GainDb)];
             assert_eq!(draft.input, input);
             assert!(draft.dirty);
             assert_eq!(draft.input.read(cx).text(), "4.75");
@@ -5387,7 +5610,8 @@ mod tests {
         click(cx, handle, "eq-node-7-2");
         assert_selected(cx, &editor, handle, 2);
         assert_eq!(
-            editor.read_with(cx, |editor, _| editor.fields["band.2.gain_db"]
+            editor.read_with(cx, |editor, _| editor.fields
+                [&EqField::Band(2, BandField::GainDb)]
                 .input
                 .clone()),
             input
@@ -5405,7 +5629,9 @@ mod tests {
             assert!(!editor.config.bands[1].enabled);
             (
                 editor.band_focus[1].as_ref().unwrap().handle.clone(),
-                editor.fields["band.1.frequency_hz"].input.clone(),
+                editor.fields[&EqField::Band(1, BandField::FrequencyHz)]
+                    .input
+                    .clone(),
                 editor.config.clone(),
             )
         });
@@ -5416,7 +5642,10 @@ mod tests {
             assert_selected(cx, &editor, handle, 1);
             editor.read_with(cx, |editor, _| {
                 assert_eq!(editor.band_focus[1].as_ref().unwrap().handle, focus);
-                assert_eq!(editor.fields["band.1.frequency_hz"].input, input);
+                assert_eq!(
+                    editor.fields[&EqField::Band(1, BandField::FrequencyHz)].input,
+                    input
+                );
             });
             cx.update_window(handle, |_, window, _| assert!(focus.is_focused(window)))
                 .unwrap();
@@ -5447,7 +5676,9 @@ mod tests {
         text: &str,
     ) {
         use gpui::EntityInputHandler as _;
-        let input = editor.read_with(cx, |editor, _| editor.fields["band_count"].input.clone());
+        let input = editor.read_with(cx, |editor, _| {
+            editor.fields[&EqField::BandCount].input.clone()
+        });
         cx.update_window(handle, |_, window, cx| {
             input.update(cx, |input, cx| {
                 input.focus_and_select_all(window, cx);
@@ -5514,7 +5745,9 @@ mod tests {
             enter_band_count(cx, &editor, handle, text);
             assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
         }
-        let input = editor.read_with(cx, |editor, _| editor.fields["band_count"].input.clone());
+        let input = editor.read_with(cx, |editor, _| {
+            editor.fields[&EqField::BandCount].input.clone()
+        });
         cx.update_window(handle, |_, window, cx| {
             use gpui::EntityInputHandler as _;
             input.update(cx, |input, cx| {
@@ -5551,7 +5784,9 @@ mod tests {
     fn reducing_total_count_preserves_prefix_drafts_and_clamps_selection(cx: &mut TestAppContext) {
         let (_directory, _runtime, editor, handle) = fixture(cx);
         let input = editor.read_with(cx, |editor, _| {
-            editor.fields["band.0.frequency_hz"].input.clone()
+            editor.fields[&EqField::Band(0, BandField::FrequencyHz)]
+                .input
+                .clone()
         });
         cx.update_window(handle, |_, window, cx| {
             use gpui::EntityInputHandler as _;
@@ -5572,10 +5807,17 @@ mod tests {
         draw(cx, handle);
         assert_selected(cx, &editor, handle, 0);
         editor.read_with(cx, |editor, cx| {
-            assert_eq!(editor.fields["band.0.frequency_hz"].input, input);
+            assert_eq!(
+                editor.fields[&EqField::Band(0, BandField::FrequencyHz)].input,
+                input
+            );
             assert_eq!(input.read(cx).text(), "123");
-            assert!(editor.fields["band.0.frequency_hz"].dirty);
-            assert!(!editor.fields.contains_key("band.2.frequency_hz"));
+            assert!(editor.fields[&EqField::Band(0, BandField::FrequencyHz)].dirty);
+            assert!(
+                !editor
+                    .fields
+                    .contains_key(&EqField::Band(2, BandField::FrequencyHz))
+            );
         });
     }
 
@@ -5584,7 +5826,7 @@ mod tests {
         let mut edits = HashMap::new();
         assert!(merge_draft_edit(
             &mut edits,
-            "band.0.gain_db",
+            &EqField::Band(0, BandField::GainDb),
             EqualizerEdit::BandField {
                 index: 0,
                 field: EqBandEdit::GainDb(3.25),
@@ -5592,7 +5834,7 @@ mod tests {
         ));
         assert!(merge_draft_edit(
             &mut edits,
-            "band.0.gain_db",
+            &EqField::Band(0, BandField::GainDb),
             EqualizerEdit::BandField {
                 index: 0,
                 field: EqBandEdit::GainDb(3.25),
@@ -5600,7 +5842,7 @@ mod tests {
         ));
         assert!(!merge_draft_edit(
             &mut edits,
-            "band.0.gain_db",
+            &EqField::Band(0, BandField::GainDb),
             EqualizerEdit::BandField {
                 index: 0,
                 field: EqBandEdit::GainDb(-2.),
