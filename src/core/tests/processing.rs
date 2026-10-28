@@ -2763,6 +2763,63 @@ fn playback_bypass_does_not_relax_mix_source_admission() {
 }
 
 #[test]
+fn quarantined_mix_completion_does_not_persist_pending_queue_selection() {
+    let (directory, mut core) = fixture();
+    source(directory.path());
+    prepare_mix(&mut core);
+    let commands = recording_audio(&mut core);
+    let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+    let saved_current = core.store.queue_state().unwrap().current_id;
+    connection
+        .execute_batch(
+            "CREATE TRIGGER reject_queue_selection BEFORE UPDATE ON rivu_meta
+             BEGIN SELECT RAISE(ABORT, 'queue selection rejected'); END;",
+        )
+        .unwrap();
+    assert!(core.command(Command::Play { track_id: 1 }).is_err());
+    while !matches!(
+        commands.recv_timeout(Duration::from_secs(10)).unwrap(),
+        AudioCommand::Load { .. }
+    ) {}
+    assert!(core.queue_current_pending);
+    connection
+        .execute_batch("DROP TRIGGER reject_queue_selection")
+        .unwrap();
+    core.audition_processing(1, AuditionMode::Mix, 0.0, 0.0)
+        .unwrap();
+    let event = mix_completion(&mut core);
+    let crate::processing::Event::MixFinished {
+        result: Ok(path), ..
+    } = &event
+    else {
+        panic!("expected rendered mix");
+    };
+    let path = path.clone();
+    let generation = core.generation;
+    let cache_bytes = core.processing.results[0].cache_bytes;
+    core.database_outcome_uncertain();
+    core.processing_event(event);
+    assert_eq!(core.store.queue_state().unwrap().current_id, saved_current);
+    assert!(core.queue_current_pending);
+    assert_eq!(core.generation, generation);
+    assert!(commands.try_recv().is_err());
+    assert!(core.processing.audition.is_none());
+    assert!(core.processing.results[0].mix.is_none());
+    assert_eq!(core.processing.results[0].cache_bytes, cache_bytes);
+    assert!(!path.exists());
+    let status = core.processing_status(1).unwrap();
+    assert_eq!(status.phase, ProcessingPhase::Failed);
+    assert!(
+        status
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("Database outcome is uncertain")
+    );
+    assert_eq!(terminal_wait(&mut core, 1), status);
+}
+
+#[test]
 fn processing_mix_ack_reports_admission_but_synchronous_audition_does_not() {
     let (directory, mut core) = fixture();
     source(directory.path());

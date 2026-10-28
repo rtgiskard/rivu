@@ -838,13 +838,15 @@ impl Core {
                     Ok(path) if !cancelled && (!requested || generation == self.generation) => {
                         let bytes = std::fs::metadata(&path).map(|metadata| metadata.len());
                         let outcome = bytes.map_err(anyhow::Error::from).and_then(|bytes| {
-                            let source = self
-                                .processing
-                                .results
-                                .iter()
-                                .find(|r| r.status.id == id)
-                                .context("Processing result is no longer retained")?;
-                            self.processing_source(source)?;
+                            if !requested {
+                                let source = self
+                                    .processing
+                                    .results
+                                    .iter()
+                                    .find(|r| r.status.id == id)
+                                    .context("Processing result is no longer retained")?;
+                                self.processing_source(source)?;
+                            }
                             let retained = self
                                 .processing
                                 .results
@@ -871,7 +873,7 @@ impl Core {
                                 .find(|r| r.status.id == id)
                             {
                                 result.cache_bytes += *bytes;
-                                if let Some(old) = result.mix.replace(path.clone()) {
+                                if let Some(old) = result.mix.replace(path) {
                                     let old_bytes = std::fs::metadata(&old)
                                         .map_or(0, |metadata| metadata.len());
                                     if std::fs::remove_file(old).is_ok() {
@@ -1030,6 +1032,10 @@ impl Core {
         path: Option<PathBuf>,
         graph: Option<audio::GraphRunner>,
     ) -> Result<()> {
+        ensure!(
+            !self.database_unavailable,
+            "Database outcome is uncertain; restart Rivu before publishing processing results"
+        );
         self.ensure_queue_control_ready()?;
         let status = self
             .processing_status(id)

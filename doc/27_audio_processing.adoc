@@ -497,6 +497,10 @@ of leaving the task active indefinitely. Neural interpreter children are
 terminated and reaped before failure delivery. Core applies cancellation and
 source validation, commits the terminal status, and only then completes task waits.
 
+If a database outcome is uncertain, audition is rejected before queue recovery
+can access the database. A late stem mix is discarded without committing a
+pending queue selection or replacing current playback.
+
 Processing and stem-mix workers are established before their retirement barrier
 enters the bounded reclamation mailbox. A thread-spawn failure returns to Core
 without leaving queued work, so repeated retries cannot consume retirement
