@@ -722,6 +722,16 @@ media-cover/MPRIS disk paths and encoded-file maintenance are unchanged.
 
 == Font and rendering resources
 
+=== Native graphics preparation
+
+Native window creation selects instance, surface and device together. Vulkan
+hardware must configure the real surface successfully to avoid initializing GL.
+If it cannot, GL hardware is tried before either backend's software adapters.
+Each backend is initialized at most once per preparation; software fallback
+reuses the prepared instance and surface. Device recovery rejects software
+adapters, and additional windows reuse an existing healthy shared context's
+originating instance rather than choosing a new backend.
+
 === Font data and glyphs
 
 Font retention is independent of `visualizations.cache` and Still Mode.

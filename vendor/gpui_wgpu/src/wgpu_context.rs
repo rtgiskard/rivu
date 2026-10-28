@@ -126,53 +126,129 @@ pub struct CompositorGpuHint {
     pub device_id: u32,
 }
 
+/// Only initialize GL after every Vulkan hardware candidate failed. Software adapters
+/// are a last resort across both backends, not a reason to skip hardware GL.
+#[cfg(not(target_family = "wasm"))]
+fn select_native_backend<T>(
+    reject_software: bool,
+    mut try_backend: impl FnMut(wgpu::Backends, bool) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let mut last_error = None;
+    for software_only in [false, true] {
+        if software_only && reject_software {
+            break;
+        }
+        for backend in [wgpu::Backends::VULKAN, wgpu::Backends::GL] {
+            match try_backend(backend, software_only) {
+                Ok(prepared) => return Ok(prepared),
+                Err(error) => {
+                    log::info!(
+                        "No usable {backend:?} {} adapter: {error:#}",
+                        if software_only { "software" } else { "hardware" },
+                    );
+                    last_error = Some(error);
+                }
+            }
+        }
+    }
+    Err(last_error.unwrap().context("No usable native GPU backend found"))
+}
+
 impl WgpuContext {
+    /// Prepare a surface and its device together, initializing GL only if Vulkan
+    /// cannot provide a usable hardware device for this window.
     #[cfg(not(target_family = "wasm"))]
-    pub fn new(
-        instance: wgpu::Instance,
-        surface: &wgpu::Surface<'_>,
+    pub fn for_window<W>(
+        window: &W,
         compositor_gpu: Option<CompositorGpuHint>,
-    ) -> anyhow::Result<Self> {
-        Self::new_with_options(instance, surface, compositor_gpu, false)
+    ) -> anyhow::Result<(Self, wgpu::Surface<'static>)>
+    where
+        W: raw_window_handle::HasWindowHandle
+            + raw_window_handle::HasDisplayHandle
+            + std::fmt::Debug
+            + Send
+            + Sync
+            + Clone
+            + 'static,
+    {
+        Self::new_with_options(window, compositor_gpu, false)
     }
 
     #[cfg(not(target_family = "wasm"))]
-    pub fn new_rejecting_software(
-        instance: wgpu::Instance,
-        surface: &wgpu::Surface<'_>,
+    pub fn for_window_rejecting_software<W>(
+        window: &W,
         compositor_gpu: Option<CompositorGpuHint>,
-    ) -> anyhow::Result<Self> {
-        Self::new_with_options(instance, surface, compositor_gpu, true)
+    ) -> anyhow::Result<(Self, wgpu::Surface<'static>)>
+    where
+        W: raw_window_handle::HasWindowHandle
+            + raw_window_handle::HasDisplayHandle
+            + std::fmt::Debug
+            + Send
+            + Sync
+            + Clone
+            + 'static,
+    {
+        Self::new_with_options(window, compositor_gpu, true)
     }
 
     #[cfg(not(target_family = "wasm"))]
-    fn new_with_options(
-        instance: wgpu::Instance,
-        surface: &wgpu::Surface<'_>,
+    fn new_with_options<W>(
+        window: &W,
         compositor_gpu: Option<CompositorGpuHint>,
         reject_software: bool,
-    ) -> anyhow::Result<Self> {
+    ) -> anyhow::Result<(Self, wgpu::Surface<'static>)>
+    where
+        W: raw_window_handle::HasWindowHandle
+            + raw_window_handle::HasDisplayHandle
+            + std::fmt::Debug
+            + Send
+            + Sync
+            + Clone
+            + 'static,
+    {
         let device_id_filter = Self::device_id_filter();
+        let mut vulkan = None;
+        let mut gl = None;
+        select_native_backend(reject_software, |backend, software_only| {
+            let prepared = if backend == wgpu::Backends::VULKAN {
+                &mut vulkan
+            } else {
+                &mut gl
+            };
+            // Keep each initialized instance/surface for the software pass. In
+            // particular, never initialize either backend twice during one attempt.
+            let (instance, surface) = prepared
+                .get_or_insert_with(|| {
+                    let instance = Self::instance(Some(Box::new(window.clone())), backend);
+                    let surface = instance
+                        .create_surface(window.clone())
+                        .context("Failed to create native graphics surface")?;
+                    Ok::<_, anyhow::Error>((instance, surface))
+                })
+                .as_ref()
+                .map_err(|error| anyhow::anyhow!("{error:#}"))?;
 
-        // Select an adapter by actually testing surface configuration with the real device.
-        // This is the only reliable way to determine compatibility on hybrid GPU systems.
-        let (adapter, device, queue, dual_source_blending, color_texture_format) =
-            gpui::block_on(Self::select_adapter_and_device(
-                &instance,
-                device_id_filter,
-                surface,
-                compositor_gpu.as_ref(),
-                reject_software,
-            ))?;
-
-        Ok(Self::from_native_adapter_and_device(
-            instance,
-            adapter,
-            device,
-            queue,
-            dual_source_blending,
-            color_texture_format,
-        ))
+            // Success means the real device has configured this exact surface,
+            // not merely that an adapter or compatible format was discovered.
+            let (adapter, device, queue, dual_source_blending, color_texture_format) =
+                gpui::block_on(Self::select_adapter_and_device(
+                    instance,
+                    device_id_filter,
+                    surface,
+                    compositor_gpu.as_ref(),
+                    software_only,
+                ))?;
+            let (instance, surface) = prepared.take().unwrap()?;
+            let context = Self::from_native_adapter_and_device(
+                instance,
+                adapter,
+                device,
+                queue,
+                dual_source_blending,
+                color_texture_format,
+            );
+            Ok((context, surface))
+        })
     }
 
     #[cfg(all(
@@ -202,65 +278,77 @@ impl WgpuContext {
         any(test, feature = "bench-support", feature = "test-support")
     ))]
     fn create_headless() -> anyhow::Result<(Self, wgpu::TextureFormat)> {
-        let instance = Self::instance(None);
         let device_id_filter = Self::device_id_filter();
-        let (adapter, device, queue, dual_source_blending, color_texture_format, target_format) =
-            gpui::block_on(async {
-                let mut adapters = instance.enumerate_adapters(wgpu::Backends::all()).await;
-                Self::sort_adapters(&mut adapters, device_id_filter, None);
+        let mut vulkan = None;
+        let mut gl = None;
+        select_native_backend(false, |backend, software_only| {
+            let instance = if backend == wgpu::Backends::VULKAN {
+                &mut vulkan
+            } else {
+                &mut gl
+            }
+            .get_or_insert_with(|| Self::instance(None, backend));
+            let (adapter, device, queue, dual_source_blending, color_texture_format, target_format) =
+                gpui::block_on(async {
+                    let mut adapters = instance.enumerate_adapters(backend).await;
+                    Self::sort_adapters(&mut adapters, device_id_filter, None);
 
-                for adapter in adapters {
-                    let adapter_info = adapter.get_info();
-                    let Some(target_format) = Self::headless_target_format(&adapter) else {
-                        log::warn!(
-                            "Adapter {:?} has no supported headless render target format",
-                            adapter_info.name
-                        );
-                        continue;
-                    };
+                    for adapter in adapters {
+                        let adapter_info = adapter.get_info();
+                        if (adapter_info.device_type == wgpu::DeviceType::Cpu) != software_only {
+                            continue;
+                        }
+                        let Some(target_format) = Self::headless_target_format(&adapter) else {
+                            log::warn!(
+                                "Adapter {:?} has no supported headless render target format",
+                                adapter_info.name
+                            );
+                            continue;
+                        };
 
-                    match Self::create_device(&adapter).await {
-                        Ok((device, queue, dual_source_blending, color_texture_format)) => {
-                            #[cfg(feature = "bench-support")]
-                            if adapter_info.device_type == wgpu::DeviceType::Cpu {
-                                log::error!(
-                                    "Headless renderer selected software adapter {:?}; \
-                                     benchmark results measure CPU software rendering, not hardware GPU rendering",
+                        match Self::create_device(&adapter).await {
+                            Ok((device, queue, dual_source_blending, color_texture_format)) => {
+                                #[cfg(feature = "bench-support")]
+                                if adapter_info.device_type == wgpu::DeviceType::Cpu {
+                                    log::error!(
+                                        "Headless renderer selected software adapter {:?}; \
+                                         benchmark results measure CPU software rendering, not hardware GPU rendering",
+                                        adapter_info.name
+                                    );
+                                }
+                                return Ok((
+                                    adapter,
+                                    device,
+                                    queue,
+                                    dual_source_blending,
+                                    color_texture_format,
+                                    target_format,
+                                ));
+                            }
+                            Err(error) => {
+                                log::warn!(
+                                    "Failed to create a headless device for adapter {:?}: {error:#}",
                                     adapter_info.name
                                 );
                             }
-                            return Ok((
-                                adapter,
-                                device,
-                                queue,
-                                dual_source_blending,
-                                color_texture_format,
-                                target_format,
-                            ));
-                        }
-                        Err(error) => {
-                            log::warn!(
-                                "Failed to create a headless device for adapter {:?}: {error:#}",
-                                adapter_info.name
-                            );
                         }
                     }
-                }
 
-                anyhow::bail!("No usable headless GPU adapter found")
-            })?;
+                    anyhow::bail!("No usable headless GPU adapter found")
+                })?;
 
-        Ok((
-            Self::from_native_adapter_and_device(
-                instance,
-                adapter,
-                device,
-                queue,
-                dual_source_blending,
-                color_texture_format,
-            ),
-            target_format,
-        ))
+            Ok((
+                Self::from_native_adapter_and_device(
+                    instance.clone(),
+                    adapter,
+                    device,
+                    queue,
+                    dual_source_blending,
+                    color_texture_format,
+                ),
+                target_format,
+            ))
+        })
     }
 
     #[cfg(all(
@@ -469,9 +557,12 @@ impl WgpuContext {
     }
 
     #[cfg(not(target_family = "wasm"))]
-    pub fn instance(display: Option<Box<dyn wgpu::wgt::WgpuHasDisplayHandle>>) -> wgpu::Instance {
+    fn instance(
+        display: Option<Box<dyn wgpu::wgt::WgpuHasDisplayHandle>>,
+        backends: wgpu::Backends,
+    ) -> wgpu::Instance {
         wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
+            backends,
             flags: wgpu::InstanceFlags::default(),
             backend_options: wgpu::BackendOptions::default(),
             memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
@@ -505,7 +596,7 @@ impl WgpuContext {
         device_id_filter: Option<u32>,
         surface: &wgpu::Surface<'_>,
         compositor_gpu: Option<&CompositorGpuHint>,
-        reject_software: bool,
+        software_only: bool,
     ) -> anyhow::Result<(
         wgpu::Adapter,
         wgpu::Device,
@@ -543,12 +634,7 @@ impl WgpuContext {
         for adapter in adapters {
             let info = adapter.get_info();
 
-            if reject_software && info.device_type == wgpu::DeviceType::Cpu {
-                log::info!(
-                    "Skipping software renderer: {} ({:?})",
-                    info.name,
-                    info.backend
-                );
+            if (info.device_type == wgpu::DeviceType::Cpu) != software_only {
                 continue;
             }
 
@@ -767,6 +853,82 @@ fn parse_pci_id(id: &str) -> anyhow::Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::{DeviceErrorState, parse_pci_id};
+
+    #[test]
+    fn native_vulkan_success_never_initializes_gl() {
+        let mut attempts = Vec::new();
+        super::select_native_backend(false, |backend, software_only| {
+            attempts.push((backend, software_only));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(attempts, [(wgpu::Backends::VULKAN, false)]);
+    }
+
+    #[test]
+    fn native_gl_hardware_precedes_vulkan_software() {
+        let mut attempts = Vec::new();
+        let backend = super::select_native_backend(false, |backend, software_only| {
+            attempts.push((backend, software_only));
+            if backend == wgpu::Backends::GL {
+                Ok(backend)
+            } else {
+                anyhow::bail!("only software Vulkan adapters are available")
+            }
+        })
+        .unwrap();
+        assert_eq!(backend, wgpu::Backends::GL);
+        assert_eq!(
+            attempts,
+            [(wgpu::Backends::VULKAN, false), (wgpu::Backends::GL, false)]
+        );
+    }
+
+    #[test]
+    fn native_backend_failures_preserve_bounded_software_fallback() {
+        let mut attempts = Vec::new();
+        let result: anyhow::Result<()> = super::select_native_backend(false, |backend, software| {
+            attempts.push((backend, software));
+            anyhow::bail!("surface creation, device creation, or configuration failed")
+        });
+        assert!(result.is_err());
+        assert_eq!(
+            attempts,
+            [
+                (wgpu::Backends::VULKAN, false),
+                (wgpu::Backends::GL, false),
+                (wgpu::Backends::VULKAN, true),
+                (wgpu::Backends::GL, true),
+            ]
+        );
+
+        let mut attempts = Vec::new();
+        let backend = super::select_native_backend(false, |backend, software| {
+            attempts.push((backend, software));
+            if software {
+                Ok(backend)
+            } else {
+                anyhow::bail!("no hardware adapter can configure the surface")
+            }
+        })
+        .unwrap();
+        assert_eq!(backend, wgpu::Backends::VULKAN);
+        assert_eq!(attempts.len(), 3);
+    }
+
+    #[test]
+    fn native_recovery_never_attempts_software() {
+        let mut attempts = Vec::new();
+        let result: anyhow::Result<()> = super::select_native_backend(true, |backend, software| {
+            attempts.push((backend, software));
+            anyhow::bail!("hardware device unavailable")
+        });
+        assert!(result.is_err());
+        assert_eq!(
+            attempts,
+            [(wgpu::Backends::VULKAN, false), (wgpu::Backends::GL, false)]
+        );
+    }
 
     #[test]
     fn device_errors_are_observed_independently() {
