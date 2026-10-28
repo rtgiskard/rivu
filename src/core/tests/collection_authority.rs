@@ -140,24 +140,30 @@ fn collection_transfer_rollback_preserves_all_tokens_and_rows() {
          BEGIN SELECT RAISE(ABORT,'playlist insertion refused'); END;",
         )
         .unwrap();
-    for destination in [
-        CollectionDestination::Queue { insertion: None },
-        CollectionDestination::Playlist {
-            playlist_id: 2,
-            revision: scopes[&2],
-            index: None,
-        },
+    for (destination, failure_marker) in [
+        (
+            CollectionDestination::Queue { insertion: None },
+            "queue insertion refused",
+        ),
+        (
+            CollectionDestination::Playlist {
+                playlist_id: 2,
+                revision: scopes[&2],
+                index: None,
+            },
+            "playlist insertion refused",
+        ),
     ] {
-        assert!(
-            core.command(Command::TransferCollection {
+        let error = core
+            .command(Command::TransferCollection {
                 source: CollectionSource::Playlist {
                     playlist_id: 1,
-                    revision: scopes[&1]
+                    revision: scopes[&1],
                 },
                 destination,
             })
-            .is_err()
-        );
+            .unwrap_err();
+        assert!(format!("{error:#}").contains(failure_marker));
         assert_eq!(core.state.query_revisions(), before);
         assert!(Arc::ptr_eq(
             &core.state.library.playlist_entry_revisions,

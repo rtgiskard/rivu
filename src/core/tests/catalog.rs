@@ -1639,6 +1639,7 @@ fn scan_of_one_root_ignores_an_unavailable_configured_root() {
     let (directory, mut core) = fixture();
     let source = directory.path().join("1.wav");
     write_pcm(&source);
+    let duration_before = core.track(1).unwrap().duration;
     Arc::make_mut(&mut core.state.system.config)
         .library_roots
         .push(directory.path().join("offline/Music"));
@@ -1648,8 +1649,15 @@ fn scan_of_one_root_ignores_an_unavailable_configured_root() {
     })
     .unwrap();
     assert!(settle_scan(&mut core));
-    assert_eq!(core.track(1).unwrap().path, source);
-    assert!(!core.track(1).unwrap().missing);
+    let track = core.track(1).unwrap();
+    assert_eq!(track.path, source);
+    assert!(!track.missing);
+    assert_ne!(track.duration, duration_before);
+    assert!(
+        track
+            .duration
+            .is_some_and(|duration| duration > 0.0 && duration < 1.0)
+    );
 }
 
 #[test]
@@ -2101,6 +2109,15 @@ fn import_input_failures_are_terminal_tasks_without_database_changes() {
             "invalid_utf8" => std::fs::write(&path, [0xff]).unwrap(),
             _ => unreachable!(),
         }
+        // Check the failing boundary, not the full user-facing error chain.
+        let expected_source = match kind {
+            "missing" => std::fs::File::open(&path).unwrap_err().to_string(),
+            "fifo" | "nested_fifo" => "not an ordinary file".into(),
+            "oversized" => "input exceeds".into(),
+            "expansion" => "import expansion exceeds".into(),
+            "invalid_utf8" => "UTF-8".into(),
+            _ => unreachable!(),
+        };
         let before = core.state.query_revisions();
         core.command(Command::ImportPlaylist {
             path,
@@ -2111,7 +2128,8 @@ fn import_input_failures_are_terminal_tasks_without_database_changes() {
         assert!(!settle_scan(&mut core));
         let status = core.scan_results.back().unwrap();
         assert_eq!(status.progress.phase, ScanPhase::Failed);
-        assert!(status.error.is_some());
+        let error = status.error.as_deref().unwrap();
+        assert!(error.contains(&expected_source), "{kind}: {error}");
         assert_eq!(core.state.query_revisions(), before);
         assert_eq!(core.store.track_count().unwrap(), 4);
         assert_eq!(

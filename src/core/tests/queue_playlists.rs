@@ -1502,7 +1502,6 @@ fn failed_queue_moves_preserve_memory_order_current_history_and_revision() {
         assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
         assert_eq!(core.played, [1, 3, 5]);
         assert_eq!(core.played_cursor, 2);
-        assert_queue_saved(&core);
     }
 }
 
@@ -1602,11 +1601,14 @@ fn randomize_changes_order_without_changing_current_or_history() {
     core.played = vec![1, 3, 5];
     core.played_cursor = 2;
     let generation = core.generation;
-    let mut expected = core.queue_ids.clone();
+    let original = core.queue_ids.clone();
     core.randomize_queue(&mut rand::rngs::StdRng::seed_from_u64(42))
         .unwrap();
+    assert_ne!(core.queue_ids, original);
+    assert_queue_saved(&core);
     let mut actual = core.queue_ids.clone();
     actual.sort_unstable();
+    let mut expected = original;
     expected.sort_unstable();
     assert_eq!(actual, expected);
     assert_eq!(core.state.queue.current_id, Some(3));

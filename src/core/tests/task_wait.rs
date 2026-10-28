@@ -130,31 +130,6 @@ fn worker_completion_does_not_return_before_scan_owner_commits_state() {
 }
 
 #[test]
-fn cancelled_queued_registration_cannot_resurrect_or_consume_recovered_capacity() {
-    let (directory, mut core) = fixture();
-    let path = directory.path().join("1.wav");
-    write_pcm(&path);
-    core.scan(vec![path], false).unwrap();
-    let id = core.active_scan.as_ref().unwrap().status.id;
-    let (handle, requests) = wait_handle(&core);
-    let mut cancelled = Box::pin(handle.wait_task(TaskTarget::Scan { id }));
-    assert!(cancelled.as_mut().now_or_never().is_none());
-    drop(cancelled);
-    // Reserve a new identity before the cancelled operation is dispatched.
-    let mut active = Box::pin(handle.wait_task(TaskTarget::Scan { id }));
-    assert!(active.as_mut().now_or_never().is_none());
-    dispatch_wait(&mut core, &requests);
-    dispatch_wait(&mut core, &requests);
-    assert!(active.as_mut().now_or_never().is_none());
-    finish_scan(&mut core);
-    assert!(matches!(
-        futures::executor::block_on(active),
-        Ok(TaskOutcome::Scan(status)) if status.progress.phase == ScanPhase::Completed
-    ));
-    assert!(core.active_scan.is_none());
-}
-
-#[test]
 fn waiter_capacity_is_bounded_and_drop_recovers_it_without_owner_work() {
     for activated in [false, true] {
         let (directory, mut core) = fixture();
@@ -181,11 +156,15 @@ fn waiter_capacity_is_bounded_and_drop_recovers_it_without_owner_work() {
         let mut recovered = Box::pin(handle.wait_task(TaskTarget::Scan { id }));
         assert!(recovered.as_mut().now_or_never().is_none());
         if !activated {
+            // The cancelled requests remain queued. Dispatch their old identities
+            // before the newly reserved waiter; they must not resurrect or steal
+            // its recovered capacity before the task completes.
             for _ in 0..MAX_TASK_WAITERS {
                 dispatch_wait(&mut core, &requests);
             }
         }
         dispatch_wait(&mut core, &requests);
+        assert!(recovered.as_mut().now_or_never().is_none());
         finish_scan(&mut core);
         assert!(matches!(futures::executor::block_on(recovered),
             Ok(TaskOutcome::Scan(status)) if status.progress.phase == ScanPhase::Completed));

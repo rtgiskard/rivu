@@ -105,9 +105,20 @@ fn manual_relocation_preserves_source_identity_state_and_references() {
     core.enqueue(&[source]).unwrap();
     core.command(Command::CreatePlaylistWithTracks {
         name: "Preserved".into(),
-        track_ids: vec![source],
+        track_ids: vec![source, 1, source],
     })
     .unwrap();
+    let playlist_id = core
+        .store
+        .playlist_summary_page(Some("Preserved"), 0, 1)
+        .unwrap()
+        .rows[0]
+        .id;
+    let entries_before = core
+        .store
+        .playlist_entries_page(playlist_id, None, 0, MAX_QUERY_ROWS)
+        .unwrap()
+        .rows;
     let queue_before = core.queue_ids.clone();
     let revisions = core.state.query_revisions();
     core.command(Command::RelocateTrack {
@@ -129,6 +140,24 @@ fn manual_relocation_preserves_source_identity_state_and_references() {
     assert!(core.store.track(target).unwrap().is_none());
     assert_eq!(core.queue_ids, queue_before);
     assert!(core.store.queued_track(source).unwrap().is_some());
+    let entries_after = core
+        .store
+        .playlist_entries_page(playlist_id, None, 0, MAX_QUERY_ROWS)
+        .unwrap()
+        .rows;
+    assert_eq!(entries_after.len(), entries_before.len());
+    for (before, after) in entries_before.iter().zip(&entries_after) {
+        assert_eq!(
+            (after.id, after.position, after.track_id),
+            (before.id, before.position, before.track_id)
+        );
+        if after.track_id == source {
+            assert_eq!(after.path, target_path);
+            assert!(!after.missing);
+        } else {
+            assert_eq!(after.path, before.path);
+        }
+    }
     assert!(core.state.query_revisions().library > revisions.library);
     assert!(core.state.query_revisions().structure > revisions.structure);
     assert!(

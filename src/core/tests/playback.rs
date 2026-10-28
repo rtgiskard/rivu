@@ -1231,7 +1231,7 @@ fn queued_start_rejection_fences_once_without_recursive_stop_or_count() {
         core.audio_event(event).unwrap();
     }
     assert!(core.store.history(200).unwrap().is_empty());
-    assert_eq!(play_count(&core, 2), 0);
+    assert_eq!(play_count(&core, 1), 0);
 }
 
 #[test]
@@ -1300,7 +1300,7 @@ fn rejected_recent_update_stops_without_counting_the_start() {
     assert_ne!(core.generation, generation);
     assert!(core.playback.is_none());
     assert!(core.store.history(200).unwrap().is_empty());
-    assert_eq!(play_count(&core, 2), 0);
+    assert_eq!(play_count(&core, 1), 0);
 }
 
 #[test]

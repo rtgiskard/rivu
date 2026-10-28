@@ -590,11 +590,10 @@ source has at most three generated tiers; this is not a global disk-capacity lim
 The MPRIS default export uses the same content-hash directory and is protected
 once exported; later sessions can clean it when it is no longer resident.
 
-Maintenance scans managed files at the cache root and within one level of
-two-character lowercase-hex buckets. It does not follow symlinks or descend into
-nested directories. Recognized flat full-hash originals and version-suffixed
-thumbnails are included in statistics and age-based cleanup; runtime lookup uses
-only the content paths described above.
+Maintenance scans managed originals and thumbnails only within one level of
+two-character lowercase-hex buckets, using the filename forms described above.
+Files at the cache root and unrecognized names are excluded from statistics and
+cleanup. It does not follow symlinks or descend into nested directories.
 
 Only explicit link:01_config.adoc#_artwork_cache_maintenance[Settings maintenance]
 enumerates disposable files. Statistics and cleanup use modification age, not

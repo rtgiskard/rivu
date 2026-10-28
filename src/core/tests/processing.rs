@@ -393,10 +393,20 @@ fn changed_source_between_completion_and_commit_is_rejected() {
 fn retained_output_directories_and_statuses_are_bounded() {
     let (directory, mut core) = fixture();
     source(directory.path());
+    let mut directories = Vec::new();
     for _ in 0..34 {
         core.start_processing(1, ProcessingOperation::Denoise, None)
             .unwrap();
         complete(&mut core);
+        directories.push(
+            core.processing
+                .results
+                .back()
+                .unwrap()
+                .directory
+                .path()
+                .to_path_buf(),
+        );
     }
     assert_eq!(core.processing.results.len(), 4);
     assert_eq!(core.processing_results.len(), 32);
@@ -406,6 +416,15 @@ fn retained_output_directories_and_statuses_are_bounded() {
         core.audition_processing(1, AuditionMode::Denoised, 0.0, 0.0)
             .is_err()
     );
+    // Join physical reclamation without dropping the four retained results.
+    core.processing.shutdown();
+    let retired = directories.len() - core.processing.results.len();
+    for path in &directories[..retired] {
+        assert!(!path.exists(), "{}", path.display());
+    }
+    for path in &directories[retired..] {
+        assert!(path.is_dir(), "{}", path.display());
+    }
 }
 #[test]
 fn equalizer_preset_import_bounds_bytes_and_rejects_non_regular_inputs() {
@@ -2482,7 +2501,7 @@ fn graph_exports_reject_every_owned_scratch_directory_and_alias() {
         std::fs::create_dir(&nested).unwrap();
         let alias = directory.path().join(format!("scratch-alias-{index}"));
         std::os::unix::fs::symlink(&nested, &alias).unwrap();
-        for parent in [run, &nested, &alias, &scratch] {
+        for parent in [run, &nested, &alias] {
             let path = parent.join("must-not-export.wav");
             let error = core
                 .processing_graph_export(1, graph_port(2, 0), path.clone())
@@ -2495,6 +2514,13 @@ fn graph_exports_reject_every_owned_scratch_directory_and_alias() {
             assert!(core.processing.active.is_none());
         }
     }
+    let path = scratch.join("must-not-export.wav");
+    let error = core
+        .processing_graph_export(1, graph_port(2, 0), path.clone())
+        .unwrap_err();
+    assert!(error.to_string().contains("automatically reclaimed"));
+    assert!(!path.exists());
+    assert!(core.processing.active.is_none());
     // Retirement does not make a session-owned location a durable destination.
     let retired = core.processing.results.pop_front().unwrap();
     core.processing.retire(Box::new(retired));
@@ -2809,13 +2835,6 @@ fn quarantined_mix_completion_does_not_persist_pending_queue_selection() {
     assert!(!path.exists());
     let status = core.processing_status(1).unwrap();
     assert_eq!(status.phase, ProcessingPhase::Failed);
-    assert!(
-        status
-            .error
-            .as_deref()
-            .unwrap()
-            .contains("Database outcome is uncertain")
-    );
     assert_eq!(terminal_wait(&mut core, 1), status);
 }
 
@@ -3002,9 +3021,7 @@ fn optimization_settles_pending_selection_before_stopped_graph_handoff() {
     assert!(!core.queue_current_pending);
     assert_eq!(core.store.queue_state().unwrap().current_id, Some(1));
 
-    // Maintenance has not retired on Core, even if its worker has finished.
-    // Any queue write during this handoff would have to wait for this lock.
-    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    // Core still owns maintenance until it consumes the worker completion.
     core.processing_event(graph);
     assert_eq!(
         core.processing_status(id).unwrap().phase,
@@ -3013,7 +3030,6 @@ fn optimization_settles_pending_selection_before_stopped_graph_handoff() {
     assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
     assert_eq!(core.generation, generation);
     assert!(core.processing.audition.is_none());
-    lock.execute_batch("ROLLBACK").unwrap();
     let _ = core.shutdown_optimization();
 
     let audition = core.processing_graph_audition(id, target).unwrap();

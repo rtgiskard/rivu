@@ -567,7 +567,8 @@ fn library_column_toggles_merge_latest_config_without_audio_side_effects() {
         codec: false,
         bitrate: false,
     };
-    let audio = recording_audio(&mut core);
+    let (commands, audio) = async_channel::bounded(1);
+    core.engine.replace_commands(commands);
     let mut expected = core.state.system.config.as_ref().clone();
     expected.volume = 0.25;
     expected.shuffle = true;
@@ -648,7 +649,7 @@ fn library_column_toggles_merge_latest_config_without_audio_side_effects() {
         assert_eq!(*core.shared.read().system.config, expected);
         assert!(matches!(
             audio.try_recv(),
-            Err(crossbeam_channel::TryRecvError::Empty)
+            Err(async_channel::TryRecvError::Empty)
         ));
     }
 }
@@ -656,7 +657,8 @@ fn library_column_toggles_merge_latest_config_without_audio_side_effects() {
 #[test]
 fn library_column_toggle_commits_without_accessing_unwritable_config_path() {
     let (_directory, mut core) = fixture();
-    let audio = recording_audio(&mut core);
+    let (commands, audio) = async_channel::bounded(1);
+    core.engine.replace_commands(commands);
     Arc::make_mut(&mut core.state.system.config)
         .library_columns
         .duration = true;
@@ -668,7 +670,10 @@ fn library_column_toggle_commits_without_accessing_unwritable_config_path() {
     core.publish();
     assert!(!core.shared.read().system.config.library_columns.duration);
     assert!(core.state.system.last_error.is_none());
-    assert!(audio.try_recv().is_err());
+    assert!(matches!(
+        audio.try_recv(),
+        Err(async_channel::TryRecvError::Empty)
+    ));
     assert!(core.state.system.config_path.is_dir());
 }
 
@@ -843,7 +848,8 @@ fn settings_apply_explicit_fields_override_newer_conflicting_values() {
 #[test]
 fn settings_failed_save_retry_merges_against_latest_runtime() {
     let (_directory, mut core) = fixture();
-    let audio = recording_audio(&mut core);
+    let (commands, audio) = async_channel::bounded(8);
+    core.engine.replace_commands(commands);
     let baseline = core.state.system.config.clone();
     let mut draft = baseline.as_ref().clone();
     draft.scan_max_depth = 7;
@@ -854,7 +860,10 @@ fn settings_failed_save_retry_merges_against_latest_runtime() {
             .is_err()
     );
     assert_eq!(*core.state.system.config, *baseline);
-    assert!(audio.try_recv().is_err());
+    assert!(matches!(
+        audio.try_recv(),
+        Err(async_channel::TryRecvError::Empty)
+    ));
     std::fs::remove_dir(&core.state.system.config_path).unwrap();
     core.command(Command::Volume { value: 0.2 }).unwrap();
     core.update_gui_config(GuiConfigChange::Settings(Box::new(patch)))
