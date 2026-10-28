@@ -203,6 +203,31 @@ Keep `Cargo.lock` to retain the resolved dependency versions. Run `make lint`
 to check formatting and all workspace targets with all features, including
 font embedding; install its additional prerequisites below first.
 
+Run `make test` for the Rust and Python behavior suites. `make test-rust` runs
+workspace unit, integration, and documentation tests with default features, all
+features (including font embedding), and no default features (native-only
+decoding). It also tests `rivu-dsp` and `rivu-format` separately without default
+features, so workspace feature unification cannot hide their standalone builds.
+Cargo tests use `Cargo.lock` without updating it and stop on the first failure.
+The build and font prerequisites above and below also apply to tests; additionally
+install `dbus` for the MPRIS lifecycle tests. These tests start private session
+buses and do not require a running desktop bus. GPUI tests use its test platform;
+no display server or audio device is required.
+
+`make test-python` requires Python with NumPy, SciPy, soundfile, and jsonschema
+(`sudo pacman -S --needed python python-numpy python-scipy python-soundfile python-jsonschema`
+on Arch Linux). Use `PYTHON=/path/to/python` to select a prepared interpreter.
+The base suite requires no model downloads. Torch/torchaudio numerical checks and
+real-model checks remain optional; the latter use explicitly prepared local
+manifests via `RIVU_SPEECH_MANIFEST`, `RIVU_KIM_MANIFEST`, and
+`RIVU_HTDEMUCS_MANIFEST`. Ordinary CI installs the base dependencies, not model
+environments.
+
+The link:.github/workflows/build.yml[CI workflow] runs `make lint` and `make test`
+before release builds on branch pushes, pull requests, and `v*` tags. Tag releases
+also verify the packaged archive checksum and run both binaries with `--version`
+and `--help` before publishing.
+
 The install command builds the workspace and installs `rivu`, `rivu-migrate`,
 the desktop entry, and icons. Ensure `~/.local/bin` is on `PATH`.
 Use `make build` to build without installing, or `cargo build --locked --workspace --release`

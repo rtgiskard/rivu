@@ -1,5 +1,6 @@
 PREFIX ?= /usr/local
 DESTDIR ?=
+PYTHON ?= python3
 RIVU_GIT_VERSION ?= $(shell git describe --long --tags --always --dirty 2>/dev/null || printf unknown)
 CARGO_TARGET_DIR ?= .cache/target
 PACKAGE_NAME := rivu-linux-$(shell uname -m)
@@ -9,7 +10,7 @@ export CARGO_TARGET_DIR
 # Keep DESTDIR for application installation, not Cargo/CMake dependency builds.
 unexport DESTDIR
 
-.PHONY: build lint ui-demo clean install package
+.PHONY: build lint test test-rust test-python ui-demo clean install package
 
 build:
 	RIVU_GIT_VERSION="$(RIVU_GIT_VERSION)" cargo build --workspace --release
@@ -17,6 +18,19 @@ build:
 lint:
 	cargo fmt --all -- --check
 	cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+test: test-rust test-python
+
+test-rust:
+	cargo test --locked --workspace
+	cargo test --locked --workspace --all-features
+	cargo test --locked --workspace --no-default-features
+	cargo test --locked -p rivu-dsp --no-default-features
+	cargo test --locked -p rivu-format --no-default-features
+
+test-python:
+	$(PYTHON) -c 'import numpy, scipy, soundfile, jsonschema'
+	$(PYTHON) -m unittest discover -s tools/audio_processing -p 'test_*.py'
 
 ui-demo:
 	cargo run -p rivu-ui --example showcase --features showcase

@@ -30,7 +30,8 @@ jobs:
         run: |
           pacman -Syu --noconfirm --needed \
             rustup make cmake gcc binutils mold clang pkgconf libpipewire opus \
-            fontconfig libxkbcommon ffmpeg git tar zstd github-cli ttf-nerd-fonts-symbols-mono
+            fontconfig libxkbcommon ffmpeg dbus git tar zstd github-cli ttf-nerd-fonts-symbols-mono \
+            python python-numpy python-scipy python-soundfile python-jsonschema
 
       - name: Check out source and tags
         uses: actions/checkout@v4
@@ -42,6 +43,9 @@ jobs:
         run: |
           rustup show
           make lint
+
+      - name: Test workspace features, standalone crates, and Python workers
+        run: make test
 
       - name: Build release binaries
         if: github.ref_type != 'tag'
