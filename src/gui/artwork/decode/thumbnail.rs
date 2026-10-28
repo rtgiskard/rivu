@@ -122,27 +122,46 @@ fn dimensions(width: u32, height: u32, side: u32) -> (u32, u32) {
     (scale(width), scale(height))
 }
 
-/// A borrowed BGRA view with on-demand 16-bit premultiplication. The extra
-/// precision retains low-alpha colors without allocating another source image.
-struct Premultiplied<'a>(image::ImageBuffer<image::Rgba<u8>, &'a [u8]>);
+/// Triangle support and pixel-center convention match image's separable filter.
+struct TriangleAxis {
+    length: usize,
+    ratio: f32,
+    support: f32,
+}
 
-impl image::GenericImageView for Premultiplied<'_> {
-    type Pixel = image::Rgba<u16>;
-
-    fn dimensions(&self) -> (u32, u32) {
-        self.0.dimensions()
+impl TriangleAxis {
+    fn new(source: u32, target: u32) -> Self {
+        let ratio = source as f32 / target as f32;
+        Self {
+            length: source as usize,
+            ratio,
+            support: ratio.max(1.0),
+        }
     }
 
-    fn get_pixel(&self, x: u32, y: u32) -> Self::Pixel {
-        let pixel = self.0.get_pixel(x, y).0;
-        let alpha = u32::from(pixel[3]);
-        let premultiply = |channel| ((u32::from(channel) * alpha * 257 + 127) / 255) as u16;
-        image::Rgba([
-            premultiply(pixel[0]),
-            premultiply(pixel[1]),
-            premultiply(pixel[2]),
-            (alpha * 257) as u16,
-        ])
+    fn max_taps(&self) -> usize {
+        ((self.support * 2.0).ceil() as usize + 1).min(self.length)
+    }
+
+    fn weights(&self, position: usize, weights: &mut Vec<f32>) -> usize {
+        let center = (position as f32 + 0.5) * self.ratio;
+        let start =
+            ((center - self.support).floor() as i64).clamp(0, self.length as i64 - 1) as usize;
+        let end = ((center + self.support).ceil() as i64)
+            .clamp(start as i64 + 1, self.length as i64) as usize;
+        let center = center - 0.5;
+        weights.clear();
+        let mut sum = 0.0;
+        for pixel in start..end {
+            let distance = ((pixel as f32 - center) / self.support).abs();
+            let weight = if distance < 1.0 { 1.0 - distance } else { 0.0 };
+            weights.push(weight);
+            sum += weight;
+        }
+        for weight in weights {
+            *weight /= sum;
+        }
+        start
     }
 }
 
@@ -151,44 +170,87 @@ fn resize_bgra(
     width: u32,
     height: u32,
 ) -> image::RgbaImage {
-    if view.pixels().all(|pixel| pixel[3] == 255) {
-        return image::imageops::resize(
-            &view,
-            width,
-            height,
-            image::imageops::FilterType::Triangle,
-        );
+    let horizontal = TriangleAxis::new(view.width(), width);
+    let vertical = TriangleAxis::new(view.height(), height);
+    let source_width = view.width() as usize;
+    let source = view.as_raw().as_chunks::<4>().0;
+    let alpha = source.iter().any(|pixel| pixel[3] != 255);
+    let mut taps = Vec::with_capacity(horizontal.max_taps().max(vertical.max_taps()));
+    let mut spans = Vec::with_capacity(width as usize);
+    let mut weights = Vec::with_capacity(width as usize * horizontal.max_taps());
+    for x in 0..width as usize {
+        let start = horizontal.weights(x, &mut taps);
+        spans.push((start, weights.len(), taps.len()));
+        weights.extend_from_slice(&taps);
     }
-    // Keep image's separable Triangle filter, but filter premultiplied channels
-    // so fully transparent hidden RGB cannot contaminate a visible edge. No
-    // full-sized scratch copy is needed. With default admission and tiers, the
-    // source BGRA (<=16 MiB), float filter intermediate (~<=32 MiB), and bounded
-    // 16-bit output (<=8 MiB) use ~56 MiB of known pixel working storage, below
-    // the 64 MiB workspace estimate, not a hard cap on native codec allocations.
-    let filtered = image::imageops::resize(
-        &Premultiplied(view),
-        width,
-        height,
-        image::imageops::FilterType::Triangle,
-    );
-    // The filter's float intermediate has already been released. Convert only
-    // the thumbnail back to straight-alpha BGRA8 for the existing encoder path.
-    image::RgbaImage::from_fn(width, height, |x, y| {
-        let pixel = filtered.get_pixel(x, y).0;
-        let alpha = u32::from(pixel[3]);
-        let alpha8 = ((alpha + 128) / 257) as u8;
-        if alpha8 == 0 {
-            return image::Rgba([0, 0, 0, 0]);
+
+    // Retain only one source-width f32 row, not source_width * target_height.
+    // Each pixel keeps the existing vertical-then-horizontal accumulation order.
+    let mut row = vec![[0.0_f32; 4]; source_width];
+    let mut output = image::RgbaImage::new(width, height);
+    for (y, destination) in output
+        .as_mut()
+        .chunks_exact_mut(width as usize * 4)
+        .enumerate()
+    {
+        let start = vertical.weights(y, &mut taps);
+        row.fill([0.0; 4]);
+        for (source_row, &weight) in source[start * source_width..]
+            .chunks_exact(source_width)
+            .zip(&taps)
+        {
+            if alpha {
+                // Premultiply on read at 16-bit precision, without a source copy.
+                for (accumulator, pixel) in row.iter_mut().zip(source_row) {
+                    let alpha = u32::from(pixel[3]);
+                    for channel in 0..3 {
+                        let premultiplied = (u32::from(pixel[channel]) * alpha * 257 + 127) / 255;
+                        accumulator[channel] += premultiplied as f32 * weight;
+                    }
+                    accumulator[3] += (alpha * 257) as f32 * weight;
+                }
+            } else {
+                for (accumulator, pixel) in row.iter_mut().zip(source_row) {
+                    for channel in 0..4 {
+                        accumulator[channel] += f32::from(pixel[channel]) * weight;
+                    }
+                }
+            }
         }
-        let unpremultiply =
-            |channel| ((u32::from(channel) * 255 + alpha / 2) / alpha).min(255) as u8;
-        image::Rgba([
-            unpremultiply(pixel[0]),
-            unpremultiply(pixel[1]),
-            unpremultiply(pixel[2]),
-            alpha8,
-        ])
-    })
+        for (destination, &(start, offset, length)) in
+            destination.as_chunks_mut::<4>().0.iter_mut().zip(&spans)
+        {
+            let mut pixel = [0.0_f32; 4];
+            for (source, &weight) in row[start..start + length]
+                .iter()
+                .zip(&weights[offset..offset + length])
+            {
+                for channel in 0..4 {
+                    pixel[channel] += source[channel] * weight;
+                }
+            }
+            if alpha {
+                // Preserve the u16 filter rounding before unpremultiplication,
+                // but write BGRA8 directly instead of retaining a u16 image.
+                let alpha = pixel[3].clamp(0.0, 65535.0).round() as u32;
+                let alpha8 = ((alpha + 128) / 257) as u8;
+                if alpha8 == 0 {
+                    destination.fill(0);
+                } else {
+                    for channel in 0..3 {
+                        let value = pixel[channel].clamp(0.0, 65535.0).round() as u32;
+                        destination[channel] = ((value * 255 + alpha / 2) / alpha).min(255) as u8;
+                    }
+                    destination[3] = alpha8;
+                }
+            } else {
+                for channel in 0..4 {
+                    destination[channel] = pixel[channel].clamp(0.0, 255.0).round() as u8;
+                }
+            }
+        }
+    }
+    output
 }
 
 pub(super) fn load(
@@ -403,6 +465,25 @@ mod tests {
         .image;
         assert_eq!(image.as_bytes(0), cached.as_bytes(0));
         assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn noninteger_triangle_sampling_keeps_neighboring_contributions_on_both_axes() {
+        for vertical in [false, true] {
+            let (width, height) = if vertical { (1, 257) } else { (257, 1) };
+            let mut pixels =
+                image::RgbaImage::from_pixel(width, height, image::Rgba([0, 0, 0, 255]));
+            let (x, y) = if vertical { (0, 9) } else { (9, 0) };
+            pixels.put_pixel(x, y, image::Rgba([255, 255, 255, 255]));
+            let view =
+                image::ImageBuffer::from_raw(width, height, pixels.as_raw().as_slice()).unwrap();
+            let (width, height) = if vertical { (1, 243) } else { (243, 1) };
+            let resized = resize_bgra(view, width, height);
+            let (x, y) = if vertical { (0, 8) } else { (8, 0) };
+            // Pixel 9 contributes ~49% of the normalized Triangle support.
+            // Rounding the support down to two taps would discard it entirely.
+            assert_eq!(resized.get_pixel(x, y).0, [125, 125, 125, 255]);
+        }
     }
 
     #[test]

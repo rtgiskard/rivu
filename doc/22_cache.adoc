@@ -643,8 +643,14 @@ Visible consumers share the largest required tier. An upgrade retains the old
 image until the replacement is ready; shrinking demand is debounced for 300 ms.
 Cached consumers are invalidated after painting and acknowledge the new image
 generation before old textures retire at a frame boundary. Ordinary within-tier
-resizing does not decode again. Resizing uses premultiplied-alpha filtering to
-avoid colored fringes without copying the full source image.
+resizing does not decode again. Thumbnail generation uses a separable Triangle
+filter with one source-width floating-point row and linear-size coefficient
+tables, rather than a two-dimensional intermediate image. Transparent pixels
+are premultiplied on read at 16-bit precision; the final conversion preserves
+that rounding while writing straight-alpha BGRA8 directly. This avoids colored
+fringes, a full-source premultiplied copy, and a separate 16-bit thumbnail.
+The complete decoded source, output pixels, codecs, and encoded bytes still have
+their own costs; row filtering does not change the source admission policy.
 
 Replaced or hidden consumers retire through a window-owned queue after scene
 replacement; removed panels need not paint again. Releasing one consumer cannot
