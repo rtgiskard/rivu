@@ -82,14 +82,14 @@ fn other_collection_source_commands_resolve_execution_time_roots() {
         directory.path().to_path_buf(),
     ))
     .unwrap();
-    let before = core.queue_ids.clone();
+    let before = core.store.queue_ids().unwrap();
     core.command(Command::EnqueueSources {
         other_tracks: true,
         directories: vec![],
         track_ids: vec![],
     })
     .unwrap();
-    assert_eq!(core.queue_ids, before);
+    assert_eq!(core.store.queue_ids().unwrap(), before);
     core.update_gui_config(GuiConfigChange::RemoveLibraryRoot(
         directory.path().to_path_buf(),
     ))

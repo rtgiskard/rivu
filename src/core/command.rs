@@ -51,25 +51,15 @@ impl Core {
                     }
                     _ => {}
                 }
-                let (count, inserted) = self.store.transfer_collection(&source, destination)?;
+                let count = self.store.transfer_collection(&source, destination)?;
                 if count == 0 {
                     return Ok(None);
                 }
-                if count != 0
-                    && matches!(
-                        destination,
-                        CollectionDestination::Queue { insertion: None }
-                    )
-                {
-                    self.advance_queue_revision();
-                }
                 match destination {
-                    CollectionDestination::Queue {
-                        insertion: Some(insertion),
-                    } => {
-                        self.insert_queue_ids(usize::try_from(insertion.index)?, inserted)?;
+                    CollectionDestination::Queue { .. } => {
+                        self.advance_queue_revision();
+                        self.refresh_queue_projection()?;
                     }
-                    CollectionDestination::Queue { insertion: None } => self.append_queue_ids()?,
                     CollectionDestination::Playlist { playlist_id, .. } if count != 0 => {
                         self.invalidate_playlist_members(&[playlist_id])?;
                     }
@@ -88,13 +78,14 @@ impl Core {
                 self.played.clear();
                 self.played_cursor = 0;
                 self.reload_queue()?;
-                self.start(self.queue_ids[0], true)?;
+                let first = self.store.queue_id_at(0)?.context("Album is empty")?;
+                self.start(first, true)?;
             }
             Command::EnqueueAlbum { key } => {
                 self.ensure_queue_control_ready()?;
                 self.store.queue_album(&key, false)?;
                 self.advance_queue_revision();
-                self.append_queue_ids()?;
+                self.refresh_queue_projection()?;
             }
             Command::Scan { paths, force } => self.scan(paths, force)?,
             Command::CheckOtherTracks { force } => {
@@ -156,7 +147,9 @@ impl Core {
                     id
                 } else {
                     self.enqueue(&[track_id])?;
-                    *self.queue_ids.last().unwrap()
+                    self.store
+                        .queue_id_at(self.state.queue.total - 1)?
+                        .context("Track was not queued")?
                 };
                 self.start(id, true)?;
             }
@@ -174,17 +167,16 @@ impl Core {
                 self.played.clear();
                 self.played_cursor = 0;
                 self.reload_queue()?;
-                self.start(self.queue_ids[0], true)?;
+                let first = self.store.queue_id_at(0)?.context("Playlist is empty")?;
+                self.start(first, true)?;
             }
             Command::Resume => {
                 if self.state.playback.status == PlaybackStatus::Stopped {
                     self.ensure_queue_control_ready()?;
-                    let id = self
-                        .state
-                        .queue
-                        .current_id
-                        .or_else(|| self.queue_ids.first().copied())
-                        .context("Queue is empty")?;
+                    let id = match self.state.queue.current_id {
+                        Some(id) => id,
+                        None => self.store.queue_id_at(0)?.context("Queue is empty")?,
+                    };
                     self.start(id, true)?;
                 } else {
                     self.engine.send(AudioCommand::Pause(false))?;
@@ -255,7 +247,7 @@ impl Core {
                     .enqueue_sources(&directories, &track_ids, roots)?
                 {
                     self.advance_queue_revision();
-                    self.append_queue_ids()?;
+                    self.refresh_queue_projection()?;
                 }
             }
             Command::InsertQueue {
@@ -265,8 +257,10 @@ impl Core {
             } => {
                 self.ensure_queue_control_ready()?;
                 self.check_queue_insertion(index, expected_revision)?;
-                let inserted = self.store.insert_queue_tracks(&track_ids, index)?;
-                self.insert_queue_ids(index, inserted)?;
+                if self.store.insert_queue_tracks(&track_ids, index)? != 0 {
+                    self.advance_queue_revision();
+                    self.refresh_queue_projection()?;
+                }
             }
             Command::InsertQueueSources {
                 other_tracks,
@@ -277,20 +271,23 @@ impl Core {
             } => {
                 self.ensure_queue_control_ready()?;
                 self.check_queue_insertion(index, expected_revision)?;
-                let inserted = self.store.insert_queue_sources(
+                let count = self.store.insert_queue_sources(
                     &directories,
                     &track_ids,
                     other_tracks.then_some(self.state.system.config.library_roots.as_slice()),
                     index,
                 )?;
-                self.insert_queue_ids(index, inserted)?;
+                if count != 0 {
+                    self.advance_queue_revision();
+                    self.refresh_queue_projection()?;
+                }
             }
             Command::RemoveQueue { queue_id } => self.remove_queue_entries(&[queue_id])?,
             Command::RemoveQueueEntries { queue_ids } => self.remove_queue_entries(&queue_ids)?,
             Command::MoveQueue { queue_id, index } => {
                 self.ensure_queue_control_ready()?;
                 ensure!(
-                    index < self.queue_ids.len(),
+                    index < self.state.queue.total,
                     "Queue target position out of range"
                 );
                 self.move_queue_entries(&[queue_id], index)?;

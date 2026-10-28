@@ -1751,16 +1751,14 @@ mod occurrence_tests {
             revision: 0,
         };
         assert_eq!(
-            store
-                .transfer_collection(
-                    &selection,
-                    CollectionDestination::Playlist {
-                        playlist_id: destination,
-                        revision: 0,
-                        index: Some(1)
-                    }
-                )?
-                .0,
+            store.transfer_collection(
+                &selection,
+                CollectionDestination::Playlist {
+                    playlist_id: destination,
+                    revision: 0,
+                    index: Some(1)
+                }
+            )?,
             5
         );
         assert_eq!(
@@ -1768,9 +1766,10 @@ mod occurrence_tests {
             [4, 3, 1, 3, 2, 1, 4]
         );
         assert_eq!(
-            store
-                .transfer_collection(&selection, CollectionDestination::Queue { insertion: None })?
-                .0,
+            store.transfer_collection(
+                &selection,
+                CollectionDestination::Queue { insertion: None }
+            )?,
             5
         );
         assert_eq!(
@@ -1789,7 +1788,7 @@ mod occurrence_tests {
         let foreign = source_entries[1].id as u64;
         assert!(store.set_queue_current(Some(foreign)).is_err());
         assert!(store.remove_queue_entries(&[foreign]).is_err());
-        assert!(store.move_queue_entries(&[(foreign as i64, 0)], 0).is_err());
+        assert!(store.move_queue_entries(&[foreign], 0).is_err());
         assert!(store.queue_track_id(foreign).is_err());
         assert!(store.queue_entries(None, &[foreign])?.is_empty());
         let queue_entry = copied_queue.rows[0].id as i64;

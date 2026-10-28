@@ -174,7 +174,7 @@ fn committed_track_deletions_invalidate_before_failed_refresh() {
         assert_eq!(core.store.playlist_track_ids(2, 10).unwrap(), [4]);
         assert_eq!(core.store.playlist_track_ids(3, 10).unwrap(), [1, 3]);
         assert_eq!(core.state.library.track_total, 3);
-        assert_eq!(core.queue_ids, [1, 4, 5]);
+        assert_eq!(core.store.queue_ids().unwrap(), [1, 4, 5]);
         assert!(Arc::ptr_eq(
             core.state.current_track.as_ref().unwrap(),
             &current
@@ -187,7 +187,7 @@ fn committed_track_deletions_invalidate_before_failed_refresh() {
 #[test]
 fn committed_deletions_isolate_history_and_queue_read_failures() {
     for missing in [false, true] {
-        for fail_queue_ids in [false, true] {
+        for fail_queue_projection in [false, true] {
             let (directory, mut core) = fixture_with_database(Some(10.0));
             if missing {
                 let path = core.track(2).unwrap().path;
@@ -208,15 +208,14 @@ fn committed_deletions_isolate_history_and_queue_read_failures() {
             core.refresh_queue_tracks().unwrap();
             let current = Arc::clone(core.state.current_track.as_ref().unwrap());
             let queue = core.state.queue.clone();
-            let queue_ids = core.queue_ids.clone();
             core.played = vec![1, 2, 3, 4, 5];
             core.played_cursor = 4;
             let before = core.state.query_revisions();
             let connection =
                 rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
-            let failure = if fail_queue_ids {
-                // A negative persisted ID cannot be represented by the queue cache.
-                "UPDATE playlist_entries SET id=-5 WHERE playlist_id=0 AND id=5;"
+            let failure = if fail_queue_projection {
+                // The scalar projection requires the singleton metadata row.
+                "DELETE FROM rivu_meta;"
             } else {
                 // Only history reads this surviving, non-current row's timestamp.
                 "UPDATE tracks SET last_played='unreadable' WHERE id=3;"
@@ -239,9 +238,9 @@ fn committed_deletions_isolate_history_and_queue_read_failures() {
             let committed = core.state.query_revisions();
             assert_ne!(committed.library, before.library);
             assert_ne!(committed.structure, before.structure);
-            if fail_queue_ids {
+            if fail_queue_projection {
                 assert!(core.state.library.history.is_empty());
-                assert_eq!(core.queue_ids, queue_ids);
+                assert_eq!(core.store.queue_ids().unwrap(), [1, 4, 5]);
                 assert_eq!(core.state.queue.total, queue.total);
                 assert_eq!(core.state.queue.current_id, queue.current_id);
                 assert_eq!(core.state.queue.current_position, queue.current_position);
@@ -250,12 +249,12 @@ fn committed_deletions_isolate_history_and_queue_read_failures() {
                     core.state.current_track.as_ref().unwrap(),
                     &current
                 ));
-                assert_eq!(core.played, [1, 2, 3, 4, 5]);
-                assert_eq!(core.played_cursor, 4);
+                assert_eq!(core.played, [1, 4, 5]);
+                assert_eq!(core.played_cursor, 2);
             } else {
                 assert!(format!("{error:#}").contains("Refreshing history failed"));
                 assert!(Arc::ptr_eq(&core.state.library.history, &history));
-                assert_eq!(core.queue_ids, [1, 4, 5]);
+                assert_eq!(core.store.queue_ids().unwrap(), [1, 4, 5]);
                 assert_queue_saved(&core);
                 assert_eq!(core.state.current_track().unwrap().id, 1);
                 assert_eq!(core.played, [1, 4, 5]);
@@ -683,7 +682,7 @@ fn removing_missing_tracks_reuses_queue_playlist_and_recent_cleanup_without_disk
             .collect::<Vec<_>>(),
         [1, 3, 4]
     );
-    assert_eq!(core.queue_ids, [1, 4, 5]);
+    assert_eq!(core.store.queue_ids().unwrap(), [1, 4, 5]);
     assert_eq!(
         core.store
             .playlist_entries_page(playlist_id, None, 0, MAX_QUERY_ROWS)
@@ -1105,7 +1104,7 @@ fn committed_deletion_invalidates_all_affected_playlists_before_projection_failu
     );
     assert_ne!(core.state.library.playlist_entry_revisions[&2], second);
     assert_ne!(core.state.library.playlist_entry_revisions[&1], first);
-    assert_eq!(core.queue_ids, [1, 4, 5]);
+    assert_eq!(core.store.queue_ids().unwrap(), [1, 4, 5]);
     assert_eq!(core.state.queue.total, 3);
     assert_eq!(core.store.playlist_track_ids(1, 20).unwrap(), [3]);
     assert_eq!(core.store.playlist_track_ids(2, 20).unwrap(), [4]);

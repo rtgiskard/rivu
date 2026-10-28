@@ -37,7 +37,7 @@ fn external_admission_appends_valid_subset_without_roots_autoplay_or_playlist_ch
         .clear();
     Arc::make_mut(&mut core.state.system.config).scan_min_duration_secs = 60;
     let config = Arc::clone(&core.state.system.config);
-    let before_queue = core.queue_ids.clone();
+    let before_queue = core.store.queue_ids().unwrap();
     let before_playback = core.state.playback.clone();
     let before_playlists = core.state.library.playlist_total;
     let before_playlist_revision = core.state.library.playlist_revision;
@@ -72,7 +72,7 @@ fn external_admission_appends_valid_subset_without_roots_autoplay_or_playlist_ch
             .system
             .scan_visible(crate::projection::MediaTaskOwner::Library)
     );
-    assert_eq!(core.queue_ids, before_queue);
+    assert_eq!(core.store.queue_ids().unwrap(), before_queue);
     let ViewResponse::ScanTask(status) = core.view(&Query::ScanTask { id }).unwrap() else {
         panic!("expected media task")
     };
@@ -105,7 +105,10 @@ fn external_admission_appends_valid_subset_without_roots_autoplay_or_playlist_ch
     assert_eq!(paths, vec![second.clone(), first.clone(), second]);
     assert_eq!(added[0].track_id, added[2].track_id);
     assert_ne!(added[0].id, added[2].id);
-    assert_eq!(&core.queue_ids[..before_queue.len()], &before_queue);
+    assert_eq!(
+        &core.store.queue_ids().unwrap()[..before_queue.len()],
+        &before_queue
+    );
     assert_eq!(core.state.playback, before_playback);
     assert_eq!(core.state.library.playlist_total, before_playlists);
     assert_eq!(
@@ -178,9 +181,9 @@ fn revision_changed_during_probe_rejects_entire_batch_without_registration_or_ap
     let id = core.active_external_admission.as_ref().unwrap().status.id;
     core.command(Command::Enqueue { track_ids: vec![1] })
         .unwrap();
-    let queue = core.queue_ids.clone();
+    let queue = core.store.queue_ids().unwrap();
     finish_admission(&mut core);
-    assert_eq!(core.queue_ids, queue);
+    assert_eq!(core.store.queue_ids().unwrap(), queue);
     assert_eq!(core.state.library.track_total, before_total);
     assert_eq!(core.store.track_count().unwrap(), before_total);
     assert!(
@@ -208,7 +211,7 @@ fn cancel_scan_is_intent_until_preparation_joins_and_leaves_no_residue() {
     let (directory, mut core) = admission_fixture();
     let path = directory.path().join("external.wav");
     write_pcm_frames(&path, 1);
-    let queue = core.queue_ids.clone();
+    let queue = core.store.queue_ids().unwrap();
     let total = core.state.library.track_total;
     core.start_external_admission(vec![path.clone()], None, None)
         .unwrap();
@@ -226,7 +229,7 @@ fn cancel_scan_is_intent_until_preparation_joins_and_leaves_no_residue() {
     assert_eq!(core.state.system.scan_task_id, Some(id));
     finish_admission(&mut core);
     drop(held_lookup);
-    assert_eq!(core.queue_ids, queue);
+    assert_eq!(core.store.queue_ids().unwrap(), queue);
     assert_eq!(core.store.track_count().unwrap(), total);
     assert!(
         core.store
@@ -332,7 +335,7 @@ fn saving_rejects_cancel_and_shutdown_joins_then_applies_committed_queue_facts()
     let path = directory.path().join("external.wav");
     write_pcm_frames(&path, 1);
     let total = core.state.library.track_total;
-    let queue_total = core.queue_ids.len();
+    let queue_total = core.state.queue.total;
     let lock = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     lock.execute_batch("BEGIN IMMEDIATE").unwrap();
     core.start_external_admission(vec![path.clone(), path.clone()], None, None)
@@ -357,9 +360,11 @@ fn saving_rejects_cancel_and_shutdown_joins_then_applies_committed_queue_facts()
     assert!(core.active_external_admission.is_none());
     assert!(!core.database_maintenance_active());
     assert_eq!(core.state.library.track_total, total + 1);
-    assert_eq!(core.queue_ids.len(), queue_total + 2);
     assert_eq!(core.state.queue.total, queue_total + 2);
-    assert_eq!(core.store.queue_ids().unwrap(), core.queue_ids);
+    assert_eq!(
+        core.store.queue_ids().unwrap().len(),
+        core.state.queue.total
+    );
     let ViewResponse::ScanTask(status) = core.view(&Query::ScanTask { id }).unwrap() else {
         panic!("expected retained task")
     };
@@ -374,19 +379,21 @@ fn committed_queue_and_task_facts_survive_current_track_projection_failure() {
     let path = directory.path().join("1.wav");
     write_pcm_frames(&path, 1);
     core.store
-        .set_queue_current(Some(core.queue_ids[0]))
+        .set_queue_current(Some(core.store.queue_id_at(0).unwrap().unwrap()))
         .unwrap();
     core.refresh_queue_tracks().unwrap();
-    let before = core.queue_ids.len();
+    let before = core.state.queue.total;
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     connection.execute_batch("CREATE TRIGGER corrupt_admission_projection AFTER UPDATE OF raw_title ON tracks WHEN NEW.id=1 BEGIN UPDATE tracks SET channels='unreadable' WHERE id=1; END;").unwrap();
     core.start_external_admission(vec![path], None, None)
         .unwrap();
     let id = core.active_external_admission.as_ref().unwrap().status.id;
     finish_admission(&mut core);
-    assert_eq!(core.queue_ids.len(), before + 1);
     assert_eq!(core.state.queue.total, before + 1);
-    assert_eq!(core.store.queue_ids().unwrap(), core.queue_ids);
+    assert_eq!(
+        core.store.queue_ids().unwrap().len(),
+        core.state.queue.total
+    );
     let ViewResponse::ScanTask(status) = core.view(&Query::ScanTask { id }).unwrap() else {
         panic!("expected task")
     };
@@ -417,7 +424,7 @@ fn external_media_waits_share_scan_identity_and_report_all_terminal_paths() {
             if expected != ScanPhase::Failed {
                 write_pcm(&path);
             }
-            let before_queue = core.queue_ids.len();
+            let before_queue = core.state.queue.total;
             core.start_external_admission(vec![path], None, None)
                 .unwrap();
             let id = core.active_external_admission.as_ref().unwrap().status.id;
@@ -453,7 +460,7 @@ fn external_media_waits_share_scan_identity_and_report_all_terminal_paths() {
                 expected
             );
             assert_eq!(
-                core.queue_ids.len(),
+                core.state.queue.total,
                 before_queue + usize::from(expected == ScanPhase::Completed)
             );
         }
@@ -465,18 +472,21 @@ fn stale_queue_external_paths_command_recovers_before_accepting_task() {
     let (directory, mut core) = admission_fixture();
     let path = directory.path().join("external.wav");
     write_pcm_frames(&path, 1);
-    let connection = committed_queue_id_refresh_failure(&mut core, directory.path());
-    repair_queue_ids(&connection);
+    let connection = committed_queue_scalar_refresh_failure(&mut core, directory.path());
+    repair_queue_scalar(&connection);
     core.command(Command::QueueExternalPaths {
         paths: vec![path],
         index: None,
         expected_revision: None,
     })
     .unwrap();
-    assert!(!core.queue_ids_stale);
+    assert!(!core.queue_projection_stale);
     finish_admission(&mut core);
     assert_eq!(core.state.queue.total, 4);
-    assert_eq!(core.queue_ids, core.store.queue_ids().unwrap());
+    assert_eq!(
+        core.store.queue_ids().unwrap().len(),
+        core.state.queue.total
+    );
 }
 
 #[test]
@@ -497,9 +507,9 @@ fn stale_queue_external_saving_rechecks_recovery_before_capturing_queue_snapshot
             core.external_admission_event(event);
         };
         let id = core.active_external_admission.as_ref().unwrap().status.id;
-        let connection = committed_queue_id_refresh_failure(&mut core, directory.path());
+        let connection = committed_queue_scalar_refresh_failure(&mut core, directory.path());
         if repaired {
-            repair_queue_ids(&connection);
+            repair_queue_scalar(&connection);
         }
         core.external_admission_event(prepared);
         finish_admission(&mut core);
@@ -515,7 +525,7 @@ fn stale_queue_external_saving_rechecks_recovery_before_capturing_queue_snapshot
                 ScanPhase::Failed
             }
         );
-        assert_eq!(core.queue_ids_stale, !repaired);
+        assert_eq!(core.queue_projection_stale, !repaired);
         assert_eq!(
             core.store.track_count().unwrap(),
             if repaired { 4 } else { 3 }
@@ -523,8 +533,11 @@ fn stale_queue_external_saving_rechecks_recovery_before_capturing_queue_snapshot
         assert_eq!(core.state.queue.current_id, Some(1));
         if repaired {
             assert_eq!(core.state.queue.total, 4);
-            assert_eq!(core.queue_ids, core.store.queue_ids().unwrap());
-            assert_eq!(&core.queue_ids[..3], &[1, 4, 5]);
+            assert_eq!(
+                core.store.queue_ids().unwrap().len(),
+                core.state.queue.total
+            );
+            assert_eq!(&core.store.queue_ids().unwrap()[..3], &[1, 4, 5]);
         } else {
             assert!(
                 core.store

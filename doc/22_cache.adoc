@@ -17,14 +17,24 @@ to link:25_gpu_rendering.adoc[GPU rendering]. The sections below retain the
 invalidation consequences needed to reason about resource use without repeating
 those mechanisms.
 
-== Queue mutation working memory
+== Queue control and mutation working memory
+
+SQLite owns the complete occurrence order. Core retains a scalar queue projection
+and at most 4096 successful starts for navigation history, not a full queue-ID
+array. Playback navigation resolves positions through the queue-order index;
+history reconciliation checks only retained identities. Occurrence identity,
+duplicate tracks, and queue size are independent of page-cache limits.
+
+Bulk edits retain their submitted selection and affected positions, not a second
+complete queue. Randomizing the entire queue temporarily materializes an ID
+permutation; that buffer belongs to the operation and is released on completion.
+These bounds do not cap SQLite page caches or transaction working memory.
 
 Queue clearing deletes at most 4096 occurrences per prepared-statement execution
 inside one SQLite transaction. This bounds the foreign-key delete plan's temporary
 row-ID set without exposing partial clears: any failure rolls back all batches
-and current-occurrence changes. Core then replaces its compact queue-ID array,
-releasing the old capacity. Freed SQLite and Rust allocations can remain in the
-allocator; a lower post-restart RSS alone does not establish a live-object leak.
+and current-occurrence changes. Freed SQLite and Rust allocations can remain in
+the allocator; a lower post-restart RSS alone does not establish a live-object leak.
 
 == Query projection retention
 
@@ -197,6 +207,14 @@ retaining bounded reuse slack instead of reallocating on every deselection or co
 Branch collection borrows live identities and runs when ownership changes, not
 for unchanged viewport demand alone.
 
+Queue, Playlist, and History identity selections also shed high-water hash-table
+capacity after clear, replacement, or reconciliation removes most entries. Capacity
+above the larger of 64 entries or four times the retained selection is reduced
+toward twice the retained selection, allowing reuse without rebuilding on each
+deselection. Large range replacements account for the incoming selection before
+shrinking. All-selected state still stores the selected identities; this policy
+limits stale capacity, not the size of an active selection.
+
 A data revision forgets counts and drops obsolete pages, failures, and positional
 pins, but retains nonempty scroll geometry until a current result supplies its
 total. Previously empty results gain a loading position so additions remain
@@ -232,7 +250,9 @@ column measurements per source, resolved font, and text size. Search, scrolling,
 and playback do not rebuild static widths. Only the replacement playback-time
 label is remeasured; two widest stored-time measurements preserve exact sizing
 when its row is excluded, including ties, without a per-row measurement cache.
-Typography/source changes rebuild measurements. Tree page acceptance similarly
+Typography/source changes rebuild measurements. Source replacement immediately
+retires obsolete column measurements even while History is hidden, so their source
+reference cannot pin the preceding history snapshot. Tree page acceptance similarly
 indexes borrowed identities once for selection revalidation; viewport demand
 binary-searches intersecting preorder segments instead of rescanning all retained
 expansions. These caches are independent of visualization caching.

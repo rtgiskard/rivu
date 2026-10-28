@@ -47,6 +47,11 @@ impl Default for HistoryBrowser {
 }
 
 impl HistoryBrowser {
+    fn reclaim_selection_capacity(&mut self, len: usize) {
+        if self.selected.capacity() > 64.max(len.saturating_mul(4)) {
+            self.selected.shrink_to(len.saturating_mul(2));
+        }
+    }
     /// Returns whether source data or visible order changed. Playback-only
     /// updates preserve pending row actions unless they actually reorder rows.
     pub(in crate::gui) fn sync(
@@ -69,6 +74,7 @@ impl HistoryBrowser {
             .collect();
         self.rebuild();
         self.selected.retain(|id| self.positions.contains_key(id));
+        self.reclaim_selection_capacity(self.selected.len());
         self.anchor = self.anchor.filter(|id| self.positions.contains_key(id));
         true
     }
@@ -242,6 +248,7 @@ impl HistoryBrowser {
             return false;
         }
         self.selected = commit.selected;
+        self.reclaim_selection_capacity(self.selected.len());
         self.anchor = commit.anchor;
         self.selection_generation = self.selection_generation.wrapping_add(1);
         true
@@ -249,6 +256,7 @@ impl HistoryBrowser {
 
     pub(in crate::gui) fn select_all(&mut self) {
         self.selected.clear();
+        self.reclaim_selection_capacity(self.positions.len());
         self.selected.extend(self.positions.keys().copied());
         self.anchor = None;
         self.selection_generation = self.selection_generation.wrapping_add(1);
@@ -256,6 +264,7 @@ impl HistoryBrowser {
 
     pub(in crate::gui) fn clear_selection(&mut self) {
         self.selected.clear();
+        self.reclaim_selection_capacity(0);
         self.anchor = None;
         self.selection_generation = self.selection_generation.wrapping_add(1);
     }
@@ -307,6 +316,28 @@ impl HistoryBrowser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn large_selection_releases_capacity_on_replace_clear_and_source_eviction() {
+        let mut history = HistoryBrowser::default();
+        let ids: Vec<_> = (1..=4096).collect();
+        history.sync(&history_selection_source(&ids), None);
+        history.select_all();
+        assert_eq!(history.selected.len(), ids.len());
+        select_history(&mut history, 1, false, false);
+        assert_eq!(history.ordered_selection(), vec![1]);
+        assert!(history.selected.capacity() <= 64);
+        history.select_all();
+        history.sync(&history_selection_source(&[1, 2]), None);
+        assert_eq!(history.selected.len(), 2);
+        assert!(history.selected.capacity() <= 64);
+        history.sync(&history_selection_source(&ids), None);
+        history.select_all();
+        history.clear_selection();
+        assert!(history.selected.is_empty());
+        assert!(history.selected.capacity() <= 64);
+        assert_eq!(history.anchor, None);
+    }
 
     fn history_selection_source(ids: &[i64]) -> Arc<Vec<HistoryEntry>> {
         Arc::new(

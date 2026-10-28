@@ -112,7 +112,7 @@ fn indexed_queue_commands_preserve_playing_occurrence_and_reject_stale_empty_int
     assert_eq!(core.played, [3]);
     assert_eq!(core.state.queue.revision, revision + 1);
     let state = core.state.queue.clone();
-    let ids = core.queue_ids.clone();
+    let ids = core.store.queue_ids().unwrap();
     for command in [
         Command::InsertQueue {
             track_ids: vec![],
@@ -145,7 +145,7 @@ fn indexed_queue_commands_preserve_playing_occurrence_and_reject_stale_empty_int
         },
     ] {
         assert!(core.command(command).is_err());
-        assert_eq!(core.queue_ids, ids);
+        assert_eq!(core.store.queue_ids().unwrap(), ids);
         assert_eq!(core.state.queue, state);
     }
     core.command(Command::InsertQueueSources {
@@ -178,7 +178,7 @@ fn indexed_playlist_commands_advance_only_changed_members_and_reject_stale_drops
     .unwrap();
     let baseline = core.state.playlist_query_revisions(1);
     let token = baseline.playlist_entries.unwrap().revision;
-    let queue = core.queue_ids.clone();
+    let queue = core.store.queue_ids().unwrap();
     core.command(Command::InsertPlaylist {
         playlist_id: 1,
         track_ids: vec![4, 2, 3, 4],
@@ -264,7 +264,7 @@ fn indexed_playlist_commands_advance_only_changed_members_and_reject_stale_drops
     })
     .unwrap();
     assert_eq!(core.state.playlist_query_revisions(1), after);
-    assert_eq!(core.queue_ids, queue);
+    assert_eq!(core.store.queue_ids().unwrap(), queue);
 }
 
 #[test]
@@ -300,7 +300,6 @@ fn sql_queue_restores_order_duplicates_current_and_clear_does_not_reuse_ids() {
     let (_directory, mut core) = fixture();
     core.state.queue.current_id = Some(3);
     core.save_queue().unwrap();
-    core.queue_ids.clear();
     core.state.queue = QueueState::default();
     core.load_initial_state().unwrap();
     assert_eq!(
@@ -312,7 +311,7 @@ fn sql_queue_restores_order_duplicates_current_and_clear_does_not_reuse_ids() {
     assert_eq!(core.state.current_track().unwrap().id, 2);
     core.command(Command::ClearQueue).unwrap();
     core.enqueue(&[1]).unwrap();
-    assert!(core.queue_ids[0] > 5);
+    assert!(core.store.queue_id_at(0).unwrap().unwrap() > 5);
     core.load_initial_state().unwrap();
     assert_eq!(core.state.queue.total, 1);
     assert!(core.state.current_track.is_none());
@@ -1211,7 +1210,7 @@ fn album_commands_resolve_all_members_and_reject_stale_keys_before_stop() {
     };
     core.command(Command::EnqueueAlbum { key: key.clone() })
         .unwrap();
-    assert_eq!(core.queue_ids.len(), MAX_QUERY_ROWS + 8);
+    assert_eq!(core.state.queue.total, MAX_QUERY_ROWS + 8);
     let first = core.store.album_tracks_page(&key, None, 0, 1).unwrap().rows[0].id;
     core.command(Command::CreatePlaylist {
         name: "whole album".into(),
@@ -1242,14 +1241,22 @@ fn album_commands_resolve_all_members_and_reject_stale_keys_before_stop() {
         destination: rivu_protocol::model::CollectionDestination::Queue { insertion: None },
     })
     .unwrap();
-    assert_eq!(core.queue_ids.len(), 2 * (MAX_QUERY_ROWS + 3) + 5);
+    assert_eq!(core.state.queue.total, 2 * (MAX_QUERY_ROWS + 3) + 5);
     write_pcm(&core.track(first).unwrap().path);
     let _commands = recording_audio(&mut core);
     core.command(Command::PlayAlbum { key }).unwrap();
-    assert_eq!(core.queue_ids.len(), MAX_QUERY_ROWS + 3);
-    assert_eq!(core.store.queue_track_id(core.queue_ids[0]).unwrap(), first);
-    assert_eq!(core.state.queue.current_id, Some(core.queue_ids[0]));
-    let queue = core.queue_ids.clone();
+    assert_eq!(core.state.queue.total, MAX_QUERY_ROWS + 3);
+    assert_eq!(
+        core.store
+            .queue_track_id(core.store.queue_id_at(0).unwrap().unwrap())
+            .unwrap(),
+        first
+    );
+    assert_eq!(
+        core.state.queue.current_id,
+        Some(core.store.queue_id_at(0).unwrap().unwrap())
+    );
+    let queue = core.store.queue_ids().unwrap();
     let generation = core.generation;
     let current_id = core.state.queue.current_id;
     let playback_status = core.state.playback.status;
@@ -1263,7 +1270,7 @@ fn album_commands_resolve_all_members_and_reject_stale_keys_before_stop() {
             Command::EnqueueAlbum { key: key.clone() },
         ] {
             assert!(core.command(command).is_err());
-            assert_eq!(core.queue_ids, queue);
+            assert_eq!(core.store.queue_ids().unwrap(), queue);
             assert_eq!(core.generation, generation);
             assert_eq!(core.state.queue.current_id, current_id);
             assert_eq!(core.state.playback.status, playback_status);
@@ -1399,13 +1406,12 @@ fn playlist_dedup_preserves_first_entries_and_is_scoped_revision_safe() {
 #[test]
 fn interval_queue_moves_match_stable_selection_order_and_preserve_current() {
     let (_directory, mut core) = fixture();
-    let original = core.queue_ids.clone();
+    let original = core.store.queue_ids().unwrap();
     let current = original[2];
     core.store.set_queue_current(Some(current)).unwrap();
     for mask in 0..(1usize << original.len()) {
         for target in (0..=original.len()).chain(std::iter::once(usize::MAX)) {
             core.store.reorder_queue(&original).unwrap();
-            core.queue_ids.clone_from(&original);
             core.refresh_queue_tracks().unwrap();
             let selected: Vec<_> = original
                 .iter()
@@ -1430,7 +1436,11 @@ fn interval_queue_moves_match_stable_selection_order_and_preserve_current() {
                 index: target,
             })
             .unwrap();
-            assert_eq!(core.queue_ids, expected, "mask={mask} target={target}");
+            assert_eq!(
+                core.store.queue_ids().unwrap(),
+                expected,
+                "mask={mask} target={target}"
+            );
             assert_queue_saved(&core);
             assert_eq!(
                 core.state.queue.revision,
@@ -1474,7 +1484,7 @@ fn failed_queue_moves_preserve_memory_order_current_history_and_revision() {
     playing(&mut core, 3);
     core.played = vec![1, 3, 5];
     core.played_cursor = 2;
-    let order = core.queue_ids.clone();
+    let order = core.store.queue_ids().unwrap();
     let state = core.state.queue.clone();
     let generation = core.generation;
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
@@ -1495,7 +1505,7 @@ fn failed_queue_moves_preserve_memory_order_current_history_and_revision() {
         },
     ] {
         assert!(core.command(command).is_err());
-        assert_eq!(core.queue_ids, order);
+        assert_eq!(core.store.queue_ids().unwrap(), order);
         assert_eq!(core.state.queue, state);
         assert_queue_saved(&core);
         assert_eq!(core.generation, generation);
@@ -1601,12 +1611,12 @@ fn randomize_changes_order_without_changing_current_or_history() {
     core.played = vec![1, 3, 5];
     core.played_cursor = 2;
     let generation = core.generation;
-    let original = core.queue_ids.clone();
+    let original = core.store.queue_ids().unwrap();
     core.randomize_queue(&mut rand::rngs::StdRng::seed_from_u64(42))
         .unwrap();
-    assert_ne!(core.queue_ids, original);
+    assert_ne!(core.store.queue_ids().unwrap(), original);
     assert_queue_saved(&core);
-    let mut actual = core.queue_ids.clone();
+    let mut actual = core.store.queue_ids().unwrap();
     actual.sort_unstable();
     let mut expected = original;
     expected.sort_unstable();
@@ -1634,10 +1644,10 @@ fn empty_and_singleton_queue_edits_are_valid_and_empty_bulk_requests_are_no_ops(
         if singleton {
             core.enqueue(&[2]).unwrap();
         }
-        let before = core.queue_ids.clone();
+        let before = core.store.queue_ids().unwrap();
         core.command(Command::RandomizeQueue).unwrap();
         core.command(Command::DeduplicateQueue).unwrap();
-        assert_eq!(core.queue_ids, before);
+        assert_eq!(core.store.queue_ids().unwrap(), before);
     }
 }
 
@@ -1730,7 +1740,7 @@ fn collection_transfers_reject_source_changes_after_the_last_page() {
         index: 0,
     })
     .unwrap();
-    let queue = core.queue_ids.clone();
+    let queue = core.store.queue_ids().unwrap();
     let queue_state = core.state.queue.clone();
     let target = core.store.playlist_track_ids(2, 20).unwrap();
     let target_revision = core.state.library.playlist_entry_revisions[&2];
@@ -1750,7 +1760,7 @@ fn collection_transfers_reject_source_changes_after_the_last_page() {
                 })
                 .is_err()
             );
-            assert_eq!(core.queue_ids, queue);
+            assert_eq!(core.store.queue_ids().unwrap(), queue);
             assert_eq!(core.state.queue, queue_state);
             assert_eq!(core.store.playlist_track_ids(2, 20).unwrap(), target);
             assert_eq!(
@@ -1774,7 +1784,7 @@ fn collection_transfers_keep_source_order_and_existing_occurrences() {
         playlist_id: 1,
         revision: core.state.library.playlist_entry_revisions[&1],
     };
-    let current = core.queue_ids[2];
+    let current = core.store.queue_id_at(2).unwrap().unwrap();
     core.state.queue.current_id = Some(current);
     core.save_queue().unwrap();
     core.command(Command::TransferCollection {
@@ -1889,14 +1899,15 @@ fn stale_queue_recovery_retries_projection_and_prunes_shuffle_history_without_re
     );
     core.played = vec![1, 2, 3, 4, 5];
     core.played_cursor = 4;
-    let connection = committed_queue_id_refresh_failure(&mut core, directory.path());
+    let connection = committed_queue_scalar_refresh_failure(&mut core, directory.path());
     let generation = core.generation;
     let revision = core.state.queue.revision;
     let commands = recording_audio(&mut core);
     assert!(core.ensure_queue_control_ready().is_err());
-    assert!(core.queue_ids_stale);
-    assert_eq!(core.played, [1, 2, 3, 4, 5]);
-    repair_queue_ids(&connection);
+    assert!(core.queue_projection_stale);
+    assert_eq!(core.played, [1, 4, 5]);
+    assert_eq!(core.played_cursor, 2);
+    repair_queue_scalar(&connection);
     connection
         .execute_batch("UPDATE tracks SET channels='unreadable' WHERE id=1;")
         .unwrap();
@@ -1904,15 +1915,15 @@ fn stale_queue_recovery_retries_projection_and_prunes_shuffle_history_without_re
     // Evict the surviving track so recovery actually decodes the corrupt row.
     core.store.invalidate_caches();
     assert!(core.ensure_queue_control_ready().is_err());
-    assert!(core.queue_ids_stale);
-    assert_eq!(core.queue_ids, [1, 4, 5]);
+    assert!(core.queue_projection_stale);
+    assert_eq!(core.store.queue_ids().unwrap(), [1, 4, 5]);
     assert_eq!(core.played, [1, 4, 5]);
     assert_eq!(core.played_cursor, 2);
     connection
         .execute_batch("UPDATE tracks SET channels=2 WHERE id=1;")
         .unwrap();
     core.ensure_queue_control_ready().unwrap();
-    assert!(!core.queue_ids_stale);
+    assert!(!core.queue_projection_stale);
     assert_eq!(core.state.queue.total, 3);
     assert_eq!(core.state.queue.current_id, Some(1));
     assert_eq!(core.state.current_track().unwrap().id, 1);
@@ -1937,7 +1948,7 @@ fn stale_queue_recovery_retries_projection_and_prunes_shuffle_history_without_re
 fn stale_queue_does_not_block_pause_toggle_pause_or_stop() {
     let (directory, mut core) = fixture();
     pending(&mut core, 1);
-    let _connection = committed_queue_id_refresh_failure(&mut core, directory.path());
+    let _connection = committed_queue_scalar_refresh_failure(&mut core, directory.path());
     let _commands = recording_audio(&mut core);
     core.command(Command::Pause).unwrap();
     assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
@@ -1948,7 +1959,7 @@ fn stale_queue_does_not_block_pause_toggle_pause_or_stop() {
     assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
     core.command(Command::Stop).unwrap();
     assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
-    assert!(core.queue_ids_stale);
+    assert!(core.queue_projection_stale);
 }
 
 #[test]
@@ -2045,7 +2056,7 @@ fn incremental_queue_commits_recover_projection_before_previous() {
         core.navigate(Navigation::Previous).unwrap();
         assert_eq!(core.state.queue.current_id, Some(expected));
         assert_eq!(core.state.queue.total, ids.len());
-        assert_eq!(core.queue_ids, ids);
+        assert_eq!(core.store.queue_ids().unwrap(), ids);
         assert_queue_saved(&core);
     }
 }
@@ -2083,32 +2094,52 @@ fn removal_projection_failure_recovers_two_entry_position_and_shuffle_history() 
 }
 
 #[test]
-fn failed_incremental_id_read_reloads_occurrences_before_navigation() {
+fn delayed_queue_projection_preserves_pending_selection_at_its_committed_position() {
+    let (directory, mut core) = fixture();
+    core.state.queue.current_id = Some(1);
+    core.save_queue().unwrap();
+    let delayed = core.store.queue_projection(core.state.queue.revision);
+    let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+    connection.execute_batch(
+        "CREATE TRIGGER reject_queue_selection BEFORE UPDATE OF current_queue_entry_id ON rivu_meta
+         BEGIN SELECT RAISE(ABORT,'selection rejected'); END;",
+    ).unwrap();
+    core.state.queue.current_id = Some(3);
+    assert!(core.save_queue().is_err());
+    assert!(core.queue_current_pending);
+    connection
+        .execute_batch("DROP TRIGGER reject_queue_selection")
+        .unwrap();
+    core.store.reorder_queue(&[5, 3, 1, 2, 4]).unwrap();
+    core.accept_queue_projection(delayed).unwrap();
+    assert!(!core.queue_current_pending);
+    assert!(!core.queue_projection_stale);
+    assert_eq!(core.state.queue.current_id, Some(3));
+    assert_eq!(core.state.queue.current_position, Some(1));
+    assert_queue_saved(&core);
+}
+
+#[test]
+fn committed_append_scalar_failure_recovers_without_replaying_insertion() {
     let (directory, mut core) = fixture();
     core.state.queue.current_id = Some(5);
     core.save_queue().unwrap();
     core.refresh_queue_tracks().unwrap();
-    let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
-    connection
-        .execute_batch(
-            "CREATE TRIGGER corrupt_appended_id AFTER INSERT ON playlist_entries
-         WHEN NEW.playlist_id=0 BEGIN UPDATE playlist_entries SET id=-NEW.id WHERE id=NEW.id; END;",
-        )
-        .unwrap();
+    let connection = fail_queue_projection_after(directory.path(), "INSERT");
     assert!(
         core.command(Command::Enqueue { track_ids: vec![1] })
             .is_err()
     );
-    let _commands = recording_audio(&mut core);
+    assert_eq!(core.store.queue_ids().unwrap(), [1, 2, 3, 4, 5, 6]);
+    assert!(core.queue_projection_stale);
+    let commands = recording_audio(&mut core);
     assert!(core.navigate(Navigation::Previous).is_err());
-    connection
-        .execute_batch(
-            "DROP TRIGGER corrupt_appended_id;
-         UPDATE playlist_entries SET id=-id WHERE playlist_id=0 AND id<0;",
-        )
-        .unwrap();
-    core.navigate(Navigation::Previous).unwrap();
-    assert_eq!(core.state.queue.current_id, Some(4));
-    assert_eq!(core.queue_ids, [1, 2, 3, 4, 5, 6]);
+    assert!(commands.try_recv().is_err());
+    repair_queue_projection(&connection);
+    core.ensure_queue_control_ready().unwrap();
+    assert_eq!(core.state.queue.total, 6);
+    assert_eq!(core.state.queue.current_id, Some(5));
+    assert_eq!(core.state.queue.current_position, Some(4));
+    assert_eq!(core.store.queue_ids().unwrap(), [1, 2, 3, 4, 5, 6]);
     assert_queue_saved(&core);
 }

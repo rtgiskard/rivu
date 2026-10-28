@@ -5,7 +5,7 @@ fn navigation_fixture(status: PlaybackStatus) -> (tempfile::TempDir, Core) {
     for id in 1..=4 {
         std::fs::write(directory.path().join(format!("{id}.wav")), []).unwrap();
     }
-    let id = core.queue_ids[1];
+    let id = core.store.queue_id_at(1).unwrap().unwrap();
     pending(&mut core, id);
     core.state.playback.status = status;
     if status == PlaybackStatus::Stopped {
@@ -46,10 +46,14 @@ fn navigation_endpoint_preserves_execution_status_and_occurrence_selection() {
     ] {
         for direction in [Navigation::Next, Navigation::Previous] {
             let (directory, mut core) = navigation_fixture(status);
-            let expected = core.queue_ids[match direction {
-                Navigation::Next => 2,
-                Navigation::Previous => 0,
-            }];
+            let expected = core
+                .store
+                .queue_id_at(match direction {
+                    Navigation::Next => 2,
+                    Navigation::Previous => 0,
+                })
+                .unwrap()
+                .unwrap();
             let path = core
                 .track(core.store.queue_track_id(expected).unwrap())
                 .unwrap()
@@ -77,7 +81,7 @@ fn navigation_endpoint_preserves_execution_status_and_occurrence_selection() {
             let core = worker.join().unwrap();
             assert_eq!(
                 core.store
-                    .queue_projection(core.queue_ids.len(), core.state.queue.revision)
+                    .queue_projection(core.state.queue.revision)
                     .unwrap()
                     .current_id,
                 Some(expected)
@@ -93,7 +97,11 @@ fn pause_accepted_before_queued_eof_keeps_next_and_repeat_one_paused() {
     for repeat in [RepeatMode::Off, RepeatMode::One] {
         let (_directory, mut core) = navigation_fixture(PlaybackStatus::Playing);
         core.state.playback.repeat = repeat;
-        let expected = core.queue_ids[if repeat == RepeatMode::One { 1 } else { 2 }];
+        let expected = core
+            .store
+            .queue_id_at(if repeat == RepeatMode::One { 1 } else { 2 })
+            .unwrap()
+            .unwrap();
         let generation = core.generation;
         let commands = recording_audio(&mut core);
         core.command(Command::Pause).unwrap();
@@ -139,7 +147,7 @@ fn pause_accepted_before_queued_eof_keeps_next_and_repeat_one_paused() {
 fn identical_shuffle_setter_preserves_previous_occurrence_history() {
     let (_directory, mut core) = navigation_fixture(PlaybackStatus::Paused);
     core.state.playback.shuffle = true;
-    let previous = core.queue_ids[3];
+    let previous = core.store.queue_id_at(3).unwrap().unwrap();
     let current = core.state.queue.current_id.unwrap();
     core.played = vec![previous, current];
     core.played_cursor = 2;
@@ -313,7 +321,7 @@ fn old_seek_rejections_cannot_roll_back_newer_seek_or_generation() {
 #[test]
 fn queued_pause_is_authoritative_for_navigation_not_the_callers_snapshot() {
     let (_directory, mut core) = navigation_fixture(PlaybackStatus::Playing);
-    let expected = core.queue_ids[2];
+    let expected = core.store.queue_id_at(2).unwrap().unwrap();
     let commands = recording_audio(&mut core);
     let (handle, control, worker, publications) = navigation_runtime(core);
     assert_eq!(
@@ -386,7 +394,7 @@ fn previous_resets_position_without_loading_or_changing_status() {
 fn shuffle_previous_preserves_status_and_follows_occurrence_history() {
     for status in [PlaybackStatus::Paused, PlaybackStatus::Stopped] {
         let (_directory, mut core) = navigation_fixture(status);
-        let ids = core.queue_ids.clone();
+        let ids = core.store.queue_ids().unwrap();
         pending(&mut core, ids[3]);
         core.state.playback.status = status;
         if status == PlaybackStatus::Stopped {
@@ -452,19 +460,19 @@ fn preserving_navigation_reuses_repeat_and_single_occurrence_shuffle_selection()
             let expected = if shuffle {
                 core.command(Command::ClearQueue).unwrap();
                 core.enqueue(&[1]).unwrap();
-                core.queue_ids[0]
+                core.store.queue_id_at(0).unwrap().unwrap()
             } else if repeat == RepeatMode::All {
-                core.queue_ids[0]
+                core.store.queue_id_at(0).unwrap().unwrap()
             } else {
                 // Manual Next ignores Repeat One, just like the wire command.
-                core.queue_ids[2]
+                core.store.queue_id_at(2).unwrap().unwrap()
             };
             let current = if shuffle {
                 expected
             } else if repeat == RepeatMode::All {
-                *core.queue_ids.last().unwrap()
+                *core.store.queue_ids().unwrap().last().unwrap()
             } else {
-                core.queue_ids[1]
+                core.store.queue_id_at(1).unwrap().unwrap()
             };
             pending(&mut core, current);
             core.state.playback.status = status;
@@ -495,7 +503,7 @@ fn preserving_navigation_reuses_repeat_and_single_occurrence_shuffle_selection()
 #[test]
 fn stopped_shuffle_previous_without_history_at_first_occurrence_is_noop() {
     let (_directory, mut core) = navigation_fixture(PlaybackStatus::Stopped);
-    let current = core.queue_ids[0];
+    let current = core.store.queue_id_at(0).unwrap().unwrap();
     pending(&mut core, current);
     core.playback = None;
     core.state.playback.status = PlaybackStatus::Stopped;
@@ -598,7 +606,7 @@ fn random_draws_include_current_weight_duplicates_and_ignore_forward_history() {
     let mut immediate_repeat = false;
     let mut previous = 3;
     for _ in 0..30_000 {
-        let id = core.random_queue_id(&mut rng).unwrap();
+        let id = core.random_queue_id(&mut rng).unwrap().unwrap();
         immediate_repeat |= previous == id;
         counts[id as usize - 1] += 1;
         previous = id;
@@ -608,9 +616,9 @@ fn random_draws_include_current_weight_duplicates_and_ignore_forward_history() {
     assert!(counts[1] + counts[2] > counts[0] * 18 / 10);
     core.command(Command::ClearQueue).unwrap();
     core.enqueue(&[1]).unwrap();
-    let id = core.queue_ids[0];
-    assert_eq!(core.random_queue_id(&mut rng), Some(id));
-    assert_eq!(core.random_queue_id(&mut rng), Some(id));
+    let id = core.store.queue_id_at(0).unwrap().unwrap();
+    assert_eq!(core.random_queue_id(&mut rng).unwrap(), Some(id));
+    assert_eq!(core.random_queue_id(&mut rng).unwrap(), Some(id));
     for _ in 0..5000 {
         core.record_queue_history(id);
     }
@@ -768,14 +776,14 @@ fn stale_queue_toggle_recovers_before_stopped_selection() {
     core.state.queue.current_id = Some(1);
     core.save_queue().unwrap();
     core.refresh_queue_tracks().unwrap();
-    let connection = committed_queue_id_refresh_failure(&mut core, directory.path());
+    let connection = committed_queue_scalar_refresh_failure(&mut core, directory.path());
     let _commands = recording_audio(&mut core);
     assert!(core.command(Command::Toggle).is_err());
     assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
-    repair_queue_ids(&connection);
+    repair_queue_scalar(&connection);
     core.command(Command::Toggle).unwrap();
-    assert!(!core.queue_ids_stale);
-    assert_eq!(core.queue_ids, [1, 4, 5]);
+    assert!(!core.queue_projection_stale);
+    assert_eq!(core.store.queue_ids().unwrap(), [1, 4, 5]);
     assert_eq!(core.state.queue.total, 3);
     assert_eq!(core.state.queue.current_id, Some(1));
     assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
@@ -787,8 +795,8 @@ fn stale_queue_navigation_operation_recovers_order_before_selecting() {
     core.state.queue.current_id = Some(1);
     core.save_queue().unwrap();
     core.refresh_queue_tracks().unwrap();
-    let connection = committed_queue_id_refresh_failure(&mut core, directory.path());
-    repair_queue_ids(&connection);
+    let connection = committed_queue_scalar_refresh_failure(&mut core, directory.path());
+    repair_queue_scalar(&connection);
     let _commands = recording_audio(&mut core);
     let (handle, control, worker, _publications) = navigation_runtime(core);
     let ack = futures::executor::block_on(handle.navigate(Navigation::Next));
@@ -799,8 +807,8 @@ fn stale_queue_navigation_operation_recovers_order_before_selecting() {
     assert_eq!(state.playback.status, PlaybackStatus::Stopped);
     control.request_shutdown().unwrap();
     let core = worker.join().unwrap();
-    assert!(!core.queue_ids_stale);
-    assert_eq!(core.queue_ids, [1, 4, 5]);
+    assert!(!core.queue_projection_stale);
+    assert_eq!(core.store.queue_ids().unwrap(), [1, 4, 5]);
 }
 
 #[test]
@@ -809,15 +817,15 @@ fn stale_queue_natural_eof_recovers_order_and_keeps_paused_intent() {
         let (directory, mut core) = navigation_fixture(status);
         pending(&mut core, 1);
         core.state.playback.status = status;
-        let connection = committed_queue_id_refresh_failure(&mut core, directory.path());
-        repair_queue_ids(&connection);
+        let connection = committed_queue_scalar_refresh_failure(&mut core, directory.path());
+        repair_queue_scalar(&connection);
         let _commands = recording_audio(&mut core);
         core.audio_event(AudioEvent::Ended {
             generation: core.generation,
             bitrate_bps: None,
         })
         .unwrap();
-        assert!(!core.queue_ids_stale);
+        assert!(!core.queue_projection_stale);
         assert_eq!(core.state.queue.current_id, Some(4));
         assert_eq!(core.state.queue.total, 3);
         assert_eq!(core.state.playback.status, status);
@@ -833,8 +841,8 @@ fn stale_queue_shuffle_previous_prunes_deleted_occurrences_before_reading_cursor
     core.state.playback.shuffle = true;
     core.played = vec![1, 2, 3, 4, 5];
     core.played_cursor = 4;
-    let connection = committed_queue_id_refresh_failure(&mut core, directory.path());
-    repair_queue_ids(&connection);
+    let connection = committed_queue_scalar_refresh_failure(&mut core, directory.path());
+    repair_queue_scalar(&connection);
     core.navigate(Navigation::Previous).unwrap();
     assert_eq!(core.state.queue.current_id, Some(1));
     assert_eq!(core.played, [1, 4, 5]);
@@ -891,7 +899,10 @@ fn authoritative_queue_removal_retires_unsaved_selection_without_resurrecting_it
         core.ensure_queue_control_ready().unwrap();
         assert_eq!(core.state.queue.current_id, None);
         assert!(core.state.current_track().is_none());
-        assert_eq!(core.queue_ids, if clear { vec![] } else { vec![1, 4, 5] });
+        assert_eq!(
+            core.store.queue_ids().unwrap(),
+            if clear { vec![] } else { vec![1, 4, 5] }
+        );
         assert_queue_saved(&core);
     }
 }
@@ -916,7 +927,10 @@ fn authoritative_queue_replacement_supersedes_unsaved_old_selection() {
             .collect::<Vec<_>>(),
         [1, 4]
     );
-    assert_eq!(core.state.queue.current_id, core.queue_ids.first().copied());
+    assert_eq!(
+        core.state.queue.current_id,
+        core.store.queue_id_at(0).unwrap()
+    );
     assert_ne!(core.state.queue.current_id, Some(3));
     assert_eq!(core.state.current_track().unwrap().id, 1);
     assert_queue_saved(&core);

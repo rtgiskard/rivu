@@ -775,7 +775,7 @@ fn audition_preserves_queue_source_identity_and_cumulative_heard_stats() {
         .unwrap();
     complete(&mut core);
     let commands = recording_audio(&mut core);
-    let queue_id = core.queue_ids[0];
+    let queue_id = core.store.queue_id_at(0).unwrap().unwrap();
     core.start(queue_id, false).unwrap();
     loop {
         if matches!(
@@ -1293,7 +1293,7 @@ fn audition_rejects_stop_snapshot_from_another_generation() {
         .unwrap();
     complete(&mut core);
     let commands = recording_audio(&mut core);
-    let queue_id = core.queue_ids[0];
+    let queue_id = core.store.queue_id_at(0).unwrap().unwrap();
     core.start(queue_id, false).unwrap();
     loop {
         if matches!(
@@ -2487,7 +2487,7 @@ fn stale_queue_graph_audition_recovers_source_context_before_selecting_occurrenc
         core.processing_status(1).unwrap().phase,
         ProcessingPhase::Complete
     );
-    let connection = committed_queue_id_refresh_failure(&mut core, directory.path());
+    let connection = committed_queue_scalar_refresh_failure(&mut core, directory.path());
     let generation = core.generation;
     let _commands = recording_audio(&mut core);
     assert!(
@@ -2498,15 +2498,15 @@ fn stale_queue_graph_audition_recovers_source_context_before_selecting_occurrenc
         .is_err()
     );
     assert_eq!(core.generation, generation);
-    assert!(core.queue_ids_stale);
-    repair_queue_ids(&connection);
+    assert!(core.queue_projection_stale);
+    repair_queue_scalar(&connection);
     core.command(Command::ProcessingGraphAudition {
         id: 1,
         node: graph_port(2, 0),
     })
     .unwrap();
-    assert!(!core.queue_ids_stale);
-    assert_eq!(core.queue_ids, [1, 4, 5]);
+    assert!(!core.queue_projection_stale);
+    assert_eq!(core.store.queue_ids().unwrap(), [1, 4, 5]);
     assert_eq!(core.state.queue.total, 3);
     assert_eq!(core.state.queue.current_id, Some(1));
     assert_eq!(core.state.current_track().unwrap().id, 1);

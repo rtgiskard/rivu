@@ -195,6 +195,11 @@ pub(super) struct QueueSelection {
     pub(super) locate: QueueLocate,
 }
 impl QueueSelection {
+    fn reclaim_selection_capacity(&mut self, len: usize) {
+        if self.selected.capacity() > 64.max(len.saturating_mul(4)) {
+            self.selected.shrink_to(len.saturating_mul(2));
+        }
+    }
     pub(super) fn len(&self) -> usize {
         self.selected.len()
     }
@@ -266,6 +271,7 @@ impl QueueSelection {
     pub(super) fn clear(&mut self) {
         self.cancel();
         self.selected.clear();
+        self.reclaim_selection_capacity(0);
         self.anchor = None;
         self.active = None;
         self.positions_stale = false;
@@ -282,11 +288,13 @@ impl QueueSelection {
         self.positions_stale = false;
         if !multi {
             self.selected.clear();
+            self.reclaim_selection_capacity(1);
         }
         if multi && self.selected.remove(&row.id).is_some() {
         } else {
             self.selected.insert(row.id, row);
         }
+        self.reclaim_selection_capacity(self.selected.len());
         self.anchor = Some(row);
         self.active = Some(row);
         self.rows.pin(Some(row.offset));
@@ -588,6 +596,7 @@ impl QueueSelection {
             .filter(|row| self.selected.contains_key(&row.id))
             .map(|row| (row.id, row))
             .collect();
+        self.reclaim_selection_capacity(self.selected.len());
         self.busy = false;
         self.positions_stale = false;
         self.selection_error = None;
@@ -622,6 +631,7 @@ impl QueueSelection {
         }
         if !additive {
             self.selected.clear();
+            self.reclaim_selection_capacity(rows.len());
         }
         self.selected
             .extend(rows.into_iter().map(|row| (row.id, row)));
@@ -643,6 +653,36 @@ mod tests {
         model::{LibraryRow, Page, Query, QueueRow},
         response::QueryRevisions,
     };
+
+    #[test]
+    fn selection_releases_high_water_capacity_without_losing_owners() {
+        let mut selection = queue(1);
+        let identity = |id| QueueIdentity {
+            id,
+            track_id: 1,
+            position: id as usize,
+            offset: id as usize,
+        };
+        for id in 0..4096 {
+            selection.select(identity(id), true);
+        }
+        let capacity = selection.selected.capacity();
+        selection.select(identity(4096), true);
+        assert_eq!(selection.selected.capacity(), capacity);
+        selection.select(identity(9), false);
+        assert_eq!(selection.selected.len(), 1);
+        assert!(selection.selected.capacity() <= 64);
+        assert_eq!(selection.active, Some(identity(9)));
+        assert_eq!(selection.anchor, Some(identity(9)));
+        for id in 0..4096 {
+            selection.select(identity(id), true);
+        }
+        selection.reconcile(vec![identity(9)]);
+        assert!(selection.selected.capacity() <= 64);
+        selection.clear();
+        assert!(selection.selected.is_empty());
+        assert!(selection.selected.capacity() <= 64);
+    }
 
     fn revisions(queue: u64) -> QueryRevisions {
         QueryRevisions {

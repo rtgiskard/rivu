@@ -13,7 +13,7 @@ impl Store {
         admission: &ExternalAdmission,
         index: Option<usize>,
         current_id: Option<u64>,
-    ) -> Result<(Vec<u64>, ScanImpacts, usize)> {
+    ) -> Result<(usize, ScanImpacts, usize)> {
         ensure!(
             admission
                 .occurrences
@@ -149,15 +149,6 @@ impl Store {
             .map(|&index| resolved[index])
             .collect();
         let count = insert_tracks(&tx, 0, insertion, &serde_json::to_string(&ids)?, None)?;
-        let end = insertion
-            .checked_add(count)
-            .context("Queue insertion overflow")?;
-        let inserted = tx.prepare("SELECT id FROM playlist_entries WHERE playlist_id=0 AND position>=?1 AND position<?2 ORDER BY position,id")?
-            .query_map(params![i64::try_from(insertion)?, i64::try_from(end)?], |row| {
-                let value = row.get::<_, i64>(0)?;
-                u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, value))
-            })?
-            .collect::<rusqlite::Result<Vec<u64>>>()?;
         let current_id = current_id
             .map(i64::try_from)
             .transpose()
@@ -169,11 +160,11 @@ impl Store {
         tx.execute_batch("DROP TABLE external_sources;")?;
         tx.commit()?;
         impacts.changed = changed != 0 || added != 0;
-        impacts.queue |= !inserted.is_empty();
+        impacts.queue |= count != 0;
         if impacts.changed {
             self.invalidate_caches();
         }
-        Ok((inserted, impacts, added))
+        Ok((count, impacts, added))
     }
 }
 
@@ -243,7 +234,7 @@ mod tests {
             vec![0, 1, 0],
         );
         let (inserted, impacts, added) = store.admit_external_queue(&prepared, None, None).unwrap();
-        assert_eq!(inserted.len(), 3);
+        assert_eq!(inserted, 3);
         assert_eq!(added, 2);
         assert!(impacts.structure);
         assert!(store.queue_state().unwrap().current_id.is_none());
@@ -317,6 +308,11 @@ mod tests {
         let (inserted, _, _) = store
             .admit_external_queue(&prepared, Some(1), Some(old[1]))
             .unwrap();
+        assert_eq!(inserted, 2);
+        let inserted = [
+            store.queue_id_at(1).unwrap().unwrap(),
+            store.queue_id_at(2).unwrap().unwrap(),
+        ];
         assert_eq!(
             store.queue_ids().unwrap(),
             vec![old[0], inserted[0], inserted[1], old[1]]
@@ -449,6 +445,11 @@ mod tests {
         let (inserted, impacts, added) = store
             .admit_external_queue(&prepared, None, Some(old_queue[0]))
             .unwrap();
+        assert_eq!(inserted, 2);
+        let inserted = [
+            store.queue_id_at(1).unwrap().unwrap(),
+            store.queue_id_at(2).unwrap().unwrap(),
+        ];
         assert_eq!(added, 0);
         assert!(
             impacts.changed

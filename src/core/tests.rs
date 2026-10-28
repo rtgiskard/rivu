@@ -112,10 +112,8 @@ pub(super) fn fixture_with_database(duration: Option<f64>) -> (tempfile::TempDir
         task_completions_pending: false,
         generation: 1,
         output_settings_request: 0,
-        queue_ids: Vec::new(),
         next_playlist_token: 0,
         database_unavailable: false,
-        queue_ids_stale: false,
         queue_projection_stale: false,
         queue_current_pending: false,
         playback: None,
@@ -319,14 +317,18 @@ fn write_pcm_frames(path: &Path, frames: u32) {
     file.write_all(&vec![0; data_len as usize]).unwrap();
 }
 
-// Commit a deletion, then fail the queue identity refresh independently of
+// Commit a deletion, then fail its scalar queue projection independently of
 // decoding or audio output. The retained connection can repair each read stage.
-fn committed_queue_id_refresh_failure(core: &mut Core, directory: &Path) -> rusqlite::Connection {
+fn committed_queue_scalar_refresh_failure(
+    core: &mut Core,
+    directory: &Path,
+) -> rusqlite::Connection {
     let connection = rusqlite::Connection::open(directory.join("library.db")).unwrap();
     connection
         .execute_batch(
-            "CREATE TRIGGER fail_delete_queue_ids AFTER DELETE ON tracks WHEN OLD.id=2
-         BEGIN UPDATE playlist_entries SET id=-5 WHERE playlist_id=0 AND id=5; END;",
+            "CREATE TABLE saved_queue_scalar AS SELECT * FROM rivu_meta;
+         CREATE TRIGGER fail_delete_queue_scalar AFTER DELETE ON tracks WHEN OLD.id=2
+         BEGIN DELETE FROM rivu_meta; END;",
         )
         .unwrap();
     let error = core
@@ -334,15 +336,16 @@ fn committed_queue_id_refresh_failure(core: &mut Core, directory: &Path) -> rusq
         .unwrap_err();
     assert!(error.to_string().contains("Track deletion committed"));
     assert!(core.store.track(2).unwrap().is_none());
-    assert!(core.queue_ids_stale);
+    assert!(core.queue_projection_stale);
     connection
 }
 
-fn repair_queue_ids(connection: &rusqlite::Connection) {
+fn repair_queue_scalar(connection: &rusqlite::Connection) {
     connection
         .execute_batch(
-            "DROP TRIGGER fail_delete_queue_ids;
-         UPDATE playlist_entries SET id=5 WHERE playlist_id=0 AND id=-5;",
+            "DROP TRIGGER fail_delete_queue_scalar;
+         INSERT INTO rivu_meta SELECT * FROM saved_queue_scalar;
+         DROP TABLE saved_queue_scalar;",
         )
         .unwrap();
 }
@@ -457,10 +460,9 @@ fn queue_entries(core: &Core) -> Vec<(u64, i64)> {
 }
 
 fn assert_queue_saved(core: &Core) {
-    assert_eq!(core.store.queue_ids().unwrap(), core.queue_ids);
     let projection = core
         .store
-        .queue_projection(core.queue_ids.len(), core.state.queue.revision)
+        .queue_projection(core.state.queue.revision)
         .unwrap();
     assert_eq!(projection.current_id, core.state.queue.current_id);
     assert_eq!(

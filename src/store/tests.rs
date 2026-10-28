@@ -4630,10 +4630,7 @@ fn persistent_queue_accepts_entire_large_library_pages_restarts_and_saves_playli
     assert_eq!(second.rows[0].position, 256);
     let current = last.rows[63].id;
     store.set_queue_current(Some(current)).unwrap();
-    assert_eq!(
-        store.queue_projection(state.total, 123).unwrap().revision,
-        123
-    );
+    assert_eq!(store.queue_projection(123).unwrap().revision, 123);
     let (playlist, has_members) = store.create_playlist_from_queue("All").unwrap();
     assert!(has_members);
     assert_eq!(
@@ -5027,8 +5024,7 @@ fn collection_transfer_failures_preserve_queue_and_playlist_positions() {
     assert_eq!(
         store
             .transfer_collection(&source, CollectionDestination::Queue { insertion: None },)
-            .unwrap()
-            .0,
+            .unwrap(),
         2
     );
     assert_eq!(
@@ -5041,8 +5037,7 @@ fn collection_transfer_failures_preserve_queue_and_playlist_positions() {
                     index: Some(0)
                 },
             )
-            .unwrap()
-            .0,
+            .unwrap(),
         2
     );
     assert_eq!(store.playlist_track_ids(playlist, 20).unwrap(), [1, 2, 3]);

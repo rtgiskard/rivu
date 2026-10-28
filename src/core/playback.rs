@@ -204,7 +204,8 @@ impl Core {
         status: PlaybackStatus,
     ) -> Result<()> {
         self.ensure_queue_control_ready()?;
-        let track = self.track(self.store.queue_track_id(queue_id)?)?;
+        let (track_id, position) = self.store.queue_location(queue_id)?;
+        let track = self.track(track_id)?;
         if status != PlaybackStatus::Stopped && !track.path.is_file() {
             bail!("Missing audio file: {}", track.path.display());
         }
@@ -248,6 +249,9 @@ impl Core {
         }
         self.state.playback.last_heard_at = None;
         self.state.queue.current_id = Some(queue_id);
+        // Core serializes occurrence-order writes. Stop can advance metadata
+        // revisions through final accounting, but cannot move this occurrence.
+        self.state.queue.current_position = Some(position);
         self.state.playback.duration = track.duration;
         self.state.current_track = Some(Arc::new(track));
         self.state.playback.status = status;
@@ -255,14 +259,7 @@ impl Core {
         if record_history {
             self.record_queue_history(queue_id);
         }
-        let saved = self.save_queue();
-        if saved.is_err() {
-            // The failed write leaves runtime selection authoritative. Repair
-            // its position locally; successful saves use the indexed projection.
-            self.state.queue.current_position =
-                self.queue_ids.iter().position(|&id| id == queue_id);
-        }
-        saved
+        self.save_queue()
     }
     pub(in crate::core) fn count_play(&mut self) -> Result<()> {
         if self.database_maintenance_active() {
@@ -532,7 +529,7 @@ impl Core {
             bail!("Database maintenance is in progress; navigation was not executed");
         }
         self.ensure_queue_control_ready()?;
-        if self.queue_ids.is_empty() {
+        if self.state.queue.total == 0 {
             return self.stop();
         }
         let current = self.state.queue.current_id;
@@ -545,17 +542,18 @@ impl Core {
         if self.state.playback.shuffle {
             // Every Next is an independent draw over occurrences, including current.
             let id = self
-                .random_queue_id(&mut rand::rng())
+                .random_queue_id(&mut rand::rng())?
                 .expect("queue is nonempty");
             return self.start_with_status(id, true, status);
         }
         let index = self.state.queue.current_position;
         let next = index.map_or(0, |index| index + 1);
-        if let Some(id) = self.queue_ids.get(next).copied() {
+        if let Some(id) = self.store.queue_id_at(next)? {
             return self.start_with_status(id, true, status);
         }
         if self.state.playback.repeat == RepeatMode::All {
-            return self.start_with_status(self.queue_ids[0], true, status);
+            let id = self.store.queue_id_at(0)?.context("Queue is empty")?;
+            return self.start_with_status(id, true, status);
         }
         if status == PlaybackStatus::Paused {
             Ok(())
@@ -587,7 +585,11 @@ impl Core {
         let index = self.state.queue.current_position;
         if let Some(index) = index {
             if index > 0 {
-                return self.start_with_status(self.queue_ids[index - 1], true, status);
+                let id = self
+                    .store
+                    .queue_id_at(index - 1)?
+                    .context("Queue entry not found")?;
+                return self.start_with_status(id, true, status);
             }
             return if status == PlaybackStatus::Stopped {
                 Ok(())
@@ -595,7 +597,7 @@ impl Core {
                 self.seek(0.0)
             };
         }
-        if let Some(id) = self.queue_ids.first().copied() {
+        if let Some(id) = self.store.queue_id_at(0)? {
             return self.start_with_status(id, true, status);
         }
         bail!("Queue is empty")

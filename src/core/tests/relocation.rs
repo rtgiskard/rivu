@@ -119,7 +119,7 @@ fn manual_relocation_preserves_source_identity_state_and_references() {
         .playlist_entries_page(playlist_id, None, 0, MAX_QUERY_ROWS)
         .unwrap()
         .rows;
-    let queue_before = core.queue_ids.clone();
+    let queue_before = core.store.queue_ids().unwrap();
     let revisions = core.state.query_revisions();
     core.command(Command::RelocateTrack {
         source_id: source,
@@ -138,7 +138,7 @@ fn manual_relocation_preserves_source_identity_state_and_references() {
     assert_eq!(retained.play_count, 1);
     assert_eq!(retained.last_played, Some(123));
     assert!(core.store.track(target).unwrap().is_none());
-    assert_eq!(core.queue_ids, queue_before);
+    assert_eq!(core.store.queue_ids().unwrap(), queue_before);
     assert!(core.store.queued_track(source).unwrap().is_some());
     let entries_after = core
         .store
@@ -241,7 +241,7 @@ fn relocation_rejects_active_affected_rows_at_start_and_during_hash() {
             }
             core.enqueue(&[if playing_target { target } else { source }])
                 .unwrap();
-            let queue_id = *core.queue_ids.last().unwrap();
+            let queue_id = *core.store.queue_ids().unwrap().last().unwrap();
             pending(&mut core, queue_id);
             if during_hash {
                 assert_eq!(settle_relocation(&mut core).phase, RelocationPhase::Failed);

@@ -734,10 +734,8 @@ impl Runtime {
             output_settings_request: 0,
             next_playlist_token: 0,
             database_unavailable: false,
-            queue_ids_stale: false,
             queue_projection_stale: false,
             queue_current_pending: false,
-            queue_ids: Vec::new(),
             playback: None,
             retired_playback: None,
             playback_write_deferred: false,
@@ -910,11 +908,7 @@ struct Core {
     output_settings_request: u64,
     next_playlist_token: u64,
     database_unavailable: bool,
-    // The only full queue projection: compact occurrence IDs, never shared with clients.
-    queue_ids: Vec<u64>,
-    /// True after a committed mutation whose queue occurrence IDs could not be refreshed.
-    queue_ids_stale: bool,
-    // IDs can be current while the position/current-track projection is not.
+    // Failed scalar/current-track refresh gates dependent controls until recovery.
     queue_projection_stale: bool,
     // A runtime selection must reach the database before accepting its projection.
     queue_current_pending: bool,
@@ -993,7 +987,6 @@ impl Core {
         } else {
             "disabled".to_owned()
         };
-        self.queue_ids = self.store.queue_ids()?;
         self.refresh_queue_tracks()?;
         self.publish();
         Ok(())

@@ -322,7 +322,7 @@ fn queue_save_failure_does_not_prevent_final_config_save() {
     core.command(Command::Volume { value: 0.25 }).unwrap();
     core.update_gui_config(GuiConfigChange::ToggleWaveformSeek)
         .unwrap();
-    core.state.queue.current_id = Some(core.queue_ids[0]);
+    core.state.queue.current_id = Some(core.store.queue_id_at(0).unwrap().unwrap());
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     connection
         .execute_batch(
@@ -1030,7 +1030,7 @@ fn output_settings_errors_follow_current_request_after_stop() {
     assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
 
     core.command(Command::Stop).unwrap();
-    let queue_id = core.queue_ids[0];
+    let queue_id = core.store.queue_id_at(0).unwrap().unwrap();
     playing(&mut core, queue_id);
     let playback_generation = core.generation;
     core.state.system.last_error = None;
@@ -1223,8 +1223,8 @@ fn configure_shuffle_keeps_current_occurrence_as_history_start() {
         std::fs::write(directory.path().join(format!("{id}.wav")), []).unwrap();
     }
     let _audio = recording_audio(&mut core);
-    let first = core.queue_ids[0];
-    let next = core.queue_ids[4];
+    let first = core.store.queue_id_at(0).unwrap().unwrap();
+    let next = core.store.queue_id_at(4).unwrap().unwrap();
     core.start(first, true).unwrap();
     core.command(Command::Pause).unwrap();
     let mut config = core.state.system.config.as_ref().clone();

@@ -637,7 +637,7 @@ fn precision_pending(core: &mut Core) {
     core.apply_scan_impacts(impacts).unwrap();
     core.command(Command::ClearQueue).unwrap();
     core.enqueue(&[1]).unwrap();
-    let queue_id = core.queue_ids[0];
+    let queue_id = core.store.queue_id_at(0).unwrap().unwrap();
     pending(core, queue_id);
     assert!(core.playback.as_ref().unwrap().source.is_some());
 }
@@ -808,7 +808,7 @@ fn same_track_restart_retains_queued_started_and_eof_bitrate_upgrades() {
     for eof in [false, true] {
         let (_directory, mut core) = fixture();
         precision_pending(&mut core);
-        let queue_id = core.queue_ids[0];
+        let queue_id = core.store.queue_id_at(0).unwrap().unwrap();
         let generation = core.generation;
         let event = if eof {
             started(&mut core, Some(10.0)).unwrap();
@@ -1129,6 +1129,45 @@ fn final_stop_snapshot_counts_only_matching_generation_above_boundary() {
 }
 
 #[test]
+fn switching_selection_counts_final_snapshot_without_invalidating_its_position() {
+    let (_directory, mut core) = fixture();
+    playing(&mut core, 1);
+    progress(&mut core, 2.0, 2.0);
+    let generation = core.generation;
+    let (commands, receive) = async_channel::bounded(4);
+    let idle_commands = core.engine.replace_commands(commands);
+    let responder = thread::spawn(move || {
+        let AudioCommand::StopAndSnapshot(reply) = receive.recv_blocking().unwrap() else {
+            panic!("selection must retire the previous playback");
+        };
+        reply
+            .send(audio::AudioSnapshot {
+                generation,
+                position_seconds: 2.01,
+                listened_seconds: 2.01,
+            })
+            .unwrap();
+    });
+
+    core.start_with_status(2, true, PlaybackStatus::Stopped)
+        .unwrap();
+    core.engine.replace_commands(idle_commands);
+    responder.join().unwrap();
+    assert_eq!(play_count(&core, 1), 1);
+    assert_eq!(core.state.queue.current_id, Some(2));
+    assert_eq!(core.state.queue.current_position, Some(1));
+    assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+    assert_queue_saved(&core);
+    core.audio_event(AudioEvent::Progress {
+        generation,
+        position_seconds: 10.0,
+        listened_seconds: 10.0,
+    })
+    .unwrap();
+    assert_eq!(play_count(&core, 1), 1);
+}
+
+#[test]
 fn stop_ack_records_queued_start_and_snapshot_without_terminal_navigation() {
     for (heard, expected) in [(2.0, 0), (2.01, 1)] {
         let (_directory, mut core) = fixture();
@@ -1410,7 +1449,10 @@ fn duplicate_queue_entries_count_as_separate_plays_but_share_recent_history() {
         core.store.queue_track_id(2).unwrap(),
         core.store.queue_track_id(3).unwrap()
     );
-    assert_ne!(core.queue_ids[1], core.queue_ids[2]);
+    assert_ne!(
+        core.store.queue_id_at(1).unwrap().unwrap(),
+        core.store.queue_id_at(2).unwrap().unwrap()
+    );
 }
 
 #[test]

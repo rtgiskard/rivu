@@ -167,6 +167,11 @@ pub(in crate::gui) struct EntrySelection {
     refresh_pending: bool,
 }
 impl EntrySelection {
+    fn reclaim_selection_capacity(&mut self, len: usize) {
+        if self.selected.capacity() > 64.max(len.saturating_mul(4)) {
+            self.selected.shrink_to(len.saturating_mul(2));
+        }
+    }
     pub(in crate::gui) fn sync_projection(
         &mut self,
         playlist_id: i64,
@@ -249,6 +254,7 @@ impl EntrySelection {
     pub(in crate::gui) fn clear(&mut self) {
         self.cancel();
         self.selected.clear();
+        self.reclaim_selection_capacity(0);
         self.active = None;
         self.anchor = None;
     }
@@ -260,10 +266,12 @@ impl EntrySelection {
         self.cancel();
         if !multi {
             self.selected.clear();
+            self.reclaim_selection_capacity(1);
         }
         if !multi || self.selected.remove(&row.id).is_none() {
             self.selected.insert(row.id, row);
         }
+        self.reclaim_selection_capacity(self.selected.len());
         self.active = Some(row);
         self.anchor = Some(row);
     }
@@ -354,7 +362,12 @@ impl EntrySelection {
         rows
     }
     pub(in crate::gui) fn ordered_ids(&self) -> Vec<i64> {
-        self.ordered().into_iter().map(|row| row.id).collect()
+        if !self.ready() {
+            return Vec::new();
+        }
+        let mut ids: Vec<_> = self.selected.keys().copied().collect();
+        ids.sort_unstable_by_key(|id| self.selected[id].position);
+        ids
     }
     pub(in crate::gui) fn drag_ids(&self, source: i64) -> Vec<i64> {
         if !self.ready() {
@@ -385,6 +398,7 @@ impl EntrySelection {
     pub(in crate::gui) fn remove(&mut self, id: i64) {
         self.cancel();
         self.selected.remove(&id);
+        self.reclaim_selection_capacity(self.selected.len());
         if self.active.is_some_and(|row| row.id == id) {
             self.active = None;
         }
@@ -407,6 +421,7 @@ impl EntrySelection {
             .filter(|row| self.selected.contains_key(&row.id))
             .map(|row| (row.id, row))
             .collect();
+        self.reclaim_selection_capacity(self.selected.len());
         self.busy = false;
         self.error = None;
     }
@@ -423,6 +438,7 @@ impl EntrySelection {
         }
         if !additive {
             self.selected.clear();
+            self.reclaim_selection_capacity(rows.len());
         }
         self.selected
             .extend(rows.into_iter().map(|row| (row.id, row)));
@@ -1390,6 +1406,33 @@ impl Playlists {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn selection_releases_high_water_capacity_and_preserves_toggle_owners() {
+        let mut selection = super::EntrySelection::default();
+        for id in 0..4096 {
+            selection.select(identity(id, id as usize), true);
+        }
+        let capacity = selection.selected.capacity();
+        selection.select(identity(4096, 4096), true);
+        assert_eq!(selection.selected.capacity(), capacity);
+        selection.select(identity(9, 9), false);
+        assert_eq!(selection.len(), 1);
+        assert!(selection.selected.capacity() <= 64);
+        selection.select(identity(9, 9), true);
+        assert_eq!(selection.len(), 0);
+        assert_eq!(selection.active, Some(identity(9, 9)));
+        assert_eq!(selection.anchor, Some(identity(9, 9)));
+        for id in 0..4096 {
+            selection.select(identity(id, id as usize), true);
+        }
+        selection.reconcile(vec![identity(9, 9)]);
+        assert_eq!(selection.len(), 1);
+        assert!(selection.selected.capacity() <= 64);
+        selection.clear();
+        assert_eq!(selection.len(), 0);
+        assert!(selection.selected.capacity() <= 64);
+    }
+
     use super::{
         EntryIdentity, EntryNavigationEffect, EntryNavigationJob, EntryNavigationRange,
         EntryNavigationScope, EntryRangePages, EntrySelection, EntryTarget,

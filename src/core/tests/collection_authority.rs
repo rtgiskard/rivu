@@ -225,7 +225,7 @@ fn collection_tokens_survive_unrelated_playlist_edits_and_repeated_transfers() {
         source_revision
     );
     assert_eq!(core.state.library.album_revision, album_revision);
-    let before = core.queue_ids.len();
+    let before = core.state.queue.total;
     for _ in 0..2 {
         core.command(Command::TransferCollection {
             source: CollectionSource::Playlist {
@@ -329,7 +329,7 @@ fn core_playlist_recreation_never_reuses_a_stale_lifetime_token() {
     let replacement_id = *core.store.playlist_ids().unwrap().last().unwrap();
     assert_ne!(replacement_id, 3);
     assert!(core.state.library.playlist_entry_revisions[&replacement_id] > token);
-    let queue = core.queue_ids.clone();
+    let queue = core.store.queue_ids().unwrap();
     assert!(
         core.command(Command::TransferCollection {
             source: CollectionSource::Playlist {
@@ -340,7 +340,7 @@ fn core_playlist_recreation_never_reuses_a_stale_lifetime_token() {
         })
         .is_err()
     );
-    assert_eq!(core.queue_ids, queue);
+    assert_eq!(core.store.queue_ids().unwrap(), queue);
     assert_eq!(
         core.query_response(&Query::PlaylistEntryBatch {
             playlist_id: replacement_id,

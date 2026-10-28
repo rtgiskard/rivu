@@ -807,8 +807,12 @@ position gap, and inserts in one transaction; there is no externally visible
 append-then-move phase or whole-list metadata load. Explicit `Enqueue` and
 `AddPlaylist` additions have the same multiplicity-preserving behavior.
 
-The core retains only one private compact occurrence-ID vector (8 bytes per row,
-about 1.53 MiB for 200,000 occurrences); client state frames remain constant-size.
+SQLite owns the complete occurrence order. Core retains only its scalar queue
+projection and bounded navigation history; client state frames remain constant-size.
+Normal navigation and Shuffle resolve occurrence positions through the queue-order
+index, without a whole-queue ID cache or random-offset traversal. Shuffle samples
+positions uniformly, so each occurrence remains equally likely, including the
+current one. Whole-queue randomization uses an operation-local ID permutation.
 
 Shuffle navigation retains at most 4096 successful occurrence starts for
 Previous; it does not maintain a nonrepeating shuffle cycle.
@@ -952,15 +956,17 @@ later events cannot account for that heard time twice.
 
 Committed track deletion has one Core completion boundary. It advances affected
 library, structure, playlist, and duplicate revisions before reading projections.
-Catalog count/history and queue refreshes are attempted independently. Queue IDs
-are reloaded and navigation history is pruned before the queue/current-track
-projection is refreshed once. If reading IDs fails, the previous queue and
-navigation snapshots remain intact. A projection error reports the committed
-deletion without rollback or preventing other domains from refreshing.
+Catalog count/history and queue refreshes are attempted independently. Queue
+recovery checks retained navigation identities, reconciles the history cursor,
+and refreshes the scalar queue/current-track projections. A failed read leaves
+recovery pending; already confirmed history removals need not be undone. A
+projection error reports the committed deletion without rollback or preventing
+other domains from refreshing.
 
-Queue consumers recover stale IDs before using occurrence order, insertion
-boundaries, or navigation history. Recovery reloads IDs, prunes removed history
-entries and reconciles its cursor, then refreshes queue/current-track projections.
+Queue consumers recover stale control projections before using occurrence order,
+insertion boundaries, or navigation history. Recovery does not materialize the
+complete queue. A pending runtime selection is persisted before accepting database
+current; a committed removal owns the disappearance of its occurrence.
 The queue becomes ready only when all required refreshes succeed; a later consumer
 retries an incomplete recovery. Existing playback Pause and Stop do not require
 queue recovery. External admission repeats the readiness and insertion-baseline

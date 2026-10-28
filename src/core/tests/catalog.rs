@@ -2224,7 +2224,7 @@ fn database_optimization_checkpoint_failure_retires_owner_and_allows_explicit_re
         favorite: true,
     })
     .unwrap();
-    let queue = core.queue_ids.clone();
+    let queue = core.store.queue_ids().unwrap();
     let reader = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     reader
         .execute_batch("BEGIN; SELECT * FROM tracks;")
@@ -2234,7 +2234,7 @@ fn database_optimization_checkpoint_failure_retires_owner_and_allows_explicit_re
     // This is a post-VACUUM failure, not evidence that the database was untouched.
     assert!(format!("{error:#}").contains("checkpoint"));
     assert!(core.state.system.database_optimization.is_none());
-    assert_eq!(core.queue_ids, queue);
+    assert_eq!(core.store.queue_ids().unwrap(), queue);
     assert!(core.store.track(1).unwrap().unwrap().favorite);
     reader.execute_batch("ROLLBACK").unwrap();
     drop(reader);
@@ -2243,7 +2243,7 @@ fn database_optimization_checkpoint_failure_retires_owner_and_allows_explicit_re
     let report = core.state.system.database_optimization.as_ref().unwrap();
     assert!(report.database_bytes_after > 0);
     assert_eq!(report.wal_bytes_after, 0);
-    assert_eq!(core.queue_ids, queue);
+    assert_eq!(core.store.queue_ids().unwrap(), queue);
     assert!(core.store.track(1).unwrap().unwrap().favorite);
 }
 

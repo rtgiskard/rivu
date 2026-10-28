@@ -7,7 +7,13 @@ use rivu_protocol::model::{
     Batch, BatchContinuation, MAX_QUERY_ROWS, Page, QueryStamp, QueueCursor, QueueRow, QueueState,
 };
 use rusqlite::{OptionalExtension, Transaction, params};
+use std::collections::HashSet;
 use std::path::PathBuf;
+
+pub(crate) struct PreparedQueueRemoval {
+    ids: String,
+    positions: Vec<i64>,
+}
 
 const CLEAR_BATCH_SIZE: usize = 4096;
 
@@ -56,19 +62,14 @@ fn queue_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueueRow> {
 impl Store {
     #[cfg(test)]
     pub fn queue_state(&self) -> Result<QueueState> {
-        let total = self.conn.query_row(
-            "SELECT COUNT(*) FROM playlist_entries WHERE playlist_id=0",
-            [],
-            |row| integer(row, 0),
-        )?;
-        self.queue_projection(total, 0)
+        self.queue_projection(0)
     }
 
-    pub(crate) fn queue_projection(&self, total: usize, revision: u64) -> Result<QueueState> {
+    pub(crate) fn queue_projection(&self, revision: u64) -> Result<QueueState> {
         Ok(self.conn.query_row(
-            "SELECT current_queue_entry_id,(SELECT position FROM playlist_entries WHERE playlist_id=0 AND id=current_queue_entry_id) FROM rivu_meta WHERE singleton=1",
+            "SELECT current_queue_entry_id,(SELECT position FROM playlist_entries WHERE playlist_id=0 AND id=current_queue_entry_id),(SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=0) FROM rivu_meta WHERE singleton=1",
             [], |row| Ok(QueueState {
-                total,
+                total: integer(row, 2)?,
                 current_id: row.get::<_, Option<i64>>(0)?.map(|value| u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, value))).transpose()?,
                 current_position: row.get::<_, Option<i64>>(1)?.map(|value| usize::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(1, value))).transpose()?,
                 revision,
@@ -85,27 +86,40 @@ impl Store {
             .collect::<rusqlite::Result<_>>()?)
     }
 
-    pub(crate) fn extend_queue_ids(&self, ids: &mut Vec<u64>) -> Result<()> {
-        let mut statement = self
+    pub(crate) fn queue_id_at(&self, position: usize) -> Result<Option<u64>> {
+        let Ok(position) = i64::try_from(position) else {
+            return Ok(None);
+        };
+        Ok(self
             .conn
-            .prepare("SELECT id FROM playlist_entries WHERE playlist_id=0 AND position>=?1 ORDER BY position,id")?;
-        let mut rows = statement.query([ids.len() as i64])?;
-        while let Some(row) = rows.next()? {
-            ids.push(integer(row, 0)?);
-        }
-        Ok(())
+            .query_row(
+                "SELECT id FROM playlist_entries WHERE playlist_id=0 AND position=?1",
+                [position],
+                |row| integer(row, 0),
+            )
+            .optional()?)
     }
 
-    pub(crate) fn queue_track_id(&self, id: u64) -> Result<i64> {
+    pub(crate) fn queue_location(&self, id: u64) -> Result<(i64, usize)> {
         let id = i64::try_from(id).context("Queue entry ID exceeds database range")?;
         self.conn
             .query_row(
-                "SELECT track_id FROM playlist_entries WHERE playlist_id=0 AND id=?1",
+                "SELECT track_id,position FROM playlist_entries WHERE playlist_id=0 AND id=?1",
                 [id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, integer(row, 1)?)),
             )
             .optional()?
             .context("Queue entry not found")
+    }
+
+    pub(crate) fn queue_track_id(&self, id: u64) -> Result<i64> {
+        Ok(self.queue_location(id)?.0)
+    }
+
+    pub(crate) fn queue_existing_ids(&self, ids: &[u64]) -> Result<HashSet<u64>> {
+        // NOT INDEXED still permits rowid lookup. Otherwise SQLite can prefer
+        // scanning playlist_order for playlist_id=0 over probing these few IDs.
+        Ok(self.conn.prepare("SELECT id FROM playlist_entries NOT INDEXED WHERE playlist_id=0 AND id IN (SELECT value FROM json_each(?1))")?.query_map([serde_json::to_string(ids)?], |row| integer(row, 0))?.collect::<rusqlite::Result<_>>()?)
     }
 
     pub(crate) fn queued_track(&self, track_id: i64) -> Result<Option<u64>> {
@@ -302,7 +316,7 @@ impl Store {
         Ok(changed != 0)
     }
 
-    pub(crate) fn insert_queue_tracks(&self, ids: &[i64], index: usize) -> Result<Vec<u64>> {
+    pub(crate) fn insert_queue_tracks(&self, ids: &[i64], index: usize) -> Result<usize> {
         let ids = self.validated_track_ids(ids)?;
         self.insert_queue(&ids, None, index)
     }
@@ -313,7 +327,7 @@ impl Store {
         ids: &[i64],
         other_roots: Option<&[PathBuf]>,
         index: usize,
-    ) -> Result<Vec<u64>> {
+    ) -> Result<usize> {
         if directories.is_empty() && other_roots.is_none() {
             return self.insert_queue_tracks(ids, index);
         }
@@ -321,14 +335,11 @@ impl Store {
         self.insert_queue(&ids, Some(&directories), index)
     }
 
-    fn insert_queue(&self, ids: &str, directories: Option<&str>, index: usize) -> Result<Vec<u64>> {
+    fn insert_queue(&self, ids: &str, directories: Option<&str>, index: usize) -> Result<usize> {
         let tx = self.conn.unchecked_transaction()?;
         let count = super::positions::insert_tracks(&tx, 0, index, ids, directories)?;
-        let inserted = tx.prepare("SELECT id FROM playlist_entries WHERE playlist_id=0 AND position>=?1 AND position<?2 ORDER BY position,id")?
-            .query_map(params![i64::try_from(index)?, i64::try_from(index.checked_add(count).context("Queue insertion overflow")?)?], |row| integer(row, 0))?
-            .collect::<rusqlite::Result<Vec<u64>>>()?;
         tx.commit()?;
-        Ok(inserted)
+        Ok(count)
     }
 
     pub(crate) fn replace_queue_from_playlist(&self, playlist: i64) -> Result<()> {
@@ -346,7 +357,10 @@ impl Store {
         Ok(())
     }
 
-    pub(crate) fn remove_queue_entries(&self, ids: &[u64]) -> Result<bool> {
+    pub(crate) fn prepare_queue_removal(&self, ids: &[u64]) -> Result<PreparedQueueRemoval> {
+        for &id in ids {
+            i64::try_from(id).context("Queue entry ID exceeds database range")?;
+        }
         let tx = self.conn.unchecked_transaction()?;
         let ids = serde_json::to_string(ids)?;
         let missing: Option<i64> = tx.query_row("SELECT requested.value FROM json_each(?1) AS requested WHERE NOT EXISTS (SELECT 1 FROM playlist_entries AS e WHERE e.id=requested.value AND e.playlist_id=0) LIMIT 1", [&ids], |row| row.get(0)).optional()?;
@@ -356,16 +370,27 @@ impl Store {
             missing.unwrap_or_default()
         );
         let positions = tx
-            .prepare("SELECT position FROM playlist_entries WHERE playlist_id=0 AND id IN (SELECT value FROM json_each(?1)) ORDER BY position")?
+            .prepare("SELECT position FROM playlist_entries NOT INDEXED WHERE playlist_id=0 AND id IN (SELECT value FROM json_each(?1)) ORDER BY position")?
             .query_map([&ids], |row| row.get::<_, i64>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        tx.execute(
-            "DELETE FROM playlist_entries WHERE playlist_id=0 AND id IN (SELECT value FROM json_each(?1))",
-            [&ids],
-        )?;
-        close_gaps(&tx, &positions, 0)?;
         tx.commit()?;
-        Ok(!positions.is_empty())
+        Ok(PreparedQueueRemoval { ids, positions })
+    }
+
+    pub(crate) fn remove_prepared_queue_entries(
+        &self,
+        selection: PreparedQueueRemoval,
+    ) -> Result<bool> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM playlist_entries NOT INDEXED WHERE playlist_id=0 AND id IN (SELECT value FROM json_each(?1))", [&selection.ids])?;
+        close_gaps(&tx, &selection.positions, 0)?;
+        tx.commit()?;
+        Ok(!selection.positions.is_empty())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn remove_queue_entries(&self, ids: &[u64]) -> Result<bool> {
+        self.remove_prepared_queue_entries(self.prepare_queue_removal(ids)?)
     }
 
     pub(crate) fn reorder_queue(&self, ids: &[u64]) -> Result<bool> {
@@ -384,31 +409,23 @@ impl Store {
         Ok(changed)
     }
 
-    pub(crate) fn move_queue_entries(&self, selected: &[(i64, i64)], index: usize) -> Result<bool> {
+    pub(crate) fn move_queue_entries(&self, ids: &[u64], index: usize) -> Result<bool> {
         let tx = self.conn.unchecked_transaction()?;
-        let insertion = i64::try_from(index).context("Queue target exceeds database range")?;
-        ensure!(
-            selected.windows(2).all(|pair| pair[0].1 < pair[1].1),
-            "Queue selection is not in occurrence order"
-        );
+        let ids = serde_json::to_string(ids)?;
+        let selected = tx.prepare("SELECT id,position FROM playlist_entries NOT INDEXED WHERE playlist_id=0 AND id IN (SELECT value FROM json_each(?1)) ORDER BY position")?.query_map([&ids], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let requested: usize = tx.query_row(
+            "SELECT COUNT(DISTINCT value) FROM json_each(?1)",
+            [&ids],
+            |row| integer(row, 0),
+        )?;
+        ensure!(requested == selected.len(), "Queue entry not found");
         let total: usize = tx.query_row(
             "SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=0",
             [],
             |row| integer(row, 0),
         )?;
-        ensure!(
-            selected.len() <= total && index <= total - selected.len(),
-            "Queue target out of range"
-        );
-        let matched: usize = tx.query_row(
-            "SELECT COUNT(*) FROM json_each(?1) AS picked JOIN playlist_entries AS e ON e.id=json_extract(picked.value,'$[0]') AND e.position=json_extract(picked.value,'$[1]') WHERE e.playlist_id=0",
-            [serde_json::to_string(selected)?], |row| integer(row, 0),
-        )?;
-        ensure!(
-            matched == selected.len(),
-            "Queue entry not found in selection"
-        );
-        let changed = move_selection(&tx, 0, selected, insertion)?;
+        let insertion = i64::try_from(index.min(total - selected.len()))?;
+        let changed = move_selection(&tx, 0, &selected, insertion)?;
         tx.commit()?;
         Ok(changed)
     }
@@ -473,6 +490,61 @@ mod tests {
     }
 
     #[test]
+    fn removing_tracks_closes_every_duplicate_queue_gap() -> Result<()> {
+        let store = fixture()?;
+        store.enqueue_tracks(&[1, 2, 1, 3, 1, 2])?;
+        let before = store.queue_ids()?;
+        store.set_queue_current(Some(before[3]))?;
+        store.remove_tracks(&[1])?;
+        assert_eq!(store.queue_ids()?, [before[1], before[3], before[5]]);
+        assert_eq!(store.queue_location(before[3])?, (3, 1));
+        assert_eq!(store.queue_projection(0)?.total, 3);
+        assert_compact(&store)
+    }
+
+    #[test]
+    fn database_selection_moves_and_removes_duplicate_occurrences() -> Result<()> {
+        let store = fixture()?;
+        store.enqueue_tracks(&[1, 2, 1, 3])?;
+        let ids = store.queue_ids()?;
+        assert_eq!(store.queue_location(ids[2])?, (1, 2));
+        assert_eq!(store.queue_id_at(4)?, None);
+        assert_eq!(
+            store.queue_existing_ids(&[ids[0], ids[0], u64::MAX])?,
+            HashSet::from([ids[0]])
+        );
+        assert!(store.move_queue_entries(&[ids[2], ids[0], ids[2]], usize::MAX)?);
+        assert_eq!(store.queue_ids()?, [ids[1], ids[3], ids[0], ids[2]]);
+        assert_compact(&store)?;
+        assert!(store.prepare_queue_removal(&[ids[0], u64::MAX]).is_err());
+        let prepared = store.prepare_queue_removal(&[ids[2], ids[2], ids[1]])?;
+        assert!(store.remove_prepared_queue_entries(prepared)?);
+        assert_eq!(store.queue_ids()?, [ids[3], ids[0]]);
+        assert_eq!(store.queue_projection(17)?.total, 2);
+        assert_compact(&store)
+    }
+
+    #[test]
+    fn staged_ordinal_gaps_do_not_become_position_gaps() -> Result<()> {
+        let store = fixture()?;
+        store.enqueue_tracks(&[2])?;
+        let tx = store.conn.unchecked_transaction()?;
+        tx.execute_batch("CREATE TEMP TABLE insertion_tracks(ordinal INTEGER PRIMARY KEY,track_id INTEGER NOT NULL); INSERT INTO insertion_tracks VALUES(4,1),(99,1),(1000,3);")?;
+        assert_eq!(super::super::positions::insert_staged_tracks(&tx, 0, 0)?, 3);
+        tx.commit()?;
+        assert_eq!(
+            store
+                .queue_page(None, 0, 10)?
+                .rows
+                .iter()
+                .map(|row| row.track_id)
+                .collect::<Vec<_>>(),
+            [1, 1, 3, 2]
+        );
+        assert_compact(&store)
+    }
+
+    #[test]
     fn indexed_queue_insertion_preserves_order_duplicates_and_current_occurrence() -> Result<()> {
         for index in 0..=3 {
             let store = fixture()?;
@@ -480,9 +552,12 @@ mod tests {
             let original = store.queue_ids()?;
             store.set_queue_current(Some(original[2]))?;
             let inserted = store.insert_queue_tracks(&[3, 1, 3], index)?;
-            assert_eq!(inserted.len(), 3);
+            assert_eq!(inserted, 3);
             let mut expected_ids = original.clone();
-            expected_ids.splice(index..index, inserted);
+            expected_ids.splice(
+                index..index,
+                store.queue_ids()?[index..index + inserted].iter().copied(),
+            );
             assert_eq!(store.queue_ids()?, expected_ids);
             let mut expected_tracks = vec![1, 2, 2];
             expected_tracks.splice(index..index, [3, 1, 3]);
@@ -532,11 +607,10 @@ mod tests {
                 .insert_queue_sources(&["/music".into()], &[999], None, 1)
                 .is_err()
         );
-        assert!(store.insert_queue_tracks(&[], state.total)?.is_empty());
-        assert!(
-            store
-                .insert_queue_sources(&["/absent".into()], &[], None, 0)?
-                .is_empty()
+        assert_eq!(store.insert_queue_tracks(&[], state.total)?, 0);
+        assert_eq!(
+            store.insert_queue_sources(&["/absent".into()], &[], None, 0)?,
+            0
         );
         assert_eq!(store.queue_state()?, state);
         assert_eq!(store.queue_ids()?, order);
@@ -560,7 +634,7 @@ mod tests {
         assert_eq!(store.queue_ids()?, order);
         assert_eq!(store.queue_state()?, before);
         store.conn.execute_batch("DROP TRIGGER reject_insertion;")?;
-        assert_eq!(store.insert_queue_tracks(&[3], 1)?.len(), 1);
+        assert_eq!(store.insert_queue_tracks(&[3], 1)?, 1);
         Ok(())
     }
 
@@ -582,17 +656,17 @@ mod tests {
         let ids = store.queue_ids()?;
         store.set_queue_current(Some(ids[1]))?;
         let before = store.queue_state()?;
-        assert!(!store.move_queue_entries(&[(ids[1] as i64, 1)], 1)?);
+        assert!(!store.move_queue_entries(&[ids[1]], 1)?);
         assert!(!store.reorder_queue(&ids)?);
-        assert!(!store.move_queue_entries(&[(ids[1] as i64, 1), (ids[2] as i64, 2)], 1)?);
+        assert!(!store.move_queue_entries(&[ids[1], ids[2]], 1)?);
         assert!(!store.remove_queue_entries(&[])?);
         assert!(!store.deduplicate_queue()?);
         assert_eq!(store.queue_state()?, before);
 
-        assert!(store.move_queue_entries(&[(ids[0] as i64, 0)], 2)?);
+        assert!(store.move_queue_entries(&[ids[0]], 2)?);
         assert_eq!(store.queue_ids()?, [ids[1], ids[2], ids[0]]);
         assert!(store.reorder_queue(&ids)?);
-        assert!(store.move_queue_entries(&[(ids[2] as i64, 2)], 1)?);
+        assert!(store.move_queue_entries(&[ids[2]], 1)?);
         assert!(store.remove_queue_entries(&[ids[0]])?);
         assert!(store.enqueue_sources(&[], &[1], None)?);
         assert!(store.enqueue_tracks(&[2])?);
@@ -735,17 +809,13 @@ mod tests {
         )?;
         assert!(store.enqueue_tracks(&[1]).is_err());
         assert!(store.enqueue_sources(&[], &[1], None).is_err());
-        assert!(store.move_queue_entries(&[(ids[0] as i64, 0)], 3).is_err());
+        assert!(store.move_queue_entries(&[ids[0]], 3).is_err());
         assert!(
             store
                 .reorder_queue(&[ids[3], ids[2], ids[1], ids[0]])
                 .is_err()
         );
-        assert!(
-            store
-                .move_queue_entries(&[(ids[0] as i64, 0), (ids[2] as i64, 2)], 2)
-                .is_err()
-        );
+        assert!(store.move_queue_entries(&[ids[0], ids[2]], 2).is_err());
         assert!(store.remove_queue_entries(&[ids[2]]).is_err());
         assert!(store.deduplicate_queue().is_err());
         assert!(store.clear_queue().is_err());

@@ -167,9 +167,8 @@ impl Core {
             id
         } else {
             self.enqueue(&[track_id])?;
-            *self
-                .queue_ids
-                .last()
+            self.store
+                .queue_id_at(self.state.queue.total - 1)?
                 .context("Graph source was not queued")?
         };
         self.start_with_status(queue_id, false, status)

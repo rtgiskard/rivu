@@ -115,7 +115,9 @@ impl History {
         let typography_changed = self.state.system.config.ui_font_size
             != state.system.config.ui_font_size
             || self.state.system.config.ui_scale != state.system.config.ui_scale;
-        if typography_changed {
+        if typography_changed
+            || !std::sync::Arc::ptr_eq(&self.state.library.history, &state.library.history)
+        {
             self.column_widths = None;
         }
         self.state = state;

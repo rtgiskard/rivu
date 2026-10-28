@@ -35,7 +35,7 @@ impl Store {
         &self,
         source: &rivu_protocol::model::CollectionSource,
         destination: rivu_protocol::model::CollectionDestination,
-    ) -> Result<(usize, Vec<u64>)> {
+    ) -> Result<usize> {
         use super::positions::insert_staged_tracks;
         use rivu_protocol::model::{CollectionDestination, CollectionSource};
         let tx = rusqlite::Transaction::new_unchecked(
@@ -96,21 +96,8 @@ impl Store {
             }
         };
         let count = insert_staged_tracks(&tx, scope, index)?;
-        let ids = if matches!(
-            destination,
-            CollectionDestination::Queue { insertion: Some(_) }
-        ) {
-            let end = index
-                .checked_add(count)
-                .context("Queue insertion overflow")?;
-            tx.prepare("SELECT id FROM playlist_entries WHERE playlist_id=0 AND position>=?1 AND position<?2 ORDER BY position,id")?
-                .query_map(params![i64::try_from(index)?, i64::try_from(end)?], |row| integer(row, 0))?
-                .collect::<rusqlite::Result<Vec<u64>>>()?
-        } else {
-            Vec::new()
-        };
         tx.commit()?;
-        Ok((count, ids))
+        Ok(count)
     }
 
     pub fn albums_page(

@@ -15,7 +15,7 @@ pub(in crate::core) struct Saved {
     committed: bool,
     uncertain: bool,
     impacts: Option<crate::store::ScanImpacts>,
-    queue: Option<(Vec<u64>, Result<QueueState>)>,
+    queue: Option<(usize, Result<QueueState>)>,
     track_total: Option<Result<usize>>,
     history: Option<Result<Vec<HistoryEntry>>>,
     current_track: Option<Result<Option<Track>>>,
@@ -73,7 +73,6 @@ fn save_external(
     path: PathBuf,
     mut prepared: library::ExternalAdmission,
     index: Option<usize>,
-    queue_total: usize,
     current_id: Option<u64>,
     sender: oneshot::Sender<Saved>,
 ) {
@@ -101,13 +100,7 @@ fn save_external(
     };
     saved.committed = true;
     saved.impacts = Some(impacts);
-    let total = queue_total.checked_add(inserted.len());
-    saved.queue = Some((
-        inserted,
-        total
-            .context("Queue count overflow after external admission")
-            .and_then(|total| store.queue_projection(total, 0)),
-    ));
+    saved.queue = Some((inserted, store.queue_projection(0)));
     let dependencies = impacts.dependencies(false);
     if dependencies.refresh_track_total {
         saved.track_total = Some(store.track_count());
@@ -379,13 +372,13 @@ impl Core {
             self.retain_external(task.status.clone());
             return;
         }
-        // Preparation may outlive a committed deletion whose ID refresh failed.
-        // Recover before validating an insertion or capturing Saving's snapshot.
+        // Preparation can outlive a committed mutation whose projection failed.
+        // Recover before validating insertion or capturing Saving's baseline.
         let baseline =
             self.ensure_queue_control_ready()
                 .and_then(|()| match task.expected_revision {
                     Some(expected) => self.check_queue_insertion(
-                        task.index.unwrap_or(self.queue_ids.len()),
+                        task.index.unwrap_or(self.state.queue.total),
                         expected,
                     ),
                     None => Ok(()),
@@ -404,12 +397,11 @@ impl Core {
         let (facts_tx, facts_rx) = oneshot::channel();
         let path = std::mem::take(&mut task.database_path);
         let index = task.index;
-        let queue_total = self.queue_ids.len();
         let current_id = self.state.queue.current_id;
         let workers = self.workers.clone();
         task.worker = Some(self.executor.spawn(async move {
             let joined = workers.execute(move || {
-                save_external(path, prepared, index, queue_total, current_id, facts_tx);
+                save_external(path, prepared, index, current_id, facts_tx);
             }).await;
             let mut saved = facts_rx.await.unwrap_or_else(|_| Saved::uncertain(anyhow::anyhow!("External audio saving worker produced no completion facts")));
             if let Err(error) = joined {
@@ -458,17 +450,13 @@ impl Core {
         if let Some(error) = saved.error {
             errors.push(format!("{error:#}"));
         }
-        let queued = saved
-            .queue
-            .as_ref()
-            .map_or(0, |(inserted, _)| inserted.len());
-        if let Some((inserted, queue)) = saved.queue {
-            let index = task.index.unwrap_or(self.queue_ids.len());
-            if let Err(error) = self.accept_queue_insertion(index, inserted, queue) {
-                errors.push(format!(
-                    "Queue committed but refreshing its projection failed: {error:#}"
-                ));
-            }
+        let queued = saved.queue.as_ref().map_or(0, |(inserted, _)| *inserted);
+        if let Some((_, queue)) = saved.queue
+            && let Err(error) = self.accept_queue_projection(queue)
+        {
+            errors.push(format!(
+                "Queue committed but refreshing its projection failed: {error:#}"
+            ));
         }
         if let Some(total) = saved.track_total {
             match total {
@@ -482,12 +470,21 @@ impl Core {
                 Err(error) => errors.push(format!("Refreshing library history failed: {error:#}")),
             }
         }
-        if let Some(track) = saved.current_track
-            && let Err(error) = track.and_then(|track| self.replace_current_track(track))
-        {
-            errors.push(format!(
-                "Refreshing current track after admission failed: {error:#}"
-            ));
+        if let Some(track) = saved.current_track {
+            let projection_stale = self.queue_projection_stale;
+            self.queue_projection_stale = true;
+            match track.and_then(|track| self.replace_current_track(track)) {
+                Ok(()) => {
+                    // A failed scalar projection must remain gated even if
+                    // the independently captured track snapshot is readable.
+                    if !projection_stale {
+                        self.queue_projection_stale = false;
+                    }
+                }
+                Err(error) => errors.push(format!(
+                    "Refreshing current track after admission failed: {error:#}"
+                )),
+            }
         }
         task.status.message = if saved.committed {
             format!(
@@ -750,7 +747,8 @@ mod tests {
             writer.write_sample(0_i16).unwrap();
         }
         writer.finalize().unwrap();
-        let before = core.queue_ids.clone();
+        let before = core.store.queue_ids().unwrap();
+        let before_total = core.state.queue.total;
         core.command(Command::QueueExternalPaths {
             paths: vec![path],
             index: None,
@@ -775,7 +773,7 @@ mod tests {
             core.external_admission_event(event);
         }
         assert!(core.database_maintenance_active());
-        assert_eq!(core.queue_ids, before);
+        assert_eq!(core.state.queue.total, before_total);
         assert!(
             core.command(Command::Enqueue { track_ids: vec![1] })
                 .is_err()
