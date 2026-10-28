@@ -121,7 +121,9 @@ mod bitrate;
 mod channels;
 mod graph;
 mod output;
+mod pcm;
 mod playback;
+pub use pcm::{PcmAudio, PcmBudget, PcmBuilder};
 mod render;
 mod source;
 mod waveform;
@@ -130,7 +132,7 @@ mod worker;
 use channels::Channel;
 pub use graph::GraphRunner;
 pub use output::devices;
-pub use render::{RenderFormat, RenderInfo, SourceRenderer};
+pub use render::{RenderFormat, SourceRenderer};
 pub use source::{
     ProbeBackend, ProbeResult, SourceIdentity, metadata_budget, probe, probe_details, probe_file,
     probe_with_cancel,
@@ -152,6 +154,7 @@ pub fn ffmpeg_load_attempted() -> bool {
 #[derive(Clone, Debug)]
 pub struct WaveformScanSnapshot {
     pub path: PathBuf,
+    pub pcm: Option<PcmAudio>,
     pub range: Option<PlaybackRange>,
     pub decoder_hint: DecoderHint,
     pub expected_identity: Option<SourceIdentity>,
@@ -170,6 +173,7 @@ impl WaveformScanSnapshot {
     ) -> Self {
         Self {
             path,
+            pcm: None,
             range,
             decoder_hint,
             expected_identity: None,
@@ -265,10 +269,11 @@ pub enum AudioCommand {
         paused: bool,
     },
     /// Switch between original and aligned processed audio without resetting heard time.
-    /// Processed WAV uses no range and Some(original_info); restore uses the
-    /// original path/range/decoder and None. Core retains the original Track.
+    /// Processed PCM retains the original path/range metadata. Core retains the
+    /// original Track; PCM already contains the selected timeline.
     Audition {
         path: PathBuf,
+        pcm: Option<PcmAudio>,
         range: Option<PlaybackRange>,
         decoder_hint: DecoderHint,
         source_info: Option<MediaInfo>,
@@ -283,6 +288,7 @@ pub enum AudioCommand {
     /// Graph state never leaks into subsequent tracks.
     GraphAudition {
         path: PathBuf,
+        pcm: Option<PcmAudio>,
         expected_identity: SourceIdentity,
         range: Option<PlaybackRange>,
         decoder_hint: DecoderHint,

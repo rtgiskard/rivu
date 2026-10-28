@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:rivu:audio-processing:event:2",
-  "title": "Version 2 bounded completion; full evidence remains in task-owned result.json",
+  "$id": "urn:rivu:audio-processing:event:3",
+  "title": "Version 3 bounded framed JSON control and raw PCM outputs",
   "type": "object",
   "required": ["version", "task_id", "type"],
   "unevaluatedProperties": false,
   "properties": {
-    "version": {"const": 2},
+    "version": {"const": 3},
     "task_id": {"type": "string", "maxLength": 128},
     "type": {"enum": ["progress", "complete", "error"]}
   },
@@ -26,12 +26,12 @@
         "type": {"const": "complete"},
         "outputs": {
           "type": "object",
-          "description": "Fixed WAV basenames relative to the request's output_dir, published only after successful complete and result.json write. Source format and unclipped float samples are preserved.",
+          "description": "Availability of exact source-aligned raw PCM streams. Complete is valid only after every declared frame has arrived; no retained output paths exist.",
           "additionalProperties": false,
           "properties": {
-            "speech": {"const": "speech.wav"},
-            "vocals": {"const": "vocals.wav"},
-            "accompaniment": {"const": "accompaniment.wav"}
+            "speech": {"const": true},
+            "vocals": {"const": true},
+            "accompaniment": {"const": true}
           },
           "oneOf": [{"required": ["speech"], "maxProperties": 1}, {"required": ["vocals", "accompaniment"], "maxProperties": 2}]
         },
@@ -42,7 +42,7 @@
           "type": "object", "required": ["id", "sha256"], "additionalProperties": false,
           "properties": {
             "id": {"enum": ["MossFormer2_SE_48K", "nsnet2", "DeepFilterNet3", "melband_roformer_kim", "htdemucs"]},
-            "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$", "description": "Canonical manifest SHA256; full artifact/provenance evidence is in result.json."}
+            "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$", "description": "Canonical prepared manifest SHA256; explicit evaluation export may retain detailed provenance."}
           }
         }
       }
@@ -54,7 +54,7 @@
         "code": {"type": "string"},
         "message": {"type": "string"}
       },
-      "description": "Process exits nonzero. No result is committed. Cancellation is terminating/reaping the subprocess, not a stdin protocol; caller owns scratch cleanup. A partial directory after signal termination is not a successful output."
+      "description": "Process exits nonzero. No result is committed. Cancellation terminates and reaps the subprocess, including after early stdout EOF. No implicit files require cleanup."
     }
   ]
 }

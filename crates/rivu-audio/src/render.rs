@@ -8,24 +8,10 @@ use anyhow::{Context, Result, bail};
 use rivu_format::input::open_regular_file;
 use rivu_format::media::DecoderHint;
 use std::{
-    fs::{File, OpenOptions},
-    io::BufWriter,
+    fs::File,
     path::Path,
-    sync::atomic::AtomicBool,
+    sync::{Arc, atomic::AtomicBool},
 };
-
-// RIFF uses 32-bit lengths. Leave room for all WAV headers; reject rather than
-// wrap a long job's lengths or silently truncate its source timeline.
-const MAX_RENDER_BYTES: u64 = u32::MAX as u64 - 1024;
-const WRITE_FRAMES: usize = 4096;
-
-#[derive(Clone, Debug)]
-pub struct RenderInfo {
-    pub source_identity: SourceIdentity,
-    pub sample_rate: u32,
-    pub channels: u16,
-    pub frames: u64,
-}
 
 /// Format and duration from the actual decoder retained for rendering.
 #[derive(Clone, Debug)]
@@ -48,7 +34,7 @@ impl RenderFormat {
 /// Owns one opened decoder, so admission and rendering inspect the same source.
 pub struct SourceRenderer {
     source: Source,
-    identity_file: File,
+    identity_file: Option<File>,
     format: RenderFormat,
 }
 
@@ -94,7 +80,7 @@ impl SourceRenderer {
         check_cancelled(Some(cancelled)).context("Audio render cancelled")?;
         Ok(Self {
             source,
-            identity_file,
+            identity_file: Some(identity_file),
             format,
         })
     }
@@ -103,118 +89,85 @@ impl SourceRenderer {
         &self.format
     }
 
-    /// Native-rate float32 WAV, bounded by the caller's whole-file byte allowance.
-    /// Existing destinations are never overwritten; failures remove the partial file.
-    pub fn render(
-        self,
-        destination: &Path,
-        max_bytes: u64,
-        cancelled: &AtomicBool,
-    ) -> Result<RenderInfo> {
-        check_cancelled(Some(cancelled)).context("Audio render cancelled")?;
-        let Self {
-            mut source,
-            identity_file,
-            format,
-        } = self;
-        if format.estimated_frames().is_some_and(|frames| {
-            frames
-                .checked_mul(u64::from(format.channels) * 4)
-                .and_then(|bytes| bytes.checked_add(128))
-                .is_none_or(|bytes| bytes > max_bytes)
-        }) {
-            bail!("Audio render exceeds task byte limit");
-        }
-        if format.estimated_frames().is_some_and(|frames| {
-            frames
-                .checked_mul(u64::from(format.channels) * 4)
-                .is_none_or(|bytes| bytes > MAX_RENDER_BYTES)
-        }) {
-            bail!("Audio render exceeds the float WAV RIFF size limit");
-        }
-        let RenderFormat {
+    /// Open retained PCM directly. The identity remains the admitted original source.
+    pub fn from_pcm(pcm: super::PcmAudio, source_identity: SourceIdentity) -> Result<Self> {
+        let format = RenderFormat {
             source_identity,
-            sample_rate,
-            channels,
-            ..
-        } = format;
-        if max_bytes < 128 {
-            bail!("Audio render exceeds task byte limit");
-        }
-        let output = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(destination)
-            .with_context(|| format!("Creating audio render {}", destination.display()))?;
-        let result = (|| {
-            let mut writer = hound::WavWriter::new(
-                BufWriter::with_capacity(64 * 1024, output),
-                hound::WavSpec {
-                    channels,
-                    sample_rate,
-                    bits_per_sample: 32,
-                    sample_format: hound::SampleFormat::Float,
-                },
-            )?;
-            let mut frames = 0_u64;
-            loop {
-                let mut budget = DECODE_WORK_BUDGET;
-                let samples = match source.next_frames_with_cancel(Some(cancelled), &mut budget)? {
-                    DecodeStep::Frames(span) => span.samples,
-                    DecodeStep::Yield => continue,
-                    DecodeStep::Eof => break,
-                };
-                if !samples.len().is_multiple_of(usize::from(channels)) {
-                    bail!("Audio render ends in an incomplete interleaved frame");
-                }
-                let next_frames = frames
-                    .checked_add((samples.len() / usize::from(channels)) as u64)
-                    .context("Audio render frame count overflows")?;
-                if next_frames
-                    .checked_mul(u64::from(channels) * 4)
-                    .is_none_or(|bytes| bytes > MAX_RENDER_BYTES)
-                {
-                    bail!("Audio render exceeds the float WAV RIFF size limit");
-                }
-                if next_frames
-                    .checked_mul(u64::from(channels) * 4)
-                    .and_then(|bytes| bytes.checked_add(128))
-                    .is_none_or(|bytes| bytes > max_bytes)
-                {
-                    bail!("Audio render exceeds task byte limit");
-                }
-                for chunk in samples.chunks(WRITE_FRAMES * usize::from(channels)) {
-                    check_cancelled(Some(cancelled)).context("Audio render cancelled")?;
-                    for &sample in chunk {
-                        writer.write_sample(sample)?;
-                    }
-                }
-                frames = next_frames;
-                if source.layout().len() != usize::from(channels)
-                    || source.info().sample_rate != sample_rate
-                {
-                    bail!("Audio render source format changed within the track");
+            sample_rate: pcm.sample_rate(),
+            channels: pcm.channels(),
+            duration: Some(pcm.frames() as f64 / f64::from(pcm.sample_rate())),
+        };
+        Ok(Self {
+            source: Source::from_pcm(pcm, 0.0)?,
+            identity_file: None,
+            format,
+        })
+    }
+
+    /// Decode one bounded block into reusable caller storage; false means EOF.
+    pub fn read_block(&mut self, output: &mut Vec<f32>, cancelled: &AtomicBool) -> Result<bool> {
+        output.clear();
+        loop {
+            let mut work = DECODE_WORK_BUDGET;
+            match self
+                .source
+                .next_frames_with_cancel(Some(cancelled), &mut work)?
+            {
+                DecodeStep::Frames(span) => output.extend_from_slice(span.samples),
+                DecodeStep::Yield => continue,
+                DecodeStep::Eof => {
+                    self.finish(cancelled)?;
+                    return Ok(false);
                 }
             }
-            check_cancelled(Some(cancelled)).context("Audio render cancelled")?;
-            if SourceIdentity::from_file(&identity_file)? != source_identity {
-                bail!("Audio render source changed while decoding");
+            if self.source.layout().len() != usize::from(self.format.channels)
+                || self.source.info().sample_rate != self.format.sample_rate
+            {
+                bail!("Audio render source format changed within the track");
             }
-            writer.finalize().context("Finalizing audio render WAV")?;
-            check_cancelled(Some(cancelled)).context("Audio render cancelled")?;
-            Ok(RenderInfo {
-                source_identity,
-                sample_rate,
-                channels,
-                frames,
-            })
-        })();
-        if result.is_err() {
-            std::fs::remove_file(destination).with_context(|| {
-                format!("Removing partial audio render {}", destination.display())
-            })?;
+            return Ok(true);
         }
-        result
+    }
+
+    pub fn finish(&self, cancelled: &AtomicBool) -> Result<()> {
+        check_cancelled(Some(cancelled)).context("Audio render cancelled")?;
+        if let Some(file) = &self.identity_file
+            && SourceIdentity::from_file(file)? != self.format.source_identity
+        {
+            bail!("Audio render source changed while decoding");
+        }
+        Ok(())
+    }
+
+    pub fn render_pcm(
+        mut self,
+        budget: Arc<super::PcmBudget>,
+        cancelled: &AtomicBool,
+    ) -> Result<super::PcmAudio> {
+        self.finish(cancelled)?;
+        if let Some(pcm) = self.source.pcm() {
+            return Ok(pcm.clone());
+        }
+        let mut builder =
+            super::PcmBuilder::new(self.format.sample_rate, self.format.channels, budget)?;
+        loop {
+            let mut work = DECODE_WORK_BUDGET;
+            match self
+                .source
+                .next_frames_with_cancel(Some(cancelled), &mut work)?
+            {
+                DecodeStep::Frames(span) => builder.push(span.samples)?,
+                DecodeStep::Yield => continue,
+                DecodeStep::Eof => break,
+            }
+            if self.source.layout().len() != usize::from(self.format.channels)
+                || self.source.info().sample_rate != self.format.sample_rate
+            {
+                bail!("Audio render source format changed within the track");
+            }
+        }
+        self.finish(cancelled)?;
+        builder.finish()
     }
 }
 
@@ -244,11 +197,11 @@ mod tests {
     }
 
     #[test]
-    fn render_preserves_selected_stereo_timeline_and_float_overs() {
+    fn render_pcm_preserves_selected_stereo_timeline_without_output_files() {
         let directory = tempfile::tempdir().unwrap();
         let source = float_source(directory.path());
-        let output = directory.path().join("selected.wav");
-        let info = SourceRenderer::open(
+        let budget = super::super::PcmBudget::new(128 * 1024);
+        let pcm = SourceRenderer::open(
             &source,
             Some(PlaybackRange {
                 start_seconds: 0.025,
@@ -260,18 +213,15 @@ mod tests {
             &AtomicBool::new(false),
         )
         .unwrap()
-        .render(&output, u64::MAX, &AtomicBool::new(false))
+        .render_pcm(Arc::clone(&budget), &AtomicBool::new(false))
         .unwrap();
         assert_eq!(
-            (info.sample_rate, info.channels, info.frames),
+            (pcm.sample_rate(), pcm.channels(), pcm.frames()),
             (8_000, 2, 400)
         );
-        let reader = hound::WavReader::open(output).unwrap();
-        assert_eq!(reader.spec().sample_format, hound::SampleFormat::Float);
-        let samples: Vec<f32> = reader
-            .into_samples()
-            .map(|sample| sample.unwrap())
-            .collect();
+        let mut samples = vec![0.0; 800];
+        assert_eq!(pcm.read_frames(0, &mut samples), 400);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
         for (offset, pair) in samples.as_chunks::<2>().0.iter().enumerate() {
             assert_eq!(
                 pair,
@@ -281,27 +231,51 @@ mod tests {
                 ]
             );
         }
+        let retained = budget.used_bytes();
+        let selected = pcm.slice_frames(17, 23).unwrap();
+        let identity = SourceIdentity::from_file(&File::open(&source).unwrap()).unwrap();
+        let other_budget = super::super::PcmBudget::new(0);
+        let alias = SourceRenderer::from_pcm(selected.clone(), identity)
+            .unwrap()
+            .render_pcm(Arc::clone(&other_budget), &AtomicBool::new(false))
+            .unwrap();
+        assert_eq!(budget.used_bytes(), retained);
+        assert_eq!(other_budget.used_bytes(), 0);
+        assert_eq!(alias.identity(), selected.identity());
+        assert!(
+            SourceRenderer::from_pcm(selected.clone(), identity)
+                .unwrap()
+                .render_pcm(Arc::clone(&budget), &AtomicBool::new(true))
+                .is_err()
+        );
+        drop(pcm);
+        drop(selected);
+        assert_eq!(budget.used_bytes(), retained);
+        let mut selected_samples = [0.0; 46];
+        assert_eq!(alias.read_frames(0, &mut selected_samples), 23);
+        assert_eq!(&selected_samples, &samples[34..80]);
+        drop(alias);
+        assert_eq!(budget.used_bytes(), 0);
     }
 
     #[test]
-    fn render_budget_rejects_before_creation_and_cleans_unknown_duration_partial() {
+    fn render_pcm_budget_releases_failed_known_and_unknown_duration_decodes() {
         let directory = tempfile::tempdir().unwrap();
         let source = float_source(directory.path());
-        let output = directory.path().join("limited.wav");
         let cancelled = AtomicBool::new(false);
         let renderer =
             SourceRenderer::open(&source, None, DecoderHint::Native, 1, false, &cancelled).unwrap();
         assert_eq!(renderer.format().channels, 2);
         assert_eq!(renderer.format().sample_rate, 8000);
-        assert!(!output.exists());
+        let budget = super::super::PcmBudget::new(256);
         assert!(
             renderer
-                .render(&output, 256, &cancelled)
+                .render_pcm(Arc::clone(&budget), &cancelled)
                 .unwrap_err()
                 .to_string()
-                .contains("task byte limit")
+                .contains("PCM memory budget exceeded")
         );
-        assert!(!output.exists());
+        assert_eq!(budget.used_bytes(), 0);
 
         let longer = directory.path().join("longer.wav");
         let mut writer = hound::WavWriter::create(
@@ -321,24 +295,27 @@ mod tests {
         let mut renderer =
             SourceRenderer::open(&longer, None, DecoderHint::Native, 1, false, &cancelled).unwrap();
         renderer.format.duration = None;
+        let budget = super::super::PcmBudget::new(40 * 1024);
         assert!(
             renderer
-                .render(&output, 10_000 * 2 * 4 + 128, &cancelled)
+                .render_pcm(Arc::clone(&budget), &cancelled)
                 .unwrap_err()
                 .to_string()
-                .contains("task byte limit")
+                .contains("PCM memory budget exceeded")
         );
-        assert!(!output.exists());
+        assert_eq!(budget.used_bytes(), 0);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);
 
         let renderer =
             SourceRenderer::open(&source, None, DecoderHint::Native, 1, false, &cancelled).unwrap();
         assert_eq!(
             renderer
-                .render(&output, 800 * 2 * 4 + 128, &cancelled)
+                .render_pcm(Arc::clone(&budget), &cancelled)
                 .unwrap()
-                .frames,
+                .frames(),
             800
         );
+        assert_eq!(budget.used_bytes(), 0);
     }
 
     #[test]
@@ -353,10 +330,14 @@ mod tests {
         let identity = renderer.format().source_identity;
         std::fs::remove_file(&source).unwrap();
         std::fs::write(&source, b"replacement is not audio").unwrap();
-        let output = directory.path().join("rendered.wav");
-        let info = renderer.render(&output, u64::MAX, &cancelled).unwrap();
-        assert_eq!(info.source_identity, identity);
-        assert_eq!(info.frames, 800);
+        assert_eq!(renderer.format().source_identity, identity);
+        let pcm = renderer
+            .render_pcm(super::super::PcmBudget::new(128 * 1024), &cancelled)
+            .unwrap();
+        assert_eq!(pcm.frames(), 800);
+        let mut samples = [0.0; 2];
+        assert_eq!(pcm.read_frames(799, &mut samples), 1);
+        assert_eq!(samples, [7.99, -3.995]);
         assert_ne!(
             SourceIdentity::from_file(&File::open(source).unwrap()).unwrap(),
             identity
@@ -364,23 +345,84 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_and_existing_destination_never_modify_files() {
+    fn cancellation_rejects_open_and_admitted_pcm_decode() {
         let directory = tempfile::tempdir().unwrap();
         let source = float_source(directory.path());
-        let output = directory.path().join("output.wav");
         let cancelled = AtomicBool::new(true);
         assert!(
             SourceRenderer::open(&source, None, DecoderHint::Native, 2, false, &cancelled).is_err()
         );
-        assert!(!output.exists());
         cancelled.store(false, Ordering::Relaxed);
-        std::fs::write(&output, b"keep").unwrap();
+        let renderer =
+            SourceRenderer::open(&source, None, DecoderHint::Native, 2, false, &cancelled).unwrap();
+        let budget = super::super::PcmBudget::new(128 * 1024);
+        cancelled.store(true, Ordering::Relaxed);
         assert!(
-            SourceRenderer::open(&source, None, DecoderHint::Native, 2, false, &cancelled)
-                .unwrap()
-                .render(&output, u64::MAX, &cancelled)
+            renderer
+                .render_pcm(Arc::clone(&budget), &cancelled)
                 .is_err()
         );
-        assert_eq!(std::fs::read(output).unwrap(), b"keep");
+        assert_eq!(budget.used_bytes(), 0);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn retained_pcm_decodes_after_original_disappears() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = float_source(directory.path());
+        let cancelled = AtomicBool::new(false);
+        let budget = super::super::PcmBudget::new(128 * 1024);
+        let renderer =
+            SourceRenderer::open(&path, None, DecoderHint::Native, 1, false, &cancelled).unwrap();
+        let identity = renderer.format().source_identity;
+        let pcm = renderer
+            .render_pcm(Arc::clone(&budget), &cancelled)
+            .unwrap();
+        std::fs::remove_file(path).unwrap();
+        let retained = budget.used_bytes();
+        let renderer = SourceRenderer::from_pcm(pcm.clone(), identity).unwrap();
+        assert_eq!(renderer.format().source_identity, identity);
+        let decoded = renderer
+            .render_pcm(Arc::clone(&budget), &cancelled)
+            .unwrap();
+        assert_eq!(
+            (decoded.sample_rate(), decoded.channels(), decoded.frames()),
+            (8000, 2, 800)
+        );
+        assert_eq!(budget.used_bytes(), retained);
+        let mut samples = vec![0.0; 1600];
+        assert_eq!(decoded.read_frames(0, &mut samples), 800);
+        let mut expected = vec![0.0; samples.len()];
+        assert_eq!(pcm.read_frames(0, &mut expected), 800);
+        assert_eq!(samples, expected);
+        drop(decoded);
+        drop(pcm);
+        assert_eq!(budget.used_bytes(), 0);
+    }
+
+    #[test]
+    fn block_decode_preserves_stereo_samples_and_rejects_cancelled_reads() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = float_source(directory.path());
+        let cancelled = AtomicBool::new(false);
+        let mut renderer =
+            SourceRenderer::open(&path, None, DecoderHint::Native, 1, false, &cancelled).unwrap();
+        let mut block = vec![f32::NAN; 7];
+        cancelled.store(true, Ordering::Relaxed);
+        assert!(renderer.read_block(&mut block, &cancelled).is_err());
+        cancelled.store(false, Ordering::Relaxed);
+        let mut samples = Vec::new();
+        while renderer.read_block(&mut block, &cancelled).unwrap() {
+            assert!(!block.is_empty());
+            assert!(block.len().is_multiple_of(2));
+            samples.extend_from_slice(&block);
+        }
+        assert!(block.is_empty());
+        let expected: Vec<_> = (0..800)
+            .flat_map(|frame| [frame as f32 / 100.0, -(frame as f32) / 200.0])
+            .collect();
+        assert_eq!(samples, expected);
+        cancelled.store(true, Ordering::Relaxed);
+        assert!(renderer.finish(&cancelled).is_err());
     }
 }

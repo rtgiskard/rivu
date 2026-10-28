@@ -82,6 +82,7 @@ impl CommandInbox {
 // published until its selected opening has completed in finite decode rounds.
 struct Opening {
     path: PathBuf,
+    pcm: Option<super::PcmAudio>,
     range: Option<super::PlaybackRange>,
     decoder_hint: DecoderHint,
     generation: u64,
@@ -100,21 +101,28 @@ struct Opening {
 impl Opening {
     fn poll(&mut self, buffer_len: usize, ffmpeg_enabled: bool) -> anyhow::Result<bool> {
         if self.source.is_none() {
-            self.source = Some(Source::begin_open(
-                &self.path,
-                buffer_len,
-                self.decoder_hint,
-                ffmpeg_enabled,
-                SourceSelection {
-                    range: self.range,
-                    start: self.start,
-                },
-            )?);
-            if let Some(expected) = self.expected_identity
-                && self.source.as_ref().unwrap().identity() != expected
-            {
-                anyhow::bail!("Opened source differs from the source admitted for graph audition");
-            }
+            self.source = Some(if let Some(pcm) = self.pcm.take() {
+                Source::from_pcm(pcm, self.start)?
+            } else {
+                let source = Source::begin_open(
+                    &self.path,
+                    buffer_len,
+                    self.decoder_hint,
+                    ffmpeg_enabled,
+                    SourceSelection {
+                        range: self.range,
+                        start: self.start,
+                    },
+                )?;
+                if let Some(expected) = self.expected_identity
+                    && source.identity() != expected
+                {
+                    anyhow::bail!(
+                        "Opened source differs from the source admitted for graph audition"
+                    );
+                }
+                source
+            });
         }
         if let Some((seconds, _)) = self.pending_seek {
             self.source.as_mut().unwrap().seek(seconds)?;
@@ -126,7 +134,7 @@ impl Opening {
 
     fn uses_ffmpeg(&self) -> bool {
         self.source.as_ref().map_or(
-            self.decoder_hint == DecoderHint::Ffmpeg,
+            self.pcm.is_none() && self.decoder_hint == DecoderHint::Ffmpeg,
             Source::uses_ffmpeg,
         )
     }
@@ -328,6 +336,7 @@ impl Worker {
             }
             AudioCommand::Audition {
                 path,
+                pcm,
                 range,
                 decoder_hint,
                 source_info,
@@ -340,6 +349,7 @@ impl Worker {
                 self.stop();
                 self.opening = Some(Opening {
                     path,
+                    pcm,
                     range,
                     decoder_hint,
                     generation,
@@ -356,6 +366,7 @@ impl Worker {
             }
             AudioCommand::GraphAudition {
                 path,
+                pcm,
                 expected_identity,
                 range,
                 decoder_hint,
@@ -370,6 +381,7 @@ impl Worker {
                 self.stop();
                 self.opening = Some(Opening {
                     path,
+                    pcm,
                     range,
                     decoder_hint,
                     generation,
@@ -396,6 +408,7 @@ impl Worker {
                 self.stop();
                 self.opening = Some(Opening {
                     path,
+                    pcm: None,
                     range,
                     decoder_hint,
                     generation,
@@ -873,6 +886,7 @@ mod tests {
             worker.ffmpeg_enabled = hint == DecoderHint::Ffmpeg;
             worker.command(AudioCommand::GraphAudition {
                 path: original.path().to_owned(),
+                pcm: None,
                 expected_identity,
                 range: None,
                 decoder_hint: hint,
@@ -898,6 +912,126 @@ mod tests {
             );
             assert!(events.is_empty());
         }
+    }
+    #[test]
+    fn hybrid_pcm_replaces_original_waveform_and_keeps_scan_identity() {
+        use rivu_format::config::processing_graph::{GraphPort, ProcessingGraph};
+        let original = crate::source::opening_prefix_file(0, true);
+        let opened = Source::open(original.path(), 65536, DecoderHint::Native, false).unwrap();
+        let admitted = opened.identity();
+        let duration = opened.info().duration;
+        let mut waveform = crate::WaveformFrame::default();
+        waveform.select_source(original.path(), None, DecoderHint::Native, &opened);
+        waveform.prepare_bins(8000);
+        waveform.push(0.0, &[0.75; 8], 8000, 1);
+        assert!(waveform.peaks.iter().any(Option::is_some));
+        let mut builder =
+            crate::PcmBuilder::new(8000, 1, crate::PcmBudget::new(128 * 1024)).unwrap();
+        builder.push(&[0.25; 800]).unwrap();
+        let pcm = builder.finish().unwrap();
+        let identity = pcm.identity();
+        let (mut worker, _commands, _events, _shutdown) = opening_worker();
+        worker.command(AudioCommand::GraphAudition {
+            path: original.path().to_owned(),
+            pcm: Some(pcm.clone()),
+            expected_identity: admitted,
+            range: None,
+            decoder_hint: DecoderHint::Native,
+            source_info: Some(opened.info().clone()),
+            metadata: Arc::default(),
+            generation: 93,
+            start_seconds: 0.0,
+            paused: true,
+            listened_seconds: 0.0,
+            runner: Box::new(
+                GraphRunner::compile(
+                    &ProcessingGraph::default(),
+                    GraphPort { node: 2, port: 0 },
+                    8000,
+                    1,
+                )
+                .unwrap(),
+            ),
+        });
+        let opening = worker.opening.as_mut().unwrap();
+        assert!(opening.poll(65536, false).unwrap());
+        let source = opening.source.as_ref().unwrap();
+        assert_ne!(source.identity(), admitted);
+        assert_eq!(source.identity(), identity);
+        waveform.select_audition_source(
+            original.path(),
+            None,
+            DecoderHint::Native,
+            source,
+            duration,
+        );
+        assert!(!waveform.peaks.iter().any(Option::is_some));
+        let mut snapshot = crate::WaveformScanSnapshot::original(
+            original.path().to_owned(),
+            None,
+            DecoderHint::Native,
+            rivu_format::config::VisualizationSignal::Before,
+            Arc::default(),
+        );
+        snapshot.expected_identity = Some(source.identity());
+        snapshot.pcm = Some(pcm);
+        let scan = crate::waveform(
+            &snapshot,
+            1,
+            false,
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(scan.scan_source_identity, Some(identity));
+        assert!(scan.peaks.iter().all(|peak| *peak == Some(0.25)));
+        assert_eq!(scan.rms_counts.iter().sum::<u64>(), 800);
+    }
+
+    #[test]
+    fn memory_audition_opening_never_opens_original_path_or_applies_range_twice() {
+        let directory = tempfile::tempdir().unwrap();
+        let budget = super::super::PcmBudget::new(128 * 1024);
+        let mut builder = super::super::PcmBuilder::new(8000, 1, Arc::clone(&budget)).unwrap();
+        let samples: Vec<_> = (0..800).map(|frame| frame as f32).collect();
+        builder.push(&samples).unwrap();
+        let (mut worker, _commands, _events, _shutdown) = opening_worker();
+        worker.command(AudioCommand::Audition {
+            path: directory.path().join("metadata-only.wav"),
+            pcm: Some(builder.finish().unwrap()),
+            range: Some(super::super::PlaybackRange {
+                start_seconds: 10.0,
+                end_seconds: Some(10.1),
+            }),
+            decoder_hint: DecoderHint::Ffmpeg,
+            source_info: None,
+            metadata: Arc::default(),
+            generation: 92,
+            start_seconds: 0.025,
+            paused: true,
+            listened_seconds: 2.0,
+        });
+        let opening = worker.opening.as_mut().unwrap();
+        assert!(!opening.uses_ffmpeg());
+        assert!(opening.poll(65536, false).unwrap());
+        assert!(!opening.uses_ffmpeg());
+        assert!(opening.poll(65536, false).unwrap());
+        let source = opening.source.as_mut().unwrap();
+        assert_eq!(source.info().sample_rate, 8000);
+        assert_eq!(source.info().channels, 1);
+        assert_eq!(source.info().duration, Some(0.1));
+        let mut work = crate::source::DECODE_WORK_BUDGET;
+        let crate::source::DecodeStep::Frames(span) =
+            source.next_frames_with_budget(&mut work).unwrap()
+        else {
+            panic!("memory audition must retain its primed samples");
+        };
+        assert_eq!(span.samples, &samples[200..]);
+        assert_eq!(span.media_start, 0.025);
+        assert!(budget.used_bytes() > 0);
+        worker.command(AudioCommand::Stop);
+        assert!(worker.opening.is_none());
+        assert_eq!(budget.used_bytes(), 0);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
     }
 
     fn load_prefix(
@@ -2079,6 +2213,7 @@ mod tests {
         let (mut worker, _commands, events, _shutdown) = opening_worker();
         worker.command(AudioCommand::Audition {
             path: file.path().to_owned(),
+            pcm: None,
             range: None,
             decoder_hint: DecoderHint::Native,
             source_info: Some(info),

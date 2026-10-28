@@ -80,14 +80,21 @@ pub fn metadata_budget(visuals: bool) -> symphonia_metadata::budget::MetadataBud
     ))
 }
 
-/// Content version captured from the same file descriptor used by the decoder.
+/// Content version of an opened file or an immutable retained PCM span.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SourceIdentity {
-    device: u64,
-    inode: u64,
-    len: u64,
-    modified: (i64, i64),
-    changed: (i64, i64),
+pub enum SourceIdentity {
+    File {
+        device: u64,
+        inode: u64,
+        len: u64,
+        modified: (i64, i64),
+        changed: (i64, i64),
+    },
+    Pcm {
+        storage: u64,
+        start: u64,
+        frames: u64,
+    },
 }
 
 impl SourceIdentity {
@@ -100,7 +107,7 @@ impl SourceIdentity {
     }
 
     pub fn from_metadata(metadata: &std::fs::Metadata) -> Self {
-        Self {
+        Self::File {
             device: metadata.dev(),
             inode: metadata.ino(),
             len: metadata.len(),
@@ -355,6 +362,7 @@ enum Decode {
     Native(Box<dyn AudioDecoder>),
     Opus(OpusDecoder),
     Ffmpeg(Box<super::ffmpeg::Decoder>),
+    Memory { pcm: super::PcmAudio, position: u64 },
 }
 fn decoder(params: &AudioCodecParameters, timestamps_include_delay: bool) -> Result<Decode> {
     if params.codec != CODEC_ID_OPUS {
@@ -473,6 +481,78 @@ pub(super) struct Source {
     opening_fallback: Option<(PathBuf, File, SourceSelection)>,
 }
 impl Source {
+    pub(super) fn from_pcm(pcm: super::PcmAudio, start: f64) -> Result<Self> {
+        super::validate_seek_position(start)?;
+        let rate = pcm.sample_rate();
+        let channels = pcm.channels();
+        let layout = if channels == 1 {
+            vec![Channel::FrontCenter]
+        } else {
+            (0..u32::from(channels))
+                .map(|index| {
+                    Channel::from_standard_index(index).context("Unsupported PCM speaker layout")
+                })
+                .collect::<Result<Vec<_>>>()?
+        };
+        let identity = pcm.identity();
+        let info = MediaInfo {
+            duration: Some(pcm.frames() as f64 / f64::from(rate)),
+            sample_rate: rate,
+            channels,
+            bits_per_sample: Some(32),
+            bitrate_bps: Some(u64::from(rate) * u64::from(channels) * 32),
+            bitrate_exact: true,
+            codec: "PCM f32".into(),
+            title: String::new(),
+            artist: String::new(),
+            album: String::new(),
+            track_number: None,
+            disc_number: None,
+            release_date: None,
+        };
+        let position = ((start * f64::from(rate)).round() as u64).min(pcm.frames());
+        Ok(Self {
+            identity,
+            format: None,
+            metadata_budget: metadata_budget(false),
+            track: 0,
+            decode: Decode::Memory { pcm, position },
+            time_base: TimeBase::try_new(1, rate).unwrap(),
+            timestamp_tick: 1.0 / f64::from(rate),
+            frames: Vec::with_capacity(4096 * usize::from(channels)),
+            frame_start: start,
+            next_media_start: None,
+            delivered_frames: 0,
+            frame_discontinuity: false,
+            discontinuity_pending: true,
+            native_pcm: None,
+            ffmpeg_pending: None,
+            vorbis_timing: None,
+            layout,
+            info,
+            probe_backend: ProbeBackend::Native,
+            range_start: 0.0,
+            range_end: None,
+            seek_target: None,
+            pending_seek: None,
+            ready: false,
+            exhausted: false,
+            decoded_pcm: true,
+            packet_stats: PacketStats::new(),
+            complete_stream: false,
+            expected_samples: None,
+            mpeg_packets: false,
+            opening_fallback: None,
+        })
+    }
+
+    pub(super) fn pcm(&self) -> Option<&super::PcmAudio> {
+        match &self.decode {
+            Decode::Memory { pcm, .. } => Some(pcm),
+            _ => None,
+        }
+    }
+
     pub(super) fn open(
         path: &Path,
         buffer_len: usize,
@@ -920,6 +1000,7 @@ impl Source {
             Decode::Opus(_) => 0.08,
             Decode::Native(_) if self.vorbis_timing.is_some() => 2.0,
             Decode::Native(_) => 0.0,
+            Decode::Memory { .. } => 0.0,
         }
     }
 
@@ -949,6 +1030,14 @@ impl Source {
     fn seek_with_cancel(&mut self, target: f64, cancelled: Option<&AtomicBool>) -> Result<()> {
         check_cancelled(cancelled)?;
         self.validate_seek(target)?;
+        if let Decode::Memory { pcm, position } = &mut self.decode {
+            *position = ((target * f64::from(pcm.sample_rate())).round() as u64).min(pcm.frames());
+            self.reset_traversal();
+            self.frames.clear();
+            self.ready = false;
+            self.exhausted = false;
+            return Ok(());
+        }
         self.complete_stream = false;
         self.packet_stats.invalidate();
         if let Some((_, _, selection)) = &mut self.opening_fallback {
@@ -1050,7 +1139,7 @@ impl Source {
                     0
                 };
             }
-            Decode::Ffmpeg(_) => unreachable!(),
+            Decode::Ffmpeg(_) | Decode::Memory { .. } => unreachable!(),
         }
         self.reset_traversal();
         self.frames.clear();
@@ -1225,17 +1314,21 @@ impl Source {
         let buffer_len = usize::try_from(media_read_buffer_mb)
             .context("Waveform media buffer size does not fit usize")?
             .saturating_mul(super::BYTES_PER_MEBIBYTE);
-        let mut source = Self::open_with_cancel(
-            &snapshot.path,
-            buffer_len,
-            snapshot.decoder_hint,
-            ffmpeg_enabled,
-            SourceSelection {
-                range: snapshot.range,
-                start: 0.0,
-            },
-            Some(cancelled),
-        )?;
+        let mut source = if let Some(pcm) = &snapshot.pcm {
+            Self::from_pcm(pcm.clone(), 0.0)?
+        } else {
+            Self::open_with_cancel(
+                &snapshot.path,
+                buffer_len,
+                snapshot.decoder_hint,
+                ffmpeg_enabled,
+                SourceSelection {
+                    range: snapshot.range,
+                    start: 0.0,
+                },
+                Some(cancelled),
+            )?
+        };
         check_cancelled(Some(cancelled))?;
         if snapshot
             .expected_identity
@@ -1656,6 +1749,24 @@ impl Source {
         if self.exhausted {
             return Ok(DecodeStep::Eof);
         }
+        if let Decode::Memory { pcm, position } = &mut self.decode {
+            if *budget == 0 {
+                return Ok(DecodeStep::Yield);
+            }
+            *budget -= 1;
+            self.frames.resize(4096 * usize::from(pcm.channels()), 0.0);
+            let count = pcm.read_frames(*position, &mut self.frames);
+            self.frames.truncate(count * usize::from(pcm.channels()));
+            self.frame_start = *position as f64 / f64::from(pcm.sample_rate());
+            *position += count as u64;
+            self.frame_discontinuity = self.discontinuity_pending;
+            self.discontinuity_pending = false;
+            if count == 0 {
+                self.exhausted = true;
+                return Ok(DecodeStep::Eof);
+            }
+            return Ok(DecodeStep::Frames(()));
+        }
         if matches!(self.decode, Decode::Ffmpeg(_)) {
             return self.read_ffmpeg_next(cancelled, budget);
         }
@@ -1799,7 +1910,7 @@ impl Source {
                         (packet_start - opus.timestamp_delay + leading as f64 / 48_000.0).max(0.0);
                     Some(count as u64)
                 }
-                Decode::Ffmpeg(_) => unreachable!(),
+                Decode::Ffmpeg(_) | Decode::Memory { .. } => unreachable!(),
             };
             match encoded_samples {
                 Some(samples) => self.packet_stats.add(packet.data.len() as u64, samples),

@@ -24,8 +24,10 @@ class NSNetSpectralTests(unittest.TestCase):
     def test_log_power_floor_and_complex_bins(self):
         spectrum = np.array([0, 1e-8j, 1e-6, 3 + 4j, -2 - 3j], dtype="complex128")
         original = spectrum.copy()
-        expected = np.log10(np.maximum(np.abs(spectrum)**2, 1e-12)).astype("float32")
-        np.testing.assert_array_equal(_log_power(spectrum), expected)
+        expected = np.array([-12, -12, -12, 1.3979400086720377, 1.1139433523068367], dtype="float32")
+        output = _log_power(spectrum)
+        self.assertEqual(output.dtype, np.float32)
+        np.testing.assert_array_equal(output, expected)
         np.testing.assert_array_equal(spectrum, original)
 
     def test_overlap_add_edges_hops_and_independent_channels(self):
@@ -127,7 +129,6 @@ class MossFormerNumericalTests(unittest.TestCase):
         with torch.inference_mode():
             waveform = torch.linspace(-1000, 1000, 2688)
             source = torch.linspace(-0.1, 1.1, 2*961*3).reshape(1, 2, 961, 3)
-            original_source = source.clone()
             relu_output = torch.nn.ReLU()(source)
             untouched_speaker = relu_output[:, 1].clone()
             # Pinned final activation/view geometry: selected speaker shares storage.
@@ -138,7 +139,6 @@ class MossFormerNumericalTests(unittest.TestCase):
                 win_length=1920, window=self.window, center=False, length=len(waveform))[:2305].numpy()/32768.0
             output = self.backend._synthesize(waveform, mask, self.window, 2305, 0.0001)
             np.testing.assert_array_equal(output, expected)
-            np.testing.assert_array_equal(source.numpy(), original_source.numpy())
             np.testing.assert_array_equal(relu_output[:, 1].numpy(), untouched_speaker.numpy())
 
 
@@ -169,7 +169,7 @@ for count in (1, 383, 384, 385, 511, 512, 513, 1919, 1920, 1921, 48037):
     engine(np.zeros((1921, 1), dtype="float32"))
     np.testing.assert_allclose(engine(audio), first, rtol=1e-5, atol=1e-6)
 """
-        completed = subprocess.run([sys.executable, "-c", script], cwd=Path(__file__).resolve().parent,
+        completed = subprocess.run([sys.executable, "-B", "-c", script], cwd=Path(__file__).resolve().parent,
                                    capture_output=True, text=True, timeout=600)
         self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
 

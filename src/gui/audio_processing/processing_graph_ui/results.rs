@@ -262,7 +262,7 @@ impl AudioProcessing {
             } else if live {
                 "processing-result-live-prepared"
             } else {
-                "processing-graph-file-ready"
+                "processing-graph-memory-ready"
             };
             content = content.child(caption(theme, self.tr(ready)));
             content = content.child(
@@ -304,19 +304,14 @@ impl AudioProcessing {
                     })
                 });
             for (kind, port) in ports {
-                let file = task.graph_outputs.iter().find(|output| output.port == port);
+                let retained = task.graph_outputs.iter().any(|output| output.port == port);
                 let label = self.tr(node_label(kind));
                 let availability = if export_receipt {
                     format!("{} #{id}", self.tr("processing-result-source-run"))
+                } else if retained {
+                    self.tr("processing-graph-cached").to_string()
                 } else {
-                    file.map(|output| {
-                        format!(
-                            "{} · {}",
-                            self.tr("processing-graph-cached"),
-                            output.path.display()
-                        )
-                    })
-                    .unwrap_or_else(|| self.tr("processing-result-not-rendered").to_string())
+                    self.tr("processing-result-not-rendered").to_string()
                 };
                 content = content.child(
                     row()
@@ -338,7 +333,7 @@ impl AudioProcessing {
                             )),
                             self.tr(if export_receipt {
                                 "processing-graph-audition"
-                            } else if file.is_some() {
+                            } else if retained {
                                 "processing-result-audition-cached"
                             } else {
                                 "processing-result-calculate-audition"
@@ -355,7 +350,7 @@ impl AudioProcessing {
                             )),
                             self.tr(if export_receipt {
                                 "processing-graph-export"
-                            } else if file.is_some() {
+                            } else if retained {
                                 "processing-result-export-cached"
                             } else {
                                 "processing-result-calculate-export"
@@ -453,15 +448,14 @@ impl AudioProcessing {
                         "#{}:{} · {}",
                         output.port.node,
                         output.port.port,
-                        output.path.display()
+                        self.tr("processing-graph-cached")
                     ),
                 ));
                 if let Some(context) = &output.context {
                     content = content.child(caption(
                         theme,
                         format!(
-                            "{} · {} {}",
-                            context.path.display(),
+                            "{} {}",
                             context.start_frame,
                             self.tr("processing-result-frames")
                         ),

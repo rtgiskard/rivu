@@ -412,14 +412,27 @@ already copied worker. To receive worker fixes, run the provisioning command abo
 from the updated checkout into a new bundle and configure all three emitted paths;
 do not edit the old bundle's hashed files in place.
 
-The worker accepts request version 1 and emits event version 2. Completion is a
-bounded summary: source format/length, model ID and manifest hash, and fixed WAV
-basenames relative to that request's `output_dir`. Full provenance, absolute
-output paths and per-block measurements remain in `output_dir/result.json`.
-The worker writes that report before emitting completion; callers still require
-a successful process exit and validate outputs before publication. Rust keeps
-the 64 KiB event-line limit and does not load the full report. Benchmark and corpus
-evaluation tools read the full report only after successful completion.
+The application starts `worker.py --stream` with request version 2 and event
+version 3. Stdin/stdout carry framed JSON controls and interleaved little-endian
+float32 PCM: a one-byte kind, a four-byte little-endian payload length, and at
+most 64 KiB of payload. Requests describe rate, channels and exact frame count,
+not input/output paths. The worker retains bounded overlapping model windows;
+it does not create WAV intermediates or a result report. Diagnostics use stderr.
+Each worker process handles one task: a request frame, the declared number of
+PCM frames, an empty input-end marker, then stdin EOF. No bytes may follow the
+marker. The producer must close stdin after sending it, without waiting for
+completion. The worker checks EOF before reporting completion; trailing data
+fails the task even if some output PCM has already been streamed.
+Completion reports model identity, format, frame count and available stems.
+Rust validates framing, alignment, finite samples, completion and successful
+process exit before publishing any result; cancellation terminates and reaps
+the child, including after early stdout EOF.
+
+Benchmark and corpus evaluation use the explicit `export.py --request` adapter.
+Its version-1 file job names an input WAV and a new output directory; that
+requested destination contains stem WAVs and the full `result.json` report.
+This adapter is not part of application node execution. Existing provisioned
+workers must be reprovisioned from this checkout to use the framed protocol.
 
 Provision runtime bundles from verified manifests with current tooling. Keep hashed
 sidecars immutable; update the configured worker path to select a new bundle.
@@ -479,18 +492,17 @@ instance. A bare task number is not sufficient, and restarting the service does
 not make a saved reference address a new task. A cancellation acknowledgement
 accepts the request, not proof that the worker has already retired. Cancellation
 invalidates publication, terminates/reaps neural workers and retires partial
-scratch; it does not publish a partial result. Source identity and job settings
+PCM; it does not publish a partial result. Source identity and job settings
 are captured. Later configuration or graph edits do not change that snapshot;
 changes to its registered source or media invalidate publication. Switching the
 playback track is different: it suppresses a pending automatic graph-audition
 handoff through the playback generation, but does not discard a valid completed
 result. Use task IDs for completion and the selected-audio line for playback.
 
-Scratch directory creation, path preparation and neural-backend filesystem checks
-run on the processing worker. An accepted start can therefore fail asynchronously
-during preparation; no terminal result is published until Core rechecks source
-identity and cancellation. Queued can also mean waiting for retired cache files
-to be deleted before preparation or final publication proceeds.
+Decoder preparation and neural-backend validation run on the processing worker.
+An accepted start can fail asynchronously during preparation; Core rechecks
+source identity and cancellation before publication. Queued can also mean waiting
+for previously retired PCM to release its memory reservation.
 
 Unwinding processing and stem-mix workers deliver a failed result to Core instead
 of leaving the task active indefinitely. Neural interpreter children are
@@ -504,9 +516,9 @@ pending queue selection or replacing current playback.
 Processing and stem-mix workers are established before their retirement barrier
 enters the bounded reclamation mailbox. A thread-spawn failure returns to Core
 without leaving queued work, so repeated retries cannot consume retirement
-capacity. An admitted worker waits off Core for earlier deletions; Core never
-blocks on the reclamation mailbox. A deletion failure still rejects the waiting
-task and keeps the unreclaimed bytes charged until shutdown.
+capacity. An admitted worker waits off Core for earlier memory releases; Core
+never blocks on the reclamation mailbox. Failed validation or worker creation
+does not revoke previously available PCM.
 
 Native source preparation checks cancellation between decoder calls; a backend
 call or filesystem operation has no hard cancellation-time guarantee. A retained
@@ -521,47 +533,39 @@ Current task status, bounded task history and still-retained audio agree on the
 terminal phase and error for a task ID, including later stem-mix and audition
 failures. History eviction does not expose an older status through retained audio.
 
-Scratch lives below one session-owned root under the data directory. Active,
-retained and retiring runs share that ownership. Up to four retained audition
-results share 4 GiB; the selected audition
-stays protected, so a result too large to coexist with it fails. Export jobs keep
-only a terminal receipt and the destination WAV, not another audition result;
-repeated exports do not evict their source run. Task status keeps the export job's
-`id` separate from `graph_run_id`, the retained snapshot used for subsequent
-audition and export actions. The results page preserves the receipt identity and
-routes those actions to the source snapshot. Old task status does not guarantee
-that its audio remains available. See
-link:22_cache.adoc#_processing_output_retention[Processing output retention]
-for eviction and status-history lifetimes. Export a graph output to keep a durable
-WAV. Shutdown closes task admission and joins processing/reclamation workers while
-preserving retained outputs until playback has retired; final service destruction
-removes those temporary results, never original media or exported files.
+Processing results are immutable, shared in-memory PCM. No processing directory,
+intermediate WAV, request file or result report is created during node execution.
+The service has a 512 MiB PCM allocation budget shared by active, retained and
+retiring audio; slices and clones charge their backing storage only once, until
+its final owner releases it. Capacity exhaustion fails explicitly, without disk
+spill. This is not a process-RSS limit: decoder/DSP state, model weights and Python
+working buffers have separate costs.
 
-Input files are bounded to 8 GiB; source rendering has the float WAV RIFF limit
-(under 4 GiB). Admission opens the selected decoder once and validates its actual
-format and source identity before creating PCM output. Known duration is checked
-against the render allowance up front; unknown or understated duration is still
-bounded while writing, and failure removes partial output.
+A new non-export run releases unselected PCM and prepared runners after successful
+admission, before worker allocation. Selected audition audio remains pinned.
+Up to four frozen run snapshots remain available for graph recomputation even
+when their PCM has been released. Availability in task status reflects this
+release; completion alone does not guarantee cached audio. Export jobs preserve
+their source handles and retain only a terminal receipt and the destination WAV,
+not another audition slot. `id` identifies the export receipt; `graph_run_id`
+identifies the frozen run used for further audition/export actions.
+See link:22_cache.adoc#_processing_output_retention[Processing output retention].
 
-Offline/hybrid graph execution limits its per-run cache to 2 GiB. Admission counts
-unique PCM files, propagated causal guards, public crops and transient denoise
-copies, plus each neural node's request (1 MiB), report (8 MiB) and retained stderr
-(64 KiB) allowances. Disabled EQ and true denoise bypass share their input PCM and
-timeline instead of writing another file. Off denoise with active hum/impulse
-processing is not a bypass; wet-zero Profile mode still validates/captures its
-selected noise range.
+Native denoise and native-only graphs decode in blocks, retaining final PCM and
+bounded DSP/delay state rather than whole-track native intermediates. Profile
+capture can reread the original source with identity checks. Graphs containing
+neural nodes retain budgeted PCM at model boundaries; their source PCM also
+counts against the budget. Input files remain bounded to 8 GiB. Actual decoded
+frames, including unknown-duration streams, determine EOF and output coverage.
 
-Neural jobs require nonempty input of at most four hours and total stem output at
-most 8 GiB; the worker also checks free space for its predicted outputs plus
-256 MiB. Its report is written within the 8 MiB allowance; overflow fails and
-removes that task's outputs. These checks do not reserve disk space or supersede
-the retained-cache limit. The limits apply at different stages and are not a
-combined scratch or RAM budget. Leave room for rendered input, stems, graph
-intermediates and an optional remix; an input within worker duration/size limits
-can still exceed graph or retention capacity.
-The neural worker chooses RIFF or RF64 independently for each output stem;
-combined stem size does not force individually small files into RF64. Application
-rendering and retained-cache limits still apply.
+Neural requests require nonempty input of at most four hours. The Python worker
+limits each source context window to 128 MiB and transports PCM in bounded frames.
+Model weights and inference workspace are additional allocations, not part of
+the Rust PCM reservation. Explicit evaluation exports independently choose RIFF
+or RF64 per stem. Application graph export writes float WAV through an atomic,
+no-clobber destination commit. Shutdown joins processing/reclamation workers and
+keeps live playback handles valid until their last owner releases them; original
+media and explicit exports are never reclaimed as processing results.
 
 [source,shell]
 ----
@@ -692,13 +696,11 @@ Export accepts a real filesystem path, including spaces; relative destinations
 are anchored to the invoking client's working directory, not the core's. Choose
 a new file in an existing directory; existing destinations are never overwritten.
 The parent is resolved at admission so retargeting a directory alias cannot redirect
-the export. Destinations inside automatically reclaimed session scratch, including
-directory aliases into it, are rejected. Both the destination parent and owned
-scratch root are resolved for the boundary check; an unresolvable scratch root
-rejects export. These checks do not guarantee safety against arbitrary concurrent
-directory replacement. Other locations under the application data directory
-remain valid. Retained temporary outputs remain session-owned; an exported file
-is the durable result. Source files are not modified.
+the export. The worker writes a temporary sibling only for this explicit export,
+then commits without overwriting an existing destination after cancellation and
+source checks. These checks do not guarantee safety against arbitrary concurrent
+directory replacement. In-memory results are session-owned; the exported file
+is durable. Source files are not modified.
 
 == Ownership and invariants
 
@@ -738,13 +740,22 @@ is the durable result. Source files are not modified.
 Graph execution retains full causal intermediate context: FIR ringing, denoiser
 startup delay and branch-alignment delays are not trimmed before downstream nodes.
 Only published node audio is compensated and restricted to the original source
-timeline. A retained `graph_outputs[].context`, when present, names guarded PCM
-and its signed source-relative `start_frame`; hybrid suffixes consume that context
-rather than the trimmed audition/export file. At EOF each denoiser finishes at
+timeline. A retained `graph_outputs[].context`, when present, describes guarded
+in-memory PCM with its signed source-relative `start_frame`; hybrid suffixes
+consume that context rather than the trimmed audition/export slice. At EOF each denoiser finishes at
 its actual upstream end, before its output and FIR tails propagate downstream;
-padding is never treated as new source input. Graph audition checks the opened
-decoder descriptor against the admitted source identity (or guarded cache identity),
-so replacing a pathname with same-format media cannot substitute another source.
+padding is never treated as new source input. Original-source audition checks
+the opened decoder descriptor against the admitted source identity; processed
+audition uses the retained PCM handle, not a replacement cache pathname.
+
+Waveform provenance distinguishes opened-file identity from immutable PCM content.
+PCM clones share identity; different retained allocations and different slice
+intervals do not. A hybrid boundary therefore cannot reuse an original-source
+waveform or a manual scan of a different PCM span, even when path and format match.
+
+Native graph execution reports a terminal node failure (or cancellation) as well
+as the task outcome. Profile failures identify the denoise node; final graph
+compilation, decoding and output-allocation failures identify the requested output.
 
 === DSP crate features
 

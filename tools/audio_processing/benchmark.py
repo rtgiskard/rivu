@@ -118,11 +118,11 @@ def main():
         with request_path.open("x") as stream:
             json.dump(run_request, stream)
         worker_start = time.perf_counter()
-        completed = subprocess.run([sys.executable, str(Path(__file__).with_name("worker.py")), "--request", str(request_path)],
+        completed = subprocess.run([sys.executable, "-B", str(Path(__file__).with_name("export.py")), "--request", str(request_path)],
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         worker_seconds = time.perf_counter()-worker_start
         events = [json.loads(line) for line in completed.stdout.splitlines()]
-        if completed.returncode or not events or events[-1]["type"] != "complete" or events[-1].get("version") != 2 or events[-1].get("task_id") != request["task_id"]:
+        if completed.returncode or not events or events[-1]["type"] != "complete" or events[-1].get("version") != 3 or events[-1].get("task_id") != request["task_id"]:
             raise RuntimeError(json.dumps({"exit":completed.returncode,"events":events,"stderr":completed.stderr}))
         with (Path(run_request["output_dir"]) / "result.json").open() as stream:
             result = json.load(stream)

@@ -1,27 +1,21 @@
 #!/usr/bin/env python3
-"""Local offline inference worker; stdout is the version2 JSONL event protocol.
+"""Read-only offline inference over bounded framed raw PCM stdin/stdout.
 
-Launch with the explicitly prepared interpreter and local request file:
-  .cache/neural/moss-venv/bin/python tools/audio_processing/worker.py --request /abs/request.json
-  .cache/neural/separate-venv/bin/python tools/audio_processing/worker.py --request /abs/request.json
+Invoke the prepared interpreter with worker.py --stream. Each frame is a one-byte
+kind, a uint32 little-endian payload size, and at most 65536 payload bytes. Kind 0
+is UTF-8 JSON (request v2/events v3), 1 is interleaved float32-le input, and 2 is
+the empty input-end marker, which must be followed immediately by stdin EOF.
+Each process handles one task; the producer must close stdin without waiting for
+completion. Output kinds 17/18/19 are speech/vocals/accompaniment
+PCM at the exact source format. Only explicit export.py/evaluation writes files.
 
-request.schema.json and event.schema.json define the stable app interface. Only
-progress/complete/error objects are written to stdout; diagnostics go to stderr.
-Successful outputs also include result.json with model/source/request/worker/code
-hashes, dependency pins, effective settings and phase-specific performance data.
-The caller publishes complete results only, and cancels by terminating/reaping
-the process, then cleaning its scratch directory. Sources are never rewritten.
-
-MossFormer2 uses8s cores plus2s context; Kim/HTDemucs/DF3/NSNet2 use24s cores plus8s
-context. Buffers are duration-bounded, not whole-file. Source sample rate,
-channels and frame count are exact; explicit zero-phase resampling is compensated
-and trimmed. Speech stereo is independent (stereo image may change); multichannel
-and mono separation are rejected, never silently downmixed/duplicated. Model
-processing is offline, never in an audio callback. There is no automatic model
-download, dependency installation, device fallback, peak rescale or clipping.
+The sequential context reader retains at most one bounded model window, not the
+whole signal. MossFormer2 uses 8s cores plus 2s context; other models use 24s plus
+8s. Algorithms, compensated resampling, independent speech channels, exact stem
+complement and unclipped samples are unchanged. No network/device fallback.
 """
 import argparse
-from contextlib import ExitStack, redirect_stdout
+from contextlib import redirect_stdout
 import hashlib
 import importlib.metadata
 import json
@@ -29,18 +23,22 @@ import math
 import os
 from pathlib import Path
 import resource
-import shutil
 import socket
 import sys
 import time
+import struct
 
-VERSION = 1
-EVENT_VERSION = 2
+sys.dont_write_bytecode = True
+VERSION = 2
+EVENT_VERSION = 3
 CORE_SECONDS = 24
 CONTEXT_SECONDS = 8
 MAX_SECONDS = 4 * 60 * 60
-MAX_OUTPUT_BYTES = 8 * 1024**3
+MAX_FRAME_BYTES = 65536
+MAX_WINDOW_BYTES = 128 * 1024**2
 MAX_REPORT_BYTES = 8 * 1024**2
+JSON_FRAME, INPUT_PCM, INPUT_END = 0, 1, 2
+STEM_KINDS = {"speech":17, "vocals":18, "accompaniment":19}
 RUNTIME_FILES = ("worker.py", "mossformer.py", "nsnet2.py", "request.schema.json", "event.schema.json")
 
 class WorkerError(Exception):
@@ -72,9 +70,9 @@ def read_json(path):
 
 def validate_request(request):
     require(isinstance(request, dict), "invalid_request", "request must be an object")
-    allowed = {"version", "task_id", "operation", "input_path", "output_dir", "model_manifest", "device", "threads", "parameters"}
+    allowed = {"version", "task_id", "operation", "sample_rate", "channels", "frames", "model_manifest", "device", "threads", "parameters"}
     require(not (set(request) - allowed), "invalid_request", "unknown request fields: " + str(sorted(set(request) - allowed)))
-    require(request.get("version") == VERSION, "invalid_request", "version must be 1")
+    require(request.get("version") == VERSION, "invalid_request", "version must be 2")
     require(isinstance(request.get("task_id"), str) and 0 < len(request["task_id"]) <= 128, "invalid_request", "task_id must be 1..128 characters")
     require(request.get("operation") in ("speech", "separate"), "invalid_request", "operation must be speech or separate")
     require(request.get("device", "cpu") in ("cpu", "cuda"), "invalid_request", "device must be cpu or cuda")
@@ -91,8 +89,12 @@ def validate_request(request):
                     "invalid_request", name + " outside supported finite range")
     require("post_filter" not in parameters or type(parameters["post_filter"]) is bool,
             "invalid_request", "post_filter must be boolean")
-    for field in ("input_path", "output_dir", "model_manifest"):
-        absolute_path(request.get(field), field)
+    absolute_path(request.get("model_manifest"), "model_manifest")
+    rate, channels, frames = (request.get(key) for key in ("sample_rate", "channels", "frames"))
+    require(type(rate) is int and 8000 <= rate <= 192000, "input_rate", "supported source rates: 8000..192000 Hz")
+    require(type(channels) is int and channels in ((2,) if request["operation"] == "separate" else (1, 2)),
+            "input_channels", "separation requires stereo; speech supports mono/stereo; multichannel downmix is never implicit")
+    require(type(frames) is int and 0 < frames <= MAX_SECONDS * rate, "input_duration", "input must be nonempty and <=4 hours")
     return request
 
 def validate_artifacts(path, operation):
@@ -223,14 +225,83 @@ def build_engine(manifest, base, device, controls=None):
                                atten_lim_db=controls.get("attenuation_limit_db", 80)).cpu().numpy().T
         return 48000, run
 
-def process(request, emit):
+def read_exact(stream, count):
+    require(0 <= count <= MAX_FRAME_BYTES, "protocol", "frame exceeds 64 KiB")
+    data = bytearray(count)
+    offset = 0
+    while offset < count:
+        chunk = stream.read(count-offset)
+        require(bool(chunk), "protocol", "truncated frame")
+        data[offset:offset+len(chunk)] = chunk
+        offset += len(chunk)
+    return data
+
+
+def read_frame(stream):
+    header = read_exact(stream, 5)
+    kind, size = struct.unpack("<BI", header)
+    return kind, read_exact(stream, size)
+
+
+def write_frame(stream, kind, payload):
+    require(len(payload) <= MAX_FRAME_BYTES, "protocol", "frame exceeds 64 KiB")
+    stream.write(struct.pack("<BI", kind, len(payload)))
+    stream.write(payload)
+    stream.flush()
+
+
+class StreamInput:
+    """Sequential input with bounded overlap retention and no seekable-file proxy."""
+    def __init__(self, stream, request):
+        self.stream = stream
+        self.frames, self.channels = request["frames"], request["channels"]
+        self.buffer = None
+        self.left = self.right = self.received = 0
+        self.pending = memoryview(b"")
+        self.hasher = hashlib.sha256()
+
+    def window(self, left, right):
+        import numpy as np
+        require(self.left <= left <= self.right <= right <= self.frames, "protocol", "nonsequential input window")
+        size = (right-left)*self.channels*4
+        require(size <= MAX_WINDOW_BYTES, "memory_capacity", "model context window exceeds 128 MiB")
+        audio = np.empty((right-left, self.channels), dtype="<f4")
+        retained = self.right-left
+        if retained:
+            audio[:retained] = self.buffer[left-self.left:]
+        target = memoryview(audio).cast("B")[retained*self.channels*4:]
+        offset = 0
+        while offset < len(target):
+            if not self.pending:
+                kind, payload = read_frame(self.stream)
+                require(kind == INPUT_PCM and len(payload) and len(payload) % (self.channels*4) == 0,
+                        "protocol", "expected aligned input PCM")
+                self.received += len(payload)//(self.channels*4)
+                require(self.received <= self.frames, "protocol", "input exceeds declared frames")
+                self.hasher.update(payload)
+                self.pending = memoryview(payload)
+            count = min(len(target)-offset, len(self.pending))
+            target[offset:offset+count] = self.pending[:count]
+            self.pending = self.pending[count:]
+            offset += count
+        self.buffer, self.left, self.right = audio, left, right
+        return audio
+
+    def finish(self):
+        require(self.right == self.frames and self.received == self.frames and not self.pending,
+                "protocol", "input frame count mismatch")
+        kind, payload = read_frame(self.stream)
+        require(kind == INPUT_END and not payload, "protocol", "expected empty input end marker")
+        require(not self.stream.read(1), "protocol", "unexpected data after input end marker")
+        self.buffer = None
+        return self.hasher.hexdigest()
+
+
+def process(request, source, write_pcm, emit):
+    """Infer source.window(left,right); emit PCM via callback, return evidence in RAM."""
     request = validate_request(request)
-    source = absolute_path(request["input_path"], "input_path")
-    destination = absolute_path(request["output_dir"], "output_dir")
+    rate, channels, frames = (request[key] for key in ("sample_rate", "channels", "frames"))
     manifest_path = absolute_path(request["model_manifest"], "model_manifest")
-    require(source.is_file(), "input_missing", "input file does not exist")
-    require(not destination.exists(), "output_exists", "output_dir must not already exist")
-    require(destination.parent.is_dir(), "output_parent", "output parent must already exist")
     emit("progress", stage="inspect", completed=0, total=1)
     manifest = validate_manifest(manifest_path, request["operation"])
     controls = request.get("parameters", {})
@@ -238,24 +309,11 @@ def process(request, emit):
     dry = request["operation"] == "speech" and controls.get("wet_mix", 1.0) == 0.0
     if not dry:
         check_packages(manifest)
-    import numpy as np
-    import soundfile as sf
-    info = sf.info(source)
-    require(info.format in ("WAV", "WAVEX", "RF64") and info.subtype == "FLOAT", "input_format", "input must be IEEE float32 WAV/WAVEX/RF64")
-    require(8000 <= info.samplerate <= 192000, "input_rate", "supported source rates: 8000..192000 Hz")
-    require(info.channels in ((2,) if request["operation"] == "separate" else (1, 2)), "input_channels", "separation requires stereo; speech supports mono/stereo; multichannel downmix is never implicit")
-    require(0 < info.frames <= MAX_SECONDS * info.samplerate, "input_duration", "input must be nonempty and <=4 hours")
-    stems = ("vocals", "accompaniment") if request["operation"] == "separate" else ("speech",)
-    output_bytes = info.frames * info.channels * 4 * len(stems) + 8192
-    require(output_bytes <= MAX_OUTPUT_BYTES, "output_capacity", "result exceeds 8 GiB output limit")
-    # RIFF's length applies to each file, not the combined separation outputs.
-    output_format = "RF64" if info.frames * info.channels * 4 + 1024 >= 2**32 else "WAV"
-    require(shutil.disk_usage(destination.parent).free > output_bytes + 256 * 1024**2, "disk_capacity", "insufficient output disk reserve")
-    # Bind the input contents before/after inference; publication is denied if they change.
-    source_hash = digest(source)
     for key in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
         os.environ[key] = str(request.get("threads", 4))
+    os.environ["HF_HUB_OFFLINE"] = os.environ["TRANSFORMERS_OFFLINE"] = "1"
     deny_network()
+    import numpy as np
     model_rate = None
     load_seconds = 0.0
     if not dry:
@@ -264,136 +322,131 @@ def process(request, emit):
         with redirect_stdout(sys.stderr):
             model_rate, infer = build_engine(manifest, manifest_path.parent, request.get("device", "cpu"), controls)
         load_seconds = time.perf_counter() - start
-    destination.mkdir(mode=0o700)
-    outputs = {stem: str(destination / (stem + ".wav")) for stem in stems}
+    stems = ("vocals", "accompaniment") if request["operation"] == "separate" else ("speech",)
     core_seconds, context_seconds = (8, 2) if manifest["id"] == "MossFormer2_SE_48K" else (CORE_SECONDS, CONTEXT_SECONDS)
     if dry:
         core_seconds, context_seconds = CORE_SECONDS, 0
+    require((core_seconds+2*context_seconds)*rate*channels*4 <= MAX_WINDOW_BYTES,
+            "memory_capacity", "model context window exceeds 128 MiB")
     block_times = []
     sample_io_seconds = resampling_seconds = inference_seconds = 0.0
     peaks = dict.fromkeys(stems, 0.0)
     input_energy = output_energy = 0.0
     wall_start = time.perf_counter()
     cpu_start = time.process_time()
-    try:
-        with ExitStack() as stack:
-            reader = stack.enter_context(sf.SoundFile(source))
-            writers = {stem: stack.enter_context(sf.SoundFile(path, mode="w", samplerate=info.samplerate,
-                       channels=info.channels, format=output_format, subtype="FLOAT"))
-                       for stem, path in outputs.items()}
-            step = core_seconds * info.samplerate
-            context = context_seconds * info.samplerate
-            for begin in range(0, info.frames, step):
-                end = min(info.frames, begin + step)
-                left, right = max(0, begin-context), min(info.frames, end+context)
-                io_start = time.perf_counter()
-                reader.seek(left)
-                audio = reader.read(right-left, dtype="float32", always_2d=True)
-                sample_io_seconds += time.perf_counter()-io_start
-                require(audio.shape == (right-left, info.channels) and np.isfinite(audio).all(), "input_samples", "input changed/truncated or contains nonfinite samples")
-                block_start = time.perf_counter()
-                offset = begin-left
-                original = audio[offset:offset+end-begin]
-                if dry:
-                    result = original
-                else:
-                    phase_start = time.perf_counter()
-                    converted = resample_exact(audio, info.samplerate, model_rate)
-                    resampling_seconds += time.perf_counter()-phase_start
-                    phase_start = time.perf_counter()
-                    with redirect_stdout(sys.stderr):
-                        inferred = infer(converted)
-                    inference_seconds += time.perf_counter()-phase_start
-                    require(inferred.shape == converted.shape and np.isfinite(inferred).all(), "inference_output", "model returned wrong length/channels or nonfinite samples")
-                    phase_start = time.perf_counter()
-                    restored = resample_exact(inferred, model_rate, info.samplerate)
-                    resampling_seconds += time.perf_counter()-phase_start
-                    require(len(restored) >= len(audio), "alignment", "resampler returned insufficient source frames")
-                    restored = restored[:len(audio)]
-                    result = restored[offset:offset+end-begin].astype("float32", copy=False)
-                    if request["operation"] == "speech":
-                        wet = controls.get("wet_mix", 1.0)
-                        if wet != 1.0:
-                            result = original*(1.0-wet) + result*wet
-                    del converted, inferred, restored
-                chunks = {"vocals": result, "accompaniment": original-result} if len(stems) == 2 else {"speech":result}
-                for stem, chunk in chunks.items():
-                    if not dry:
-                        require(np.isfinite(chunk).all(), "inference_output", "nonfinite output; refusing sanitization")
-                    io_start = time.perf_counter()
-                    writers[stem].write(chunk)
-                    sample_io_seconds += time.perf_counter()-io_start
-                    peaks[stem] = max(peaks[stem], abs(float(np.min(chunk))), abs(float(np.max(chunk))))
-                # Accumulate in float64 without two full-size float64 temporaries.
-                block_energy = float(np.einsum("ij,ij->", original, original, dtype=np.float64, optimize=False))
-                input_energy += block_energy
-                output_energy += block_energy if dry else float(np.einsum("ij,ij->", result, result, dtype=np.float64, optimize=False))
-                block_times.append(time.perf_counter()-block_start)
-                # Views in result/original/chunks otherwise retain the previous
-                # context buffers while the next inference allocates its output.
-                del audio, result, original, chunks, chunk
-                emit("progress", stage="copy" if dry else "inference", completed=end, total=info.frames)
-        require(digest(source) == source_hash, "source_changed", "source changed during processing")
-        for path in outputs.values():
-            output_info = sf.info(path)
-            require((output_info.frames, output_info.channels, output_info.samplerate) == (info.frames, info.channels, info.samplerate), "alignment", "written result format/length mismatch")
-        wall = time.perf_counter()-wall_start
-        report = {"outputs":outputs, "sample_rate":info.samplerate, "channels":info.channels, "frames":info.frames,
-                  "model":{"id":manifest["id"], "sha256":canonical_digest(manifest), "files":manifest["files"],
-                           "provenance":manifest.get("provenance", {})},
-                  "source_sha256":source_hash, "request_sha256":canonical_digest(request),
-                  "worker_sha256":digest(__file__), "python":sys.version, "packages":manifest["packages"],
-                  "implementation_sha256":{path.name:digest(path) for path in sorted(Path(__file__).parent.glob("*.py"))},
-                  "interpreter":{"path":sys.executable,"sha256":digest(sys.executable)},
-                  "installed_packages":{} if dry else {name:importlib.metadata.version(name) for name in manifest["packages"]},
-                  "device":"cpu" if dry else request.get("device", "cpu"), "threads":request.get("threads", 4),
-                  "processing":{"core_seconds":core_seconds,"context_seconds":context_seconds,
-                    "inner_overlap":controls.get("overlap",0.75) if len(stems)==2 else None,"shifts":0,"precision":"float32",
-                    "parameters":controls,"bypass":dry,"model_executed":not dry,
-                    "resampling":None if dry else "scipy zero-phase resample_poly; ceil-length final trim",
-                    "accompaniment":"source mixture minus source-rate vocals" if len(stems)==2 else None,
-                    "speech_channels":("unchanged dry source" if dry else "independent; stereo image may change") if len(stems)==1 else None},
-                  "metrics":{"load_seconds":load_seconds,"processing_wall_seconds":wall,
-                    "processing_cpu_seconds":time.process_time()-cpu_start,"real_time_factor":wall/(info.frames/info.samplerate),
-                    "inference_seconds":inference_seconds,"resampling_seconds":resampling_seconds,
-                    "sample_read_write_seconds":sample_io_seconds,
-                    "block_latency_seconds":dict(zip(("p50","p95","p99"),map(float,np.percentile(block_times,[50,95,99])))),
-                    "first_block_seconds":block_times[0],"subsequent_block_seconds":block_times[1:],
-                    "block_seconds":block_times,"peak_rss_kib":resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
-                    "output_peaks":peaks,"input_rms":math.sqrt(input_energy/(info.frames*info.channels)),
-                    "target_rms":math.sqrt(output_energy/(info.frames*info.channels))}}
-        with (destination / "result.json").open("wb") as output:
-            report_bytes = 1  # Final newline is included in the disk allowance.
-            for text in json.JSONEncoder(indent=2, allow_nan=False).iterencode(report):
-                chunk = text.encode("utf-8")
-                report_bytes += len(chunk)
-                require(report_bytes <= MAX_REPORT_BYTES, "report_capacity", "result report exceeds 8 MiB")
-                output.write(chunk)
-            output.write(b"\n")
-        emit("complete", outputs={stem: stem + ".wav" for stem in stems},
-             sample_rate=info.samplerate, channels=info.channels, frames=info.frames,
-             model={"id":manifest["id"], "sha256":report["model"]["sha256"]})
-    except BaseException:
-        # Only this newly created task directory is ours; never remove preexisting data.
-        shutil.rmtree(destination)
-        raise
+    step, context = core_seconds*rate, context_seconds*rate
+    for begin in range(0, frames, step):
+        end = min(frames, begin+step)
+        left, right = max(0, begin-context), min(frames, end+context)
+        io_start = time.perf_counter()
+        audio = source.window(left, right)
+        sample_io_seconds += time.perf_counter()-io_start
+        require(audio.shape == (right-left, channels) and audio.dtype == np.dtype("float32") and np.isfinite(audio).all(),
+                "input_samples", "input changed/truncated or contains nonfinite samples")
+        block_start = time.perf_counter()
+        offset = begin-left
+        original = audio[offset:offset+end-begin]
+        if dry:
+            result = original
+        else:
+            phase_start = time.perf_counter()
+            converted = resample_exact(audio, rate, model_rate)
+            resampling_seconds += time.perf_counter()-phase_start
+            phase_start = time.perf_counter()
+            with redirect_stdout(sys.stderr):
+                inferred = infer(converted)
+            inference_seconds += time.perf_counter()-phase_start
+            require(inferred.shape == converted.shape and np.isfinite(inferred).all(), "inference_output", "model returned wrong length/channels or nonfinite samples")
+            phase_start = time.perf_counter()
+            restored = resample_exact(inferred, model_rate, rate)
+            resampling_seconds += time.perf_counter()-phase_start
+            require(len(restored) >= len(audio), "alignment", "resampler returned insufficient source frames")
+            restored = restored[:len(audio)]
+            result = restored[offset:offset+end-begin].astype("float32", copy=False)
+            if request["operation"] == "speech":
+                wet = controls.get("wet_mix", 1.0)
+                if wet != 1.0:
+                    result = original*(1.0-wet) + result*wet
+            del converted, inferred, restored
+        for stem in stems:
+            chunk = original-result if stem == "accompaniment" else result
+            require(np.isfinite(chunk).all(), "inference_output", "nonfinite output; refusing sanitization")
+            io_start = time.perf_counter()
+            # Transport copies at most 64 KiB, even for a strided model result.
+            stride = MAX_FRAME_BYTES//(channels*4)
+            for index in range(0, len(chunk), stride):
+                write_pcm(stem, np.ascontiguousarray(chunk[index:index+stride], dtype="<f4"))
+            sample_io_seconds += time.perf_counter()-io_start
+            peaks[stem] = max(peaks[stem], abs(float(np.min(chunk))), abs(float(np.max(chunk))))
+            del chunk
+        block_energy = float(np.einsum("ij,ij->", original, original, dtype=np.float64, optimize=False))
+        input_energy += block_energy
+        output_energy += block_energy if dry else float(np.einsum("ij,ij->", result, result, dtype=np.float64, optimize=False))
+        block_times.append(time.perf_counter()-block_start)
+        del audio, result, original
+        emit("progress", stage="copy" if dry else "inference", completed=end, total=frames)
+    source_hash = source.finish()
+    wall = time.perf_counter()-wall_start
+    report = {"outputs":dict.fromkeys(stems, True), "sample_rate":rate, "channels":channels, "frames":frames,
+              "model":{"id":manifest["id"], "sha256":canonical_digest(manifest), "files":manifest["files"],
+                       "provenance":manifest.get("provenance", {})},
+              "source_sha256":source_hash, "request_sha256":canonical_digest(request),
+              "worker_sha256":digest(__file__), "python":sys.version, "packages":manifest["packages"],
+              "implementation_sha256":{path.name:digest(path) for path in sorted(Path(__file__).parent.glob("*.py"))},
+              "interpreter":{"path":sys.executable,"sha256":digest(sys.executable)},
+              "installed_packages":{} if dry else {name:importlib.metadata.version(name) for name in manifest["packages"]},
+              "device":"cpu" if dry else request.get("device", "cpu"), "threads":request.get("threads", 4),
+              "processing":{"core_seconds":core_seconds,"context_seconds":context_seconds,
+                "inner_overlap":controls.get("overlap",0.75) if len(stems)==2 else None,"shifts":0,"precision":"float32",
+                "parameters":controls,"bypass":dry,"model_executed":not dry,
+                "resampling":None if dry else "scipy zero-phase resample_poly; ceil-length final trim",
+                "accompaniment":"source mixture minus source-rate vocals" if len(stems)==2 else None,
+                "speech_channels":("unchanged dry source" if dry else "independent; stereo image may change") if len(stems)==1 else None},
+              "metrics":{"load_seconds":load_seconds,"processing_wall_seconds":wall,
+                "processing_cpu_seconds":time.process_time()-cpu_start,"real_time_factor":wall/(frames/rate),
+                "inference_seconds":inference_seconds,"resampling_seconds":resampling_seconds,
+                "sample_read_write_seconds":sample_io_seconds,
+                "block_latency_seconds":dict(zip(("p50","p95","p99"),map(float,np.percentile(block_times,[50,95,99])))),
+                "first_block_seconds":block_times[0],"subsequent_block_seconds":block_times[1:],
+                "block_seconds":block_times,"peak_rss_kib":resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+                "output_peaks":peaks,"input_rms":math.sqrt(input_energy/(frames*channels)),
+                "target_rms":math.sqrt(output_energy/(frames*channels))}}
+    report_bytes = 0
+    for text in json.JSONEncoder(allow_nan=False).iterencode(report):
+        report_bytes += len(text.encode("utf-8"))
+        require(report_bytes <= MAX_REPORT_BYTES, "report_capacity", "result report exceeds 8 MiB")
+    emit("complete", outputs=report["outputs"], sample_rate=rate, channels=channels, frames=frames,
+         model={"id":manifest["id"], "sha256":report["model"]["sha256"]})
+    return report
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--request", type=Path, required=True)
-    args = parser.parse_args()
+    parser.add_argument("--stream", action="store_true", required=True)
+    parser.parse_args()
     task_id = ""
+    output = sys.stdout.buffer
     def emit(event_type, **fields):
-        print(json.dumps({"version":EVENT_VERSION,"task_id":task_id,"type":event_type,**fields}, allow_nan=False), flush=True)
+        payload = json.dumps({"version":EVENT_VERSION,"task_id":task_id,"type":event_type,**fields}, allow_nan=False).encode()
+        write_frame(output, JSON_FRAME, payload)
     try:
-        request = read_json(args.request)
+        kind, payload = read_frame(sys.stdin.buffer)
+        require(kind == JSON_FRAME, "protocol", "first frame must be a JSON request")
+        request = json.loads(payload)
         candidate_id = request.get("task_id") if isinstance(request, dict) else None
         task_id = candidate_id if isinstance(candidate_id, str) and 0 < len(candidate_id) <= 128 else ""
-        process(request, emit)
+        validate_request(request)
+        source = StreamInput(sys.stdin.buffer, request)
+        def write_pcm(stem, samples):
+            write_frame(output, STEM_KINDS[stem], memoryview(samples).cast("B"))
+        # Package diagnostics must never corrupt the binary stdout protocol.
+        with redirect_stdout(sys.stderr):
+            process(request, source, write_pcm, emit)
         return 0
     except Exception as exc:
-        emit("error", code=exc.code if isinstance(exc, WorkerError) else "worker_failure", message=str(exc))
+        emit("error", code=exc.code if isinstance(exc, WorkerError) else "worker_failure", message=str(exc)[:8192])
         return 1
+
 
 if __name__ == "__main__":
     sys.exit(main())

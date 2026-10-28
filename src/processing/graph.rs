@@ -1,298 +1,18 @@
-//! File-backed DAG evaluation. Each ancestor is evaluated once; fan-out shares immutable PCM.
+//! Block-streamed DAG evaluation. Only model boundaries and the selected output retain PCM.
 use super::*;
-use std::collections::BTreeMap;
+use rivu_dsp::{
+    denoise::{DenoiseMode, Denoiser, NoiseProfile, ProfileCollector},
+    equalizer::{fir::FirEqualizer, iir::Equalizer},
+};
+use std::collections::{BTreeMap, VecDeque};
 
-pub(super) const MAX_GRAPH_CACHE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-pub(crate) const MAX_RETAINED_CACHE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
-
-// Request JSON (1 MiB), worker result JSON (8 MiB), retained stderr (64 KiB).
-const NEURAL_SIDECAR_BYTES: u64 = 9 * 1024 * 1024 + 64 * 1024;
+const BLOCK: usize = 256;
 
 pub(super) fn denoise_bypassed(config: &rivu_dsp::denoise::DenoiseConfig) -> bool {
-    use rivu_dsp::denoise::DenoiseMode;
     config.wet == 0.0
         || (config.mode == DenoiseMode::Off && !config.hum.enabled && !config.impulse.enabled)
 }
 
-fn validate_equalizer(
-    config: &rivu_dsp::equalizer::config::EqualizerConfig,
-    implementation: EqImplementation,
-    rate: u32,
-    channels: usize,
-) -> Result<()> {
-    config.validate_for_stream(rate, channels)?;
-    implementation.validate()?;
-    if matches!(implementation, EqImplementation::LinearPhase { .. }) {
-        ensure!(
-            channels <= rivu_dsp::equalizer::config::MAX_CHANNELS,
-            "FIR channel limit exceeded"
-        );
-    }
-    Ok(())
-}
-
-fn pcm_bytes(frames: u64, channels: u16) -> Result<u64> {
-    frames
-        .checked_mul(u64::from(channels) * 4)
-        .and_then(|bytes| bytes.checked_add(128))
-        .context("Graph PCM size overflow")
-}
-
-/// Peak files actually produced: aliases/fan-out share storage; only causal
-/// contexts need a separate public crop. Denoise's aligned intermediate coexists
-/// with its causal replacement briefly and is included in the peak.
-fn max_source_frames(
-    graph: &ProcessingGraph,
-    target: GraphPort,
-    rate: u32,
-    channels: u16,
-) -> Result<u64> {
-    // Every file has source_frames + guard_frames. Propagate only guards and
-    // solve the linear byte allowance once at each transient/publication peak.
-    #[derive(Clone, Copy)]
-    struct Pcm {
-        start: i64,
-        frames: u64,
-    }
-    let mut outputs = BTreeMap::<GraphPort, Pcm>::new();
-    let mut files = Vec::<Pcm>::new();
-    let mut source_pcm = None;
-    let mut retained = 0_u64;
-    let mut retained_files = 0_u64;
-    let mut allowance = u64::MAX;
-    let frame_bytes = u64::from(channels) * 4;
-    ensure!(rate != 0 && frame_bytes != 0, "Invalid graph source format");
-    let constrain = |files: u64, overhead: u64| -> Result<u64> {
-        let available = MAX_GRAPH_CACHE_BYTES
-            .checked_sub(overhead)
-            .context("Graph guards exceed the 2 GiB per-run limit")?;
-        Ok(available
-            / files
-                .checked_mul(frame_bytes)
-                .context("Graph cache size overflow")?)
-    };
-    let mut inputs = Vec::<Pcm>::new();
-    for id in graph.ancestors(target)? {
-        let kind = &graph.node(id)?.kind;
-        inputs.clear();
-        for port in 0..kind.inputs() {
-            let edge = graph
-                .edges
-                .iter()
-                .find(|edge| {
-                    edge.to
-                        == GraphPort {
-                            node: id,
-                            port: port as u16,
-                        }
-                })
-                .context("Disconnected graph input")?;
-            inputs.push(
-                outputs
-                    .get(&edge.from)
-                    .copied()
-                    .context("Missing graph ancestor")?,
-            );
-        }
-        let mut transient = 0;
-        let (alias, start, count, copies) = match kind {
-            GraphNodeKind::Source => (source_pcm, 0, 0, 1),
-            GraphNodeKind::Output => (Some(inputs[0]), 0, 0, 0),
-            GraphNodeKind::Equalizer {
-                config,
-                implementation,
-            } => {
-                validate_equalizer(config, *implementation, rate, usize::from(channels))?;
-                if !config.enabled {
-                    (Some(inputs[0]), 0, 0, 0)
-                } else {
-                    let (latency, tail) = match implementation {
-                        EqImplementation::Iir => (0, 0),
-                        EqImplementation::LinearPhase { taps } => {
-                            let partition = rivu_dsp::equalizer::fir::PARTITION as u64;
-                            (
-                                ((*taps as u64 - 1) / 2) + partition,
-                                *taps as u64 - 1 + partition,
-                            )
-                        }
-                    };
-                    (
-                        None,
-                        inputs[0]
-                            .start
-                            .checked_sub(i64::try_from(latency)?)
-                            .context("Graph timeline overflow")?,
-                        inputs[0]
-                            .frames
-                            .checked_add(tail)
-                            .context("Graph length overflow")?,
-                        1,
-                    )
-                }
-            }
-            GraphNodeKind::Denoise { config, profile } => {
-                use rivu_dsp::denoise::DenoiseMode;
-                config.validate_for_format(rate, usize::from(channels))?;
-                if let Some(selection) = profile {
-                    selection.validate()?;
-                }
-                ensure!(
-                    config.mode != DenoiseMode::Profile || profile.is_some(),
-                    "Profile mode requires an explicit selected noise-only range"
-                );
-                if denoise_bypassed(config) {
-                    (Some(inputs[0]), 0, 0, 0)
-                } else {
-                    let latency = (if config.mode == DenoiseMode::Off {
-                        0
-                    } else {
-                        config.fft_size as u64
-                    }) + if config.impulse.enabled {
-                        config.impulse.max_width as u64 + 2
-                    } else {
-                        0
-                    };
-                    if latency != 0 {
-                        transient = pcm_bytes(inputs[0].frames, channels)?;
-                    }
-                    (
-                        None,
-                        inputs[0]
-                            .start
-                            .checked_sub(i64::try_from(latency)?)
-                            .context("Graph timeline overflow")?,
-                        inputs[0]
-                            .frames
-                            .checked_add(latency)
-                            .context("Graph length overflow")?,
-                        1,
-                    )
-                }
-            }
-            GraphNodeKind::Speech { .. } | GraphNodeKind::Separate { .. } => {
-                let separate = matches!(kind, GraphNodeKind::Separate { .. });
-                ensure!(
-                    if separate {
-                        channels == 2
-                    } else {
-                        (1..=2).contains(&channels)
-                    },
-                    "Neural graph node source channel format is unsupported; no channel fallback"
-                );
-                retained = retained
-                    .checked_add(NEURAL_SIDECAR_BYTES)
-                    .context("Graph cache size overflow")?;
-                (
-                    None,
-                    inputs[0].start,
-                    inputs[0].frames,
-                    if separate { 2 } else { 1 },
-                )
-            }
-            GraphNodeKind::Mix { .. } => {
-                let start = inputs
-                    .iter()
-                    .map(|pcm| pcm.start)
-                    .min()
-                    .context("Empty mix")?;
-                let end = inputs
-                    .iter()
-                    .try_fold(i64::MIN, |end, pcm| -> Result<i64> {
-                        Ok(end.max(
-                            pcm.start
-                                .checked_add(i64::try_from(pcm.frames)?)
-                                .context("Graph timeline overflow")?,
-                        ))
-                    })?;
-                (
-                    None,
-                    start,
-                    u64::try_from(end.checked_sub(start).context("Graph timeline overflow")?)?,
-                    1,
-                )
-            }
-        };
-        if let Some(pcm) = alias {
-            outputs.insert(GraphPort { node: id, port: 0 }, pcm);
-        } else {
-            for port in 0..copies {
-                let pcm = Pcm {
-                    start,
-                    frames: count,
-                };
-                retained = retained
-                    .checked_add(pcm_bytes(count, channels)?)
-                    .context("Graph cache size overflow")?;
-                retained_files += 1;
-                files.push(pcm);
-                if matches!(kind, GraphNodeKind::Source) {
-                    source_pcm = Some(pcm);
-                }
-                outputs.insert(GraphPort { node: id, port }, pcm);
-            }
-        }
-        let peak_files = retained_files + u64::from(transient != 0);
-        allowance = allowance.min(constrain(
-            peak_files,
-            retained
-                .checked_add(transient)
-                .context("Graph cache size overflow")?,
-        )?);
-    }
-    for pcm in files {
-        if pcm.start != 0 || pcm.frames != 0 {
-            retained = retained
-                .checked_add(128)
-                .context("Graph cache size overflow")?;
-            retained_files += 1;
-        }
-    }
-    Ok(allowance.min(constrain(retained_files, retained)?))
-}
-
-/// Turn the whole graph allowance into an input-render allowance. The same
-/// monotonic estimate handles unknown/misreported duration during actual writes.
-pub(super) fn render_budget(
-    status: &ProcessingTaskStatus,
-    format: &audio::RenderFormat,
-) -> Result<u64> {
-    let graph = status
-        .settings
-        .graph
-        .as_ref()
-        .context("Missing graph snapshot")?;
-    let target = status
-        .settings
-        .graph_boundary
-        .or(status.settings.graph_target)
-        .context("Missing graph target")?;
-    let allowance = max_source_frames(graph, target, format.sample_rate, format.channels)?;
-    if let Some(frames) = format.estimated_frames() {
-        ensure!(
-            frames <= allowance,
-            "Graph PCM cache would exceed the 2 GiB per-run limit; select a nearer preview target or shorter source"
-        );
-    }
-    pcm_bytes(allowance, format.channels)
-}
-
-pub(super) fn directory_bytes(path: &Path) -> Result<u64> {
-    let mut bytes = 0_u64;
-    for entry in fs::read_dir(path)? {
-        let entry = entry?;
-        let metadata = entry.metadata()?;
-        bytes = bytes
-            .checked_add(if metadata.is_dir() {
-                directory_bytes(&entry.path())?
-            } else {
-                metadata.len()
-            })
-            .context("Cache size overflow")?;
-    }
-    Ok(bytes)
-}
-
-/// Returns an owned prepared live suffix. Explicit modes never downgrade algorithms.
 pub(super) fn prepare(
     graph: &ProcessingGraph,
     target: GraphPort,
@@ -362,44 +82,501 @@ pub(super) fn prepare(
     );
     Ok((GraphExecutionMode::Offline, None, None))
 }
-/// Internal PCM retains causal startup and tail. Only consumer-facing files are
-/// cropped to the original source timeline; downstream nodes always see guards.
+
 #[derive(Clone)]
 struct GraphPcm {
-    path: PathBuf,
+    pcm: audio::PcmAudio,
     start_frame: i64,
-    frames: u64,
 }
 
-impl GraphPcm {
-    fn processed(&self, path: PathBuf, latency: u64, tail: u64) -> Result<Self> {
-        Ok(Self {
-            path,
-            start_frame: self
-                .start_frame
-                .checked_sub(i64::try_from(latency)?)
-                .context("Graph timeline overflow")?,
-            frames: self
-                .frames
-                .checked_add(tail)
-                .context("Graph PCM length overflow")?,
+struct Edge {
+    node: usize,
+    gain: f64,
+    delay: Vec<f32>,
+    position: usize,
+}
+
+struct DenoiseStream {
+    processor: Denoiser,
+    queue: VecDeque<f32>,
+    output: Vec<f32>,
+    finished: bool,
+}
+impl DenoiseStream {
+    fn new(processor: Denoiser, channels: usize) -> Self {
+        let latency = processor.lookahead_frames() * channels;
+        let burst = processor
+            .config()
+            .fft_size
+            .max(processor.lookahead_frames())
+            + BLOCK;
+        let mut queue = VecDeque::with_capacity(latency + burst * channels);
+        queue.resize(latency, 0.0);
+        Self {
+            processor,
+            queue,
+            output: Vec::with_capacity(burst * channels),
+            finished: false,
+        }
+    }
+    fn process(
+        &mut self,
+        samples: &mut [f32],
+        input_samples: usize,
+        eof: bool,
+        cancel: &AtomicBool,
+    ) -> Result<()> {
+        self.output.clear();
+        if input_samples > 0 {
+            self.processor.process_block(
+                &samples[..input_samples],
+                &mut self.output,
+                &mut || cancel.load(Ordering::Acquire),
+            )?;
+        }
+        if eof && !self.finished {
+            self.processor
+                .finish(&mut self.output, &mut || cancel.load(Ordering::Acquire))?;
+            self.finished = true;
+        }
+        ensure!(
+            self.queue.len() + self.output.len() <= self.queue.capacity(),
+            "Denoise output exceeded bounded staging capacity"
+        );
+        self.queue.extend(self.output.iter().copied());
+        ensure!(
+            self.queue.len() >= samples.len(),
+            "Denoise exceeded declared lookahead"
+        );
+        for sample in samples {
+            *sample = self.queue.pop_front().expect("checked queue length");
+        }
+        Ok(())
+    }
+}
+
+enum Processor {
+    Source(audio::PcmAudio),
+    Decoder,
+    Pass,
+    Iir(Equalizer),
+    Fir(FirEqualizer),
+    Denoise(Box<DenoiseStream>),
+}
+struct Node {
+    inputs: Vec<Edge>,
+    processor: Processor,
+    output: Vec<f32>,
+    sum: Vec<f64>,
+    latency: u64,
+    frames: u64,
+    input_frames: u64,
+}
+
+/// One block per reachable native node, plus bounded causal delay queues. Model
+/// outputs act as immutable sources, never as a second implicit file protocol.
+struct Engine {
+    nodes: Vec<Node>,
+    indices: BTreeMap<GraphPort, usize>,
+    channels: usize,
+    rate: u32,
+    source: Option<audio::PcmAudio>,
+}
+impl Engine {
+    fn new(source: &audio::PcmAudio) -> Self {
+        Self {
+            nodes: Vec::new(),
+            indices: BTreeMap::new(),
+            channels: usize::from(source.channels()),
+            rate: source.sample_rate(),
+            source: Some(source.clone()),
+        }
+    }
+    fn for_decoder(rate: u32, channels: u16) -> Self {
+        Self {
+            nodes: Vec::new(),
+            indices: BTreeMap::new(),
+            channels: usize::from(channels),
+            rate,
+            source: None,
+        }
+    }
+    fn compile(
+        &mut self,
+        graph: &ProcessingGraph,
+        port: GraphPort,
+        boundaries: &BTreeMap<GraphPort, GraphPcm>,
+        profiles: &BTreeMap<u64, NoiseProfile>,
+        cancel: &AtomicBool,
+    ) -> Result<usize> {
+        if let Some(&index) = self.indices.get(&port) {
+            return Ok(index);
+        }
+        check_cancel(cancel)?;
+        let kind = &graph.node(port.node)?.kind;
+        let mut inputs = Vec::new();
+        let mut latency = 0;
+        let mut frames = self.source.as_ref().map_or(0, audio::PcmAudio::frames);
+        let processor;
+        if let Some(boundary) = boundaries.get(&port) {
+            ensure!(boundary.start_frame <= 0, "Invalid causal graph boundary");
+            latency = boundary.start_frame.unsigned_abs();
+            frames = boundary.pcm.frames();
+            processor = Processor::Source(boundary.pcm.clone());
+        } else if matches!(kind, GraphNodeKind::Source) {
+            processor = self.source.as_ref().map_or(Processor::Decoder, |source| {
+                Processor::Source(source.clone())
+            });
+        } else {
+            for input_port in 0..kind.inputs() {
+                let edge = graph
+                    .edges
+                    .iter()
+                    .find(|edge| {
+                        edge.to
+                            == GraphPort {
+                                node: port.node,
+                                port: input_port as u16,
+                            }
+                    })
+                    .context("Disconnected graph input")?;
+                let node = self.compile(graph, edge.from, boundaries, profiles, cancel)?;
+                latency = latency.max(self.nodes[node].latency);
+                let gain = if let GraphNodeKind::Mix {
+                    gains_db,
+                    muted,
+                    solo,
+                } = kind
+                {
+                    if muted[input_port] || (solo.iter().any(|value| *value) && !solo[input_port]) {
+                        0.0
+                    } else {
+                        10.0_f64.powf(f64::from(gains_db[input_port]) / 20.0)
+                    }
+                } else {
+                    1.0
+                };
+                inputs.push(Edge {
+                    node,
+                    gain,
+                    delay: Vec::new(),
+                    position: 0,
+                });
+            }
+            frames = 0;
+            for edge in &mut inputs {
+                let delay = latency - self.nodes[edge.node].latency;
+                frames = frames.max(
+                    self.nodes[edge.node]
+                        .frames
+                        .checked_add(delay)
+                        .context("Graph timeline overflow")?,
+                );
+                let samples = usize::try_from(delay)?
+                    .checked_mul(self.channels)
+                    .context("Graph delay overflow")?;
+                // DSP state is bounded separately from chunked retained PCM.
+                ensure!(
+                    samples <= 16 * 1024 * 1024,
+                    "Graph delay exceeds 64 MiB state bound"
+                );
+                edge.delay = vec![0.0; samples];
+            }
+            processor = match kind {
+                GraphNodeKind::Source => unreachable!(),
+                GraphNodeKind::Output | GraphNodeKind::Mix { .. } => Processor::Pass,
+                GraphNodeKind::Equalizer {
+                    config,
+                    implementation,
+                } => {
+                    config.validate_for_stream(self.rate, self.channels)?;
+                    implementation.validate()?;
+                    if !config.enabled {
+                        Processor::Pass
+                    } else {
+                        match implementation {
+                            EqImplementation::Iir => {
+                                Processor::Iir(Equalizer::new(config, self.rate, self.channels)?)
+                            }
+                            EqImplementation::LinearPhase { taps } => Processor::Fir(
+                                FirEqualizer::new(config, self.rate, self.channels, *taps)?,
+                            ),
+                        }
+                    }
+                }
+                GraphNodeKind::Denoise { config, .. } => {
+                    let profile = profiles.get(&port.node).cloned();
+                    let denoiser =
+                        Denoiser::new(self.rate, self.channels, config.clone(), profile)?;
+                    if denoise_bypassed(config) {
+                        Processor::Pass
+                    } else {
+                        Processor::Denoise(Box::new(DenoiseStream::new(denoiser, self.channels)))
+                    }
+                }
+                GraphNodeKind::Speech { .. } | GraphNodeKind::Separate { .. } => {
+                    bail!("Missing prepared neural boundary")
+                }
+            };
+        }
+        let input_frames = frames;
+        let (delay, tail) = match &processor {
+            Processor::Fir(fir) => (fir.latency_frames() as u64, fir.tail_frames() as u64),
+            Processor::Denoise(denoise) => {
+                let delay = denoise.processor.lookahead_frames() as u64;
+                (delay, delay)
+            }
+            _ => (0, 0),
+        };
+        latency = latency
+            .checked_add(delay)
+            .context("Graph latency overflow")?;
+        frames = frames.checked_add(tail).context("Graph length overflow")?;
+        let index = self.nodes.len();
+        self.nodes.push(Node {
+            inputs,
+            processor,
+            output: vec![0.0; BLOCK * self.channels],
+            sum: vec![0.0; BLOCK * self.channels],
+            latency,
+            frames,
+            input_frames,
+        });
+        self.indices.insert(port, index);
+        Ok(index)
+    }
+    fn round(
+        &mut self,
+        position: u64,
+        count: usize,
+        decoder: Option<&[f32]>,
+        source_eof: Option<u64>,
+        cancel: &AtomicBool,
+    ) -> Result<()> {
+        check_cancel(cancel)?;
+        let streaming = self.source.is_none();
+        for index in 0..self.nodes.len() {
+            let (previous, rest) = self.nodes.split_at_mut(index);
+            let node = &mut rest[0];
+            let end = if streaming {
+                source_eof.and_then(|source| source.checked_add(node.frames))
+            } else {
+                Some(node.frames)
+            };
+            let input_end = if streaming {
+                source_eof.and_then(|source| source.checked_add(node.input_frames))
+            } else {
+                Some(node.input_frames)
+            };
+            let frames = end.map_or(count, |end| {
+                end.saturating_sub(position).min(count as u64) as usize
+            });
+            node.output.fill(0.0);
+            let output = &mut node.output[..frames * self.channels];
+            match &node.processor {
+                Processor::Source(pcm) => {
+                    pcm.read_frames(position, output);
+                }
+                Processor::Decoder => {
+                    if let Some(input) = decoder {
+                        output.copy_from_slice(&input[..output.len()]);
+                    }
+                }
+                _ => {
+                    if node.inputs.len() == 1
+                        && node.inputs[0].gain == 1.0
+                        && node.inputs[0].delay.is_empty()
+                    {
+                        output
+                            .copy_from_slice(&previous[node.inputs[0].node].output[..output.len()]);
+                    } else {
+                        let sum = &mut node.sum[..output.len()];
+                        sum.fill(0.0);
+                        for edge in &mut node.inputs {
+                            let input = &previous[edge.node].output[..output.len()];
+                            for (sum, &sample) in sum.iter_mut().zip(input) {
+                                let sample = if edge.delay.is_empty() {
+                                    sample
+                                } else {
+                                    let delayed = edge.delay[edge.position];
+                                    edge.delay[edge.position] = sample;
+                                    edge.position = (edge.position + 1) % edge.delay.len();
+                                    delayed
+                                };
+                                *sum += f64::from(sample) * edge.gain;
+                            }
+                        }
+                        for (sample, sum) in output.iter_mut().zip(sum) {
+                            *sample = *sum as f32;
+                        }
+                    }
+                    let input_frames = input_end.map_or(frames, |end| {
+                        end.saturating_sub(position).min(frames as u64) as usize
+                    });
+                    match &mut node.processor {
+                        Processor::Source(_) | Processor::Decoder | Processor::Pass => {}
+                        Processor::Iir(eq) => eq.process(output)?,
+                        Processor::Fir(eq) => eq.process_interleaved(output)?,
+                        Processor::Denoise(denoise) => denoise.process(
+                            output,
+                            input_frames * self.channels,
+                            input_end.is_some_and(|end| position + count as u64 >= end),
+                            cancel,
+                        )?,
+                    }
+                }
+            }
+            ensure!(
+                output.iter().all(|sample| sample.is_finite()),
+                "Nonfinite graph output"
+            );
+        }
+        Ok(())
+    }
+    fn stream(
+        &mut self,
+        target: usize,
+        cancel: &AtomicBool,
+        mut consume: impl FnMut(u64, &[f32]) -> Result<()>,
+    ) -> Result<()> {
+        let total = self.nodes[target].frames;
+        let mut position = 0;
+        while position < total {
+            let count = (total - position).min(BLOCK as u64) as usize;
+            self.round(position, count, None, None, cancel)?;
+            consume(
+                position,
+                &self.nodes[target].output[..count * self.channels],
+            )?;
+            position += count as u64;
+        }
+        Ok(())
+    }
+    fn decode(
+        &mut self,
+        target: usize,
+        mut renderer: audio::SourceRenderer,
+        cancel: &AtomicBool,
+        mut consume: impl FnMut(u64, &[f32]) -> Result<()>,
+    ) -> Result<u64> {
+        ensure!(
+            self.source.is_none(),
+            "Decoder engine cannot contain a retained source"
+        );
+        let mut decoded = Vec::new();
+        let mut position = 0_u64;
+        while renderer.read_block(&mut decoded, cancel)? {
+            ensure!(
+                decoded.len().is_multiple_of(self.channels),
+                "Incomplete graph source frame"
+            );
+            for block in decoded.chunks(BLOCK * self.channels) {
+                let count = block.len() / self.channels;
+                self.round(position, count, Some(block), None, cancel)?;
+                consume(position, &self.nodes[target].output[..block.len()])?;
+                position = position
+                    .checked_add(count as u64)
+                    .context("Decoded source length overflow")?;
+            }
+        }
+        let frames = position;
+        self.round(position, 0, None, Some(frames), cancel)?;
+        let total = frames
+            .checked_add(self.nodes[target].frames)
+            .context("Graph tail length overflow")?;
+        while position < total {
+            let count = (total - position).min(BLOCK as u64) as usize;
+            self.round(position, count, None, Some(frames), cancel)?;
+            consume(
+                position,
+                &self.nodes[target].output[..count * self.channels],
+            )?;
+            position += count as u64;
+        }
+        renderer.finish(cancel)?;
+        Ok(frames)
+    }
+    fn alias(&self, target: usize) -> Option<audio::PcmAudio> {
+        let node = &self.nodes[target];
+        match &node.processor {
+            Processor::Source(pcm) => Some(pcm.clone()),
+            Processor::Pass
+                if node.inputs.len() == 1
+                    && node.inputs[0].gain == 1.0
+                    && node.inputs[0].delay.is_empty() =>
+            {
+                self.alias(node.inputs[0].node)
+            }
+            _ => None,
+        }
+    }
+    fn render(
+        mut self,
+        target: usize,
+        budget: Arc<audio::PcmBudget>,
+        cancel: &AtomicBool,
+    ) -> Result<GraphPcm> {
+        let start_frame = -i64::try_from(self.nodes[target].latency)?;
+        if let Some(pcm) = self.alias(target) {
+            return Ok(GraphPcm { pcm, start_frame });
+        }
+        let mut builder = audio::PcmBuilder::new(self.rate, self.channels as u16, budget)?;
+        self.stream(target, cancel, |_, block| builder.push(block))?;
+        Ok(GraphPcm {
+            pcm: builder.finish()?,
+            start_frame,
         })
     }
+}
 
-    fn end_frame(&self) -> Result<i64> {
-        self.start_frame
-            .checked_add(i64::try_from(self.frames)?)
-            .context("Graph timeline overflow")
+fn input_port(graph: &ProcessingGraph, node: u64) -> Result<GraphPort> {
+    graph
+        .edges
+        .iter()
+        .find(|edge| edge.to == GraphPort { node, port: 0 })
+        .map(|edge| edge.from)
+        .context("Disconnected graph input")
+}
+
+fn reachable_boundaries(
+    graph: &ProcessingGraph,
+    port: GraphPort,
+    boundaries: &BTreeMap<GraphPort, GraphPcm>,
+    visited: &mut std::collections::BTreeSet<GraphPort>,
+    retained: &mut std::collections::BTreeSet<GraphPort>,
+) -> Result<()> {
+    if !visited.insert(port) {
+        return Ok(());
     }
+    if boundaries.contains_key(&port) {
+        retained.insert(port);
+        return Ok(());
+    }
+    for input in 0..graph.node(port.node)?.kind.inputs() {
+        let from = graph
+            .edges
+            .iter()
+            .find(|edge| {
+                edge.to
+                    == GraphPort {
+                        node: port.node,
+                        port: input as u16,
+                    }
+            })
+            .context("Disconnected graph input")?
+            .from;
+        reachable_boundaries(graph, from, boundaries, visited, retained)?;
+    }
+    Ok(())
 }
 
 pub(super) fn execute(
-    input: &Path,
-    directory: &Path,
+    input: &audio::PcmAudio,
+    budget: Arc<audio::PcmBudget>,
     status: &mut ProcessingTaskStatus,
     cancel: &AtomicBool,
     tx: &Sender<Event>,
-) -> Result<()> {
+) -> Result<BTreeMap<GraphPort, GraphAudioOutput>> {
     let graph = status
         .settings
         .graph
@@ -411,46 +588,10 @@ pub(super) fn execute(
         .or(status.settings.graph_target)
         .context("Missing graph target")?;
     let order = graph.ancestors(target)?;
-    status.graph_nodes = order
-        .iter()
-        .map(|&node| GraphNodeStatus {
-            node,
-            phase: ProcessingPhase::Queued,
-            error: None,
-            model_id: None,
-            model_sha256: None,
-        })
-        .collect();
-    let reader = hound::WavReader::open(input)?;
-    let spec = reader.spec();
-    let frames = u64::from(reader.duration());
-    drop(reader);
-    ensure!(
-        frames <= max_source_frames(&graph, target, spec.sample_rate, spec.channels)?,
-        "Graph PCM cache would exceed the 2 GiB per-run limit; select a nearer preview target or shorter source"
-    );
-    let mut outputs = BTreeMap::<GraphPort, GraphPcm>::new();
-    for (index, id) in order.iter().copied().enumerate() {
+    let mut boundaries = BTreeMap::new();
+    let mut profiles = BTreeMap::new();
+    for (index, &id) in order.iter().enumerate() {
         check_cancel(cancel)?;
-        let node = graph.node(id)?;
-        let inputs: Vec<GraphPcm> = (0..node.kind.inputs())
-            .map(|port| {
-                let edge = graph
-                    .edges
-                    .iter()
-                    .find(|e| {
-                        e.to == GraphPort {
-                            node: id,
-                            port: port as u16,
-                        }
-                    })
-                    .context("Disconnected input")?;
-                outputs
-                    .get(&edge.from)
-                    .cloned()
-                    .context("Missing ancestor output")
-            })
-            .collect::<Result<_>>()?;
         report(
             tx,
             status.id,
@@ -459,135 +600,115 @@ pub(super) fn execute(
             Some(order.len() as u64),
         );
         node_event(status, id, ProcessingPhase::Processing, None, tx);
-        let node_dir = directory.join(format!("node-{id}"));
         let outcome = (|| -> Result<()> {
-            let paths = match &node.kind {
-                GraphNodeKind::Source => vec![GraphPcm {
-                    path: input.to_path_buf(),
-                    start_frame: 0,
-                    frames,
-                }],
-                GraphNodeKind::Output => vec![inputs[0].clone()],
-                GraphNodeKind::Equalizer {
-                    config,
-                    implementation,
-                } => {
-                    validate_equalizer(
-                        config,
-                        *implementation,
-                        spec.sample_rate,
-                        usize::from(spec.channels),
+            if let GraphNodeKind::Denoise {
+                profile: Some(selection),
+                ..
+            } = &graph.node(id)?.kind
+            {
+                selection.validate()?;
+                ensure!(
+                    (selection.end_seconds * f64::from(input.sample_rate())).floor()
+                        <= input.frames() as f64,
+                    "Noise profile selection lies outside the source"
+                );
+            }
+            match &graph.node(id)?.kind {
+                GraphNodeKind::Denoise { config, profile }
+                    if config.mode == DenoiseMode::Profile =>
+                {
+                    let selection = profile
+                        .context("Profile mode requires an explicit selected noise-only range")?;
+                    selection.validate()?;
+                    let start =
+                        (selection.start_seconds * f64::from(input.sample_rate())).floor() as u64;
+                    let end =
+                        (selection.end_seconds * f64::from(input.sample_rate())).floor() as u64;
+                    ensure!(
+                        start < end && end <= input.frames(),
+                        "Noise profile selection lies outside the source"
+                    );
+                    let mut engine = Engine::new(input);
+                    let upstream = engine.compile(
+                        &graph,
+                        input_port(&graph, id)?,
+                        &boundaries,
+                        &profiles,
+                        cancel,
                     )?;
-                    if !config.enabled {
-                        vec![inputs[0].clone()]
-                    } else {
-                        fs::create_dir(&node_dir)?;
-                        let output = node_dir.join("equalized.wav");
-                        let (latency, tail) =
-                            equalize(&inputs[0].path, &output, config, *implementation, cancel)?;
-                        vec![inputs[0].processed(output, latency, tail)?]
-                    }
-                }
-                GraphNodeKind::Denoise { config, profile } => {
-                    if let Some(selection) = profile {
-                        ensure!(
-                            (selection.end_seconds * f64::from(spec.sample_rate)).floor()
-                                <= frames as f64,
-                            "Noise profile selection lies outside the source"
-                        );
-                    }
-                    if denoise_bypassed(config) {
-                        // Wet-zero Profile still captures and validates its
-                        // explicitly selected profile and stream format.
-                        prepare_classical(
-                            &inputs[0].path,
-                            config,
-                            *profile,
-                            inputs[0].start_frame.unsigned_abs(),
-                            cancel,
-                        )?;
-                        vec![inputs[0].clone()]
-                    } else {
-                        fs::create_dir(&node_dir)?;
-                        let output = node_dir.join("denoised.wav");
-                        let latency = classical(
-                            &inputs[0].path,
-                            &output,
-                            config,
-                            *profile,
-                            inputs[0].start_frame.unsigned_abs(),
-                            cancel,
-                            |_| {},
-                        )?;
-                        let output = if latency == 0 {
-                            output
-                        } else {
-                            // Streaming denoise has an explicit startup queue. Keep
-                            // it too: another adaptive/nonlinear node must see the
-                            // same causal history in Offline, Hybrid and Realtime.
-                            let causal = node_dir.join("causal.wav");
-                            copy_pcm_window(
-                                &output,
-                                &causal,
-                                latency,
-                                0,
-                                inputs[0].frames,
-                                cancel,
+                    let offset = engine.nodes[upstream].latency;
+                    let start = start
+                        .checked_add(offset)
+                        .context("Profile offset overflow")?;
+                    let end = end.checked_add(offset).context("Profile offset overflow")?;
+                    let channels = usize::from(input.channels());
+                    let mut collector = ProfileCollector::new(
+                        input.sample_rate(),
+                        channels,
+                        config.fft_size,
+                        end - start,
+                    )?;
+                    engine.stream(upstream, cancel, |position, samples| {
+                        let begin = position.max(start);
+                        let finish = (position + (samples.len() / channels) as u64).min(end);
+                        if begin < finish {
+                            collector.push_block(
+                                &samples[(begin - position) as usize * channels
+                                    ..(finish - position) as usize * channels],
+                                &mut || cancel.load(Ordering::Acquire),
                             )?;
-                            fs::remove_file(output)?;
-                            causal
-                        };
-                        vec![inputs[0].processed(output, latency, latency)?]
-                    }
+                        }
+                        Ok(())
+                    })?;
+                    profiles.insert(id, collector.finish()?);
                 }
                 GraphNodeKind::Speech { config } | GraphNodeKind::Separate { config } => {
-                    let operation = if matches!(node.kind, GraphNodeKind::Speech { .. }) {
-                        ensure!(
-                            (1..=2).contains(&spec.channels),
-                            "Speech supports mono/stereo only; no channel fallback"
-                        );
+                    let operation = if matches!(graph.node(id)?.kind, GraphNodeKind::Speech { .. })
+                    {
                         ProcessingOperation::Speech
                     } else {
-                        ensure!(
-                            spec.channels == 2,
-                            "Separation requires stereo; no channel fallback"
-                        );
                         ProcessingOperation::Separate
                     };
-                    let manifest = if operation == ProcessingOperation::Speech {
-                        &config.speech_manifest
-                    } else {
-                        &config.separation_manifest
-                    };
                     ensure!(
-                        manifest
-                            .as_ref()
-                            .is_some_and(|p| p.is_absolute() && p.is_file()),
-                        "Node {id} requires an absolute local prepared model manifest"
+                        if operation == ProcessingOperation::Speech {
+                            (1..=2).contains(&input.channels())
+                        } else {
+                            input.channels() == 2
+                        },
+                        "Neural graph node has unsupported channel layout"
                     );
-                    ensure!(
-                        config.worker.is_file(),
-                        "Node {id} neural worker does not exist"
-                    );
-                    fs::create_dir(&node_dir)?;
-                    let operation_before = status.operation;
-                    let frames_before = status.frames;
+                    let mut engine = Engine::new(input);
+                    let upstream = engine.compile(
+                        &graph,
+                        input_port(&graph, id)?,
+                        &boundaries,
+                        &profiles,
+                        cancel,
+                    )?;
+                    let upstream = engine.render(upstream, Arc::clone(&budget), cancel)?;
+                    let original_operation = status.operation;
+                    let original_frames = status.frames;
                     status.operation = operation;
-                    status.frames = Some(inputs[0].frames);
-                    let result = neural(&inputs[0].path, &node_dir, config, cancel, tx, status);
-                    status.operation = operation_before;
-                    status.frames = frames_before;
+                    status.frames = Some(upstream.pcm.frames());
+                    let result = neural::run(
+                        &upstream.pcm,
+                        config,
+                        Arc::clone(&budget),
+                        cancel,
+                        tx,
+                        status,
+                    );
+                    status.operation = original_operation;
+                    status.frames = original_frames;
                     let result = result?;
-                    let model_id = status.model_id.take();
-                    let model_sha256 = status.model_sha256.take();
-                    let evidence = status
+                    let entry = status
                         .graph_nodes
                         .iter_mut()
-                        .find(|n| n.node == id)
-                        .expect("admitted node");
-                    evidence.model_id = model_id;
-                    evidence.model_sha256 = model_sha256;
-                    let paths = if operation == ProcessingOperation::Speech {
+                        .find(|entry| entry.node == id)
+                        .context("Missing graph node status")?;
+                    entry.model_id = status.model_id.take();
+                    entry.model_sha256 = status.model_sha256.take();
+                    let outputs = if operation == ProcessingOperation::Speech {
                         vec![result.denoised.context("Missing speech output")?]
                     } else {
                         vec![
@@ -597,43 +718,28 @@ pub(super) fn execute(
                                 .context("Missing accompaniment output")?,
                         ]
                     };
-                    paths
-                        .into_iter()
-                        .map(|path| inputs[0].processed(path, 0, 0))
-                        .collect::<Result<Vec<_>>>()?
+                    for (port, pcm) in outputs.into_iter().enumerate() {
+                        validate_output(
+                            &pcm,
+                            input.sample_rate(),
+                            input.channels(),
+                            upstream.pcm.frames(),
+                            cancel,
+                        )?;
+                        boundaries.insert(
+                            GraphPort {
+                                node: id,
+                                port: port as u16,
+                            },
+                            GraphPcm {
+                                pcm,
+                                start_frame: upstream.start_frame,
+                            },
+                        );
+                    }
                 }
-                GraphNodeKind::Mix {
-                    gains_db,
-                    muted,
-                    solo,
-                } => {
-                    fs::create_dir(&node_dir)?;
-                    let output = node_dir.join("mixed.wav");
-                    vec![mix_pcm(&inputs, &output, gains_db, muted, solo, cancel)?]
-                }
-            };
-            for (port, pcm) in paths.into_iter().enumerate() {
-                if !outputs.values().any(|existing| existing.path == pcm.path) {
-                    validate_output(
-                        &pcm.path,
-                        spec.sample_rate,
-                        spec.channels,
-                        pcm.frames,
-                        cancel,
-                    )?;
-                }
-                outputs.insert(
-                    GraphPort {
-                        node: id,
-                        port: port as u16,
-                    },
-                    pcm,
-                );
+                _ => {}
             }
-            ensure!(
-                directory_bytes(directory)? <= MAX_GRAPH_CACHE_BYTES,
-                "Graph cache exceeded 2 GiB"
-            );
             Ok(())
         })();
         if let Err(error) = outcome {
@@ -650,64 +756,247 @@ pub(super) fn execute(
             );
             return Err(error);
         }
-        node_event(status, id, ProcessingPhase::Complete, None, tx);
-    }
-    let mut published = BTreeMap::<PathBuf, PathBuf>::new();
-    let mut graph_outputs = Vec::with_capacity(outputs.len());
-    for (port, pcm) in outputs {
-        check_cancel(cancel)?;
-        let context = pcm.start_frame != 0 || pcm.frames != frames;
-        let path = if !context {
-            pcm.path.clone()
-        } else if let Some(path) = published.get(&pcm.path) {
-            path.clone()
-        } else {
-            ensure!(
-                pcm.start_frame <= 0 && pcm.end_frame()? >= i64::try_from(frames)?,
-                "Graph output does not cover the source timeline"
-            );
-            let path = directory.join(format!("published-{}-{}.wav", port.node, port.port));
-            copy_pcm_window(
-                &pcm.path,
-                &path,
-                0,
-                pcm.start_frame.unsigned_abs(),
-                frames,
-                cancel,
+        if matches!(
+            graph.node(id)?.kind,
+            GraphNodeKind::Speech { .. } | GraphNodeKind::Separate { .. }
+        ) {
+            let mut retained = std::collections::BTreeSet::new();
+            reachable_boundaries(
+                &graph,
+                target,
+                &boundaries,
+                &mut std::collections::BTreeSet::new(),
+                &mut retained,
             )?;
-            published.insert(pcm.path.clone(), path.clone());
-            ensure!(
-                directory_bytes(directory)? <= MAX_GRAPH_CACHE_BYTES,
-                "Graph cache exceeded 2 GiB"
-            );
-            path
-        };
-        graph_outputs.push(GraphNodeOutput {
-            port,
-            path,
-            context: context.then_some(GraphOutputContext {
-                path: pcm.path,
-                start_frame: pcm.start_frame,
-            }),
-        });
+            boundaries.retain(|port, _| retained.contains(port));
+        }
     }
-    check_cancel(cancel)?;
-    if let (Some(plan), Some(boundary)) = (&mut status.graph_plan, status.settings.graph_boundary)
-        && let Some(context) = graph_outputs
-            .iter()
-            .find(|output| output.port == boundary)
-            .and_then(|output| output.context.as_ref())
-    {
+    let mut engine = Engine::new(input);
+    let index = engine.compile(&graph, target, &boundaries, &profiles, cancel)?;
+    // The engine owns only boundaries reachable from this target; obsolete model
+    // ancestors are released before allocating the final retained output.
+    drop(boundaries);
+    drop(profiles);
+    let output = engine.render(index, budget, cancel)?;
+    publish(output, input.frames(), target, order, status, tx)
+}
+
+fn publish(
+    output: GraphPcm,
+    frames: u64,
+    target: GraphPort,
+    order: Vec<u64>,
+    status: &mut ProcessingTaskStatus,
+    tx: &Sender<Event>,
+) -> Result<BTreeMap<GraphPort, GraphAudioOutput>> {
+    ensure!(
+        output.start_frame <= 0
+            && output.pcm.frames()
+                >= output
+                    .start_frame
+                    .unsigned_abs()
+                    .checked_add(frames)
+                    .context("Graph output timeline overflow")?,
+        "Graph output does not cover source timeline"
+    );
+    let pcm = output
+        .pcm
+        .slice_frames(output.start_frame.unsigned_abs(), frames)?;
+    let context =
+        (output.start_frame != 0 || output.pcm.frames() != frames).then_some(GraphAudioContext {
+            pcm: output.pcm,
+            start_frame: output.start_frame,
+        });
+    status.graph_outputs = vec![GraphNodeOutput {
+        port: target,
+        context: context.as_ref().map(|context| GraphOutputContext {
+            start_frame: context.start_frame,
+        }),
+    }];
+    if let (Some(plan), Some(context)) = (&mut status.graph_plan, &context) {
         plan.latency_frames = plan
             .latency_frames
             .checked_add(context.start_frame.unsigned_abs())
             .context("Hybrid graph latency overflow")?;
     }
-    status.graph_outputs = graph_outputs;
-    status.phase = ProcessingPhase::Complete;
-    status.completed = frames;
-    status.total = Some(frames);
-    Ok(())
+    for id in order {
+        node_event(status, id, ProcessingPhase::Complete, None, tx);
+    }
+    if status.settings.graph_mode == Some(GraphExecutionMode::Hybrid) {
+        for node in &mut status.graph_nodes {
+            if node.phase == ProcessingPhase::Queued {
+                node.phase = ProcessingPhase::Processing;
+            }
+        }
+    }
+    Ok(BTreeMap::from([(
+        target,
+        GraphAudioOutput { pcm, context },
+    )]))
+}
+
+pub(super) fn native_only(status: &ProcessingTaskStatus) -> Result<bool> {
+    let graph = status
+        .settings
+        .graph
+        .as_ref()
+        .context("Missing graph snapshot")?;
+    let target = status
+        .settings
+        .graph_boundary
+        .or(status.settings.graph_target)
+        .context("Missing graph target")?;
+    Ok(graph.ancestors(target)?.into_iter().all(|id| {
+        graph.node(id).is_ok_and(|node| {
+            !matches!(
+                node.kind,
+                GraphNodeKind::Speech { .. } | GraphNodeKind::Separate { .. }
+            )
+        })
+    }))
+}
+
+pub(super) fn execute_native(
+    renderer: audio::SourceRenderer,
+    mut reopen: impl FnMut() -> Result<audio::SourceRenderer>,
+    budget: Arc<audio::PcmBudget>,
+    status: &mut ProcessingTaskStatus,
+    cancel: &AtomicBool,
+    tx: &Sender<Event>,
+) -> Result<BTreeMap<GraphPort, GraphAudioOutput>> {
+    let graph = status
+        .settings
+        .graph
+        .clone()
+        .context("Missing immutable graph snapshot")?;
+    let target = status
+        .settings
+        .graph_boundary
+        .or(status.settings.graph_target)
+        .context("Missing graph target")?;
+    let order = graph.ancestors(target)?;
+    let mut active_node = None;
+    let outcome = (|| {
+        let rate = renderer.format().sample_rate;
+        let channels = renderer.format().channels;
+        let mut profiles = BTreeMap::new();
+        for (index, &id) in order.iter().enumerate() {
+            active_node = None;
+            check_cancel(cancel)?;
+            report(
+                tx,
+                status.id,
+                ProcessingPhase::Processing,
+                index as u64,
+                Some(order.len() as u64),
+            );
+            node_event(status, id, ProcessingPhase::Processing, None, tx);
+            active_node = Some(id);
+            if let GraphNodeKind::Denoise { config, profile } = &graph.node(id)?.kind
+                && config.mode == DenoiseMode::Profile
+            {
+                let selection = profile
+                    .context("Profile mode requires an explicit selected noise-only range")?;
+                selection.validate()?;
+                let start = (selection.start_seconds * f64::from(rate)).floor() as u64;
+                let end = (selection.end_seconds * f64::from(rate)).floor() as u64;
+                ensure!(
+                    start < end,
+                    "Noise profile selection contains no source frames"
+                );
+                let mut engine = Engine::for_decoder(rate, channels);
+                let upstream = engine.compile(
+                    &graph,
+                    input_port(&graph, id)?,
+                    &BTreeMap::new(),
+                    &profiles,
+                    cancel,
+                )?;
+                let offset = engine.nodes[upstream].latency;
+                let begin = start
+                    .checked_add(offset)
+                    .context("Profile offset overflow")?;
+                let finish = end.checked_add(offset).context("Profile offset overflow")?;
+                let mut collector = ProfileCollector::new(
+                    rate,
+                    usize::from(channels),
+                    config.fft_size,
+                    end - start,
+                )?;
+                let source_frames =
+                    engine.decode(upstream, reopen()?, cancel, |position, samples| {
+                        let from = position.max(begin);
+                        let to =
+                            (position + (samples.len() / usize::from(channels)) as u64).min(finish);
+                        if from < to {
+                            collector.push_block(
+                                &samples[(from - position) as usize * usize::from(channels)
+                                    ..(to - position) as usize * usize::from(channels)],
+                                &mut || cancel.load(Ordering::Acquire),
+                            )?;
+                        }
+                        Ok(())
+                    })?;
+                ensure!(
+                    end <= source_frames,
+                    "Noise profile selection lies outside the source"
+                );
+                profiles.insert(id, collector.finish()?);
+            }
+        }
+        // Compilation, decoding, and publication execute the requested output;
+        // profile collection and validation instead belong to their own node.
+        active_node = Some(target.node);
+        let mut engine = Engine::for_decoder(rate, channels);
+        let index = engine.compile(&graph, target, &BTreeMap::new(), &profiles, cancel)?;
+        let start_frame = -i64::try_from(engine.nodes[index].latency)?;
+        drop(profiles);
+        let mut builder = audio::PcmBuilder::new(rate, channels, budget)?;
+        let frames = engine.decode(index, renderer, cancel, |_, block| builder.push(block))?;
+        for &id in &order {
+            active_node = Some(id);
+            if let GraphNodeKind::Denoise {
+                profile: Some(selection),
+                ..
+            } = &graph.node(id)?.kind
+            {
+                selection.validate()?;
+                ensure!(
+                    (selection.end_seconds * f64::from(rate)).floor() <= frames as f64,
+                    "Noise profile selection lies outside the source"
+                );
+            }
+        }
+        active_node = Some(target.node);
+        status.frames = Some(frames);
+        publish(
+            GraphPcm {
+                pcm: builder.finish()?,
+                start_frame,
+            },
+            frames,
+            target,
+            order,
+            status,
+            tx,
+        )
+    })();
+    if let Err(error) = &outcome
+        && let Some(id) = active_node
+    {
+        node_event(
+            status,
+            id,
+            if cancel.load(Ordering::Acquire) {
+                ProcessingPhase::Cancelled
+            } else {
+                ProcessingPhase::Failed
+            },
+            Some(format!("{error:#}")),
+            tx,
+        );
+    }
+    outcome
 }
 
 fn node_event(
@@ -720,7 +1009,7 @@ fn node_event(
     let entry = status
         .graph_nodes
         .iter_mut()
-        .find(|n| n.node == node)
+        .find(|entry| entry.node == node)
         .expect("admitted node");
     entry.phase = phase;
     entry.error = error;
@@ -744,203 +1033,10 @@ pub(super) fn plan_info(runner: &audio::GraphRunner) -> GraphPlanInfo {
     }
 }
 
-fn equalize(
-    input: &Path,
-    output: &Path,
-    config: &rivu_dsp::equalizer::config::EqualizerConfig,
-    implementation: EqImplementation,
-    cancel: &AtomicBool,
-) -> Result<(u64, u64)> {
-    use rivu_dsp::{equalizer::fir::FirEqualizer, equalizer::iir::Equalizer};
-    let mut reader = hound::WavReader::open(input)?;
-    let spec = reader.spec();
-    let channels = usize::from(spec.channels);
-    let frames = u64::from(reader.duration());
-    enum Processor {
-        Iir(Equalizer),
-        Fir(FirEqualizer),
-    }
-    let mut processor = match implementation {
-        EqImplementation::Iir => {
-            Processor::Iir(Equalizer::new(config, spec.sample_rate, channels)?)
-        }
-        EqImplementation::LinearPhase { taps } => {
-            Processor::Fir(FirEqualizer::new(config, spec.sample_rate, channels, taps)?)
-        }
-    };
-    let (latency, tail) = match &processor {
-        Processor::Iir(_) => (0, 0),
-        Processor::Fir(fir) => (fir.latency_frames() as u64, fir.tail_frames() as u64),
-    };
-    let mut samples = reader.samples::<f32>();
-    let file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(output)?;
-    let mut writer = hound::WavWriter::new(std::io::BufWriter::new(file), spec)?;
-    let mut block = vec![0.0_f32; 4096 * channels];
-    let mut position = 0_u64;
-    // Keep the full causal result, including startup buffering and FIR ringing.
-    // Its source-relative origin is tracked separately by GraphPcm.
-    let total = frames.checked_add(tail).context("EQ PCM length overflow")?;
-    while position < total {
-        check_cancel(cancel)?;
-        let count = (total - position).min(4096) as usize;
-        for frame in 0..count {
-            for channel in 0..channels {
-                block[frame * channels + channel] = if position + (frame as u64) < frames {
-                    samples.next().context("Truncated EQ input")??
-                } else {
-                    0.0
-                };
-            }
-        }
-        let block = &mut block[..count * channels];
-        match &mut processor {
-            Processor::Iir(eq) => eq.process(block)?,
-            Processor::Fir(eq) => eq.process_interleaved(block)?,
-        }
-        for &sample in block.iter() {
-            ensure!(sample.is_finite(), "Nonfinite equalizer output");
-            writer.write_sample(sample)?;
-        }
-        position += count as u64;
-    }
-    writer.finalize()?;
-    Ok((latency, tail))
-}
-
-fn mix_pcm(
-    inputs: &[GraphPcm],
-    output: &Path,
-    gains_db: &[f32],
-    muted: &[bool],
-    solo: &[bool],
-    cancel: &AtomicBool,
-) -> Result<GraphPcm> {
-    let mut readers = inputs
-        .iter()
-        .map(|pcm| hound::WavReader::open(&pcm.path))
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let spec = readers[0].spec();
-    ensure!(
-        readers
-            .iter()
-            .zip(inputs)
-            .all(|(r, pcm)| r.spec() == spec && u64::from(r.duration()) == pcm.frames),
-        "Mix inputs are not aligned PCM"
-    );
-    let start_frame = inputs
-        .iter()
-        .map(|pcm| pcm.start_frame)
-        .min()
-        .context("Empty mix")?;
-    let end_frame = inputs
-        .iter()
-        .try_fold(start_frame, |end, pcm| -> Result<i64> {
-            Ok(end.max(pcm.end_frame()?))
-        })?;
-    let frames = u64::try_from(
-        end_frame
-            .checked_sub(start_frame)
-            .context("Mix timeline overflow")?,
-    )?;
-    let any_solo = solo.iter().any(|&s| s);
-    let alignment: Vec<(u64, f64)> = inputs
-        .iter()
-        .enumerate()
-        .map(|(i, pcm)| -> Result<_> {
-            let offset = u64::try_from(
-                pcm.start_frame
-                    .checked_sub(start_frame)
-                    .context("Mix timeline overflow")?,
-            )?;
-            let gain = if muted[i] || (any_solo && !solo[i]) {
-                0.0
-            } else {
-                10.0_f64.powf(f64::from(gains_db[i]) / 20.0)
-            };
-            Ok((offset, gain))
-        })
-        .collect::<Result<_>>()?;
-    let mut samples: Vec<_> = readers.iter_mut().map(|r| r.samples::<f32>()).collect();
-    let file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(output)?;
-    let mut writer = hound::WavWriter::new(std::io::BufWriter::new(file), spec)?;
-    for frame in 0..frames {
-        if frame % 4096 == 0 {
-            check_cancel(cancel)?;
-        }
-        for _ in 0..spec.channels {
-            let mut value = 0.0_f64;
-            for ((samples, pcm), &(offset, gain)) in samples.iter_mut().zip(inputs).zip(&alignment)
-            {
-                if frame >= offset && frame - offset < pcm.frames {
-                    value += f64::from(samples.next().context("Truncated mix input")??) * gain;
-                }
-            }
-            let value = value as f32;
-            ensure!(value.is_finite(), "Nonfinite mix output");
-            writer.write_sample(value)?;
-        }
-    }
-    writer.finalize()?;
-    Ok(GraphPcm {
-        path: output.to_path_buf(),
-        start_frame,
-        frames,
-    })
-}
-
-/// Copy an exact PCM window, optionally retaining a processor's causal startup.
-fn copy_pcm_window(
-    input: &Path,
-    output: &Path,
-    leading_frames: u64,
-    skip_frames: u64,
-    frames: u64,
-    cancel: &AtomicBool,
-) -> Result<()> {
-    let mut reader = hound::WavReader::open(input)?;
-    let spec = reader.spec();
-    ensure!(
-        skip_frames
-            .checked_add(frames)
-            .is_some_and(|end| end <= u64::from(reader.duration())),
-        "PCM window lies outside graph context"
-    );
-    reader.seek(u32::try_from(skip_frames)?)?;
-    let file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(output)?;
-    let mut writer = hound::WavWriter::new(std::io::BufWriter::new(file), spec)?;
-    for frame in 0..leading_frames {
-        if frame % 4096 == 0 {
-            check_cancel(cancel)?;
-        }
-        for _ in 0..spec.channels {
-            writer.write_sample(0.0_f32)?;
-        }
-    }
-    let mut samples = reader.samples::<f32>();
-    for frame in 0..frames {
-        if frame % 4096 == 0 {
-            check_cancel(cancel)?;
-        }
-        for _ in 0..spec.channels {
-            writer.write_sample(samples.next().context("Truncated graph context")??)?;
-        }
-    }
-    writer.finalize()?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
     fn chain(kinds: Vec<GraphNodeKind>) -> ProcessingGraph {
         let mut graph = ProcessingGraph::default();
         graph.edges.clear();
@@ -963,10 +1059,41 @@ mod tests {
         });
         graph
     }
+    fn pcm(samples: &[f32], budget: &Arc<audio::PcmBudget>) -> audio::PcmAudio {
+        let mut builder = audio::PcmBuilder::new(48000, 1, Arc::clone(budget)).unwrap();
+        builder.push(samples).unwrap();
+        builder.finish().unwrap()
+    }
+    fn samples(pcm: &audio::PcmAudio) -> Vec<f32> {
+        let mut samples = vec![0.0; pcm.frames() as usize];
+        assert_eq!(pcm.read_frames(0, &mut samples), samples.len());
+        samples
+    }
+    fn render(
+        graph: &ProcessingGraph,
+        input: &audio::PcmAudio,
+        budget: &Arc<audio::PcmBudget>,
+    ) -> GraphPcm {
+        let mut engine = Engine::new(input);
+        let index = engine
+            .compile(
+                graph,
+                GraphPort { node: 2, port: 0 },
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        engine
+            .render(index, Arc::clone(budget), &AtomicBool::new(false))
+            .unwrap()
+    }
 
     #[test]
-    fn graph_budget_counts_bypass_aliases_and_iir_files_without_double_reservation() {
-        let target = GraphPort { node: 2, port: 0 };
+    fn bypass_aliases_charge_once_and_native_chains_retain_only_final_pcm() {
+        let budget = audio::PcmBudget::new(MEMORY_LIMIT);
+        let input = pcm(&vec![0.125; 20000], &budget);
+        let source_bytes = budget.used_bytes();
         let bypass = chain(vec![
             GraphNodeKind::Equalizer {
                 config: Default::default(),
@@ -977,10 +1104,10 @@ mod tests {
                 profile: None,
             },
         ]);
-        assert_eq!(
-            max_source_frames(&bypass, target, 48000, 1).unwrap(),
-            (MAX_GRAPH_CACHE_BYTES - 128) / 4
-        );
+        let output = render(&bypass, &input, &budget);
+        assert_eq!(budget.used_bytes(), source_bytes);
+        assert_eq!(samples(&output.pcm), samples(&input));
+        drop(output);
         let iir = || GraphNodeKind::Equalizer {
             config: rivu_dsp::equalizer::config::EqualizerConfig {
                 enabled: true,
@@ -988,14 +1115,217 @@ mod tests {
             },
             implementation: EqImplementation::Iir,
         };
+        let graph = chain(vec![iir(), iir(), iir()]);
+        let output = render(&graph, &input, &budget);
         assert_eq!(
-            max_source_frames(&chain(vec![iir(), iir()]), target, 48000, 1).unwrap(),
-            (MAX_GRAPH_CACHE_BYTES - 3 * 128) / (3 * 4)
+            budget.used_bytes(),
+            source_bytes + output.pcm.retained_bytes()
+        );
+        assert_eq!(samples(&output.pcm), samples(&input));
+        drop(output);
+        assert_eq!(budget.used_bytes(), source_bytes);
+    }
+
+    fn mix_graph(gains_db: Vec<f32>, muted: Vec<bool>, solo: Vec<bool>) -> ProcessingGraph {
+        let mut graph = chain(vec![GraphNodeKind::Mix {
+            gains_db,
+            muted,
+            solo,
+        }]);
+        graph.edges.push(GraphEdge {
+            from: GraphPort { node: 1, port: 0 },
+            to: GraphPort { node: 3, port: 1 },
+        });
+        graph
+    }
+
+    #[test]
+    fn mix_preserves_gain_solo_and_unclipped_pcm() {
+        let budget = audio::PcmBudget::new(MEMORY_LIMIT);
+        let input = pcm(&[0.75, -0.75, 0.0], &budget);
+        let output = render(
+            &mix_graph(vec![0.0; 2], vec![false; 2], vec![false; 2]),
+            &input,
+            &budget,
+        );
+        assert_eq!(samples(&output.pcm), [1.5, -1.5, 0.0]);
+        let output = render(
+            &mix_graph(vec![0.0, -6.0206], vec![false; 2], vec![false, true]),
+            &input,
+            &budget,
+        );
+        let actual = samples(&output.pcm);
+        assert_eq!(actual.len(), 3);
+        for (actual, expected) in actual.into_iter().zip([0.375, -0.375, 0.0]) {
+            assert!((actual - expected).abs() < 1e-6);
+        }
+        let output = render(
+            &mix_graph(vec![0.0; 2], vec![false, true], vec![false, true]),
+            &input,
+            &budget,
+        );
+        assert_eq!(samples(&output.pcm), [0.0; 3]);
+    }
+
+    #[test]
+    fn mix_retains_union_of_guarded_source_relative_support() {
+        let budget = audio::PcmBudget::new(MEMORY_LIMIT);
+        let input = pcm(&[10.0, 20.0], &budget);
+        let guarded = pcm(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &budget);
+        let mut graph = mix_graph(vec![0.0; 2], vec![false; 2], vec![false; 2]);
+        graph.nodes.push(GraphNode {
+            id: 4,
+            kind: GraphNodeKind::Source,
+            position: [0.0; 2],
+        });
+        graph.next_id = 5;
+        graph.edges[0].from = GraphPort { node: 4, port: 0 };
+        let boundaries = BTreeMap::from([(
+            GraphPort { node: 4, port: 0 },
+            GraphPcm {
+                pcm: guarded,
+                start_frame: -2,
+            },
+        )]);
+        let mut engine = Engine::new(&input);
+        let index = engine
+            .compile(
+                &graph,
+                GraphPort { node: 2, port: 0 },
+                &boundaries,
+                &BTreeMap::new(),
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        let output = engine
+            .render(index, budget, &AtomicBool::new(false))
+            .unwrap();
+        assert_eq!(output.start_frame, -2);
+        assert_eq!(samples(&output.pcm), [1.0, 2.0, 13.0, 24.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn equalizer_instances_are_independent_across_every_block() {
+        let budget = audio::PcmBudget::new(MEMORY_LIMIT);
+        let data: Vec<f32> = (0..513).map(|i| (i as f32 * 0.07).sin() * 0.3).collect();
+        let input = pcm(&data, &budget);
+        let config = rivu_dsp::equalizer::config::EqualizerConfig {
+            enabled: true,
+            preamp_db: 6.020599913,
+            ..Default::default()
+        };
+        let graph = chain(vec![GraphNodeKind::Equalizer {
+            config,
+            implementation: EqImplementation::Iir,
+        }]);
+        let actual = samples(&render(&graph, &input, &budget).pcm);
+        assert_eq!(actual.len(), data.len());
+        for (&actual, &source) in actual.iter().zip(&data) {
+            assert!((actual - source * 2.0).abs() < 1e-6);
+        }
+        assert_eq!(
+            samples(&render(&ProcessingGraph::default(), &input, &budget).pcm),
+            data
         );
     }
 
     #[test]
-    fn graph_budget_propagates_guard_union_and_shared_fanout_publications() {
+    fn cancellation_after_first_decoded_block_releases_partial_pcm_and_allows_retry() {
+        let budget = audio::PcmBudget::new(MEMORY_LIMIT);
+        let data: Vec<f32> = (0..1401).map(|i| (i as f32 * 0.017).sin() * 0.3).collect();
+        let input = pcm(&data, &budget);
+        let before = budget.used_bytes();
+        let graph = chain(vec![GraphNodeKind::Equalizer {
+            config: rivu_dsp::equalizer::config::EqualizerConfig {
+                enabled: true,
+                preamp_db: 6.020599913,
+                ..Default::default()
+            },
+            implementation: EqImplementation::Iir,
+        }]);
+        let cancel = AtomicBool::new(true);
+        let mut engine = Engine::for_decoder(48000, 1);
+        assert!(
+            engine
+                .compile(
+                    &graph,
+                    GraphPort { node: 2, port: 0 },
+                    &BTreeMap::new(),
+                    &BTreeMap::new(),
+                    &cancel,
+                )
+                .is_err()
+        );
+        cancel.store(false, Ordering::Release);
+        let metadata = fs::metadata(std::env::current_exe().unwrap()).unwrap();
+        let renderer = audio::SourceRenderer::from_pcm(
+            input.clone(),
+            audio::SourceIdentity::from_metadata(&metadata),
+        )
+        .unwrap();
+        let target = engine
+            .compile(
+                &graph,
+                GraphPort { node: 2, port: 0 },
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &cancel,
+            )
+            .unwrap();
+        let mut blocks = 0;
+        let result: Result<audio::PcmAudio> = (|| {
+            let mut builder = audio::PcmBuilder::new(48000, 1, Arc::clone(&budget))?;
+            engine.decode(target, renderer, &cancel, |_, block| {
+                builder.push(block)?;
+                blocks += 1;
+                cancel.store(true, Ordering::Release);
+                Ok(())
+            })?;
+            builder.finish()
+        })();
+        assert!(format!("{:#}", result.err().unwrap()).contains("cancelled"));
+        assert_eq!(blocks, 1);
+        assert_eq!(budget.used_bytes(), before);
+        let output = render(&graph, &input, &budget);
+        let actual = samples(&output.pcm);
+        assert_eq!(actual.len(), data.len());
+        for (actual, source) in actual.into_iter().zip(data) {
+            assert!((actual - source * 2.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn offline_fir_retains_original_timeline_including_last_frame() {
+        let budget = audio::PcmBudget::new(MEMORY_LIMIT);
+        let mut expected = vec![0.0; 513];
+        expected[0] = 0.5;
+        expected[512] = -0.5;
+        let input = pcm(&expected, &budget);
+        let config = rivu_dsp::equalizer::config::EqualizerConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        let graph = chain(vec![GraphNodeKind::Equalizer {
+            config,
+            implementation: EqImplementation::LinearPhase { taps: 65 },
+        }]);
+        let output = render(&graph, &input, &budget);
+        assert!(output.start_frame < 0);
+        assert!(output.pcm.frames() > input.frames());
+        let cropped = output
+            .pcm
+            .slice_frames(output.start_frame.unsigned_abs(), input.frames())
+            .unwrap();
+        for (a, e) in samples(&cropped).into_iter().zip(expected) {
+            assert!((a - e).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn streaming_native_fanout_and_eof_match_realtime_causal_output() {
+        let budget = audio::PcmBudget::new(MEMORY_LIMIT);
+        let data: Vec<f32> = (0..1401).map(|i| (i as f32 * 0.017).sin() * 0.3).collect();
+        let input = pcm(&data, &budget);
         let mut graph = chain(vec![
             GraphNodeKind::Equalizer {
                 config: rivu_dsp::equalizer::config::EqualizerConfig {
@@ -1006,7 +1336,7 @@ mod tests {
             },
             GraphNodeKind::Denoise {
                 config: rivu_dsp::denoise::DenoiseConfig {
-                    mode: rivu_dsp::denoise::DenoiseMode::Adaptive,
+                    mode: DenoiseMode::Adaptive,
                     fft_size: 256,
                     ..Default::default()
                 },
@@ -1022,278 +1352,71 @@ mod tests {
             from: GraphPort { node: 3, port: 0 },
             to: GraphPort { node: 5, port: 1 },
         });
-        let partition = rivu_dsp::equalizer::fir::PARTITION as u64;
-        let fir_tail = 64 + partition;
-        let denoise_tail = fir_tail + 256;
-        // Source, FIR, denoise, mix, and one public crop for each guarded file.
-        let overhead = 7 * 128 + (fir_tail + denoise_tail * 2) * 4;
-        assert_eq!(
-            max_source_frames(&graph, GraphPort { node: 2, port: 0 }, 48000, 1).unwrap(),
-            (MAX_GRAPH_CACHE_BYTES - overhead) / (7 * 4)
-        );
-    }
-
-    fn source(path: &Path, pcm: &[f32]) {
-        let mut writer = hound::WavWriter::create(
-            path,
-            hound::WavSpec {
-                channels: 1,
-                sample_rate: 48000,
-                bits_per_sample: 32,
-                sample_format: hound::SampleFormat::Float,
-            },
-        )
-        .unwrap();
-        for &sample in pcm {
-            writer.write_sample(sample).unwrap();
-        }
-        writer.finalize().unwrap();
-    }
-    fn samples(path: &Path) -> Vec<f32> {
-        hound::WavReader::open(path)
-            .unwrap()
-            .samples()
-            .collect::<std::result::Result<_, _>>()
-            .unwrap()
-    }
-    #[test]
-    fn mix_preserves_gain_solo_alignment_and_unclipped_pcm() {
-        let dir = tempfile::tempdir().unwrap();
-        let a = dir.path().join("a.wav");
-        let b = dir.path().join("b.wav");
-        source(&a, &[0.75, -0.75, 0.0]);
-        source(&b, &[0.75, -0.75, 0.0]);
-        let a = GraphPcm {
-            path: a,
-            start_frame: 0,
-            frames: 3,
-        };
-        let b = GraphPcm {
-            path: b,
-            start_frame: 0,
-            frames: 3,
-        };
-        let output = dir.path().join("mix.wav");
-        mix_pcm(
-            &[a.clone(), b.clone()],
-            &output,
-            &[0.0, 0.0],
-            &[false; 2],
-            &[false; 2],
-            &AtomicBool::new(false),
-        )
-        .unwrap();
-        assert_eq!(samples(&output), vec![1.5, -1.5, 0.0]);
-        let output = dir.path().join("solo.wav");
-        mix_pcm(
-            &[a, b],
-            &output,
-            &[0.0, -6.0206],
-            &[false; 2],
-            &[false, true],
-            &AtomicBool::new(false),
-        )
-        .unwrap();
-        assert!((samples(&output)[0] - 0.375).abs() < 1e-6);
-    }
-    #[test]
-    fn mix_retains_union_of_guarded_source_relative_support() {
-        let dir = tempfile::tempdir().unwrap();
-        let guarded = dir.path().join("guarded.wav");
-        let plain = dir.path().join("plain.wav");
-        source(&guarded, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-        source(&plain, &[10.0, 20.0]);
-        let output = dir.path().join("mixed.wav");
-        let mixed = mix_pcm(
-            &[
-                GraphPcm {
-                    path: guarded,
-                    start_frame: -2,
-                    frames: 6,
-                },
-                GraphPcm {
-                    path: plain,
-                    start_frame: 0,
-                    frames: 2,
-                },
-            ],
-            &output,
-            &[0.0; 2],
-            &[false; 2],
-            &[false; 2],
-            &AtomicBool::new(false),
-        )
-        .unwrap();
-        assert_eq!(mixed.start_frame, -2);
-        assert_eq!(mixed.frames, 6);
-        assert_eq!(samples(&output), [1.0, 2.0, 13.0, 24.0, 5.0, 6.0]);
-    }
-    #[test]
-    fn guarded_profile_selection_adds_offset_after_source_frame_floor() {
-        use rivu_dsp::denoise::{DenoiseConfig, DenoiseMode, Denoiser, ProfileCollector};
-        let dir = tempfile::tempdir().unwrap();
-        let input = dir.path().join("guarded.wav");
-        let output = dir.path().join("profile.wav");
-        let mut pcm: Vec<f32> = (0..1400)
-            .map(|i| {
-                if i < 288 {
-                    0.0
-                } else {
-                    (i as f32 * 0.07).sin() * 0.3
-                }
-            })
-            .collect();
-        pcm[314] = 0.9;
-        pcm[315] = -0.7;
-        source(&input, &pcm);
-        let selection = NoiseSelection {
-            start_seconds: 0.0005625,
-            end_seconds: 0.012,
-        };
-        let start = (selection.start_seconds * 48000.0).floor() as usize;
-        let end = (selection.end_seconds * 48000.0).floor() as usize;
-        assert_eq!(start, 26);
-        // Shifting seconds instead would select frame315, not frame314.
-        assert_ne!(
-            ((selection.start_seconds + 288.0 / 48000.0) * 48000.0).floor() as usize,
-            start + 288
-        );
-        let config = DenoiseConfig {
-            mode: DenoiseMode::Profile,
-            fft_size: 256,
-            ..Default::default()
-        };
-        let mut collector = ProfileCollector::new(48000, 1, 256, (end - start) as u64).unwrap();
-        collector
-            .push_block(&pcm[start + 288..end + 288], &mut || false)
-            .unwrap();
-        let mut denoiser =
-            Denoiser::new(48000, 1, config.clone(), Some(collector.finish().unwrap())).unwrap();
-        let mut expected = Vec::new();
-        denoiser
-            .process_block(&pcm, &mut expected, &mut || false)
-            .unwrap();
-        denoiser.finish(&mut expected, &mut || false).unwrap();
-        classical(
-            &input,
-            &output,
-            &config,
-            Some(selection),
-            288,
-            &AtomicBool::new(false),
-            |_| {},
-        )
-        .unwrap();
-        assert_eq!(samples(&output), expected);
-    }
-    #[test]
-    fn eq_instances_are_independent_and_cancel_does_not_finish_output() {
-        let dir = tempfile::tempdir().unwrap();
-        let input = dir.path().join("input.wav");
-        source(&input, &[0.1; 513]);
-        let config = rivu_dsp::equalizer::config::EqualizerConfig {
-            enabled: true,
-            preamp_db: 6.020599913,
-            ..Default::default()
-        };
-        let first = dir.path().join("one.wav");
-        let second = dir.path().join("two.wav");
-        equalize(
-            &input,
-            &first,
-            &config,
-            EqImplementation::Iir,
-            &AtomicBool::new(false),
-        )
-        .unwrap();
-        equalize(
-            &input,
-            &second,
-            &Default::default(),
-            EqImplementation::Iir,
-            &AtomicBool::new(false),
-        )
-        .unwrap();
-        assert!((samples(&first)[0] - 0.2).abs() < 1e-6);
-        assert_eq!(samples(&second), vec![0.1; 513]);
-        assert!(
-            equalize(
-                &input,
-                &dir.path().join("cancel.wav"),
-                &config,
-                EqImplementation::Iir,
-                &AtomicBool::new(true)
+        let output = render(&graph, &input, &budget);
+        let metadata = std::fs::metadata(std::env::current_exe().unwrap()).unwrap();
+        let identity = audio::SourceIdentity::from_metadata(&metadata);
+        let renderer = audio::SourceRenderer::from_pcm(input.clone(), identity).unwrap();
+        let mut decoder = Engine::for_decoder(48000, 1);
+        let target = decoder
+            .compile(
+                &graph,
+                GraphPort { node: 2, port: 0 },
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &AtomicBool::new(false),
             )
-            .is_err()
-        );
-    }
-    #[test]
-    fn offline_fir_retains_original_timeline_including_last_frame() {
-        let dir = tempfile::tempdir().unwrap();
-        let input = dir.path().join("impulses.wav");
-        let mut expected = vec![0.0; 513];
-        expected[0] = 0.5;
-        expected[512] = -0.5;
-        source(&input, &expected);
-        let output = dir.path().join("aligned.wav");
-        let config = rivu_dsp::equalizer::config::EqualizerConfig {
-            enabled: true,
-            ..Default::default()
-        };
-        let guarded = dir.path().join("guarded.wav");
-        let (latency, tail) = equalize(
-            &input,
-            &guarded,
-            &config,
-            EqImplementation::LinearPhase { taps: 65 },
-            &AtomicBool::new(false),
-        )
-        .unwrap();
-        assert_eq!(samples(&guarded).len(), expected.len() + tail as usize);
-        copy_pcm_window(
-            &guarded,
-            &output,
-            0,
-            latency,
-            expected.len() as u64,
-            &AtomicBool::new(false),
-        )
-        .unwrap();
-        let actual = samples(&output);
+            .unwrap();
+        let mut decoded = Vec::new();
+        let frames = decoder
+            .decode(target, renderer, &AtomicBool::new(false), |_, block| {
+                decoded.extend_from_slice(block);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(frames, input.frames());
+        let causal = samples(&output.pcm);
+        assert_eq!(decoded.len(), causal.len());
+        for (actual, reference) in decoded.into_iter().zip(causal) {
+            assert!((actual - reference).abs() < 1e-5);
+        }
+        let mut live =
+            audio::GraphRunner::compile(&graph, GraphPort { node: 2, port: 0 }, 48000, 1).unwrap();
+        let mut expected = data;
+        live.process_interleaved(&mut expected).unwrap();
+        let mut tail = [0.0; 256];
+        loop {
+            let frames = live.finish_interleaved(&mut tail).unwrap();
+            if frames == 0 {
+                break;
+            }
+            expected.extend_from_slice(&tail[..frames]);
+        }
+        let actual = samples(&output.pcm);
         assert_eq!(actual.len(), expected.len());
-        for (a, e) in actual.iter().zip(expected) {
-            assert!((*a - e).abs() < 1e-5);
+        for (a, e) in actual.into_iter().zip(expected) {
+            assert!((a - e).abs() < 1e-5);
         }
     }
 
     #[test]
     fn auto_selects_exact_realtime_hybrid_or_offline_without_downgrading_nodes() {
         let target = GraphPort { node: 2, port: 0 };
-        let mut graph = ProcessingGraph::default();
         let flag = AtomicBool::new(false);
-        let (mode, boundary, runner) =
-            prepare(&graph, target, GraphExecutionMode::Auto, 48000, 2, &flag).unwrap();
+        let (mode, boundary, runner) = prepare(
+            &ProcessingGraph::default(),
+            target,
+            GraphExecutionMode::Auto,
+            48000,
+            2,
+            &flag,
+        )
+        .unwrap();
         assert_eq!(mode, GraphExecutionMode::Realtime);
         assert!(boundary.is_none());
         assert!(runner.is_some());
-        graph.next_id = 5;
-        graph.nodes.push(GraphNode {
-            id: 3,
-            position: [0.0; 2],
-            kind: GraphNodeKind::Speech {
-                config: Default::default(),
-            },
-        });
-        graph.edges = vec![
-            GraphEdge {
-                from: GraphPort { node: 1, port: 0 },
-                to: GraphPort { node: 3, port: 0 },
-            },
-            GraphEdge {
-                from: GraphPort { node: 3, port: 0 },
-                to: target,
-            },
-        ];
+        let graph = chain(vec![GraphNodeKind::Speech {
+            config: Default::default(),
+        }]);
         assert!(
             prepare(
                 &graph,
@@ -1310,19 +1433,15 @@ mod tests {
         assert_eq!(mode, GraphExecutionMode::Offline);
         assert!(boundary.is_none());
         assert!(runner.is_none());
-        graph.nodes.push(GraphNode {
-            id: 4,
-            position: [0.0; 2],
-            kind: GraphNodeKind::Equalizer {
+        let graph = chain(vec![
+            GraphNodeKind::Speech {
+                config: Default::default(),
+            },
+            GraphNodeKind::Equalizer {
                 config: Default::default(),
                 implementation: EqImplementation::Iir,
             },
-        });
-        graph.edges[1].to = GraphPort { node: 4, port: 0 };
-        graph.edges.push(GraphEdge {
-            from: GraphPort { node: 4, port: 0 },
-            to: target,
-        });
+        ]);
         let (mode, boundary, runner) =
             prepare(&graph, target, GraphExecutionMode::Auto, 48000, 2, &flag).unwrap();
         assert_eq!(mode, GraphExecutionMode::Hybrid);

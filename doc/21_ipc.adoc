@@ -136,7 +136,7 @@ The frame header is six bytes. `body_length` excludes the four-byte length field
 and includes the version, message type, and serialized body.
 
 Bodies use Postcard serialization without COBS framing. The protocol version is
-`7`; both peers must use the same positional wire schemas. The four-byte frame
+`8`; both peers must use the same positional wire schemas. The four-byte frame
 length remains little-endian; body integers follow Postcard's encoding.
 Version mismatches are rejected before decoding the body. There is no schema
 negotiation. See <<_wire_schemas,Wire schemas>> for positional fields and adapters.
@@ -1157,9 +1157,13 @@ original/denoised/vocals/accompaniment/mix. System state exposes the latest
 `processing` status. Use the exact task query for completion rather than an
 unrelated latest-task field, and keep task IDs bound to the Hello instance.
 Settings and source identity are captured with the job; output status reports
-the models actually used. Retained output availability is session-bounded. See
+the models actually used. Retained output availability is session-bounded.
+`ProcessingOutputs` exposes boolean stem availability, not paths. Graph outputs
+identify their ports and optional causal `start_frame` context; PCM remains owned
+by the service and is never serialized into status. Only an explicit export
+receipt carries a durable output path. See
 link:27_audio_processing.adoc#_tasks_retention_and_audition[Audio processing] for
-CLI equivalents, terminal states, provisioning, scratch and audition lifetime.
+CLI equivalents, terminal states, provisioning, PCM ownership and audition lifetime.
 
 ==== Immutable audio graph runs
 
@@ -1178,7 +1182,7 @@ explicit modes reject unsupported plans. `settings.graph_mode` reports the actua
 mode, `graph_boundary` the actual hybrid prefix, and `graph_plan` native-rate
 latency/tail frames and admission/work estimates, not a deadline guarantee.
 Preparation runs on the processing worker, not Core or the device callback.
-Realtime tasks are `complete` when live-ready, without cached files; a nonplaying
+Realtime tasks are `complete` when live-ready, without retained PCM; a nonplaying
 source opens paused/live-ready and cannot replace newer playback intent. Planning
 and execution algorithms belong to link:27_audio_processing.adoc[Audio processing].
 

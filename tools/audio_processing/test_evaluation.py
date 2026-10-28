@@ -191,7 +191,7 @@ class TimingBoundaryTests(unittest.TestCase):
                       "processing":{"core_seconds":24}, "metrics":{"real_time_factor":1.0}}
             (destination/"result.json").write_text(json.dumps(result))
             clock[0] += 7
-            event = {"version":2, "type":"complete", "task_id":request["task_id"]}
+            event = {"version":3, "type":"complete", "task_id":request["task_id"]}
             return subprocess.CompletedProcess(command, 0, json.dumps(event)+"\n", "")
         manifest = root/"manifest.json"
         if module is benchmark:

@@ -10,9 +10,14 @@ from pathlib import Path
 import tempfile
 from unittest.mock import patch
 import unittest
-from worker import RUNTIME_FILES, WorkerError, canonical_digest, deny_network, digest, process, resample_exact, validate_artifacts, validate_manifest, validate_request
+from worker import RUNTIME_FILES, WorkerError, canonical_digest, deny_network, digest, resample_exact, validate_artifacts, validate_manifest, validate_request
+from export import process_export
 
 ROOT = Path(__file__).resolve().parents[2]
+
+def export_request():
+    return {"version":1,"task_id":"test","operation":"speech","input_path":"/input.wav",
+            "output_dir":"/new-output","model_manifest":"/manifest.json"}
 
 def bundle_fixture(base, operation="speech", model="nsnet2", provenance=None):
     """Current admission fixture, not a downloadable or executable model."""
@@ -81,17 +86,18 @@ class ProvisionTests(unittest.TestCase):
 
 class ProtocolTests(unittest.TestCase):
     def request(self):
-        return {"version":1,"task_id":"test","operation":"speech","input_path":"/input.wav",
-                "output_dir":"/new-output","model_manifest":"/manifest.json"}
+        return {"version":2,"task_id":"test","operation":"speech","sample_rate":8000,
+                "channels":1,"frames":8,"model_manifest":"/manifest.json"}
 
     def test_controls_reject_nonfinite_wrong_operation_and_unknown(self):
-        for parameters in ({"wet_mix":float("nan")}, {"wet_mix":1.1}, {"overlap":0.5}, {"wet_mix":True}):
+        for parameters in ({"wet_mix":float("nan")}, {"wet_mix":1.1}, {"overlap":0.5}, {"wet_mix":True},
+                           {"unknown_control":0}, {"post_filter":0}):
             with self.subTest(parameters=parameters), self.assertRaises(WorkerError):
                 validate_request({**self.request(),"parameters":parameters})
         with self.assertRaises(WorkerError):
             validate_request({**self.request(),"threads":9})
         with self.assertRaises(WorkerError):
-            validate_request({**self.request(),"input_path":"relative.wav"})
+            validate_request({**self.request(),"model_manifest":"relative.json"})
 
     def test_manifest_hash_and_path_binding(self):
         scratch = ROOT / ".cache/neural/tests"
@@ -101,7 +107,6 @@ class ProtocolTests(unittest.TestCase):
             artifact = base / "weight-license.txt"
             manifest = bundle_fixture(base)
             path = base / "manifest.json"
-            path.write_text(json.dumps(manifest))
             self.assertEqual(validate_manifest(path,"speech"),manifest)
             artifact.write_text("changed")
             with self.assertRaisesRegex(WorkerError,"SHA256 mismatch"):
@@ -122,7 +127,6 @@ class ProtocolTests(unittest.TestCase):
                     with self.subTest(model=model):
                         manifest = bundle_fixture(base, operation, model)
                         path = base / "manifest.json"
-                        path.write_text(json.dumps(manifest))
                         self.assertEqual(validate_manifest(path,operation)["id"],model)
                         with self.assertRaises(WorkerError):
                             validate_manifest(path,"speech" if operation=="separate" else "separate")
@@ -195,9 +199,9 @@ class SignalTests(unittest.TestCase):
 
 @unittest.skipUnless(importlib.util.find_spec("numpy") and importlib.util.find_spec("soundfile"),
                      "NumPy and soundfile required for real WAV container behavior")
-class OutputContainerTests(unittest.TestCase):
+class ExplicitExportTests(unittest.TestCase):
     @unittest.skipUnless(importlib.util.find_spec("jsonschema"), "jsonschema required for event protocol validation")
-    def test_actual_dry_worker_events_validate_against_protocol_schema(self):
+    def test_explicit_dry_export_events_validate_against_protocol_schema(self):
         import subprocess
         import sys
         import jsonschema
@@ -210,13 +214,13 @@ class OutputContainerTests(unittest.TestCase):
             bundle_fixture(base)
             source = base / "input.wav"
             sf.write(source, np.array([[0.125, -0.25], [1.25, -1.25]], dtype="float32"), 44100, subtype="FLOAT")
-            request = {**ProtocolTests().request(), "input_path":str(source),
+            request = {**export_request(), "input_path":str(source),
                        "output_dir":str(base / "result"), "model_manifest":str(base / "manifest.json"),
                        "parameters":{"wet_mix":0}}
             request_path = base / "request.json"
             request_path.write_text(json.dumps(request))
-            result = subprocess.run([sys.executable, str(Path(__file__).parent / "worker.py"),
-                                     "--request", str(request_path)], capture_output=True, text=True)
+            result = subprocess.run([sys.executable, "-B", str(Path(__file__).parent / "export.py"),
+                                     "--request", str(request_path)], capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             events = [json.loads(line) for line in result.stdout.splitlines()]
             self.assertEqual(events[-1]["type"], "complete")
@@ -234,7 +238,7 @@ class OutputContainerTests(unittest.TestCase):
             audio = np.linspace(-0.8, 0.8, 16014, dtype="float32").reshape(-1, 2)
             source = base / "input.wav"
             sf.write(source, audio, 8000, subtype="FLOAT")
-            request = {**ProtocolTests().request(), "input_path":str(source),
+            request = {**export_request(), "input_path":str(source),
                        "output_dir":str(base / "result"), "model_manifest":str(base / "manifest.json"),
                        "parameters":{"wet_mix":0.25}}
             calls = []
@@ -244,7 +248,7 @@ class OutputContainerTests(unittest.TestCase):
             with patch("worker.build_engine", return_value=(8000, infer)), \
                  patch("worker.importlib.metadata.version", return_value="1"), \
                  patch("worker.deny_network"), patch("worker.CORE_SECONDS", 1), patch.dict(os.environ):
-                process(request, lambda *args, **kwargs: None)
+                process_export(request, lambda *args, **kwargs: None)
             output, rate = sf.read(base / "result/speech.wav", dtype="float32", always_2d=True)
             np.testing.assert_array_equal(output, audio * 0.75 + (audio * -0.5 + np.float32(0.125)) * 0.25)
             self.assertEqual(rate, 8000)
@@ -265,7 +269,7 @@ class OutputContainerTests(unittest.TestCase):
                 audio[1, 0] = np.float32(-0.0)
                 sf.write(source, audio, rate, subtype="FLOAT")
                 destination = base / str(channels)
-                request = {**ProtocolTests().request(), "input_path":str(source),
+                request = {**export_request(), "input_path":str(source),
                            "output_dir":str(destination), "model_manifest":str(base / "manifest.json"),
                            "device":"cuda", "parameters":{"wet_mix":0}}
                 events = []
@@ -275,7 +279,7 @@ class OutputContainerTests(unittest.TestCase):
                      patch("worker.importlib.metadata.version", side_effect=AssertionError("dependency queried")), \
                      patch("worker.deny_network"), patch("worker.CORE_SECONDS", 1), patch.dict(os.environ), \
                      patch.object(sf.SoundFile, "read", autospec=True, side_effect=sf.SoundFile.read) as reads:
-                    process(request, lambda kind, **fields: events.append((kind, fields)))
+                    process_export(request, lambda kind, **fields: events.append((kind, fields)))
                 output, output_rate = sf.read(destination / "speech.wav", dtype="float32", always_2d=True)
                 np.testing.assert_array_equal(output.view("uint32"), audio.view("uint32"))
                 self.assertEqual([call.args[1] for call in reads.call_args_list], [rate, 7])
@@ -300,7 +304,7 @@ class OutputContainerTests(unittest.TestCase):
                 rejected_events = []
                 with patch("worker.deny_network"), patch.dict(os.environ):
                     with self.assertRaisesRegex(WorkerError, "already exist"):
-                        process(request, lambda kind, **fields: rejected_events.append((kind, fields)))
+                        process_export(request, lambda kind, **fields: rejected_events.append((kind, fields)))
                 self.assertEqual(rejected_events, [])
                 self.assertEqual({path.name: path.read_bytes() for path in destination.iterdir()}, preserved)
 
@@ -316,14 +320,14 @@ class OutputContainerTests(unittest.TestCase):
             destination = base / "result"
             for parameters in ({}, {"wet_mix":0}):
                 with self.subTest(parameters=parameters):
-                    request = {**ProtocolTests().request(), "input_path":str(source),
+                    request = {**export_request(), "input_path":str(source),
                                "output_dir":str(destination), "model_manifest":str(base / "manifest.json"),
                                "parameters":parameters}
                     with patch("worker.check_packages"), \
                          patch("worker.build_engine", side_effect=AssertionError("model loaded")), \
                          patch("worker.deny_network"), patch.dict(os.environ):
                         with self.assertRaisesRegex(WorkerError, "multichannel downmix"):
-                            process(request, lambda *args, **kwargs: None)
+                            process_export(request, lambda *args, **kwargs: None)
                     self.assertFalse(destination.exists())
                     self.assertEqual(source.read_bytes(), original)
 
@@ -336,13 +340,13 @@ class OutputContainerTests(unittest.TestCase):
             source = base / "input.wav"
             sf.write(source, np.array([0.25, -0.25], dtype="float32"), 8000, subtype="FLOAT")
             destination = base / "result"
-            request = {**ProtocolTests().request(), "input_path":str(source),
+            request = {**export_request(), "input_path":str(source),
                        "output_dir":str(destination), "model_manifest":str(base / "manifest.json"),
                        "parameters":{"wet_mix":0}}
             events = []
             with patch("worker.MAX_REPORT_BYTES", 1), patch("worker.deny_network"), patch.dict(os.environ):
                 with self.assertRaises(WorkerError) as error:
-                    process(request, lambda kind, **fields: events.append((kind, fields)))
+                    process_export(request, lambda kind, **fields: events.append((kind, fields)))
             self.assertEqual(error.exception.code, "report_capacity")
             self.assertFalse(destination.exists())
             self.assertNotIn("complete", [kind for kind, _ in events])
@@ -356,20 +360,20 @@ class OutputContainerTests(unittest.TestCase):
             source = base / "input.wav"
             sf.write(source, np.zeros((8, 1), dtype="float32"), 8000, subtype="FLOAT")
             destination = base / "result"
-            request = {**ProtocolTests().request(), "input_path":str(source),
+            request = {**export_request(), "input_path":str(source),
                        "output_dir":str(destination), "model_manifest":str(base / "manifest.json"),
                        "parameters":{"wet_mix":0, "post_filter":False}}
             with self.assertRaisesRegex(WorkerError, "post_filter"):
-                process(request, lambda *args, **kwargs: None)
+                process_export(request, lambda *args, **kwargs: None)
             request["parameters"] = {"wet_mix":0}
             sf.write(source, np.full((8, 1), np.nan, dtype="float32"), 8000, subtype="FLOAT")
             with patch("worker.deny_network"), patch.dict(os.environ):
                 with self.assertRaisesRegex(WorkerError, "nonfinite"):
-                    process(request, lambda *args, **kwargs: None)
+                    process_export(request, lambda *args, **kwargs: None)
             self.assertFalse(destination.exists())
             (base / "weight-license.txt").write_text("tampered")
             with self.assertRaisesRegex(WorkerError, "SHA256 mismatch"):
-                process(request, lambda *args, **kwargs: None)
+                process_export(request, lambda *args, **kwargs: None)
             self.assertFalse(destination.exists())
 
     def test_separation_uses_riff_when_each_stem_fits_even_if_total_exceeds_four_gib(self):
@@ -407,9 +411,9 @@ class OutputContainerTests(unittest.TestCase):
                  patch("worker.deny_network"), patch.dict(os.environ), \
                  patch("worker.importlib.metadata.version", return_value="1"), \
                  patch.object(sf, "info", return_value=info), \
-                 patch("worker.shutil.disk_usage", return_value=SimpleNamespace(free=16 * 1024**3)):
+                 patch("export.shutil.disk_usage", return_value=SimpleNamespace(free=16 * 1024**3)):
                 with self.assertRaises(InspectedOutputs):
-                    process(request, lambda *args, **kwargs: None)
+                    process_export(request, lambda *args, **kwargs: None)
             self.assertFalse(destination.exists())
 
     def test_large_report_does_not_expand_completion_and_preserves_audio(self):
@@ -418,6 +422,7 @@ class OutputContainerTests(unittest.TestCase):
         import numpy as np
         import soundfile as sf
         import worker
+        import export
         from contextlib import redirect_stdout
         from unittest.mock import patch
 
@@ -431,23 +436,23 @@ class OutputContainerTests(unittest.TestCase):
             manifest = base / "manifest.json"
             bundle_fixture(base, provenance={"record":"x" * 70000})
             destination = base / "result"
-            request = {**ProtocolTests().request(), "input_path":str(source),
+            request = {**export_request(), "input_path":str(source),
                        "output_dir":str(destination), "model_manifest":str(manifest)}
             request_path = base / "request.json"
             request_path.write_text(json.dumps(request))
             stdout = io.StringIO()
-            # Only inference is synthetic: admission, WAV I/O, reporting and
-            # the actual main() JSONL serializer execute unchanged.
+            # Only inference is synthetic: admission, explicit WAV export,
+            # reporting and the export adapter's JSONL serializer are real.
             with patch.object(worker, "build_engine", return_value=(8000, lambda samples: samples * 0.5)), \
                  patch.object(worker, "deny_network"), patch.object(worker, "CORE_SECONDS", 1), \
                  patch("worker.importlib.metadata.version", return_value="1"), \
-                 patch.dict(os.environ), patch.object(sys, "argv", ["worker.py", "--request", str(request_path)]), \
+                 patch.dict(os.environ), patch.object(sys, "argv", ["export.py", "--request", str(request_path)]), \
                  redirect_stdout(stdout):
-                self.assertEqual(worker.main(), 0)
+                self.assertEqual(export.main(), 0)
             lines = stdout.getvalue().splitlines()
             event = json.loads(lines[-1])
             self.assertEqual(event["type"], "complete")
-            self.assertEqual(event["version"], 2)
+            self.assertEqual(event["version"], 3)
             self.assertLess(len(lines[-1].encode("utf-8")) + 1, 65536)
             report_path = destination / "result.json"
             self.assertGreater(report_path.stat().st_size, 65536)
@@ -455,15 +460,13 @@ class OutputContainerTests(unittest.TestCase):
             self.assertEqual(report["model"]["provenance"]["record"], "x" * 70000)
             self.assertEqual(len(report["metrics"]["block_seconds"]), 2)
             self.assertEqual(report["source_sha256"], digest(source))
-            output, rate = sf.read(destination / event["outputs"]["speech"], dtype="float32", always_2d=True)
+            output, rate = sf.read(destination / "speech.wav", dtype="float32", always_2d=True)
             self.assertEqual(rate, 8000)
             np.testing.assert_array_equal(output, audio * 0.5)
 
 
 @unittest.skipUnless(os.environ.get("RIVU_SPEECH_MANIFEST"),"explicit prepared real speech model required")
 class RealSpeechTests(unittest.TestCase):
-
-
     def test_full_strength_silence_exact_length_and_source_unchanged(self):
         import subprocess
         import sys
@@ -482,24 +485,24 @@ class RealSpeechTests(unittest.TestCase):
                        "threads":1,"parameters":{"wet_mix":1.0,"attenuation_limit_db":80}}
             request_path = base/"request.json"
             request_path.write_text(json.dumps(request))
-            completed = subprocess.run([sys.executable,str(Path(__file__).with_name("worker.py")),"--request",str(request_path)],
+            completed = subprocess.run([sys.executable,"-B",str(Path(__file__).with_name("export.py")),"--request",str(request_path)],
                                        capture_output=True,text=True,check=True)
             event = json.loads(completed.stdout.splitlines()[-1])
             self.assertEqual(event["type"],"complete")
-            output,rate = sf.read(base / "result" / event["outputs"]["speech"],dtype="float32",always_2d=True)
+            output,rate = sf.read(base / "result/speech.wav",dtype="float32",always_2d=True)
             self.assertEqual(rate,44100)
             np.testing.assert_array_equal(output,audio)
             self.assertEqual(digest(source),original_hash)
 
 class RealSeparationTests(unittest.TestCase):
     def check_model(self, variable, model_id):
+        manifest = os.environ.get(variable)
+        if not manifest:
+            self.skipTest("explicit prepared real separation model required: " + variable)
         import subprocess
         import sys
         import numpy as np
         import soundfile as sf
-        manifest = os.environ.get(variable)
-        if not manifest:
-            self.skipTest("explicit prepared real separation model required: " + variable)
         scratch = ROOT / ".cache/neural/tests"
         scratch.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=scratch) as directory:
@@ -520,7 +523,7 @@ class RealSeparationTests(unittest.TestCase):
                        "model_manifest":manifest, "threads":1, "parameters":{"overlap":0.75}}
             request_path = base / "request.json"
             request_path.write_text(json.dumps(request))
-            completed = subprocess.run([sys.executable, str(Path(__file__).with_name("worker.py")),
+            completed = subprocess.run([sys.executable, "-B", str(Path(__file__).with_name("export.py")),
                                         "--request", str(request_path)],
                                        capture_output=True, text=True, check=True)
             event = json.loads(completed.stdout.splitlines()[-1])
@@ -530,7 +533,7 @@ class RealSeparationTests(unittest.TestCase):
                              (rate, 2, len(audio)))
             stems = {}
             for name in ("vocals", "accompaniment"):
-                stems[name], output_rate = sf.read(base / "result" / event["outputs"][name], dtype="float32", always_2d=True)
+                stems[name], output_rate = sf.read(base / "result" / (name+".wav"), dtype="float32", always_2d=True)
                 self.assertEqual(output_rate, rate)
                 self.assertEqual(stems[name].shape, audio.shape)
                 self.assertTrue(np.isfinite(stems[name]).all())

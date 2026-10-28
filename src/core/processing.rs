@@ -12,7 +12,7 @@ impl Core {
         // Revoking audition intent does not cancel the rendering/export owner.
         self.processing.pending_audition = None;
         if let Some(id) = self.processing.audition
-            && let Err(error) = self.audition_path(id, None)
+            && let Err(error) = self.audition_pcm(id, None)
         {
             self.stop()?;
             return Err(error);
@@ -44,9 +44,11 @@ impl Core {
             source_run: None,
             cached_output: None,
         };
-        let status =
-            self.processing
-                .start_graph(track, self.state.system.config.clone(), request)?;
+        let status = self
+            .processing
+            .start_graph(track, self.state.system.config.clone(), request);
+        self.sync_processing_audio_availability();
+        let status = status?;
         let id = status.id;
         self.state.system.processing = Some(status);
         if mode != GraphExecutionMode::Offline {
@@ -74,11 +76,11 @@ impl Core {
             .context("Not a graph run")?;
         graph.ancestors(node)?;
         let track = self.processing_source(result)?;
-        if let Some(output) = result.status.graph_outputs.iter().find(|o| o.port == node) {
-            let path = output.path.clone();
+        if let Some(output) = result.graph_outputs.get(&node) {
+            let pcm = output.pcm.clone();
             let track_id = result.track.id;
             self.establish_graph_source_context(track_id)?;
-            self.audition_path(id, Some(path))?;
+            self.audition_pcm(id, Some(pcm))?;
             self.state.processing_audition = Some(crate::projection::ProcessingAudition {
                 id,
                 output: Some(node),
@@ -97,7 +99,9 @@ impl Core {
         };
         let status = self
             .processing
-            .start_graph(track, Arc::new(config), request)?;
+            .start_graph(track, Arc::new(config), request);
+        self.sync_processing_audio_availability();
+        let status = status?;
         let task_id = status.id;
         self.processing.pending_audition = Some((status.id, self.generation));
         self.state.system.processing = Some(status);
@@ -111,31 +115,31 @@ impl Core {
     ) -> Result<()> {
         let status = self.processing_status(id).context("Unknown graph run")?;
         self.establish_graph_source_context(status.track_id)?;
-        let path = status
+        let pcm = status
             .settings
             .graph_boundary
             .map(|boundary| {
-                status
-                    .graph_outputs
+                let output = self
+                    .processing
+                    .results
                     .iter()
-                    .find(|o| o.port == boundary)
-                    .map(|output| -> Result<PathBuf> {
-                        if let Some(context) = &output.context {
-                            runner.set_source_context(
-                                context.start_frame,
-                                status
-                                    .frames
-                                    .context("Missing original graph source frame count")?,
-                            )?;
-                            Ok(context.path.clone())
-                        } else {
-                            Ok(output.path.clone())
-                        }
-                    })
-                    .context("Hybrid prefix is not ready")?
+                    .find(|result| result.status.id == id)
+                    .and_then(|result| result.graph_outputs.get(&boundary))
+                    .context("Hybrid prefix is not ready")?;
+                if let Some(context) = &output.context {
+                    runner.set_source_context(
+                        context.start_frame,
+                        status
+                            .frames
+                            .context("Missing original graph source frame count")?,
+                    )?;
+                    Ok(context.pcm.clone())
+                } else {
+                    Ok::<_, anyhow::Error>(output.pcm.clone())
+                }
             })
             .transpose()?;
-        self.audition_path_with_graph(id, path, Some(runner))
+        self.audition_pcm_with_graph(id, pcm, Some(runner))
     }
 
     fn establish_graph_source_context(&mut self, track_id: i64) -> Result<()> {
@@ -191,23 +195,13 @@ impl Core {
             .context("Not a graph run")?;
         graph.ancestors(node)?;
         let track = self.processing_source(result)?;
-        let cached_output = result
-            .status
-            .graph_outputs
-            .iter()
-            .find(|output| output.port == node)
-            .map(|output| {
-                Ok::<_, anyhow::Error>(crate::processing::CachedGraphOutput {
-                    path: output.path.clone(),
-                    sample_rate: result
-                        .status
-                        .sample_rate
-                        .context("Missing cached sample rate")?,
-                    channels: result.status.channels.context("Missing cached channels")?,
-                    frames: result.status.frames.context("Missing cached frame count")?,
-                })
-            })
-            .transpose()?;
+        let cached_output =
+            result
+                .graph_outputs
+                .get(&node)
+                .map(|output| crate::processing::CachedGraphOutput {
+                    pcm: output.pcm.clone(),
+                });
         let mut config = self.effective_config();
         config.processing_graph = graph;
         let request = crate::processing::GraphRequest {
@@ -248,7 +242,7 @@ impl Core {
             self.processing.pending_audition = None;
         }
         if selected {
-            if let Err(error) = self.audition_path(id, None) {
+            if let Err(error) = self.audition_pcm(id, None) {
                 self.stop()?;
                 return Err(error);
             }
@@ -462,11 +456,31 @@ impl Core {
         let track = self.track(track_id)?;
         let status =
             self.processing
-                .start(track, self.state.system.config.clone(), operation, profile)?;
+                .start(track, self.state.system.config.clone(), operation, profile);
+        self.sync_processing_audio_availability();
+        let status = status?;
         let id = status.id;
         self.state.system.processing = Some(status);
         Ok(id)
     }
+    fn sync_processing_audio_availability(&mut self) {
+        for result in &self.processing.results {
+            for status in self
+                .state
+                .system
+                .processing
+                .iter_mut()
+                .chain(self.processing_results.iter_mut())
+                .filter(|status| status.id == result.status.id)
+            {
+                status.outputs.clone_from(&result.status.outputs);
+                status
+                    .graph_outputs
+                    .clone_from(&result.status.graph_outputs);
+            }
+        }
+    }
+
     pub(in crate::core) fn processing_status(&self, id: u64) -> Option<ProcessingTaskStatus> {
         self.processing_status_ref(id).cloned()
     }
@@ -561,21 +575,6 @@ impl Core {
     ) -> Result<()> {
         ensure!(!cancelled, "Processing cancelled");
         self.processing_source(result)?;
-        if result.retains_audio() {
-            let pinned_bytes = self
-                .processing
-                .results
-                .iter()
-                .filter(|r| Some(r.status.id) == self.processing.audition)
-                .map(|r| r.cache_bytes)
-                .sum::<u64>();
-            ensure!(
-                pinned_bytes.checked_add(result.cache_bytes).is_some_and(
-                    |bytes| bytes <= crate::processing::graph::MAX_RETAINED_CACHE_BYTES
-                ),
-                "Processing cache plus selected audition exceeds the 4 GiB retention limit; stop that audition before running again"
-            );
-        }
         Ok(())
     }
 
@@ -593,16 +592,6 @@ impl Core {
     }
     pub(in crate::core) fn processing_event(&mut self, event: crate::processing::Event) {
         use crate::processing::Event;
-        // ReadyToPublish is emitted only after the reclamation wave preceding
-        // this completion has physically retired. It receives the same current
-        // cancellation/source checks as the original worker completion.
-        let event = match event {
-            Event::ReadyToPublish { id, result } => Event::Finished {
-                id,
-                result: Ok(result),
-            },
-            event => event,
-        };
         match event {
             Event::GraphNode { id, status: node } => {
                 if self
@@ -667,17 +656,7 @@ impl Core {
                         self.processing.retire(result);
                         return Err(error);
                     }
-                    while result.retains_audio()
-                        && (self.processing.results.len() >= 4
-                            || self
-                                .processing
-                                .results
-                                .iter()
-                                .map(|r| r.cache_bytes)
-                                .sum::<u64>()
-                                .saturating_add(result.cache_bytes)
-                                > crate::processing::graph::MAX_RETAINED_CACHE_BYTES)
-                    {
+                    while result.retains_audio() && self.processing.results.len() >= 4 {
                         let index = self
                             .processing
                             .results
@@ -689,30 +668,6 @@ impl Core {
                     }
                     Ok(result)
                 });
-                if let Ok(completed) = &result
-                    && completed.retains_audio()
-                    && self
-                        .processing
-                        .results
-                        .iter()
-                        .map(|r| r.cache_bytes)
-                        .sum::<u64>()
-                        .saturating_add(self.processing.retiring_bytes())
-                        .saturating_add(completed.cache_bytes)
-                        > crate::processing::graph::MAX_RETAINED_CACHE_BYTES
-                {
-                    let result = result.unwrap();
-                    self.processing.publish_after_retirement(id, result);
-                    if let Some(status) =
-                        self.state.system.processing.as_mut().filter(|s| s.id == id)
-                    {
-                        status.phase = ProcessingPhase::Queued;
-                    }
-                    self.publish();
-                    // Still active: cancellation can revoke publication while
-                    // the reclaimer owns this completed but unadmitted result.
-                    return;
-                }
                 let task = self.processing.active.take().unwrap();
                 let _ = task.worker.join();
                 let result = result.and_then(|mut result| {
@@ -742,8 +697,7 @@ impl Core {
                 match result {
                     Ok(mut result) => {
                         if !result.retains_audio() {
-                            // Export receipts outlive scratch, but never advertise
-                            // its soon-to-be-retired audition paths.
+                            // Export receipts do not advertise retired PCM.
                             result.status.outputs = None;
                             result.status.graph_outputs.clear();
                             self.state.system.processing = Some(result.status.clone());
@@ -821,6 +775,9 @@ impl Core {
                     .as_ref()
                     .is_some_and(|task| task.id == id)
                 {
+                    if let Ok(pcm) = result {
+                        self.processing.retire_pcm(pcm);
+                    }
                     return;
                 }
                 let task = self.processing.active.take().unwrap();
@@ -835,60 +792,40 @@ impl Core {
                     self.processing.pending_audition = None;
                 }
                 let outcome = match result {
-                    Ok(path) if !cancelled && (!requested || generation == self.generation) => {
-                        let bytes = std::fs::metadata(&path).map(|metadata| metadata.len());
-                        let outcome = bytes.map_err(anyhow::Error::from).and_then(|bytes| {
-                            if !requested {
-                                let source = self
-                                    .processing
-                                    .results
-                                    .iter()
-                                    .find(|r| r.status.id == id)
-                                    .context("Processing result is no longer retained")?;
-                                self.processing_source(source)?;
-                            }
-                            let retained = self
+                    Ok(pcm) if !cancelled && (!requested || generation == self.generation) => {
+                        let outcome = (|| -> Result<()> {
+                            let source = self
                                 .processing
                                 .results
                                 .iter()
-                                .map(|r| r.cache_bytes)
-                                .sum::<u64>();
-                            ensure!(
-                                retained
-                                    .saturating_add(self.processing.retiring_bytes())
-                                    .saturating_add(bytes)
-                                    <= crate::processing::graph::MAX_RETAINED_CACHE_BYTES,
-                                "Stem mix exceeds the 4 GiB processing retention limit"
-                            );
+                                .find(|r| r.status.id == id)
+                                .context("Processing result is no longer retained")?;
+                            self.processing_source(source)?;
                             if requested {
-                                self.audition_path(id, Some(path.clone()))?;
+                                self.audition_pcm(id, Some(pcm.clone()))?;
                             }
-                            Ok(bytes)
-                        });
-                        if let Ok(bytes) = outcome.as_ref() {
+                            Ok(())
+                        })();
+                        if outcome.is_ok() {
                             if let Some(result) = self
                                 .processing
                                 .results
                                 .iter_mut()
                                 .find(|r| r.status.id == id)
                             {
-                                result.cache_bytes += *bytes;
-                                if let Some(old) = result.mix.replace(path) {
-                                    let old_bytes = std::fs::metadata(&old)
-                                        .map_or(0, |metadata| metadata.len());
-                                    if std::fs::remove_file(old).is_ok() {
-                                        result.cache_bytes =
-                                            result.cache_bytes.saturating_sub(old_bytes);
-                                    }
+                                if let Some(old) = result.mix.replace(pcm) {
+                                    self.processing.retire_pcm(old);
                                 }
+                            } else {
+                                self.processing.retire_pcm(pcm);
                             }
                         } else {
-                            let _ = std::fs::remove_file(path);
+                            self.processing.retire_pcm(pcm);
                         }
-                        outcome.map(|_| ())
+                        outcome
                     }
-                    Ok(path) => {
-                        let _ = std::fs::remove_file(path);
+                    Ok(pcm) => {
+                        self.processing.retire_pcm(pcm);
                         Err(anyhow::anyhow!(
                             "Mix audition cancelled or source playback changed"
                         ))
@@ -913,7 +850,6 @@ impl Core {
                 self.retain_processing_terminal(id);
                 self.task_completed(TaskTarget::Processing { id });
             }
-            Event::ReadyToPublish { .. } => unreachable!("normalized before dispatch"),
         }
         self.publish();
     }
@@ -931,11 +867,7 @@ impl Core {
             .find(|r| r.status.id == id)
             .context("Processing result is no longer retained")?;
         let track = self.processing_source(result)?;
-        let outputs = result
-            .status
-            .outputs
-            .as_ref()
-            .context("No processing outputs")?;
+        let outputs = &result.outputs;
         match mode {
             AuditionMode::Denoised => ensure!(outputs.denoised.is_some(), "No denoised output"),
             AuditionMode::Vocals => ensure!(outputs.vocals.is_some(), "No vocal stem"),
@@ -1003,12 +935,8 @@ impl Core {
             .iter()
             .find(|r| r.status.id == id)
             .context("Processing result is no longer retained")?;
-        let outputs = result
-            .status
-            .outputs
-            .as_ref()
-            .context("No processing outputs")?;
-        let path = match mode {
+        let outputs = &result.outputs;
+        let pcm = match mode {
             AuditionMode::Original => None,
             AuditionMode::Denoised => Some(outputs.denoised.clone().context("No denoised output")?),
             AuditionMode::Vocals => Some(outputs.vocals.clone().context("No vocal stem")?),
@@ -1020,16 +948,16 @@ impl Core {
             ),
             AuditionMode::Mix => unreachable!(),
         };
-        self.audition_path(id, path).map(|_| None)
+        self.audition_pcm(id, pcm).map(|_| None)
     }
-    fn audition_path(&mut self, id: u64, path: Option<PathBuf>) -> Result<()> {
-        self.audition_path_with_graph(id, path, None)
+    fn audition_pcm(&mut self, id: u64, pcm: Option<audio::PcmAudio>) -> Result<()> {
+        self.audition_pcm_with_graph(id, pcm, None)
     }
 
-    fn audition_path_with_graph(
+    fn audition_pcm_with_graph(
         &mut self,
         id: u64,
-        path: Option<PathBuf>,
+        pcm: Option<audio::PcmAudio>,
         graph: Option<audio::GraphRunner>,
     ) -> Result<()> {
         ensure!(
@@ -1077,22 +1005,8 @@ impl Core {
             self.state.playback.status != PlaybackStatus::Stopped,
             "Start the source track before auditioning"
         );
-        // Capture before stopping playback or queueing worker work. For a cached
-        // boundary this is the cache identity, not the original source identity.
-        let expected_identity = if graph.is_some() {
-            Some(if let Some(path) = &path {
-                let metadata = std::fs::metadata(path)?;
-                ensure!(
-                    metadata.is_file(),
-                    "Cached graph boundary must be a regular file"
-                );
-                audio::SourceIdentity::from_metadata(&metadata)
-            } else {
-                admitted_source.identity()
-            })
-        } else {
-            None
-        };
+        // PCM is immutable; graph admission still validates the original source.
+        let expected_identity = graph.as_ref().map(|_| admitted_source.identity());
         self.engine.ensure_command_capacity(2)?;
         self.processing.pending_audition = None;
         let generation = self.generation;
@@ -1125,7 +1039,7 @@ impl Core {
         let heard = self.playback.as_ref().map_or(0.0, |p| p.heard);
         self.generation = self.generation.wrapping_add(1);
         let is_graph = graph.is_some();
-        let original = path.is_none();
+        let original = pcm.is_none();
         let source_info = if original {
             None
         } else {
@@ -1145,23 +1059,16 @@ impl Core {
                 sample_rate: status.sample_rate.unwrap_or(track.sample_rate),
             })
         };
-        let path = path.unwrap_or_else(|| track.path.clone());
-        let range = if original {
-            track.cue.as_ref().map(|cue| audio::PlaybackRange {
-                start_seconds: cue.start_seconds(),
-                end_seconds: cue.end_seconds(),
-            })
-        } else {
-            None
-        };
-        let decoder_hint = if original {
-            track.decoder_hint
-        } else {
-            DecoderHint::Native
-        };
+        let path = track.path.clone();
+        let range = track.cue.as_ref().map(|cue| audio::PlaybackRange {
+            start_seconds: cue.start_seconds(),
+            end_seconds: cue.end_seconds(),
+        });
+        let decoder_hint = track.decoder_hint;
         let command = if let Some(runner) = graph {
             AudioCommand::GraphAudition {
                 path,
+                pcm,
                 expected_identity: expected_identity
                     .expect("graph identity captured before admission"),
                 range,
@@ -1177,6 +1084,7 @@ impl Core {
         } else {
             AudioCommand::Audition {
                 path,
+                pcm,
                 range,
                 decoder_hint,
                 source_info,

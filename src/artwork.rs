@@ -984,15 +984,13 @@ pub(crate) mod tests {
     }
 
     fn assert_budget_audio(path: &Path) {
-        use rivu_audio::{ProbeBackend, SourceRenderer};
+        use rivu_audio::{PcmBudget, ProbeBackend, SourceRenderer};
         use rivu_format::media::DecoderHint;
         use std::sync::atomic::AtomicBool;
 
         let details = rivu_audio::probe_details(path, false, false).unwrap();
         assert!(matches!(details.decoder_backend, ProbeBackend::Native));
         assert_eq!(details.info.sample_rate, 8_000);
-        let directory = tempfile::tempdir().unwrap();
-        let output = directory.path().join("decoded.wav");
         let rendered = SourceRenderer::open(
             path,
             None,
@@ -1002,14 +1000,11 @@ pub(crate) mod tests {
             &AtomicBool::new(false),
         )
         .unwrap()
-        .render(&output, u64::MAX, &AtomicBool::new(false))
+        .render_pcm(PcmBudget::new(128 * 1024), &AtomicBool::new(false))
         .unwrap();
-        assert_eq!(rendered.frames, 1);
-        let samples = hound::WavReader::open(output)
-            .unwrap()
-            .into_samples::<f32>()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
+        assert_eq!(rendered.frames(), 1);
+        let mut samples = [0.0];
+        assert_eq!(rendered.read_frames(0, &mut samples), 1);
         assert_eq!(samples, [0.5]);
     }
 

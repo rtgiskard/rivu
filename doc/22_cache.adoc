@@ -239,30 +239,27 @@ expansions. These caches are independent of visualization caching.
 
 == Processing output retention
 
-The processing service, not a window or its query cache, owns scratch, retained
-PCM, and auditions. Graph PCM is capped at 2 GiB per run; graph and ordinary jobs
-share a 4 GiB output budget and at most four retained audition results. The selected
-audition is pinned; output that cannot coexist within the budget fails publication
-rather than evicting that audition. Export jobs publish durable files without
-occupying audition slots or evicting retained runs, whether copying cached PCM or
-rendering another port. Their scratch is retired after publication, and their
-receipts share the latest 32 terminal statuses. Those statuses may outlive audition
-files, so a terminal status alone does not authorize audition. Native source
-rendering also has the RIFF 4 GiB scratch limit. Cancellation/closed views do not
-prove worker retirement. Workflow and source/output validity are specified in
-link:27_audio_processing.adoc#_tasks_retention_and_audition[Audio processing].
+The processing service owns immutable PCM and frozen run snapshots, independently
+of windows and query caches. Active, retained and retiring PCM share a 512 MiB
+allocation budget. Clones and slices share their backing reservation; the final
+owner releases the charge. This does not cap decoder/DSP state, model weights,
+Python inference workspace or total process RSS.
 
-Retirement is nonblocking on Core: one bounded reclamation worker deletes rejected
-and evicted results. Retiring bytes remain charged until deletion succeeds, and
-stem mixes count toward the same output budget. A subsequent processing worker
-waits for prior reclamation before preparing more PCM. An audition result that
-must wait for reclamation remains cancellable and is revalidated before publication.
-Export publication also rechecks cancellation and source identity before its
-no-clobber commit; it does not admit temporary PCM into the audition budget.
-A deletion failure retains ownership and charge and fails later preparation
-rather than allowing more PCM
-to accumulate. Shutdown joins work and reclamation; retained audition files live
-until final service destruction after playback retirement.
+Successful admission of a non-export run retires unselected PCM and prepared
+runners before the worker allocates. The selected audition stays pinned; capacity
+exhaustion fails rather than evicting it or spilling to disk. At most four frozen
+run snapshots support later graph recomputation. Availability is revoked when PCM
+is retired, including in current/history status. The latest 32 terminal statuses
+can outlive retained audio. Export jobs preserve their source handles, occupy no
+audition slot and publish only a durable file and receipt.
+
+One bounded reclamation worker releases rejected/replaced payloads off Core.
+Workers wait for preceding retirement without blocking Core; charges persist
+while playback, exports or aliases still own the PCM. Export publication rechecks
+cancellation and source identity before its atomic no-clobber commit. Shutdown
+joins workers; live audio survives until its final playback owner releases it.
+Workflow, native streaming and neural memory boundaries are specified in
+link:27_audio_processing.adoc#_tasks_retention_and_audition[Audio processing].
 
 
 == Visualization caching

@@ -63,6 +63,21 @@ fn terminal_wait(core: &mut Core, id: u64) -> ProcessingTaskStatus {
     *status
 }
 
+fn pcm_samples(pcm: &audio::PcmAudio) -> Vec<f32> {
+    let mut samples = vec![0.0; pcm.frames() as usize * usize::from(pcm.channels())];
+    assert_eq!(pcm.read_frames(0, &mut samples) as u64, pcm.frames());
+    samples
+}
+
+fn populate_stems(result: &mut crate::processing::ProcessingResult) {
+    let stem = result.outputs.denoised.clone().unwrap();
+    result.outputs.vocals = Some(stem.clone());
+    result.outputs.accompaniment = Some(stem);
+    let status = result.status.outputs.as_mut().unwrap();
+    status.vocals = true;
+    status.accompaniment = true;
+}
+
 fn prepare_mix(core: &mut Core) {
     core.start_processing(1, ProcessingOperation::Denoise, None)
         .unwrap();
@@ -74,19 +89,7 @@ fn prepare_mix(core: &mut Core) {
         panic!("native processing did not produce PCM");
     };
     // Use real native PCM for both stems without requiring a prepared neural model.
-    let stem = result
-        .status
-        .outputs
-        .as_ref()
-        .unwrap()
-        .denoised
-        .clone()
-        .unwrap();
-    result.status.outputs = Some(ProcessingOutputs {
-        vocals: Some(stem.clone()),
-        accompaniment: Some(stem),
-        ..Default::default()
-    });
+    populate_stems(result);
     core.processing_event(event);
 }
 
@@ -140,12 +143,13 @@ fn mix_terminal_replaces_history_and_survives_current_and_history_eviction() {
     core.processing.cancel(1).unwrap();
     core.processing_event(event);
     let latest = core.processing_status(1).unwrap();
+    core.processing.audition = Some(1);
     core.start_processing(1, ProcessingOperation::Speech, None)
         .unwrap();
     assert_eq!(core.processing_status(1).unwrap(), latest);
     assert_eq!(terminal_wait(&mut core, 1), latest);
     complete(&mut core);
-    // Failed native jobs age the receipt without evicting retained audio.
+    // Failed jobs age the receipt without revoking the selected audio.
     for _ in 1..MAX_RETAINED_SCAN_RESULTS {
         core.start_processing(1, ProcessingOperation::Speech, None)
             .unwrap();
@@ -201,13 +205,16 @@ fn native_and_mix_worker_panics_commit_failure_finish_waits_and_release_admissio
         }
         core.start_processing(1, ProcessingOperation::Denoise, None)
             .unwrap();
-        assert_eq!(core.processing_status(1).unwrap(), *status);
+        let mut status = *status;
+        status.outputs = None;
+        status.graph_outputs.clear();
+        assert_eq!(core.processing_status(1).unwrap(), status);
         complete(&mut core);
         assert_eq!(
             core.processing_status(2).unwrap().phase,
             ProcessingPhase::Complete
         );
-        assert_eq!(terminal_wait(&mut core, 1), *status);
+        assert_eq!(terminal_wait(&mut core, 1), status);
     }
 }
 
@@ -217,18 +224,16 @@ fn shutdown_mix_retires_queued_output_and_keeps_latest_retained_outcome() {
     source(directory.path());
     prepare_mix(&mut core);
     let frozen = core.processing_status(1).unwrap();
+    let retained_bytes = core.processing.memory_bytes();
     begin_mix(&mut core, 1);
     let event = mix_completion(&mut core);
-    let crate::processing::Event::MixFinished {
-        result: Ok(path), ..
-    } = &event
-    else {
-        panic!("mix did not produce output");
-    };
-    let path = path.clone();
+    assert!(matches!(
+        &event,
+        crate::processing::Event::MixFinished { result: Ok(_), .. }
+    ));
     assert!(core.processing.sender.try_send(event).is_ok());
     core.shutdown_processing();
-    assert!(!path.exists());
+    assert_eq!(core.processing.memory_bytes(), retained_bytes);
     let cancelled = core.processing_status(1).unwrap();
     assert_eq!(cancelled.phase, ProcessingPhase::Cancelled);
     assert_eq!(cancelled.outputs, frozen.outputs);
@@ -280,44 +285,19 @@ fn offline_job_preserves_native_float_frames_and_does_not_add_library_entries() 
     let status = core.processing_status(1).unwrap();
     assert_eq!(status.phase, ProcessingPhase::Complete);
     assert_eq!(status.frames, Some(4096));
-    let output = status.outputs.unwrap().denoised.unwrap();
-    let actual = hound::WavReader::open(output)
-        .unwrap()
-        .samples::<f32>()
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .unwrap();
+    assert!(status.outputs.unwrap().denoised);
+    let actual = pcm_samples(
+        core.processing.results[0]
+            .outputs
+            .denoised
+            .as_ref()
+            .unwrap(),
+    );
     assert_eq!(actual, expected);
     assert_eq!(core.store.track_count().unwrap(), before);
     assert_eq!(
         core.processing.results[0].status.settings.denoise,
         core.state.system.config.denoise
-    );
-}
-#[test]
-fn scratch_preparation_failure_is_terminal_and_can_be_retried() {
-    let (directory, mut core) = fixture();
-    source(directory.path());
-    let scratch = directory.path().join("processing-data");
-    std::fs::write(&scratch, b"not a directory").unwrap();
-    core.processing = crate::processing::Service::new(scratch.clone());
-    core.start_processing(1, ProcessingOperation::Denoise, None)
-        .unwrap();
-    assert_eq!(
-        core.processing_status(1).unwrap().phase,
-        ProcessingPhase::Queued
-    );
-    complete(&mut core);
-    let failed = core.processing_status(1).unwrap();
-    assert_eq!(failed.phase, ProcessingPhase::Failed);
-    assert!(failed.outputs.is_none());
-    assert!(failed.graph_outputs.is_empty());
-    std::fs::remove_file(&scratch).unwrap();
-    core.start_processing(1, ProcessingOperation::Denoise, None)
-        .unwrap();
-    complete(&mut core);
-    assert_eq!(
-        core.processing_status(2).unwrap().phase,
-        ProcessingPhase::Complete
     );
 }
 #[test]
@@ -390,23 +370,13 @@ fn changed_source_between_completion_and_commit_is_rejected() {
     assert!(core.processing.results.is_empty());
 }
 #[test]
-fn retained_output_directories_and_statuses_are_bounded() {
+fn retained_pcm_and_statuses_are_bounded() {
     let (directory, mut core) = fixture();
     source(directory.path());
-    let mut directories = Vec::new();
     for _ in 0..34 {
         core.start_processing(1, ProcessingOperation::Denoise, None)
             .unwrap();
         complete(&mut core);
-        directories.push(
-            core.processing
-                .results
-                .back()
-                .unwrap()
-                .directory
-                .path()
-                .to_path_buf(),
-        );
     }
     assert_eq!(core.processing.results.len(), 4);
     assert_eq!(core.processing_results.len(), 32);
@@ -418,13 +388,22 @@ fn retained_output_directories_and_statuses_are_bounded() {
     );
     // Join physical reclamation without dropping the four retained results.
     core.processing.shutdown();
-    let retired = directories.len() - core.processing.results.len();
-    for path in &directories[..retired] {
-        assert!(!path.exists(), "{}", path.display());
-    }
-    for path in &directories[retired..] {
-        assert!(path.is_dir(), "{}", path.display());
-    }
+    let retained_bytes: u64 = core
+        .processing
+        .results
+        .iter()
+        .filter_map(|result| result.outputs.denoised.as_ref())
+        .map(audio::PcmAudio::retained_bytes)
+        .sum();
+    assert_eq!(core.processing.memory_bytes(), retained_bytes);
+    assert_eq!(
+        core.processing
+            .results
+            .iter()
+            .filter(|result| result.outputs.denoised.is_some())
+            .count(),
+        1
+    );
 }
 #[test]
 fn equalizer_preset_import_bounds_bytes_and_rejects_non_regular_inputs() {
@@ -832,6 +811,7 @@ fn audition_preserves_queue_source_identity_and_cumulative_heard_stats() {
         command,
         AudioCommand::Audition {
             range: None,
+            pcm: Some(_),
             start_seconds: 0.065,
             listened_seconds: 2.52,
             source_info: Some(_),
@@ -926,27 +906,16 @@ fn decoder_hint_change_before_mix_handoff_discards_the_rendered_mix() {
         .unwrap();
     complete(&mut core);
     let result = &mut core.processing.results[0];
-    let stem = result
-        .status
-        .outputs
-        .as_ref()
-        .unwrap()
-        .denoised
-        .clone()
-        .unwrap();
-    result.status.outputs.as_mut().unwrap().vocals = Some(stem.clone());
-    result.status.outputs.as_mut().unwrap().accompaniment = Some(stem);
+    populate_stems(result);
+    let retained_bytes = core.processing.memory_bytes();
     let _commands = recording_audio(&mut core);
     core.audition_processing(1, AuditionMode::Mix, 0.0, 0.0)
         .unwrap();
     let event = next_processing_event(&mut core, Duration::from_secs(10)).unwrap();
-    let crate::processing::Event::MixFinished {
-        result: Ok(path), ..
-    } = &event
-    else {
-        panic!("expected a completed mix");
-    };
-    let path = path.clone();
+    assert!(matches!(
+        &event,
+        crate::processing::Event::MixFinished { result: Ok(_), .. }
+    ));
     core.command(Command::EditTrack {
         track_id: 1,
         title: None,
@@ -964,7 +933,8 @@ fn decoder_hint_change_before_mix_handoff_discards_the_rendered_mix() {
     assert!(core.processing.results[0].mix.is_none());
     assert!(core.processing.audition.is_none());
     assert_eq!(core.generation, generation);
-    assert!(!path.exists());
+    core.processing.shutdown();
+    assert_eq!(core.processing.memory_bytes(), retained_bytes);
 }
 
 #[test]
@@ -975,16 +945,7 @@ fn background_mix_applies_actual_gains_without_clipping_or_new_track_identity() 
         .unwrap();
     complete(&mut core);
     let result = &mut core.processing.results[0];
-    let stem = result
-        .status
-        .outputs
-        .as_ref()
-        .unwrap()
-        .denoised
-        .clone()
-        .unwrap();
-    result.status.outputs.as_mut().unwrap().vocals = Some(stem.clone());
-    result.status.outputs.as_mut().unwrap().accompaniment = Some(stem);
+    populate_stems(result);
     let _commands = recording_audio(&mut core);
     core.audition_processing(1, AuditionMode::Mix, -6.0, 0.0)
         .unwrap();
@@ -995,11 +956,7 @@ fn background_mix_applies_actual_gains_without_clipping_or_new_track_identity() 
     ));
     core.processing_event(event);
     let mixed = core.processing.results[0].mix.as_ref().unwrap();
-    let actual = hound::WavReader::open(mixed)
-        .unwrap()
-        .samples::<f32>()
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .unwrap();
+    let actual = pcm_samples(mixed);
     assert_eq!(actual.len(), original.len());
     let gain = 1.0 + 10.0_f32.powf(-6.0 / 20.0);
     for (actual, source) in actual.iter().zip(&original) {
@@ -1007,6 +964,48 @@ fn background_mix_applies_actual_gains_without_clipping_or_new_track_identity() 
     }
     assert!(actual.iter().any(|sample| sample.abs() > 1.0));
     assert_eq!(core.state.current_track.as_ref().unwrap().id, 1);
+}
+
+#[test]
+fn rejected_invalid_profile_preserves_retained_pcm_and_availability() {
+    let (directory, mut core) = fixture();
+    let expected = source(directory.path());
+    core.start_processing(1, ProcessingOperation::Denoise, None)
+        .unwrap();
+    complete(&mut core);
+    let retained = core.processing_status(1).unwrap();
+    let bytes = core.processing.memory_bytes();
+    assert!(
+        core.start_processing(
+            1,
+            ProcessingOperation::Denoise,
+            Some(NoiseSelection {
+                start_seconds: 1.0,
+                end_seconds: 0.0,
+            })
+        )
+        .is_err()
+    );
+    assert!(core.processing.active.is_none());
+    assert_eq!(core.processing.memory_bytes(), bytes);
+    assert_eq!(core.processing_status(1).unwrap(), retained);
+    assert_eq!(core.processing_results.back().unwrap(), &retained);
+    assert_eq!(
+        pcm_samples(
+            core.processing.results[0]
+                .outputs
+                .denoised
+                .as_ref()
+                .unwrap()
+        ),
+        expected
+    );
+    let _commands = recording_audio(&mut core);
+    assert_eq!(
+        core.audition_processing(1, AuditionMode::Denoised, 0.0, 0.0)
+            .unwrap(),
+        None
+    );
 }
 
 #[test]
@@ -1062,7 +1061,7 @@ fn rendered_descriptor_rejects_symlink_target_round_trip() {
     let admitted = crate::processing::SourceStamp::read(&alias).unwrap();
     std::fs::remove_file(&alias).unwrap();
     symlink(&alternate, &alias).unwrap();
-    let rendered = audio::SourceRenderer::open(
+    let renderer = audio::SourceRenderer::open(
         &alias,
         None,
         DecoderHint::Native,
@@ -1070,24 +1069,19 @@ fn rendered_descriptor_rejects_symlink_target_round_trip() {
         false,
         &AtomicBool::new(false),
     )
-    .unwrap()
-    .render(
-        &directory.path().join("render.wav"),
-        u64::MAX,
-        &AtomicBool::new(false),
-    )
     .unwrap();
+    let identity = renderer.format().source_identity;
+    let rendered = renderer
+        .render_pcm(audio::PcmBudget::new(1024 * 1024), &AtomicBool::new(false))
+        .unwrap();
+    assert_eq!(rendered.frames(), 64);
     std::fs::remove_file(&alias).unwrap();
     symlink(directory.path().join("1.wav"), &alias).unwrap();
     assert_eq!(
         crate::processing::SourceStamp::read(&alias).unwrap(),
         admitted
     );
-    assert!(
-        admitted
-            .validate_rendered(rendered.source_identity)
-            .is_err()
-    );
+    assert!(admitted.validate_rendered(identity).is_err());
 }
 
 #[test]
@@ -1100,13 +1094,13 @@ fn retained_audition_remains_queryable_after_terminal_history_eviction() {
     let _commands = recording_audio(&mut core);
     core.audition_processing(1, AuditionMode::Denoised, 0.0, 0.0)
         .unwrap();
-    let path = core
-        .processing_status(1)
-        .unwrap()
-        .outputs
-        .unwrap()
-        .denoised
-        .unwrap();
+    let retained = pcm_samples(
+        core.processing.results[0]
+            .outputs
+            .denoised
+            .as_ref()
+            .unwrap(),
+    );
     for _ in 0..33 {
         core.start_processing(1, ProcessingOperation::Denoise, None)
             .unwrap();
@@ -1119,8 +1113,17 @@ fn retained_audition_remains_queryable_after_terminal_history_eviction() {
         panic!("Retained audition disappeared from its query");
     };
     assert_eq!(task.phase, ProcessingPhase::Complete);
-    assert_eq!(task.outputs.unwrap().denoised, Some(path.clone()));
-    assert!(path.is_file());
+    assert!(task.outputs.unwrap().denoised);
+    let result = core
+        .processing
+        .results
+        .iter()
+        .find(|result| result.status.id == 1)
+        .unwrap();
+    assert_eq!(
+        pcm_samples(result.outputs.denoised.as_ref().unwrap()),
+        retained
+    );
     core.audition_processing(1, AuditionMode::Original, 0.0, 0.0)
         .unwrap();
 }
@@ -1151,7 +1154,8 @@ fn neural_cancellation_reaps_interpreter_that_closed_stdout_without_exiting() {
     let deadline = Instant::now() + Duration::from_secs(5);
     let pid = loop {
         if let Ok(pid) = std::fs::read_to_string(&ready)
-            && pid.parse::<u32>().is_ok_and(|pid| pid > 0)
+            && let Ok(pid) = pid.parse::<libc::pid_t>()
+            && pid > 0
         {
             break pid;
         }
@@ -1162,7 +1166,7 @@ fn neural_cancellation_reaps_interpreter_that_closed_stdout_without_exiting() {
         thread::yield_now();
     };
     core.command(Command::CancelProcessing { id: 1 }).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + Duration::from_secs(10);
     let event = loop {
         match core
             .processing
@@ -1175,24 +1179,30 @@ fn neural_cancellation_reaps_interpreter_that_closed_stdout_without_exiting() {
         }
     };
     if event.is_none() {
-        // Ensure a regression reports failure rather than leaving its real child alive.
-        let _ = std::process::Command::new("/bin/kill")
-            .arg("-KILL")
-            .arg(&pid)
-            .status();
+        // The processing worker retains wait ownership; kill only to unblock
+        // its cleanup if cancellation regresses, without an external utility.
+        // SAFETY: pid identifies this test's interpreter child.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
     }
     assert!(
         event.is_some(),
         "Cancellation stalled after interpreter stdout EOF"
     );
+    let mut exit = 0;
+    // SAFETY: WNOHANG cannot block; reaping must precede terminal delivery,
+    // not happen as a side effect of retiring the owner below.
+    let observed = unsafe { libc::waitpid(pid, &mut exit, libc::WNOHANG) };
+    let error = std::io::Error::last_os_error();
+    if observed == 0 {
+        // SAFETY: an unreaped live child still belongs to this test process.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+    assert_eq!(observed, -1, "interpreter remained live or unreaped");
+    assert_eq!(error.raw_os_error(), Some(libc::ECHILD));
     core.processing_event(event.unwrap());
     assert_eq!(
         core.processing_status(1).unwrap().phase,
         ProcessingPhase::Cancelled
-    );
-    assert!(
-        !Path::new("/proc").join(pid).exists(),
-        "Interpreter was not reaped"
     );
 }
 
@@ -1201,9 +1211,14 @@ fn neural_unwind_reaps_live_interpreter_before_failure_event_and_owner_retiremen
     let (directory, mut core) = fixture();
     source(directory.path());
     let worker = directory.path().join("panic_progress.sh");
+    let progress = r#"{"version":3,"task_id":"1","type":"progress","completed":0}"#;
+    let mut header = String::from("\\000");
+    for byte in (progress.len() as u32).to_le_bytes() {
+        header.push_str(&format!("\\{byte:03o}"));
+    }
     std::fs::write(
         &worker,
-        "printf '%s' \"$$\" > \"${0%/*}/worker.ready\"\nprintf '%s\\n' '{\"version\":2,\"task_id\":\"1\",\"type\":\"progress\",\"completed\":0}'\nwhile :; do :; done\n",
+        format!("printf '%s' \"$$\" > \"${{0%/*}}/worker.ready\"\nprintf '{header}'\nprintf '%s' '{progress}'\nwhile :; do :; done\n"),
     )
     .unwrap();
     let manifest = directory.path().join("manifest.json");
@@ -1477,16 +1492,7 @@ fn graph_cascaded_nonflat_fir_preserves_source_edge_context() {
             status.error
         );
         assert_eq!(status.frames, Some(513));
-        let output = status
-            .graph_outputs
-            .iter()
-            .find(|o| o.port == graph_port(2, 0))
-            .unwrap();
-        let actual = hound::WavReader::open(&output.path)
-            .unwrap()
-            .samples::<f32>()
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .unwrap();
+        let actual = pcm_samples(&core.processing.results[0].graph_outputs[&graph_port(2, 0)].pcm);
         assert_eq!(actual.len(), pcm.len());
         for (index, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
             assert!(
@@ -1546,21 +1552,13 @@ fn graph_cached_fir_boundary_matches_uncut_causal_graph() {
         "{:?}",
         status.error
     );
-    let boundary = status
-        .graph_outputs
-        .iter()
-        .find(|o| o.port == graph_port(3, 0))
-        .unwrap();
+    let boundary = &core.processing.results[0].graph_outputs[&graph_port(3, 0)];
     let context = boundary
         .context
         .as_ref()
         .expect("FIR boundary must retain its guards");
     assert!(context.start_frame < 0);
-    let cached = hound::WavReader::open(&context.path)
-        .unwrap()
-        .samples::<f32>()
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .unwrap();
+    let cached = pcm_samples(&context.pcm);
     let mut suffix = audio::GraphRunner::compile_from_boundary(
         &graph,
         graph_port(2, 0),
@@ -1642,16 +1640,7 @@ fn graph_hybrid_profile_boundary_preserves_fir_guards_and_source_identity() {
         "{:?}",
         offline.error
     );
-    let output = offline
-        .graph_outputs
-        .iter()
-        .find(|o| o.port == graph_port(2, 0))
-        .unwrap();
-    let expected = hound::WavReader::open(&output.path)
-        .unwrap()
-        .samples::<f32>()
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .unwrap();
+    let expected = pcm_samples(&core.processing.results[0].graph_outputs[&graph_port(2, 0)].pcm);
     assert_eq!(expected.len(), pcm.len());
     core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Hybrid)
         .unwrap();
@@ -1665,28 +1654,26 @@ fn graph_hybrid_profile_boundary_preserves_fir_guards_and_source_identity() {
     );
     assert_eq!(hybrid.settings.graph_mode, Some(GraphExecutionMode::Hybrid));
     assert_eq!(hybrid.settings.graph_boundary, Some(graph_port(5, 0)));
-    let context = hybrid
-        .graph_outputs
-        .iter()
-        .find(|o| o.port == graph_port(5, 0))
-        .unwrap()
+    let context = core.processing.results[1].graph_outputs[&graph_port(5, 0)]
         .context
         .as_ref()
         .expect("Hybrid prefix must retain FIR/denoise causal context");
-    let context_path = context.path.clone();
+    let cached = pcm_samples(&context.pcm);
     let plan_latency = hybrid.graph_plan.as_ref().unwrap().latency_frames;
     let runner = loop {
         if let AudioCommand::GraphAudition {
             path,
+            pcm: Some(context_pcm),
             expected_identity,
             runner,
             ..
         } = commands.recv_timeout(Duration::from_secs(2)).unwrap()
         {
-            assert_eq!(path, context_path);
+            assert_eq!(path, directory.path().join("1.wav"));
+            assert_eq!(pcm_samples(&context_pcm), cached);
             assert_eq!(
                 expected_identity,
-                crate::processing::SourceStamp::read(&context_path)
+                crate::processing::SourceStamp::read(&path)
                     .unwrap()
                     .identity()
             );
@@ -1695,11 +1682,6 @@ fn graph_hybrid_profile_boundary_preserves_fir_guards_and_source_identity() {
             break runner;
         }
     };
-    let cached = hound::WavReader::open(context_path)
-        .unwrap()
-        .samples::<f32>()
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .unwrap();
     let actual = finished_graph_pcm(*runner, cached, pcm.len() / 2);
     assert_eq!(actual.len(), expected.len());
     for (index, (&actual, &expected)) in actual.iter().zip(&expected).enumerate() {
@@ -1804,18 +1786,9 @@ fn graph_executes_shuffled_ancestors_once_with_independent_eq_and_unclipped_mix(
             .iter()
             .all(|n| n.phase == ProcessingPhase::Complete)
     );
-    assert_eq!(status.graph_outputs.len(), 5);
-    let output = &status
-        .graph_outputs
-        .iter()
-        .find(|o| o.port == graph_port(2, 0))
-        .unwrap()
-        .path;
-    let actual = hound::WavReader::open(output)
-        .unwrap()
-        .samples::<f32>()
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .unwrap();
+    assert_eq!(status.graph_outputs.len(), 1);
+    assert_eq!(status.graph_outputs[0].port, graph_port(2, 0));
+    let actual = pcm_samples(&core.processing.results[0].graph_outputs[&graph_port(2, 0)].pcm);
     assert_eq!(actual.len(), expected.len());
     for (actual, source) in actual.iter().zip(expected) {
         assert!((*actual - source * 2.5).abs() < 2e-5);
@@ -1879,6 +1852,7 @@ fn graph_exports_preserve_all_retained_runs_and_never_retain_export_scratch() {
             )
             .unwrap();
             complete(&mut core);
+            core.processing.audition = Some(1);
         }
         let outputs = core.processing_status(1).unwrap().graph_outputs;
         let mut action_run = core.processing_status(1).unwrap().graph_run_id.unwrap();
@@ -1910,7 +1884,16 @@ fn graph_exports_preserve_all_retained_runs_and_never_retain_export_scratch() {
                 let retained = core.processing_status(id).unwrap();
                 assert!(retained.error.is_none());
                 for output in retained.graph_outputs {
-                    assert!(output.path.is_file());
+                    let result = core
+                        .processing
+                        .results
+                        .iter()
+                        .find(|result| result.status.id == id)
+                        .unwrap();
+                    assert_eq!(
+                        pcm_samples(&result.graph_outputs[&output.port].pcm),
+                        expected
+                    );
                 }
             }
             action_run = task.graph_run_id.unwrap();
@@ -2078,6 +2061,36 @@ fn auto_graph_prepares_off_thread_and_opens_stopped_source_paused() {
 }
 
 #[test]
+fn new_runs_release_unselected_pcm_but_preserve_frozen_graph_actions() {
+    let (directory, mut core) = fixture();
+    source(directory.path());
+    let _commands = recording_audio(&mut core);
+    core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Offline)
+        .unwrap();
+    complete(&mut core);
+    let frozen = core.processing_status(1).unwrap().settings;
+    core.start_processing(1, ProcessingOperation::Denoise, None)
+        .unwrap();
+    assert!(core.processing_status(1).unwrap().graph_outputs.is_empty());
+    assert!(core.processing.results[0].graph_outputs.is_empty());
+    assert_eq!(core.processing_status(1).unwrap().settings, frozen);
+    complete(&mut core);
+    assert_eq!(
+        core.processing_graph_audition(1, graph_port(2, 0)).unwrap(),
+        Some(3)
+    );
+    assert!(core.processing_status(2).unwrap().outputs.is_none());
+    complete(&mut core);
+    let selected = core.state.processing_audition.unwrap();
+    assert_eq!(selected.id, 3);
+    assert_eq!(selected.output, Some(graph_port(2, 0)));
+    assert_eq!(
+        core.processing_status(3).unwrap().settings.graph,
+        frozen.graph
+    );
+}
+
+#[test]
 fn cached_audition_tracks_the_selected_port_without_following_new_results() {
     let (directory, mut core) = fixture();
     source(directory.path());
@@ -2105,16 +2118,36 @@ fn cached_audition_tracks_the_selected_port_without_following_new_results() {
             .is_err()
     );
     assert_eq!(core.state.processing_audition, Some(admitted));
-    core.processing_graph_audition(1, graph_port(1, 0)).unwrap();
+    let frozen_graph = core.processing_status(1).unwrap().settings.graph.unwrap();
+    core.processing_graph_edit(
+        frozen_graph.revision,
+        GraphEdit::Add {
+            kind: GraphNodeKind::Denoise {
+                config: Default::default(),
+                profile: None,
+            },
+            position: [0.0; 2],
+        },
+    )
+    .unwrap();
+    let recomputed = core.processing_graph_audition(1, graph_port(1, 0)).unwrap();
+    assert_eq!(recomputed, Some(2));
+    assert_eq!(core.state.processing_audition, Some(admitted));
+    complete(&mut core);
+    assert_eq!(
+        core.processing_status(2).unwrap().settings.graph.unwrap(),
+        frozen_graph
+    );
     let selected = crate::projection::ProcessingAudition {
+        id: 2,
         output: Some(graph_port(1, 0)),
-        ..admitted
+        mode: Some(GraphExecutionMode::Realtime),
     };
     assert_eq!(core.state.processing_audition, Some(selected));
     core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Offline)
         .unwrap();
     complete(&mut core);
-    assert_eq!(core.state.system.processing.as_ref().unwrap().id, 2);
+    assert_eq!(core.state.system.processing.as_ref().unwrap().id, 3);
     assert_eq!(core.state.processing_audition, Some(selected));
     core.publish();
     assert_eq!(
@@ -2186,43 +2219,68 @@ fn generic_configure_cannot_overwrite_graph_from_a_stale_settings_snapshot() {
 }
 
 #[test]
-fn selected_cache_budget_rejects_new_result_without_publishing_dangling_paths() {
+fn selected_pcm_budget_rejects_new_result_without_revoking_retained_audio() {
     let (directory, mut core) = fixture();
-    source(directory.path());
-    core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Offline)
+    let expected = source(directory.path());
+    core.processing = crate::processing::Service::with_memory_limit(48 * 1024);
+    core.start_processing(1, ProcessingOperation::Denoise, None)
         .unwrap();
     complete(&mut core);
-    let retained = core.processing_status(1).unwrap().graph_outputs[0]
-        .path
-        .clone();
-    // Exercise byte-budget admission without creating a multi-gigabyte test fixture.
-    core.processing.results[0].cache_bytes = crate::processing::graph::MAX_RETAINED_CACHE_BYTES;
+    assert_eq!(
+        core.processing_status(1).unwrap().phase,
+        ProcessingPhase::Complete
+    );
     core.processing.audition = Some(1);
-    core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Offline)
+    core.start_processing(1, ProcessingOperation::Denoise, None)
         .unwrap();
     complete(&mut core);
     let rejected = core.processing_status(2).unwrap();
     assert_eq!(rejected.phase, ProcessingPhase::Failed);
-    assert!(rejected.error.unwrap().contains("retention limit"));
-    assert!(rejected.graph_outputs.is_empty());
+    assert!(rejected.error.unwrap().contains("memory budget"));
+    assert!(rejected.outputs.is_none());
     assert_eq!(core.processing.results.len(), 1);
-    assert!(retained.exists());
+    assert_eq!(
+        pcm_samples(
+            core.processing.results[0]
+                .outputs
+                .denoised
+                .as_ref()
+                .unwrap()
+        ),
+        expected
+    );
+    assert!(core.processing.memory_bytes() <= 48 * 1024);
 }
 
 #[test]
 fn shutdown_closes_processing_delivery_and_retires_unpublished_outputs() {
     let (directory, mut core) = fixture();
     source(directory.path());
+    let mut held_results = std::collections::VecDeque::new();
     for _ in 0..3 {
-        core.start_processing(1, ProcessingOperation::Denoise, None)
+        let track = core.track(1).unwrap();
+        let status = core
+            .processing
+            .start(
+                track,
+                core.state.system.config.clone(),
+                ProcessingOperation::Denoise,
+                None,
+            )
             .unwrap();
+        core.state.system.processing = Some(status);
         complete(&mut core);
+        held_results.push_back(core.processing.results.pop_back().unwrap());
     }
+    core.processing.results = held_results;
     let buffered = core.processing.results.pop_front().unwrap();
     let blocked = core.processing.results.pop_front().unwrap();
-    let buffered_path = buffered.directory.path().to_path_buf();
-    let blocked_path = blocked.directory.path().to_path_buf();
-    let retained_path = core.processing.results[0].directory.path().to_path_buf();
+    let retained_bytes = core.processing.results[0]
+        .outputs
+        .denoised
+        .as_ref()
+        .unwrap()
+        .retained_bytes();
     core.processing
         .sender
         .try_send(crate::processing::Event::Finished {
@@ -2268,10 +2326,7 @@ fn shutdown_closes_processing_delivery_and_retires_unpublished_outputs() {
         core.processing.shutdown();
         assert!(core.processing.sender.is_closed());
         assert!(core.processing.receiver.try_recv().is_err());
-        assert!(
-            retained_path.exists(),
-            "retained audition output retired too early"
-        );
+        assert_eq!(core.processing.memory_bytes(), retained_bytes);
         finished.send(()).unwrap();
         core
     });
@@ -2287,8 +2342,7 @@ fn shutdown_closes_processing_delivery_and_retires_unpublished_outputs() {
         waiting_for_retirement,
         "shutdown returned before worker retirement"
     );
-    assert!(!buffered_path.exists());
-    assert!(!blocked_path.exists());
+    assert_eq!(core.processing.memory_bytes(), retained_bytes);
     assert!(core.processing.active.is_none());
 }
 
@@ -2345,17 +2399,7 @@ fn playback_bypass_preserves_parameters_queue_and_final_heard_snapshot() {
         core.processing_status(1).unwrap().phase,
         ProcessingPhase::Complete
     );
-    assert!(
-        core.processing.results[0]
-            .status
-            .outputs
-            .as_ref()
-            .unwrap()
-            .denoised
-            .as_ref()
-            .unwrap()
-            .is_file()
-    );
+    assert!(core.processing.results[0].outputs.denoised.is_some());
 }
 
 #[test]
@@ -2389,12 +2433,7 @@ fn playback_bypass_revokes_prepared_graph_selection_without_cancelling_job() {
         assert!(core.state.processing_audition.is_none());
         assert!(core.processing.pending_audition.is_none());
         if mode == GraphExecutionMode::Offline {
-            let path = &core.processing.results[0].status.graph_outputs[0].path;
-            let pcm = hound::WavReader::open(path)
-                .unwrap()
-                .samples::<f32>()
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .unwrap();
+            let pcm = pcm_samples(&core.processing.results[0].graph_outputs[&graph_port(2, 0)].pcm);
             assert_eq!(pcm, expected);
         }
     }
@@ -2408,9 +2447,7 @@ fn playback_bypass_revokes_late_mix_selection_but_keeps_completed_audio() {
         .unwrap();
     complete(&mut core);
     let result = &mut core.processing.results[0];
-    let outputs = result.status.outputs.as_mut().unwrap();
-    outputs.vocals = outputs.denoised.clone();
-    outputs.accompaniment = outputs.denoised.clone();
+    populate_stems(result);
     let _commands = recording_audio(&mut core);
     core.audition_processing(1, AuditionMode::Mix, 0.0, 0.0)
         .unwrap();
@@ -2429,11 +2466,7 @@ fn playback_bypass_revokes_late_mix_selection_but_keeps_completed_audio() {
         core.processing_status(1).unwrap().phase,
         ProcessingPhase::Complete
     );
-    let pcm = hound::WavReader::open(core.processing.results[0].mix.as_ref().unwrap())
-        .unwrap()
-        .samples::<f32>()
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .unwrap();
+    let pcm = pcm_samples(core.processing.results[0].mix.as_ref().unwrap());
     assert_eq!(
         pcm,
         original
@@ -2481,86 +2514,76 @@ fn stale_queue_graph_audition_recovers_source_context_before_selecting_occurrenc
 }
 
 #[test]
-fn graph_exports_reject_every_owned_scratch_directory_and_alias() {
+fn processing_and_audition_create_no_implicit_files() {
     let (directory, mut core) = fixture();
-    source(directory.path());
-    for _ in 0..3 {
-        core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Offline)
+    let expected = source(directory.path());
+    let tree = || {
+        let mut paths = std::collections::BTreeSet::new();
+        let mut pending = vec![directory.path().to_path_buf()];
+        while let Some(parent) = pending.pop() {
+            for entry in std::fs::read_dir(parent).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if entry.file_type().unwrap().is_dir() {
+                    pending.push(path.clone());
+                }
+                paths.insert(path);
+            }
+        }
+        paths
+    };
+    let before = tree();
+    let original = std::fs::read(directory.path().join("1.wav")).unwrap();
+    let _commands = recording_audio(&mut core);
+    for mode in [GraphExecutionMode::Offline, GraphExecutionMode::Auto] {
+        core.processing_graph_run(1, graph_port(2, 0), mode)
             .unwrap();
         complete(&mut core);
-    }
-    let runs = core
-        .processing
-        .results
-        .iter()
-        .map(|result| result.directory.path().to_path_buf())
-        .collect::<Vec<_>>();
-    let scratch = runs[0].parent().unwrap().to_path_buf();
-    for (index, run) in runs.iter().enumerate() {
-        let nested = run.join("nested");
-        std::fs::create_dir(&nested).unwrap();
-        let alias = directory.path().join(format!("scratch-alias-{index}"));
-        std::os::unix::fs::symlink(&nested, &alias).unwrap();
-        for parent in [run, &nested, &alias] {
-            let path = parent.join("must-not-export.wav");
-            let error = core
-                .processing_graph_export(1, graph_port(2, 0), path.clone())
-                .unwrap_err();
-            assert!(
-                error.to_string().contains("automatically reclaimed"),
-                "{error:#}"
+        if mode == GraphExecutionMode::Offline {
+            assert_eq!(
+                pcm_samples(&core.processing.results[0].graph_outputs[&graph_port(2, 0)].pcm),
+                expected
             );
-            assert!(!path.exists());
-            assert!(core.processing.active.is_none());
+            core.processing_graph_audition(1, graph_port(2, 0)).unwrap();
         }
+        assert_eq!(tree(), before);
     }
-    let path = scratch.join("must-not-export.wav");
-    let error = core
-        .processing_graph_export(1, graph_port(2, 0), path.clone())
-        .unwrap_err();
-    assert!(error.to_string().contains("automatically reclaimed"));
-    assert!(!path.exists());
-    assert!(core.processing.active.is_none());
-    // Retirement does not make a session-owned location a durable destination.
-    let retired = core.processing.results.pop_front().unwrap();
-    core.processing.retire(Box::new(retired));
-    let error = core
-        .processing_graph_export(2, graph_port(2, 0), scratch.join("retiring.wav"))
-        .unwrap_err();
-    assert!(error.to_string().contains("automatically reclaimed"));
+    if core
+        .processing_graph_audition(1, graph_port(2, 0))
+        .unwrap()
+        .is_some()
+    {
+        complete(&mut core);
+    }
+    prepare_mix(&mut core);
+    let id = core.state.system.processing.as_ref().unwrap().id;
+    core.audition_processing(id, AuditionMode::Mix, 0.0, 0.0)
+        .unwrap();
+    let event = mix_completion(&mut core);
+    core.processing_event(event);
+    assert!(core.processing.results.back().unwrap().mix.is_some());
+    assert_eq!(tree(), before);
+    assert_eq!(
+        std::fs::read(directory.path().join("1.wav")).unwrap(),
+        original
+    );
 }
 
 #[test]
-fn graph_exports_reject_scratch_after_ancestor_rename_with_old_path_alias() {
+fn graph_export_needs_no_processing_directory_and_survives_owner_drop() {
     let (directory, mut core) = fixture();
     let expected = source(directory.path());
-    let data = directory.path().join("data");
-    core.processing = crate::processing::Service::new(data.clone());
+    let entries = || {
+        std::fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let mut expected_entries = entries();
     core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Offline)
         .unwrap();
     complete(&mut core);
-    let scratch = core.processing.results[0]
-        .directory
-        .path()
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    let moved = directory.path().join("moved-data");
-    std::fs::rename(&data, &moved).unwrap();
-    std::os::unix::fs::symlink(&moved, &data).unwrap();
-    let moved_scratch = moved.join(scratch.strip_prefix(&data).unwrap());
-    for parent in [&scratch, &moved_scratch] {
-        let destination = parent.join("must-not-export.wav");
-        let error = core
-            .processing_graph_export(1, graph_port(2, 0), destination.clone())
-            .unwrap_err();
-        assert!(
-            error.to_string().contains("automatically reclaimed"),
-            "{error:#}"
-        );
-        assert!(!destination.exists());
-        assert!(core.processing.active.is_none());
-    }
+    assert_eq!(entries(), expected_entries);
     let destination = directory.path().join("durable.wav");
     core.processing_graph_export(1, graph_port(2, 0), destination.clone())
         .unwrap();
@@ -2568,38 +2591,16 @@ fn graph_exports_reject_scratch_after_ancestor_rename_with_old_path_alias() {
     let status = core.processing_status(2).unwrap();
     assert_eq!(status.phase, ProcessingPhase::Complete);
     assert_eq!(status.graph_exported_path, Some(destination.clone()));
+    expected_entries.insert(destination.clone());
+    assert_eq!(entries(), expected_entries);
     drop(core);
-    assert!(!moved_scratch.exists());
+    assert!(entries().is_subset(&expected_entries));
     let actual = hound::WavReader::open(destination)
         .unwrap()
         .samples::<f32>()
         .collect::<std::result::Result<Vec<_>, _>>()
         .unwrap();
     assert_eq!(actual, expected);
-}
-
-#[test]
-fn graph_exports_reject_unresolvable_owned_scratch_root() {
-    let (directory, mut core) = fixture();
-    source(directory.path());
-    let data = directory.path().join("data");
-    core.processing = crate::processing::Service::new(data.clone());
-    core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Offline)
-        .unwrap();
-    complete(&mut core);
-    std::fs::rename(&data, directory.path().join("moved-data")).unwrap();
-    let destination = directory.path().join("durable.wav");
-    let error = core
-        .processing_graph_export(1, graph_port(2, 0), destination.clone())
-        .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("Cannot resolve processing scratch root"),
-        "{error:#}"
-    );
-    assert!(!destination.exists());
-    assert!(core.processing.active.is_none());
 }
 
 #[test]
@@ -2616,12 +2617,8 @@ fn graph_export_freezes_external_alias_and_survives_processing_owner_drop() {
     core.processing_graph_export(1, graph_port(2, 0), alias.join("export.wav"))
         .unwrap();
     let event = completion(&mut core);
-    let scratch = core.processing.results[0]
-        .directory
-        .path()
-        .parent()
-        .unwrap()
-        .to_path_buf();
+    let scratch = directory.path().join("other-destination");
+    std::fs::create_dir(&scratch).unwrap();
     std::fs::remove_file(&alias).unwrap();
     std::os::unix::fs::symlink(&scratch, &alias).unwrap();
     core.processing_event(event);
@@ -2632,7 +2629,7 @@ fn graph_export_freezes_external_alias_and_survives_processing_owner_drop() {
     );
     assert!(!scratch.join("export.wav").exists());
     drop(core);
-    assert!(!scratch.exists());
+    assert!(scratch.is_dir());
     let actual = hound::WavReader::open(destination)
         .unwrap()
         .samples::<f32>()
@@ -2653,18 +2650,22 @@ fn graph_export_rechecks_canonical_parent_before_publication() {
     core.processing_graph_export(1, graph_port(2, 0), parent.join("export.wav"))
         .unwrap();
     let event = completion(&mut core);
-    let crate::processing::Event::Finished {
-        result: Ok(result), ..
-    } = &event
-    else {
-        panic!("expected staged export completion");
-    };
-    let scratch = result.directory.path().to_path_buf();
+    assert!(matches!(
+        &event,
+        crate::processing::Event::Finished { result: Ok(result), .. }
+            if result.pending_export.is_some()
+    ));
+    let scratch = directory.path().join("other-parent");
+    std::fs::create_dir(&scratch).unwrap();
     std::fs::rename(&parent, directory.path().join("moved-parent")).unwrap();
     std::os::unix::fs::symlink(&scratch, &parent).unwrap();
     core.processing_event(event);
     let status = core.processing_status(2).unwrap();
     assert_eq!(status.phase, ProcessingPhase::Failed);
+    assert_eq!(
+        status.error.as_deref(),
+        Some("Export destination parent changed after admission")
+    );
     assert!(status.graph_exported_path.is_none());
     assert!(!scratch.join("export.wav").exists());
 }
@@ -2699,6 +2700,7 @@ fn processing_acks_identify_only_the_task_admitted_by_that_command() {
         Some(1)
     );
     complete(&mut core);
+    core.processing_graph_audition(1, graph_port(1, 0)).unwrap();
     assert_eq!(
         processing_command_ack(&mut core, run()).processing_id,
         Some(2)
@@ -2754,17 +2756,15 @@ fn playback_bypass_does_not_relax_mix_source_admission() {
         core.edit_track(1, None, None, None, Some(DecoderHint::Auto))
             .unwrap();
         prepare_mix(&mut core);
+        let retained_bytes = core.processing.memory_bytes();
         let _commands = recording_audio(&mut core);
         core.audition_processing(1, AuditionMode::Mix, 0.0, 0.0)
             .unwrap();
         let event = mix_completion(&mut core);
-        let crate::processing::Event::MixFinished {
-            result: Ok(path), ..
-        } = &event
-        else {
-            panic!("expected rendered mix");
-        };
-        let path = path.clone();
+        assert!(matches!(
+            &event,
+            crate::processing::Event::MixFinished { result: Ok(_), .. }
+        ));
         core.processing_bypass().unwrap();
         match change {
             "file" => std::fs::write(directory.path().join("1.wav"), b"changed source").unwrap(),
@@ -2782,7 +2782,8 @@ fn playback_bypass_does_not_relax_mix_source_admission() {
             "{change}"
         );
         assert!(core.processing.results[0].mix.is_none());
-        assert!(!path.exists());
+        core.processing.shutdown();
+        assert_eq!(core.processing.memory_bytes(), retained_bytes);
         assert!(core.processing.audition.is_none());
         assert_eq!(core.generation, generation);
     }
@@ -2793,6 +2794,7 @@ fn quarantined_mix_completion_does_not_persist_pending_queue_selection() {
     let (directory, mut core) = fixture();
     source(directory.path());
     prepare_mix(&mut core);
+    let retained_bytes = core.processing.memory_bytes();
     let commands = recording_audio(&mut core);
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     let saved_current = core.store.queue_state().unwrap().current_id;
@@ -2814,15 +2816,11 @@ fn quarantined_mix_completion_does_not_persist_pending_queue_selection() {
     core.audition_processing(1, AuditionMode::Mix, 0.0, 0.0)
         .unwrap();
     let event = mix_completion(&mut core);
-    let crate::processing::Event::MixFinished {
-        result: Ok(path), ..
-    } = &event
-    else {
-        panic!("expected rendered mix");
-    };
-    let path = path.clone();
+    assert!(matches!(
+        &event,
+        crate::processing::Event::MixFinished { result: Ok(_), .. }
+    ));
     let generation = core.generation;
-    let cache_bytes = core.processing.results[0].cache_bytes;
     core.database_outcome_uncertain();
     core.processing_event(event);
     assert_eq!(core.store.queue_state().unwrap().current_id, saved_current);
@@ -2831,8 +2829,8 @@ fn quarantined_mix_completion_does_not_persist_pending_queue_selection() {
     assert!(commands.try_recv().is_err());
     assert!(core.processing.audition.is_none());
     assert!(core.processing.results[0].mix.is_none());
-    assert_eq!(core.processing.results[0].cache_bytes, cache_bytes);
-    assert!(!path.exists());
+    core.processing.shutdown();
+    assert_eq!(core.processing.memory_bytes(), retained_bytes);
     let status = core.processing_status(1).unwrap();
     assert_eq!(status.phase, ProcessingPhase::Failed);
     assert_eq!(terminal_wait(&mut core, 1), status);

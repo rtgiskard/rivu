@@ -223,6 +223,10 @@ manifests via `RIVU_SPEECH_MANIFEST`, `RIVU_KIM_MANIFEST`, and
 `RIVU_HTDEMUCS_MANIFEST`. Ordinary CI installs the base dependencies, not model
 environments.
 
+Neural transport tests use synthetic PCM and isolated export fixtures to check
+framing, sample preservation, cancellation, and filesystem side effects. They do
+not establish real-model inference quality or model-runtime memory usage.
+
 The link:.github/workflows/build.yml[CI workflow] runs `make lint` and `make test`
 before release builds on branch pushes, pull requests, and `v*` tags. Tag releases
 also verify the packaged archive checksum and run both binaries with `--version`

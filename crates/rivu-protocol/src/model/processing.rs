@@ -301,9 +301,9 @@ pub enum AuditionMode {
 }
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProcessingOutputs {
-    pub denoised: Option<PathBuf>,
-    pub vocals: Option<PathBuf>,
-    pub accompaniment: Option<PathBuf>,
+    pub denoised: bool,
+    pub vocals: bool,
+    pub accompaniment: bool,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProcessingSettings {
@@ -374,7 +374,6 @@ pub struct GraphPlanInfo {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GraphNodeOutput {
     pub port: GraphPort,
-    pub path: PathBuf,
     /// Full causal PCM retained for suffix execution, before timeline trimming.
     #[serde(default)]
     pub context: Option<GraphOutputContext>,
@@ -382,7 +381,6 @@ pub struct GraphNodeOutput {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GraphOutputContext {
-    pub path: PathBuf,
     /// Source-relative frame represented by the first context frame.
     pub start_frame: i64,
 }

@@ -59,7 +59,7 @@ pub(super) struct Playback {
     // Preguard-only boundaries are never published.
     graph_gaps: VecDeque<u64>,
     source_eof: bool,
-    // Audition keeps the selected source's metadata/timeline, not the WAV's tags.
+    // Audition keeps the selected source's metadata/timeline, not PCM metadata.
     source_info: Option<MediaInfo>,
     pending: Vec<f32>,
     pending_start: f64,
@@ -328,6 +328,7 @@ impl Playback {
             scan_equalizer,
         );
         scan_source.expected_identity = Some(source.identity());
+        scan_source.pcm = source.pcm().cloned();
         scan_source.graph = graph.as_ref().map(GraphRunner::snapshot);
         let before_skip_frames = graph.as_ref().map_or(0, GraphRunner::source_lead_frames);
         Ok(Self {

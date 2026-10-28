@@ -3239,7 +3239,7 @@ fn graph_configuration_round_trip_retains_authoritative_revision_nodes_and_edges
 }
 
 #[test]
-fn graph_task_query_frame_retains_snapshot_revision_and_multiple_node_output_paths() {
+fn graph_task_query_frame_retains_pcm_availability_and_context_without_paths() {
     use rivu_protocol::model::{
         GraphExecutionMode, GraphNodeOutput, GraphPort, ProcessingGraph, ProcessingOperation,
         ProcessingPhase, ProcessingSettings, ProcessingTaskStatus,
@@ -3253,7 +3253,11 @@ fn graph_task_query_frame_retains_snapshot_revision_and_multiple_node_output_pat
         completed: 48_000,
         total: Some(48_000),
         error: None,
-        outputs: None,
+        outputs: Some(rivu_protocol::model::ProcessingOutputs {
+            denoised: true,
+            vocals: false,
+            accompaniment: true,
+        }),
         sample_rate: Some(48_000),
         channels: Some(2),
         frames: Some(48_000),
@@ -3277,22 +3281,24 @@ fn graph_task_query_frame_retains_snapshot_revision_and_multiple_node_output_pat
         graph_outputs: vec![
             GraphNodeOutput {
                 port: GraphPort { node: 1, port: 0 },
-                path: "/cache/run 91/source.wav".into(),
                 context: None,
             },
             GraphNodeOutput {
                 port: target,
-                path: "/cache/run 91/output.wav".into(),
-                context: Some(rivu_protocol::model::GraphOutputContext {
-                    path: "/cache/run 91/output-context.wav".into(),
-                    start_frame: -256,
-                }),
+                context: Some(rivu_protocol::model::GraphOutputContext { start_frame: -256 }),
             },
         ],
         graph_exported_path: Some("/rendered outputs/voice -6 dB.wav".into()),
         graph_nodes: Vec::new(),
         graph_plan: None,
     };
+    let json = serde_json::to_value(&task).unwrap();
+    assert_eq!(
+        json["outputs"],
+        serde_json::json!({"denoised": true, "vocals": false, "accompaniment": true})
+    );
+    assert!(json["graph_outputs"][0].get("path").is_none());
+    assert!(json["graph_outputs"][1]["context"].get("path").is_none());
     let mut encoded = Vec::new();
     encode_response_frame_into(
         &WireResponse::Query(QueryResponse {

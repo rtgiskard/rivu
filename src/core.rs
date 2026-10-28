@@ -747,7 +747,7 @@ impl Runtime {
             active_export: None,
             active_external_admission: None,
             active_optimization: None,
-            processing: crate::processing::Service::new(data_dir.to_path_buf()),
+            processing: crate::processing::Service::new(),
             processing_results: VecDeque::new(),
             scan_tx,
             scan_rx,
