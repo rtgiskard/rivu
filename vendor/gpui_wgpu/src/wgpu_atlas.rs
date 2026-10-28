@@ -140,7 +140,7 @@ impl AtlasBackend for WgpuAtlasTextures {
         &mut self,
         kind: AtlasTextureKind,
         size: Size<DevicePixels>,
-        bytes: &[u8],
+        bytes: Cow<'_, [u8]>,
     ) -> Result<AtlasTile> {
         let tile = self.allocate(size, kind).context("failed to allocate")?;
         self.upload_texture(tile.texture_id, tile.bounds, bytes);
@@ -267,13 +267,9 @@ impl WgpuAtlasTextures {
         Some(tile)
     }
 
-    fn upload_texture(&mut self, id: AtlasTextureId, bounds: Bounds<DevicePixels>, bytes: &[u8]) {
-        let data = self
-            .storage
-            .get(id)
-            .map(|texture| swizzle_upload_data(bytes, texture.format))
-            .unwrap_or_else(|| bytes.to_vec());
-
+    fn upload_texture(&mut self, id: AtlasTextureId, bounds: Bounds<DevicePixels>, bytes: Cow<'_, [u8]>) {
+        let format = self.storage.get(id).map(|texture| texture.format);
+        let data = swizzle_upload_data(bytes, format.unwrap_or(wgpu::TextureFormat::Bgra8Unorm));
         self.pending_uploads
             .push(PendingUpload { id, bounds, data });
     }
@@ -400,17 +396,14 @@ impl WgpuAtlasTexture {
     }
 }
 
-fn swizzle_upload_data(bytes: &[u8], format: wgpu::TextureFormat) -> Vec<u8> {
-    match format {
-        wgpu::TextureFormat::Rgba8Unorm => {
-            let mut data = bytes.to_vec();
-            for pixel in data.chunks_exact_mut(4) {
-                pixel.swap(0, 2);
-            }
-            data
+fn swizzle_upload_data(bytes: Cow<'_, [u8]>, format: wgpu::TextureFormat) -> Vec<u8> {
+    let mut data = bytes.into_owned();
+    if format == wgpu::TextureFormat::Rgba8Unorm {
+        for pixel in data.as_chunks_mut::<4>().0 {
+            pixel.swap(0, 2);
         }
-        _ => bytes.to_vec(),
     }
+    data
 }
 
 #[cfg(all(test, not(target_family = "wasm")))]
@@ -479,7 +472,7 @@ mod tests {
                         width: DevicePixels(width),
                         height: DevicePixels(height),
                     };
-                    assert!(backend.insert(kind, invalid_size, &[]).is_err());
+                    assert!(backend.insert(kind, invalid_size, Cow::Borrowed(&[])).is_err());
                     assert_eq!(backend.storage[kind].textures.len(), page_count);
                     assert_eq!(backend.storage[kind].free_list, free_list);
                     assert_eq!(backend.next_texture_generation, generation);
@@ -495,7 +488,7 @@ mod tests {
             }
             match phase {
                 0 => {
-                    let tile = backend.insert(kind, size, &[7; 65 * 65])?;
+                    let tile = backend.insert(kind, size, Cow::Borrowed(&[7; 65 * 65]))?;
                     assert_eq!(tile.bounds.size, size);
                     keeper = Some(tile);
                 }
@@ -510,7 +503,7 @@ mod tests {
                     assert!(backend.pending_uploads.is_empty());
                 }
                 _ => {
-                    let tile = backend.insert(kind, size, &[9; 65 * 65])?;
+                    let tile = backend.insert(kind, size, Cow::Borrowed(&[9; 65 * 65]))?;
                     assert_eq!(tile.texture_id.index, free_list[0] as u32);
                     assert_eq!(backend.storage[kind].textures.len(), page_count);
                     assert_eq!(
@@ -821,7 +814,7 @@ mod tests {
     fn swizzle_upload_data_preserves_bgra_uploads() {
         let input = vec![0x10, 0x20, 0x30, 0x40];
         assert_eq!(
-            swizzle_upload_data(&input, wgpu::TextureFormat::Bgra8Unorm),
+            swizzle_upload_data(Cow::Borrowed(&input), wgpu::TextureFormat::Bgra8Unorm),
             input
         );
     }
@@ -830,7 +823,7 @@ mod tests {
     fn swizzle_upload_data_converts_bgra_to_rgba() {
         let input = vec![0x10, 0x20, 0x30, 0x40, 0xAA, 0xBB, 0xCC, 0xDD];
         assert_eq!(
-            swizzle_upload_data(&input, wgpu::TextureFormat::Rgba8Unorm),
+            swizzle_upload_data(Cow::Owned(input), wgpu::TextureFormat::Rgba8Unorm),
             vec![0x30, 0x20, 0x10, 0x40, 0xCC, 0xBB, 0xAA, 0xDD]
         );
     }

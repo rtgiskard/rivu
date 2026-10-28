@@ -779,6 +779,12 @@ pages are evicted; image and SVG owners remain responsible for their own tiles.
 Whole-page protection preserves cached paint ranges but can retain unused
 glyphs alongside live ones, so this is a high-water policy, not a hard byte cap.
 
+Atlas insertion transfers owned pixel buffers into the renderer's pending-upload
+queue. Required BGRA-to-RGBA conversion runs in place on that owner; borrowed
+pixels are copied once because the queue must outlive the build callback.
+Uploads remain deferred to frame preparation and can be discarded when their
+texture retires before submission. This does not eliminate wgpu staging copies.
+
 System font-file mappings can share kernel file pages, whereas parsed font and
 glyph data also consume process memory. Font discovery alone is not a measure
 of retained memory, and total process memory includes unrelated renderer

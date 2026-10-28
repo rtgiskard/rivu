@@ -1774,7 +1774,7 @@ pub trait AtlasBackend {
         &mut self,
         kind: AtlasTextureKind,
         size: Size<DevicePixels>,
-        bytes: &[u8],
+        bytes: Cow<'_, [u8]>,
     ) -> Result<AtlasTile>;
 
     fn remove(&mut self, tile: AtlasTile);
@@ -1831,7 +1831,7 @@ impl<Backend: AtlasBackend> AtlasState<Backend> {
                 };
                 let tile = self
                     .backend
-                    .insert(entry.key().texture_kind(), size, &bytes)?;
+                    .insert(entry.key().texture_kind(), size, bytes)?;
                 if matches!(entry.key(), AtlasKey::Glyph(_)) {
                     self.glyph_count += 1;
                 }
@@ -1924,7 +1924,7 @@ impl AtlasBackend for HeadlessAtlasBackend {
         &mut self,
         kind: AtlasTextureKind,
         size: Size<DevicePixels>,
-        _bytes: &[u8],
+        _bytes: Cow<'_, [u8]>,
     ) -> Result<AtlasTile> {
         self.next_id += 1;
         let texture_id = self.next_id;
@@ -3579,7 +3579,7 @@ mod atlas_tests {
             &mut self,
             kind: AtlasTextureKind,
             size: Size<DevicePixels>,
-            _bytes: &[u8],
+            _bytes: Cow<'_, [u8]>,
         ) -> Result<AtlasTile> {
             self.insert_calls += 1;
             if std::mem::take(&mut self.fail_next_insert) {
