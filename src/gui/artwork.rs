@@ -18,6 +18,7 @@ use gpui::{
 };
 
 mod decode;
+mod default_filter;
 
 #[derive(Default)]
 struct ArtworkImagesState {
@@ -1008,17 +1009,9 @@ impl DefaultArtworkBitmap {
             )?;
             // Borrow the BGRA pixels: no full supersampled-buffer copy.
             // The SVG is opaque, so filtering needs no alpha conversion.
-            let buffer = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
-                sample_side as u32,
-                sample_side as u32,
+            let filtered = default_filter::reduce_default(
                 sampled.as_bytes(0).expect("rasterized default artwork"),
-            )
-            .expect("square default artwork buffer");
-            let filtered = image::imageops::resize(
-                &buffer,
                 source.side,
-                source.side,
-                image::imageops::FilterType::Lanczos3,
             );
             Ok(Arc::new(RenderImage::new([image::Frame::new(filtered)])))
         }

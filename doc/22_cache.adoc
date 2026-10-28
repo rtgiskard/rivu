@@ -701,6 +701,11 @@ to the target size. Display scale and style-specific image size select immutable
 keys; older completions cannot replace a newer size. Existing fitting, clipping,
 and rotation remain unchanged. Warm frames share images without rasterization
 or pixel-buffer copies, and a single asynchronous gate serializes generation.
+The fixed 2:1 Lanczos3 reduction preserves vertical-then-horizontal floating-point
+filtering and final byte rounding, but processes one intermediate row at a time.
+Its floating-point row uses 32 bytes per target-side pixel, plus a linear-size
+coefficient table, rather than 32 bytes per target-image pixel. Supersampled SVG
+pixels and final BGRA output remain separate allocations; scratch is not cached.
 
 This memory-only cache admits at most 16 pending/completed size keys and 32 MiB
 of final BGRA pixels. Least-recently-used eviction cancels pending assets and
