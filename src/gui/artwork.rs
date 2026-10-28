@@ -18,7 +18,6 @@ use gpui::{
 };
 
 mod decode;
-mod default_filter;
 
 #[derive(Default)]
 struct ArtworkImagesState {
@@ -953,7 +952,7 @@ impl DefaultArtworkSizes {
 struct DefaultArtworkRasterizer {
     renderer: SvgRenderer,
     // The lock is async and acquired only by background asset futures. There is
-    // one raster/filter operation at a time, not one worker per card or size.
+    // one rasterization at a time, not one worker per card or size.
     parsed: futures::lock::Mutex<Option<ParsedSvg>>,
 }
 
@@ -996,24 +995,18 @@ impl DefaultArtworkBitmap {
                         .parse_svg(include_bytes!("../../data/artwork/default.svg"))?,
                 );
             }
-            // Filter at the final physical size, rather than asking the GPU
-            // to minify the old 1024px texture without mipmaps. 2x sampling
-            // also resolves subpixel SVG strokes before Lanczos filtering.
-            let sample_side = (source.side * 2) as i32;
-            let sampled = source.rasterizer.renderer.render_parsed(
-                parsed.as_ref().expect("parsed default artwork"),
-                SvgSize::ExactSize(gpui::size(
-                    gpui::DevicePixels(sample_side),
-                    gpui::DevicePixels(sample_side),
-                )),
-            )?;
-            // Borrow the BGRA pixels: no full supersampled-buffer copy.
-            // The SVG is opaque, so filtering needs no alpha conversion.
-            let filtered = default_filter::reduce_default(
-                sampled.as_bytes(0).expect("rasterized default artwork"),
-                source.side,
-            );
-            Ok(Arc::new(RenderImage::new([image::Frame::new(filtered)])))
+            let side = source.side as i32;
+            source
+                .rasterizer
+                .renderer
+                .render_parsed(
+                    parsed.as_ref().expect("parsed default artwork"),
+                    SvgSize::ExactSize(gpui::size(
+                        gpui::DevicePixels(side),
+                        gpui::DevicePixels(side),
+                    )),
+                )
+                .map_err(Into::into)
         }
         .await;
         if let Err(error) = &result {

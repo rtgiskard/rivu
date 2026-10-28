@@ -708,26 +708,22 @@ are unchanged.
 
 Generated default covers share a separate window-local cache across square
 previews, cards, and circular artwork panels. GPUI background assets rasterize
-the embedded SVG at twice the displayed physical square size, then Lanczos-filter
-to the target size. Display scale and style-specific image size select immutable
-keys; older completions cannot replace a newer size. Existing fitting, clipping,
-and rotation remain unchanged. Warm frames share images without rasterization
-or pixel-buffer copies, and a single asynchronous gate serializes generation.
-The fixed 2:1 Lanczos3 reduction preserves vertical-then-horizontal floating-point
-filtering and final byte rounding, but processes one intermediate row at a time.
-Its floating-point row uses 32 bytes per target-side pixel, plus a linear-size
-coefficient table, rather than 32 bytes per target-image pixel. Supersampled SVG
-pixels and final BGRA output remain separate allocations; scratch is not cached.
+the embedded SVG directly at the target physical square size with the SVG
+renderer's antialiasing. Display scale and style-specific image size select
+immutable keys; older completions cannot replace a newer size. Existing fitting,
+clipping, and rotation remain unchanged. Warm frames share images without
+rasterization or pixel-buffer copies, and a single asynchronous gate serializes
+generation.
 
 This memory-only cache admits at most 16 pending/completed size keys and 32 MiB
 of final BGRA pixels. Least-recently-used eviction cancels pending assets and
 retires GPU images at the next window-frame boundary; temporary retired images
-are outside the resident budget. Final sides are capped at 2048 physical pixels
-(larger surfaces scale that image), bounding supersampling at 4096 pixels per side.
-Only one generation uses raster/filter scratch memory at a time. The last shared
-owner releases its assets and GPU images on window close or reload; other windows
-have independent caches. More active sizes than these limits can regenerate
-evicted images. Generation failures are logged and display `Artwork unavailable`.
+are outside the resident budget. Raster sides are capped at 2048 physical pixels
+(larger surfaces scale that image). Only one generation uses rasterizer workspace
+at a time. The last shared owner releases its assets and GPU images on window
+close or reload; other windows have independent caches. More active sizes than
+these limits can regenerate evicted images. Generation failures are logged and
+display `Artwork unavailable`.
 Generated bitmaps remain in RAM/GPU memory and never create disk files; existing
 media-cover/MPRIS disk paths and encoded-file maintenance are unchanged.
 
