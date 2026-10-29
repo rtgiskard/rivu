@@ -493,6 +493,10 @@ covers remain owned by their views; neither changes the shared 64-entry target.
 === Encoded files and maintenance
 
 Encoded images use immutable content-derived paths under `artwork/cache`.
+Viewport and album-page changes synchronize card demand with the shared cache.
+An individual completion updates only cards demanding that source and advances
+the bounded waiting queue; it does not rescan every visible card or re-read all
+completed cache entries.
 Disk names use the first 128 bits of BLAKE3 as 32 lowercase hexadecimal characters:
 the first two form a bucket directory and the remaining 30 form the filename.
 For example, originals use `ab/<30-hex>.png` and thumbnails use

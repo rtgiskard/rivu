@@ -1,4 +1,11 @@
-use std::{cell::RefCell, collections::BTreeMap, ops::Range, rc::Rc, sync::Arc, time::Instant};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, VecDeque},
+    ops::Range,
+    rc::Rc,
+    sync::Arc,
+    time::Instant,
+};
 
 use gpui::{prelude::*, *};
 
@@ -101,6 +108,108 @@ impl AlbumCover {
     }
 }
 
+/// Only viewport/page changes rebuild demand. A completed source addresses its
+/// current cards directly; scheduling consumes the remaining viewport once.
+#[derive(Default)]
+struct AlbumCovers {
+    views: BTreeMap<usize, AlbumCover>,
+    sources: BTreeMap<i64, Vec<usize>>,
+    pending: VecDeque<usize>,
+}
+
+impl AlbumCovers {
+    fn clear(&mut self, cx: &mut App) {
+        self.sources.clear();
+        self.pending.clear();
+        for cover in std::mem::take(&mut self.views).into_values() {
+            cover.view.replace(None, cx);
+        }
+    }
+
+    fn sync<'a>(
+        &mut self,
+        demand: Range<usize>,
+        source: impl Fn(usize) -> Option<&'a Track>,
+        manager: &ArtworkManager,
+        images: &ArtworkImages,
+        cx: &mut App,
+    ) -> bool {
+        self.sources.clear();
+        self.pending.clear();
+        for (_, cover) in self.views.extract_if(.., |index, _| {
+            !demand.contains(index) || source(*index).is_none()
+        }) {
+            cover.view.replace(None, cx);
+        }
+        let mut changed = false;
+        for index in demand {
+            let Some(track) = source(index) else {
+                continue;
+            };
+            let cover = self
+                .views
+                .entry(index)
+                .or_insert_with(|| AlbumCover::new(images.clone()));
+            if cover
+                .negative
+                .as_ref()
+                .is_some_and(|negative| !negative.matches(track))
+            {
+                cover.negative = None;
+            }
+            changed |= cover.view.replace(manager.cached(track), cx);
+            if cover.needs_load(track, manager) {
+                self.pending.push_back(index);
+            }
+            self.sources.entry(track.id).or_default().push(index);
+        }
+        changed
+    }
+
+    fn prepare<'a>(
+        &mut self,
+        source: impl Fn(usize) -> Option<&'a Track>,
+        manager: &ArtworkManager,
+        loader: &mut ArtworkLoader,
+    ) -> Option<Track> {
+        while let Some(&index) = self.pending.front() {
+            if let Some(track) = source(index)
+                && self
+                    .views
+                    .get(&index)
+                    .is_some_and(|cover| cover.needs_load(track, manager))
+            {
+                // Keep this candidate while an obsolete physical worker retires.
+                let track = loader.prepare(Some(track))?;
+                self.pending.pop_front();
+                return Some(track);
+            }
+            self.pending.pop_front();
+        }
+        let _ = loader.prepare(None);
+        None
+    }
+
+    fn complete<'a>(
+        &mut self,
+        track: &Track,
+        loaded: Option<&LoadedArtwork>,
+        source: impl Fn(usize) -> Option<&'a Track>,
+        cx: &mut App,
+    ) -> bool {
+        let Some(indices) = self.sources.get(&track.id) else {
+            return false;
+        };
+        let mut changed = false;
+        for &index in indices {
+            if let Some(cover) = self.views.get_mut(&index) {
+                changed |= cover.complete(track, source(index), loaded, cx);
+            }
+        }
+        changed
+    }
+}
+
 /// Sparse absolute rows and viewport-owned covers per panel. Visibility cancels
 /// submissions and cover demand, not unchanged album or track data.
 pub(super) struct AlbumBrowser {
@@ -117,7 +226,7 @@ pub(super) struct AlbumBrowser {
     loading_text: rivu_ui::loading::LoadingText<()>,
     error: Option<String>,
     dismissed_actions: Option<AlbumKey>,
-    covers: BTreeMap<usize, AlbumCover>,
+    covers: AlbumCovers,
     loader: ArtworkLoader,
     demand: Range<usize>,
     grid_layout: AlbumGridLayout,
@@ -203,7 +312,7 @@ impl AlbumBrowser {
             loading_text: rivu_ui::loading::LoadingText::new(std::time::Duration::from_millis(150)),
             error: None,
             dismissed_actions: None,
-            covers: BTreeMap::new(),
+            covers: AlbumCovers::default(),
             loader: ArtworkLoader::default(),
             demand: 0..0,
             grid_layout: AlbumGridLayout::measured(
@@ -297,9 +406,7 @@ impl AlbumBrowser {
     fn clear_covers(&mut self, cx: &mut App) {
         self.demand = 0..0;
         let _ = self.loader.prepare(None);
-        for cover in std::mem::take(&mut self.covers).into_values() {
-            cover.view.replace(None, cx);
-        }
+        self.covers.clear(cx);
     }
 
     fn apply_data_change(&mut self, change: DataChange, cx: &mut App) {
@@ -387,7 +494,7 @@ impl AlbumBrowser {
                     let published = completion.published;
                     this.apply_completion(completion, cx);
                     if published == Published::Albums {
-                        this.prepare_cover(cx);
+                        this.sync_covers(cx);
                     }
                     let count = if published != Published::None {
                         this.model.prepare_count(&query, generation)
@@ -577,50 +684,41 @@ impl AlbumBrowser {
             .start
             .saturating_mul(self.grid_layout.columns)
             .min(end);
+        let changed = self.demand != (start..end);
         self.demand = start..end;
         // Updating demand while a request is pending still records the latest viewport.
         self.model.demand_albums(self.demand.clone());
-        self.prepare_cover(cx);
+        if changed {
+            self.sync_covers(cx);
+        }
         self.request_next(cx);
     }
 
-    fn prepare_cover(&mut self, cx: &mut Context<Self>) {
+    fn sync_covers(&mut self, cx: &mut Context<Self>) {
         if !self.model.visible() || self.model.selected().is_some() {
             return;
         }
-        for (_, cover) in self.covers.extract_if(.., |index, _| {
-            !self.demand.contains(index) || self.model.albums().get(*index).is_none()
-        }) {
-            cover.view.replace(None, cx);
+        let albums = self.model.albums();
+        let changed = self.covers.sync(
+            self.demand.clone(),
+            |index| albums.get(index).map(|album| &album.representative),
+            &self.manager,
+            &self.images,
+            cx,
+        );
+        if changed {
+            cx.notify();
         }
-        let mut changed = false;
-        for index in self.demand.clone() {
-            let Some(album) = self.model.albums().get(index) else {
-                continue;
-            };
-            let cover = self
-                .covers
-                .entry(index)
-                .or_insert_with(|| AlbumCover::new(self.images.clone()));
-            if cover
-                .negative
-                .as_ref()
-                .is_some_and(|negative| !negative.matches(&album.representative))
-            {
-                cover.negative = None;
-            }
-            changed |= cover
-                .view
-                .replace(self.manager.cached(&album.representative), cx);
-        }
-        let next = self.demand.clone().find_map(|index| {
-            let track = &self.model.albums().get(index)?.representative;
-            self.covers
-                .get(&index)?
-                .needs_load(track, &self.manager)
-                .then_some(track)
-        });
-        if let Some(track) = self.loader.prepare(next) {
+        self.load_next_cover(cx);
+    }
+
+    fn load_next_cover(&mut self, cx: &mut Context<Self>) {
+        let albums = self.model.albums();
+        if let Some(track) = self.covers.prepare(
+            |index| albums.get(index).map(|album| &album.representative),
+            &self.manager,
+            &mut self.loader,
+        ) {
             let identity = ArtworkIdentity::for_track(&track);
             let manager = Arc::clone(&self.manager);
             cx.spawn(async move |this, cx| {
@@ -638,27 +736,20 @@ impl AlbumBrowser {
                     if !this.model.visible() || this.model.selected().is_some() {
                         return;
                     }
-                    let mut changed = false;
-                    for index in this.demand.clone() {
-                        let current = this
-                            .model
-                            .albums()
-                            .get(index)
-                            .map(|album| &album.representative);
-                        if let Some(cover) = this.covers.get_mut(&index) {
-                            changed |= cover.complete(&track, current, loaded.as_ref(), cx);
-                        }
-                    }
+                    let albums = this.model.albums();
+                    let changed = this.covers.complete(
+                        &track,
+                        loaded.as_ref(),
+                        |index| albums.get(index).map(|album| &album.representative),
+                        cx,
+                    );
                     if changed {
                         cx.notify();
                     }
-                    this.prepare_cover(cx);
+                    this.load_next_cover(cx);
                 });
             })
             .detach();
-        }
-        if changed {
-            cx.notify();
         }
     }
 
@@ -667,7 +758,7 @@ impl AlbumBrowser {
     }
 
     pub(super) fn release_all_images(&mut self, window: &mut Window, cx: &mut App) {
-        for cover in self.covers.values() {
+        for cover in self.covers.views.values() {
             cover.view.release_all_images(window, cx);
         }
     }
@@ -691,6 +782,7 @@ impl AlbumBrowser {
         let hover_key = key.clone();
         let image = self
             .covers
+            .views
             .get(&index)
             .and_then(|cover| cover.view.measured_image(0, cx));
         let directory = key.directory.to_string_lossy().into_owned();
@@ -1259,13 +1351,13 @@ impl Render for AlbumBrowser {
 
 #[cfg(test)]
 mod tests {
-    use super::{AlbumCover, anchored_index};
+    use super::{AlbumCover, AlbumCovers, anchored_index};
     use crate::{
         artwork::{
-            ArtworkManager,
+            ArtworkIdentity, ArtworkManager,
             tests::{tagged_wav, track},
         },
-        gui::artwork::ArtworkImages,
+        gui::artwork::{ArtworkImages, ArtworkLoader},
     };
 
     #[gpui::test]
@@ -1315,25 +1407,46 @@ mod tests {
                 source
             })
             .collect();
-        let mut covers: Vec<_> = sources
-            .iter()
-            .map(|_| AlbumCover::new(ArtworkImages::default()))
-            .collect();
-        for (source, cover) in sources.iter().zip(&mut covers) {
-            assert!(cover.needs_load(source, &manager));
-            let completed = manager.load(source);
+        let mut covers = AlbumCovers::default();
+        let mut loader = ArtworkLoader::default();
+        cx.update(|cx| {
+            covers.sync(
+                0..sources.len(),
+                |index| sources.get(index),
+                &manager,
+                &ArtworkImages::default(),
+                cx,
+            );
+        });
+        for source in &sources {
+            let next = covers
+                .prepare(|index| sources.get(index), &manager, &mut loader)
+                .unwrap();
+            assert!(ArtworkIdentity::for_track(source).matches(&next));
+            assert!(
+                covers
+                    .prepare(|index| sources.get(index), &manager, &mut loader)
+                    .is_none()
+            );
+            let completed = manager.load(&next);
             assert!(completed.is_none());
             assert!(manager.is_loaded(source));
             assert!(manager.cached(source).is_none());
+            let _ = loader.finish(&ArtworkIdentity::for_track(&next), None);
             cx.update(|cx| {
-                cover.complete(source, Some(source), completed.as_ref(), cx);
-                assert!(cover.view.image(cx).is_none());
-                assert!(cover.negative.is_some());
+                covers.complete(&next, completed.as_ref(), |index| sources.get(index), cx);
             });
         }
         assert!(!manager.is_loaded(&sources[0]));
-        for (source, cover) in sources.iter().zip(&covers) {
+        assert!(
+            covers
+                .prepare(|index| sources.get(index), &manager, &mut loader)
+                .is_none()
+        );
+        for (index, source) in sources.iter().enumerate() {
+            let cover = &covers.views[&index];
             assert!(!cover.needs_load(source, &manager));
+            cx.update(|cx| assert!(cover.view.image(cx).is_none()));
         }
     }
 
@@ -1369,6 +1482,110 @@ mod tests {
             assert!(cover.view.image(cx).is_some());
             assert!(cover.negative.is_none());
         });
+    }
+
+    #[gpui::test]
+    fn one_source_completion_publishes_to_every_current_card(cx: &mut gpui::TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("cover.wav");
+        tagged_wav(&path);
+        let first = track(path);
+        let mut second = track(directory.path().join("missing.wav"));
+        second.id = first.id + 1;
+        let sources = [first.clone(), second.clone(), first.clone()];
+        let manager = ArtworkManager::new(directory.path());
+        let mut covers = AlbumCovers::default();
+        let mut loader = ArtworkLoader::default();
+        cx.update(|cx| {
+            covers.sync(
+                0..sources.len(),
+                |index| sources.get(index),
+                &manager,
+                &ArtworkImages::default(),
+                cx,
+            );
+        });
+        let next = covers
+            .prepare(|index| sources.get(index), &manager, &mut loader)
+            .unwrap();
+        assert!(ArtworkIdentity::for_track(&first).matches(&next));
+        let completed = manager.load(&next).unwrap();
+        let _ = loader.finish(&ArtworkIdentity::for_track(&next), None);
+        cx.update(|cx| {
+            assert!(covers.complete(&next, Some(&completed), |index| sources.get(index), cx));
+            assert!(covers.views[&0].view.image(cx).is_some());
+            assert!(covers.views[&1].view.image(cx).is_none());
+            assert!(covers.views[&2].view.image(cx).is_some());
+        });
+        let next = covers
+            .prepare(|index| sources.get(index), &manager, &mut loader)
+            .unwrap();
+        assert!(ArtworkIdentity::for_track(&second).matches(&next));
+        let completed = manager.load(&next);
+        let _ = loader.finish(&ArtworkIdentity::for_track(&next), None);
+        cx.update(|cx| {
+            covers.complete(&next, completed.as_ref(), |index| sources.get(index), cx);
+        });
+        assert!(
+            covers
+                .prepare(|index| sources.get(index), &manager, &mut loader)
+                .is_none()
+        );
+    }
+
+    #[gpui::test]
+    fn changed_viewport_waits_for_retirement_and_rejects_old_source(cx: &mut gpui::TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let old = track(directory.path().join("missing.wav"));
+        let mut discarded = old.clone();
+        discarded.id += 1;
+        let previous = [old.clone(), discarded];
+        let mut current = old.clone();
+        current.path = directory.path().join("available.wav");
+        tagged_wav(&current.path);
+        let manager = ArtworkManager::new(directory.path());
+        let mut covers = AlbumCovers::default();
+        let mut loader = ArtworkLoader::default();
+        cx.update(|cx| {
+            covers.sync(
+                0..2,
+                |index| previous.get(index),
+                &manager,
+                &ArtworkImages::default(),
+                cx,
+            );
+        });
+        let active = covers
+            .prepare(|index| previous.get(index), &manager, &mut loader)
+            .unwrap();
+        assert!(ArtworkIdentity::for_track(&old).matches(&active));
+        // A page can arrive for the latest viewport while the old load is physical.
+        cx.update(|cx| {
+            covers.sync(2..3, |_| None, &manager, &ArtworkImages::default(), cx);
+        });
+        assert!(covers.prepare(|_| None, &manager, &mut loader).is_none());
+        let latest = |index| (index == 2).then_some(&current);
+        cx.update(|cx| {
+            covers.sync(2..3, latest, &manager, &ArtworkImages::default(), cx);
+        });
+        assert!(covers.prepare(latest, &manager, &mut loader).is_none());
+        let negative = manager.load(&active);
+        assert!(negative.is_none());
+        let _ = loader.finish(&ArtworkIdentity::for_track(&active), None);
+        cx.update(|cx| {
+            assert!(!covers.complete(&active, negative.as_ref(), latest, cx));
+            assert!(covers.views[&2].negative.is_none());
+            assert!(covers.views[&2].view.image(cx).is_none());
+        });
+        let next = covers.prepare(latest, &manager, &mut loader).unwrap();
+        assert!(ArtworkIdentity::for_track(&current).matches(&next));
+        let completed = manager.load(&next).unwrap();
+        let _ = loader.finish(&ArtworkIdentity::for_track(&next), None);
+        cx.update(|cx| {
+            assert!(covers.complete(&next, Some(&completed), latest, cx));
+            assert!(covers.views[&2].view.image(cx).is_some());
+        });
+        assert!(covers.prepare(latest, &manager, &mut loader).is_none());
     }
 
     #[test]
