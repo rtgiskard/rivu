@@ -1,7 +1,7 @@
 use super::ScanCancellation;
 use super::input::{MAX_CUE_BYTES, read_input_async};
 use super::paths::{is_cue_path, logical_path};
-use crate::execution::BlockingPool;
+use crate::execution::BlockingExecutor;
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use futures::{FutureExt, Stream, StreamExt};
 use rivu_protocol::model::PlaylistExportTrack;
@@ -26,7 +26,7 @@ const COOPERATIVE_ROWS: usize = 256;
 /// Keep formatting on the async task, but submit only bounded file writes.
 /// The buffer and descriptor return after every write, including I/O errors.
 struct ExportWriter<'a> {
-    workers: &'a BlockingPool,
+    workers: &'a BlockingExecutor,
     file: Option<std::fs::File>,
     bytes: Vec<u8>,
     cancellation: ScanCancellation,
@@ -76,15 +76,15 @@ pub(crate) struct PlaylistImport {
 pub(crate) struct ImportSheets {
     pub sheets: HashMap<PathBuf, super::cue::CueSheet>,
     /// Shared immutable source payloads and lightweight segment storage (64 MiB).
-    pub budget: super::input::RetainedBudget,
+    pub budget: super::import_budget::ImportBudget,
     /// Parsed sheet payloads (64 MiB), released by the final sheet owner.
-    pub parsed_budget: super::input::RetainedBudget,
+    pub parsed_budget: super::import_budget::ImportBudget,
 }
 
 /// Import a bounded CUE sheet in sheet order, or a UTF-8 M3U/M3U8 playlist.
 #[cfg(test)]
 pub fn import_playlist(path: &Path) -> Result<Vec<M3uItem>> {
-    let workers = &BlockingPool::new(4);
+    let workers = &BlockingExecutor::new(4);
     Ok(test_io(prepare_playlist_import(
         workers,
         path,
@@ -97,7 +97,7 @@ pub fn import_playlist(path: &Path) -> Result<Vec<M3uItem>> {
 /// Read a bounded UTF-8 M3U/M3U8, expanding complete CUE sheets in order.
 #[cfg(test)]
 pub fn import_m3u(path: &Path) -> Result<Vec<M3uItem>> {
-    let workers = &BlockingPool::new(4);
+    let workers = &BlockingExecutor::new(4);
     Ok(test_io(prepare_import(
         workers,
         path,
@@ -114,7 +114,7 @@ fn test_io<T>(future: impl Future<Output = T>) -> T {
 }
 
 pub(crate) async fn prepare_playlist_import(
-    workers: &BlockingPool,
+    workers: &BlockingExecutor,
     path: &Path,
     cancellation: &ScanCancellation,
     roots: Option<&[PathBuf]>,
@@ -125,7 +125,7 @@ pub(crate) async fn prepare_playlist_import(
 struct ImportBuilder {
     result: PlaylistImport,
     bytes_read: usize,
-    budget: super::input::RetainedBudget,
+    budget: super::import_budget::ImportBudget,
 }
 
 impl ImportBuilder {
@@ -158,7 +158,7 @@ impl ImportBuilder {
 }
 
 async fn prepare_import(
-    workers: &BlockingPool,
+    workers: &BlockingExecutor,
     path: &Path,
     cue: bool,
     cancellation: &ScanCancellation,
@@ -166,7 +166,7 @@ async fn prepare_import(
 ) -> Result<PlaylistImport> {
     cancellation.check()?;
     let path = logical_path(path)?;
-    let budget = super::input::RetainedBudget::default();
+    let budget = super::import_budget::ImportBudget::default();
     let mut builder = ImportBuilder {
         result: PlaylistImport {
             items: Vec::new(),
@@ -204,7 +204,7 @@ async fn prepare_import(
         // CPU work, not filesystem I/O on the async driver.
         workers
             .execute(
-                move || -> Result<(Vec<PathBuf>, super::input::RetainedScope)> {
+                move || -> Result<(Vec<PathBuf>, super::import_budget::ImportBudgetScope)> {
                     let text = std::str::from_utf8(
                         bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes),
                     )
@@ -334,7 +334,7 @@ async fn prepare_import(
 /// Export a database-ordered stream of playlist occurrences atomically.
 /// Preserve repetitions; retain only the current CUE validation run.
 pub async fn export_m3u<S>(
-    workers: &BlockingPool,
+    workers: &BlockingExecutor,
     path: &Path,
     tracks: S,
     cancellation: &ScanCancellation,
@@ -396,7 +396,7 @@ where
 }
 
 async fn write_export<S>(
-    workers: &BlockingPool,
+    workers: &BlockingExecutor,
     writer: &mut ExportWriter<'_>,
     parent: &Path,
     tracks: S,
@@ -579,7 +579,7 @@ mod tests {
     #[test]
     fn stream_panic_preserves_destination_and_retires_temporary_file() -> Result<()> {
         futures::executor::block_on(async {
-            let workers = &BlockingPool::new(4);
+            let workers = &BlockingExecutor::new(4);
             let directory = tempfile::tempdir()?;
             let destination = directory.path().join("playlist.m3u8");
             let original = b"original playlist\n";
@@ -620,7 +620,7 @@ mod batch_tests {
     fn ready_rows_yield_in_bounded_batches_and_cancel_without_replacement() -> Result<()> {
         let executor = async_executor::Executor::new();
         futures::executor::block_on(executor.run(async {
-            let workers = &BlockingPool::new(4);
+            let workers = &BlockingExecutor::new(4);
             let directory = tempfile::tempdir()?;
             let destination = directory.path().join("playlist.m3u8");
             std::fs::write(&destination, b"original\n")?;

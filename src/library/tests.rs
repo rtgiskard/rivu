@@ -59,7 +59,7 @@ fn scan_paths(
 }
 
 async fn scan_uncached_paths(
-    workers: &crate::execution::BlockingPool,
+    workers: &crate::execution::BlockingExecutor,
     paths: &[PathBuf],
     roots: &[PathBuf],
 ) -> Result<ScanResult> {
@@ -519,7 +519,7 @@ fn async_source_lookup_releases_the_only_blocking_slot() -> Result<()> {
     let root = directory.path().to_path_buf();
     let audio = root.join("audio.wav");
     wav(&audio, 150)?;
-    let workers = &crate::execution::BlockingPool::new(1);
+    let workers = &crate::execution::BlockingExecutor::new(1);
     futures::executor::block_on(async {
         let cancellation = ScanCancellation::default();
         let (lookup, requested) = futures::channel::oneshot::channel();
@@ -639,7 +639,7 @@ fn cancellation_during_a_hash_read_stops_at_the_chunk_boundary() {
 fn bounded_playlist_reads_enforce_capacity_and_cancellation_boundaries() -> Result<()> {
     futures::executor::block_on(async {
         use super::input::{MAX_CUE_BYTES, read_chunks_async, read_input_async};
-        let workers = &crate::execution::BlockingPool::new(4);
+        let workers = &crate::execution::BlockingExecutor::new(4);
 
         let directory = tempfile::tempdir()?;
         let sheet = directory.path().join("album.cue");
@@ -2748,7 +2748,7 @@ fn export_m3u<I>(path: &Path, tracks: I, cancellation: &ScanCancellation) -> Res
 where
     I: IntoIterator<Item = Result<PlaylistExportTrack>>,
 {
-    let workers = &crate::execution::BlockingPool::new(4);
+    let workers = &crate::execution::BlockingExecutor::new(4);
     futures::executor::block_on(super::export_m3u(
         workers,
         path,
@@ -3150,7 +3150,7 @@ fn playlist_import_never_traverses_directory_entries_or_type_changes() -> Result
     futures::executor::block_on(async {
         let directory = tempfile::tempdir()?;
         let root = directory.path().to_path_buf();
-        let workers = &crate::execution::BlockingPool::new(4);
+        let workers = &crate::execution::BlockingExecutor::new(4);
         let good = root.join("good.wav");
         let changed = root.join("changed.wav");
         wav(&good, 75)?;
@@ -3239,7 +3239,7 @@ fn cue_import_rescan_relocation_and_copy_preserve_independent_user_state() -> Re
         two_track_sheet(&old.join("album.cue"))?;
         let playlist = root.join("list.m3u8");
         fs::write(&playlist, "old/album.cue\n")?;
-        let workers = &crate::execution::BlockingPool::new(4);
+        let workers = &crate::execution::BlockingExecutor::new(4);
         let cancellation = ScanCancellation::default();
         let store = crate::store::Store::open(Path::new(":memory:"))?;
         let prepared = super::prepare_playlist_import(
@@ -3366,7 +3366,7 @@ fn import_retained_overflow_after_a_valid_sheet_aborts_the_whole_scan() -> Resul
         two_track_sheet(&root.join("b.cue"))?;
         let playlist = root.join("list.m3u8");
         fs::write(&playlist, "a.cue\nb.cue\n")?;
-        let workers = &crate::execution::BlockingPool::new(4);
+        let workers = &crate::execution::BlockingExecutor::new(4);
         let cancellation = ScanCancellation::default();
         let prepared = super::prepare_playlist_import(
             workers,
@@ -3401,7 +3401,9 @@ fn import_retained_overflow_after_a_valid_sheet_aborts_the_whole_scan() -> Resul
         )
         .await;
         assert!(first_completed);
-        assert!(super::input::RetainedBudget::is_limit(&result.unwrap_err()));
+        assert!(super::import_budget::ImportBudget::is_limit(
+            &result.unwrap_err()
+        ));
         assert_eq!(budget.remaining(), 0);
         Ok(())
     })
@@ -3416,7 +3418,7 @@ fn import_source_fifo_substitution_is_fatal_without_blocking_or_recursion() -> R
         wav(&audio, 75)?;
         let playlist = root.join("list.m3u8");
         fs::write(&playlist, "audio.wav\n")?;
-        let workers = &crate::execution::BlockingPool::new(4);
+        let workers = &crate::execution::BlockingExecutor::new(4);
         let cancellation = ScanCancellation::default();
         let prepared = super::prepare_playlist_import(
             workers,

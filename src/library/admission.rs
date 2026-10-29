@@ -2,7 +2,7 @@ use super::paths::{is_audio_path, logical_path};
 use super::scan::MAX_REPORTED_SCAN_ERRORS;
 use super::source::{HASH_CHUNK_BYTES, SOURCE_BATCH_SIZE, ScanRecord, prepare_sources};
 use super::{KnownFile, ScanCancellation};
-use crate::execution::BlockingPool;
+use crate::execution::BlockingExecutor;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -52,7 +52,7 @@ impl ExternalAdmission {
 }
 
 pub(crate) async fn prepare_external_admission<Fut>(
-    workers: &BlockingPool,
+    workers: &BlockingExecutor,
     paths: Vec<PathBuf>,
     mut known_sources: impl FnMut(Vec<PathBuf>) -> Fut,
     ffmpeg_enabled: bool,
@@ -207,7 +207,7 @@ mod tests {
 
     #[test]
     fn exact_files_keep_order_duplicates_and_short_audio_without_expansion() {
-        let workers = &BlockingPool::new(4);
+        let workers = &BlockingExecutor::new(4);
         let directory = tempfile::tempdir().unwrap();
         let first = directory.path().join("first.wav");
         let second = directory.path().join("second.wav");
@@ -267,7 +267,7 @@ mod tests {
 
     #[test]
     fn exact_probe_reuses_unchanged_cache_and_preserves_logical_symlink_path() {
-        let workers = &BlockingPool::new(4);
+        let workers = &BlockingExecutor::new(4);
         let directory = tempfile::tempdir().unwrap();
         let original = directory.path().join("not-decodable.wav");
         std::fs::write(&original, b"cached encoded content").unwrap();
@@ -322,7 +322,7 @@ mod tests {
 
     #[test]
     fn cache_batches_and_invalid_diagnostics_remain_bounded() {
-        let workers = &BlockingPool::new(4);
+        let workers = &BlockingExecutor::new(4);
         let directory = tempfile::tempdir().unwrap();
         let files: Vec<_> = (0..SOURCE_BATCH_SIZE + 3)
             .map(|index| {
@@ -364,7 +364,7 @@ mod tests {
 
     #[test]
     fn cancelled_exact_admission_returns_no_partial_result() {
-        let workers = &BlockingPool::new(4);
+        let workers = &BlockingExecutor::new(4);
         let token = ScanCancellation::default();
         token.cancel();
         assert!(

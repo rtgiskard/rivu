@@ -11,7 +11,7 @@ pub struct CueSheet {
     pub title: Option<String>,
     pub performer: Option<String>,
     pub tracks: Vec<CueTrack>,
-    pub(super) retained: Option<super::input::RetainedScope>,
+    pub(super) retained: Option<super::import_budget::ImportBudgetScope>,
 }
 
 #[derive(Debug)]
@@ -57,7 +57,7 @@ pub(super) fn parse_import_input(
     bytes: &[u8],
     path: &Path,
     cancellation: &super::ScanCancellation,
-    budget: &super::input::RetainedBudget,
+    budget: &super::import_budget::ImportBudget,
 ) -> Result<CueSheet> {
     cancellation.check()?;
     let text = decode(bytes).with_context(|| format!("Decoding CUE {}", path.display()))?;
@@ -162,14 +162,14 @@ fn parse_checked(
     text: &str,
     parent: &Path,
     mut check: impl FnMut() -> Result<()>,
-    budget: Option<&super::input::RetainedBudget>,
+    budget: Option<&super::import_budget::ImportBudget>,
     sheet_path_bytes: usize,
 ) -> Result<CueSheet> {
-    let mut retained = budget.map(super::input::RetainedBudget::scoped);
+    let mut retained = budget.map(super::import_budget::ImportBudget::scoped);
     if let Some(retained) = &mut retained {
         retained.reserve(std::mem::size_of::<CueSheet>() + sheet_path_bytes)?;
     }
-    let mut workspace = budget.map(super::input::RetainedBudget::scoped);
+    let mut workspace = budget.map(super::import_budget::ImportBudget::scoped);
     let mut file_bytes = 0;
     let mut sheet = CueSheet {
         title: None,
@@ -455,9 +455,9 @@ FILE "disc two.wav" WAVE
 
     #[test]
     fn parsed_sheet_budget_tracks_live_metadata_not_replaced_titles_or_workspace() {
-        let budget = crate::library::input::RetainedBudget::default();
+        let budget = crate::library::import_budget::ImportBudget::default();
         budget
-            .reserve(crate::library::input::MAX_IMPORT_RETAINED_BYTES - 8192)
+            .reserve(crate::library::import_budget::MAX_IMPORT_RETAINED_BYTES - 8192)
             .unwrap();
         let mut text = String::new();
         for _ in 0..99 {

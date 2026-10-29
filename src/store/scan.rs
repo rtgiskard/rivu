@@ -1,7 +1,7 @@
 use super::Store;
 use super::rows::{cue_from_row, fingerprint_from_row};
 use crate::library::{CueRecord, KnownFile, RegisteredCueMetadata, ScanResult, ScanUncertainty};
-use crate::library::{RetainedBudget, RetainedScope};
+use crate::library::{ImportBudget, ImportBudgetScope};
 use anyhow::{Context, Result, bail};
 use rivu_audio::MediaInfo;
 use rivu_protocol::model::CueSegment;
@@ -142,7 +142,7 @@ const SCAN_SCOPE_IDS: &str = "
 fn scan_scope<'a>(
     paths: &'a [PathBuf],
     descendants: bool,
-    mut retained: Option<&mut RetainedScope>,
+    mut retained: Option<&mut ImportBudgetScope>,
 ) -> Result<(HashSet<&'a str>, HashSet<String>)> {
     if let Some(retained) = &mut retained {
         // Conservative allowance for both hash indexes, independent of successful
@@ -187,14 +187,14 @@ fn scan_scope<'a>(
 /// Charge vector growth before appending, including JSON escaping and spare capacity.
 struct ScopeJson {
     bytes: Vec<u8>,
-    retained: Option<RetainedScope>,
+    retained: Option<ImportBudgetScope>,
 }
 
 impl ScopeJson {
-    fn serialize(value: &impl serde::Serialize, budget: Option<&RetainedBudget>) -> Result<Self> {
+    fn serialize(value: &impl serde::Serialize, budget: Option<&ImportBudget>) -> Result<Self> {
         let mut output = Self {
             bytes: Vec::new(),
-            retained: budget.map(RetainedBudget::scoped),
+            retained: budget.map(ImportBudget::scoped),
         };
         serde_json::to_writer(&mut output, value)?;
         Ok(output)
@@ -459,7 +459,7 @@ impl Store {
         }
         let transaction_started = std::time::Instant::now();
         let tx = self.conn.unchecked_transaction()?;
-        let mut scope_workspace = result.retained_budget.as_ref().map(RetainedBudget::scoped);
+        let mut scope_workspace = result.retained_budget.as_ref().map(ImportBudget::scoped);
         let (mut exact, prefixes) =
             scan_scope(&result.roots, !exact_sources, scope_workspace.as_mut())?;
         exact.extend(records.iter().map(|record| {

@@ -3,7 +3,7 @@ use super::source::{
     CueRecord, HASH_CHUNK_BYTES, KnownFile, SOURCE_BATCH_SIZE, ScanRecord, ScanTrack,
     prepare_sources,
 };
-use crate::execution::BlockingPool;
+use crate::execution::BlockingExecutor;
 use anyhow::{Context, Result, anyhow, bail};
 use rivu_protocol::model::ScanPhase;
 use std::collections::{HashMap, HashSet};
@@ -86,7 +86,7 @@ pub struct ScanResult {
     pub records: Vec<Arc<ScanRecord>>,
     pub segments: Vec<CueRecord>,
     /// Import-only source/segment payload budget; transaction workspace is scoped.
-    pub(crate) retained_budget: Option<super::input::RetainedBudget>,
+    pub(crate) retained_budget: Option<super::import_budget::ImportBudget>,
     /// Admission threshold captured when the scan starts; zero disables filtering.
     /// Keep admitted records so storage can resolve existing identities first.
     pub min_duration_secs: u32,
@@ -197,7 +197,7 @@ impl ScanResult {
 /// expanding playlists/CUE sheets. Roots record confirmed absence only; failed
 /// opens, probes and permission checks never authorize missing reconciliation.
 pub(crate) async fn recheck_sources<Fut>(
-    workers: &BlockingPool,
+    workers: &BlockingExecutor,
     paths: &[PathBuf],
     mut known_sources: impl FnMut(Vec<PathBuf>) -> Fut,
     ffmpeg_enabled: bool,
@@ -301,7 +301,7 @@ pub fn scan_paths(
     cancellation: &ScanCancellation,
     progress: impl FnMut(ScanPhase, usize, Option<usize>, usize, Option<&Path>),
 ) -> Result<ScanResult> {
-    let workers = &BlockingPool::new(4);
+    let workers = &BlockingExecutor::new(4);
     futures::executor::block_on(scan_paths_with_cues(
         workers,
         paths,
@@ -325,7 +325,7 @@ pub(crate) struct ScanSettings<'a> {
 }
 
 pub(crate) async fn scan_paths_with_cues<Fut>(
-    workers: &BlockingPool,
+    workers: &BlockingExecutor,
     paths: &[PathBuf],
     mut known_sources: impl FnMut(Vec<PathBuf>) -> Fut,
     ScanSettings {
@@ -534,7 +534,7 @@ where
                 }
                 Err(error) => {
                     cancellation.check()?;
-                    if super::input::RetainedBudget::is_limit(&error) {
+                    if super::import_budget::ImportBudget::is_limit(&error) {
                         return Err(error);
                     }
                     result.push_uncertainty(ScanUncertainty::CueSheet(path.clone()));
@@ -662,7 +662,7 @@ where
 /// One sequential DFS: at most max_depth + 1 directory readers, no task per
 /// entry, and inode ancestry detects loops without erasing logical aliases.
 async fn discover_directory(
-    workers: &BlockingPool,
+    workers: &BlockingExecutor,
     root: &Path,
     metadata: fs::Metadata,
     (root_index, max_depth): (usize, u32),
@@ -842,7 +842,7 @@ fn traversal_error(
 }
 
 async fn read_cue(
-    workers: &BlockingPool,
+    workers: &BlockingExecutor,
     path: &Path,
     library_roots: &[PathBuf],
     cancellation: &ScanCancellation,
@@ -904,9 +904,12 @@ fn cue_records(
     mut sheet: super::cue::CueSheet,
     sources: &HashMap<PathBuf, std::result::Result<Arc<ScanRecord>, String>>,
     cancellation: &ScanCancellation,
-    budget: Option<&super::input::RetainedBudget>,
-) -> Result<(Vec<CueRecord>, Option<super::input::RetainedScope>)> {
-    let mut workspace = budget.map(super::input::RetainedBudget::scoped);
+    budget: Option<&super::import_budget::ImportBudget>,
+) -> Result<(
+    Vec<CueRecord>,
+    Option<super::import_budget::ImportBudgetScope>,
+)> {
+    let mut workspace = budget.map(super::import_budget::ImportBudget::scoped);
     if let Some(workspace) = &mut workspace {
         workspace.reserve(sheet.tracks.len() * std::mem::size_of::<CueRecord>())?;
     }
@@ -1006,7 +1009,7 @@ mod recheck_tests {
     #[test]
     fn exact_recheck_never_expands_inputs_and_only_confirms_absence() {
         futures::executor::block_on(async {
-            let workers = &BlockingPool::new(4);
+            let workers = &BlockingExecutor::new(4);
             let directory = tempfile::tempdir().unwrap();
             let nested = directory.path().join("nested");
             fs::create_dir(&nested).unwrap();
@@ -1054,7 +1057,7 @@ mod recheck_tests {
     #[test]
     fn exact_recheck_reuses_cache_and_force_callback_bypasses_it() {
         futures::executor::block_on(async {
-            let workers = &BlockingPool::new(4);
+            let workers = &BlockingExecutor::new(4);
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("cached.wav");
             fs::write(&path, b"intentionally unprobeable cached bytes").unwrap();
@@ -1091,7 +1094,7 @@ mod recheck_tests {
     #[test]
     fn exact_recheck_preserves_probe_failures_and_observes_cancellation_after_lookup() {
         futures::executor::block_on(async {
-            let workers = &BlockingPool::new(4);
+            let workers = &BlockingExecutor::new(4);
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("probe.wav");
             fs::write(&path, b"unreadable probe").unwrap();

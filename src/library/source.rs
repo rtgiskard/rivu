@@ -1,5 +1,5 @@
 use super::ScanCancellation;
-use crate::execution::BlockingPool;
+use crate::execution::BlockingExecutor;
 use anyhow::{Context, Result, bail};
 use rivu_audio::{MediaInfo, SourceIdentity, probe_file};
 use rivu_format::regular_file::open_regular_file;
@@ -274,7 +274,7 @@ impl PendingSource {
         ffmpeg_enabled: bool,
         cancellation: &ScanCancellation,
         scratch: &mut [u8],
-        budget: Option<&super::input::RetainedBudget>,
+        budget: Option<&super::import_budget::ImportBudget>,
     ) -> Result<Option<ScanRecord>> {
         cancellation.check()?;
         let size = self.size;
@@ -368,12 +368,15 @@ impl PendingSource {
 }
 
 pub(super) async fn prepare_sources<Fut>(
-    workers: &BlockingPool,
+    workers: &BlockingExecutor,
     paths: Vec<PathBuf>,
     known_sources: &mut impl FnMut(Vec<PathBuf>) -> Fut,
     sources: &mut HashMap<PathBuf, std::result::Result<Arc<ScanRecord>, String>>,
     ffmpeg_enabled: bool,
-    (cancellation, budget): (&ScanCancellation, Option<&super::input::RetainedBudget>),
+    (cancellation, budget): (
+        &ScanCancellation,
+        Option<&super::import_budget::ImportBudget>,
+    ),
     scratch: &mut Vec<u8>,
 ) -> Result<()>
 where
@@ -490,7 +493,7 @@ where
                             Ok(None) => {}
                             Err(error) => {
                                 token.check()?;
-                                if super::input::RetainedBudget::is_limit(&error) {
+                                if super::import_budget::ImportBudget::is_limit(&error) {
                                     return Err(error);
                                 }
                                 let source = pending.pop_front().expect("front source is present");
