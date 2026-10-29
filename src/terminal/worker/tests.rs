@@ -1,6 +1,9 @@
 use super::*;
 use crate::ipc;
-use crate::terminal::{PagedList, UiState, View};
+use crate::terminal::{
+    paged::PagedList,
+    state::{UiState, View},
+};
 use rivu_protocol::response::QueryRevisions;
 use std::time::Duration;
 

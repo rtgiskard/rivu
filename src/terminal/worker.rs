@@ -1,12 +1,13 @@
-use super::{Command, Path, PathBuf, Query, TuiSnapshot};
+use crate::projection::TuiSnapshot;
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender, TryRecvError, bounded};
 use parking_lot::Mutex;
 use rivu_protocol::{
-    model::{ClientSnapshot, LibrarySort, QueryStamp},
+    model::{ClientSnapshot, Command, LibrarySort, Query, QueryStamp},
     response::{Ack, StateSections, ViewResponse},
 };
 use std::{
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},

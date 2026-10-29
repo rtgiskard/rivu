@@ -1,7 +1,8 @@
-use super::render::tests::render_view;
 use super::*;
-use ratatui::{backend::TestBackend, text::Line};
+use crate::terminal::render::{draw, help_bindings, tests::render_view};
+use ratatui::{Terminal, backend::TestBackend, text::Line};
 use rivu_protocol::{model::Page, response::QueryRevisions};
+use std::path::Path;
 
 #[test]
 fn startup_hint_expires_once_at_its_deadline() {
@@ -49,7 +50,7 @@ fn closing_help_or_returning_to_queue_never_restores_startup_hint() {
     assert!(ui.startup_hint_deadline.is_none());
 }
 
-pub(super) fn terminal_text(terminal: &Terminal<TestBackend>) -> String {
+pub(in crate::terminal) fn terminal_text(terminal: &Terminal<TestBackend>) -> String {
     let buffer = terminal.backend().buffer();
     let mut text = String::new();
     for y in buffer.area.y..buffer.area.bottom() {
@@ -224,7 +225,7 @@ fn details_pin_search_target_reject_late_reads_and_restore_source() {
     assert!(ui.query_request(&state).is_none());
 }
 
-pub(super) fn full_track(id: i64) -> rivu_protocol::model::Track {
+pub(in crate::terminal) fn full_track(id: i64) -> rivu_protocol::model::Track {
     rivu_protocol::model::Track {
         id,
         path: "/music/夜航.flac".into(),
@@ -372,7 +373,7 @@ fn queue_rejects_delayed_pages_and_selection_lookups_after_navigation() {
     load_queue(&mut tui.ui, &state);
 }
 
-pub(super) fn queue_row(position: usize, id: u64) -> QueueRow {
+pub(in crate::terminal) fn queue_row(position: usize, id: u64) -> QueueRow {
     QueueRow {
         id,
         track_id: 7,
@@ -382,7 +383,7 @@ pub(super) fn queue_row(position: usize, id: u64) -> QueueRow {
     }
 }
 
-pub(super) fn load_queue(ui: &mut UiState, state: &TuiSnapshot) {
+pub(in crate::terminal) fn load_queue(ui: &mut UiState, state: &TuiSnapshot) {
     for _ in 0..16 {
         let Some(request) = ui.query_request(state) else {
             return;
@@ -416,7 +417,7 @@ fn empty_queue_changes_wait_for_occurrence_rows_before_actions() {
     assert!(tui.ui.queue.pages.is_empty());
 }
 
-pub(super) fn track(index: usize) -> LibraryRow {
+pub(in crate::terminal) fn track(index: usize) -> LibraryRow {
     LibraryRow {
         path: Default::default(),
         id: index as i64,
@@ -437,7 +438,7 @@ pub(super) fn track(index: usize) -> LibraryRow {
     }
 }
 
-pub(super) fn response(request: &QueryRequest, total: usize) -> QueryResult {
+pub(in crate::terminal) fn response(request: &QueryRequest, total: usize) -> QueryResult {
     let indices = request.offset..(request.offset + request.limit).min(total);
     let view = match &request.kind {
         QueryKind::OtherTracksCount => ViewResponse::OtherTracksCount(total),
@@ -516,7 +517,7 @@ pub(super) fn response(request: &QueryRequest, total: usize) -> QueryResult {
     }
 }
 
-pub(super) fn load_visible(ui: &mut UiState, state: &TuiSnapshot) {
+pub(in crate::terminal) fn load_visible(ui: &mut UiState, state: &TuiSnapshot) {
     ui.prepare_local_view(state);
     for _ in 0..16 {
         let Some(request) = ui.query_request(state) else {
@@ -527,7 +528,7 @@ pub(super) fn load_visible(ui: &mut UiState, state: &TuiSnapshot) {
     panic!("visible requests did not converge");
 }
 
-pub(super) fn playlist_view(playlist_id: i64) -> View {
+pub(in crate::terminal) fn playlist_view(playlist_id: i64) -> View {
     View::PlaylistDetail {
         playlists: (ListState::default(), 1),
         detail: PlaylistDetail {
@@ -540,7 +541,7 @@ pub(super) fn playlist_view(playlist_id: i64) -> View {
     }
 }
 
-pub(super) fn query_snapshot() -> TuiSnapshot {
+pub(in crate::terminal) fn query_snapshot() -> TuiSnapshot {
     let mut state = TuiSnapshot::default();
     state.system.page_size = 3;
     state.queue.total = 12;
@@ -1254,48 +1255,6 @@ fn every_queried_view_renders_across_batches_without_resetting_scroll() {
         assert!(!rendered.contains("row-0"), "{rendered}");
         assert!(rendered.contains("row-1"), "{rendered}");
         assert!(rendered.contains("row-4"), "{rendered}");
-    }
-}
-
-#[test]
-fn viewport_navigation_and_retention_do_not_depend_on_batch_size() {
-    for fetch_size in [1, 3, 32] {
-        let mut list = PagedList::default();
-        list.set_viewport(10);
-        for down in [true, false] {
-            for _ in 0..200 {
-                let mut requests = 0;
-                while let Some(offset) = list.next_offset(fetch_size) {
-                    let rows = (offset..(offset + fetch_size).min(10_000)).collect();
-                    list.insert(offset, fetch_size, 10_000, rows);
-                    requests += 1;
-                    assert!(requests <= 10usize.div_ceil(fetch_size) + 4);
-                }
-                assert_eq!(list.total, 10_000);
-                assert!(list.pages.len() <= 10usize.div_ceil(fetch_size) + 3);
-                assert!(
-                    (list.selection.offset()..list.visible_end())
-                        .all(|index| list.get(index) == Some(&index))
-                );
-                let before = list.selection.selected().unwrap();
-                list.navigate_action(
-                    if down {
-                        Action::PageDown
-                    } else {
-                        Action::PageUp
-                    },
-                    10,
-                );
-                assert_eq!(
-                    list.selection.selected(),
-                    Some(if down {
-                        before + 10
-                    } else {
-                        before.saturating_sub(10)
-                    })
-                );
-            }
-        }
     }
 }
 

@@ -1,11 +1,31 @@
-use super::*;
+use super::{
+    paged::PagedList,
+    state::{
+        DetailState, Details, LibrarySearch, LibraryTree, NoticeKind, PlaylistDetail, SearchFocus,
+        TopTab, UiState, View,
+    },
+};
+use crate::{
+    i18n::Localizer,
+    keyboard::{self, Action, Context as KeyboardContext},
+    projection::TuiSnapshot,
+};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, LineGauge, List, ListItem, Paragraph},
+    widgets::{Block, Borders, LineGauge, List, ListItem, ListState, Paragraph},
 };
-use rivu_protocol::model::RepeatMode;
+use rivu_protocol::model::{
+    DirectoryRow, LibraryRow, PlaybackStatus, PlaylistEntryRow, PlaylistSummary, QueueRow,
+    RepeatMode,
+};
+use std::borrow::Cow;
+use unicode_segmentation::UnicodeSegmentation;
+
+pub(super) fn help_bindings(context: KeyboardContext) -> impl Iterator<Item = keyboard::HelpRow> {
+    keyboard::help_rows(&[context, KeyboardContext::TuiHelp])
+}
 
 pub(super) fn track_label<'a>(title: &'a str, artist: &'a str) -> Cow<'a, str> {
     if title.is_empty() {

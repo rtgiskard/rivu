@@ -1,7 +1,15 @@
 use super::*;
-use crate::terminal::tests::*;
-use ratatui::backend::TestBackend;
-use rivu_protocol::response::QueryRevisions;
+use crate::terminal::{
+    state::{KeyAction, TuiState, tests::*},
+    worker::{QueryKind, QueryResult},
+};
+use crossterm::event::{KeyCode, KeyEvent};
+use ratatui::{Terminal, backend::TestBackend};
+use rivu_protocol::{
+    model::Query,
+    response::{QueryRevisions, ViewResponse},
+};
+use std::sync::Arc;
 
 #[test]
 fn details_loading_and_errors_preserve_scroll_until_fresh_track_is_rendered() {
