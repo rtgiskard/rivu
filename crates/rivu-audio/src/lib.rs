@@ -45,6 +45,11 @@ mod ffmpeg {
         availability().map(|_| ())
     }
 
+    pub(super) async fn load_completed() {
+        std::future::pending::<()>().await;
+    }
+
+    #[cfg(test)]
     pub(super) fn load_attempted() -> bool {
         false
     }
@@ -144,9 +149,10 @@ pub fn ffmpeg_status() -> anyhow::Result<String> {
     ffmpeg::availability()
 }
 
-/// Whether an explicit load has published either a runtime or its failure.
-pub fn ffmpeg_load_attempted() -> bool {
-    ffmpeg::load_attempted()
+/// Wait for the process-wide explicit load to publish success or failure.
+/// Does not start loading; without FFmpeg support this remains pending.
+pub async fn ffmpeg_load_completed() {
+    ffmpeg::load_completed().await;
 }
 
 /// Immutable click-time description of the actual source and active processing.

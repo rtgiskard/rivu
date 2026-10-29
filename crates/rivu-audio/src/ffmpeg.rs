@@ -187,6 +187,8 @@ unsafe impl Sync for Runtime {}
 // Non-forcing snapshots remain available while an explicit load is in progress.
 static RUNTIME: LazyLock<std::result::Result<Runtime, String>> =
     LazyLock::new(|| load_runtime().map_err(|error| format!("{error:#}")));
+static LOAD_COMPLETED: LazyLock<(async_channel::Sender<()>, async_channel::Receiver<()>)> =
+    LazyLock::new(|| async_channel::bounded(1));
 
 unsafe fn symbol<T: Copy>(library: &Library, name: &[u8]) -> Result<T> {
     // Every caller supplies an extern function pointer. Option preserves its
@@ -324,13 +326,19 @@ fn load_runtime() -> Result<Runtime> {
     Ok(runtime)
 }
 fn runtime() -> Result<&'static Runtime> {
-    LazyLock::force(&RUNTIME)
-        .as_ref()
-        .map_err(|error| anyhow::anyhow!("{error}"))
+    let result = LazyLock::force(&RUNTIME);
+    // Close only after LazyLock has published success or failure. Every current
+    // and future waiter then observes completion without consuming a token.
+    LOAD_COMPLETED.0.close();
+    result.as_ref().map_err(|error| anyhow::anyhow!("{error}"))
 }
 pub(super) fn ensure_loaded() -> Result<()> {
     runtime().map(|_| ())
 }
+pub(super) async fn load_completed() {
+    let _ = LOAD_COMPLETED.1.recv().await;
+}
+#[cfg(test)]
 pub(super) fn load_attempted() -> bool {
     // get() stays nonblocking and returns None until initialization is published.
     LazyLock::get(&RUNTIME).is_some()

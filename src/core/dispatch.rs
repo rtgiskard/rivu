@@ -10,7 +10,7 @@ pub(super) enum BusinessEvent {
     Export(Result<()>),
     ExternalAdmission(admission::Event),
     Optimization(Result<DatabaseOptimization>),
-    FfmpegStatus,
+    FfmpegLoaded,
     Shutdown(RuntimeControl),
 }
 
@@ -43,13 +43,9 @@ impl Core {
                 return;
             }
         }
-        let mut ffmpeg_status_ticks = None;
-        while let Some(event) = futures::executor::block_on(self.next_event(
-            &mut requests,
-            &mut shutdown,
-            &mut ffmpeg_status_ticks,
-            control,
-        )) {
+        while let Some(event) =
+            futures::executor::block_on(self.next_event(&mut requests, &mut shutdown, control))
+        {
             let transition = self
                 .read_queries
                 .as_ref()
@@ -70,14 +66,8 @@ impl Core {
         &mut self,
         requests: &mut mpsc::Receiver<Request>,
         shutdown: &mut mpsc::Receiver<()>,
-        ffmpeg_status_ticks: &mut Option<Instant>,
         control: &RuntimeControl,
     ) -> Option<BusinessEvent> {
-        if self.state.system.ffmpeg_status == "not loaded" {
-            ffmpeg_status_ticks.get_or_insert_with(|| Instant::now() + Duration::from_millis(100));
-        } else {
-            *ffmpeg_status_ticks = None;
-        }
         let Core {
             engine,
             scan_rx,
@@ -88,6 +78,7 @@ impl Core {
             processing,
             ..
         } = self;
+        let awaiting_ffmpeg = self.state.system.ffmpeg_status == "not loaded";
         // Consume one event per iteration, with randomized selection to avoid
         // permanent priority for a hot input.
         Some(futures::select! {
@@ -99,6 +90,13 @@ impl Core {
             scan = scan_rx.recv().fuse() => BusinessEvent::Scan(scan.ok()?),
             relocation = relocation_rx.recv().fuse() => BusinessEvent::Relocation(relocation.ok()?),
             event = processing.receiver.recv().fuse() => BusinessEvent::Processing(event.ok()?),
+            _ = async {
+                if awaiting_ffmpeg {
+                    audio::ffmpeg_load_completed().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            }.fuse() => BusinessEvent::FfmpegLoaded,
             event = async {
                 match active_external_admission.as_mut() {
                     Some(task) => task.next_event().await,
@@ -121,15 +119,6 @@ impl Core {
             }.fuse() => BusinessEvent::Optimization(result.unwrap_or_else(|_| Err(anyhow::anyhow!(
                 "Database optimization ended without a result; the database may already have changed"
             )))),
-            _ = async {
-                match ffmpeg_status_ticks {
-                    Some(deadline) => {
-                        async_io::Timer::at(*deadline).await;
-                        *deadline = Instant::now() + Duration::from_millis(100);
-                    }
-                    None => std::future::pending().await,
-                }
-            }.fuse() => BusinessEvent::FfmpegStatus,
         })
     }
 }
@@ -167,12 +156,10 @@ impl Core {
                 let (reply, result) = self.finish_optimization(result);
                 self.complete_optimization(reply, result);
             }
-            BusinessEvent::FfmpegStatus => {
-                if audio::ffmpeg_load_attempted() {
-                    self.state.system.ffmpeg_status = audio::ffmpeg_status()
-                        .unwrap_or_else(|error| format!("unavailable: {error:#}"));
-                    self.publish();
-                }
+            BusinessEvent::FfmpegLoaded => {
+                self.state.system.ffmpeg_status = audio::ffmpeg_status()
+                    .unwrap_or_else(|error| format!("unavailable: {error:#}"));
+                self.publish();
             }
             BusinessEvent::Shutdown(control) => {
                 self.state.system.shutting_down = true;

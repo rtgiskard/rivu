@@ -186,6 +186,8 @@ link:02_library.adoc#_metadata_and_favorites[enhanced probe]. Missing libraries
 are reported when needed; native decoders continue to work. A load failure is
 retained until restart. Disabling stops a track currently decoded through FFmpeg;
 native-decoded playback is unaffected.
+Runtime availability updates when the first explicit load completes, including
+loads initiated by GUI waveform work; an unused extension has no periodic status polling.
 
 === Volume and playback controls
 
