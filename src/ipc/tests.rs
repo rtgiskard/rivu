@@ -33,11 +33,11 @@ fn pending_query_preserves_pipelined_responses_and_disconnected_clients_release_
     }
     .save(&config_path)
     .unwrap();
-    let mut runtime = crate::core::Runtime::start(directory.path(), &config_path).unwrap();
+    let mut runtime = crate::core::CoreRuntime::start(directory.path(), &config_path).unwrap();
     let (handle, queries) = crate::core::CoreHandle::test_query_port();
     let owner = SocketOwner::acquire(directory.path()).unwrap();
     let app = AppHandle::new(&runtime, false);
-    let server = Server::start(&owner, handle.clone(), app).unwrap();
+    let server = Server::start(&owner, handle.clone(), app, runtime.test_executor()).unwrap();
     let address = rivu_protocol::wire::address(directory.path()).unwrap();
     let connect = || {
         let mut stream = std::os::unix::net::UnixStream::connect_addr(&address).unwrap();
@@ -124,9 +124,10 @@ fn configuration_only_change_wakes_ipc_watch_and_selective_read_omits_runtime() 
     .save(&config_path)
     .unwrap();
     let owner = SocketOwner::acquire(directory.path()).unwrap();
-    let mut runtime = crate::core::Runtime::start(directory.path(), &config_path).unwrap();
+    let mut runtime = crate::core::CoreRuntime::start(directory.path(), &config_path).unwrap();
     let app = AppHandle::new(&runtime, false);
-    let server = Server::start(&owner, runtime.handle.clone(), app).unwrap();
+    let server =
+        Server::start(&owner, runtime.handle.clone(), app, runtime.test_executor()).unwrap();
     let mut control = client_session(directory.path()).unwrap();
     control.query(Query::ScanTask { id: 0 }).unwrap();
     let initial = control.get_state(StateSections::ALL).unwrap();
@@ -191,9 +192,10 @@ fn app_commands_route_over_ipc_without_changing_business_state() {
     .save(&config_path)
     .unwrap();
     let owner = SocketOwner::acquire(directory.path()).unwrap();
-    let mut runtime = crate::core::Runtime::start(directory.path(), &config_path).unwrap();
+    let mut runtime = crate::core::CoreRuntime::start(directory.path(), &config_path).unwrap();
     let app = AppHandle::new(&runtime, false);
-    let server = Server::start(&owner, runtime.handle.clone(), app).unwrap();
+    let server =
+        Server::start(&owner, runtime.handle.clone(), app, runtime.test_executor()).unwrap();
     let mut client = client_session(directory.path()).unwrap();
     // A query fences asynchronous startup before comparing published state.
     client.query(Query::ScanTask { id: 0 }).unwrap();
@@ -262,9 +264,10 @@ fn malformed_request_during_watch_receives_invalid_request_response() {
     .save(&config_path)
     .unwrap();
     let owner = SocketOwner::acquire(directory.path()).unwrap();
-    let mut runtime = crate::core::Runtime::start(directory.path(), &config_path).unwrap();
+    let mut runtime = crate::core::CoreRuntime::start(directory.path(), &config_path).unwrap();
     let app = AppHandle::new(&runtime, false);
-    let server = Server::start(&owner, runtime.handle.clone(), app).unwrap();
+    let server =
+        Server::start(&owner, runtime.handle.clone(), app, runtime.test_executor()).unwrap();
     let mut control = client_session(directory.path()).unwrap();
     control.query(Query::ScanTask { id: 0 }).unwrap();
     let address = rivu_protocol::wire::address(directory.path()).unwrap();
@@ -936,7 +939,7 @@ fn library_root_responses_wire_round_trip_preserves_projection_and_revisions() {
 
 #[test]
 fn library_root_queries_run_through_real_owner_and_ipc_session() {
-    use crate::{config::Config, core::Runtime, store::Store};
+    use crate::{config::Config, core::CoreRuntime, store::Store};
     use rivu_protocol::{
         model::{LibrarySort, MAX_QUERY_ROWS},
         response::{QueryError, ViewResponse},
@@ -974,9 +977,15 @@ fn library_root_queries_run_through_real_owner_and_ipc_session() {
     .save(&config_path)
     .unwrap();
     let owner = SocketOwner::acquire(directory.path()).unwrap();
-    let mut runtime = Runtime::start(directory.path(), &config_path).unwrap();
+    let mut runtime = CoreRuntime::start(directory.path(), &config_path).unwrap();
     let app = AppHandle::new(&runtime, false);
-    let server = Server::start(&owner, runtime.handle.clone(), app.clone()).unwrap();
+    let server = Server::start(
+        &owner,
+        runtime.handle.clone(),
+        app.clone(),
+        runtime.test_executor(),
+    )
+    .unwrap();
     assert!(SocketOwner::acquire(directory.path()).is_err());
     let mut session = client_session(directory.path()).unwrap();
     let count_query = Query::LibraryRootCounts {
@@ -1050,7 +1059,7 @@ fn library_root_queries_run_through_real_owner_and_ipc_session() {
 
 #[test]
 fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
-    use crate::{config::Config, core::Runtime, store::Store};
+    use crate::{config::Config, core::CoreRuntime, store::Store};
     use rivu_protocol::response::{PlaylistEntryRevision, QueryError, ViewResponse};
     let directory = socket_test_directory();
     let database = directory.path().join("library.db");
@@ -1074,9 +1083,15 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
     .save(&config_path)
     .unwrap();
     let owner = SocketOwner::acquire(directory.path()).unwrap();
-    let mut runtime = Runtime::start(directory.path(), &config_path).unwrap();
+    let mut runtime = CoreRuntime::start(directory.path(), &config_path).unwrap();
     let app = AppHandle::new(&runtime, false);
-    let server = Server::start(&owner, runtime.handle.clone(), app.clone()).unwrap();
+    let server = Server::start(
+        &owner,
+        runtime.handle.clone(),
+        app.clone(),
+        runtime.test_executor(),
+    )
+    .unwrap();
     let mut session = client_session(directory.path()).unwrap();
     let summaries = Query::PlaylistSummaries {
         query: None,
@@ -3063,9 +3078,15 @@ fn filtered_occurrence_continuations_round_trip_and_reject_stale_ipc_scopes() {
     .save(&config_path)
     .unwrap();
     let owner = SocketOwner::acquire(directory.path()).unwrap();
-    let mut runtime = crate::core::Runtime::start(directory.path(), &config_path).unwrap();
+    let mut runtime = crate::core::CoreRuntime::start(directory.path(), &config_path).unwrap();
     let app = AppHandle::new(&runtime, false);
-    let server = Server::start(&owner, runtime.handle.clone(), app.clone()).unwrap();
+    let server = Server::start(
+        &owner,
+        runtime.handle.clone(),
+        app.clone(),
+        runtime.test_executor(),
+    )
+    .unwrap();
     let mut session = client_session(directory.path()).unwrap();
     let queue_query = |query: &str, after| Query::QueueBatch {
         query: Some(query.into()),

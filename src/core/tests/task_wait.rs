@@ -9,13 +9,10 @@ pub(super) fn wait_handle(core: &Core) -> (CoreHandle, mpsc::Receiver<Request>) 
         analysis_control: Arc::clone(&core.engine.analysis_control),
         waveform: Arc::clone(&core.engine.waveform),
         sender,
-        executor: Arc::clone(&core.executor),
-        workers: Arc::clone(&core.workers),
         revision_updates: Arc::clone(&core.revision_updates),
         wakeup: Arc::clone(&core.wakeup),
         task_waiters: Arc::clone(&core.task_waiters),
         query_timeout: None,
-        _test_tasks: None,
     };
     (handle, requests)
 }

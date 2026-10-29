@@ -1,6 +1,39 @@
 use super::*;
 use anyhow::bail;
 
+pub(super) struct PlaybackSession {
+    pub(super) track_id: i64,
+    // The source admitted by Load, shared with the initial current-track projection.
+    // Library refreshes may update metadata but cannot replace this session's source.
+    pub(super) loaded_track: Arc<Track>,
+    pub(super) source: Option<(crate::store::PlaybackSource, std::fs::Metadata)>,
+    pub(super) heard: f64,
+    pub(super) position: Option<f64>,
+    pub(super) started: bool,
+    pub(super) counted: bool,
+    pub(super) last_heard_at: Option<i64>,
+    pub(super) activity_updated: bool,
+    pub(super) paused_at: Option<i64>,
+}
+impl PlaybackSession {
+    pub(super) fn record_heard(&mut self, heard: f64, heard_at: i64) -> bool {
+        if !heard.is_finite() || heard <= self.heard {
+            return false;
+        }
+        self.heard = heard;
+        self.last_heard_at = Some(
+            self.last_heard_at
+                .map_or(heard_at, |previous| previous.max(heard_at)),
+        );
+        self.activity_updated = true;
+        true
+    }
+}
+pub(super) struct RetiredPlayback {
+    pub(super) stats: PlaybackSession,
+    pub(super) duration: Option<f64>,
+}
+
 fn modified_ns(metadata: &std::fs::Metadata) -> Option<i64> {
     let modified = metadata.modified().ok()?;
     let ns = match modified.duration_since(UNIX_EPOCH) {
@@ -230,7 +263,7 @@ impl Core {
                 start_seconds: 0.0,
                 paused: status == PlaybackStatus::Paused,
             })?;
-            self.playback = Some(PlaybackStats {
+            self.playback = Some(PlaybackSession {
                 track_id: track.id,
                 loaded_track: Arc::clone(&track),
                 source,

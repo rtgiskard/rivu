@@ -23,7 +23,8 @@ impl Core {
                 .command(Command::Configure {
                     config: std::sync::Arc::new(config),
                 })
-                .map(|_| ());
+                .map(|_| ())
+                .map_err(|error| error.error);
         }
         let mut config = self.effective_config();
         let still_mode = matches!(change, GuiConfigChange::ToggleStillMode);

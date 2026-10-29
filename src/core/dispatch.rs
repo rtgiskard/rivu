@@ -11,7 +11,7 @@ pub(super) enum BusinessEvent {
     ExternalAdmission(admission::Event),
     Optimization(Result<DatabaseOptimization>),
     FfmpegLoaded,
-    Shutdown(RuntimeControl),
+    Shutdown(CoreLifecycle),
 }
 
 impl Core {
@@ -21,7 +21,7 @@ impl Core {
         &mut self,
         mut requests: mpsc::Receiver<Request>,
         mut shutdown: mpsc::Receiver<()>,
-        control: &RuntimeControl,
+        control: &CoreLifecycle,
     ) {
         match self
             .store
@@ -66,7 +66,7 @@ impl Core {
         &mut self,
         requests: &mut mpsc::Receiver<Request>,
         shutdown: &mut mpsc::Receiver<()>,
-        control: &RuntimeControl,
+        control: &CoreLifecycle,
     ) -> Option<BusinessEvent> {
         let Core {
             engine,
@@ -252,67 +252,40 @@ impl Core {
                 let _ = self.engine.send(AudioCommand::WaveformSnapshot(reply));
             }
             Operation::Command(command) => {
-                let starts_scan = matches!(
-                    &command,
-                    Command::Scan { .. }
-                        | Command::ImportPlaylist { .. }
-                        | Command::CheckOtherTracks { .. }
-                );
-                let library_owned = matches!(
-                    &command,
-                    Command::Scan { .. } | Command::CheckOtherTracks { .. }
-                );
-                let starts_relocation = matches!(&command, Command::RelocateTrack { .. });
-                let starts_export = matches!(&command, Command::ExportPlaylist { .. });
-                let starts_external = matches!(&command, Command::QueueExternalPaths { .. });
-                let starts_optimization = matches!(&command, Command::OptimizeDatabase);
+                use command::CommandOutcome;
                 let result = self.command(command);
                 if let Err(error) = &result
-                    && (!library_owned || request.reply.is_none())
+                    && (!error.library_owned || request.reply.is_none())
                 {
-                    self.state.system.last_error = Some(format!("{error:#}"));
+                    self.state.system.last_error = Some(format!("{:#}", error.error));
                 }
                 self.publish();
-                let scan_id = if result.is_ok() {
-                    if starts_external {
-                        self.active_external_admission
-                            .as_ref()
-                            .map(|task| task.status.id)
-                    } else if starts_scan {
-                        self.active_scan.as_ref().map(|task| task.status.id)
-                    } else {
-                        None
+                let mut ack = Ack::from_result(Ok(()), self.state.system.revision);
+                match result {
+                    Ok(CommandOutcome::Immediate) => {}
+                    Ok(CommandOutcome::Scan(id)) => ack.scan_id = Some(id),
+                    Ok(CommandOutcome::Relocation(id)) => ack.relocation_id = Some(id),
+                    Ok(CommandOutcome::Processing(id)) => ack.processing_id = Some(id),
+                    Ok(CommandOutcome::DeferredExport) => {
+                        self.active_export
+                            .as_mut()
+                            .expect("export was accepted")
+                            .reply = request.reply;
+                        return;
                     }
-                } else {
-                    None
-                };
-                let relocation_id = if result.is_ok() && starts_relocation {
-                    self.active_relocation.as_ref().map(|task| task.status.id)
-                } else {
-                    None
-                };
-                let processing_id = result.as_ref().ok().copied().flatten();
-                if result.is_ok() && starts_export {
-                    self.active_export
-                        .as_mut()
-                        .expect("export was accepted")
-                        .reply = request.reply;
-                    return;
-                }
-                if result.is_ok() && starts_optimization {
-                    self.active_optimization
-                        .as_mut()
-                        .expect("optimization was accepted")
-                        .reply = request.reply;
-                    return;
+                    Ok(CommandOutcome::DeferredOptimization) => {
+                        self.active_optimization
+                            .as_mut()
+                            .expect("optimization was accepted")
+                            .reply = request.reply;
+                        return;
+                    }
+                    Err(error) => {
+                        ack = Ack::from_result(Err(error.error), self.state.system.revision);
+                    }
                 }
                 if let Some(reply) = request.reply {
-                    let _ = reply.send(CoreResponse::Ack(Ack {
-                        scan_id,
-                        relocation_id,
-                        processing_id,
-                        ..Ack::from_result(result.map(|_| ()), self.state.system.revision)
-                    }));
+                    let _ = reply.send(CoreResponse::Ack(ack));
                 }
             }
             operation @ (Operation::GuiConfig(_)

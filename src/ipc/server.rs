@@ -51,8 +51,8 @@ impl SocketOwner {
     }
 }
 
-/// Async transport owned by App; Core's runtime stays alive until this service
-/// and every connection have retired, before SocketOwner releases authority.
+/// Async transport owned by App; application execution stays alive until this
+/// service and every connection retire, before SocketOwner releases authority.
 pub struct Server {
     data_dir: PathBuf,
     shutdown: Sender<()>,
@@ -60,12 +60,22 @@ pub struct Server {
 }
 
 impl Server {
-    pub(crate) fn start(owner: &SocketOwner, handle: CoreHandle, app: AppHandle) -> Result<Self> {
+    pub(crate) fn start(
+        owner: &SocketOwner,
+        handle: CoreHandle,
+        app: AppHandle,
+        executor: &std::sync::Arc<async_executor::Executor<'static>>,
+    ) -> Result<Self> {
         let data_dir = owner.data_dir.clone();
         let listener = Async::new(owner.listener.try_clone()?)?;
         let (shutdown, shutdown_rx) = async_channel::bounded(1);
-        let executor = handle.executor().clone();
-        let worker = executor.spawn(run_server(listener, handle, app, shutdown_rx));
+        let worker = executor.spawn(run_server(
+            listener,
+            handle,
+            app,
+            shutdown_rx,
+            executor.clone(),
+        ));
         tracing::info!(path = %data_dir.display(), "ipc_server_started");
         Ok(Self {
             data_dir,
@@ -473,6 +483,7 @@ async fn run_server(
     handle: CoreHandle,
     app: AppHandle,
     shutdown: Receiver<()>,
+    executor: std::sync::Arc<async_executor::Executor<'static>>,
 ) {
     let instance_id = {
         let mut rng = rand::rng();
@@ -533,7 +544,7 @@ async fn run_server(
                         instance_id,
                         shutdown.clone(),
                     );
-                    clients.push(handle.executor().spawn(async move {
+                    clients.push(executor.spawn(async move {
                         std::panic::AssertUnwindSafe(connection)
                             .catch_unwind()
                             .await

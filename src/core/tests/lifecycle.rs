@@ -1,8 +1,9 @@
 use super::*;
+use crate::core::catalog::ScanFinished;
 
 #[test]
 fn runtime_completion_notifies_on_panic_and_reconciles_late_registration() {
-    let (control, _shutdown) = RuntimeControl::new();
+    let (control, _shutdown) = CoreLifecycle::new();
     let (wake, wakes) = bounded(1);
     control.set_completion_callback(move || {
         let _ = wake.try_send(());
@@ -29,7 +30,7 @@ fn runtime_completion_notifies_on_panic_and_reconciles_late_registration() {
 
 #[test]
 fn lifecycle_shutdown_coalesces_without_business_queue_capacity() {
-    let (control, shutdown) = RuntimeControl::new();
+    let (control, shutdown) = CoreLifecycle::new();
     for _ in 0..1000 {
         control.request_shutdown().unwrap();
     }
@@ -231,10 +232,10 @@ fn owner_disconnect_after_admission_reports_unknown_not_rejection() {
 
 #[test]
 fn shutdown_acknowledgement_does_not_claim_runtime_teardown_is_finished() {
-    let (control, _shutdown) = RuntimeControl::new();
+    let (control, _shutdown) = CoreLifecycle::new();
     control.acknowledge(Ack::from_result(Ok(()), 9));
     assert!(futures::executor::block_on(control.shutdown_ack_async(|| 0)).is_success());
-    assert!(!control.completion.state.lock().finished);
+    assert!(!control.is_complete());
 }
 
 #[test]
@@ -251,9 +252,9 @@ fn query_startup_failure_retains_its_cause_after_final_persistence() {
         // A memory-only store cannot start the independent read owner.
         core.store = Store::open(std::path::Path::new(":memory:")).unwrap();
         let (_sender, requests) = async_channel::bounded(1);
-        let (control, shutdown) = RuntimeControl::new();
+        let (control, shutdown) = CoreLifecycle::new();
         core.run(requests, shutdown, &control);
-        let error = control.completion.state.lock().error.take().unwrap();
+        let error = control.take_error().unwrap();
         let error = format!("{error:#}");
         assert!(error.contains("Starting read queries"));
         assert!(error.contains("file-backed library"));
@@ -289,7 +290,7 @@ fn final_queue_failure_still_attempts_config_and_retains_all_failures() {
         assert!(ack.is_success());
         let core = worker.join().unwrap();
         assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
-        let error = control.completion.state.lock().error.take().unwrap();
+        let error = control.take_error().unwrap();
         let error = format!("{error:#}");
         assert!(error.contains("Saving queue"));
         assert_eq!(error.contains("Saving configuration"), invalid_config);
@@ -321,7 +322,7 @@ fn accepted_shutdown_reports_stop_failure_without_rejecting_the_request() {
     assert!(core.state.system.shutting_down);
     assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
     assert!(core.state.system.last_error.is_some());
-    let error = control.completion.state.lock().error.take().unwrap();
+    let error = control.take_error().unwrap();
     assert!(format!("{error:#}").contains("activity unavailable"));
     let (count, last_played) = connection
         .query_row(
@@ -337,15 +338,16 @@ fn accepted_shutdown_reports_stop_failure_without_rejecting_the_request() {
 #[test]
 fn async_replies_and_admission_do_not_need_a_blocking_pool_slot() {
     let (_directory, mut core) = fixture_with_database(Some(10.0));
-    let tasks = TaskRuntime::with_blocking_threads(1).unwrap();
+    let tasks = TaskRuntime::with_blocking_limit(1).unwrap();
+    let executor = Arc::clone(&tasks.handle);
+    let workers = Arc::clone(&tasks.workers);
     core.executor = tasks.handle.clone();
     core.workers = tasks.workers.clone();
     core._test_tasks = Some(tasks);
     let (handle, control, worker, _) = navigation_runtime(core);
     let (started, running) = bounded(1);
     let (release, released) = bounded(1);
-    let workers = handle.workers().clone();
-    let blocker = handle.executor.spawn(async move {
+    let blocker = executor.spawn(async move {
         workers
             .execute(move || {
                 started.send(()).unwrap();
@@ -382,7 +384,7 @@ fn async_replies_and_admission_do_not_need_a_blocking_pool_slot() {
     });
     assert_eq!(handle.state.read().playback.volume, 0.42);
 
-    let optimizing = handle.executor.spawn({
+    let optimizing = executor.spawn({
         let handle = handle.clone();
         async move { handle.request_ack(Command::OptimizeDatabase).await }
     });
@@ -497,7 +499,7 @@ fn owner_failure_retires_background_work_without_blocking_executor() {
                 reply: None,
             })
             .unwrap();
-        let (control, shutdown) = RuntimeControl::new();
+        let (control, shutdown) = CoreLifecycle::new();
         let (completed, completion) = bounded(1);
         let retired = retired_scan.clone();
         control.set_completion_callback(move || {

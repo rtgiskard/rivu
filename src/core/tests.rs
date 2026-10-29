@@ -1,5 +1,6 @@
 use super::*;
 use crate::library::ScanRecord;
+use crate::query_tracking::QueryEpoch;
 use crossbeam_channel::{Receiver, bounded};
 use std::sync::atomic::Ordering;
 
@@ -227,7 +228,7 @@ fn navigation_runtime(
     mut core: Core,
 ) -> (
     CoreHandle,
-    RuntimeControl,
+    CoreLifecycle,
     JoinHandle<Core>,
     Arc<Mutex<Vec<MprisSnapshot>>>,
 ) {
@@ -239,13 +240,10 @@ fn navigation_runtime(
         analysis_control: core.engine.analysis_control.clone(),
         waveform: core.engine.waveform.clone(),
         sender,
-        executor: core.executor.clone(),
-        workers: core.workers.clone(),
         revision_updates: core.revision_updates.clone(),
         wakeup: core.wakeup.clone(),
         task_waiters: core.task_waiters.clone(),
         query_timeout: None,
-        _test_tasks: None,
     };
     let publications = Arc::new(Mutex::new(Vec::new()));
     let observed = publications.clone();
@@ -255,7 +253,7 @@ fn navigation_runtime(
             .lock()
             .push(MprisSnapshot::from_core(&state.read()));
     });
-    let (control, shutdown) = RuntimeControl::new();
+    let (control, shutdown) = CoreLifecycle::new();
     let worker_control = control.clone();
     let worker = thread::spawn(move || run_test_driver(core, requests, shutdown, &worker_control));
     (handle, control, worker, publications)
@@ -265,14 +263,14 @@ fn run_test_driver(
     mut core: Core,
     requests: mpsc::Receiver<Request>,
     shutdown: mpsc::Receiver<()>,
-    control: &RuntimeControl,
+    control: &CoreLifecycle,
 ) -> Core {
     core.run(requests, shutdown, control);
     core
 }
 
 fn run_until_disconnected(core: Core, requests: mpsc::Receiver<Request>) -> Core {
-    let (control, shutdown) = RuntimeControl::new();
+    let (control, shutdown) = CoreLifecycle::new();
     run_test_driver(core, requests, shutdown, &control)
 }
 
@@ -291,20 +289,16 @@ fn display_fixture() -> (
     });
     worker.set_playback_active(true);
     let (sender, receiver) = async_channel::bounded(1);
-    let tasks = Arc::new(TaskRuntime::start().unwrap());
     let handle = CoreHandle {
         state: Arc::new(RwLock::new(CoreState::default())),
         analysis,
         analysis_control: worker.control.clone(),
         waveform: Arc::new(RwLock::new(audio::WaveformFrame::default())),
         sender,
-        executor: tasks.handle.clone(),
-        workers: tasks.workers.clone(),
         revision_updates: Arc::new(RwLock::new(Vec::new())),
         wakeup: Arc::new(RwLock::new(None)),
         task_waiters: Arc::new(Mutex::new(TaskWaiters::default())),
         query_timeout: None,
-        _test_tasks: Some(tasks),
     };
     (handle, worker, receiver)
 }
@@ -447,7 +441,7 @@ fn pending(core: &mut Core, queue_id: u64) {
         (track.id, track.duration)
     };
     core.state.playback.duration = duration;
-    core.playback = Some(PlaybackStats {
+    core.playback = Some(PlaybackSession {
         track_id,
         loaded_track: Arc::clone(core.state.current_track.as_ref().unwrap()),
         source: core

@@ -5,7 +5,8 @@
 use crate::config::ConfigPersistence;
 use crate::{
     artwork::ArtworkManager,
-    core::{CoreHandle, Runtime, RuntimeControl},
+    core::{CoreHandle, CoreLifecycle, CoreRuntime},
+    execution::TaskRuntime,
     gui::{self, session::UiSession},
     ipc, logging, mpris,
     tray::TrayController,
@@ -36,12 +37,12 @@ struct ControlState {
 #[derive(Clone)]
 pub(crate) struct AppHandle {
     core: CoreHandle,
-    runtime: RuntimeControl,
+    runtime: CoreLifecycle,
     state: Arc<parking_lot::Mutex<ControlState>>,
 }
 
 impl AppHandle {
-    pub(crate) fn new(runtime: &Runtime, graphical: bool) -> Self {
+    pub(crate) fn new(runtime: &CoreRuntime, graphical: bool) -> Self {
         let state = Arc::new(parking_lot::Mutex::new(ControlState {
             graphical,
             ..ControlState::default()
@@ -187,20 +188,22 @@ impl AppHandle {
 /// App retains socket acquisition until core, media, and transport have stopped.
 pub struct App {
     handle: AppHandle,
-    runtime: Runtime,
+    runtime: CoreRuntime,
     signals: Option<ShutdownSignals>,
-    media: Option<mpris::MediaWorker>,
+    media: Option<mpris::MprisController>,
     artwork: Arc<ArtworkManager>,
     tray: Option<TrayController>,
-    gui: Option<GuiState>,
+    gui: Option<GuiHost>,
     server: Option<ipc::Server>,
     session: Option<logging::Session>,
+    // Field order keeps execution alive through all owners, including GUI teardown.
+    tasks: TaskRuntime,
     // Retire the socket last, including after partial startup and core join.
     _socket_owner: ipc::SocketOwner,
 }
 
 /// GPUI integration state, not a second application or services owner.
-struct GuiState {
+struct GuiHost {
     session: Rc<RefCell<UiSession>>,
     i18n: Arc<crate::i18n::Localizer>,
     window_closed: Option<Subscription>,
@@ -252,7 +255,7 @@ impl App {
         let socket_owner = ipc::SocketOwner::acquire(&data_dir)?;
         let signals =
             Signals::new([Signal::Int, Signal::Term]).context("Registering shutdown signals")?;
-        let config = Runtime::load_startup_config(&config_path)?;
+        let config = CoreRuntime::load_startup_config(&config_path)?;
         let artwork_limit_bytes = config.artwork_file_limit_mb as usize * 1024 * 1024;
         let i18n = Arc::new(crate::i18n::Localizer::new(if graphical {
             &config.ui_language
@@ -260,11 +263,23 @@ impl App {
             "auto"
         }));
         let session = logging::Session::start(&data_dir, &config)?;
-        let runtime =
-            Runtime::start_with_logging(&data_dir, &config_path, config, session.control())?;
+        let tasks = TaskRuntime::start()?;
+        let runtime = CoreRuntime::start_with_logging(
+            &data_dir,
+            &config_path,
+            config,
+            session.control(),
+            Arc::clone(&tasks.handle),
+            Arc::clone(&tasks.workers),
+        )?;
         let handle = AppHandle::new(&runtime, graphical);
-        let signals = ShutdownSignals::start(signals, handle.clone());
-        let server = ipc::Server::start(&socket_owner, runtime.handle.clone(), handle.clone())?;
+        let signals = ShutdownSignals::start(signals, handle.clone(), &tasks.handle);
+        let server = ipc::Server::start(
+            &socket_owner,
+            runtime.handle.clone(),
+            handle.clone(),
+            &tasks.handle,
+        )?;
         let artwork =
             Arc::new(ArtworkManager::new(&data_dir).with_max_image_bytes(artwork_limit_bytes));
         let mut app = Self {
@@ -277,12 +292,15 @@ impl App {
             gui: None,
             server: Some(server),
             session: Some(session),
+            tasks,
             _socket_owner: socket_owner,
         };
-        app.media = Some(mpris::MediaWorker::start(
+        app.media = Some(mpris::MprisController::start(
             app.runtime.handle.clone(),
             app.handle.clone(),
             Arc::clone(&app.artwork),
+            &app.tasks.handle,
+            Arc::clone(&app.tasks.workers),
         ));
         if !paths.is_empty() {
             app.runtime.handle.send(Command::Scan {
@@ -291,7 +309,7 @@ impl App {
             })?;
         }
         if graphical {
-            app.gui = Some(GuiState {
+            app.gui = Some(GuiHost {
                 session: UiSession::new(
                     app.runtime.handle.clone(),
                     app.handle.clone(),
@@ -474,6 +492,7 @@ impl App {
                 self.runtime.handle.clone(),
                 self.handle.clone(),
                 Arc::clone(&gui.i18n),
+                &self.tasks.handle,
             ));
         }
         let app = Rc::new(RefCell::new(self));
@@ -610,8 +629,11 @@ struct ShutdownSignals {
 }
 
 impl ShutdownSignals {
-    fn start(mut signals: Signals, app: AppHandle) -> Self {
-        let executor = Arc::clone(app.core.executor());
+    fn start(
+        mut signals: Signals,
+        app: AppHandle,
+        executor: &Arc<async_executor::Executor<'static>>,
+    ) -> Self {
         let worker = executor.spawn(async move {
             if let Some(signal) = signals.next().await {
                 match signal {
@@ -644,7 +666,7 @@ impl Drop for ShutdownSignals {
 mod tests {
     use super::*;
 
-    fn runtime_fixture() -> (tempfile::TempDir, Runtime) {
+    fn runtime_fixture() -> (tempfile::TempDir, CoreRuntime) {
         let directory = tempfile::tempdir().unwrap();
         let config = directory.path().join("config.toml");
         crate::config::Config {
@@ -654,7 +676,7 @@ mod tests {
         }
         .save(&config)
         .unwrap();
-        let runtime = Runtime::start(directory.path(), &config).unwrap();
+        let runtime = CoreRuntime::start(directory.path(), &config).unwrap();
         (directory, runtime)
     }
 
@@ -687,7 +709,13 @@ mod tests {
         let (directory, mut runtime) = runtime_fixture();
         let owner = ipc::SocketOwner::acquire(directory.path()).unwrap();
         let app = AppHandle::new(&runtime, true);
-        let server = ipc::Server::start(&owner, runtime.handle.clone(), app.clone()).unwrap();
+        let server = ipc::Server::start(
+            &owner,
+            runtime.handle.clone(),
+            app.clone(),
+            runtime.test_executor(),
+        )
+        .unwrap();
         let unused_config = directory
             .path()
             .join(OsString::from_vec(b"unused-\xff.toml".to_vec()));
@@ -920,15 +948,21 @@ mod tests {
         let (directory, mut runtime) = runtime_fixture();
         let owner = ipc::SocketOwner::acquire(directory.path()).unwrap();
         let app = AppHandle::new(&runtime, false);
-        let server = ipc::Server::start(&owner, runtime.handle.clone(), app.clone()).unwrap();
+        let server = ipc::Server::start(
+            &owner,
+            runtime.handle.clone(),
+            app.clone(),
+            runtime.test_executor(),
+        )
+        .unwrap();
         let (started, running) = bounded(4);
         let (release, released) = bounded::<()>(0);
         let workers: Vec<_> = (0..4)
             .map(|_| {
                 let started = started.clone();
                 let released = released.clone();
-                let workers = Arc::clone(runtime.handle.workers());
-                runtime.handle.executor().spawn(async move {
+                let workers = Arc::clone(runtime.test_workers());
+                runtime.test_executor().spawn(async move {
                     workers
                         .execute(move || {
                             started.send(()).unwrap();

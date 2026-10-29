@@ -1,4 +1,4 @@
-//! Owner-scoped cancellation for queued Core reads.
+//! Query identity, freshness, and owner-scoped cancellation across consumers and Core.
 
 use std::sync::{
     Arc,
@@ -55,6 +55,69 @@ pub(crate) struct QueryTicket {
 impl QueryTicket {
     pub(crate) fn is_current(&self) -> bool {
         self.shared.load(Ordering::Acquire) == self.generation
+    }
+}
+
+/// Owns query identity and freshness, never payload or business operations.
+/// Page demand and the physical in-flight worker gate stay with the consumer.
+#[derive(Debug, Default)]
+pub(crate) struct QueryTracker {
+    identity: Option<rivu_protocol::model::Query>,
+    stamp: Option<rivu_protocol::model::QueryStamp>,
+    generation: QueryEpoch,
+}
+
+impl QueryTracker {
+    pub(crate) fn sync(
+        &mut self,
+        query: &rivu_protocol::model::Query,
+        revisions: rivu_protocol::response::QueryRevisions,
+    ) -> bool {
+        let stamp = query.stamp(revisions);
+        let identity_changed = !self.matches_identity(query);
+        if !identity_changed && self.stamp == Some(stamp) {
+            return false;
+        }
+        if identity_changed {
+            self.identity = Some(query.clone());
+        }
+        self.stamp = Some(stamp);
+        self.cancel();
+        true
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.generation()
+    }
+
+    pub(crate) fn stamp(&self) -> Option<rivu_protocol::model::QueryStamp> {
+        self.stamp
+    }
+
+    pub(crate) fn matches_identity(&self, query: &rivu_protocol::model::Query) -> bool {
+        self.identity
+            .as_ref()
+            .is_some_and(|current| current.identity() == query.identity())
+    }
+
+    /// Retiring submissions does not invalidate a still-current cached payload.
+    pub(crate) fn cancel(&mut self) {
+        self.generation.cancel();
+    }
+
+    pub(crate) fn ticket(&mut self) -> QueryTicket {
+        self.generation.ticket()
+    }
+
+    pub(crate) fn accepts(
+        &self,
+        query: &rivu_protocol::model::Query,
+        generation: u64,
+        revisions: rivu_protocol::response::QueryRevisions,
+    ) -> bool {
+        self.generation.generation() == generation
+            && self.matches_identity(query)
+            && self.stamp == Some(query.stamp(revisions))
     }
 }
 

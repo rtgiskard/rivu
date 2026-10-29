@@ -12,6 +12,7 @@ pub(crate) mod logging;
 pub(crate) mod mpris;
 mod processing;
 pub mod projection;
+pub(crate) mod query_tracking;
 pub(crate) mod store;
 pub mod terminal;
 pub(crate) mod theme;

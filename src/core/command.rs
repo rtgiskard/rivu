@@ -1,6 +1,34 @@
 use super::*;
 use anyhow::{bail, ensure};
 
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum CommandOutcome {
+    Immediate,
+    Scan(u64),
+    Relocation(u64),
+    Processing(u64),
+    DeferredExport,
+    DeferredOptimization,
+}
+
+#[derive(Debug)]
+pub(super) struct CommandError {
+    pub(super) error: anyhow::Error,
+    pub(super) library_owned: bool,
+}
+
+impl std::fmt::Display for CommandError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.error, formatter)
+    }
+}
+
+impl std::error::Error for CommandError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.error.source()
+    }
+}
+
 impl Core {
     pub(in crate::core) fn mpris_seek(&mut self, queue_id: u64, offset: i64) -> Result<()> {
         // In-occurrence seeking uses only the playback owner. Queue recovery and
@@ -35,14 +63,29 @@ impl Core {
         }
     }
 
-    pub(in crate::core) fn command(&mut self, command: Command) -> Result<Option<u64>> {
-        if self.database_maintenance_active() && self.maintenance_control(&command)? {
-            return Ok(None);
-        }
-        self.apply_command(command)
+    pub(in crate::core) fn command(
+        &mut self,
+        command: Command,
+    ) -> std::result::Result<CommandOutcome, CommandError> {
+        // Scan failures with an awaiting caller belong to that library surface;
+        // fire-and-forget failures still reach the shared system error.
+        let library_owned = matches!(
+            &command,
+            Command::Scan { .. } | Command::CheckOtherTracks { .. }
+        );
+        let result = (|| {
+            if self.database_maintenance_active() && self.maintenance_control(&command)? {
+                return Ok(CommandOutcome::Immediate);
+            }
+            self.apply_command(command)
+        })();
+        result.map_err(|error| CommandError {
+            error,
+            library_owned,
+        })
     }
 
-    fn apply_command(&mut self, command: Command) -> Result<Option<u64>> {
+    fn apply_command(&mut self, command: Command) -> Result<CommandOutcome> {
         match command {
             Command::TransferCollection {
                 source,
@@ -86,7 +129,7 @@ impl Core {
                 }
                 let count = self.store.transfer_collection(&source, destination)?;
                 if count == 0 {
-                    return Ok(None);
+                    return Ok(CommandOutcome::Immediate);
                 }
                 match destination {
                     CollectionDestination::Queue { .. } => {
@@ -120,22 +163,32 @@ impl Core {
                 self.advance_queue_revision();
                 self.refresh_queue_projection()?;
             }
-            Command::Scan { paths, force } => self.scan(paths, force)?,
+            Command::Scan { paths, force } => {
+                return self.scan(paths, force).map(CommandOutcome::Scan);
+            }
             Command::CheckOtherTracks { force } => {
-                self.start_other_tracks_check(force)?;
+                return self
+                    .start_other_tracks_check(force)
+                    .map(CommandOutcome::Scan);
             }
             Command::QueueExternalPaths {
                 paths,
                 index,
                 expected_revision,
             } => {
-                self.start_external_admission(paths, index, expected_revision)?;
+                return self
+                    .start_external_admission(paths, index, expected_revision)
+                    .map(CommandOutcome::Scan);
             }
             Command::CancelScan { id } => self.cancel_scan(id)?,
             Command::RelocateTrack {
                 source_id,
                 target_id,
-            } => self.relocate_track(source_id, target_id)?,
+            } => {
+                return self
+                    .relocate_track(source_id, target_id)
+                    .map(CommandOutcome::Relocation);
+            }
             Command::CancelRelocation { id } => self.cancel_relocation(id)?,
             Command::KeepTrackIndependent { track_id } => self.keep_track_independent(track_id)?,
             Command::ProcessingBypass => self.processing_bypass()?,
@@ -150,12 +203,20 @@ impl Core {
                 track_id,
                 target,
                 mode,
-            } => return self.processing_graph_run(track_id, target, mode).map(Some),
+            } => {
+                return self
+                    .processing_graph_run(track_id, target, mode)
+                    .map(CommandOutcome::Processing);
+            }
             Command::ProcessingGraphAudition { id, node } => {
-                return self.processing_graph_audition(id, node);
+                return self
+                    .processing_graph_audition(id, node)
+                    .map(|id| id.map_or(CommandOutcome::Immediate, CommandOutcome::Processing));
             }
             Command::ProcessingGraphExport { id, node, path } => {
-                return self.processing_graph_export(id, node, path).map(Some);
+                return self
+                    .processing_graph_export(id, node, path)
+                    .map(CommandOutcome::Processing);
             }
             Command::StartProcessing {
                 track_id,
@@ -164,7 +225,7 @@ impl Core {
             } => {
                 return self
                     .start_processing(track_id, operation, profile)
-                    .map(Some);
+                    .map(CommandOutcome::Processing);
             }
             Command::CancelProcessing { id } => self.cancel_processing(id)?,
             Command::AuditionProcessing {
@@ -172,7 +233,11 @@ impl Core {
                 mode,
                 vocal_gain_db,
                 accompaniment_gain_db,
-            } => return self.audition_processing(id, mode, vocal_gain_db, accompaniment_gain_db),
+            } => {
+                return self
+                    .audition_processing(id, mode, vocal_gain_db, accompaniment_gain_db)
+                    .map(|id| id.map_or(CommandOutcome::Immediate, CommandOutcome::Processing));
+            }
             Command::Play { track_id } => {
                 self.track(track_id)?;
                 let existing = self.store.queued_track(track_id)?;
@@ -251,7 +316,7 @@ impl Core {
                 {
                     self.seek((self.state.playback.position + delta).max(0.0))?;
                 }
-                return Ok(None);
+                return Ok(CommandOutcome::Immediate);
             }
             Command::Volume { value } => {
                 if !value.is_finite() || !(0.0..=1.0).contains(&value) {
@@ -463,10 +528,11 @@ impl Core {
                         .into_owned()
                 });
                 Store::validate_playlist_name(&name)?;
-                self.import_playlist(path, name)?;
+                return self.import_playlist(path, name).map(CommandOutcome::Scan);
             }
             Command::ExportPlaylist { playlist_id, path } => {
                 self.export_playlist(playlist_id, &path)?;
+                return Ok(CommandOutcome::DeferredExport);
             }
             Command::EditTrack {
                 track_id,
@@ -494,11 +560,11 @@ impl Core {
             }
             Command::Analysis { enabled } => {
                 self.engine.analysis_control.set_display_enabled(enabled);
-                return Ok(None);
+                return Ok(CommandOutcome::Immediate);
             }
             Command::DismissError => {
                 self.state.system.last_error = None;
-                return Ok(None);
+                return Ok(CommandOutcome::Immediate);
             }
             Command::DismissScanResult => {
                 if !self.state.system.scanning {
@@ -507,21 +573,24 @@ impl Core {
                     self.state.system.scan_task_id = None;
                     self.state.system.scan_message.clear();
                 }
-                return Ok(None);
+                return Ok(CommandOutcome::Immediate);
             }
             Command::Configure { config } => self.configure(config)?,
             Command::MprisStatus { status } => {
                 self.state.system.mpris_status = status;
-                return Ok(None);
+                return Ok(CommandOutcome::Immediate);
             }
             Command::SeekQueue { queue_id, seconds } => {
                 if self.state.queue.current_id == Some(queue_id) {
                     self.seek(seconds)?;
                 }
-                return Ok(None);
+                return Ok(CommandOutcome::Immediate);
             }
-            Command::OptimizeDatabase => self.optimize_database()?,
+            Command::OptimizeDatabase => {
+                self.optimize_database()?;
+                return Ok(CommandOutcome::DeferredOptimization);
+            }
         }
-        Ok(None)
+        Ok(CommandOutcome::Immediate)
     }
 }

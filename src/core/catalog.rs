@@ -1,5 +1,34 @@
 use super::*;
 use anyhow::{bail, ensure};
+
+pub(super) struct ScanFinished {
+    pub(super) id: u64,
+    pub(super) result: Result<ScanResult>,
+    pub(super) import: Option<(String, Vec<M3uItem>)>,
+    pub(super) progress: ScanProgress,
+    pub(super) other_tracks_check: bool,
+}
+pub(super) enum ScanEvent {
+    Progress {
+        id: u64,
+        progress: ScanProgress,
+    },
+    KnownSources {
+        id: u64,
+        paths: Vec<PathBuf>,
+        reply: oneshot::Sender<Result<Vec<Option<library::KnownFile>>>>,
+    },
+    Finished(ScanFinished),
+    Saved(catalog::ScanSaved),
+}
+pub(super) const MAX_RETAINED_SCAN_RESULTS: usize = 32;
+pub(super) struct ScanTask {
+    pub(super) status: ScanTaskStatus,
+    pub(super) owner: state::MediaTaskOwner,
+    pub(super) cancellation: library::ScanCancellation,
+    pub(super) worker: async_executor::Task<()>,
+    pub(super) pending_save: Option<ScanFinished>,
+}
 use futures::FutureExt;
 
 fn scan_message(progress: &ScanProgress) -> String {
@@ -241,14 +270,12 @@ fn save_scan(
 }
 
 impl Core {
-    pub(in crate::core) fn scan(&mut self, paths: Vec<PathBuf>, force: bool) -> Result<()> {
+    pub(in crate::core) fn scan(&mut self, paths: Vec<PathBuf>, force: bool) -> Result<u64> {
         self.start_scan(ScanInput::Paths { paths, force })
-            .map(|_| ())
     }
 
-    pub(in crate::core) fn import_playlist(&mut self, path: PathBuf, name: String) -> Result<()> {
+    pub(in crate::core) fn import_playlist(&mut self, path: PathBuf, name: String) -> Result<u64> {
         self.start_scan(ScanInput::Import { path, name })
-            .map(|_| ())
     }
 
     pub(in crate::core) fn start_other_tracks_check(&mut self, force: bool) -> Result<u64> {

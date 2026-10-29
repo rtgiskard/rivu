@@ -1,4 +1,5 @@
 use super::*;
+use crate::core::catalog::ScanFinished;
 
 // Scan commits use another connection; all catalog task tests need a real DB.
 fn fixture() -> (tempfile::TempDir, Core) {

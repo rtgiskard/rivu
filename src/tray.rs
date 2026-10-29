@@ -81,10 +81,14 @@ pub(crate) struct TrayController {
 }
 
 impl TrayController {
-    pub(crate) fn start(handle: CoreHandle, app: AppHandle, i18n: Arc<Localizer>) -> Self {
+    pub(crate) fn start(
+        handle: CoreHandle,
+        app: AppHandle,
+        i18n: Arc<Localizer>,
+        executor: &Arc<async_executor::Executor<'static>>,
+    ) -> Self {
         let (cancel, cancelled) = oneshot::channel();
-        let executor = handle.executor().clone();
-        let worker = executor.spawn(run_bus(handle, app, i18n, cancelled));
+        let worker = executor.spawn(run_bus(handle, app, i18n, cancelled, Arc::clone(executor)));
         Self {
             cancel: Some(cancel),
             worker: Some(worker),
@@ -110,6 +114,7 @@ async fn run_bus(
     app: AppHandle,
     i18n: Arc<Localizer>,
     cancelled: oneshot::Receiver<()>,
+    executor: Arc<async_executor::Executor<'static>>,
 ) {
     let cancelled = cancelled.shared();
     let data = Arc::new(RwLock::new(TrayData {
@@ -161,7 +166,7 @@ async fn run_bus(
             .unwrap_or_else(|| service_name.clone());
         let watcher_connection = connection.clone();
         let (watcher_stop, watcher_stopped) = oneshot::channel();
-        let watcher = handle.executor().spawn(watch_watcher(
+        let watcher = executor.spawn(watch_watcher(
             watcher_connection,
             item_address,
             watcher_stopped,
@@ -748,9 +753,11 @@ mod tests {
     #[test]
     fn grouped_menu_quit_stops_core_without_window_and_reports_invalid_ids() {
         let directory = tempfile::tempdir().unwrap();
-        let mut runtime =
-            crate::core::Runtime::start(directory.path(), &directory.path().join("config.toml"))
-                .unwrap();
+        let mut runtime = crate::core::CoreRuntime::start(
+            directory.path(),
+            &directory.path().join("config.toml"),
+        )
+        .unwrap();
         let handle = runtime.handle.clone();
         let app = AppHandle::new(&runtime, false);
         assert!(!app.can_raise());

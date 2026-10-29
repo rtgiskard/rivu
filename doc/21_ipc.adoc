@@ -46,15 +46,15 @@ not IPC state sections.
 
 The graphical host has three lifetime boundaries within one process:
 
-* `App` owns the Core runtime, IPC listener and instance ownership, shutdown
-  signals, shared artwork, logging session, optional tray, MPRIS manager, and
-  open/focus/quit coordination. Its GPUI event loop remains available without a
+* `App` owns `TaskRuntime`, the Core runtime, IPC listener and instance ownership,
+  shutdown signals, shared artwork, logging session, optional tray, MPRIS manager,
+  and open/focus/quit coordination. Its GPUI host remains available without a
   window. The headless `serve` host uses the same application ownership.
 * Core owns accepted business operations and authoritative state. Closing a
   window does not cancel playback, scans, saves, or accepted commands. Dismissing
   a relocation review explicitly requests cancellation of its verification task,
   without undoing a commit.
-* `UiSession` owns window creation, focus, reload, and close; `GuiApp` owns view
+* `UiSession` owns window creation, focus, reload, and close; `WindowView` owns view
   state, subscriptions, and render resources. Reopening builds a new view from
   current Core state; repeated open requests focus the existing window. Late
   background results use weak references and need not reach a closed view.
@@ -74,6 +74,12 @@ channels carry requests and worker facts; replies and revision subscriptions
 wake consumers without polling. Notifications coalesce, so consumers read the
 current authoritative projection after a wakeup rather than replaying events.
 
+Command execution returns an explicit outcome: immediate acknowledgement, an
+allocated task ID, or a deferred export/maintenance reply. Dispatch publishes the
+state transition and applies that outcome; it does not infer task identity from
+the current active-task slots. The task owner retains any deferred reply through
+completion or shutdown.
+
 SQLite writes and their state transitions stay atomic on Core. A separate bounded
 query owner reuses a read connection and pins a SQLite snapshot per request,
 validating it against captured Core revisions. A publication fence prevents reads
@@ -84,11 +90,14 @@ IPC disconnection or shutdown drops a pending query's reply receiver. Obsolete
 queued reads are skipped before database admission, but SQL already executing
 keeps its snapshot lease until completion. This does not cancel accepted commands.
 
-App retains shared execution resources through Core and IPC retirement. File,
-probe, and background transaction stages share at most four blocking slots;
-waiting for Core admission or replies holds none. A physical closure keeps its
-slot after async cancellation. Shutdown joins started work before retiring the
-executor: cancelling a waiter is neither worker retirement nor rollback.
+App explicitly supplies execution capabilities to Core and services, independently
+of the business `CoreHandle`. It retains `TaskRuntime` through Core, service, and
+GUI resource retirement. File, probe, and background transaction stages share at
+most four blocking slots; waiting for Core admission or replies holds none.
+`BlockingExecutor` bounds physical closures, not a private pool of threads. A
+closure keeps its slot after async cancellation. Shutdown joins started work
+before retiring execution: cancelling a waiter is neither worker retirement nor
+rollback.
 
 === Projection and view costs
 

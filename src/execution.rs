@@ -6,20 +6,20 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-const BLOCKING_THREADS: usize = 4;
+const BLOCKING_LIMIT: usize = 4;
 
-/// Concrete execution resources for bounded synchronous stages. Callers pass
-/// this owner explicitly; business futures never require ambient runtime state.
-pub(crate) struct BlockingPool {
+/// Limits concurrent synchronous closures dispatched to the shared blocking executor.
+/// The lease follows physical work, not the lifetime of its async waiter.
+pub(crate) struct BlockingExecutor {
     slots: Arc<async_lock::Semaphore>,
-    capacity: usize,
+    concurrency_limit: usize,
 }
-impl BlockingPool {
+impl BlockingExecutor {
     pub(crate) fn new(slots: usize) -> Arc<Self> {
         assert!(slots > 0);
         Arc::new(Self {
             slots: Arc::new(async_lock::Semaphore::new(slots)),
-            capacity: slots,
+            concurrency_limit: slots,
         })
     }
 
@@ -41,16 +41,16 @@ impl BlockingPool {
 /// Application-owned executor, retained through Core and IPC retirement.
 pub(crate) struct TaskRuntime {
     pub(crate) handle: Arc<Executor<'static>>,
-    pub(crate) workers: Arc<BlockingPool>,
+    pub(crate) workers: Arc<BlockingExecutor>,
     stop: Option<oneshot::Sender<()>>,
     worker: Option<JoinHandle<()>>,
 }
 impl TaskRuntime {
     pub(crate) fn start() -> Result<Self> {
-        Self::with_blocking_threads(BLOCKING_THREADS)
+        Self::with_blocking_limit(BLOCKING_LIMIT)
     }
-    pub(crate) fn with_blocking_threads(threads: usize) -> Result<Self> {
-        let workers = BlockingPool::new(threads);
+    pub(crate) fn with_blocking_limit(limit: usize) -> Result<Self> {
+        let workers = BlockingExecutor::new(limit);
         let handle = Arc::new(Executor::new());
         let executor = Arc::clone(&handle);
         let (stop, stopped) = oneshot::channel();
@@ -74,8 +74,8 @@ impl Drop for TaskRuntime {
         // Even a cancelled async waiter may have dispatched a physical closure.
         // Keep driving jobs while collecting every application-owned lease.
         let _retired = futures::executor::block_on(async {
-            let mut retired = Vec::with_capacity(self.workers.capacity);
-            for _ in 0..self.workers.capacity {
+            let mut retired = Vec::with_capacity(self.workers.concurrency_limit);
+            for _ in 0..self.workers.concurrency_limit {
                 retired.push(self.workers.slots.acquire_arc().await);
             }
             retired

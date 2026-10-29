@@ -222,7 +222,7 @@ impl Core {
         paths: Vec<PathBuf>,
         index: Option<usize>,
         expected_revision: Option<u64>,
-    ) -> Result<()> {
+    ) -> Result<u64> {
         ensure!(!paths.is_empty(), "No external audio files supplied");
         ensure!(
             self.active_external_admission.is_none() && self.active_scan.is_none(),
@@ -319,7 +319,7 @@ impl Core {
         });
         self.next_scan_id = next_id;
         self.project_scan();
-        Ok(())
+        Ok(id)
     }
 
     pub(in crate::core) fn cancel_external_admission(&mut self, id: u64) -> Result<()> {

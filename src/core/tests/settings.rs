@@ -119,7 +119,7 @@ fn runtime_rejects_non_utf8_config_paths_before_creating_storage() {
             derived_data_dir.join("config.toml"),
         ),
     ] {
-        let error = Runtime::start(&data_dir, &config_path).err().unwrap();
+        let error = CoreRuntime::start(&data_dir, &config_path).err().unwrap();
         assert!(
             error
                 .to_string()
@@ -140,7 +140,7 @@ fn runtime_validates_config_path_before_reading_or_rewriting_config() {
         .join(OsString::from_vec(b"config-\xff.toml".to_vec()));
     let original = b"intentionally not valid TOML";
     std::fs::write(&path, original).unwrap();
-    let error = Runtime::start(directory.path(), &path).err().unwrap();
+    let error = CoreRuntime::start(directory.path(), &path).err().unwrap();
     assert!(
         error
             .to_string()
@@ -155,7 +155,7 @@ fn startup_config_accepts_unicode_without_creating_a_file() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("配置.toml");
     assert_eq!(
-        Runtime::load_startup_config(&path).unwrap(),
+        CoreRuntime::load_startup_config(&path).unwrap(),
         Config::default()
     );
     assert!(!path.exists());
@@ -173,7 +173,7 @@ fn startup_and_unchanged_exit_preserve_config_bytes_and_comments() {
     ).into_bytes();
     std::fs::write(&path, &original).unwrap();
     let inode = std::fs::metadata(&path).unwrap().ino();
-    let mut runtime = Runtime::start(directory.path(), &path).unwrap();
+    let mut runtime = CoreRuntime::start(directory.path(), &path).unwrap();
     assert_eq!(
         runtime.handle.config_snapshot().library_roots,
         [directory.path().to_path_buf()]
@@ -353,7 +353,7 @@ fn changed_apply_and_exit_reject_invalid_existing_input_without_overwriting_it()
 fn runtime_start_with_missing_config_waits_until_exit_to_create_it() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
-    let mut runtime = Runtime::start(directory.path(), &path).unwrap();
+    let mut runtime = CoreRuntime::start(directory.path(), &path).unwrap();
     assert!(!path.exists());
     runtime.control.request_shutdown().unwrap();
     runtime.join().unwrap();

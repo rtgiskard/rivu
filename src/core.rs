@@ -3,12 +3,15 @@
 //! Caller timeout never cancels admitted work or authorizes replay. Real-time
 //! audio stays independent; shutdown completion includes physical retirement.
 
+#[cfg(test)]
+use crate::execution::TaskRuntime;
 use crate::{
     config::{Config, ConfigPatch, ConfigPersistence, LibraryColumn},
-    execution::{BlockingPool, TaskRuntime},
+    execution::BlockingExecutor,
     library::{self, M3uItem, ScanResult},
     logging,
     projection::{GuiSnapshot, MprisSnapshot, TraySnapshot},
+    query_tracking::QueryTicket,
     store::Store,
 };
 use anyhow::{Context, Result};
@@ -37,11 +40,18 @@ use std::{
 };
 
 pub mod state;
+pub(crate) use state::CoreState;
+
+mod runtime;
+use catalog::{MAX_RETAINED_SCAN_RESULTS, ScanEvent, ScanTask};
+use playback::{PlaybackSession, RetiredPlayback};
+use relocation::{RelocationFinished, RelocationTask};
+#[cfg(test)]
+use runtime::CompletionGuard;
+pub(crate) use runtime::CoreLifecycle;
+pub use runtime::CoreRuntime;
 
 mod query_worker;
-
-mod query_epoch;
-pub(crate) use query_epoch::{QueryEpoch, QueryTicket};
 
 mod task_wait;
 use task_wait::TaskWaiters;
@@ -120,91 +130,6 @@ struct Request {
     reply: Option<oneshot::Sender<CoreResponse>>,
 }
 
-#[derive(Clone, Debug, Default)]
-pub(crate) struct CoreState {
-    pub(crate) library: LibrarySnapshot,
-    pub(crate) queue: QueueState,
-    pub(crate) current_track: Option<Arc<Track>>,
-    pub(crate) playback: PlaybackState,
-    /// Audio source ownership, independent of metadata and transport state.
-    pub(crate) source_generation: u64,
-    pub(crate) processing_audition: Option<state::ProcessingAudition>,
-    pub(crate) system: SystemState,
-    pub(crate) configuration: ConfigurationState,
-    pub(crate) scan_owner: Option<state::MediaTaskOwner>,
-    pub(crate) revisions: StateRevisions,
-}
-
-impl CoreState {
-    pub(crate) fn current_track(&self) -> Option<&Track> {
-        self.current_track.as_deref()
-    }
-    pub(crate) fn query_revisions(&self) -> QueryRevisions {
-        self.library.query_revisions(self.queue.revision, None)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn playlist_query_revisions(&self, playlist_id: i64) -> QueryRevisions {
-        self.library
-            .query_revisions(self.queue.revision, Some(playlist_id))
-    }
-
-    pub(crate) fn query_revisions_for(&self, query: &Query) -> QueryRevisions {
-        self.library.query_revisions_for(query, self.queue.revision)
-    }
-
-    /// Queue state is constant-size; Arc identity avoids traversing history/config.
-    /// Replacing an Arc conservatively invalidates its section even if values match.
-    fn changed_sections(&self, previous: &Self) -> StateSections {
-        let current_track_changed = match (&self.current_track, &previous.current_track) {
-            (Some(current), Some(previous)) => !Arc::ptr_eq(current, previous),
-            (None, None) => false,
-            _ => true,
-        };
-        let system = &self.system;
-        let old = &previous.system;
-        StateSections {
-            playback: self.playback != previous.playback
-                || self.source_generation != previous.source_generation
-                || current_track_changed
-                || self.processing_audition != previous.processing_audition,
-            queue: self.queue != previous.queue,
-            library: self.library.revision != previous.library.revision
-                || self.library.structure_revision != previous.library.structure_revision
-                || self.library.playlist_revision != previous.library.playlist_revision
-                || self.library.album_revision != previous.library.album_revision
-                || self.library.bitrate_revision != previous.library.bitrate_revision
-                || self.library.duplicate_groups_revision
-                    != previous.library.duplicate_groups_revision
-                || self.library.duplicate_members_revision
-                    != previous.library.duplicate_members_revision
-                || !Arc::ptr_eq(
-                    &self.library.playlist_entry_revisions,
-                    &previous.library.playlist_entry_revisions,
-                )
-                || self.library.track_total != previous.library.track_total
-                || self.library.playlist_total != previous.library.playlist_total
-                || !Arc::ptr_eq(&self.library.history, &previous.library.history),
-            system: system.scanning != old.scanning
-                || system.scan_message != old.scan_message
-                || system.scan_progress != old.scan_progress
-                || system.scan_task_id != old.scan_task_id
-                || self.scan_owner != previous.scan_owner
-                || system.relocation_task != old.relocation_task
-                || system.processing != old.processing
-                || system.last_error != old.last_error
-                || !Arc::ptr_eq(&system.devices, &old.devices)
-                || system.selected_device != old.selected_device
-                || system.mpris_status != old.mpris_status
-                || system.ffmpeg_status != old.ffmpeg_status
-                || system.database_optimization != old.database_optimization
-                || system.shutting_down != old.shutting_down,
-            configuration: !Arc::ptr_eq(&self.configuration.config, &previous.configuration.config)
-                || self.configuration.config_path != previous.configuration.config_path,
-        }
-    }
-}
-
 /// Cloneable access to core business commands, queries, and published state.
 #[derive(Clone)]
 pub struct CoreHandle {
@@ -213,15 +138,11 @@ pub struct CoreHandle {
     analysis_control: Arc<AnalysisControl>,
     pub(crate) waveform: Arc<RwLock<audio::WaveformFrame>>,
     sender: mpsc::Sender<Request>,
-    executor: Arc<async_executor::Executor<'static>>,
-    workers: Arc<BlockingPool>,
     revision_updates: Arc<RwLock<Vec<mpsc::Sender<()>>>>,
     wakeup: Arc<RwLock<Option<Wakeup>>>,
     task_waiters: Arc<Mutex<TaskWaiters>>,
     // Window-scoped: cloning a GUI handle must not change IPC/CLI query policy.
     query_timeout: Option<QueryTimeout>,
-    #[cfg(test)]
-    _test_tasks: Option<Arc<TaskRuntime>>,
 }
 
 pub(crate) struct MprisServiceState {
@@ -339,14 +260,6 @@ impl CoreHandle {
         subscribers.retain(|sender| !sender.is_closed());
         subscribers.push(sender);
         receiver
-    }
-
-    pub(crate) fn executor(&self) -> &Arc<async_executor::Executor<'static>> {
-        &self.executor
-    }
-
-    pub(crate) fn workers(&self) -> &Arc<BlockingPool> {
-        &self.workers
     }
 
     pub(crate) async fn query_async(&self, query: Query) -> QueryResponse {
@@ -516,405 +429,12 @@ impl CoreHandle {
     }
 }
 
-/// Runtime lifecycle control, separate from business requests and view wakeups.
-#[derive(Clone)]
-pub(crate) struct RuntimeControl {
-    shutdown: mpsc::Sender<()>,
-    completion: Arc<Completion>,
-}
-
-#[derive(Default)]
-struct Completion {
-    state: Mutex<CompletionState>,
-    acknowledged: Event,
-}
-
-#[derive(Default)]
-struct CompletionState {
-    ack: Option<Ack>,
-    finished: bool,
-    callback: Option<Wakeup>,
-    error: Option<anyhow::Error>,
-}
-
-impl RuntimeControl {
-    fn new() -> (Self, mpsc::Receiver<()>) {
-        let (shutdown, receiver) = async_channel::bounded(1);
-        (
-            Self {
-                shutdown,
-                completion: Arc::new(Completion::default()),
-            },
-            receiver,
-        )
-    }
-
-    pub(crate) fn request_shutdown(&self) -> Result<()> {
-        match self.shutdown.try_send(()) {
-            Ok(()) | Err(mpsc::TrySendError::Full(())) => Ok(()),
-            Err(mpsc::TrySendError::Closed(())) => {
-                anyhow::bail!("Rivu is stopped")
-            }
-        }
-    }
-
-    /// Acknowledges the shutdown request, not completion of runtime teardown.
-    pub(crate) async fn shutdown_ack_async(&self, revision: impl Fn() -> u64) -> Ack {
-        let requested = self.request_shutdown();
-        let waiting = async {
-            loop {
-                let notified = self.completion.acknowledged.listen();
-                {
-                    let state = self.completion.state.lock();
-                    if state.ack.is_some() || state.finished || requested.is_err() {
-                        return;
-                    }
-                }
-                notified.await;
-            }
-        };
-        let _ = rivu_protocol::transport::timeout(REPLY_TIMEOUT, waiting).await;
-        self.completion.state.lock().ack.clone().unwrap_or_else(|| {
-            let status = if requested.is_err() {
-                AckStatus::NotAdmitted
-            } else {
-                AckStatus::Unknown
-            };
-            Ack::new(
-                status,
-                Some(if status == AckStatus::NotAdmitted {
-                    "Core stopped; shutdown request not admitted".into()
-                } else {
-                    "Core shutdown outcome unknown; do not automatically retry".into()
-                }),
-                revision(),
-            )
-        })
-    }
-
-    fn acknowledge(&self, ack: Ack) {
-        self.completion.state.lock().ack = Some(ack);
-        self.completion.acknowledged.notify(usize::MAX);
-    }
-
-    pub(crate) fn set_completion_callback(&self, callback: impl Fn() + Send + Sync + 'static) {
-        let callback: Wakeup = Arc::new(callback);
-        let mut state = self.completion.state.lock();
-        state.callback = Some(Arc::clone(&callback));
-        let finished = state.finished;
-        drop(state);
-        if finished {
-            callback();
-        }
-    }
-
-    fn record_result(&self, result: Result<()>) {
-        self.completion.state.lock().error = result.err();
-    }
-
-    fn complete(&self) {
-        let mut state = self.completion.state.lock();
-        state.finished = true;
-        let callback = state.callback.clone();
-        drop(state);
-        self.completion.acknowledged.notify(usize::MAX);
-        if let Some(callback) = callback {
-            callback();
-        }
-    }
-}
-
-// Runs on normal return and panic, including failure before Core::run starts.
-struct CompletionGuard(RuntimeControl);
-impl Drop for CompletionGuard {
-    fn drop(&mut self) {
-        self.0.complete();
-    }
-}
-
-pub struct Runtime {
-    pub handle: CoreHandle,
-    pub(crate) control: RuntimeControl,
-    worker: Option<JoinHandle<()>>,
-    // Last field: Drop joins Core before the application executor can stop. App
-    // separately retires IPC before releasing this lifecycle owner.
-    _tasks: TaskRuntime,
-}
-impl Runtime {
-    /// Load host configuration only when its path can be published over IPC.
-    pub(crate) fn load_startup_config(config_path: &Path) -> Result<Config> {
-        config_path
-            .to_str()
-            .context("Configuration path is not valid UTF-8; IPC requires UTF-8 paths")?;
-        Config::load(config_path)
-    }
-
-    #[cfg(test)]
-    /// Start a standalone core without installing or owning process logging.
-    pub fn start(data_dir: &Path, config_path: &Path) -> Result<Self> {
-        Self::start_inner(
-            data_dir,
-            config_path,
-            Self::load_startup_config(config_path)?,
-            None,
-        )
-    }
-
-    // App loads through load_startup_config before starting process logging.
-    pub(crate) fn start_with_logging(
-        data_dir: &Path,
-        config_path: &Path,
-        config: Config,
-        logging: logging::Control,
-    ) -> Result<Self> {
-        Self::start_inner(data_dir, config_path, config, Some(logging))
-    }
-
-    fn start_inner(
-        data_dir: &Path,
-        config_path: &Path,
-        mut config: Config,
-        logging: Option<logging::Control>,
-    ) -> Result<Self> {
-        config.library_roots = config
-            .library_roots
-            .iter()
-            .map(|root| library::logical_path(root))
-            .collect::<Result<_>>()?;
-        config.validate()?;
-        // An existing file establishes an effective, normalized baseline without
-        // rewriting user formatting or materializing omitted defaults at startup.
-        let saved_config = config_path.try_exists()?.then(|| config.clone());
-        std::fs::create_dir_all(data_dir)?;
-        tracing::info!(path = %config_path.display(), "configuration_loaded");
-        // Keep the handle usable with a config-only snapshot. Database views,
-        // device enumeration and optional decoder probing run on the core
-        // worker so the GUI is not blocked by startup I/O.
-        let store = Store::open(&data_dir.join("library.db"))?;
-        store.set_track_cache_page_size(config.page_size);
-        tracing::debug!("store_ready");
-        let engine = AudioEngine::new(config.media_read_buffer_mb)?;
-        tracing::info!("audio_engine_ready");
-        let tasks = TaskRuntime::start()?;
-        let executor = tasks.handle.clone();
-        let (sender, receiver) = async_channel::bounded(64);
-        let (control, shutdown_receiver) = RuntimeControl::new();
-        let shared = Arc::new(RwLock::new(CoreState::default()));
-        let wakeup = Arc::new(RwLock::new(None));
-        let initial = {
-            let mut state = CoreState::default();
-            state.playback.volume = config.volume;
-            state.playback.shuffle = config.shuffle;
-            state.playback.repeat = config.repeat;
-            state.system.selected_device = config.output_device.clone();
-            state.configuration.config = Arc::new(config);
-            state.configuration.config_path = config_path.to_path_buf();
-            state
-        };
-        *shared.write() = initial.clone();
-        let revision_updates = Arc::new(RwLock::new(Vec::new()));
-        let task_waiters = Arc::new(Mutex::new(TaskWaiters::default()));
-        let handle = CoreHandle {
-            state: shared.clone(),
-            analysis: engine.analysis.clone(),
-            analysis_control: Arc::clone(&engine.analysis_control),
-            waveform: Arc::clone(&engine.waveform),
-            sender,
-            executor: executor.clone(),
-            workers: Arc::clone(&tasks.workers),
-            revision_updates: Arc::clone(&revision_updates),
-            wakeup: wakeup.clone(),
-            task_waiters: Arc::clone(&task_waiters),
-            query_timeout: None,
-            #[cfg(test)]
-            _test_tasks: None,
-        };
-        let (scan_tx, scan_rx) = async_channel::bounded(3);
-        let (relocation_tx, relocation_rx) = async_channel::bounded(1);
-        let core = Core {
-            store,
-            engine,
-            logging,
-            executor: executor.clone(),
-            workers: Arc::clone(&tasks.workers),
-            read_queries: None,
-            revision_updates,
-            state: initial,
-            shared,
-            wakeup,
-            task_waiters,
-            task_completions_pending: false,
-            generation: 0,
-            output_settings_request: 0,
-            next_playlist_token: 0,
-            database_unavailable: false,
-            queue_projection_stale: false,
-            queue_current_pending: false,
-            playback: None,
-            retired_playback: None,
-            playback_write_deferred: false,
-            playback_history_pending: false,
-            pending_bitrate: None,
-            pending_navigation: None,
-            active_export: None,
-            active_external_admission: None,
-            active_optimization: None,
-            processing: crate::processing::Service::new(),
-            pending_processing_audition: None,
-            processing_results: VecDeque::new(),
-            scan_tx,
-            scan_rx,
-            active_scan: None,
-            scan_results: VecDeque::new(),
-            next_scan_id: 1,
-            relocation_tx,
-            relocation_rx,
-            active_relocation: None,
-            relocation_results: VecDeque::new(),
-            next_relocation_id: 1,
-            played: Vec::new(),
-            played_cursor: 0,
-            saved_config,
-            config_save_error: None,
-            #[cfg(test)]
-            _test_tasks: None,
-        };
-        let worker_control = control.clone();
-        let worker = thread::Builder::new()
-            .name("rivu-core".into())
-            .spawn(move || {
-                let _completion = CompletionGuard(worker_control.clone());
-                // Local ownership ensures unwind drops Core before publishing
-                // completion, on this thread rather than the shared reactor.
-                let mut core = core;
-                core.initialize();
-                core.run(receiver, shutdown_receiver, &worker_control);
-            })?;
-        Ok(Self {
-            handle,
-            control,
-            worker: Some(worker),
-            _tasks: tasks,
-        })
-    }
-    pub fn is_finished(&self) -> bool {
-        self.worker
-            .as_ref()
-            .is_none_or(|worker| worker.is_finished())
-    }
-    pub fn join(&mut self) -> Result<()> {
-        if let Some(worker) = self.worker.take() {
-            worker
-                .join()
-                .map_err(|_| anyhow::anyhow!("Rivu core worker panicked"))?;
-        }
-        // Only expose finalization failures after Core and its owned resources
-        // have physically retired; shutdown acknowledgement remains admission.
-        match self.control.completion.state.lock().error.take() {
-            Some(error) => Err(error),
-            None => Ok(()),
-        }
-    }
-}
-impl Drop for Runtime {
-    fn drop(&mut self) {
-        if self
-            .worker
-            .as_ref()
-            .is_some_and(|worker| !worker.is_finished())
-        {
-            let _ = self.control.request_shutdown();
-        }
-        let _ = self.join();
-    }
-}
-
-struct PlaybackStats {
-    track_id: i64,
-    // The source admitted by Load, shared with the initial current-track projection.
-    // Library refreshes may update metadata but cannot replace this session's source.
-    loaded_track: Arc<Track>,
-    source: Option<(crate::store::PlaybackSource, std::fs::Metadata)>,
-    heard: f64,
-    position: Option<f64>,
-    started: bool,
-    counted: bool,
-    last_heard_at: Option<i64>,
-    activity_updated: bool,
-    paused_at: Option<i64>,
-}
-impl PlaybackStats {
-    fn record_heard(&mut self, heard: f64, heard_at: i64) -> bool {
-        if !heard.is_finite() || heard <= self.heard {
-            return false;
-        }
-        self.heard = heard;
-        self.last_heard_at = Some(
-            self.last_heard_at
-                .map_or(heard_at, |previous| previous.max(heard_at)),
-        );
-        self.activity_updated = true;
-        true
-    }
-}
-struct RetiredPlayback {
-    stats: PlaybackStats,
-    duration: Option<f64>,
-}
-
-struct ScanFinished {
-    id: u64,
-    result: Result<ScanResult>,
-    import: Option<(String, Vec<M3uItem>)>,
-    progress: ScanProgress,
-    other_tracks_check: bool,
-}
-enum ScanEvent {
-    Progress {
-        id: u64,
-        progress: ScanProgress,
-    },
-    KnownSources {
-        id: u64,
-        paths: Vec<PathBuf>,
-        reply: oneshot::Sender<Result<Vec<Option<library::KnownFile>>>>,
-    },
-    Finished(ScanFinished),
-    Saved(catalog::ScanSaved),
-}
-const MAX_RETAINED_SCAN_RESULTS: usize = 32;
-struct ScanTask {
-    status: ScanTaskStatus,
-    owner: state::MediaTaskOwner,
-    cancellation: library::ScanCancellation,
-    worker: async_executor::Task<()>,
-    pending_save: Option<ScanFinished>,
-}
-struct RelocationTask {
-    status: RelocationTaskStatus,
-    prepared: crate::store::PreparedRelocation,
-    cancellation: library::ScanCancellation,
-    worker: Option<async_executor::Task<()>>,
-}
-impl Drop for RelocationTask {
-    fn drop(&mut self) {
-        self.cancellation.cancel();
-        if let Some(worker) = self.worker.take() {
-            let _ =
-                futures::executor::block_on(std::panic::AssertUnwindSafe(worker).catch_unwind());
-        }
-    }
-}
-struct RelocationFinished {
-    id: u64,
-    result: Result<relocation::VerifiedTarget>,
-}
 struct Core {
     store: Store,
     engine: AudioEngine,
     logging: Option<logging::Control>,
     executor: Arc<async_executor::Executor<'static>>,
-    workers: Arc<BlockingPool>,
+    workers: Arc<BlockingExecutor>,
     read_queries: Option<query_worker::ReadQueries>,
     revision_updates: Arc<RwLock<Vec<mpsc::Sender<()>>>>,
     state: CoreState,
@@ -930,7 +450,7 @@ struct Core {
     queue_projection_stale: bool,
     // A runtime selection must reach the database before accepting its projection.
     queue_current_pending: bool,
-    playback: Option<PlaybackStats>,
+    playback: Option<PlaybackSession>,
     // At most one playback can retire while database writes are excluded.
     retired_playback: Option<RetiredPlayback>,
     playback_write_deferred: bool,

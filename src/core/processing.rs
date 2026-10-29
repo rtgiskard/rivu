@@ -820,7 +820,8 @@ impl Core {
             .as_ref()
             .is_some_and(|t| t.id == track.id);
         if !same_source {
-            self.command(Command::Play { track_id: track.id })?;
+            self.command(Command::Play { track_id: track.id })
+                .map_err(|error| error.error)?;
         } else if self.state.playback.status == PlaybackStatus::Stopped {
             let queue_id = self
                 .state

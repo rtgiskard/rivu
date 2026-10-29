@@ -1,5 +1,25 @@
 use super::*;
 use anyhow::{bail, ensure};
+
+pub(super) struct RelocationTask {
+    pub(super) status: RelocationTaskStatus,
+    pub(super) prepared: crate::store::PreparedRelocation,
+    pub(super) cancellation: library::ScanCancellation,
+    pub(super) worker: Option<async_executor::Task<()>>,
+}
+impl Drop for RelocationTask {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+        if let Some(worker) = self.worker.take() {
+            let _ =
+                futures::executor::block_on(std::panic::AssertUnwindSafe(worker).catch_unwind());
+        }
+    }
+}
+pub(super) struct RelocationFinished {
+    pub(super) id: u64,
+    pub(super) result: Result<relocation::VerifiedTarget>,
+}
 use std::fs::{File, Metadata};
 use std::io::Read;
 #[cfg(unix)]
@@ -76,7 +96,7 @@ fn check_source_absent(metadata: std::io::Result<Metadata>) -> Result<()> {
 async fn verify_target(
     prepared: crate::store::PreparedRelocation,
     cancellation: library::ScanCancellation,
-    workers: Arc<BlockingPool>,
+    workers: Arc<BlockingExecutor>,
 ) -> Result<VerifiedTarget> {
     cancellation.check()?;
     let admitted = prepared.clone();
@@ -176,7 +196,11 @@ impl Core {
         Ok(())
     }
 
-    pub(in crate::core) fn relocate_track(&mut self, source_id: i64, target_id: i64) -> Result<()> {
+    pub(in crate::core) fn relocate_track(
+        &mut self,
+        source_id: i64,
+        target_id: i64,
+    ) -> Result<u64> {
         ensure!(
             self.active_external_admission.is_none(),
             "External audio admission is active; relocation was not started"
@@ -216,7 +240,7 @@ impl Core {
         });
         self.next_relocation_id = next_id;
         self.state.system.relocation_task = Some(status);
-        Ok(())
+        Ok(id)
     }
 
     pub(in crate::core) fn spawn_relocation_verification(
@@ -375,7 +399,7 @@ mod tests {
         let error = futures::executor::block_on(verify_target(
             prepared,
             library::ScanCancellation::default(),
-            BlockingPool::new(4),
+            BlockingExecutor::new(4),
         ))
         .err()
         .unwrap();
@@ -391,7 +415,7 @@ mod tests {
             futures::executor::block_on(verify_target(
                 prepared.clone(),
                 cancellation,
-                BlockingPool::new(4),
+                BlockingExecutor::new(4),
             ))
             .is_err()
         );
@@ -400,7 +424,7 @@ mod tests {
             futures::executor::block_on(verify_target(
                 prepared,
                 library::ScanCancellation::default(),
-                BlockingPool::new(4),
+                BlockingExecutor::new(4),
             ))
             .err()
             .unwrap()
@@ -415,7 +439,7 @@ mod tests {
         let verified = futures::executor::block_on(verify_target(
             prepared.clone(),
             library::ScanCancellation::default(),
-            BlockingPool::new(4),
+            BlockingExecutor::new(4),
         ))
         .unwrap();
         let replacement = prepared.target.path.with_extension("replacement");
@@ -430,7 +454,7 @@ mod tests {
         let verified = futures::executor::block_on(verify_target(
             prepared.clone(),
             library::ScanCancellation::default(),
-            BlockingPool::new(4),
+            BlockingExecutor::new(4),
         ))
         .unwrap();
         std::fs::write(&prepared.target.path, b"changed bytes").unwrap();
@@ -451,7 +475,7 @@ mod tests {
             let result = futures::executor::block_on(verify_target(
                 prepared,
                 library::ScanCancellation::default(),
-                BlockingPool::new(4),
+                BlockingExecutor::new(4),
             ));
             let _ = completed.send(result);
         });

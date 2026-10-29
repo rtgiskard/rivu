@@ -8,6 +8,7 @@ use crate::{
     app::AppHandle,
     artwork::{Artwork, ArtworkIdentity, ArtworkManager},
     core::{CoreHandle, Navigation},
+    execution::BlockingExecutor,
     projection::MprisSnapshot,
 };
 use anyhow::{Context, Result, anyhow};
@@ -38,15 +39,21 @@ const NO_TRACK: &str = "/org/mpris/MediaPlayer2/TrackList/NoTrack";
 const MICROS_PER_SECOND: f64 = 1_000_000.0;
 type Metadata = HashMap<String, OwnedValue>;
 
-pub(crate) struct MediaWorker {
+pub(crate) struct MprisController {
     stop: Option<oneshot::Sender<()>>,
     worker: Option<async_executor::Task<()>>,
 }
 
-impl MediaWorker {
-    pub(crate) fn start(handle: CoreHandle, app: AppHandle, artwork: Arc<ArtworkManager>) -> Self {
+impl MprisController {
+    pub(crate) fn start(
+        handle: CoreHandle,
+        app: AppHandle,
+        artwork: Arc<ArtworkManager>,
+        executor: &Arc<async_executor::Executor<'static>>,
+        workers: Arc<BlockingExecutor>,
+    ) -> Self {
         let changes = handle.subscribe_revisions();
-        let executor = Arc::clone(handle.executor());
+        let service_executor = Arc::clone(executor);
         let (stop, stopped) = oneshot::channel();
         let worker = executor.spawn(async move {
             let mut stopped = stopped.fuse();
@@ -68,7 +75,7 @@ impl MediaWorker {
                     }
                     if state.enabled {
                         registration = Some(Registration::spawn(
-                            handle.executor(),
+                            &service_executor,
                             register(handle.clone(), app.clone(), Arc::clone(&artwork)),
                         ));
                     } else {
@@ -108,6 +115,8 @@ impl MediaWorker {
                             handle.clone(),
                             app.clone(),
                             Arc::clone(&artwork),
+                            &service_executor,
+                            Arc::clone(&workers),
                         ));
                     }
                     Ok(connection) => retire_connection(connection).await,
@@ -133,7 +142,7 @@ impl MediaWorker {
     }
 }
 
-impl Drop for MediaWorker {
+impl Drop for MprisController {
     fn drop(&mut self) {
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
@@ -219,13 +228,14 @@ impl Mpris {
         handle: CoreHandle,
         app: AppHandle,
         artwork: Arc<ArtworkManager>,
+        executor: &Arc<async_executor::Executor<'static>>,
+        workers: Arc<BlockingExecutor>,
     ) -> Self {
         let updates = handle.subscribe_revisions();
         let initial = handle.mpris_snapshot();
         let initial_can_raise = app.can_raise();
         let (cancel, mut cancelled) = oneshot::channel();
         let bus = connection.clone();
-        let executor = Arc::clone(handle.executor());
         let publisher_handle = handle.clone();
         let publisher = executor.spawn(async move {
             // The publisher alone owns success/failure status; initial failure
@@ -242,7 +252,7 @@ impl Mpris {
                 loop {
                     if artwork_load.is_none() {
                         artwork_load = load_artwork(
-                            &handle,
+                            &workers,
                             &handle.mpris_snapshot(),
                             &artwork,
                             &loaded_artwork,
@@ -888,7 +898,7 @@ struct ArtworkLoad {
 
 impl ArtworkLoad {
     async fn retire(self) {
-        // Skip cold I/O if the pool has not started it. If it has, await the
+        // Skip cold I/O if its bounded execution slot has not started it. If it has, await the
         // actual closure rather than dropping its logical waiter.
         self.cancelled.store(true, Ordering::Release);
         let _ = self.completion.await;
@@ -900,10 +910,10 @@ enum PublisherEvent {
     Artwork(zbus::Result<(ArtworkIdentity, Option<Artwork>)>),
 }
 
-/// Cold probes use the application's blocking pool, never its reactor. The
+/// Cold probes use the application's bounded blocking executor, never its reactor.
 /// publisher retains this future until physical completion, including shutdown.
 fn load_artwork(
-    handle: &CoreHandle,
+    workers: &Arc<BlockingExecutor>,
     requested: &MprisSnapshot,
     artwork: &Arc<ArtworkManager>,
     loaded: &Option<ArtworkIdentity>,
@@ -920,7 +930,7 @@ fn load_artwork(
     let identity = ArtworkIdentity::for_track(track);
     let manager = Arc::clone(artwork);
     let track = track.clone();
-    let workers = Arc::clone(handle.workers());
+    let workers = Arc::clone(workers);
     let cancelled = Arc::new(AtomicBool::new(false));
     let cancellation = Arc::clone(&cancelled);
     let completion = async move {
@@ -1103,7 +1113,7 @@ mod tests {
         sync::atomic::{AtomicBool, Ordering},
     };
 
-    fn runtime_fixture() -> (tempfile::TempDir, crate::core::Runtime) {
+    fn runtime_fixture() -> (tempfile::TempDir, crate::core::CoreRuntime) {
         let directory = tempfile::tempdir().unwrap();
         let config = directory.path().join("config.toml");
         crate::config::Config {
@@ -1114,7 +1124,7 @@ mod tests {
         }
         .save(&config)
         .unwrap();
-        let runtime = crate::core::Runtime::start(directory.path(), &config).unwrap();
+        let runtime = crate::core::CoreRuntime::start(directory.path(), &config).unwrap();
         (directory, runtime)
     }
 
@@ -1142,10 +1152,12 @@ mod tests {
     #[test]
     fn initially_disabled_manager_reports_status_without_bus_registration() {
         let (directory, mut runtime) = runtime_fixture();
-        let manager = MediaWorker::start(
+        let manager = MprisController::start(
             runtime.handle.clone(),
             AppHandle::new(&runtime, false),
             Arc::new(ArtworkManager::new(directory.path())),
+            runtime.test_executor(),
+            Arc::clone(runtime.test_workers()),
         );
         wait_status(&runtime.handle, "Desktop media controls disabled");
         drop(manager);
@@ -1156,17 +1168,17 @@ mod tests {
     #[test]
     fn registration_panic_becomes_an_error_and_manager_drop_contains_panics() {
         let (_directory, mut runtime) = runtime_fixture();
-        let mut attempt = Registration::spawn(runtime.handle.executor(), async {
+        let mut attempt = Registration::spawn(runtime.test_executor(), async {
             panic!("registration panic regression");
         });
         let error = async_io::block_on(attempt.result()).unwrap_err();
         assert_eq!(error.to_string(), "MPRIS registration task panicked");
 
         let (stop, _stopped) = oneshot::channel();
-        let worker = runtime.handle.executor().spawn(async {
+        let worker = runtime.test_executor().spawn(async {
             panic!("manager panic regression");
         });
-        drop(MediaWorker {
+        drop(MprisController {
             stop: Some(stop),
             worker: Some(worker),
         });
@@ -1180,7 +1192,7 @@ mod tests {
         let dropped = Arc::new(AtomicBool::new(false));
         let guard = Dropped(Arc::clone(&dropped));
         let (polled, entered) = bounded(1);
-        let attempt = Registration::spawn(runtime.handle.executor(), async move {
+        let attempt = Registration::spawn(runtime.test_executor(), async move {
             let _guard = guard;
             polled.send(()).unwrap();
             futures::future::pending::<Result<Connection>>().await
@@ -1194,7 +1206,7 @@ mod tests {
 
     #[test]
     fn artwork_retirement_waits_for_physical_completion() {
-        let pool = crate::execution::BlockingPool::new(1);
+        let pool = crate::execution::BlockingExecutor::new(1);
         let retired = Arc::new(AtomicBool::new(false));
         let worker_retired = Arc::clone(&retired);
         let (started, entered) = bounded(1);
@@ -1239,7 +1251,7 @@ mod tests {
             playback: PlaybackState::default(),
             shutting_down: false,
         };
-        let load = load_artwork(&runtime.handle, &state, &artwork, &None).unwrap();
+        let load = load_artwork(runtime.test_workers(), &state, &artwork, &None).unwrap();
         async_io::block_on(load.retire());
         assert!(
             artwork
@@ -1259,7 +1271,7 @@ mod tests {
         let guard = Dropped(Arc::clone(&dropped));
         let (cancel, mut cancelled) = oneshot::channel();
         let (polled, entered) = bounded(1);
-        let publisher = runtime.handle.executor().spawn(async move {
+        let publisher = runtime.test_executor().spawn(async move {
             publish_until_cancelled(&mut cancelled, &handle, async move {
                 let _guard = guard;
                 polled.send(()).unwrap();
@@ -1369,10 +1381,7 @@ mod tests {
         // Model a peer whose reply has not finished: the exclusive drain cannot
         // complete, but the deadline must still close all connection clones.
         let active_reply = futures::executor::block_on(root.get());
-        let retire = runtime
-            .handle
-            .executor()
-            .spawn(retire_connection(connection));
+        let retire = runtime.test_executor().spawn(retire_connection(connection));
         async_io::block_on(retire);
         assert!(retained.is_closed());
         assert!(futures::executor::block_on(
@@ -1400,7 +1409,7 @@ mod tests {
         let connection = bus.serve_root(AppHandle::new(&runtime, false));
         let retained = connection.clone();
         let (cancel, _cancelled) = oneshot::channel();
-        let publisher = runtime.handle.executor().spawn(async {
+        let publisher = runtime.test_executor().spawn(async {
             panic!("publisher panic regression");
         });
         let service = Mpris {
@@ -1435,7 +1444,7 @@ mod tests {
         let connection = bus.serve_root(AppHandle::new(&runtime, false));
         let changes = runtime.handle.subscribe_revisions();
         let client = bus.connect();
-        let quit = runtime.handle.executor().spawn(async move {
+        let quit = runtime.test_executor().spawn(async move {
             client
                 .call_method(
                     Some(BUS_NAME),
@@ -1585,6 +1594,8 @@ mod tests {
                 runtime.handle.clone(),
                 app,
                 Arc::clone(&artwork),
+                runtime.test_executor(),
+                Arc::clone(runtime.test_workers()),
             );
             let first = next_metadata(&mut signals).await;
             let original_uri = <&str>::try_from(&first["mpris:artUrl"]).unwrap().to_owned();

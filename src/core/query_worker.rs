@@ -679,6 +679,7 @@ impl Drop for ReadQueries {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::query_tracking::QueryEpoch;
 
     fn response(receiver: oneshot::Receiver<CoreResponse>) -> QueryResponse {
         let response = futures::executor::block_on(rivu_protocol::transport::timeout(
