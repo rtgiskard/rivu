@@ -512,7 +512,11 @@ Checkboxes and choices are controlled: owners accept changes and update dependen
 state. They do not save configuration or replace Settings' Apply/Discard boundary.
 Action groups share appearance, not state or commands. Hosts choose wrapping,
 inline clipping or scrolling. Hover actions appear on their row's hover or
-descendant focus, not list-wide focus; hidden actions leave text width available.
+descendant keyboard-visible focus, not list-wide focus; hidden actions leave
+text width available. Mouse activation retains native focus without pinning the
+actions open after the pointer leaves. Button focus borders appear only in
+keyboard mode. Playback's Favorite and Locate buttons remain visible; their
+hover and focus feedback does not change favorite state.
 Release handling follows child gestures so a consumed dock cannot commit twice.
 
 ==== Editors and choice popups

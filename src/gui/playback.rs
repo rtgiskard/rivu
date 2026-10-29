@@ -440,7 +440,9 @@ impl Playback {
                                                     .bg(gpui::transparent_black())
                                                     .text_color(rgb(theme.text))
                                             })
-                                            .focus(|style| style.text_color(rgb(theme.text)))
+                                            .focus_visible(|style| {
+                                                style.text_color(rgb(theme.text))
+                                            })
                                     })
                             },
                         ),
@@ -480,7 +482,7 @@ impl Playback {
                                         .p_0()
                                         .min_w_0()
                                         .min_h_0()
-                                        .focus(|style| {
+                                        .focus_visible(|style| {
                                             style.text_color(rgb(if favorite {
                                                 theme.accent
                                             } else {

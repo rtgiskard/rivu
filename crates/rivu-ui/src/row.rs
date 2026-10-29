@@ -166,7 +166,7 @@ pub fn row_action_region(id: impl Into<ElementId>) -> Stateful<Div> {
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
 }
 
-/// Reveal child actions on row hover or descendant focus, without replacing their hover styles.
+/// Reveal actions on row hover or descendant keyboard focus, preserving child hover styles.
 pub fn hover_reveal(
     id: impl Into<ElementId>,
     group: &'static str,
@@ -181,7 +181,7 @@ fn hover_reveal_surface(id: impl Into<ElementId>, group: &'static str) -> Statef
         .tab_stop(false)
         .opacity(0.)
         .group_hover(group, |style| style.opacity(1.))
-        .focus_within(|style| style.opacity(1.))
+        .focus_visible_within(|style| style.opacity(1.))
 }
 
 // Out-of-flow actions leave the full text width available until the row is hovered.

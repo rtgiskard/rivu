@@ -535,6 +535,56 @@ fn row_action_reveal_tracks_own_focus_and_hover_without_layout_or_tab_stops() {
             assert_eq!(bounds.get(), initial);
         }
 
+        cx.update_window(handle, |_, window, cx| {
+            let position = initial[2].center();
+            window.simulate_mouse_move(position, cx);
+        })
+        .unwrap();
+        draw(&mut cx, handle);
+        cx.update_window(handle, |_, window, cx| {
+            let position = initial[2].center();
+            window.dispatch_event(
+                gpui::MouseDownEvent {
+                    button: gpui::MouseButton::Left,
+                    position,
+                    click_count: 1,
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+            window.dispatch_event(
+                gpui::MouseUpEvent {
+                    button: gpui::MouseButton::Left,
+                    position,
+                    click_count: 1,
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+        })
+        .unwrap();
+        draw(&mut cx, handle);
+        cx.update_window(handle, |_, window, cx| {
+            assert!(actions[0].is_focused(window));
+            assert_reveal_paint(window, [Some(REVEAL_HOVER[0]), None]);
+            window.simulate_mouse_move(gpui::point(gpui::px(500.), gpui::px(500.)), cx);
+        })
+        .unwrap();
+        draw(&mut cx, handle);
+        cx.update_window(handle, |_, window, _| {
+            assert!(actions[0].is_focused(window));
+            assert_reveal_paint(window, [None, None]);
+        })
+        .unwrap();
+        press(&mut cx, handle, "enter");
+        cx.update_window(handle, |_, window, cx| {
+            assert_reveal_paint(window, [Some(REVEAL_IDLE[0]), None]);
+            scope.handle().focus(window, cx);
+        })
+        .unwrap();
+
         cx.update_window(handle, |_, window, cx| scope.advance(false, window, cx))
             .unwrap();
         draw(&mut cx, handle);
@@ -570,7 +620,7 @@ fn row_action_reveal_tracks_own_focus_and_hover_without_layout_or_tab_stops() {
                 .unwrap();
                 draw(&mut cx, handle);
                 cx.update_window(handle, |_, window, _| {
-                    assert_reveal_paint(window, [Some(REVEAL_IDLE[0]), Some(REVEAL_IDLE[1])]);
+                    assert_reveal_paint(window, [None, Some(REVEAL_IDLE[1])]);
                 })
                 .unwrap();
                 assert_eq!(bounds.get(), initial);
@@ -1006,7 +1056,7 @@ fn overlay_material_follows_row_hover_without_treating_keyboard_focus_as_hover()
             cx.update_window(handle, |_, window, _| {
                 let scale = window.scale_factor();
                 for (index, bounds) in original.iter().enumerate() {
-                    if index != focused && hovered != Some(index) {
+                    if hovered != Some(index) {
                         continue;
                     }
                     let expected: gpui::Hsla =
@@ -1023,5 +1073,14 @@ fn overlay_material_follows_row_hover_without_treating_keyboard_focus_as_hover()
             .unwrap();
             assert_eq!(bounds.get(), original);
         }
+        press(&mut cx, handle, "enter");
+        cx.update_window(handle, |_, window, _| {
+            let expected: gpui::Hsla = crate::row_background(theme, focused == 1, false).into();
+            let area = original[focused].scale(window.scale_factor());
+            assert!(window.painted_quads().iter().any(|quad| {
+                quad.bounds == area && quad.background.as_solid() == Some(expected)
+            }));
+        })
+        .unwrap();
     }
 }

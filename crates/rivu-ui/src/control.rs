@@ -38,7 +38,7 @@ fn control_surface(
         .id(id)
         .group("control")
         .tab_index(0)
-        .focus(|style| style.border_color(rgb(theme.accent)))
+        .focus_visible(|style| style.border_color(rgb(theme.accent)))
         .flex()
         .items_center()
         .min_w_0()
@@ -334,7 +334,7 @@ impl IconButton {
                 control
                     .text_color(rgb(theme.disabled))
                     .border_color(border)
-                    .focus(move |style| style.border_color(border))
+                    .focus_visible(move |style| style.border_color(border))
                     .bg(background)
                     .group_hover("control", move |style| {
                         style.bg(background).text_color(rgb(theme.disabled))
