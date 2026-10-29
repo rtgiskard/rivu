@@ -1,6 +1,39 @@
 use super::*;
 use gpui::{GpuLimits, GpuPalette, GpuRectangle, GpuRectangleParams};
 
+#[cfg(target_os = "linux")]
+#[test]
+fn mapped_creation_keeps_unwritten_abi_bytes_zero_without_a_second_fill() -> anyhow::Result<()> {
+    let (context, _) = crate::WgpuContext::new_headless()?;
+    let buffer = mapped_buffer(
+        &context.device,
+        PLACEMENT_SIZE,
+        wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        "material initialization regression",
+        |bytes| put_u32(bytes, 4, 0x1234_5678),
+    );
+    let submission = context.queue.submit(std::iter::empty());
+    let (sender, receiver) = std::sync::mpsc::channel();
+    buffer
+        .slice(..)
+        .map_async(wgpu::MapMode::Read, move |result| {
+            sender.send(result).unwrap();
+        });
+    context.device.poll(wgpu::PollType::Wait {
+        submission_index: Some(submission),
+        timeout: Some(std::time::Duration::from_secs(30)),
+    })?;
+    receiver.recv_timeout(std::time::Duration::from_secs(30))??;
+    {
+        let mapped = buffer.slice(..).get_mapped_range();
+        let mut expected = [0_u8; PLACEMENT_SIZE as usize];
+        expected[4..8].copy_from_slice(&0x1234_5678_u32.to_le_bytes());
+        assert_eq!(&mapped[..], &expected);
+    }
+    buffer.unmap();
+    Ok(())
+}
+
 #[test]
 fn composed_material_capability_admission_matches_shader_requirements() {
     let module = naga::front::wgsl::parse_str(SHADER).expect("composed shader parses");

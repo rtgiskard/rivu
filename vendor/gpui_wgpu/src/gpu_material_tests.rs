@@ -191,6 +191,55 @@ fn gpu_material_maintenance_handles_do_not_pin_recovered_or_closed_renderer() ->
 }
 
 #[test]
+fn dynamic_preparation_releases_cpu_publications_without_another_frame() -> anyhow::Result<()> {
+    for (budget, capabilities) in [
+        (None, None),
+        (Some(0), None),
+        (
+            None,
+            Some(wgpu::DownlevelFlags::all() - wgpu::DownlevelFlags::MULTISAMPLED_SHADING),
+        ),
+    ] {
+        let mut renderer = WgpuHeadlessRenderer::new()?;
+        if let Some(budget) = budget {
+            renderer
+                .core
+                .resources
+                .materials
+                .borrow_mut()
+                .set_byte_limit(budget);
+        }
+        if let Some(capabilities) = capabilities {
+            renderer
+                .core
+                .resources
+                .materials
+                .borrow_mut()
+                .set_downlevel_flags(capabilities);
+        }
+        let publication = frame([1.0, 0.0, 0.0, 1.0]);
+        let weak = Arc::downgrade(&publication);
+        let state = GpuState::new(publication, limits())?;
+        let mut scene = Scene::default();
+        for x in [0.0, 8.0] {
+            scene.insert_primitive(draw(
+                GpuSource::Dynamic(state.clone()),
+                bounds(x, 0.0, 8.0, 8.0),
+            ));
+        }
+        scene.finish();
+        renderer.render_scene(&scene, size(16, 8))?;
+        state.clear();
+        assert!(
+            weak.upgrade().is_none(),
+            "preparation scratch must not retain a cleared publication while idle"
+        );
+        drop(renderer);
+    }
+    Ok(())
+}
+
+#[test]
 fn logarithmic_columns_keep_floor_distinct_from_palette_sample_zero() -> anyhow::Result<()> {
     let mut renderer = WgpuHeadlessRenderer::new()?;
     let palette = GpuPalette::new(&[[1.0, 0.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0]], 2)?;

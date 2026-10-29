@@ -247,8 +247,13 @@ pub(crate) struct MaterialRenderer {
     uploads: FxHashMap<u64, Upload>,
     palettes: FxHashMap<u64, PaletteUpload>,
     placements: Vec<PlacementAllocation>,
+    // Private bounded resolver scratch; cleared after each preparation so it
+    // never extends publication lifetimes while the renderer is idle.
+    resolved: Vec<Option<Arc<GpuFrame>>>,
+    states: FxHashMap<usize, Option<Arc<GpuFrame>>>,
     wanted: FxHashSet<u64>,
     wanted_palettes: FxHashSet<u64>,
+    live_palettes: FxHashSet<u64>,
     completed: Arc<AtomicU64>,
     submitted: u64,
     collected: u64,
@@ -427,8 +432,11 @@ impl MaterialRenderer {
             uploads: FxHashMap::default(),
             palettes: FxHashMap::default(),
             placements: Vec::new(),
+            resolved: Vec::new(),
+            states: FxHashMap::default(),
             wanted: FxHashSet::default(),
             wanted_palettes: FxHashSet::default(),
+            live_palettes: FxHashSet::default(),
             completed: Arc::new(AtomicU64::new(0)),
             submitted: 0,
             collected: 0,
@@ -466,13 +474,12 @@ impl MaterialRenderer {
     }
     /// Resolve each slot, including a cleared slot, once per recorded frame.
     fn resolve(&mut self, batches: &[GpuDraw]) -> Vec<Option<Arc<GpuFrame>>> {
-        let mut states = FxHashMap::default();
-        batches
-            .iter()
-            .take(MAX_DRAWS)
-            .map(|batch| match &batch.source {
+        let mut resolved = std::mem::take(&mut self.resolved);
+        resolved.extend(batches.iter().take(MAX_DRAWS).map(|batch| {
+            match &batch.source {
                 GpuSource::Fixed(frame) => Some(frame.clone()),
-                GpuSource::Dynamic(state) => states
+                GpuSource::Dynamic(state) => self
+                    .states
                     .entry(Arc::as_ptr(state) as usize)
                     .or_insert_with(|| {
                         #[cfg(test)]
@@ -482,8 +489,10 @@ impl MaterialRenderer {
                         state.snapshot()
                     })
                     .clone(),
-            })
-            .collect()
+            }
+        }));
+        self.states.clear();
+        resolved
     }
     fn report_skipped(&mut self, counts: [usize; 5], first_upload_error: Option<&anyhow::Error>) {
         let kinds = counts
@@ -523,7 +532,7 @@ impl MaterialRenderer {
         if self.submitted > self.completed.load(Ordering::Acquire) {
             let _ = device.poll(wgpu::PollType::Poll);
         }
-        let resolved = self.resolve(batches);
+        let mut resolved = self.resolve(batches);
         self.wanted.clear();
         self.wanted
             .extend(resolved.iter().flatten().map(|frame| frame.id()));
@@ -531,7 +540,10 @@ impl MaterialRenderer {
         self.wanted_palettes
             .extend(resolved.iter().flatten().map(|frame| frame.palette().id()));
         self.collect_completed();
-        self.prepare_resolved(device, batches, size, msaa_ranges, &resolved)
+        let prepared = self.prepare_resolved(device, batches, size, msaa_ranges, &resolved);
+        resolved.clear();
+        self.resolved = resolved;
+        prepared
     }
 
     /// No presentation, uploads or waits. Hidden scenes discard their wanted
@@ -576,15 +588,14 @@ impl MaterialRenderer {
                 true
             }
         });
-        let live_palettes: FxHashSet<_> = self
-            .wanted_palettes
-            .iter()
-            .copied()
-            .chain(self.uploads.values().map(|upload| upload.palette_id))
-            .collect();
+        self.live_palettes.clear();
+        self.live_palettes
+            .extend(self.wanted_palettes.iter().copied());
+        self.live_palettes
+            .extend(self.uploads.values().map(|upload| upload.palette_id));
         self.palettes.retain(|key, upload| {
             if upload.last_submission <= completed
-                && (!live_palettes.contains(key) || upload.owner.strong_count() == 0)
+                && (!self.live_palettes.contains(key) || upload.owner.strong_count() == 0)
             {
                 self.bytes -= upload.bytes;
                 false
@@ -965,7 +976,9 @@ fn mapped_buffer(
     {
         let mut mapped = buffer.slice(..).get_mapped_range_mut();
         let mut bytes = mapped.slice(..);
-        bytes.fill(0);
+        // wgpu 29 guarantees every new Buffer starts zeroed, including its
+        // mapped-at-creation view. Preserve untouched ABI padding without a
+        // second full upload-sized CPU zero pass.
         encode(&mut bytes);
     }
     buffer.unmap();

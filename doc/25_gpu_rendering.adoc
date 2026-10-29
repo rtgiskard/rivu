@@ -237,10 +237,17 @@ native packed batches, nonzero raster origins, resize and resource recovery.
 === Admission and retirement
 
 Buffers are initialized through write-only mapped storage, never by reinterpreting
-Rust models or overwriting a submitted revision. Active and retired allocations
-remain charged through completion. Failed pre-submit work follows the renderer's
+Rust models or overwriting a submitted revision. WGPU's zero-initialization
+guarantee covers unwritten ABI padding; encoding writes only meaningful fields,
+without a second whole-buffer zero pass. Active and retired allocations remain
+charged through completion. Failed pre-submit work follows the renderer's
 queue-flush/finalization path so later draw failure cannot strand a provisional
 submission.
+
+The renderer reuses bounded resolution vectors/maps and publication/palette ID
+sets. Scratch publication references are cleared after preparation, including
+rejected work, so retained capacity does not extend CPU publication lifetimes.
+Placement slabs remain exact-sized and immutable until submission completion.
 
 Unsupported capabilities and capacity pressure omit the affected material and
 report an error without preventing unrelated controls from rendering. Capability
