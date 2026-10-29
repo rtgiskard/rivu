@@ -15,12 +15,9 @@ operate on the session collection; Sync requests persistence. These are GUI
 actions, not `rivu` CLI subcommands or Core IPC commands. Closing Settings is
 required before layout management can proceed.
 
-The first half of this chapter follows the layout lifecycle: tree invariants,
-coordinates, edits, geometry and persistence. <<_instance_preferences_and_visibility>>
-then connects panel lifetime to feature demand; <<_gui_composition_boundaries>>
-and <<_reusable_gpui_controls>> describe the ownership and input contracts shared
-by those panels. These are current desktop contracts, not a proposed replacement
-GUI architecture.
+This chapter follows tree geometry and editing through persistence, then connects
+panel visibility to feature ownership and shared input controls. These are
+current desktop contracts, not a replacement GUI architecture.
 
 Switching or duplicating a saved layout replaces the panel tree inside the
 existing window and GUI session. Existing owners retain their state naturally;
@@ -61,14 +58,11 @@ that depth. Loading, saving, and editing enforce the same limit. There is no
 fixed sibling-count budget. Depth bounds recursive model and rendering work and
 keeps accepted layouts within the JSON reader's nesting allowance.
 
-Structural edits retain original containers until their normalized shape has
-passed depth and boundary preflight. This lets a rejected move restore panel
-order, active tabs, instance preferences, and the allocator without cloning
-the tree. Only successful edits consume the temporary structure through
-normalization. A mathematically nonempty interval
-can be too narrow to hold another distinct floating-point boundary; edits that
-would violate strict boundary ordering must be rejected, not silently rounded
-into duplicate boundaries.
+Structural edits preflight normalized depth and boundary representability before
+consuming the original tree. Rejection preserves panel order, active tabs,
+preferences and ID allocation. Even a mathematically nonempty interval can be
+too narrow for another distinct floating-point boundary; edits must reject it
+rather than round into duplicate boundaries.
 
 == Boundary coordinates
 
@@ -117,18 +111,12 @@ sizes.
 
 == Panel insertion
 
-Panel catalog insertion is drag-only, without click, double-click, or keyboard
-insertion actions. Catalog items and existing tabs share the window's docking
-session, target resolution, geometry epochs, preview, and drop path. A catalog
-preview owns a candidate layout containing the new instance; the live layout and
-ID allocator change only on a valid drop. Cancellation discards that candidate.
-The model constructs new-panel candidates and returns the allocated panel ID;
-preview geometry and commit use that identity and its actual destination group,
-without predicting allocator offsets in the UI. Catalog entries use grip-marked
-drag items rather than action buttons. Empty-workspace feedback says `Place panel`
-instead of suggesting an existing tab group.
-The measured workspace, excluding the footer, is the initial target for an empty
-layout. Resizing invalidates that measurement just like ordinary panel geometry.
+Catalog insertion is drag-only. It shares docking geometry, preview and commit
+with existing tabs; click, double-click and keyboard activation insert nothing.
+The preview owns a candidate tree with the actual new panel identity. Only a
+valid drop replaces the live tree and allocator; cancellation discards it.
+An empty layout targets the measured workspace excluding the footer, with
+`Place panel` feedback. Resize invalidates that measurement like other geometry.
 
 == Panel docking targets
 
@@ -141,18 +129,12 @@ on its axis; the remaining center merges tabs. Corners with two competing edges
 and separator gutters are neutral. The outline and direction label identify
 the destination panel; shading previews the moved panel's final rectangle.
 
-A target transition prepares one owned candidate layout using the model's
-actual move and measured-size reconciliation. Projecting that result supplies
-the preview, including source disappearance, collapse, and new gutters. The
-same candidate is consumed on release; rejected moves do not fall through to a
-different target. Pointer updates within an unchanged target reuse the
-candidate instead of cloning on every motion. Layout edits invalidate cached
-geometry and previews. Measurements and the docking session also carry the
-logical viewport, interface scale, and physical window scale. A change to any
-of these clears the candidate. Measurement canvases discard old node and tab
-rectangles when prepainting the new geometry; input cannot interleave with that
-prepaint. Until fresh measurements exist, docking resolves no target and release
-leaves the layout unchanged, rather than using the previous frame's bounds.
+A target transition prepares one candidate using the actual move and measured
+reconciliation. Its projection previews source removal, collapse and gutters;
+release consumes that same candidate, with no fallback to a different target.
+Unchanged targets reuse it. Layout edits, viewport resize, interface scale or
+physical scale changes revoke candidates and measurements. Until the next
+prepaint publishes fresh bounds, docking has no target and release changes nothing.
 
 Tab-index targeting checks the active panel's tab-bar visibility and takes
 priority over edge zones. The entire visible tab row, including gaps and its
@@ -177,19 +159,12 @@ neighbor. If the pair is already too small for both minima, dragging selects its
 equal-content midpoint instead; snapping cannot satisfy impossible minima.
 Layout locking blocks structural edits, not playback or panel content updates.
 
-The window owns one interaction state with layout/geometry epochs. Measurement
-callbacks from an old epoch cannot repopulate the current bounds cache. Escape,
-focus loss, and geometry changes cancel a separator preview and restore its
-original boundary; cancellation never requests persistence. Layout replacement
-discards old interaction state without applying its rollback to the new tree.
-Activating a native panel tab (including keyboard activation), Library, or Queue
-cancels the current pointer interaction and restores its original split boundary
-before changing and publishing the active tab. The session snapshot therefore
-cannot retain an uncommitted separator preview. Completed separator drags still
-publish their committed boundary normally.
-Rolling back a separator also invalidates its measured preview geometry, so a
-subsequent panel removal cannot reapply the cancelled ratio while reconciling
-region sizes.
+The window owns one interaction state and epoch-tagged geometry. Escape, focus
+loss or geometry changes cancel separator previews and restore the original
+boundary without persistence. Tab activation likewise rolls back before
+publishing the active tab. Rollback invalidates preview measurements so later
+edits cannot reapply a cancelled ratio. Layout replacement instead discards the
+outgoing interaction; its rollback must never touch reused IDs in the new tree.
 
 Snapping selects feasible candidates in this priority order:
 
@@ -243,82 +218,39 @@ their baseline alignment.
 
 === Panel chrome and overlays
 
-The main shell owns a uniform 0.25rem outer inset (4px at the default interface
-scale) around the workspace and footer, separated by a 0.25rem gap. Neither child
-repeats the outer inset. The full-window root stays unpadded so modal backdrops
-and docking overlays keep their window coordinates.
-The tab strip uses 0.5rem horizontal and 0.125rem vertical padding. Its labels
-use 0.25rem horizontal and 0.125rem vertical padding. These follow interface
-scale. Neither the strip nor its labels impose a fixed or minimum height;
-text and padding determine their height. Unlocking adds a centered Nerd Font close
-icon in a 1rem square, with a one-em icon line height, no button padding, and a
-0.25rem gap from the label;
-tab height and presentation remain unchanged. The footer has no separate outer padding and keeps at
-least 4rem between messages and the right-aligned button group. Messages can
-shrink and truncate; the button group does not shrink. Its content determines its height, without
-a fixed or minimum height. Its menu and panel catalog anchor above the actual
-footer bounds, with a 1rem right inset and a 0.5rem clearance from the other
-window edges. Menus size to their contents rather than a fixed width or the
-whole workspace; catalog items wrap to the available width. An individual
-overlong label truncates within its item; catalog items do not show tooltips.
-Oversized menus scroll within the available height. Shared
-menus, tooltip width limits, and drag-preview width limits likewise retain
-0.5rem clearance on both sides of the viewport, following interface scale.
-The catalog's second row groups artwork and visualizations, followed by Audio
-processing after Audio visualizer; the first row contains the other panels.
+The shell owns workspace/footer spacing and the outer inset of docked panels;
+panel roots and captions do not repeat it. Cards, rows and forms retain internal
+spacing. The full-window root remains unpadded so modal backdrops and docking
+overlays use window coordinates.
 
-The shell owns the 0.5rem outer content inset for every docked panel. Panel roots and
-standalone headings, empty-state captions, and error captions do not repeat that
-edge padding. Cards, list rows (including placeholder rows), and form groups
-retain their internal spacing; scrollable content remains bounded by the shell's
-inset and clipping region.
+Tab and footer heights follow text and scaled padding, not fixed heights.
+Unlocking adds tab-close controls without changing tab height. Footer messages
+shrink and truncate before the fixed action group. Menus anchor to actual footer
+bounds, size to contents and scroll when taller than the viewport; catalog items
+wrap and overlong individual labels truncate. Shared menus, tooltips and drag
+previews retain viewport clearance rather than expanding the workspace minimum.
 
 === Headings and inline actions
 
-Library, Queue, Albums, Playlists, Track details and Recent tracks compose headings
-with `panel_heading_row` and `panel_header_actions`. The same composition serves
-peer surfaces such as duplicate review and layout management. The title block
-shrinks into the width left by the fixed, non-wrapping actions; list titles and
-counts each truncate independently on one line, without a minimum title width.
-Tools align with the bottom of the complete title and subtitle/status block.
-Both the title-to-tools separation and the space between controls use `gap_1`
-(0.25rem). A separate `panel_toolbar` remains available for wrapping toolbars;
-it is not the heading's overflow policy.
+Shared headings keep titles and secondary text independently truncated beside
+fixed, non-wrapping actions. Tools align with the full title/status block;
+toolbars may opt into wrapping, but heading actions do not reflow or enlarge
+saved panel proportions. Track details retains full editor status in a tooltip;
+the metadata session still owns its meaning and action availability.
 
-Layout management separates its heading, layout list and action footer with
-dividers. The card has a 0.75rem outer inset; list labels, form content, footer
-actions and status messages share a second 0.5rem inset below the heading.
-List names shrink within their rows while the current-layout marker
-and delete action retain a trailing slot. Duplicate and Rename stay grouped;
-Sync sits at the opposite end of a wrapping footer. Confirmation forms align
-Cancel and Submit to the right without changing button styling.
+Header icon hit areas follow typography and interface scale. Search reserves
+the same single-line height collapsed or expanded, and its editable region can
+shrink inside the action allocation. At extremely narrow widths, panel clipping
+remains authoritative.
 
-List panels and Track details use `list_panel_header` for the same two-line title
-and secondary-text presentation. Track details supplies its editor/read status
-instead of a count, retaining the full status in a tooltip on the heading block.
-Status content and action availability remain owned by the metadata session;
-the shared layout does not change draft protection or save behavior.
+Layout management separates its heading, list and action footer. Names shrink
+while current-layout and delete actions retain their slots; Duplicate/Rename
+stay grouped and Sync sits opposite them in a wrapping footer.
 
-Header icon buttons use Surface/Regular styling. They derive their size from the
-symbol and 0.5rem padding on each side, with a 2rem minimum width and height.
-Symbols follow configured text size; padding and minimum hit areas follow UI
-scale. List search reserves a single-line height in both collapsed and expanded
-states, including its outer border. Expanded search grows up to 14rem within its
-action allocation; its editable region can shrink, and its clear button consumes
-space inside the same field. Embedded input lines center within the control and
-truncate the inline result count when necessary to retain editable text space.
-Standalone inputs retain their own sizing. At widths too small for the fixed
-actions, the panel's clipping boundary remains authoritative; heading actions do
-not reflow or enlarge the saved panel proportions.
-
-Tooltip placement belongs to the vendored GPUI window overlay, shared by action
-and row hints. It uses the pointer position captured when the hint opens, not
-the live pointer position. Prefer above with 8 logical pixels of clearance;
-fall back below with 16 pixels and keep an 8-pixel viewport inset. If a tall
-hint fits neither vertically, try either horizontal side with the same clearance
-before clamping on the roomier vertical side. Oversized content can still exceed
-the viewport; placement does not truncate text or change the existing show/hide
-lifecycle.
+Tooltip placement belongs to GPUI's window overlay. It anchors to the pointer
+position at opening, prefers above, then below or a side, and clamps against
+viewport clearance. Placement does not truncate oversized text or change the
+hint's show/hide lifecycle.
 
 == Persistence and failure semantics
 
@@ -327,13 +259,9 @@ Serialization borrows runtime data and writes one strict format. Unknown fields,
 duplicate layout names, invalid boundaries, malformed trees, and excess depth
 are errors. Runtime IDs and edit locking are omitted.
 
-One save owner belongs to the desktop session, not to an individual window. All
-layout changes, including selected tabs, docking, the active layout, named-layout
-operations, and panel preferences, publish cheap immutable snapshots to that
-owner in memory only. The GUI does not validate the whole collection, encode
-JSON, or perform save I/O. Named layouts share immutable trees until an edit
-copies the affected tree; rendering borrows a snapshot rather than temporarily
-mutating a shared tree.
+One desktop-session save owner receives immutable in-memory snapshots of all
+layout edits. Named layouts share trees until editing copies the affected tree.
+The GUI neither validates/encodes the whole collection nor performs save I/O.
 
 Only manual sync or an orderly application exit writes layout state to disk;
 the user controls are documented in link:01_config.adoc#_layout[Configuration and layout].
@@ -349,16 +277,12 @@ request supersedes visible feedback from an older request and replaces pending
 work, not the running write; superseded failures are still logged. A slow old write
 cannot overwrite a newer completed write. There is no unbounded task or request queue.
 
-The worker retains one last-successful snapshot, initialized only from a valid
-startup file. Before encoding or writing, it compares persisted content without
-allocating a JSON representation. Names, selection, tree geometry, tab order and
-active indices, and panel options participate; runtime IDs, ID allocation state,
-and edit locks do not. Identical content, including edits reverted to the saved
-state, completes successfully without a file write. Requests are still validated.
-Only a successful write (or equal-content completion) advances the baseline to
-the captured request, never to newer session memory. Failure preserves the old
-baseline; missing and invalid startup files have none and are written on sync or
-exit. The baseline is not a watcher for external file changes.
+The worker compares persisted content with its last successful snapshot before
+encoding. Equal content still validates but needs no write; runtime IDs and edit
+locks do not affect equality. Success advances the baseline only to the captured
+request, not newer session memory. Failure preserves it. Missing or invalid
+startup files have no baseline and are written on sync or orderly exit; this
+comparison does not watch external file changes.
 
 The worker validates before writing a unique sibling temporary file and renaming
 it over the destination. Failed validation, encoding, or I/O preserves the
@@ -444,40 +368,28 @@ link:27_audio_processing.adoc[Audio processing usage and acceptance].
 
 === Feature state and commits
 
-One window-local snapshot source refreshes once per Core revision. Features share
-the immutable snapshot rather than copying it, and asynchronous completions can
-read the current snapshot without re-entering the window coordinator.
-Selection-ready and cross-feature transfer events hand their owned payloads to
-their sole coordinator rather than cloning row collections.
-
-Settings separates its edit-session model from GPUI controls. The model owns the
-baseline, draft, mutually exclusive global/panel target, submission identity and
-completion state. Input entities remain the authority for editable text and caret;
-only submission captures text for conditional refill. Successful completion rebases
-later edits onto committed configuration, while failure and obsolete completion
-cannot erase newer input. Panel settings use the same session boundary without
-joining the independent artwork-cache maintenance operation.
-
-Albums keeps both logical listings and their single physical read slot in one
-feature-local model. Query changes, visibility, paging and current revisions decide
-whether a result may publish; logical cancellation does not release the physical
-slot. The GPUI owner executes reads and manages search controls, artwork demand and
-scroll anchors without duplicating the model's pages or query state.
-
-Core, not the GUI coordinator, serializes business commits and persistence; see
+Features share one immutable Core snapshot refreshed per revision. Cross-feature
+transfers hand owned results to the coordinator rather than retaining duplicate
+row collections. Core serializes business commits and persistence; GUI refresh
+failure cannot undo an accepted commit. See
 link:21_ipc.adoc#_business_ownership_and_transactions[Business ownership and transactions].
-GUI refresh failure cannot turn an already committed operation into an uncommitted one.
 
-Features interpret relative input against their latest desired cursor, not only
-the committed selection. Relative targets are prepared before cross-feature
-cancellation retires that cursor; prepared selections carry the identity and
-validity scope required for commit. The window arbitrates the newest manual
-intent and any draft confirmation; it does not calculate feature targets.
-Ready results retain the desired target until commit or retirement. Confirmation
-revalidates the target before discarding a draft, and queued clean-editor events
-recheck current protection before proceeding. Non-commit terminal transitions
-release arbitration and reconsider playback follow; stale completions cannot
-settle a newer intent.
+Settings owns its baseline, draft, target and submission identity independently
+of controls. Inputs own editable text/caret. Successful completion rebases later
+edits onto committed configuration; failure or obsolete completion cannot erase
+new input. Panel settings share this boundary, not artwork-cache maintenance.
+
+Albums owns logical listing state and its physical read slot. Visibility, query
+identity and revisions control acceptance; logical cancellation does not free
+the worker. The GPUI owner handles execution, search, artwork and scroll anchors
+without duplicating the listing model.
+
+Relative selection uses each feature's latest desired cursor. The feature
+prepares and validates its target; the window arbitrates newest manual intent
+and metadata-draft confirmation. Confirmation revalidates before discarding a
+draft, and queued actions recheck protection. Terminal non-commit transitions
+release arbitration and reconsider playback follow; stale results cannot settle
+a newer intent.
 
 === Surfaces, focus and input routing
 
@@ -497,34 +409,19 @@ tree; a missing origin falls back to the layout, and a newer workspace focus
 choice supersedes deferred restoration. Panel removal hands focus back when its
 removed control owned it and routes panel commands to a surviving active panel.
 
-Pointer focus and activation belong to semantic interaction regions, not every
-ancestor container. A list heading's focus action covers its passive title or
-count, not an embedded search field or action button. Passive row content still
-bubbles to its owning row; independent row actions isolate their press and click
-from row selection and drag initiation. Press isolation belongs on the ancestor
-action region, so child native focus and Click run first. Do not put a propagation
-barrier on the focusable control itself: GPUI runs custom mouse-down listeners
-before that control's native focus listener. Composite editable controls may also
-intentionally observe child presses, as the font picker does. Disabled inputs do
-not publish pointer, Tab or native accessibility focus targets.
-Capture-phase bookkeeping, outside dismissal, wheel/drop routing, and gesture
-move/release delivery retain their separate owners; stopping activation does not
-transfer or cancel a gesture's lifecycle.
+Pointer activation belongs to semantic regions. Passive row content bubbles to
+its row, while independent actions isolate selection and drag initiation.
+Isolation wraps the action region, not the focusable child: GPUI's native focus
+handler must run before propagation stops. Capture bookkeeping, dismissal,
+wheel/drop routing and gesture delivery retain separate lifecycle owners.
 
-Interactive row identities follow their business target, not their current display
-index: Library uses track IDs or directory paths, Albums uses directory/title keys,
-and named layouts use their names. Replacement cannot inherit another target's
-pending native activation merely by occupying the same visible slot.
-
-Native accessibility Focus is authorized against the live shell surface and its
-published focus scope before custom Focus listeners or built-in Focus run.
-Opening or replacing a surface invalidates the previous publication; native
-focus requests are rejected, not queued for the replacement frame. Feature-owned
-confirmation identity also invalidates focus requests from a replaced confirmation.
-Pointer and keyboard input retain their existing routing paths. Other native
-accessibility actions are not restricted by this focus gate.
-View caching remains unchanged. This focus gate does not add accessibility replay;
-cached views retain the pinned GPUI's existing node and listener retention limits.
+Interactive rows use business identity, not visible index, so replacement cannot
+inherit another target's pending activation. Disabled controls expose no pointer,
+Tab or accessibility focus target. Native accessibility Focus additionally checks
+the live shell surface and published scope; replaced surfaces/confirmations
+invalidate old requests rather than queue them for a new frame. Other native
+accessibility actions are outside this gate. It does not add replay support to
+the pinned GPUI accessibility cache.
 
 === Demand and cached views
 
@@ -555,215 +452,116 @@ The workspace package `rivu-ui` provides the shared controls independently of
 Rivu's application root. It depends on GPUI and Unicode segmentation, not the
 playback core, configuration, localization catalog, or feature models. Rivu's
 GUI composition layer supplies track rows, metadata/artwork presentation, and
-localized search labels and count formatting. Consumers import generic controls
-directly from `rivu_ui`; there is no compatibility facade through the application.
+localized search labels and count formatting. Generic controls are imported
+directly from `rivu_ui`.
 
 Rivu's composition layer adapts host appearance and localized presentation; its
 cross-feature coordinator arbitrates manual intents and confirmations. Generic
 controls do not absorb those responsibilities or feature-owned models and requests.
 
-Shared track controls provide consistent favorite state, tooltips and pointer
-isolation; feature owners choose visibility and submit commands for the current
-track. Loading rows expose explicit retry and full-error copying with keyboard
-and accessible activation. Copying an error does not retry it. Delayed loading
-text is presentation only: Rivu uses 150 ms, while request identity, physical
-worker slots and recovery stay with feature owners. Tree and album placeholders
-retain their specialized layouts.
-
-Two-line list text truncates each line independently and keeps numbering,
-playback markers and selection in application composition. Recent tracks uses
-single-line rows, at least 2rem high. Tooltips do not introduce data subscriptions;
-content requiring fresh input is resolved when the tooltip opens.
+Shared track controls provide favorite state, tooltips and pointer isolation;
+feature owners decide visibility and commands. Loading rows offer explicit retry
+and full-error copying, including keyboard/accessibility activation. Copying does
+not retry. The 150 ms loading delay is presentation only; request identity,
+physical slots and recovery remain feature-owned. Tree/album placeholders retain
+their own geometry. Tooltip content requiring current input resolves on opening,
+without an additional data subscription.
 
 ==== Appearance and semantic controls
 
-Hosts install an immutable `theme::Palette` with `theme::set_palette`, publish a
-resolved text font, icon family and base point size with `theme::set_typography`,
-and call `input::Input::init` before showing controls. Appearance is application-scoped;
-the host owns palette storage and font resolution/registration. Tooltip and drag
-roots read current typography without inspecting the window root. Rivu retains
-its GUI/TUI color presets and optional embedded-symbol registration outside the
-component package. Runtime appearance changes invalidate existing views.
+Hosts install palette and resolved typography, initialize Input, and invalidate
+views when appearance changes. The package does not resolve application fonts,
+configuration or localization; tooltip and drag roots read shared typography.
 
-Buttons, menu items, checkboxes and choice options expose native AccessKit roles,
-names and current state. Accessible Click uses the same activation path as mouse
-and keyboard input. Disabled controls remove Click/Focus actions as well as
-rejecting pointer and keyboard activation; business guards still belong to owners.
-Rich menu content requires a separate textual name. Decorative `icon` glyphs do
-not create duplicate accessible controls; their owning action supplies the name.
+Buttons, menus, checkboxes and choices expose native roles, names and state.
+Accessible Click follows normal activation. Disabled controls reject activation,
+remove Click/Focus and leave Tab order while retaining focus identity; business
+guards remain with owners. Decorative glyphs do not create duplicate controls,
+and rich menu content needs a textual accessible name.
 
-Checkboxes and choices are controlled: the owner supplies current state, accepts
-changes and updates dependent controls. They neither store configuration nor
-save it. Settings retains its Apply/Discard transaction. Visual selection alone
-does not imply a toggle or switch role; semantic state must describe the action.
-
-Icon actions keep stable glyph slots and hit areas across state changes, following
-typography and UI scale. Text labels truncate within available width and expose
-their full text through tooltips. Single-line tree actions fit inside row borders;
-standalone controls retain their normal hit areas.
-
-Action groups share appearance and density, not state or commands. Owners choose
-overflow: toolbars may wrap, inline actions stay on one line, and Playback retains
-horizontal scrolling. Disabled items reject all activation and leave the Tab
-order without losing their focus identity. Favorite controls show selected accent
-without a selected fill; filters and playback modes keep their fills.
-
-Row actions appear on row hover or descendant focus, not when the entire list
-gains focus. Hidden overlay actions leave the full text width available. Checked
-menu indicators reserve the same space in either state. Pointer release completes
-gestures only after child handlers: a consumed docking session cannot commit
-twice, and cancellation also cleans up previews that never acquired a workspace
-interaction session.
+Checkboxes and choices are controlled: owners accept changes and update dependent
+state. They do not save configuration or replace Settings' Apply/Discard boundary.
+Action groups share appearance, not state or commands. Hosts choose wrapping,
+inline clipping or scrolling. Hover actions appear on their row's hover or
+descendant focus, not list-wide focus; hidden actions leave text width available.
+Release handling follows child gestures so a consumed dock cannot commit twice.
 
 ==== Editors and choice popups
 
-Input owns text, selection, IME conversion, focus and pointer-selection capture.
-Text replacement, including IME preedit, invalidates its shaped-text hit-test
-cache. Pointer events arriving before the next paint cannot use offsets from
-the previous text; fresh geometry is published when the new text is painted.
-All editing paths keep single-line text by replacing line breaks with spaces.
-Caret movement and deletion follow extended grapheme boundaries using the complete
-text as context.
-`InputEvent::Changed` reports both edit origin and whether IME composition is
-active. Preedit is visible but is not a committed
-configuration value; unmarking emits a committed change even when the text is
-unchanged. Enter does not submit active preedit. Escape restores the pre-composition
-text and selection before a later Escape can reach the enclosing editor.
-Editable combo inputs can use the select-trigger surface without changing input
-geometry or editing behavior; ordinary standalone inputs keep their input surface.
-Disabling an input keeps its draft while rejecting edits and removing its Tab
-stop. `SearchField` owns expansion, clear/Escape interaction and a cancellable
-debounce task; the host supplies the delay, text and count formatter. Clearing or
-resetting invalidates an older pending query. Returning to the applied, trimmed
-query also cancels pending work without scheduling another wake; IME preedit
-continues to participate in live filtering. Its single-line height is bounded
-in both horizontal and vertical parent layouts.
+Input owns text, selection, IME, focus and pointer-selection capture. Edits
+invalidate shaped hit-test geometry until repaint, preventing pointer events
+from using old text offsets. All edit paths normalize line breaks to spaces;
+movement and deletion follow extended graphemes in full-text context.
 
-`Input::new(name, value, placeholder, cx)` requires a resolved accessible name;
-placeholder text is not its label. Inputs expose value, character geometry and
-selection through a synthetic text run. Accessible edits use the existing user
-edit path; selection requests validate node identity and Unicode character bounds.
-Platform adapter support determines which text actions reach those handlers.
-`SearchLabels::name` names the editable search independently of its icon actions.
+Change events distinguish origin and active IME composition. Preedit is visible
+but uncommitted: Enter cannot submit it, and Escape first restores the prior
+text/selection. Disabling preserves the draft while rejecting edits and focus.
+Inputs require an explicit accessible name, separate from placeholder text;
+accessible edits share the user-edit path and validate text-node/Unicode bounds.
+Platform adapters determine which text actions reach these handlers.
 
-`ChoiceState` owns candidates, keyboard highlight, open state and the existing
-scroll handle. The host supplies an already-filtered candidate set; the control
-does not maintain another filtering model.
-Closing releases the candidates and clears the highlighted selection; reopening
-supplies a fresh candidate set.
-`ChoicePopup` renders their viewport-bounded anchored surface. Select and editable
-input modes share navigation, but editable text/IME submission remains Input's
-responsibility. Owners supply filtering, value mapping, commit and dismissal
-decisions. `Dialog` and `Popover` supply materials, constraints and modal pointer
-barriers, not global surface state or an automatic outside-close policy. Shell
-focus restoration, draft protection and asynchronous business guards stay with
-their existing owners; a disabled visual control does not replace those guards.
+SearchField owns expansion, clear/Escape and cancellable debounce. The host
+supplies timing, labels and count formatting. Reset or return to the applied
+trimmed query cancels obsolete work; IME preedit participates in live filtering.
 
-Choice callbacks and retained row presses are bound to the candidate generation
-that produced the popup. Closing, reopening or replacing candidates invalidates
-both callbacks and an in-progress press, including across a repaint; moving the
-keyboard highlight does not. A fresh press can select the replacement candidate.
-Paging uses the popup's rendered row height, including before replacement
-candidates have repainted. Outside-dismiss callbacks also belong to their candidate
-generation and cannot dismiss a replacement popup.
-Owners handle select-mode keys in capture, before GPUI arms native Enter/Space
-activation. `ChoiceDisposition::apply` prevents that activation from being armed;
-it cannot clear one already registered by an earlier listener.
+Choice state owns candidates, highlight, popup lifetime and scrolling; hosts
+supply filtering, mapping, commit and dismissal. Select and editable modes share
+navigation, but text/IME submission stays with Input. Closing releases candidates.
+Callbacks and retained row presses belong to the candidate generation: replacement
+or reopening invalidates them, while highlight movement does not. Page movement
+uses rendered row height. Select-mode keys are handled before native Enter/Space
+activation is armed.
 
-Monitor EQ preset and management popovers have one explicit panel owner and use
-the shared focus scope for native keyboard traversal. Closing restores the live
-trigger only while focus still belongs to that popover; an outside press dismisses
-without activating the underlying control. Hiding the owner, changing its page
-or invalidating its geometry retires the popover. Disabled EQ removes preset
-actions from keyboard traversal as well as rejecting activation.
-Popup changes invalidate only the old/new owner editors. External preset-name
-changes refresh the open owner; shared name-draft edits refresh active monitor
-labels, without observing every processing-owner notification.
+Dialog and Popover provide materials, viewport constraints and modal pointer
+barriers, not global surface state, draft protection or automatic outside-close
+policy. Ordinary dialogs use a scrolling card; specialized surfaces can own
+internal scrolling. FormField and label/value rows share presentation only:
+callers retain inputs, validation, formatting, drafts and submission.
 
-Ordinary form and confirmation dialogs use `Dialog::scroll_card` for padded,
-viewport-bounded vertical scrolling, with width chosen by the caller. Specialized
-surfaces can retain `card` and their own internal scrolling. Input-aligned form
-actions opt into `input_aligned_control`, sharing standalone Input's scaled line
-and padding geometry while keeping the border unscaled. Toolbar defaults and
-embedded inputs retain their separate sizing contracts.
-
-`FormField` supplies the label/control shell and optional action, hint and error
-rows. It owns no input, validation, draft, submission or enabled state; callers
-retain those decisions and pass existing controls and feedback. Settings,
-metadata decoder hints and processing graph fields use this same presentation.
-`label_value_row` supplies a width-constrained muted label, a flexible value and
-an optional hover action. Metadata still owns value formatting, label measurement
-and copy eligibility; the shared row owns only geometry and hover presentation.
+Monitor EQ popovers have one panel owner and shared keyboard scope. Dismissal
+restores the live trigger only while the popup still owns focus; outside presses
+do not activate underlying controls. Hiding or invalidating owner geometry
+retires the popup, and disabled EQ removes preset actions from traversal.
+Popup/name changes invalidate affected editors rather than every processing view.
 
 ==== Lists and scrolling
 
-`VirtualList` accepts an absolute logical row count, a stable identity, an existing
-scroll handle and a range renderer. It owns neither records nor selection and
-does not fetch data. Only its actual viewport decoration reports demand: GPUI's
-sample-row measurement is not a query request. Sparse placeholders retain their
-logical indices. Optional decorations and a wrapper inside the scrollbar gutter
-keep host measurements and drop targets in the same content coordinates.
-Demand callbacks use `on_viewport_deferred`: each actual viewport queues one GPUI
-end-of-effect-cycle callback, so accepted rows can notify after paint rather than
-lose their redraw during prepaint. The owner is weakly held and release skips
-delivery; visibility, query generations and demand eligibility remain owner guards.
-Equal ranges are delivered again, allowing retry and new data without scrolling.
-The low-level synchronous `on_viewport` remains for side-effect-free observation.
-Callbacks must be cheaply cloneable and capture weak rather than strong owners;
-deferred delivery must not extend a feature's lifetime.
-Workspace remains responsible for panel lifetime and hidden-tab input routing.
-Library's sparse tree, album grid projection, and History's column geometry remain
-feature-owned; bounded heterogeneous duplicate-review pages use ordinary scroll
-areas rather than uniform-row virtualization.
+VirtualList accepts a logical count, stable identity, existing scroll handle and
+range renderer. It neither owns records/selection nor fetches data. Only the
+actual viewport requests demand; sample-row measurement does not. Sparse
+placeholders retain logical indices and viewport decorations share content
+coordinates with drop targets.
 
-The content menu's playlist-target page owns one logical cursor and one native
-list focus stop, not one tab stop per rendered row. Arrow, Page, Home and End keys
-move the cursor and scroll it into view; New and Back remain ordinary menu stops.
-The cursor binds a loaded row ID to the current catalog revision/query, rejecting
-unloaded or replaced targets at submission. It retains no copy of the catalog;
-the same sparse viewport demand path continues to fetch missing rows. Returning
-to the parent menu restores the Playlist trigger, whose explicit focus handle
-also explicitly opts into native Tab traversal.
+Deferred viewport delivery runs after paint, weakly holds its owner and may repeat
+equal ranges so retry/new data need not await scrolling. Owners still check
+visibility and query identity. Synchronous viewport observation is available for
+side-effect-free use. Library's sparse tree, Albums' grid and History's columns
+remain feature-owned; bounded heterogeneous review pages need not be virtualized.
 
-`scrollable_area` assembles a supplied vertical viewport and its scrollbar around
-the same owner-retained `Rc<ScrollHandle>`; it creates no additional position handle.
-Workspace `ScrollViews` retains the one handle per panel/region. Hiding a tab preserves it;
-activating a layout resets the registry and the next render obtains its current
-handle. Processing workbench regions do not keep a second handle cache. Settings
-and keyboard help retain their independent owner-held handles; Metadata and
-Playback keep their existing ordinary tracked scrolling without added scrollbars.
+The playlist-target menu has one logical cursor and one list focus stop. Arrow,
+Page, Home and End move it into view; submission checks loaded row identity and
+catalog revision without copying the catalog. New/Back remain ordinary stops.
 
-The scrollbar owns its element-local pointer gesture and an activation subscription,
-released with that element. Window exit or deactivation cancels the gesture;
-returning with a button held cannot revive it. Geometry or handle replacement
-cancels movement but retains ownership of the pending release, preventing it from
-reaching a row.
+Scrollable areas reuse owner-retained handles. Workspace owns panel/region
+positions: hiding retains them, layout activation resets them. Settings/help and
+ordinary Metadata/Playback scrolling keep their existing independent owners.
+The scrollbar owns its element-local pointer gesture; exit or deactivation
+cancels it. Geometry/handle replacement stops movement but consumes the pending
+release so it cannot reach a row.
 
 ==== Progress and sliders
 
-`ProgressBar` displays a host-provided normalized fraction without input handling.
-`Slider` adds focus, disabled presentation, pointer-start and keyboard intent
-handling. Both clamp finite display values to `[0, 1]` and display nonfinite values
-as zero; this presentation normalization is not application validation. Both use
-the host palette; neither owns playback state or performs Core commands.
-Disabled sliders reject activation and Tab navigation and suppress native
-pointer-focus transfer, preserving focus on another control when clicked.
-Window-level release arbitration follows the shared disabled-control policy.
-Slider values and step policy remain host-owned. The window arbitrates pointer
-sessions, while the playback owner retains seek target identity, preview and
-commit/cancellation semantics. Keyboard takeover cancels an existing pointer
-session before dispatch, so a later pointer release cannot overwrite it.
+ProgressBar displays a normalized fraction; Slider adds pointer/keyboard intents
+and disabled/focus presentation. Finite display values clamp to `[0, 1]` and
+nonfinite values display as zero; application validation and step policy remain
+host-owned. Disabled sliders reject activation and pointer-focus transfer.
 
-Playback transport buttons constrain their aspect ratio to 1:1 before applying
-full corner rounding, so their backgrounds remain circular as typography changes.
-
-Playback shows only the volume icon and slider at rest. Hovering either reveals
-the volume percentage in the shared tooltip. During a volume drag or keyboard
-focus, a tooltip-styled value appears above the slider instead of the hover hint,
-without taking layout space. This immediate value follows the current Core volume;
-pointer release/cancellation or leaving keyboard focus removes it. The panel-keyed
-focus handle lives only while that control is rendered; no separate hover state
-or cached volume value is needed.
+The window arbitrates pointer sessions; Playback owns seek identity, preview and
+commit/cancellation. Keyboard takeover cancels a live pointer session before
+dispatch, preventing a later release from overwriting it. Transport buttons keep
+circular backgrounds as typography changes. Volume appears in a hover hint or
+an immediate tooltip-styled value during drag/focus, without taking layout space
+or maintaining a second volume model.
 
 ==== Integration and showcase
 
@@ -773,17 +571,11 @@ versions. `make lint` and `make build` include the component package;
 `cargo test -p rivu-ui` runs its interaction and viewport regression tests.
 
 Run `make ui-demo` (or `cargo run -p rivu-ui --example showcase --features showcase`)
-on a Wayland desktop for a small consumer example.
-The component package owns this example; its optional `showcase` feature is disabled
-by default and enables the platform dependency needed to run it.
-It installs host appearance, retains inputs and subscriptions, filters a virtual
-list, and demonstrates choice, checkbox, progress, slider, disabled and error-recovery behavior.
-Its explicit Begin/Fail/Finish controls exercise presentation transitions without
-pretending to perform network or database work. The example uses the same pinned
-GPUI and requires the normal build and font prerequisites.
-Its font-size controls adjust 8–18pt in 1pt steps, independently of UI scale;
-root text and shared typography use the same point-to-logical-pixel conversion.
-The page scrolls to keep controls accessible at larger font sizes.
+on Wayland. This opt-in package example installs host appearance, retains controls
+and subscriptions, and demonstrates filtering, choice, disabled controls and
+error recovery without pretending to perform database/network work. It uses the
+same pinned GPUI and normal build/font prerequisites. Font-size controls are
+independent of interface scale, and the page scrolls at larger sizes.
 
 Playback seek/volume drag transactions and Settings validation remain application
 responsibilities; the package does not provide an automatic form submission,

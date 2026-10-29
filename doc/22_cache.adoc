@@ -47,41 +47,26 @@ can substitute for physical-worker completion.
 
 === Core-owned lookup retention
 
-The interactive Store keeps a track-ID LRU of at most twice
-`interface.page_size`: 128 tracks at the default 64, at most 512 at the supported
-maximum 256. Hits refresh age; misses are not cached. Reducing page size trims
-immediately. Core metadata changes invalidate affected entries; playback
-statistics patch cached scalars. A successful source-conditional bitrate commit
-patches an existing cached Track's value/certainty pair without inserting a miss.
-Scan publication clears this cache only for library-display impacts; no-change
-scans and masked raw-metadata edits retain it.
-This bounds entries, not track-string bytes, and is neither a whole-library
-snapshot nor a GUI page cache. Read-only export does not use it.
+Core's interactive track-ID LRU holds at most twice `interface.page_size`: 128
+entries by default, at most 512. Hits refresh age, misses are not retained, and a
+smaller page size trims immediately. Metadata changes invalidate affected entries;
+playback statistics and committed bitrate changes patch existing entries. Scans
+clear it only for display impacts. This bounds entries, not string bytes. The
+background query owner and export do not populate this LRU or assemble pages from it.
 
-Library track/display pages retain one latest exact filtered count, keyed by
-normalized filters and optional root. A separate scalar slot retains the
-duplicate-group total. A sixteen-entry LRU of scalar totals covers Other,
-directory children, albums and album members, Queue, and playlist entries; keys
-include the relevant filters and collection identity, never page offsets or rows.
-The read-query owner reuses counts across pinned snapshots while the owning
-data-domain revisions remain valid. Cache ownership advances only after the
-pinned snapshot passes publication validation. Read-only mode alone is not an
-invalidation rule. Writable scalar-count caches check SQLite's local-change
-counter and on-demand `PRAGMA data_version` so independent commits cannot leave
-stale totals. Explicit writer transactions bypass count caches, avoiding rollback
-leakage. Read-query caches invalidate only their affected data domains; unrelated
-Queue/playlist changes and no-change scans retain library totals. There is no
-timer-based external-commit polling or collection-sized row cache.
+Count retention stores scalars, not rows: one latest filtered library count, one
+duplicate-group total, and a sixteen-entry LRU for Other, directories, albums,
+album members, Queue, and playlist entries. Keys include normalized filters and
+collection identity, never page boundaries. The read owner reuses them across
+snapshots while their data-domain revisions remain valid, advancing cache
+ownership only after snapshot publication validation. Unrelated collection changes,
+no-change scans, and bitrate-only changes preserve library totals.
 
-The background read owner leaves its Track-cache capacity at zero; it does not
-share the interactive Store's LRU. Bitrate revision changes retain count caches:
-bitrate is neither a filter nor an ordering/count input. Single-Track reads and
-page SQL remain separate paths; pages are not assembled through per-ID LRU reads.
-
-Root aggregation and directory child relations remain request-local; persistent
-album summaries are transactionally maintained database projections, not an
-evictable page cache.
-Their query costs and invariants are in
+Writable count caches check local SQLite changes and on-demand `PRAGMA data_version`
+for independent commits; writer transactions bypass them to avoid rollback leakage.
+There is no polling timer or collection-sized row cache. Root aggregation and
+directory relations are request-local; persistent album summaries are transactional
+database projections, not evictable pages. See
 link:21_ipc.adoc#_transactional_inputs_and_bounded_storage_queries[IPC storage queries].
 
 === Window-local query retention
@@ -102,83 +87,60 @@ link:21_ipc.adoc#_query_results_and_pagination[IPC query results].
 
 ==== Demand, cancellation, and physical retirement
 
-Feature owners reconcile configuration and revision keys even while hidden;
-actual reads require demand. An open Add to playlist chooser independently
-demands summaries. Hiding retires pending reads immediately, without waiting for
-another Core publication or paint, but preserves accepted rows, selections, and
-Details drafts. Unchanged album keys retain bounded pages and failures; covers
-have separate owners.
+Feature owners reconcile configuration and freshness even while hidden, but submit
+reads only for demand. Hiding immediately revokes pending publication rights while
+preserving accepted rows, selections, and Details drafts. An open Add to playlist
+chooser has independent demand; cover acquisition has separate owners.
 
-Every submitted read holds its physical slot until its actual Core reply or
-reply-channel disconnection. Replacement, cancellation, hiding, and a logical
-timeout can revoke publication rights but cannot release that slot. Only matching
-completion releases it and re-drives the latest eligible demand; old completions
-cannot clear replacement requests or publish feedback. Hidden demand waits for
-reveal. This is handoff, not retry of a current failure or polling of a task.
-Owner epochs let Core skip obsolete queued GUI reads before Store access; already
-dispatched SQL is not interrupted, another owner's work is not cancelled, and
-writes are never replayed.
+Every submitted read holds its physical slot until the actual reply or channel
+disconnection. Replacement, hiding, cancellation, and logical timeout cannot free
+it. Matching retirement re-drives the latest eligible demand; old completions
+cannot publish or clear replacement requests. Core can skip obsolete queued GUI
+reads before Store admission, but cannot interrupt dispatched SQL or replay writes.
 
-GUI submission has a two-second deadline and response presentation a 12-second
-deadline. A response timeout stops current loading feedback and shows its error,
-but the reader still owns the slot and discards any late payload. Explicit retry
-also waits for that retirement. This GUI policy does not alter IPC, non-GUI
-deadlines, or command acknowledgements. Transport errors carry no payload stamp
-and are not evidence of a changed collection; successful payloads still require
-current data and intent.
+GUI admission allows two seconds and response presentation twelve seconds. Timeout
+ends loading feedback and shows an error, discarding late payloads; explicit retry
+still waits for physical retirement. Transport errors have no payload stamp and
+do not prove collection changes. This policy does not alter IPC or command deadlines.
 
-Album Browser publishes an accepted page before querying an uncached unfiltered
-total for its search counter. The auxiliary total has independent publication
-checks: failure or timeout leaves the accepted rows intact and the counter
-unavailable. Page loading ends when the page settles, but the same physical slot
-remains occupied through auxiliary-query retirement. Replacement or hiding
-revokes the old counter's publication rights without opening another slot.
+Album Browser publishes a page before requesting an uncached unfiltered search
+total. Auxiliary failure leaves the rows intact and counter unavailable. The same
+physical slot remains occupied until that query retires; hiding or replacement
+revokes its publication rights without opening another slot.
 
 [cols="1,3",options="header"]
 |===
 |Owner |Retained demand and execution boundary
 |Library browser
-|One root/search-count worker. Counts, totals, failures, configured roots, and
-filtered query identity are reconciled together. The forest page is local
-configuration data, not a database read; unavailable counts do not unmount roots.
-Root aggregates count each track once.
+|One root/search-count worker; configured-root rows are local data and remain
+visible without counts. Root aggregates count each track once.
 |Library tree
-|At most four physical reads and four coalesced latest pending branch demands.
-Repeated demand for the current in-flight page does not queue a second read or
-implicitly retry a failure. Unscheduled demand owns no loading token; collapsing
-an ancestor discards its queued subtree demand without releasing physical slots.
-Local forest publication and worker progress, not queued demand alone, notify rendering.
+|At most four physical reads and four coalesced pending branch demands. Collapsing
+discards queued subtree demand, not submitted slots; repeated demand does not
+duplicate in-flight work or implicitly retry failure.
 |Playlists and Queue
-|Page/request lifecycle stays with the feature owner. Other consumers borrow
-read-only buffers and request explicit catalog/entry operations. Selection-
-existence reads are independent of page size; a retired request cannot clear a
-replacement. Queue position validity is separate from operation progress.
+|The feature owns pages and request lifecycle; other consumers borrow read-only
+buffers. Selection-existence reads are independent of page size, and position
+validity is independent of operation progress.
 |Details
-|One read coordinator retains freshness, latest quiet deadline, coalesced demand,
-and reader slot. Explicit selections query Track; playback-follow uses Core's
-current-track snapshot without another reservation. The edit session separately
-owns drafts and read/save acceptance.
+|One read coordinator; explicit selections query Track, while playback-follow uses
+Core's current-track projection. Draft/save acceptance has a separate owner.
 |Collection resolution
-|One cancellable owner resolves album-menu membership for favorite actions;
-replacement/hiding/shutdown retires its paged read without publishing partial
-results. Whole-collection Queue/Playlist copies submit source identity and
-versions directly; Core resolves them within the destination write transaction,
-without retaining a GUI collection-sized ID buffer.
+|One cancellable paged reader for album-menu favorite actions. Whole-collection
+Queue/Playlist copies instead submit versioned source identity for transactional
+Core resolution, without a GUI collection-sized ID buffer.
 |Duplicate review
-|Track identities survive reference-only refreshes, but command eligibility uses
-current member facts. Dismissal/destruction requests cancellation without joining
-Core's relocation worker. A late startup acknowledgement cancels its accepted
-task rather than restoring a closed or superseded review.
+|Stable selected identities survive reference refreshes, but commands require
+current facts. Dismissal requests task cancellation without joining the worker;
+late admission cannot reopen the review.
 |===
 
-Debounced directory/playlist/Details reads recheck demand before submission.
-Abandoned timers release only their own unsubmitted reservations, not submitted
-slots or accepted data. Album searches, Playlist pages, and explicit Details
-retain the latest demand's absolute quiet deadline across redispatch, hiding,
-and completion; replacement renews it. The window's explicit-action confirmation
-barrier is independent of Details drafts and selection owners: late reads/save
-acknowledgements cannot restore retired intent. Interaction rules are described
-in link:24_layout.adoc[GUI layout].
+Debounced reads recheck demand before submission. An abandoned timer releases only
+its unsubmitted reservation. Album searches, Playlist pages, and explicit Details
+preserve the latest demand's quiet deadline across hiding and redispatch; replacement
+renews it. Confirmation barriers, drafts, and selections remain separate from read
+lifetime, so late reads or saves cannot restore retired intent. See
+link:24_layout.adoc[GUI layout] for interaction rules.
 
 ==== Payloads, failures, and retained geometry
 
@@ -193,27 +155,16 @@ same separate bound.
 unverified ancestry. Expansion/selection identities are separate from payloads.
 |===
 
-Tree branch bookkeeping follows live ownership: cached pages, demand, pending
-requests, expanded descendants and their ancestors, selection, focus, and
-navigation. Otherwise-unowned collapsed branches are reclaimed rather than kept
-for every directory ever visited. Reopening one loads its count again; hidden
-descendant expansion choices and selected anchors remain intact.
+Tree branch bookkeeping survives only while owned by cached pages, demand, pending
+reads, expansion ancestry, selection, focus, or navigation. Otherwise-unowned
+collapsed branches are reclaimed and reload counts on reopening. Switching views
+transfers the inactive expansion snapshot rather than retaining duplicate active
+branches. Hidden descendant expansion and selected anchors remain intact.
 
-Expansion snapshots belong only to the inactive view; switching consumes the
-destination snapshot rather than retaining a duplicate of its active branches.
-Sparse branch, page, stale-ancestry, selection-anchor and selected-identity hash
-tables shed high-water capacity when their live contents shrink substantially,
-retaining bounded reuse slack instead of reallocating on every deselection or collapse.
-Branch collection borrows live identities and runs when ownership changes, not
-for unchanged viewport demand alone.
-
-Queue, Playlist, and History identity selections also shed high-water hash-table
-capacity after clear, replacement, or reconciliation removes most entries. Capacity
-above the larger of 64 entries or four times the retained selection is reduced
-toward twice the retained selection, allowing reuse without rebuilding on each
-deselection. Large range replacements account for the incoming selection before
-shrinking. All-selected state still stores the selected identities; this policy
-limits stale capacity, not the size of an active selection.
+Sparse tree tables and Queue/Playlist/History selections shed high-water capacity
+when live contents shrink substantially, retaining reuse slack instead of
+reallocating on every deselection. This limits stale capacity, not live selection
+size: selecting all still retains every selected identity.
 
 A data revision forgets counts and drops obsolete pages, failures, and positional
 pins, but retains nonempty scroll geometry until a current result supplies its
@@ -224,38 +175,27 @@ cannot authorize counts, ranges, or navigation; tree ranges also need current
 ancestor counts. Unfiltered Queue state can supply a current total immediately;
 filtered Queue needs its own result.
 
-Page-size changes clear boundary-dependent pages, failures, and reservations,
-not current totals, geometry, or identity selections. Hiding/logical cancellation
-preserve accepted data and retained failures. A current failed page needs explicit
-retry until eviction or changed demand makes it eligible again. Accepted errors
-consume reservations, not successful-data publication. Queue identity-reconciliation
-failures retain occurrences but leave positions unavailable until successful
-retry or a new single selection; cancelling a replacement cannot validate them.
-Selected-playlist summary failures are retained by selection/catalog stamp;
-catalog invalidation forgets the count until a current lookup or page restores it.
-All retries use existing reader lanes and physical gates.
+Page-size changes clear boundary-dependent pages, failures, and reservations, not
+totals, geometry, or identity selections. Hiding and logical cancellation preserve
+accepted data and failures. Current page failures require explicit retry until
+eviction or changed demand makes them eligible again; retries use existing lanes.
+Queue reconciliation failures retain occurrences but leave positions unavailable.
+Selected-playlist summary failures remain scoped to selection/catalog freshness;
+catalog invalidation forgets counts until a current result restores them.
 
-Placeholders retain geometry while loading text waits 150 ms; failures/retry
-affordances remain immediate. One cancellable earliest-deadline wake per view
-belongs to current requests and retires on completion/cancellation/hiding. A
-replacement Queue search starts its own delay only when submitted, not while
-waiting for the old worker. Viewport demand is deferred past prepaint so accepted
-local forest pages can invalidate their placeholder frame. These presentation
-rules do not validate stale pages or alter metadata/operation safety semantics.
+Loading text waits 150 ms while placeholders retain geometry; errors and retries
+are immediate. A cancellable per-view wake follows current requests and retires on
+completion, hiding, or cancellation. Presentation delays never authorize stale data.
 
 ==== History-derived retention
 
-History owns one sorting index per immutable source/sort choice and cached
-column measurements per source, resolved font, and text size. Search, scrolling,
-and playback do not rebuild static widths. Only the replacement playback-time
-label is remeasured; two widest stored-time measurements preserve exact sizing
-when its row is excluded, including ties, without a per-row measurement cache.
-Typography/source changes rebuild measurements. Source replacement immediately
-retires obsolete column measurements even while History is hidden, so their source
-reference cannot pin the preceding history snapshot. Tree page acceptance similarly
-indexes borrowed identities once for selection revalidation; viewport demand
-binary-searches intersecting preorder segments instead of rescanning all retained
-expansions. These caches are independent of visualization caching.
+History retains one sort index per immutable source/sort choice and column widths
+per source, resolved font, and text size. Search, scrolling, and playback reuse
+static measurements; only the replacement time label is remeasured. Source or
+typography changes rebuild them, and source replacement releases obsolete
+measurements even while hidden. Tree pages similarly retain selection indexes
+rather than rescanning all expansions on viewport demand. Neither depends on
+visualization caching.
 
 == Processing output retention
 
@@ -321,15 +261,12 @@ available bins. Source revision, amplitude mapping, or effective count triggers
 aggregation; only changed mapped values or palette replace the publication.
 Raw-width changes preserving that count, height, and cursor movement reuse it.
 
-A full scan's request generation remains its display identity across rolling PCM
-updates; replacement scans stay distinct even with the same source revision.
-Keys do not retain full-preview snapshots. Unchanged pooled values retain their
-publication, all-unknown data creates none, and known silence remains drawable.
-Cache-off recomputes derived values without retaining publications or discarding
-source samples. Packed columns transfer to GPUI without a second column copy;
-the renderer owns upload reuse and completion-aware retirement, not application
-image queues. Signal aggregation and coverage semantics are in
-link:23_visuals.adoc#_waveform[Waveform].
+A scan generation remains its display identity across rolling PCM updates;
+replacement scans stay distinct. Keys do not pin preview snapshots. All-unknown
+data produces no publication, while known silence remains drawable. Cache-off
+recomputes without retaining derived publications or discarding samples. The
+renderer owns upload reuse and completion-aware retirement. Signal semantics are
+in link:23_visuals.adoc#_waveform[Waveform].
 
 ==== Spectrum
 
@@ -368,13 +305,11 @@ by configured rows and the startup shared GPU budget. Resizing preserves newest
 chronological columns; narrow/wide panels do not fight to resize shared history
 while painting.
 
-Prepaint retains panel measurements until bounds/visibility changes. A too-small
-panel retires only its own drawable-size request, leaving drawable siblings
-authoritative. If all active panels are too small, history shrinks to its newest
-two columns and sampling height becomes zero; unchanged small frames do not
-reallocate it. Enlargement restores measured demand and normal accumulation
-without losing those columns. This size-only transition does not change analysis
-demand; drawable geometry is specified in link:24_layout.adoc[GUI layout].
+Panels update measured demand when size or visibility changes. A too-small panel
+withdraws only its own request; when all are too small, shared history keeps its
+newest two columns and sampling height becomes zero. Enlargement resumes normal
+retention without losing them. This does not change analysis demand; see
+link:24_layout.adoc[GUI layout] for drawable geometry.
 
 When no Spectrogram panel is visible, including when the window is hidden,
 CPU history, pooling/scroll state, and derived working storage are released.
@@ -441,29 +376,21 @@ the bounded analysis ring and waveform preview retention. Admission, continuity,
 and signal-selection rules are defined in
 link:23_visuals.adoc#_pcm_admission[PCM admission].
 
-Density keeps one 256 by 256 accumulation field and three fixed immutable
-snapshot slots: 1 MiB of cell storage per active analyzer, excluding rendering and
-small control allocations. A publication materializes into a uniquely held slot;
-the shared frame, GUI staging, and Density's source model share that payload
-without copying its cells. GPU publication additionally copies the changed numeric
-field into one immutable snapshot shared by its panels. Spatial Spectrum retains
-its separate decaying field. If slow consumers retain all three worker slots, the
-worker omits Density from that publication rather than allocating, blocking, or
-pairing old Density with newer metrics. Spectrum and other ready payloads continue;
-the Density renderer keeps its prior drawing and matching readouts until a slot
-becomes available. PCM's bounded snapshot pool follows the same readiness rule.
-Losing Density demand releases its pool and consumer references without stopping
-a surviving Spatial Spectrum consumer or resetting the shared FFT window.
+Density owns one 256 × 256 accumulation field and three immutable snapshot slots:
+1 MiB of cell storage per active analyzer, excluding rendering and control state.
+Worker, GUI staging, and source model share a slot's payload. If consumers pin all
+three, Density is omitted from that publication rather than allocating or blocking;
+other ready analysis continues. The renderer keeps the prior drawing and matching
+readouts, never pairs old Density with newer metrics. PCM snapshots have the same
+readiness rule. Losing Density demand releases its pool without resetting a
+surviving Spatial Spectrum consumer or the shared FFT window.
 
-Density/Spatial use revocable dynamic GPU slots rather than retained field images.
-One Density publication contains 256 KiB of numeric cells; one Spatial publication
-contains 128 KiB. Each style shares a 4 KiB palette across publications and panel
-placements. Unchanged fields and paint/resize do not republish. Hiding clears the
-slot and source model, including references used by cached scenes; previously
-captured frames may finish safely. Renderer-owned buffers remain bounded and are
-reclaimed on a later draw after completion, or on renderer destruction, not by an
-application retirement callback or a forced cleanup frame. These are payload counts,
-not total process memory or physical VRAM limits.
+Density and Spatial Spectrum use revocable GPU slots: 256 KiB and 128 KiB per
+numeric publication respectively, with a shared 4 KiB palette per style. Unchanged
+fields and resize reuse them. Hiding clears slot/source ownership; captured frames
+may finish safely. Renderer buffers retire after completion on a later draw or
+renderer destruction, not an application cleanup frame. These are payload bounds,
+not total memory or physical VRAM limits.
 
 === Design tradeoffs
 
@@ -492,13 +419,10 @@ the fixed 24 MiB encoded-staging allowance; nested metadata is limited to eight
 levels. Oversized metadata is skipped without rejecting otherwise decodable audio;
 these limits do not guarantee complete tags or chapters for such files.
 
-One opened native source owns its remaining allowance across probing, packet
-reads, and seeks. Artwork extraction owns a separate probe allowance. Synchronous
-parser scopes share that allowance with nested readers and restore the previous
-scope on return or unwind; they never span an asynchronous wait or thread hop.
-The pinned Symphonia 0.6.1 metadata and container patches under `vendor/` enforce
-admission before frame, chunk, attachment, or metadata-packet allocation rather
-than relying on a check after decoding the complete payload.
+One native source keeps its allowance across probing, packet reads, and seeks;
+artwork probing has a separate allowance. Nested synchronous parsers share it.
+The pinned Symphonia metadata/container patches enforce admission before payload
+allocation, not after decoding complete metadata.
 
 Matroska DocType and CodecId are structural identifiers, independent of the
 exhaustible metadata allowance. Their encoded payloads have a separate 1 KiB
@@ -517,17 +441,12 @@ display images. Releasing one layer does not imply reclamation of the others.
 
 === Application-session lookup
 
-Artwork lookup is independent of visualization caching. One application-session
-manager is shared by MPRIS and every graphical window, including reopened and
-reloaded windows. Cache-only reads return only completed real covers, without
-media I/O or waiting for a probe. The GUI uses its embedded SVG default directly,
-without track lookup entries or exported default-image files. MPRIS lazily exports
-its PNG fallback on the existing background publisher; its cache-only metadata
-getter never creates that file or retries a failed export. Blocking loads run on
-GPUI's existing background executor and the MPRIS publisher, not new artwork
-threads. Source extraction accepts only regular files. Nonblocking opening rejects
-FIFOs without waiting for a writer, and the opened file is checked before probing.
-Regular-file probing and filesystem I/O can still block those background callers.
+One application-session lookup manager serves MPRIS and every graphical window,
+including reopened windows, independently of visualization caching. Cache-only
+reads never probe or perform media I/O. GUI defaults use the embedded SVG; MPRIS
+lazily exports its PNG fallback on the background publisher. Extraction runs on
+existing background executors and admits only regular sources, rejecting FIFOs
+without waiting. Regular-file probing can still block its caller.
 
 The GUI keeps one active load and only the latest pending selection. Completions
 are matched by track ID, fingerprint, and source path before updating the selected preview or
@@ -542,15 +461,12 @@ latest track. Other consumers, including MPRIS, retain their own acquisition dem
 A path change updates the panel's source snapshot and retires the previous cover
 even when track ID and fingerprint are unchanged; it does not reset track rotation.
 
-The content key is track ID plus source fingerprint. Resident requests for the
-same content share one probe outside the lookup lock. In-flight loads retain the
-lookup, while GUI and MPRIS consumers retain its published file directly. Either
-keeps that version resident.
-A changed fingerprint creates a new version without discarding an old version
-still in use. The GUI retires replaced results after the next window-frame
-boundary; MPRIS retains its published result until replacement or shutdown, and
-its property getter retains the returned result until the next read or shutdown.
-There is no separate file lease counter or session-wide visited-file registry.
+Track ID plus source fingerprint identifies content. Resident concurrent requests
+share one probe outside the lookup lock. In-flight work and published consumers
+keep that version resident; a changed fingerprint can coexist with an old cover
+still in use. GUI replacement retires after a frame boundary; MPRIS holds its
+published result until replacement/shutdown and returned properties until the
+next read/shutdown. No visited-file registry is retained.
 
 Successful embedded covers remain reusable after a path move that preserves
 track ID and fingerprint. Directory covers, misses, and source/probe failures
@@ -565,19 +481,14 @@ subsequent loads. Cache-only reads neither insert entries nor probe on misses.
 Revisiting an evicted identity requires another source probe. Late completions
 cannot replace a newer identity, even when both resolve to identical image bytes.
 
-An album worker carries its completed result lease into the GUI callback. The
-callback delivers real covers directly to still-visible demand with the same
-track ID, fingerprint, and path; shared-cache pressure cannot turn that result
-into a missing cover before delivery. Hidden or obsolete completion cannot
-retain a display owner or start another hidden demand.
+Completed workers deliver a result lease directly to matching visible demand, so
+shared-cache eviction cannot lose a cover before delivery. Hidden or obsolete
+completion cannot restore a display owner or start hidden acquisition.
 
-Album grids separately remember only explicit negative completions for their
-current visible source identity and path. Those cards keep their generated SVG
-fallback. Evicting an idle negative result from the shared cache does not restart
-that visible lookup, even when visible negatives exceed 64. Positive results
-remain owned by their existing views, not another lookup cache. Scrolling out of
-demand, changing source identity or path, hiding the grid, or closing its window
-releases these negative records; the shared 64-entry retention target is unchanged.
+Album cards retain explicit negative completions only for their current visible
+source identity/path, so eviction from the shared cache does not trigger repeated
+probes. Leaving demand, hiding, or source changes release those records. Positive
+covers remain owned by their views; neither changes the shared 64-entry target.
 
 === Encoded files and maintenance
 
@@ -604,24 +515,17 @@ There is no automatic file-count or total-byte budget, startup directory invento
 or automatic cleanup. No persistent track-to-image index is restored after restart:
 the first source probe discovers the image hash, then reuses its file if present.
 
-Static GUI covers also generate lossless WebP thumbnails on demand, with longest
-edges of 256, 512, or 1024 physical pixels. Originals remain unchanged; GIF and
-animated WebP keep their original frame path. Thumbnail filenames include only
-the source's shortened hash and numeric size tier, without a processing-version
-or encoding-policy suffix. Future processing-rule changes require explicit cache
-invalidation. Small originals are not enlarged or duplicated into equivalent
-tiers. Background loads coalesce same-source decoding and publish complete files
-atomically; missing or damaged thumbnails are regenerated. A disk-cache write
-failure does not prevent display. Reuse does not rewrite a cached thumbnail or
-refresh its age.
-Thumbnail-file reads have their own fixed 8 MiB safety cap, independent of the
-source's encoded admission limit. Every reuse still admits the original source
-under the active session policy before reading its disposable thumbnail.
+Static GUI covers generate lossless WebP tiers at 256, 512, or 1024 physical pixels
+on demand, without enlarging small originals. Animated GIF/WebP keep original
+frames. Same-source work coalesces and publishes complete files atomically; missing
+or damaged thumbnails regenerate, and write failure does not prevent display.
+Reuse neither rewrites files nor refreshes age.
 
-Maintenance counts and cleans thumbnail files as well as originals. Unlike
-resident source files, thumbnails are disposable even while a source lookup is
-resident: displayed pixels do not depend on keeping the thumbnail file. Each
-source has at most three generated tiers; this is not a global disk-capacity limit.
+Tier filenames have no processing-version suffix, so future processing changes
+need explicit invalidation. Thumbnail reads have an independent 8 MiB cap and
+still require original-source admission under the current encoded policy. These
+files are disposable even with a resident source lookup: displayed pixels do not
+depend on them. Three tiers per source are not a global disk-capacity limit.
 
 The MPRIS default export uses the same content-hash directory and is protected
 once exported; later sessions can clean it when it is no longer resident.
@@ -640,13 +544,11 @@ Released results merely become evictable; neither release nor eviction performs
 filesystem work. Disk usage can grow until the user requests maintenance, and
 age-based cleanup does not enforce a global capacity limit.
 
-Each blocking acquisition holds a shared maintenance gate through source opening,
-extraction, cache-file publication, and lookup registration. Per-file cleanup
-takes the exclusive gate before inspecting protection and deleting, so cleanup
-can wait for a slow probe. Probing and filesystem I/O do not hold the lookup
-mutex; render and MPRIS property reads remain cache-only and do not wait for the
-maintenance gate. Maintenance ignores symlinks and unrelated names, reports
-inspection/deletion failures, and leaves audio sources untouched.
+Acquisition holds shared maintenance exclusion through probing, publication, and
+lookup registration. Cleanup takes exclusive exclusion before checking protection
+and deleting, so a slow probe can delay it. Cache-only rendering/MPRIS reads do
+not wait on that gate. Maintenance never follows symlinks or touches audio sources
+and reports inspection/deletion failures.
 
 === Window-owned real-cover decoding
 
@@ -660,21 +562,15 @@ consumer retains its own lookup identity and source-file protection. Loading
 starts only when a preview requests the image and runs the artwork-specific
 bounded decoder on GPUI's background executor, not render-time file I/O.
 
-Static-image demand uses the actual display size and window scale, rounded up to
-the smallest sufficient tier; demands above 1024 use the original. Cover/cropped
-surfaces also account for aspect ratio so the short edge retains enough pixels.
-Visible consumers share the largest required tier. An upgrade retains the old
-image until the replacement is ready; shrinking demand is debounced for 300 ms.
-Cached consumers are invalidated after painting and acknowledge the new image
-generation before old textures retire at a frame boundary. Ordinary within-tier
-resizing does not decode again. Thumbnail generation uses a separable Triangle
-filter with one source-width floating-point row and linear-size coefficient
-tables, rather than a two-dimensional intermediate image. Transparent pixels
-are premultiplied on read at 16-bit precision; the final conversion preserves
-that rounding while writing straight-alpha BGRA8 directly. This avoids colored
-fringes, a full-source premultiplied copy, and a separate 16-bit thumbnail.
-The complete decoded source, output pixels, codecs, and encoded bytes still have
-their own costs; row filtering does not change the source admission policy.
+Static previews select the smallest sufficient tier from actual display size,
+scale, and cropping aspect ratio; demand above 1024 uses the original. Visible
+consumers share their largest required tier. Upgrades retain the old image until
+ready; smaller demand is debounced 300 ms. Old textures retire only after consumers
+acknowledge scene replacement. Within-tier resizing does not decode again.
+
+Thumbnail filtering uses row-sized workspace rather than a full intermediate
+image, with premultiplied-alpha filtering to avoid fringes. Complete source/output
+pixels, codecs, and encoded bytes still contribute independently to memory use.
 
 Replaced or hidden consumers retire through a window-owned queue after scene
 replacement; removed panels need not paint again. Releasing one consumer cannot
@@ -727,23 +623,14 @@ encoded-file limit is not a pixel budget.
 
 === Generated defaults and decorations
 
-Album-artwork decorations load lazily for visible styles, with one shared decode
-per style and window. Losing the last visible style consumer retires its image
-and cancels pending decoding through the same window-frame boundary; window
-hide or close flushes it immediately. A synchronous rasterization already running
-may finish, but cannot publish after cancellation. An old scene cannot restart a
-released decoration load. Reopening before retirement reuses the live owner;
-reopening after retirement decodes anew. Decoration resolution and GPU rotation
-are unchanged.
+Decorations decode lazily once per visible style/window. The last consumer retires
+them at a frame boundary; hide/close flushes immediately. Cancelled synchronous
+work may finish but cannot publish, and old scenes cannot restart it. Reopening
+reuses only owners that have not retired.
 
-Generated default covers share a separate window-local cache across square
-previews, cards, and circular artwork panels. GPUI background assets rasterize
-the embedded SVG directly at the target physical square size with the SVG
-renderer's antialiasing. Display scale and style-specific image size select
-immutable keys; older completions cannot replace a newer size. Existing fitting,
-clipping, and rotation remain unchanged. Warm frames share images without
-rasterization or pixel-buffer copies, and a single asynchronous gate serializes
-generation.
+Default SVG covers use a separate window-local memory cache keyed by physical
+size and style. Background rasterization is serialized; consumers share immutable
+images, and obsolete sizes cannot replace newer demand.
 
 This memory-only cache admits at most 16 pending/completed size keys and 32 MiB
 of final BGRA pixels. Least-recently-used eviction cancels pending assets and
@@ -772,37 +659,23 @@ originating instance rather than choosing a new backend.
 
 === Font data and glyphs
 
-Font retention is independent of `visualizations.cache` and Still Mode.
-Primary-font selection and fallback behavior are documented in
-link:01_config.adoc[Configuration and layout]. Rivu resolves the primary family
-at startup or when its saved setting changes, not during painting. On Linux,
-primary-family matching and missing-character resolution share one backend-owned
-Fontconfig configuration, initialized on first demand and retained for the text
-system's lifetime. Configuration initialization failures are retained by that
-same owner. The backend loads individual selected faces, preserving candidate
-rank rather than preferring the face with the most coverage. Native shaping
-fallback remains the final step.
-A candidate that cannot be registered or loaded is logged and skipped without
-discarding earlier successful candidates or changing the remaining order.
-Fontconfig metadata is retained by the resolver; first-use matching and loading
-can block text preparation. This does not promise lower total startup RSS or
-latency: reduced font-file residency can be offset by matching metadata and caches.
+Font retention is independent of visualization caching and Still Mode. Primary
+family resolution runs at startup or saved-setting changes, not painting. Linux
+matching and missing-character lookup share one lazily initialized Fontconfig
+owner for the text system's lifetime, including retained initialization failure.
+Faces load in candidate order; individual failures are logged and skipped, with
+native shaping fallback last. First-use lookup may block text preparation.
 
-Successful candidate results, including no coverage, share a 64-entry FIFO with
-at most 64 KiB of aggregate request-key bytes and 1 MiB of aggregate candidate
-storage (face-record sizes plus owned path capacities). Hits do not refresh FIFO
-age. These are owned-storage accounting budgets, not a total allocation or RSS
-limit: allocator overhead, Fontconfig metadata, externally held candidate results,
-and loaded font data are not included. Oversized requests or results are returned
-normally, without memoization or truncation; failed requests are not cached.
-Keys include the original family, locale, weight, style, and the sorted, unique
-Unicode scalars of the actual missing text. Reordering or repeating the same
-scalars reuses candidates, not shaped layouts; shaping still receives the
-original text and complete graphemes. Scalar keys are charged by their stored
-`u32` bytes. Normalization reuses at most 64 KiB of separately retained scratch;
-larger temporary scratch is released after the request. Repeated input does not
-grow scratch in proportion to the original text length.
-Changing base text size alone does not resolve font families again.
+Successful candidate lookups, including no coverage, use a 64-entry FIFO bounded
+by 64 KiB of request keys and 1 MiB of candidate storage. Oversized results remain
+usable without caching or truncation; failed requests are not cached. Keys include
+family, locale, weight/style, and unique missing Unicode scalars, so reordered or
+repeated scalars reuse candidates, not shaping. Normalization retains at most
+64 KiB of scratch. Text-size changes alone do not resolve families again.
+
+These bounds exclude Fontconfig metadata, externally held candidates, loaded
+fonts, and allocator overhead; they promise neither total RSS nor startup latency.
+Font selection belongs to link:01_config.adoc[Configuration and layout].
 
 Icon text uses a separate symbol family; `embed-nerd-font` embeds one discovered
 font file and registers it before GUI creation, not a subset or fallback chain.
@@ -827,16 +700,10 @@ pages are evicted; image and SVG owners remain responsible for their own tiles.
 Whole-page protection preserves cached paint ranges but can retain unused
 glyphs alongside live ones, so this is a high-water policy, not a hard byte cap.
 
-Atlas insertion transfers owned pixel buffers into the renderer's pending-upload
-queue. Required BGRA-to-RGBA conversion runs in place on that owner; borrowed
-pixels are copied once because the queue must outlive the build callback.
-Uploads remain deferred to frame preparation and can be discarded when their
-texture retires before submission. This does not eliminate wgpu staging copies.
-
-System font-file mappings can share kernel file pages, whereas parsed font and
-glyph data also consume process memory. Font discovery alone is not a measure
-of retained memory, and total process memory includes unrelated renderer
-resources.
+Atlas uploads own their pixel buffers through deferred frame preparation; retired
+textures can discard pending uploads. Font-file mappings may share kernel pages,
+but parsed fonts, shaping, glyphs, and unrelated renderer resources have separate
+costs. Font discovery is not a measurement of retained memory.
 
 === Settings view reuse
 
@@ -850,26 +717,16 @@ composition.
 
 === Renderer buffers, atlases, and display lifecycle
 
-Cached Paths and Scene replay share immutable vertex storage while keeping
-draw order, masks, and other Path metadata independent. Editing a shared Path
-uses copy-on-write. Painting still converts logical coordinates once into
-scaled geometry; Scene insertion and replay do not copy those vertices again.
-The renderer reuses its expanded vertex and Path-sprite upload buffers;
-uploads copy the bytes before either buffer is cleared for the next batch.
-Each buffer above 4096 elements shrinks after 120 successful frames at no more
-than one-quarter utilization, retaining twice the observed peak with a
-1024-element floor. Surface unconfiguration releases both buffers immediately.
+Cached Paths and replayed Scenes share immutable vertices while draw order and
+masks remain independent; editing uses copy-on-write. The renderer reuses expanded
+vertex and Path upload buffers. Above 4096 elements, 120 frames at no more than
+one-quarter use shrink them toward twice observed demand with a 1024-element
+floor. Surface unconfiguration releases them immediately.
 
-Path tessellation reuses one idle vertex/index scratch pair per calling thread,
-with a combined capacity limit of 1 MiB. Larger paths remain supported, but
-their oversized scratch allocation is discarded after use. Each call owns its
-checked-out buffers; nested calls cannot overwrite them, and failed calls
-cannot leave geometry in the next lease. Final Path vertices have independently
-owned storage reserved for the triangle count, so later scratch reuse does not
-change submitted or cached Paths. Lyon's private tessellator workspace remains
-per-call rather than becoming an unbounded retained cache. GPUI idle reclamation
-also releases idle tessellation scratch on its calling thread; other threads'
-scratch remains bounded and is released when those threads exit.
+Tessellation retains one idle scratch pair per calling thread, capped at 1 MiB;
+larger paths work but discard oversized scratch afterward. Checked-out scratch
+cannot affect submitted Paths. GPUI idle reclamation releases its calling thread's
+idle scratch; other threads retain only their bound until exit.
 
 Ordinary Paths and multisampled GPU materials, including rectangles and segments,
 share one renderer-owned resolve/MSAA scratch pair. Current demand is the
@@ -892,10 +749,8 @@ after 120 small uses of each buffer (normally 240 draws for double buffering).
 The live frame and replay ranges remain untouched. These policies use existing
 draws, not timers, and do not promise reclamation while drawing is inactive.
 
-Atlas requests with nonpositive dimensions or dimensions beyond the device limit
-are rejected before creating a page. A new page is committed only after its
-first tile reservation succeeds, so failed reservations leave no empty GPU page
-and do not consume reusable page slots.
+Atlas admission rejects invalid or over-device-limit dimensions before allocation.
+Failed first-tile reservation leaves no empty page or consumed page slot.
 
 After the window is destroyed, the application requests headless mode. A
 successful transition releases the display connection and its shared GPU
@@ -904,16 +759,12 @@ Reopening reconnects to the original display before creating a new window;
 requests arriving during a connection switch are coalesced. A failed reconnect
 leaves the application running so another open request can retry.
 
-After a successful headless transition with no pending reopen request, the host
-requests GPUI idle reclamation. GPUI waits until the current update's events and
-deferred callbacks finish, then skips reclamation if a window has opened again.
-Empty, inactive element and event arenas return excess chunks and allocation
-records, retaining one 1 MiB chunk each. Live arena allocations are not invalidated.
-Layout scratch capacity, cached font metrics and glyph bounds, and idle text
-wrapper/run buffers are released; registered fonts and their identities remain.
-Checked-out text wrappers stay usable and need not return to a discarded pool.
-Reopening rebuilds these derived caches on demand. Reclamation adds no timer or
-worker and does not wait for GPU completion or background work.
+After successful headless transition, GPUI reclaims idle derived storage once the
+current update's callbacks finish, unless a window reopened. Empty element/event
+arenas retain one 1 MiB chunk each; live allocations remain valid. Layout scratch,
+font metrics/glyph bounds, and idle text wrappers/runs are released, but registered
+font identities remain. Reopening rebuilds these caches on demand. This adds no
+timer and waits for neither GPU nor background work.
 
 Playback, IPC, tray, MPRIS, and accepted business operations remain independent
 of this transition. The GPUI event loop, executors, registered font system, and
@@ -923,9 +774,7 @@ display reconnect, so RSS is not a count of live rendering resources. No
 allocator trim is performed, and closing the window does not promise
 serve-level process memory.
 
-The graphical host shares one immutable startup Localizer between its GUI
-session and tray worker, including the parsed Fluent resources and fixed-message
-cache. Closing or reopening the window does not rebuild these resources, and
-saved language changes apply only after host restart. GUI-specific SharedString
-adaptation remains window-owned; tray protocol payloads remain tray-owned.
+GUI and tray share one startup Localizer, including parsed resources and fixed
+messages, across window reopen. Language changes require restart; window strings
+and tray protocol payloads retain their separate owners.
 

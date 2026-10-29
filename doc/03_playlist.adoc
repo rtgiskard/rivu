@@ -22,16 +22,12 @@ Save queue as playlist. These operations do not change the source collection.
 Names must contain a non-whitespace character and no control characters. Creating,
 renaming, saving a queue, and importing reject an existing name. Comparison is
 exact, including case and whitespace: CLI/API names retain outer whitespace,
-while the desktop name dialog trims it. Existing duplicate names remain usable
-by ID; rename or delete them explicitly.
+while the desktop name dialog trims it.
 
 Use `rivu playlist` for command-line management. `playlist list` shows collection
 IDs and summaries; `playlist show PLAYLIST_ID` lists that collection's entries.
 Entry IDs identify individual occurrences for removal or movement, even when they
 share a track ID. Move indices start at zero.
-Arguments are defined in link:../src/cli/args.rs[the CLI reference implementation];
-link:../src/cli/mod.rs[dispatch] maps them to
-link:../src/core/playlists.rs[core playlist operations].
 
 [source,sh]
 ----
@@ -45,10 +41,8 @@ rivu playlist remove ENTRY_ID
 rivu playlist play PLAYLIST_ID
 ----
 
-Moving an entry to its current position or renaming to the current name leaves
-contents unchanged, but still validates IDs and move bounds. Adding a track always
-creates another occurrence. Creating a playlist from a queue saves its name and
-entries atomically; a failed entry save does not leave an empty playlist.
+Adding a track always creates another occurrence. Saving a queue as a playlist
+is atomic: failure does not leave a newly created empty playlist.
 
 == Desktop UI
 
@@ -64,27 +58,22 @@ and starts playback; Append copies it without changing current playback. There
 is no playlist or queue-size cap. Empty or unknown playlists leave the queue
 unchanged.
 
-Desktop Append submits the playlist identity and selected content revision.
-Core validates that revision before atomically copying the playlist. If
-membership/order changed before execution, Append fails without copying a stale
-or partial playlist.
+Append fails if the playlist's contents change before copying, rather than
+copying a stale or partial list.
 
 When the queue is nonempty, the GUI asks before replacing it by default. Cancel
 or Esc keeps queue and playback untouched. Configure this shared album/playlist
 preference under link:01_config.adoc#_volume_and_playback_controls[Volume and playback controls].
 
-The row menu also offers Add current track, Remove duplicates, Rename, and Delete,
-with Remove duplicates immediately before Rename. Add current track uses the
-playback track, not Library selection, and is unavailable without one. Remove
-duplicates keeps the first occurrence of each track in playlist order, preserving
-retained entry IDs. It changes only that playlist, not the queue or playback;
-an already-unique playlist is unchanged. The command uses the playlist's current
-content token and rejects stale requests rather than editing a changed list.
+The row menu also offers Add current track, Remove duplicates, Rename, and Delete.
+Add current track uses the playback track, not Library selection, and requires a
+current track. Remove duplicates keeps each track's first occurrence and changes
+only that playlist. It rejects a request if the playlist's contents have changed.
+
 Rename opens the current name; Enter submits, while Cancel or Esc discards the
-draft. Saving runs in the background and prevents repeated submissions. Failure
-keeps the draft for correction; a submitted save cannot be cancelled by closing
-the window. Success refreshes the catalog under its current search. Delete asks
-for confirmation and removes only the playlist, never music files.
+draft. Saving runs in the background. Failure keeps the draft for correction;
+closing the window cannot cancel a submitted save. Delete asks for confirmation
+and removes only the playlist, never music files.
 
 === Track selection and ordering
 
@@ -156,15 +145,12 @@ can navigate again. Failed group removal does not partially remove entries.
 
 === Playlist query validity
 
-Changes to this playlist's membership or order invalidate an in-progress listing;
-restart it. Rename and changes to other playlists' membership or order do not
-interrupt it. Metadata edits preserve entry identity and position, but changes to
-displayed fields can invalidate an entry listing, including search results.
+If this playlist's membership or order changes during a listing, restart it.
+Renames and changes to other playlists do not interrupt the listing. Metadata
+edits preserve entry identity and position but can invalidate displayed results.
 Stale group edits are rejected rather than partially applied. Export uses one
-consistent snapshot, so concurrent edits do not alter the file being written.
-Query validity belongs to
-link:21_ipc.adoc#_query_results_and_pagination[IPC]; retained view lifetimes belong
-to link:22_cache.adoc#_query_projection_retention[Caching].
+consistent snapshot. See link:21_ipc.adoc#_query_results_and_pagination[IPC query
+validity] for the protocol contract.
 
 == Import and export
 
@@ -190,36 +176,32 @@ and default names are validated before a scan starts or any scan data is saved.
 Imports share one media-task slot with scans, Other checks, and external-file
 queue additions; another request is rejected while one is active.
 
-An accepted import returns a scan task ID; acceptance is not proof of completion.
-Use `--wait` to observe input, scan, or playlist-creation errors. Playlist reads,
-decoding, CUE expansion, and metadata scanning run in the background. In the
-desktop, task feedback belongs to the Playlists panel and identifies import
-progress, completion, failure, and cancellation separately from library scanning.
-A rejected request reports an error without replacing an accepted task's progress
-or result. Shared status
-queries, result dismissal, cancellation and shutdown are documented under
+An accepted import returns a task ID, not proof of completion. Use `--wait` to
+observe the result. Desktop progress, completion, failure, and cancellation appear
+in Playlists; a rejected request does not replace the accepted task's feedback.
+Status queries, result dismissal, cancellation, and shutdown are described under
 link:02_library.adoc#_cancellation[Library cancellation]. Preparation can be
-cancelled without saving results or creating a playlist; once Saving begins,
-the commits below must finish.
+cancelled without saving tracks or creating a playlist; cancellation is refused
+once Saving begins.
 
 === Input limits and cancellation
 
 Import inputs must be ordinary files, including CUE sheets referenced by M3U;
 directories, devices, and FIFOs are rejected without waiting for a writer.
 Referenced directories are never recursively imported; directory discovery belongs
-to `rivu library scan`. M3U input is limited to 16 MiB, each CUE sheet to 1 MiB,
+to `rivu library scan`. Input decoding, CUE parsing, out-of-root M3U entry or
+CUE-sheet paths, and non-regular M3U source checks belong to preparation: failure
+there aborts the import without saving tracks or creating a playlist. Partial
+results apply to later source scanning, not to an invalid input document.
+M3U input is limited to 16 MiB, each CUE sheet to 1 MiB,
 and aggregate input to 64 MiB (each distinct CUE sheet is read once). Expansion is
 limited to 100,000 entries, counting repeated occurrences.
 
-Import preparation also has independent 64 MiB accounting limits for expanded
-entries, parsed sheets, and shared source/segment data. These bound retained
-data, including paths and metadata, rather than combined process memory. They
-apply to imports, not to playlist sizes for other operations. Exceeding a limit
-aborts preparation before scan or playlist commits instead of saving partial
-results. Prepared CUE data is reused by scanning so the import keeps the sheet
-version and track order it read. Cancellation is checked during reads and parsing;
-already started work must retire before another media task is admitted. Resource
-ownership is described in link:21_ipc.adoc#_core_and_client_boundary[Core and client boundary].
+Preparation also limits retained entry, sheet, and source data to prevent
+unbounded expansion. Exceeding an input or preparation limit aborts before saving
+tracks or creating a playlist. These are import limits, not playlist-size caps.
+See link:21_ipc.adoc#_core_and_client_boundary[Core and client boundary] for resource
+accounting. A cancelled task must finish retiring before another media task starts.
 
 === Commit and export lifecycle
 
@@ -236,19 +218,15 @@ order, including repeated audio paths, CUE sheets, and CUE subtracks. Export wri
 every representable occurrence in saved order, preserving multiplicity on an M3U
 round trip subject to the CUE export restrictions below.
 
-Listings and exports include every entry, not only the visible rows. For listing
-changes and retry behavior, see link:02_library.adoc#_paged_views[Paged views].
-Export runs in the background and permits only one active export. Its command
-reply reports final output, not startup. Concurrent edits do not alter its snapshot.
-Failure or shutdown cancellation before replacement preserves the old target;
-a response timeout does not cancel the worker or prove that replacement failed.
+Listings and exports include every entry, not only visible rows. For listing
+changes and retries, see link:02_library.adoc#_paged_views[Paged views]. Only one
+export can run at a time. Its reply reports final output, not startup, and
+concurrent playlist edits do not alter the exported snapshot.
 
-Export writes a same-directory temporary file and atomically replaces the target
-only after successful output. Cancellation cannot undo replacement after the
-commit point. A new export is admitted only after the previous worker releases
-its file and snapshot resources; timeout is not permission to start a duplicate.
-The bounded worker contract is described in
-link:21_ipc.adoc#_core_and_client_boundary[Core and client boundary].
+Export atomically replaces the destination only after successful output. Failure
+or shutdown cancellation before replacement preserves the old target; cancellation
+cannot undo replacement. A timeout does not cancel export or prove it failed.
+Wait for completion and inspect the destination before retrying.
 
 [source,sh]
 ----

@@ -74,46 +74,32 @@ exit: the core keeps running. A crash or forced termination can lose changes
 since the last successful save. Database and layout persistence are independent.
 
 Apply rejects a candidate that cannot be saved and retains the settings draft;
-earlier runtime changes remain active. Saving errors are logged and exposed in
-`rivu status` and the desktop error notice. A successful retry clears its own
-error, not an unrelated error reported later. Exit makes one final save attempt;
-a failure is reported but does not prevent exit. Writes atomically replace the
-file without forcing a storage flush, so success is not a power-loss guarantee.
+earlier runtime changes remain active. Saving errors appear in logs, `rivu status`,
+and the desktop error notice. Retry after correcting the cause. Exit makes one
+final save attempt but does not wait for a successful retry. Atomic replacement
+protects against incomplete writes, not power loss.
 
-After Apply saves successfully, an audio-command delivery failure does not roll
-back the committed configuration. Resolve the audio failure before retrying or
-restarting.
-The save/merge boundary is implemented in
-link:../src/core/settings.rs[core settings]; the format-preserving file adapter is
-link:../crates/rivu-format/src/config/file.rs[the configuration file schema].
-This is independent of queue transactions and manual layout sync: Apply does not
-save a layout, and layout sync does not save configuration.
+An audio-application failure after a successful save does not roll back the saved
+configuration. Resolve the audio error before retrying or restarting.
+Configuration and layout persistence are independent: Apply does not save a
+layout, and layout sync does not save configuration.
 
 === File access and external editors
 
-The configuration file path must be valid UTF-8, including a path derived from
-`--data-dir`. A new host rejects an unrepresentable path before reading or saving
-configuration or starting background services. A client controlling an existing
-instance does not validate a configuration path that the instance will not use.
-Existing configuration inputs must be ordinary files; symlinks to ordinary files
-are accepted. FIFOs, devices, sockets and directories are rejected before reading,
-so a FIFO does not wait for a writer. Configuration input is limited to 4 MiB of
-UTF-8 TOML, including comments. The application, offline migration tool and direct
-format parser enforce the same limit before parsing; file reads check the opened
-descriptor and read at most the limit plus one byte, including files that grow.
-Saving checks the actual patched UTF-8 TOML document against the same 4 MiB limit,
-including retained comments, formatting, and string escapes. An oversized save
-fails before creating directories or temporary files and leaves the existing file
-untouched; Settings Apply retains its draft under the usual save-failure rules.
-Configuration symlinks are followed when saving, including relative chains and
-missing targets; saving atomically replaces the target file, not the links.
-Link loops and inaccessible targets are reported as errors without replacing the links.
-Configuration saves do not create a lock file. GUI and TUI changes share the same
-host core; data-directory ownership prevents a second host for that directory.
-Separate hosts sharing one configuration file, or external editors, are not
-coordinated. Format-preserving saves do not provide conflict detection or a merge
-of concurrent edits, and do not reload settings into the running core. Exit Rivu
-before editing the file manually, then restart to load the changes.
+The configuration path must be valid UTF-8, including when derived from
+`--data-dir`. Existing inputs must be ordinary files; symlinks to ordinary files
+are accepted. Directories, devices, sockets, and FIFOs are rejected without waiting
+for input. Configuration is limited to 4 MiB of UTF-8 TOML, including retained
+comments and formatting; an oversized save leaves the existing file untouched.
+
+Saving follows symlinks, including relative chains and missing targets, and
+atomically replaces the target rather than the links. Link loops and inaccessible
+targets are errors.
+
+GUI and TUI changes share the host core. Separate hosts sharing a configuration
+file and external editors are not coordinated: format preservation is not
+conflict detection or a concurrent-edit merge. Exit Rivu before editing the file
+manually, then restart to load the changes.
 
 == Parameters
 
@@ -135,52 +121,32 @@ continuously; query batch tuning stays in the configuration file, not desktop se
 link:04_playback.adoc#_queue[Playback]; query and batch contracts in
 link:02_library.adoc#_paged_views[Library].
 
-In the desktop Queue, Playlists (catalog and tracks), Library, Recent tracks, and
-Albums (cover grid and tracks), drag the right-hand scrollbar to browse long
-lists, or click its track to jump.
-Dragging continues outside the scrollbar until you release the mouse button.
-Lists that fit in the viewport have no scrollbar thumb; mouse-wheel scrolling
-remains available when content overflows.
-The list's upper and lower edges indicate more content beyond the viewport;
-the corresponding fade clears when that end is reached.
+Long desktop lists support mouse-wheel scrolling and a draggable right-hand
+scrollbar; click its track to jump. Edge fades indicate more content above or below.
 
 ==== Desktop keyboard navigation
 
-Use `Tab` and `Shift+Tab` to move between controls; a border marks the focused
-control independently of its enabled or selected state. `Enter` or `Space`
-activates a focused button or switch.
-Unavailable controls cannot be activated and are skipped by keyboard navigation;
-disabled text fields also reject pointer and accessibility focus.
-Panel tabs are also tab stops: activate a tab with `Enter`/`Space`, or press
-`Shift+F10` (the Menu key also works) to open its panel menu.
-Menus open without a focused action. Use `Up` or `Down` to enter and move between
-available actions (wrapping at the ends), or use `Tab`/`Shift+Tab`. `Enter` chooses
-the focused action. `Escape` or `Left` returns from a submenu; at the top level it
-closes the menu without triggering a playback shortcut.
-Menu action labels stay on one line; long labels are shortened, with the full name available on hover.
+Use `Tab` and `Shift+Tab` to move between enabled controls; a border marks focus.
+`Enter` or `Space` activates a focused button, switch, or panel tab. Open a panel
+tab's menu with `Shift+F10` or the Menu key.
+
+In menus, `Up`/`Down` or `Tab`/`Shift+Tab` moves between available actions with
+wraparound, and `Enter` chooses one. `Escape` or `Left` returns from a submenu
+or closes the top-level menu without triggering playback shortcuts.
 
 Open Shortcuts from the application menu to view desktop bindings;
 `Escape` or the close button dismisses the list. `F1` and `?` do not open or close it.
 
-Dialogs keep `Tab` traversal inside their controls. In Settings, tab to a page
-button and press `Enter` to change pages, then tab through its fields and
-Apply/Discard actions.
+Dialogs keep keyboard traversal inside their controls. In Settings, activate a
+page button with `Enter`, then tab through fields and Apply/Discard.
 
-Open dropdowns with `Enter` or `Space`. `Up`/`Down` selects with wraparound;
-`PageUp`/`PageDown` moves by the visible row count, clamping at either end without
-scrolling the settings underneath. `Enter` or, in non-editable dropdowns, `Space`
-accepts. Navigation and confirmation require unmodified keys; `Tab`/`Shift+Tab`
-closes the dropdown and moves focus.
+Open dropdowns with `Enter` or `Space`; select with `Up`/`Down` or
+`PageUp`/`PageDown`, then accept with `Enter` (`Space` also works in non-editable
+dropdowns). `Tab`/`Shift+Tab` closes the dropdown and moves focus.
 
-Editors and input methods retain their own keys. `Escape` cancels preedit, closes
-an open dropdown, leaves the focused editor, then closes the dialog on successive
-presses. Leaving an editor keeps focus within a still-open dialog. Closing a dialog
-restores its invoking control if present in the surviving layout, otherwise the
-layout receives focus. Playback shortcuts apply to the layout, not focused
-editors or buttons.
-Text selection started inside an editor follows the pointer outside its bounds
-until the left button is released. Leaving the window or moving focus away ends
-the selection gesture.
+Editors and input methods retain their own keys. Successive `Escape` presses
+cancel preedit, close a dropdown, leave the editor, then close the dialog.
+Playback shortcuts apply to the layout, not focused editors or buttons.
 Playback keys: link:04_playback.adoc#keyboard-controls[Keyboard controls].
 
 
@@ -261,18 +227,15 @@ and link:04_playback.adoc#_mpris_and_artwork[MPRIS and artwork].
 `logging.level` accepts `debug`, `info`, `warning` (default), or `error`. Warnings
 and errors always go to stderr. `logging.to_file` defaults to `false`; enabling it
 writes weekly logs under the data directory. `logging.retention_weeks` accepts
-`1`–`520` and defaults to `4`. `NO_COLOR` or `RIVU_COLOR=never` disables
-stderr colors. Closing the GUI window does not stop file logging. Normal application
-shutdown makes a bounded attempt to drain and flush queued file logs; forced
-termination cannot guarantee the final records. File output uses a lossy queue
-of 4096 messages to avoid blocking producers; dropped messages are reported when
-the writer stops. Changing only the log level does not trigger retention cleanup.
-If creating the writer or saving the configuration fails, the previous logging
-settings remain active.
+`1`–`520` and defaults to `4`. `NO_COLOR` or `RIVU_COLOR=never` disables stderr
+colors. Closing the GUI window does not stop file logging.
 
-Color settings use quoted `"#RRGGBB"` values. The file schema is defined in
-link:../crates/rivu-format/src/config/file.rs[the grouped file adapter]; current defaults
-and validation live in link:../crates/rivu-format/src/config.rs[`Config`].
+File logging may drop records under load rather than block the application.
+Orderly shutdown attempts to drain pending records; forced termination can lose
+them. Changing only the log level does not trigger retention cleanup. If creating
+the writer or saving configuration fails, the previous logging settings stay active.
+
+Color settings use quoted `"#RRGGBB"` values.
 
 === Audio processing defaults
 
@@ -344,22 +307,15 @@ Empty inputs show inheritance, format, or special-value cues where relevant;
 hover for complete ranges and application timing. Clearing a field does not apply
 its placeholder: settings still require Apply and their usual validation.
 
-Settings displays volume as a whole percentage; play-count threshold, visualization
-dB ranges, and Spectrum peak/bar gravity use at most one decimal place. Other
-fractional Settings fields use at most two, without trailing zeroes. This affects
-display only, not runtime values or TOML precision: applying an untouched field,
-including when another field changes, preserves its original numeric value.
-Inputs accept more decimal places within their usual ranges and are not rounded
-while typing. Clearing an optional numeric override restores inheritance on Apply.
+Settings may display fewer decimal places than TOML stores. Applying an untouched
+field preserves its original precision; inputs accept additional decimal places
+within their valid ranges. Clearing an optional numeric override restores
+inheritance on Apply.
 
-The system tray switch takes effect after restarting the graphical host, not
-merely reopening its window. Media read buffering applies to future source opens,
-including full waveform scans; it does not reopen the current track.
-Pause visualizations (Still Mode) is under Visualizations → General →
-Processing and cache and takes effect when settings are applied, without
-restarting playback. The application menu also offers a Visualizations toggle below
-Layouts; On enables visualizations and Off pauses them without writing `config.toml`.
-Both controls use `visualizations.still_mode`; neither affects artwork or animation.
+Media read buffering applies to future source opens, including full waveform
+scans; it does not reopen the current track. The application menu's Visualizations
+toggle changes Still Mode immediately without saving configuration. See
+<<_still_mode,Still Mode>> for what stops and which results are discarded.
 
 Settings edits a draft. Apply merges only fields changed since opening or the
 last successful Apply into the latest configuration, preserving unrelated
@@ -383,18 +339,14 @@ It limits each encoded embedded or directory image, not its decoded memory.
 Apply saves the value; restart the entire application, including its core, to use
 the new limit. Closing and reopening only the window does not apply it.
 
-Library → Covers & cache includes Cover decode budget (MiB per cover).
-It saves `interface.artwork_decode_budget_mb`: an integer from `1` to `1024`,
-default `64`. The limit includes all retained decoded frames and frame overhead
-for one cover; identical covers share a decode within a window, while different
-covers and windows add their own costs. Apply re-evaluates open covers, including
-previously rejected images; Discard leaves the active budget unchanged.
-Exceeding the budget shows the default cover rather than a partial animation.
-Increasing it does not relax the fixed workspace admission estimate or dimension
-limits, and is not a process/GPU memory cap. See
+Library → Covers & cache includes Cover decode budget (MiB per cover), saved as
+`interface.artwork_decode_budget_mb`: an integer from `1` to `1024`, default `64`.
+It limits the retained decoded frames of each cover, not total process or GPU
+memory. Different covers and windows add their own costs. Apply re-evaluates open
+covers, including previously rejected images; an over-budget image shows the
+default cover rather than a partial animation. Increasing the budget does not
+remove other image-admission limits. See
 link:22_cache.adoc#_artwork_lookup_retention[Artwork resource boundaries].
-The information icons explain decode, memory, and disk-cache limits. Cache
-operation results and errors remain visible in the card rather than in tooltips.
 
 Hover settings fields for accepted ranges and input syntax; inactive fields explain
 which setting enables them. Apply errors retain the specific cause; hover to read
@@ -427,14 +379,11 @@ effect when starting the core; the running core does not watch the file.
 |Tokyo Night Day |`tokyo_night_day`
 |===
 
-Rivu Dark is Rivu's own blue-gray preset, with subdued structural separators,
-neutral hover backgrounds, and restrained blue selection and primary-action fills.
-Tokyo Night Day is a light theme. The Tokyo Night presets map colors from
-https://github.com/folke/tokyonight.nvim[Tokyo Night] to Rivu's interface roles;
-text and selection colors receive local contrast adaptations without changing
-their hue families. Other applications' theme-file formats are not imported. Unknown theme
-names are configuration errors. The selected theme does not change visualization
-backgrounds, signal palettes, canvas labels, cursor colors, or album artwork.
+Rivu Dark is a blue-gray preset; Tokyo Night Day is a light theme. The Tokyo Night
+presets adapt https://github.com/folke/tokyonight.nvim[Tokyo Night]. Unknown names
+are configuration errors; other applications' theme files are not imported.
+Themes do not change visualization backgrounds, signal palettes, canvas labels,
+cursor colors, or album artwork.
 
 Search or browse installed fonts in Settings, including `monospace`, `sans-serif`,
 and `serif`. Enter or click to select; custom family names are accepted.
@@ -452,10 +401,8 @@ other applications.
 
 `interface.font_size` accepts integer point sizes from `8` to `18`, default `12`
 (16 logical pixels before interface scaling). Apply to update open windows.
-It preserves title/secondary text hierarchy; shared icon-button glyphs also follow
-the configured text size, while their padding and minimum hit areas follow interface
-scale. Plot annotations retain their own sizing. This does not affect terminal
-text or replace `interface.scale`.
+It adjusts desktop text and icon glyphs, not plot annotations or terminal text,
+and is independent of `interface.scale`.
 
 `interface.scale` accepts finite values from `0.75` to `2.0` (default `1.0`) and
 adjusts desktop controls and list density independently of the desktop's display scaling. Menus and editor dialogs
@@ -537,12 +484,9 @@ protect their files, including results still used by GUI or MPRIS. Protected
 files are skipped even when expired; the bundled icon and audio files are never
 removed. A removed cover is regenerated on demand.
 
-Usage and cleanup also include generated lossless WebP thumbnails. These derived
-files are not protected by a resident original; they can be regenerated while
-the original cover and decoded display remain available.
-The cache uses one level of two-hex-character buckets. Maintenance also handles
-managed files directly in the cache directory; it does not follow symlinks or
-scan arbitrary subdirectories.
+Usage and cleanup include generated thumbnails, which can be regenerated without
+removing the original cover. Maintenance handles only managed cache files; it
+does not follow symlinks or scan arbitrary subdirectories.
 
 Inspect reported errors and retry after fixing access or permissions. Maintenance
 has no automatic schedule or total-capacity guarantee, and the age input is not
@@ -569,13 +513,8 @@ fps = 0
 `duotone` and supplies the initial style for new panels. Each panel saves style,
 mode, period, and direction in the layout. Its right-click Style and Rotation
 actions affect only that panel; Artwork settings edits all four instance options.
-Saved panels missing options initialize from the current defaults. All seven styles
-support static and rotating
-modes. Changing style preserves the current rotation angle. Metal adds
-a fixed brushed radial sheen over a circular cover. Card preserves the full
-square image inside a rounded frame and shadow that rotate together, with room
-for the corners at every angle. Duotone adds a fixed blue/purple edge glow behind
-a circular cover, without extracted colors or audio-driven effects.
+Saved panels missing options initialize from the current defaults. All styles
+support static and rotating modes; changing style preserves the rotation angle.
 `mode` accepts `static` or `rotating` (default). `period_seconds` is the time
 for one full circle and must be finite and greater than zero; there is no
 additional upper limit. `direction` accepts `clockwise` (default) or
@@ -589,9 +528,7 @@ direction in this configuration supply defaults for new panels, not live overrid
 Playback-driven rotation and animated source covers have separate clocks but
 share this FPS cap. Their pause, hiding, track-change, and Still Mode behavior is
 documented in link:04_playback.adoc#_album_artwork_panel[Album artwork panel].
-Rendering uses GPU transforms, without rotating geometry on the CPU every frame
-or introducing an application image cache. Track details' full, static preview
-does not use the Album artwork FPS cap.
+Track details' full, static preview does not use the Album artwork FPS cap.
 
 
 == Layout
@@ -608,26 +545,17 @@ An abnormal exit loses changes made since the last successful write. Panel
 settings Apply takes effect immediately for this session only; it does not write
 the layout file.
 
-Sync and orderly exit skip file writes when the persisted layout content matches
-the last successful save or the valid collection loaded at startup. Reverting
-edits to that content also skips the write. A missing or invalid file is written
-on the next sync or orderly exit, even if no layout edits were made.
+Sync and orderly exit skip unchanged valid content. A missing or invalid file is
+written at the next sync or orderly exit, even without layout edits.
 
-Without a saved layout collection, Rivu starts in `Default` and also provides
-`Album` and `Visual`. Default opens Library in the main browsing region and
-Queue beside it; Albums, Playlists, and Recent tracks are alternative browser
-tabs, and Track details shares the side region with Queue. Below them, a cover
-sits beside Spectrum above playback controls. These three bottom panels hide
-their tab bars. Album starts with Albums and adds a cover above
-the side region; its standalone cover also hides its tab bar. Visual starts
-with Audio Visualizer, with Spectrum, Spectrogram, and Waveform available as
-tabs. Album and Visual retain playback below the main content. Built-in layouts
-start locked and use the same global configuration.
+Without a saved collection, Rivu provides `Default`, `Album`, and `Visual` layouts.
+Default combines Library and Queue with alternative browsing tabs, Track details,
+cover art, Spectrum, and playback controls. Album emphasizes album browsing and
+cover art; Visual emphasizes the audio visualizations. All use the same global
+configuration and start locked.
 
-Existing layout collections are loaded unchanged. To make another layout,
-duplicate an existing layout and edit the copy. Renaming or deleting an initial
-layout does not cause it to be restored on restart. The built-in proportions are
-initial templates, not constraints on later edits.
+To make another layout, duplicate one and edit the copy. Built-in layouts are
+editable templates; renaming or deleting one does not restore it on restart.
 
 The layout list places `Default` first when present, followed by other names in
 name order. This does not change the active layout.
@@ -645,14 +573,10 @@ layouts unchanged. The error appears in the panel while open, or in the footer
 after closing it. Press Sync again to retry; further layout edits do not
 automatically retry a failed write.
 
-Switching or duplicating updates the panel tree inside the same window. Playback,
-queue, global configuration, window placement, and the active Track details draft
-are unchanged. Layouts do not save separate copies of searches, selections,
-scroll positions, or editing sessions; switching back is not a restore operation.
-Finish or discard settings before changing layouts. Renaming and deleting an
-inactive layout do not rebuild the interface.
-Press `Escape` to close the layout manager,
-including after renaming the current layout.
+Switching or duplicating a layout keeps playback, queue, global settings, window
+placement, and the Track details draft. Layouts do not save separate browsing or
+editing sessions. Finish or discard Settings edits before switching. `Escape`
+closes the layout manager.
 
 While unlocked, panels can be added, removed, moved, resized, and reordered.
 Right-click a panel to toggle its tab bar, even while locked. Right-click the
@@ -664,65 +588,36 @@ releasing outside a valid target creates nothing.
 Playback, tab selection, and layout management remain available while locked.
 Locked separators have no resize cursor or hover highlight.
 
-Rows and columns contain two or more ordered regions. New containers divide
-their content equally. Docking at an edge splits the target region while
-preserving unrelated pane sizes; matching directions become siblings rather
-than nested splits. Dragging a separator resizes only its two neighboring
-regions, leaving other boundaries unchanged. Removing a region gives its space
-to the following neighbor, or the preceding neighbor when the removed region
-was last. Empty and single-region containers collapse; same-direction splits
-merge while preserving their proportions.
+Drag a separator to resize its two neighboring regions. Edge docking splits a
+region; removing a region gives its space to a neighbor. Other pane sizes stay
+unchanged.
 
-During a panel drag, only the panel under the pointer is a destination. Drop at
-its left, right, top, or bottom edge to split that panel region, or at its center
-to merge tabs. Enclosing rows, columns, and the entire layout are not separate
-targets. The label and outline identify the destination panel, and the shaded
-region previews the panel's final position, including source removal when moving
-an existing panel. Catalog drags use the same targets and preview as panel moves.
-Release to apply that target. Corners and separator gutters do not select an
-ambiguous edge.
+Drag onto a panel edge to split its region, or its center to merge tabs. The label,
+outline, and shaded preview identify the destination and final position. Panel
+catalog drags use the same targets as moves; release to apply the preview.
 
-Dropping anywhere in a visible tab bar reorders or transfers tabs, never splits
-the panel. Tab midpoints choose the insertion position; gaps and the unused
-tail are included, with the tail appending after the last tab. An unavailable
-target shows `Cannot dock here`; releasing there leaves the layout unchanged.
-Press Escape to cancel. Leaving or deactivating the window, opening a dialog or
-menu, or locking the layout also cancels the drag. Queue-entry drags do not
-activate panel docking.
+Drop into a visible tab bar to reorder or transfer tabs; its unused tail appends.
+`Cannot dock here` means release leaves the layout unchanged. `Escape`, window
+deactivation, opening a dialog or menu, or locking the layout cancels a panel drag.
+After a window resize or scale change, wait for a new preview before dropping.
 
-Resizing the window or changing interface or display scaling clears the old
-preview. If released before the new geometry is measured, the drag leaves the
-layout unchanged; otherwise docking uses the new geometry. Hidden tab bars do
-not retain tab targets, but their panels still accept ordinary docking.
+`Escape`, window deactivation, window resizing, or scale changes cancel a separator
+resize and restore its starting proportions. Queue-entry drags never dock panels.
 
-Escape or window deactivation also cancels a separator resize and restores its
-starting proportions. Resizing the window or changing scale cancels an active
-separator resize rather than committing coordinates from its old geometry.
-
-With Layout snapping enabled, separator dragging considers targets in this
-priority order: aligned separator centers in other visible same-direction splits,
-the equal-content midpoint of the adjacent panes, then the nearest configured
-grid line rooted at the container origin.
-Reference separators and midpoints capture within 4 logical pixels before
-interface scaling; grid snapping selects the nearest grid line.
-Targets that violate minimum pane sizes are skipped. Hold Alt to invert the global
-setting: it disables snapping when enabled and enables it when disabled.
-Releasing Alt restores the configured behavior without changing saved settings.
+Layout snapping aligns separator drags with other separators, equal pane sizes,
+or the configured grid while respecting minimum pane sizes. Hold Alt to invert
+the snapping preference for the current gesture without changing saved settings.
 
 Layouts support up to 32 nested rows or columns along any path; tab groups do
 not add to this depth. Docking that would exceed this limit leaves the layout
 unchanged. This is not a limit on the number of sibling regions or tabs.
 
-If `layout.json` cannot be read or validated at session startup, Rivu reports the
-load error and opens the default collection. Invalid layout names or operations
-leave the UI unchanged. Explicit sync requests use one background worker and
-coalesce pending requests, not ordinary edits. Each request captures the current
-collection; later edits cannot change that write or suppress its feedback, though
-a newer sync request supersedes older feedback. A
-failed write preserves the old file and all session edits. Retry with manual
-sync, not another layout edit or instance-settings Apply. Orderly application
-exit writes the latest dirty collection, waits for completion, and reports a
-remaining failure.
+If `layout.json` cannot be read or validated at startup, Rivu reports the error
+and opens the default collection. Invalid names or operations leave the UI
+unchanged. Sync captures the current layouts; later edits are not included in
+that request. A failed write preserves the old file and session edits. Retry
+with manual sync, not another layout edit or instance-settings Apply. Orderly
+application exit writes the latest layouts and reports any remaining failure.
 Application errors appear in the footer; accepted media tasks show progress and
 results in their owning Library, Queue, or Playlists panel. See
 link:02_library.adoc#_cancellation[Library cancellation] and
@@ -742,10 +637,9 @@ editing invariants.
 
 === Layout file
 
-The file uses one format, without runtime IDs or version fields. `active` names
-an entry in the nonempty `layouts` object. Each entry requires `root`; `null`
-means an empty layout. Lock state is not stored; each newly opened window starts
-locked.
+`active` names an entry in the nonempty `layouts` object. Each entry requires
+`root`; `null` means an empty layout. Lock state is not stored; each newly opened
+window starts locked.
 
 [source,json]
 ----
@@ -832,19 +726,13 @@ Hidden windows and Still Mode stop both clocks; losing focus alone does not.
 Stereo Density and Spatial Spectrum refresh from the latest analysis result,
 bounded by the display cap rather than replaying skipped publications.
 
-Switching tabs or temporarily hiding the window preserves the last displayed
-visualization until a new drawable result is ready. Switching one panel does not
-interrupt other visible visualizations. Inactive views do not analyze or animate:
-Spectrum resets its envelopes, Spectrogram releases its history, and Audio
-Visualizer releases working fields and PCM. Fractal Beams and Fractal Flow keep
-their bounded scene while paused or on an inactive tab, resuming the same
-trajectories without replaying elapsed time. Hiding the window releases those
-scenes too, retaining only bounded final drawing data until fresh input arrives.
+Switching tabs or temporarily hiding the window preserves the last visualization
+until fresh audio is ready, without replaying hidden time. Inactive views stop
+analysis and animation; switching one panel does not interrupt other visible views.
 Stop, seek, source replacement, incompatible analysis settings, and Still Mode
-invalidate the old display, including while hidden or paused. Closing the actual
-window releases its retained presentation; reopening a window does not restore
-screenshots from the previous one. Waveform retains its track preview when hidden;
-Still Mode discards it. Resource boundaries are documented in
+clear stale results, including while hidden or paused. Closing the window releases
+its presentation; reopening does not restore old frames. Waveform keeps its track
+preview when hidden but discards it in Still Mode. Retention details are in
 link:22_cache.adoc#_visualization_caching[Visualization caching].
 
 `visualizations.palette` accepts `tokyo_night` or `deadbeef` (default `deadbeef`).
@@ -1046,15 +934,12 @@ flow_speed = 0.75
 accumulation = 75
 ----
 
-The startup-only `interface.gpu_material_budget_mb` setting accepts `16`–`1024`
-MiB and defaults to `64`. Restart the GUI to apply a change. It limits the shared
-charged material buffers per window, including initialization copies and uploads
-awaiting GPU completion, not image atlases, render targets or total GPU memory.
-Edit it in Settings > Visualizations > General > Processing / cache using
-Shared GPU buffer budget (MiB).
-Spectrogram also caps frequency rows against that startup budget; long histories
-can have fewer display rows than the configured maximum. Time resolution and
-playback audio are unchanged.
+`interface.gpu_material_budget_mb` accepts `16`–`1024` MiB, default `64`. Change it
+under Settings → Visualizations → General → Processing / cache, then restart the
+GUI. It limits shared material buffers per window, not total GPU memory.
+Long Spectrogram histories may use fewer frequency rows to fit this budget;
+time resolution and playback audio are unchanged. See
+link:22_cache.adoc#_visualization_caching[Visualization caching] for resource scope.
 Both views use a logarithmic frequency axis and share `visualizations.analysis_fft_size` and
 `visualizations.analysis_window`. Their independent `visualizations.spectrum.db_range` and
 `visualizations.spectrogram.db_range` overrides inherit `visualizations.db_range` when omitted;
@@ -1101,8 +986,8 @@ labels that would overlap. Eight styles are available:
   above right, using the primary and secondary colors as solid traces. A rising
   zero crossing on the left triggers a sweep of at most 10 ms; right-only audio
   triggers on the right. Short FFT windows show the available half-window.
-  Each physical-pixel bucket preserves its minimum and maximum. Reference lines
-  mark the channel centers and ±1 limits; labels state the channel order and scale.
+  Reference lines mark the channel centers and ±1 limits; labels show channel order
+  and scale.
   Sensitivity, dB range, Bloom, radial effects, and idle fade do not apply.
 
 Both fractal styles are generative art, not amplitude or phase measurements.
@@ -1118,13 +1003,12 @@ Oscilloscope's fixed amplitude scale. The two analysis styles retain a 0.5-secon
 exponential trail measured in accepted audio time, so pausing freezes the field.
 Seeking, signal gaps, style changes, and FFT size/window changes clear the trail.
 
-The fractal styles use `visualizations.audio_visualizer.sensitivity` and `visualizations.audio_visualizer.db_range`
-to map measured energy into shape and brightness; `visualizations.audio_visualizer.bloom_intensity`
-controls the halo. Rotation, bar/ring shape, and idle fade do not apply. Motion
-and decay follow accepted audio time: silence extinguishes the light, while
-pause freezes it. Seeking, signal gaps, hiding the view, and style/FFT changes
-reset the scene. See link:23_visuals.adoc[Visualization Rendering Design] for
-analysis continuity, scene resource boundaries, and rendering trade-offs.
+Fractal sensitivity and dB range map energy to shape and brightness; Bloom controls
+the halo. Rotation, bar/ring shape, and idle fade do not apply. Silence extinguishes
+the light; pause freezes it. Seeking, signal gaps, hiding the window, and FFT
+changes reset the scene, while switching to an inactive tab preserves it.
+See link:23_visuals.adoc[Visualization Rendering Design] for signal and rendering
+mechanisms.
 
 The shared `visualizations.audio_visualizer.*` effect parameters accept finite
 values in these ranges (integer for `bar_glow_layers`):

@@ -20,20 +20,14 @@ link:01_config.adoc#volume[Volume configuration] for fractional values.
 queue occurrence from the beginning, or the first occurrence if none is selected;
 an empty queue is an error. Stop resets the position to zero but retains queue
 selection. Pause only changes playing playback; it does not select or open a
-track while stopped. These controls are dispatched by
-link:../src/cli/mod.rs[the CLI] and executed by
-link:../src/core/command.rs[core transport commands].
+track while stopped.
 
-Keyboard volume steps, repeat cycling, and shuffle toggles are applied in order
-against the core's current state, so rapid repeated inputs accumulate even before
-the next display update. The Playback panel's repeat/shuffle buttons and slider
-arrow keys use the same execution-time intents. Ctrl+Left/Right and seek-slider
-arrow keys move by five seconds from the current position. Seek keys carry the
-queue occurrence selected when pressed, so delayed inputs cannot seek a different
-occurrence after Next, even when both occurrences refer to the same track.
-Seek-slider Home/End and terminal Ctrl+Home/End seek to zero or that occurrence's
-known duration. Slider pointer dragging remains an absolute target, as do CLI
-seek and volume commands.
+Keyboard volume steps, repeat cycling, and shuffle toggles accumulate against
+the core's current state, even before the display updates. Ctrl+Left/Right and
+seek-slider arrows seek by five seconds; slider Home/End and terminal
+Ctrl+Home/End seek to zero or the known duration. A delayed seek cannot affect a
+different queue occurrence. Pointer dragging and CLI seek/volume specify absolute
+targets.
 
 Selecting a missing source manually leaves the current track running and reports
 an error. If the next entry cannot be opened at natural end, playback stops.
@@ -64,58 +58,41 @@ synthesize silence absent from the source.
 Ordinary audio plays to actual decoder EOF; an estimated metadata duration is
 not a playback cutoff. An explicit CUE subtrack end remains a hard playback bound.
 
-Seek targets must be finite, non-negative and representable on the source's
-timeline. Invalid or unrepresentable targets are rejected before changing the
-decoder, queued audio or analysis epoch; opening or existing playback, including
-its paused state, is retained. A real decoder seek or output restart failure
-still stops playback and reports the error: the decoder may already have moved.
-Targets that fail the shared time-representation check fail the command
-acknowledgement immediately. A check requiring the opened decoder's timebase can
-reject an already acknowledged, queued seek. That nonfatal rejection reports an
-error and restores the confirmed position, even while paused. The correction is
-applied only if both playback generation and seek revision still match, so a late
-rejection cannot undo a newer seek or replace the error for a different source.
-Ordinary file seeks are not clamped by estimated metadata duration; completion
-requires actual decoder EOF. Only an explicit CUE end bounds the seek target.
-Seeking while paused keeps playback paused. If Pause is accepted before a queued
-notification of actual EOF, Rivu still settles that EOF and selects the next
-occurrence, but keeps it paused;
-Repeat One instead reloads the current occurrence from its start, also paused.
-At the queue end with Repeat Off, playback stops. An EOF from an older playback
-generation cannot advance the queue again. Pause also pauses live analysis.
-Listening statistics use confirmed heard time; see link:02_library.adoc[Library].
+Seek targets must be finite, non-negative, and representable on the source
+timeline. Invalid targets report an error without stopping playback, including
+when rejected after the command was acknowledged; the confirmed position is then
+restored. A real decoder seek or output-restart failure stops playback because the
+decoder may already have moved. Ordinary file seeks are not clamped by estimated
+metadata duration; only an explicit CUE end bounds the target.
 
-Pausing lets already submitted audio finish, then makes the output stream inactive.
-Unread audio is retained for resume; paused wall time does not advance playback.
-The displayed Paused state records the accepted intent, not an instantaneous
-hardware mute. Late heard-audio confirmations can still update statistics, with
-activity timestamps bounded by the pause boundary; see
-link:../src/core/playback.rs[playback lifecycle and accounting].
+Seeking while paused stays paused. If Pause arrives at actual EOF, the next
+occurrence is selected but kept paused; Repeat One instead reloads the current
+occurrence paused from its start. At queue end with Repeat Off, playback stops.
+
+Pause lets submitted audio finish before making output inactive, retaining unread
+audio for resume. The displayed Paused state is the accepted intent, not an
+instantaneous hardware mute. Paused wall time does not advance playback or live
+analysis. Late heard-audio confirmations can still update listening statistics;
+see link:02_library.adoc#_play_counts_and_recent_tracks[Library].
 
 == Queue
 
 Queue entries are independent occurrences, so a track may appear more than once.
 The full library can be enqueued without a queue-size cap.
-Queue order, removals, and the current occurrence persist transactionally in the
-library database. Restart preserves occurrence identities, duplicates, and order;
-clearing the queue does not reuse occurrence IDs. Later scans do not automatically
-append newly discovered tracks. Removing library tracks removes their queue and
-playlist references in the same database transaction.
+Queue order, removals, and the current occurrence persist in the library database.
+Restart preserves occurrence identities, duplicates, and order. Later scans do
+not automatically append new tracks. Removing library tracks also removes their
+queue and playlist references, never their audio files.
 
-Restoring the queue does not resume audio: startup restores the selected
-occurrence and its track metadata in Stopped state, at position zero, without
-opening its decoder. Playback position, playing/paused status, and shuffle
-navigation history are not saved. Use Play explicitly to start the selected
-occurrence from its beginning. Queue mutations save as they execute; they do not
-wait for Settings Apply, layout sync, or window close. The implementation is in
-link:../src/core.rs[initial-state loading] and
-link:../src/core/queue.rs[queue persistence and refresh].
+Startup restores the selected occurrence and metadata in Stopped state at position
+zero, without opening a decoder. Playback position, playing/paused status, and
+shuffle history are not saved. Use Play explicitly to start from the beginning.
+Queue mutations save as they execute, independently of Settings Apply, layout
+sync, or window close.
 
-If a queue mutation commits but refreshing its control state fails, later queue
-operations recover that state before using it. A failed current-selection save
-keeps the runtime selection pending: operations that depend on database current,
-including deduplication, must persist it first rather than restore an older
-selection. Pause and Stop remain available while queue recovery is blocked.
+If a committed queue edit cannot be refreshed, later selection and edit operations
+retry recovery before using it. A failed selection save must also recover before
+operations that depend on that selection. Pause and Stop remain available.
 
 Desktop Queue rows use the shared
 link:02_library.adoc#_track_information[track information and hover rules].
@@ -162,9 +139,6 @@ have registered files and inserted occurrences, for example when some input file
 were skipped or a refresh failed after commit. Inspect its result and the queue
 before retrying: replaying a committed addition creates more occurrences.
 
-Queue state is checked again when prepared files enter Saving, including after
-a concurrent track deletion. If the committed queue cannot be read, no external
-files are registered or inserted by that attempt.
 
 === Queue controls
 
@@ -179,11 +153,6 @@ to the matching occurrences; repeated tracks remain distinct queue entries.
 Background refreshes preserve the browsing position with or without a search
 filter; a shorter result set clamps scrolling only when its new total arrives.
 
-After a track deletion commits but refreshing Queue fails, actions that select
-or reorder occurrences retry the committed queue refresh before using it. This
-also applies to automatic next-track selection and processing-graph audition.
-The refresh removes deleted occurrences from shuffle history without restarting
-the current audio source; Pause and Stop remain independent controls.
 
 Use the crosshair button (*Locate playing entry in Queue*) in the Queue toolbar
 or beside the Playback title to scroll to the current occurrence and briefly
@@ -196,13 +165,10 @@ playback, or an unsaved Track details draft, and playback changes do not
 automatically scroll the queue. A removed occurrence is not replaced by another
 duplicate.
 
-Hover a queue row to reveal its favorite, play, remove, move-up and move-down
-controls. Each action targets that occurrence without changing the selection;
-the favorite toggle updates its library track, including other occurrences.
-An active favorite uses an accented icon; its button background appears only on
-hover, independently of the track's favorite state.
-Move-up is unavailable on the first row and move-down on the last. The toolbar
-offers removal for a multi-selection and saving the entire queue as a playlist.
+Hover a row for Favorite, Play, Remove, Move up, and Move down. These actions
+target that occurrence without changing selection; Favorite updates the library
+track and all its occurrences. Move up/down is unavailable at the corresponding
+end. The toolbar offers multi-selection removal and Save queue as playlist.
 Dragging a selected row moves the selected group in its original queue order;
 dragging an unselected row moves only that occurrence. The group is fixed at
 drag start, even if selection changes during the gesture. Dropping on a row's
@@ -289,15 +255,12 @@ rerouting. Select an available sink and start playback again to recover.
 Changing to an invalid or unavailable sink stops playback and keeps the newly
 requested setting. Subsequent playback attempts still target that sink; neither
 the previous selection nor the default sink is substituted automatically.
-Device-application failures are reported while stopped as well as during
-playback. If playback is already stopped, a failure reports a configuration error
-for the latest output request. Reapplying unchanged settings while stopped
-validates them again. If applying settings actually terminates active playback,
-that playback remains stopped regardless of a later device selection. Events
-from an older playback cannot stop a newer playback.
-Changing the sink or remixing setting rebuilds the output at the current
-position and preserves paused state. The existing decoder is retained; these
-changes do not apply a newly saved Decoder hint or media read-buffer size.
+Device-application failures are reported even while stopped; reapplying the same
+settings validates them again. Choose an available sink, then explicitly restart
+playback if the failure stopped it.
+Changing the sink or remixing setting rebuilds output at the current position and
+preserves paused state. It does not reopen the decoder or apply a newly saved
+Decoder hint or read-buffer size.
 
 Multichannel output preserves speaker identities. `playback.pipewire_auto_mix` is enabled
 by default and permits PipeWire remixing with channel-level normalization to prevent
@@ -321,37 +284,24 @@ including edits made while playing or paused. The application identity remains
 Rivu. Mixer volume and mute are independent of Rivu's own software volume and
 remain effective with remixing disabled.
 
-The decoded output queue holds a quarter second of audio (at least 2048 frames),
-bounded to 16 MiB of interleaved float samples, plus at most 2 MiB of callback
-scratch space. Unsupported rate/channel combinations or allocation failure report
-a playback error rather than allocating without bound or changing the output route.
-Native and FFmpeg PCM conversion exposes at most 16,384 frames and 256 KiB of
-interleaved float samples per fragment. Larger legal codec results remain in the
-decoder and are converted in bounded fragments, preserving all samples and seek
-timestamps. This bounds Rivu's conversion work, not the codec's internal memory
-or the duration of a decode call.
+Unusable output formats or insufficient audio-buffer memory report a playback
+error rather than switching routes.
 
-Native and FFmpeg Matroska/WebM Vorbis decoding normalize timestamps before
-publishing audio to playback, waveform, or analysis. Detection uses a bounded
-origin probe (at most 64 selected-track packets and 256 KiB of PCM); ambiguous
-input retains start-stamp interpretation. The chosen interpretation survives
-seeks. Container gaps and overlaps remain discontinuities rather than being
-silently repaired. Decoder priming is not published as newly played audio.
-
-Opening a selection can require decoding forward from the source origin when
-duration is unknown or seeking is unavailable. The work remains cancellable,
-but reaching a distant target can require reading to actual EOF. Estimated
-whole-source duration is only a seek aid, never a playback cutoff. A valid source
-exhausted by its selection returns EOF; a source with no decodable PCM fails
-opening. Seekable native Matroska supports backward seeking, including after EOF;
+Opening a selection can require decoding forward when seeking is unavailable or
+duration is unknown. This work is cancellable, but a distant target can require
+reading to EOF. Estimated duration is only a seek aid, not a playback cutoff.
+A valid selection exhausted at open returns EOF; a source with no decodable audio
+fails. Seekable native Matroska supports backward seeking, including after EOF;
 unseekable sources retain forward-only scanning.
 
 
 == Optional FFmpeg decoder
 
-Native decoding is the default. Enable `playback.ffmpeg_enabled` for additional formats,
-including audio in MKV/MP4. In Auto mode, FFmpeg loads when a native decoder cannot
-support a source, not during startup or status queries. Opening a track whose
+Native decoding is the default. Enable `playback.ffmpeg_enabled` for sources the
+native decoder does not support. Container extensions such as MKV or MP4 alone
+do not determine whether FFmpeg is needed; the contained codec also matters.
+In Auto mode, FFmpeg loads when a native decoder cannot support a source,
+not during startup or status queries. Opening a track whose
 decoder hint is FFmpeg also loads the extension directly. Decoder status shows
 `not loaded` until a load is attempted; missing or incompatible libraries are
 reported when needed, and the load result is retained until restart.
@@ -368,13 +318,10 @@ with tag edits; an unsaved selection does not affect playback or waveform decodi
   disabling it, missing libraries, or a native-only build reports an error rather
   than falling back to native decoding.
 
-The saved choice survives rescans and restart, is independent for each CUE subtrack,
-and applies to the next track open or explicit full-waveform request. Saving it
-does not reopen current playback. Saving a changed hint cancels an in-flight
-full-waveform request and discards its completed preview, without restarting it;
-this also applies while the window is hidden. Explicit loading reads the latest
-saved hint and replaces any pending request. The scan owns its decoder; its
-result updates the rolling waveform without overwriting newer playback updates.
+The saved hint survives rescans and restart, is independent for each CUE subtrack,
+and applies to the next source open or explicit full-waveform request. It does
+not reopen current playback. Changing it cancels an in-flight full-waveform
+request and discards its completed preview; request a fresh preview explicitly.
 
 In Auto mode, once FFmpeg is loaded and enabled, future WAVE opens use its format
 recognition; ordinary PCM still uses the native decoder. Recognition is not proof
@@ -394,31 +341,20 @@ link:01_config.adoc[Configuration].
 
 == Playback metadata updates
 
-Successful playback fills or improves bitrate information in the library without
-rewriting media files. Reliable fixed-encoding opening metadata can upgrade an estimate.
-Otherwise, complete playback from the beginning to actual source EOF measures
-the selected encoded audio stream during normal decoding; there is no additional
-full-file analysis pass. Seeking, restricted CUE playback, early stop, and decode
-errors cannot produce a complete-playback measured average. Missing packet durations,
-known incomplete streams, or unsupported statistics leave the value estimated or
-unknown. Native MPEG playback checks available authoritative frame counts at completion;
-estimated metadata durations are not completeness evidence. Without reliable
-counts, measurement does not certify file integrity. Late results and
-source replacements cannot update another track or a changed file.
-Native VBRI MP3 can remain estimated because the demuxer consumes its first audio
-frame as metadata while the declared frame count still includes it.
-Pausing alone does not invalidate complete-stream measurement. Confirmed
-values are not replaced by estimates. CUE records use whole-source opening
-metadata, never source byte counts divided by a subtrack's duration.
-Bitrate measurement does not load FFmpeg or change decoder selection. It only
-reuses the decoder selected by the existing enable setting, Decoder hint, and
-Auto fallback rules.
+Successful playback can improve the library's bitrate information without
+rewriting media files. Reliable fixed-encoding metadata can confirm a value at
+open. Otherwise, complete playback from the beginning to actual source EOF may
+measure the selected encoded audio stream during normal decoding, without an
+additional analysis pass.
 
-Committed bitrate enrichment updates the existing Core Track cache as one
-value/certainty pair and advances the display payload revision. Open views reload
-on demand without changing membership or counts; hidden views wait until needed.
-Older in-flight payloads are rejected rather than patched. See
-link:21_ipc.adoc#_query_results_and_pagination[query result continuity].
+Seeking, restricted CUE playback, early stop, decode errors, incomplete stream
+statistics, or unsupported measurements leave the value estimated or unknown.
+Pausing alone does not invalidate measurement. A confirmed bitrate does not
+certify file integrity and is never replaced by an estimate. CUE records use
+whole-source metadata, not source bytes divided by subtrack duration.
+
+Enrichment updates open views without changing membership or counts. It uses the
+already selected decoder and never loads FFmpeg or changes decoder selection.
 
 
 == Terminal client
@@ -492,23 +428,20 @@ Use the application menu's Quit application action, tray Quit, or `rivu quit`
 to stop the core. Quitting also removes the tray item and releases desktop media
 controls; closing only the window does not.
 
-`interface.tray_enabled` controls tray startup and takes effect after restarting the
-graphical host, not merely reopening its window. The tray requires a session
-D-Bus and a StatusNotifier-compatible desktop host. Bus connection and watcher
-registration run in the background without delaying the window or playback;
-failures are logged and leave both usable. A watcher that starts or restarts
-later is registered automatically. Quitting cancels pending connection and
-registration work rather than waiting for the desktop host to reply.
+`interface.tray_enabled` controls tray startup and requires restarting the graphical
+host, not just reopening its window. The tray needs session D-Bus and a
+StatusNotifier-compatible desktop host. Failures are logged without preventing
+window use or playback; a watcher starting or restarting later is registered
+automatically.
 Its menu offers Play/Pause, Previous, Next, Shuffle, Repeat, and Quit.
 Repeat follows the cycle described under
 <<_transport_and_timing,Transport and timing>>.
 
 == Album artwork panel
 
-The built-in *Default* layout includes Album artwork for the current playback
-track. Existing saved layouts are not overwritten: add *Album artwork* from the
-panel catalog. Unlike Track details, browsing or selecting a different library
-track does not change this panel.
+The *Album artwork* panel follows the current playback track, independently of
+Library selection and Track details. Add it from the panel catalog; it is also
+included in the built-in *Default* layout.
 
 Use the panel's right-click Style or Rotation actions for immediate changes, or
 Artwork settings to edit its options with Apply and Discard. These choices belong
@@ -532,13 +465,10 @@ and source-animation state. Track details keeps its full, static preview.
 
 == MPRIS and artwork
 
-`interface.mpris_enabled` enables desktop media controls for graphical and headless cores
-and can be changed while running. Registration runs in the background and does
-not delay the first window or playback. Disabling it or quitting cancels an
-unfinished registration without waiting for a session-bus reply. A session D-Bus
-is required; unavailable media controls are reported in status without preventing
-playback. If enabling fails, disable and re-enable the setting after restoring
-the session bus; registration does not retry automatically.
+`interface.mpris_enabled` controls desktop media integration in graphical and
+headless cores and can be changed while running. It requires session D-Bus;
+registration failure appears in status without preventing playback. Restore the
+bus, then disable and re-enable the setting to retry registration.
 
 MPRIS, Track details, album cards, and the Album artwork panel prefer embedded
 front-cover artwork, then another supported embedded image. If none is available,
@@ -549,14 +479,11 @@ TIF/TIFF, and ICO, also ignoring case. Within each priority, filenames sort
 case-insensitively with their original bytes as a tie-breaker. Invalid,
 unsupported, or oversized candidates are skipped. File contents determine the
 cached image format; an extension alone does not establish it.
-Without a real cover, GUI consumers use their bundled SVG default directly,
-including while a cold lookup is pending. MPRIS lazily exports the bundled PNG
-icon on its existing background publisher; reading metadata never creates files.
-Directory results and misses remain cached for the current source path; moving
-a track to a different path retries directory discovery. Directory images are not
-watched for edits; a fresh lookup after eviction or application restart rediscovers
-them. The encoded-file limit
-is configured separately from decoded-image memory in
+The GUI shows a default cover until a real cover is ready or when none is found.
+MPRIS uses the bundled application icon as its fallback. Directory discovery is
+cached, not watched for edits; moving a track retries it, otherwise restart Rivu
+to reliably rediscover changed directory covers. Encoded-file and decoded-image
+limits are configured separately in
 link:01_config.adoc#_desktop_settings[Settings].
 Actual covers keep their original aspect ratio in the full, static preview.
 Local images are cached under the data directory's `artwork/` and exposed through
@@ -570,11 +497,9 @@ Relative `Seek` beyond a known end advances when a next occurrence is available;
 out-of-range `SetPosition` is ignored. `OpenUri` is rejected: import media first.
 `Raise` is unavailable for a headless core, while `Quit` remains available.
 Next and Previous preserve paused or stopped state when used through MPRIS.
-Navigation uses the authoritative state when the core executes it, without a
-temporary Playing transition or a later status-restoration command. Stopped
-navigation selects the occurrence without opening its decoder; paused navigation
-loads it paused. CLI, TUI, and GUI Next/Previous retain their normal play-starting
-behavior when navigating to another occurrence.
+Stopped navigation selects an occurrence without opening its decoder; paused
+navigation loads it paused. CLI, TUI, and GUI Next/Previous instead start playback
+when navigating to another occurrence.
 `SetPosition` for an occurrence other than the current one is ignored.
 
 == Equalizer and processed audition
@@ -583,15 +508,14 @@ Use the link:27_audio_processing.adoc[Audio processing workflow] for Monitor EQ,
 restoration, speech enhancement, separation, and graph audition. Processing never
 replaces source media. Original returns from audition to source playback; Monitor
 EQ remains in both paths, so keep EQ and level fixed for comparisons. Export a
-retained graph output explicitly for a durable WAV; audition results are temporary.
+retained graph output explicitly for a durable WAV; audition results stay in memory
+and are lost when the core exits.
 
 
 == Audio runtime crate
 
-Decoding, probing, PipeWire output, and playback workers belong to `rivu-audio`;
-the application owns library/queue identities, configuration, and job orchestration.
-Shared ordinary-file admission prevents audio readers from waiting on FIFOs.
-Application ownership is described in link:21_ipc.adoc#_core_and_client_boundary[IPC];
-native-only builds and FFmpeg/PipeWire prerequisites are in
-link:../readme.adoc[README].
+The `rivu-audio` crate provides decoding, probing, output, and playback workers.
+Application ownership is described in
+link:21_ipc.adoc#_core_and_client_boundary[IPC]; build and runtime prerequisites
+are in link:../readme.adoc[README].
 

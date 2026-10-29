@@ -33,105 +33,60 @@ stereo does not cancel. Optional spatial analysis retains the channels' relation
 
 === PCM admission
 
-The tap holds at most 32,768 frames. Playback submits analysis only for PCM
-admitted to output, not an entire decoded packet ahead of its pending tail.
-Each refill admits at most 16,384 frames, independently of output queue or packet
-size, and returns through control handling before another ready refill. DSP and
-monitor EQ process each converted fragment once; pending processed output is
-unchanged by later monitor EQ edits. Rolling waveform capture remains decoder-driven.
+The tap holds at most 32,768 stereo frames and observes only PCM admitted to
+output. Each refill admits at most 16,384 frames before returning to control
+handling. DSP and monitor EQ process converted fragments once; later edits do
+not reprocess pending output. Rolling waveform capture remains decoder-driven.
 
-After and bypass taps borrow admitted PCM. A processed Before tap retains a
-reusable stereo FIFO because its source-aligned samples can lead graph output
-by algorithmic latency. Its length is bounded by that latency plus one converted
-PCM fragment; realtime graphs admit at most two seconds of latency and each
-fragment has at most 16,384 frames, excluding source preguard. Each stored frame
-contains only two `f32` channels (eight payload bytes); deque capacity slack
-remains, so the frame-count bound is not a byte-exact memory limit.
+After and bypass taps borrow admitted PCM. A processed Before tap needs a
+source-aligned FIFO bounded by graph latency plus one converted fragment
+(at most two seconds of latency and 16,384 fragment frames, excluding preguard).
+It belongs to the current capture identity: source/seek, signal, pause, Still
+Mode and capture restarts cannot relabel retained samples as current audio.
+Optional-payload changes preserve admitted PCM; disabling capture releases the
+FIFO on the next refill, even without output admission.
 
-The FIFO belongs to one capture epoch and capture revision, not merely the
-current enabled flag. Staging and output admission both reconcile that identity.
-Changing optional payload demand preserves the FIFO and admitted PCM; publication
-still requires the complete current request token, including its transition revision.
-A quick hide/show or pause/resume cannot relabel retained samples as current
-audio, even if final enablement is unchanged. Source replacement, seeking, signal
-changes, pause and Still Mode discard incompatible pending tap state without
-reprocessing pending output. Inactive analysis releases FIFO capacity on the next
-audio-worker refill, even if output admits no PCM; exhausting the final output
-span also releases it.
-
-Decoded PCM carries a traversal-relative frame position and an explicit source
-discontinuity marker, separately from its media timestamp. Analysis advances by
-admitted sample counts; neither tap nor Before FIFO alignment compares media
-PTS to infer continuity. The source normalizes timestamp semantics and owns
-container-gap detection. Successful seek/source replacement, confirmed source
-gaps and dropped analysis samples start a new analysis segment; ordinary media
-clock corrections do not. Invalid or unrepresentable seek targets are rejected
-before changing decoder state, queued output or the current analysis epoch,
-including while the source is opening. An asynchronous rejection corrects the
-matching transport intent's displayed position without resetting output or
-analysis; obsolete rejection events cannot roll back a newer seek or playback
-generation. Decoder seek execution failures remain fatal and stop playback;
-they do not resume a potentially changed decoder under the old epoch. Seek
-priming samples are discarded before the first new span.
-With a realtime graph, explicit boundaries map into latency-trimmed output
-frame coordinates, excluding source preguard; a boundary
-at or before the preguard end does not publish a gap. Output admission splits at
-each retained boundary so both Before and After mark the discontinuity when
-that output span is admitted, not early while the decoder is feeding the graph.
-The marker prevents an FFT window from bridging the break without discarding
-valid earlier audio still awaiting admission. Restart and exhausted final output
-release the boundary queue.
+Continuity follows traversal-relative sample positions and explicit source gaps,
+not comparisons of media timestamps. Seek/source replacement, confirmed gaps
+and dropped analysis samples start new segments; ordinary clock corrections do
+not. With a realtime graph, gap markers follow latency-trimmed output admission,
+so an FFT cannot bridge a break or discard valid earlier pending audio.
+Invalid seek targets leave decoder, output and analysis unchanged; obsolete
+asynchronous rejections cannot undo newer transport intent. Decoder seek
+execution failure stops playback rather than resuming uncertain decoder state.
 
 === Ingestion and publication
 
-While playback and display demand are active, audio arrival wakes the worker to
-ingest a finite queued prefix into its rolling sampling window and demanded
-accumulators. Ingestion does not wait for a display request or its FPS deadline:
-at 192 kHz and 5 FPS, the 38,400 frames between publications need not fit in the
-tap at once. Continuing production cannot postpone control handling or shutdown
-beyond one queued prefix.
+Audio arrival wakes analysis to ingest a finite queued prefix independently of
+display requests. `analysis_fps` limits FFT transforms and publications, not PCM
+ingestion. Requests coalesce into one permit, retained until a complete fresh
+window and its publication deadline are available. The worker publishes one
+latest shared frame, not a result backlog; hidden, paused and Still Mode gates
+revoke permits and timed wakeups.
 
-FFT plans and analysis working storage are prepared on the analysis worker only
-when it accepts current-identity audio with active playback and display demand,
-outside Still Mode. Startup, configuration changes and metadata invalidation alone
-do not prepare them. Pause and loss of all display demand clear the capture window
-and published input without changing signal-continuity generation. Still Mode
-also breaks semantic continuity. Prepared working storage remains reusable; an
-FFT configuration change is prepared when eligible audio next arrives.
+FFT plans and working storage are prepared only when eligible audio arrives with
+active playback and display demand. They remain reusable across suspension;
+configuration changes alone do not allocate an analyzer. Pause or loss of demand
+clears capture input; Still Mode also breaks semantic continuity.
 
-Consumer requests coalesce into one publication permit, retained until a fresh,
-complete FFT window is available. `analysis_fps` caps transforms and publications,
-not PCM ingestion; audio arrival without a permit never runs an FFT. One latest
-shared frame is published rather than an unbounded result queue. An incomplete
-window waits for input, not repeated deadline wakeups; a complete window with a
-pending permit waits only for its publication deadline. Hidden, paused and Still
-Mode gates revoke permits and stop timed wakeups.
-
-Analysis backpressure never blocks playback. A genuinely stalled worker drops
-the stale queued prefix and resets continuity; the next accepted tap marks the
-gap. Fresh audio wakes recovery without a polling/acquisition loop. A ready
-replacement and its generation are published together, without an intermediate
-invalid frame. When fresh analysis is unavailable, invalidation remains visible
-so consumers never smooth across unrelated audio.
+Backpressure never blocks playback. A stalled worker drops stale queued input
+and marks a continuity break; fresh audio wakes recovery without polling. A
+ready replacement and its generation publish together. Until then, invalidation
+remains visible so consumers cannot smooth across unrelated audio.
 
 === Demand and continuity
 
-The display enable flag and optional-payload demand are submitted as one
-coalesced control state, independently of the core business-command queue.
-Closing a window relinquishes that demand even when the command queue is full.
-Playback activity and Still Mode remain separate execution gates; requesting a
-display never resumes playback or overrides Still Mode. Destructive demand
-transitions invalidate queued input and late frame publication.
+Display enablement and optional payloads form one coalesced control state,
+independent of the business-command queue. Closing a window relinquishes demand
+even when that queue is full. Playback and Still Mode remain separate gates;
+display demand never starts playback. Capture restarts fence queued input and
+late publications, including quick hide/show transitions.
 
-Admission of Load, audition-source replacement, and Seek reserves a monotonic
-audio intent. The serialized audio worker applies each intent before executing
-its matching command; tap capture carries the applied epoch, and the accepted
-analysis publication records that epoch and intent. Presentation requires the
-current display token, actual epoch, and matching desired/applied intent.
-Queued newer intents therefore cannot relabel old audio as a ready replacement.
-Pause and display capture restarts remain separate from semantic source identity;
-a rejected seek can resume fresh actual audio without inventing a successful seek
-or waiting forever on the UI clock-correction revision.
+Load, audition-source replacement and Seek reserve monotonic audio intent.
+Presentation accepts only frames matching current display demand, the actual
+audio epoch and the applied intent. Queued newer commands therefore cannot
+relabel old audio. Capture restarts and rejected seeks remain distinct from a
+successful semantic source change.
 
 Source/seek boundaries, Stop, dropped samples, FFT/window/signal or sample-rate
 changes, and Still Mode break signal continuity. The producer owns its generation;
@@ -166,21 +121,15 @@ snapshot with newer metrics.
 
 === Presentation scheduling and visibility
 
-The GUI presentation owner owns the shared visual models, staging buffer,
-display demand, and per-panel view entities. One analysis timer requests frames
-at `analysis_fps`; one pending native window callback consumes the latest
-publication and advances display animation independently of that timer.
-`visualizations.fps` sets a shared display cap for Spectrum, Spectrogram, and
-Audio Visualizer: `0` (default) follows window frames, while `1`–`240` limits
-animation frames per second. The cap does not throttle analysis or control
-Waveform or album artwork. The setting is under Settings → Visualizations →
-General → Animation, separate from Frequency analysis.
-The owner coalesces capped requests behind one cancellable timer; late frames
-do not create a catch-up backlog. Audio Visualizer's idle fade uses the same cap.
-Business/configuration changes update its inputs; neither clock refreshes the
-business root. Missed analysis deadlines coalesce rather than replaying a backlog.
-A configuration-only refresh reuses the current staging frame when its analysis
-sequence is unchanged, without copying its payloads or treating it as new audio.
+One GUI presentation owner shares visual models and staging across panels.
+Its analysis timer requests frames at `analysis_fps`; native window callbacks
+consume the latest publication and advance animation independently.
+`visualizations.fps` caps Spectrum, Spectrogram and Audio Visualizer animation:
+`0` follows window frames, and `1`–`240` limits requests per second. It does not
+throttle analysis, Waveform or artwork. Capped requests share one cancellable
+timer; late deadlines coalesce without catch-up. Configuration-only refreshes
+reuse unchanged staging data rather than treating it as new audio, and neither
+clock refreshes the business root.
 
 The display clock advances at wall-clock speed but never beyond the latest
 accepted audio timestamp. Spectrum hold/release and smoothing, radial rotation
@@ -241,34 +190,23 @@ retains only the latest publication until visibility is revoked.
 
 == Still Mode
 
-Still Mode overrides visualization demand at both GUI and audio-worker
-boundaries. It stops the worker tap and parks analysis without reopening
-playback. Entry discards shared analysis results, Spectrogram history, stereo
-fields, fractal scenes, progressive and shared waveform bins, and any completed
-GUI full-waveform preview. FFT plans and working buffers remain reusable, but
-their sampling window is reset.
+Still Mode gates both GUI demand and the audio-worker tap. Entry discards shared
+analysis, Spectrogram history, stereo fields, fractal scenes, waveform bins and
+completed full-waveform previews. FFT plans and working storage remain reusable,
+but resumption needs a new complete audio window. Settings, source identity,
+playback and accounting survive. Transition generations reject queued samples
+and late scan results even across quick on/off switches or while hidden.
+Submitted graphics retain their independent
+link:22_cache.adoc#_resource_boundaries[completion-aware lifetime].
 
-Settings, source identity, playback timeline, and accounting survive. Mode
-transitions invalidate queued samples and publications even across quick on/off
-switches. Sample-rate, FFT-size, or window changes rebuild the analyzer;
-resumption waits for a new complete audio window. Already submitted graphics
-follow link:22_cache.adoc#_resource_boundaries[completion-aware renderer retirement],
-independently of suspended analysis.
-The application-menu toggle changes only Still Mode in the core's serialized
-request path; pending playback and device settings are preserved rather than
-reapplied from a GUI configuration snapshot.
-
-Waveform coverage is also discarded: prior samples cannot count toward a
-complete envelope, and EOF cannot make a skipped or discarded interval complete.
-Only fresh decoded PCM allocates and fills bins. There is no automatic backfill
-or full-track rescan; an uninterrupted fresh traversal from zero can complete
-the envelope. The audio worker cancels explicit full-waveform scans on entry,
-without waiting for GUI refresh. Native and FFmpeg decode loops observe cancellation
-between packets, including packets that return no PCM. Blocking file/container/codec
-calls cannot be interrupted; cancellation takes effect when control returns. A shared suspension generation
-rejects late results and installed previews, even across quick on/off transitions
-or while hidden. Resumption neither restores discarded previews nor starts another
-scan, and intentional cancellation is not reported as a waveform-load failure.
+Discarded waveform coverage cannot become complete at EOF. Only fresh decoded
+PCM fills bins; there is no automatic backfill or rescan. A fresh uninterrupted
+traversal from zero can complete the envelope. Entry cancels explicit scans in
+the audio worker. Decode loops observe cancellation between packets, but cannot
+interrupt a blocking file/container/codec call. Cancellation is not reported as
+a load failure, and leaving Still Mode neither restores previews nor starts a scan.
+The menu toggle changes only Still Mode through the core's serialized request
+path, preserving pending playback and device settings.
 
 == Waveform
 
@@ -290,35 +228,25 @@ new traversal's statistics. Lower gain can therefore decrease old peaks and RMS.
 Successive contiguous packets in the same traversal accumulate without counting
 overlapping samples twice; unvisited bins keep their prior values.
 
-Sample-to-bin mapping uses a retained integer ratio, not the rounded display
-span. EOF can truncate trailing bins and normalize the display timeline without
-moving cached samples between bins. Pairwise coarsening doubles the sample width;
-source changes or discarded bins reset the geometry. The accumulator publishes
-this geometry with its statistics so later playback uses the same coordinates.
-Ordinary refill publishes only when the shared waveform write lock is immediately
-available. Contention retains private dirty ranges for a later refill rather than
-delaying output replenishment or dropping coverage. EOF, Still transitions and
-source retirement flush pending statistics and may wait for a current reader;
-identity and revision checks still reject stale publications.
-Both first and subsequent publications copy only waveform statistics: live scan
-cancellation registration and suspension controls remain shared-frame-owned.
-A scan registered after the decoder captures its private seed therefore still
-receives cancellation when Still Mode starts, even after the first PCM publication.
+An integer sample-to-bin ratio keeps cached statistics in stable coordinates
+through EOF correction and pairwise coarsening. Playback accumulates privately;
+ordinary refills publish dirty statistics only when the shared write lock is
+available, retaining them for a later refill on contention. EOF and retirement
+flush remaining statistics. Publication never replaces shared scan-cancellation
+controls, and identity/revision checks reject stale updates.
 
-
-Each native or FFmpeg decode call uses one work budget across packet skipping,
-seek discards, codec buffering and retained PCM fragments. Exhausting the budget
-yields control, not EOF; playback and full-waveform callers can continue later.
-Rivu converts at most 16,384 frames and 256 KiB of float PCM per fragment. These
-bounds do not limit internal codec allocations or the duration of a single demux
-syscall or blocking file/container/codec operation.
+Native and FFmpeg decoding use a finite work budget across packet skipping,
+seek discard, codec buffering and retained fragments. Exhaustion yields control,
+not EOF. Conversion is bounded to 16,384 frames and 256 KiB per float-PCM
+fragment; internal codec allocation and blocking calls are outside that bound.
 
 An explicit full-track scan supplies a baseline for the same rolling display.
 The previous display remains visible during its Track query and decode, and on
 failure. Clicking captures the selected signal, monitor EQ and actual active
-audition source/graph; later EQ or signal edits neither change nor cancel that
-request. Before playback, the explicit scan uses the selected original source
-and the latest saved decoder hint without activating a persisted graph.
+audition source/graph, including retained PCM when memory-backed. Later EQ or
+signal edits neither change nor cancel that request. Without active playback,
+the scan opens the selected original source with its saved decoder hint; it does
+not activate a persisted graph.
 When the captured graph specifies a published frame count, the scan stops once
 that timeline is filled, without decoding or processing unrelated cached suffixes.
 Preguard and processing latency are discarded before counting published frames;
@@ -327,9 +255,9 @@ real upstream EOF still drains necessary graph output if the timeline is not yet
 Each progressive bin carries its last PCM revision. Installing a scan overlays
 only playback bins newer than the request; a late baseline cannot erase PCM
 visited since the click. Subsequent playback can overwrite the installed full
-result. Different full/progressive geometries are mapped by time overlap with
-sample-weighted RMS, retaining bounded bins and no whole-track PCM. There are
-no separate before/after waveform caches and no automatic full rescans.
+result. Different full/progressive geometries map by time overlap with
+sample-weighted RMS, retaining bounded bins without another whole-track PCM
+copy. There is one rolling display, with no automatic full rescan.
 
 Explicit preview identity includes the file, optional playback range, library
 content fingerprint and captured opened-source provenance. Changed content,
@@ -339,18 +267,14 @@ supersedes the old request without dropping the current display. Request and
 suspension generations reject stale completion independently of playback's
 statistics revisions. Still Mode cancels scans and discards the display.
 
-Progressive playback identity belongs to the opened decoder, not the latest
-library fingerprint. Each successful Load captures the actual opened regular
-file's device/inode, size, modification and change timestamps, together with the
-path, range, decoder hint, actual backend, initial duration, sample rate and
-channel count. Atomic replacement or a changed decode/timeline format retires
-the prior envelope even at the same path. Seeking the existing decoder and
-reopening unchanged content retain the baseline and EOF-corrected timeline,
-but revisited bins replace old statistics, even after complete coverage.
-Identity is captured once at open: there is no
-per-frame filesystem lookup or extra whole-track PCM scan. A library refresh or
-saved hint change cannot relabel or discard data from an already opened old
-file descriptor; only a subsequent Load selects the replacement content.
+Progressive identity belongs to the opened source, not the latest library
+fingerprint. File content uses opened-file identity; memory-backed audition uses
+immutable PCM storage and slice identity. Backend, initial timeline and audio
+format also participate. Replacement content or a changed format retires the
+envelope; seeking the same source retains it, with revisited bins replacing old
+statistics even after complete coverage. No per-frame filesystem lookup or
+extra whole-track scan is needed. Library refreshes and saved-hint changes cannot
+relabel audio already opened for playback.
 
 Display aggregation keeps left and right statistics separate. Peak takes the
 maximum known value; RMS uses decoded-sample-weighted energy,
@@ -371,19 +295,14 @@ does not change the height represented by the amplitude mapping.
 
 A single shared vertical gradient would be cheaper to batch, but would assign
 the same color to equal heights across columns and weaken those differences.
-Each panel instead publishes numerical left RMS, left Peak, right RMS and right
-Peak columns. The GPU expands them into two RMS fills and two thin Peak markers;
-unknown components draw nothing, while known silence retains a minimum-height fill.
-A shared palette stores floating-point center/endpoint color pairs for all existing
-1024 amplitude-color samples, without an intermediate 8-bit quantization. The
-vertex stage applies color compression and continuously interpolates neighboring
-pairs' endpoints. Each RMS fill then blends only its own two endpoints in RGB,
-not intermediate palette colors; Peak uses its endpoint directly. Color selection
-is per primitive, not repeated per fragment. Integer logical column boundaries and
-ceil-height geometry preserve the drawing recipe, including fractional placement
-height and one-logical-pixel Peak thickness after resizing or physical scaling.
-Height and placement do not alter numerical publication identity. Cursor and glow
-remain dynamic. There are no application rectangle tiles or colored images.
+Each panel publishes numerical left/right RMS and Peak columns. The GPU expands
+them into two RMS fills and two thin Peak markers; unknown components draw
+nothing, while known silence retains a minimum-height fill. A shared palette
+keeps floating-point center/endpoint pairs. Each fill blends its own endpoints,
+not intervening palette colors; Peak uses its endpoint directly. Logical column
+boundaries and ceil-height geometry preserve one-logical-pixel markers through
+resize and physical scaling. Placement does not change numerical identity;
+cursor and glow remain dynamic. There are no derived image or rectangle tiles.
 Buffer admission and completion-aware retirement use the shared
 link:25_gpu_rendering.adoc#_admission_and_retirement[GPU material budget].
 
@@ -419,25 +338,20 @@ body. They are not connected into a curve, and the body cache does not own their
 geometry. This preserves their transient-marker meaning while keeping body
 reuse separate from Peak rendering.
 
-Spectrum shares one 1024-entry RGBA palette across panels and repaints, even when
-geometry caching is disabled. Authored cubic colors are quantized to 8-bit channels
-before conversion to f32, unlike Waveform's floating-point endpoint pairs. Range,
-dimensions and style change geometry or mapping, not palette identity. Minor sampling
-differences from the old texture are accepted; its half-texel knots are not reconstructed.
+Spectrum shares one 1024-entry palette across panels and repaints, independently
+of geometry caching. Its cubic colors use 8-bit channel quantization, unlike
+Waveform's floating-point endpoints. Range, size and style change geometry or
+mapping, not palette identity.
 
-Rectangles use per-sample coverage in the shared MSAA intermediate so adjacent
-zero-gap columns do not darken one another through overlapping alpha ramps. A
-direct single-sample draw is not equivalent. The closed GPU API and palette encoding
-are described in link:25_gpu_rendering.adoc#_implemented_fixed_schema_slices[Implemented fixed-schema slices];
-publication retention and completion-aware retirement belong to
-link:22_cache.adoc#_resource_boundaries[Resource boundaries]. Upload or paint failure
-reports an error rather than substituting a different fill.
+Rectangle coverage uses the shared MSAA intermediate: overlapping alpha ramps
+would darken adjacent zero-gap columns. Upload or paint failure reports an error
+rather than changing the fill. The closed GPU API and resource lifecycle are in
+link:25_gpu_rendering.adoc#_implemented_fixed_schema_slices[Implemented fixed-schema slices]
+and link:22_cache.adoc#_resource_boundaries[Resource boundaries].
 
-More display slots still increase aggregation, rectangle construction, and
-fragment work. Increasing LED segments does not increase CPU body geometry.
-The common gradient needs one body submission per plot without copying geometry
-for each palette interval. These bounded changes are not by themselves evidence
-of an application CPU or GPU timing improvement.
+More display slots still increase aggregation, geometry and fragment work;
+more LED segments do not increase CPU body geometry. A shared gradient avoids
+per-palette-interval submissions, but those counts alone prove no timing gain.
 
 == Audio Visualizer ownership
 
@@ -457,30 +371,23 @@ The radial presentation follows Noctalia Shell v5's concept and parameter model;
 see the pinned
 https://github.com/noctalia-dev/noctalia/blob/f95e95cafde8c23f1d3a62b969e2b5717c96d741/src/ui/visuals/fancy_audio_visualizer.h[`FancyAudioVisualizer` interface (v5.0.1)].
 It does not reuse Noctalia's rendering implementation or promise its pixel output.
-GPUI-native paths use a bounded display of at most 32 logarithmic bands.
-Each accepted spectrum maps its levels to retained target bands once. Native
-display ticks smooth toward those targets and advance rotation using the bounded
-display clock. Replaying the same generation and sample time with an unchanged
-valid band mapping does not inject new input or advance animation. A reset,
-configuration change, or return from hidden state invalidates the mapping so the
-latest compatible frame can initialize it again without inventing audio time.
-Paint and panel size changes do not advance these levels or rotation; the
-optional idle fade is a wall-clock presentation overlay, not audio smoothing.
-There is no reusable rendering cache for these styles.
+GPUI-native paths display at most 32 logarithmic bands. Accepted audio updates
+shared targets; native ticks smooth and rotate them on the bounded display
+clock. Repainting, resizing or replaying unchanged audio does not advance state.
+Mapping changes can initialize from compatible retained input without inventing
+audio time. Idle fade is a separate wall-clock overlay; radial styles have no
+reusable rendering cache.
 
 === Oscilloscope
 
 Oscilloscope consumes the same selected before/after signal as FFT analysis,
 but uses unwindowed stereo PCM rather than reconstructing samples from FFT bins.
 Only visible Oscilloscope instances request PCM.
-The analysis worker publishes an immutable, shared stereo snapshot through
-five reusable slots, each holding
-the latest `min(analysis_fft_size, 4096)` chronological stereo frames. Their
-sample storage is bounded to 160 KiB per prepared analyzer, plus container
-headers. Retaining an older GUI frame cannot force unbounded allocations or
-block audio: if every slot is retained, the worker coalesces the entire analysis
-publication rather than pairing new timing or metrics with old PCM. Panels share
-the snapshot and its selected sweep, not a second audio queue.
+The worker shares immutable snapshots of the latest
+`min(analysis_fft_size, 4096)` stereo frames through five reusable slots, at most
+160 KiB of sample storage per prepared analyzer. Pool exhaustion omits optional
+PCM without blocking audio or other analysis. Panels share the selected sweep,
+never old PCM paired with newer timing or metrics.
 
 A rising zero crossing on the left anchors at most 10 ms of samples. A silent
 left channel selects the right trigger; a window shorter than two sweeps shows
@@ -606,21 +513,17 @@ only the last bounded immutable segment publication. Removing a style from the
 layout or crossing a semantic boundary clears both, including inactive styles.
 Glow uses batched, widening translucent strokes rather than image feedback
 history or a blur post-pass. This bounds retained scene storage and submissions,
-at the cost of approximating the light spread. Beams retains 189 branches, 756
-line segments, and 12 pulse slots. Flow retains 96 filaments with at most 24
-points each and 2208 line segments. Both styles publish shared segment endpoints
-with nine intensity/color groups and three ordered stroke layers per panel,
-instead of rebuilding 27 CPU light paths. Flow limits each integration step to
-1/120 second and each display tick to 60 steps. Integration, history fading, and
-respawn retain those substeps, but render segments are rebuilt only from the
-final state. Real sample gaps reset the scene through the producer's continuity
-generation; sparse publications alone do not reset it.
-FFT/window or Before/After signal changes revoke the scene until compatible audio
-arrives. Color or Bloom changes republish material over the accepted geometry without advancing simulation;
-background changes only repaint. Sensitivity and display-range changes affect future
-accepted audio, preserving the paused geometry and publication. Beams construction
-and reset initialize state without building geometry that the first accepted frame
-would immediately replace.
+at the cost of approximating light spread. Fixed topology, particle histories,
+pulse slots and segment publications bound storage. Three ordered stroke layers
+share segment endpoints rather than rebuilding CPU paths for every light layer.
+Flow uses bounded integration substeps and rebuilds drawing segments only from
+the final state. Real sample gaps reset through producer continuity; sparse
+publications alone do not.
+
+FFT/window or signal changes revoke scenes until compatible audio arrives.
+Color and Bloom republish material without advancing geometry; background only
+repaints. Sensitivity and display range affect future accepted audio, preserving
+paused geometry.
 
 == Artwork composition and animation
 
@@ -723,9 +626,8 @@ Spectrum fills its geometry with the shared GPU palette material. Its full
 authored cubic palette is retained rather than approximated by two stops or
 repeated masked submissions; see <<_spectrum,Spectrum>>.
 
-Rust scene records, WGPU pipelines, and shader layouts change together. Spectrum
-no longer uses a gradient image, atlas tile or specialized textured-Path API.
-Ordinary fills and transformed image sprites retain their independent paths.
+Rust scene records, WGPU pipelines and shader layouts change together. Palette
+Paths, ordinary fills and transformed image sprites have distinct drawing paths.
 
 Color images clamp linear texture sampling to their atlas tile's first and last
 texel centers. This prevents neighboring images from bleeding into magnified

@@ -18,12 +18,10 @@ Clicking the Library `+` button prints the following warning on each invocation:
 zbus::proxy: Failed to populate properties cache via GetAll: org.freedesktop.DBus.Error.UnknownMethod: Object does not exist at path “/org/freedesktop/portal/desktop/request/…”. Property change streams will not produce values.
 ----
 
-The user confirmed that the folder chooser opens and adding a library root
-succeeds. The warning comes from ashpd constructing a transient Request proxy
-with property caching enabled before sending `OpenFile`. The Request object
-has not yet been created, so the cache's `GetAll` fails; selection results use
-an independent `Response` signal. Playlist import/export use the same request
-mechanism and can be affected as well.
+The user confirmed successful folder selection and library-root addition. ashpd
+creates a property-cached Request proxy before `OpenFile` creates the transient
+object, so `GetAll` fails; results arrive through an independent `Response`
+signal. Playlist import/export share this mechanism.
 
 Upstream fix:
 https://github.com/bilelmoussaoui/ashpd/commit/e9e38113ad075042fcc48b8401010ca5f905db55[Disable property caching for Request/Session objects].
@@ -44,19 +42,16 @@ have no loading text. This concerns database query scheduling, not tracks
 waiting for playback. The interval is established by code inspection; it has
 not been reproduced as a live GUI failure.
 
-The physical worker retains its slot until completion. Completion releases
-the slot and notifies the view; deferred viewport demand can then submit the
-current query without additional user input. This is not a confirmed permanent
-loading stall. Retiring the previous search's loading token remains a separate
-correctness fix and must not restore obsolete presentation to fill the gap.
+Physical completion releases the occupied slot and notifies the view so current
+demand can submit without user input. This is not a confirmed permanent stall;
+obsolete search loading must remain retired.
 
-Revisit only after deciding whether loading text should cover logical waiting
-as well as submitted requests. If so, keep presentation identity and elapsed
-delay with the current demand: obsolete completion must not clear it, submission
-must not restart its delay, and no second worker may bypass the occupied slot.
-Verify a hide/reopen and search replacement with an outstanding query longer
-than 150 ms, and retain explicit retry for failed pages. Existing ownership is
-documented in link:22_cache.adoc#_query_projection_retention[Query projection retention].
+If policy expands feedback to logical waiting, bind its identity and elapsed
+delay to current demand. Obsolete completion cannot clear it, submission cannot
+restart the delay, and no replacement worker may bypass the occupied slot.
+Verify hide/reopen and search replacement behind a query longer than 150 ms,
+including failed-page retry. See
+link:22_cache.adoc#_query_projection_retention[Query projection retention].
 
 === Small visualization canvas feedback
 
@@ -89,14 +84,11 @@ link:22_cache.adoc#_query_projection_retention[Query projection retention].
 
 Status: resolved in implementation, 2026-10-21.
 
-The right-side Panel catalog now adds components only through drag-and-drop.
-Single-click, double-click, and keyboard activation do not add components. The
-drop location chooses a tab position or edge split; empty workspaces accept their
-first component. Cancelling or dropping outside a valid target creates nothing.
+Catalog insertion is drag-only, including the first panel in an empty workspace.
+Clicks and keyboard activation insert nothing; cancellation and invalid drops
+leave the tree unchanged. Preview candidates do not allocate live IDs.
 
-Catalog insertion shares the existing panel-docking preview and commit path;
-preview candidates never allocate IDs in the live layout. Verified with layout
-behavior tests and an isolated nested Wayland GUI, including inert clicks,
-center and edge insertion, empty layouts, invalid drops, Escape cancellation,
-and existing tab transfers. User operations are documented in
+The recorded acceptance used layout tests and an isolated nested Wayland GUI:
+inert clicks, center/edge insertion, empty layouts, invalid drops, Escape and tab
+transfers. This is historical evidence, not a new run. Current operations are in
 link:01_config.adoc#_layout[Configuration and layout].

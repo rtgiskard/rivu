@@ -23,22 +23,17 @@ stable embedding SDK. Storage transactions, mutable analysis publication, and
 frontend implementation modules are crate-internal capabilities. External
 clients use the protocol rather than bypassing Core validation through storage.
 
-`rivu-protocol` owns commands, queries, snapshots, positional wire schemas, and
-bounded transport. `rivu-client` adds session handling without depending on App
-or Core. Their standalone dependency graph does not require GPUI, audio execution,
-PipeWire, SQLite, or FFT execution; a workspace consumer can enable database or
-DSP execution through Cargo feature unification.
+`rivu-protocol` defines commands, queries, snapshots, positional wire schemas, and
+bounded transport. `rivu-client` provides synchronous sessions, instance binding,
+cancellation, typed task waiting, command-failure evidence, and one-shot helpers.
+External Rust clients use these crates rather than the root application crate.
+Their standalone dependency graph requires no GPUI, audio execution, PipeWire,
+SQLite, or FFT execution, although Cargo feature unification can enable database
+or DSP execution in a combined build.
 
-`rivu-client` exposes `ClientSession`, cancellation, instance binding,
-`ClientSession::wait_task(TaskTarget)`, command failure evidence, and the one-shot
-`get_state`, `query`, and `request_ack` helpers. Task waiting returns a task-specific
-`TaskOutcome`; processing, relocation, and scan results keep their own payloads.
-The session API is synchronous and drives its I/O futures on the calling thread;
-async callers must keep it off their executor thread. Requests are owned values;
-callers retain their own copy only when needed. External Rust clients depend on
-`rivu-client` and `rivu-protocol`, not the root application crate. A retained
-session reuses its socket and framing buffers. The GUI calls Core directly and
-keeps its view and audition state inside the application.
+The client drives I/O on its calling thread, so async callers must move it off
+their executor thread. Retained sessions reuse sockets and bounded framing storage.
+The GUI calls Core directly and owns only its view and audition state.
 
 === Consumer and application lifetimes
 
@@ -79,28 +74,21 @@ channels carry requests and worker facts; replies and revision subscriptions
 wake consumers without polling. Notifications coalesce, so consumers read the
 current authoritative projection after a wakeup rather than replaying events.
 
-Synchronous SQLite writes and their business transitions stay atomic on Core.
-A separate bounded query owner reuses one read connection and prepared statements,
-pins a SQLite snapshot for each request, and validates the captured query scope
-against published Core state. A transition fence prevents a committed database
-change from being read with the preceding publication. Reader count caches follow
-their respective data-domain revisions; maintenance waits for physical snapshot retirement.
-While waiting for a Query reply, IPC observes peer EOF and shutdown and drops the
-Core reply receiver when the connection retires. Queued reads whose receiver has
-disappeared are skipped before database admission. Revoking a queued read does
-not interrupt SQL already executing or release its physical snapshot lease early;
-accepted commands retain their own completion semantics independently of the
-caller's reply receiver.
+SQLite writes and their state transitions stay atomic on Core. A separate bounded
+query owner reuses a read connection and pins a SQLite snapshot per request,
+validating it against captured Core revisions. A publication fence prevents reads
+from pairing a committed database change with preceding state. Count reuse follows
+data-domain revisions; maintenance waits for physical snapshot retirement.
 
-App retains the application-level execution resources through Core and IPC retirement.
-Core and library jobs share these resources without library depending on Core internals.
-Independent jobs coordinate file I/O and bounded synchronous file, probe and
-background transaction stages. A shared blocking pool admits at most four such
-stages concurrently; waiting for Core, task admission, and command replies hold
-no blocking slot. A physical closure retains its slot even if its async waiter
-is cancelled. Core unwinds and retires on its own thread, joining started work
-before lifecycle completion; the executor stops after accepted work and blocking
-stages retire. Cancelling a waiter is neither worker retirement nor rollback.
+IPC disconnection or shutdown drops a pending query's reply receiver. Obsolete
+queued reads are skipped before database admission, but SQL already executing
+keeps its snapshot lease until completion. This does not cancel accepted commands.
+
+App retains shared execution resources through Core and IPC retirement. File,
+probe, and background transaction stages share at most four blocking slots;
+waiting for Core admission or replies holds none. A physical closure keeps its
+slot after async cancellation. Shutdown joins started work before retiring the
+executor: cancelling a waiter is neither worker retirement nor rollback.
 
 === Projection and view costs
 
@@ -141,41 +129,31 @@ length remains little-endian; body integers follow Postcard's encoding.
 Version mismatches are rejected before decoding the body. There is no schema
 negotiation. See <<_wire_schemas,Wire schemas>> for positional fields and adapters.
 
-Request frame content is limited to 4 MiB
-and response frame content to 16 MiB, including the version and message type but
-excluding the length prefix. The server accepts at most 16 concurrent clients;
-additional connections receive `IPC server is busy` and close. An unbound client
-has one second to complete each incoming frame while waiting for Hello. After
-binding, each request frame must complete within five seconds of its first byte,
-including frames received while a Query reply is pending. The reader's timer wakes
-even if the peer sends nothing further or a full read-ahead buffer prevents more
-reads. Additional bytes and revision updates do not restart that deadline. A late
-completion cannot make an expired frame valid; a completion timeout closes the
-connection and releases its session slot. Normal idle sessions, Watch waits, and
-Query waits with no incomplete following frame have no frame-completion expiry.
+Frame content is limited to 4 MiB for requests and 16 MiB for responses, including
+version/type but excluding the length prefix. The server admits 16 clients;
+additional connections receive `IPC server is busy` and close.
 
-Frame limits bound encoded bytes, not decoded heap usage. The current Postcard
-decoder checks string lengths and suppresses collection size hints larger than
-the remaining input. The nonrecursive wire schemas contain no zero-byte collection
-elements, so decoding allocation and iteration scale with actual frame bytes,
-not arbitrary declared lengths. Decoded objects can still exceed the encoded
-size. Recursive types, zero-byte elements, or custom deserializers would require
-reassessing that bound.
+Before Hello, each incoming frame has a one-second completion limit. Once bound,
+an incomplete request must finish within five seconds of its first byte, including
+during a Query wait. Further bytes, revision updates, and socket backpressure do
+not renew or suspend the deadline. Expiry closes the connection and releases its
+slot. Idle sessions, Watch, and Query waits without an incomplete following frame
+do not expire under this rule.
 
-An oversized frame prefix closes the connection as soon as its fourth byte is
-received, before any body is consumed, including fragmented prefixes during a
-Query wait. Reads stop at each prefix and body boundary. Invalid headers, unknown
-message types, incompatible versions, malformed
-Postcard payloads, and trailing payload bytes within the frame limit receive an
-Error response and close that connection; other client sessions remain usable.
+An oversized prefix closes immediately, before consuming its body. Invalid headers,
+types, versions, malformed Postcard, and trailing payload bytes within the limit
+receive Error and close that session. Other sessions remain usable.
 
-Pipelined requests received during a Query wait stay ordered behind its reply.
-Read-ahead is bounded to one maximum request frame plus its length prefix; a full
-buffer applies socket backpressure without suspending an incomplete tail's timer.
-Frames completed before their deadline wait untimed and remain ordered while
-earlier replies are pending. Framing failures during a Query wait drop the reply
-receiver and close the connection; they do not interrupt the SQL owner or replay
-the query.
+Query read-ahead is bounded to one maximum request frame plus its prefix. Complete
+frames wait untimed and in order behind earlier replies; incomplete tails retain
+their deadline even when the buffer is full. A framing failure drops the pending
+reply receiver, without interrupting or replaying SQL.
+
+Frame limits bound encoded bytes, not decoded heap usage. Current nonrecursive
+schemas and decoder length checks make allocation and iteration scale with actual
+input, rather than arbitrary declared collection lengths. Decoded messages can
+still be larger; recursive types, zero-byte elements, or custom deserializers
+would require reviewing that bound.
 
 IPC uses one Linux abstract Unix stream socket for both communication and
 exclusive data-directory ownership. No `rivu.sock` or `rivu.sock.lock` file is
@@ -193,38 +171,23 @@ admitting a client to its bounded session set. This protects commands and state,
 not availability: another user can occupy the public abstract name and prevent
 startup, but cannot impersonate the server to a client.
 
-Before opening the database, saving configuration, or starting audio workers,
-startup creates the data directory if necessary and binds the real listener.
-Only a successful bind grants instance ownership. App retains its listening
-descriptor through runtime and IPC teardown, including partial startup failures;
-the serving worker holds a clone. The kernel releases the address after the last
-listening descriptor closes, including on process death. No stale-file recovery
-or pathname cleanup is needed.
+Startup binds the listener before database, configuration-write, or audio work;
+only successful binding grants ownership. App retains it through teardown and
+partial startup failures. The kernel releases the address when the last listening
+descriptor closes, including on process death; there is no stale-file cleanup.
 
 Ownership is scoped to a Linux network namespace. Instances in different network
 namespaces must not share a data directory.
 
-The transport retains partial input across cancelled reads and keeps frames
-independent. Sessions process requests serially; frames have no request IDs or
-multiplexed response matching.
+Sessions process requests serially, without request IDs or multiplexing. Partial
+input survives cancelled reads. Framing enforces the direction's size limit while
+encoding and decodes complete frames directly into owned messages.
 
-Requests and responses share one frame writer, which enforces the direction's
-size limit while serializing the header and body into the session buffer.
-
-Sessions reuse encoding buffers up to 256 KiB capacity. Larger send buffers are
-released after the write and flush, before an idle request or Watch wait; repeated
-bulk transfers therefore allocate again. Above 64 KiB, encoding capacity grows
-geometrically or directly to the required size, capped at the frame boundary.
-Requests and responses share one receive path: complete frames decode directly
-from the buffer into owned messages, without splitting or copying the frame payload.
-After decoding, small receive buffers remain reusable; once no pending frame bytes
-remain, backing allocations above 256 KiB are released, including growth caused by
-several individually smaller frames. Pipelined tails and cancelled partial reads
-retain their bytes. Complete malformed requests still receive an Error response;
-framing and I/O failures remain distinct from decoding errors. Disconnects discard
-partial input and release oversized client buffers. These bounds concern framing
-storage, not decoded messages or allocator-resident pages; releasing a buffer does
-not guarantee an immediate RSS decrease.
+Send buffers above 256 KiB are released after write/flush; receive buffers above
+that capacity are released once pending bytes drain. Smaller buffers are reused.
+Pipelined tails and cancelled partial reads keep their bytes until consumed or
+disconnected. These are framing-storage bounds, not decoded-message or RSS limits;
+bulk transfers can allocate again and allocator pages may remain resident.
 
 === Session handshake
 
@@ -239,21 +202,15 @@ as the invalid instance ID. IDs are equality tokens for detecting server
 identity changes; they are not ordered identifiers, authentication credentials,
 or globally unique identifiers.
 
-The TUI keeps separate command, query, and Watch sessions on its existing
-workers. Each worker reuses its connection and framing buffers;
-Watch never blocks command or query traffic. Replacing a query discards its
-result but drains the active exchange before sending only the latest pending
-query. Exiting the TUI closes an in-flight socket wait, including command and
-handshake waits, without waiting for a response.
-The Watch worker's first Hello requests all state sections and supplies the
-initial TUI snapshot and instance identity. Command and query sessions must bind
-to that same Hello instance before issuing requests. Until the snapshot arrives,
-the screen stays in a loading state that accepts `q`; no separate foreground
-state request is made. Command and query sessions can reconnect only to the
-same pinned instance; the Watch worker does not automatically reconnect. A
-changed instance is fatal, without replaying queued commands against a
-replacement server. Fatal connection, handshake, and instance-identity failures
-restore the terminal before returning the error.
+The TUI uses independent retained command, query, and Watch sessions. The Watch
+Hello supplies initial state and pins the instance; the loading screen still
+accepts `q`. Other sessions must bind to that instance. Command/query reconnection
+cannot target a replacement instance, and Watch never automatically reconnects.
+A fatal connection, handshake, or identity error restores the terminal and exits,
+without replaying queued commands.
+
+Query replacement drains the active exchange before sending only the latest
+pending query. TUI exit closes in-flight waits, including command and Hello waits.
 
 === Message types
 
@@ -360,12 +317,10 @@ An acknowledgement's `processing_id` identifies processing work admitted by that
 command, not another active task. Cached graph audition and synchronous audition
 omit it; callers must not infer task creation from the command type alone.
 
-IPC command failures before handshake/encoding completes are `NotAdmitted`.
-After successful encoding, the client marks `write_started` before attempting the
-socket write. From that point, write, flush, response, and cancellation failures
-are conservatively `Unknown`, even if no bytes are known to have reached the peer.
-A request-write timeout therefore does not authorize mutation replay. The client
-exposes `CommandFailure` without inventing a Core revision or task ID.
+Client command failures before handshake or encoding completes are `NotAdmitted`.
+Once a socket write is attempted, write, flush, response, and cancellation failures
+are conservatively `Unknown`, even without evidence that bytes reached the peer.
+The client's `CommandFailure` carries no invented Core revision or task ID.
 `Shutdown` is an App lifecycle request and bypasses GUI draft confirmation;
 interactive GUI/tray quit uses the separate user-shutdown path. Shutdown
 acknowledgement means accepted shutdown, not final persistence or worker
@@ -380,11 +335,8 @@ Failed exchanges, including an unexpected response type, discard the client
 connection and its bound instance identity. A later explicit request can reconnect
 and perform a fresh Hello, but clients never automatically replay a failed command.
 
-Client session stopping shares one handle for the stop state and waiter wakeup.
-Stopping is permanent and wakes all registered waits; a later wait also observes
-the stopped state. TUI worker shutdown stops the session and discards its socket.
-Replacing a query only invalidates its result: the active exchange still drains
-before the latest queued query is sent.
+Stopping a client session is permanent and wakes current and future waits. It
+does not cancel accepted work; replacing a query only revokes its result.
 
 == Consistency
 
@@ -420,21 +372,13 @@ Reapplying identical metadata or favorites, including a forced scan that keeps
 the same displayed values, does not advance the queue content revision.
 Raw title, artist, or album changes hidden by overrides also leave queue content
 valid when their effective display values are unchanged.
-Scans reduce committed changes into effective-track, structure, duplicate-group,
-and duplicate-member verification impacts. A size/mtime-only change to a
-fingerprinted ordinary file advances member facts, not library, structure, or
-playlist tokens. Raw metadata hidden by overrides and probe bookkeeping do not
-invalidate effective-track pages. Scan status and requested playlist imports
-still complete. Empty or existing-only playlist additions and same-position
-moves preserve playlist query validity; missing identities still fail validation.
-An explicit override equal to the displayed raw value can still change override
-presence, which advances duplicate member facts without invalidating display rows.
-Reapplying that stored override is a true no-op. This distinction preserves user
-override ownership without treating bookkeeping as changed metadata.
-Playlist creation and deletion advance duplicate member facts only when the created
-or deleted collection has members. Empty collection lifecycles, rename, and reorder
-do not advance those facts. Lifecycle publication uses the committed write's effect
-or validated creation input, without an additional membership count read.
+Scan publication distinguishes effective display changes, structure, duplicate
+groups, and duplicate-member verification facts. Size/mtime-only changes and raw
+metadata hidden by overrides need not invalidate display pages. Recording an
+override equal to the displayed raw value changes override ownership and member
+facts, not display content; reapplying that override is a no-op. Playlist reference
+changes affect duplicate-member facts only when membership changes, not on empty
+collection lifecycles, rename, or reorder.
 
 The Library section carries the summary catalog token `playlist_revision` and
 `playlist_entry_revisions`, a playlist-ID-keyed map containing exactly the extant
@@ -501,19 +445,12 @@ not make status immutable: query the exact task again to observe progress or
 completion, or use System state updates to drive presentation. Status retention
 and task IDs are scoped to the running instance, not a persistent job database.
 
-Track and playlist metadata scopes share a bounded index of at most 256 entries.
-Committed title/artist/album/favorite changes identify affected tracks and playlist
-rows inside the write transaction. Decoder hints and playback statistics affect
-Track details without invalidating playlist display rows.
-Unknown bulk effects or index overflow conservatively invalidate all metadata scopes;
-there is no whole-library track-to-playlist reverse cache. Missing targeted
-metadata scopes use the global library token conservatively. A non-scoped
-baseline can bootstrap an entry traversal only while its library token is current.
-Core and GUI/TUI snapshots use one pure response-layer policy to select these
-scopes. Playlist presence is authoritative: retained metadata cannot resurrect a
-deleted collection's scope. If the retained metadata index does not match the
-current library token, selection falls back to that library token rather than
-reusing an unrelated scoped revision.
+Track and playlist metadata scopes share an index of at most 256 entries. Commits
+identify affected display metadata transactionally; decoder hints and playback
+statistics can update Track details without invalidating playlist rows. Unknown
+bulk effects, overflow, or unavailable/currently mismatched scope information fall
+back conservatively to the global library token. There is no whole-library reverse
+cache, and retained metadata cannot recreate a deleted playlist's scope.
 
 `LibrarySnapshot.bitrate_revision` advances only after a source-conditional
 commit actually changes the `bitrate_bps`/`bitrate_exact` pair.
@@ -524,24 +461,17 @@ Track payloads, and ID/location-only queries do not depend on this revision.
 Bitrate-only publication does not advance structure, collection membership, or
 count revisions, and does not query Queue, album, or playlist membership.
 
-The existing playback/queue/library/system publication partitions remain intact.
-Consumers invalidate stale payloads and reload only when demanded; hidden views
-wait until revealed. Selection, navigation coordinates, counts and metadata drafts
-survive payload invalidation. In-flight results with an old stamp are rejected,
-not repaired; their physical reader slot remains owned until actual completion,
-after which the latest eligible demand runs. Watch coalescing needs only the
-latest scalar revision, not an update history. A bitrate change can invalidate
-unrelated bitrate-bearing payloads conservatively because this revision is global.
-Hover uses retained page data and never initiates a Track lookup.
+Consumers discard old-stamp payloads and reload on demand; hidden views wait for
+reveal. Selection, counts, navigation geometry, and metadata drafts survive
+bitrate-only invalidation. The global bitrate revision may conservatively invalidate
+unrelated track payloads, but needs no event history. Hover uses retained rows,
+not another Track request. Range anchors ignore bitrate-only changes, while range
+responses still require their full stamp.
 
-Range-selection anchors ignore bitrate-only payload freshness, but range responses
-still require their complete query stamp. Metadata reads synchronize playback-follow
-identity before preparing demand. Current transport failures are displayed without
-automatic retry; only stale work or revision-change responses retire for fresh demand.
-
-Playback statistics use the scoped metadata revisions and do not advance the
-bitrate revision. EOF and final statistics share a publication, so their query
-guards refer to that same published state.
+Freshness never substitutes for physical completion: rejected reads hold their
+reader slot until retirement. Current transport failures are displayed without
+automatic retry; stale work or revision changes can drive fresh demand. Playback
+statistics use scoped metadata revisions, not bitrate, and publish with EOF facts.
 
 Whole-collection transfers carry an album key plus its `album` revision, or a
 playlist ID plus its content/lifetime revision. Destination playlists carry their
@@ -735,9 +665,10 @@ selection. Storage work is scoped to affected collections and position ranges,
 but widely scattered moves can touch a list-length span. Business owners retain
 validation, playback effects, and revision publication.
 
-Structural queue changes advance content revision once inside the changing Store
-transaction; rollback restores both content and token. Metadata invalidation is
-field-sensitive, and an already-unique deduplication changes no revision.
+After a confirmed structural queue commit, Core advances its in-memory content
+revision once, before refreshing projections. Store transactions do not persist
+or issue that token; rollback and no-op mutations leave it unchanged. Metadata
+invalidation remains field-sensitive.
 
 `RemovePlaylistEntries {playlist_id, entry_ids, expected_revision}` removes a
 selection atomically and closes its position gaps. `MovePlaylistEntries
@@ -757,11 +688,11 @@ valid empty selections and other no-ops do not advance revisions. Mutations are
 SQL transactions retaining only selected identities and positions, not complete
 playlist metadata or an all-entry vector. Actual group moves advance only their
 playlist's scoped token; removal advances that token and summary counts, without
-invalidating other collections. Existing single-entry commands retain their CLI
-contracts. Bulk favorites use the atomic `SetFavorite {track_ids, favorite}` or `ToggleFavorite {track_ids}`
-commands. Toggle reads and reverses each track's current favorite state in one
-transaction; repeated track IDs toggle once, and any unknown ID rejects the
-whole request without changes.
+invalidating other collections.
+
+Bulk favorites use atomic `SetFavorite {track_ids, favorite}` or
+`ToggleFavorite {track_ids}`. Toggle reverses current values transactionally;
+repeated IDs toggle once, and any unknown ID rejects the whole request.
 
 `DeduplicatePlaylist {playlist_id, expected_revision}` keeps the first occurrence
 of each track in playlist order, preserving each retained entry's ID and closing
@@ -797,14 +728,11 @@ link:04_playback.adoc#_adding_local_files[Adding local files].
 `InsertPlaylist {playlist_id, track_ids, index, expected_revision}` insert directly
 at an original-list boundary in `0..=total`. The corresponding
 `InsertQueueSources` and `InsertPlaylistSources` also accept `directories` and
-use the existing stable track-ID union order for source expansion. The core
-checks the destination's order revision before mutation, including empty requests;
-stale revisions, invalid boundaries, or unknown tracks fail without partial writes.
-Both queue and playlist insertion preserve supplied occurrence order and
-duplicates; existing destination entries remain intact. Queue insertion does not
-change the playing occurrence. Storage stages incoming occurrences, opens a
-position gap, and inserts in one transaction; there is no externally visible
-append-then-move phase or whole-list metadata load. Explicit `Enqueue` and
+use stable track-ID union order for source expansion. Core checks the destination's
+order revision even for empty requests; stale revisions, invalid boundaries, or
+unknown tracks fail without partial writes. Explicit occurrences preserve input
+order and duplicates without changing existing entries or the playing occurrence.
+Gap creation and insertion commit in one transaction. Explicit `Enqueue` and
 `AddPlaylist` additions have the same multiplicity-preserving behavior.
 
 SQLite owns the complete occurrence order. Core retains only its scalar queue
@@ -828,19 +756,14 @@ playback. Blank or stale keys fail without changing the queue or playback. Both 
 resolve all current members in the backend independently of page limits; clients
 must not collect paged track IDs to perform album actions.
 
-`TransferCollection {source, destination}` copies a version-pinned whole Album
-or Playlist without collecting paged track payloads in the client. Album sources
-carry their key and Core-owned `album` collection revision; Playlist sources carry
-their ID and entry-content revision. Queue insertion carries an index and queue
-revision; Playlist destinations carry their ID, entry revision and optional
-index. Omitted positions append. Core validates versions before the Store write
-transaction; source staging and insertion use that transaction. A stale source
-or destination rejects the whole operation.
-Transfers to either destination preserve every source occurrence and its order,
-including repeated tracks and tracks already present at the destination. They
-create independent copies; subsequent edits to either collection do not affect
-the other. GUI collection drops, album menu copies and playlist-to-queue Append
-use this intent rather than bare IDs.
+`TransferCollection {source, destination}` copies a version-pinned Album or Playlist
+without client-side page collection. Album sources carry their key and `album`
+revision; Playlist sources carry ID and content/lifetime token. Queue destinations
+carry insertion index and queue revision; Playlist destinations carry ID, entry
+token, and optional index (omitted means append). Core validates both sides before
+the transaction resolves and inserts members. Staleness rejects the whole operation.
+Every occurrence and its order survive, including repeated tracks; later edits to
+either collection are independent.
 
 === Library root identity and configuration
 
@@ -874,17 +797,13 @@ identities. Successfully validated CUE sheets exempt their subtracks and referen
 whole-file identities; failed sheets grant no exemption. See
 link:02_library.adoc#_minimum_duration_for_new_tracks[Library].
 
-Source reuse requires the current probe version, independently of schema and
-protocol versions; a mismatch reprobes metadata without invalidating the
-fingerprint. Metadata lookups and CUE preparation use batches of at most 32
-sources/sheets rather than a whole-library snapshot. Unchanged ordinary identities
-authorize full-source reuse; CUE identities can supply fingerprints. Shared CUE
-sources reuse preparation within the scan and may lie outside the scanned subtree
-but must remain within configured roots. Force scans bypass reuse.
-
-Task identity and cancellation are checked before each batch. Submission and reply
-waits wake on cancellation without holding a blocking-pool slot. Stale tasks cannot
-obtain metadata or commit for a replacement scan.
+Metadata reuse requires the current probe version, independently of schema or
+protocol versions; mismatch reprobes without invalidating fingerprints. Preparation
+is bounded to 32 sources or CUE sheets per batch. Ordinary identities can reuse
+full-source metadata; CUE identities can reuse fingerprints and preparation across
+shared sources within configured roots. Force bypasses reuse. Cancellation and
+task identity are checked before each batch, so stale tasks cannot commit for a
+replacement. Waiting for Core holds no blocking slot.
 
 Relocation matching uses fingerprint and CUE segment identity. Exact identity wins;
 multiple compatible candidates remain ambiguous, and only a confirmed missing
@@ -939,29 +858,19 @@ after reopening, inspect committed data before submitting any missing operation.
 its Ack never proves worker retirement. Only the task terminal result resolves it.
 A failed wait never automatically replays startup.
 
-For scan preparation, shutdown and Core destruction close the scan event receiver
-before signalling cancellation, then join the worker. This prevents
-cancellation-triggered final delivery from overtaking receiver closure. Normal
-shutdown during Saving instead drains the accepted completion before joining,
-preserving committed facts.
+Shutdown cancels and joins scan preparation, but drains accepted Saving completion
+so committed facts cannot be reported as cancellation.
 
 === Transactional inputs and bounded storage queries
 
-Track-ID mutations serialize each input list once. Library deletion validates
-before playback-side effects, then consumes the prepared input in that serialized
-Core dispatch. Stopping can update statistics, not catalog identities; reference
-deletion and compaction remain transactional. The stop acknowledgement carries
-final position and heard time independently of lifecycle-event backpressure;
-later events cannot account for that heard time twice.
+Library deletion validates its selected identities before playback effects, then
+deletes references and compacts positions transactionally. Stop returns final
+position and heard time independently of lifecycle-event backpressure; later
+events cannot count that time twice.
 
-Committed track deletion has one Core completion boundary. It advances affected
-library, structure, playlist, and duplicate revisions before reading projections.
-Catalog count/history and queue refreshes are attempted independently. Queue
-recovery checks retained navigation identities, reconciles the history cursor,
-and refreshes the scalar queue/current-track projections. A failed read leaves
-recovery pending; already confirmed history removals need not be undone. A
-projection error reports the committed deletion without rollback or preventing
-other domains from refreshing.
+A confirmed deletion advances affected revisions before fallible projection reads.
+Catalog/history and scalar Queue recovery proceed independently; a failed refresh
+reports the committed deletion, not rollback, and leaves that domain pending.
 
 Queue consumers recover stale control projections before using occurrence order,
 insertion boundaries, or navigation history. Recovery does not materialize the
@@ -1006,25 +915,19 @@ link:26_migration.adoc#_version_authority[Database and configuration migration].
 
 === Background commits and maintenance
 
-Playlist export has one Core-owned worker, a read-only SQLite connection, and
-one snapshot established by validating the playlist before output I/O. Bounded
-keyset reads retain at most 256 decoded rows and only export fields, without
-interactive-cache or per-track queries. Missing references fail, and CUE runs
-are validated across batches. The target is atomically replaced only after full
-output and a final cancellation check. Timeout neither cancels export nor frees
-its single-flight slot; shutdown cancels cooperatively and joins the actual
-worker. Its snapshot can retain WAL pages until exit, so optimization cannot
-run concurrently.
+Playlist export owns one physical worker and read-only SQLite snapshot. Keyset
+reads retain at most 256 export rows; missing references and invalid CUE runs fail.
+The target is atomically replaced only after complete output and a final
+cancellation check. Timeout does not cancel export or free its slot. Shutdown
+cancels cooperatively and joins it. Its snapshot retains WAL pages, excluding
+concurrent optimization.
 
-Scan preparation is cancellable. Core authorizes Saving only after accepted
-relocation retires; Saving runs queue-position persistence, atomic merge, playlist
-creation, and expensive count/history projections on a worker-owned connection.
-Saving is the cancellation cutoff, not confirmation of commit. For imports, Core
-reserves a content revision and shares its latest revision-map snapshot; only
-successful playlist creation extends that map. Completion returns confirmed
-commit facts and prepared projections; Core installs them, invalidates caches,
-and publishes revisions before reads resume. Shutdown drains Saving completion
-rather than falsely recording cancellation.
+Scan preparation is cancellable. Core authorizes Saving after relocation retires;
+Saving persists queue selection, merges library facts, creates any playlist, and
+prepares projections on a worker connection. This is the cancellation cutoff,
+not commit confirmation. Core installs confirmed facts and projections, invalidates
+caches, and publishes revisions before database reads resume. Shutdown drains
+Saving rather than falsely reporting cancellation.
 
 Optimization likewise has one physical worker and retains its original reply
 until completion. During Saving or optimization, database requests are rejected
@@ -1037,13 +940,11 @@ before replacement playback, deletion, relocation, or Saving can retire its
 track identity. User mutations are never replayed automatically.
 
 Relocation verification is Core-owned and single-flight. Acceptance returns
-`Ack.relocation_id`; `RelocationTask` and System status report completion. Core
-retains 32 results and joins the worker on shutdown. The worker admits a regular
-file descriptor with its metadata, hashes in cancellable stages of at most 4 MiB
-using one 128 KiB buffer, and awaits every started stage before releasing admission.
-The verified descriptor survives to commit. Descriptor/path, source absence,
-affected playback, identities, and destination conflicts are rechecked at their
-verification and atomic Store boundaries. UI epochs reject superseded reviews.
+`Ack.relocation_id`; exact task queries and System status expose completion, with
+32 terminal results retained. Hashing is cancellable in at most 4 MiB stages with
+one 128 KiB buffer; started stages retire before admission is released. The verified
+descriptor survives to commit, where source absence, path/descriptor identity,
+playback, and destination conflicts are rechecked. Shutdown joins the worker.
 
 === Playback and audio admission
 
@@ -1079,15 +980,11 @@ An abandoned opening cannot publish Started or Failed for a later generation.
 Container setup, seeking and individual decoder, file or device calls can still
 block; these work bounds are not wall-clock deadlines.
 
-Queue mutations persist their own transactions; playback selection persists the
-current occurrence, while unrelated controls do not rewrite queue metadata.
-Toggle dispatches its chosen pause/resume operation only once. The synchronous
-audio callback and decode/output worker use a bounded non-real-time event channel.
-Stop/snapshot temporarily owns its sole receiver, drains facts while awaiting
-command capacity and its one-shot reply, and retains one absolute deadline.
-There is no second receiver or automatic stop replay. Shutdown acknowledges
-acceptance before stopping; stop/final-save failures remain published errors,
-not rejection of an already accepted exit.
+Queue mutations commit their own transactions; playback selection persists the
+current occurrence, while unrelated controls do not rewrite queue metadata. Stop
+drains lifecycle facts while waiting under one deadline, without a second receiver
+or automatic replay. Shutdown acknowledges acceptance before final stop/persistence;
+later failures remain published errors, not rejection of the accepted exit.
 
 Core polls enabled-but-not-loaded FFmpeg status every 100 ms to observe the
 nonblocking one-time result, including loads initiated by waveform work. Polling
@@ -1097,37 +994,23 @@ native-only builds have no FFmpeg polling wakeups.
 
 === Application services
 
-The MPRIS manager owns enable transitions, asynchronous registration, publisher
-startup, and teardown; App retains and joins it. Each enable attempt has one
-cancellable registration worker, joined before retirement. Completion publishes
-only while still enabled and not shutting down. Failure waits for a later off/on
-transition, not a timer, and registration never blocks the first window. The
-disabled status is published even when initially disabled. Publisher-owned status
-ordering prevents an immediate failure being overwritten by startup success.
+App owns and joins MPRIS, tray, and logging services independently of windows.
+MPRIS registration is asynchronous and cancellable; failures wait for a later
+off/on transition, not a retry timer. Teardown removes interfaces, allows up to
+one second for active replies and a separate second for connection close, then
+joins the publisher. Synchronous artwork work still has to finish. Metadata
+signals reflect exposed-value changes, not ordinary clock or unrelated queue updates.
 
-Retirement cancels signal writes and joins the publisher. Root/Player interfaces
-are removed before waiting up to one second for active replies (including accepted
-Quit), followed by a separate one-second connection-close deadline. A peer cannot
-retain the manager indefinitely; synchronous cold artwork loads still must finish
-before the publisher join. Metadata follows the immutable selected-track snapshot,
-queue occurrence/selection validity, and playback duration. Path/content changes
-can invalidate it without changing queue rows; exposed-value comparison avoids
-signals for ordinary clock updates and unrelated queue revisions.
+Tray registration reconciles current publication state independently of bus setup.
+Unchanged menus retain their revision; shutdown cancels bus work and closes under
+a bounded deadline rather than waiting indefinitely for peers.
 
-The tray subscribes after taking a publication baseline, before asynchronous bus
-setup, and reconciles current state independently of registration replies. Menu
-layout and revision come from one publication; unchanged menus retain their token.
-Shutdown cancels bus setup, signals, and watcher registration, then closes with
-a bounded deadline rather than waiting for peers.
-
-App installs the process logging subscriber once and owns writer lifetime; Core
-has only configuration control. A candidate writer is prepared before persistence
-and its route committed only after save success. Core, media, IPC, and signal
-producers retire before file output is flushed, outside GUI callbacks and writer
-locks. Standalone Core runtimes install no process subscriber. Processing worker
-shutdown closes bounded event admission to wake blocked senders, then joins and
-drains unpublished outputs; retained auditions live until service retirement.
-Its output budgets and retention are specified in
+App installs the process logger and owns writer lifetime; Core controls settings.
+A new writer is prepared before configuration persistence and activated only on
+save success. Producers retire before file output is flushed, outside GUI callbacks.
+Standalone Core runtimes install no process subscriber. Processing shutdown closes
+event admission, joins workers, and drains unpublished outputs; retained auditions
+last until service retirement. See
 link:22_cache.adoc#_processing_output_retention[Processing output retention].
 
 === Audio processing commands
@@ -1208,8 +1091,10 @@ but only while its run and playback generation still match.
 
 `settings.graph`, `graph_target`, `graph_mode`, and `graph_revision` distinguish
 captured run state from later edits. `graph_outputs` lists only real cached output
-ports and paths (separation ports 0/1 are vocals/accompaniment). `graph_nodes`
-reports per-node execution state and actual neural model IDs/SHA256 hashes.
+ports and optional causal `start_frame` context (separation ports 0/1 are
+vocals/accompaniment), not PCM or file paths. Only `graph_exported_path` records a
+successful export's durable path. `graph_nodes` reports per-node execution state
+and actual neural model IDs/SHA256 hashes.
 Output availability and status retention are separate; a terminal task alone
 does not authorize audition. Shared processing budgets and pinned-audition
 publication failure are specified in

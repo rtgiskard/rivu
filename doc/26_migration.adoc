@@ -20,21 +20,18 @@ The database format is `2`; the independent configuration schema is `1`.
 * `rivu-migrate apply` repeats validation under offline ownership. No registered
   conversion steps are available: current resources are left unchanged and no
   backup is created.
-* Populated databases with missing or noncurrent format metadata are rejected.
-  A valid configuration without an explicit version is current and left untouched.
+* Existing databases must already satisfy the current format, even if they are
+  empty. Missing default resources are reported without creating them; an explicitly
+  selected missing database is an error.
+* A valid configuration without an explicit version is current and left untouched.
 
 
 === Integration scope
 
-The application operates on current formats only. Historical recognition and
-conversion belong to an independent migration executable. Isolation is a dependency
-and responsibility boundary, not a prohibition on invoking another process.
-
-The application does not invoke the tool during startup. Normal database opening
-creates current structures only for an empty database and otherwise requires the
-current format. A later startup integration may invoke the
-executable before business initialization without moving historical rules into
-the application.
+The application operates on current formats and does not invoke migration during
+startup. Normal database opening initializes an empty database or requires the
+current format. Offline conversion belongs to the independent tool; possible
+startup invocation is specified separately below.
 
 Non-goals are automatic downgrade, a migration plugin framework, distributed or
 cross-file transactions, a recovery-state database, automatic paired restore,
@@ -42,35 +39,19 @@ changes to layout/cache formats, and invented conversions for undocumented histo
 
 == Dependency and ownership boundaries
 
-`rivu-format` owns the current disk contracts: database version and current schema,
-configuration representation, necessary value types, defaults, and validation.
-It has no dependency on the application, UI, audio engine, or migration package.
-Current defaults and validation share this implementation rather than a second
-configuration model with different rules.
+`rivu-format` owns the current database schema, configuration representation,
+defaults, and validation, with no application or migration dependency. Its
+optional `database` feature enables SQLite; configuration-only consumers such as
+`rivu-audio` leave it disabled. Cargo feature unification can enable it in a
+combined build. The application and migration tool both use this current contract.
 
-The package has no default features. Its `database` feature enables the database
-module and SQLite dependency; the application and `rivu-migrate` explicitly enable
-it. `rivu-audio` leaves it disabled, so its standalone dependency graph uses the
-configuration and file-admission contracts without pulling in SQLite. Cargo may
-unify `database` when these consumers are built together; the application still
-requires SQLite.
+The application owns runtime connections, caches, configuration I/O, Settings,
+and Core/UI state. `rivu-migrate` independently owns offline preflight, backups,
+and maintenance. Historical recognizers and conversions belong only in that tool,
+not in `rivu-format` or normal application decoding and SQL.
 
-Run `cargo test -p rivu-format --no-default-features` for the non-database contracts,
-and add `--features database` to include schema and trigger behavior tests.
-
-The application depends on that current contract. Runtime owners, connection caches,
-Settings patches, Core, and UI remain application responsibilities. Application
-configuration I/O is distinct from the shared configuration representation.
-
-`rivu-migrate` depends on the current contract, not the application. It owns offline
-preflight, backups and maintenance filesystem operations, validating results against
-the same current contract as the application. Future historical recognizers and
-conversion steps must stay within this boundary. Neither the application nor
-`rivu-format` depends on migration code.
-
-No historical aliases, version-specific decoders, or old-schema SQL may leak into
-normal business operations. Generic resource exclusion and current-format validation
-are not historical compatibility logic.
+For contract tests, use `cargo test -p rivu-format --no-default-features`;
+add `--features database` for schema and trigger behavior.
 
 == Version authority
 
@@ -95,11 +76,8 @@ format guard rather than repeating offline structural preflight.
 A missing version is not evidence of a known oldest schema. Unknown, future, or
 malformed formats are rejected; changing a marker does not make them current.
 
-Empty-database detection excludes only tables whose names begin with the literal
-`sqlite_` internal prefix. Names such as `sqlitex_data` are user tables, not SQLite
-internals: without a supported Rivu version marker, such a populated database is
-rejected and preserved rather than initialized as an empty library. This rule is
-shared by application opening and offline inspection.
+Empty-database detection ignores only SQLite's literal `sqlite_` table prefix.
+Other user tables without a supported Rivu marker cause rejection, not initialization.
 
 === Configuration schema
 
@@ -111,42 +89,25 @@ Loading never rewrites a file to add one.
 Database and configuration versions evolve independently of each other and of
 the software release number.
 
-The application decodes only the current configuration schema. A valid unversioned
-document is current and requires no migration. Parsing and validation remain strict.
-Parsing and validation failures retain their specific causes. Malformed TOML
-cannot establish a version and must be corrected first. File I/O failures are not
-version failures. Explicit noncurrent versions are rejected before decoding
-current fields; no decoder guessing or historical aliases are allowed.
-
-The current migration tool validates configuration without conversion, backups,
-writer locks, or replacement. `format_version` is not an alias. Configuration
-loading and persistence behavior is described in
-link:01_config.adoc#_saving_configuration[Saving configuration].
+The application and tool strictly validate current configuration without decoder
+guessing or historical aliases (`format_version` is not an alias). Explicit
+noncurrent versions are rejected before current-field decoding; malformed TOML
+and file I/O retain their distinct causes. The tool never rewrites configuration,
+creates its backup, or takes a configuration writer lock. See
+link:01_config.adoc#_saving_configuration[Saving configuration] for persistence.
 
 == Persistent summaries and runtime authority
 
-`albums` and `album_artists` remain derived summaries maintained by their existing
-four SQLite triggers and indexes. Their definitions belong to the database format;
-there is no independent trigger-maintenance revision. A future persistent trigger
-change must account for both future writes and already stored summaries.
+`albums` and `album_artists` are persistent derived summaries maintained by four
+SQLite triggers. They belong to the database format, not an independently revised
+cache; future changes must handle both existing summaries and subsequent writes.
 
-The six application tables are `tracks`, `playlists`, `playlist_entries`,
-`rivu_meta`, `albums`, and `album_artists`. `playlists(id = 0, name = '')` is the
-protected system queue; ordinary playlists have positive IDs. Ordinary playlist
-catalogs and APIs hide or reject `0`, while shared storage primitives accept it.
-`playlist_entries(id INTEGER PRIMARY KEY AUTOINCREMENT, playlist_id, track_id,
-position)` stores every queue and playlist occurrence. Repeated track IDs are
-valid in one collection; occurrence IDs and contiguous positions identify entries.
-Loading, saving, importing and transferring preserve occurrence order and
-multiplicity while copying entries rather than linking collection contents.
-
-There are eleven explicit indexes: the seven track indexes `tracks_fingerprint`,
-`tracks_path`, `tracks_cue`, `tracks_recent`, `tracks_album`, `tracks_most_played`,
-and `tracks_album_members`; collection indexes `playlist_order` and
-`playlist_track_lookup`; and summary indexes `albums_title` and `albums_artist`.
-`playlist_order` supports collection-local position lookup;
-`playlist_track_lookup` is a nonunique track-reference lookup, not a constraint
-against repeated tracks. There is no separate queue table or queue index.
+Queue and playlists share `playlist_entries`. The protected system playlist
+`(id = 0, name = '')` is hidden or rejected by ordinary playlist APIs. Each entry
+has a globally unique occurrence ID and a contiguous collection-local position;
+repeated track IDs are valid. Copies preserve order and multiplicity without
+linking later collection edits. Indexed position and track-reference lookups
+support this model; there is no separate queue table or persisted queue-ID array.
 
 Core owns queue and album revisions, playlist content/lifetime tokens and their
 issuing sequence in memory. They are reconstructed at startup and never persisted.
@@ -175,11 +136,9 @@ create or update WAL shared-memory sidecars for reader coordination; read-only d
 not mean zero filesystem activity. Its result is advisory, not a reservation.
 `apply` rechecks under ownership before changing formal resources.
 
-Apply excludes an application instance through the existing data-directory identity
-ownership mechanism. Device/inode identity, rather than path spelling or a new
-protocol-version-dependent name, keeps directory aliases and existing application
-binaries in the same exclusion domain. The migration process is not a normal IPC
-service and must not pretend to acknowledge application commands.
+Apply takes the application's device/inode-based data-directory ownership,
+independent of path spelling and protocol version, so aliases share one exclusion
+domain. The migration process does not serve or acknowledge IPC commands.
 
 Directory ownership does not protect configuration shared by different data
 directories, and external SQLite writers are outside advisory exclusion. Stop
@@ -189,56 +148,46 @@ Normal save destinations, symlink handling and last-writer-wins behavior belong 
 link:01_config.adoc[Configuration and layout]. A check reserves neither database
 ownership nor configuration against later edits.
 
-Configuration preflight uses the same ordinary-file admission and 4 MiB UTF-8
-TOML limit as the application, including symlinks, and rejects FIFOs without
-waiting for a writer. Human-readable reports escape control characters in paths
-and error chains, and argument errors escape untrusted command-line values while
-preserving clap's usage layout, styling, output stream and exit status. These
-escapes do not change literal filesystem paths; help and version output retain
-their normal formatting.
+Configuration admission uses the application's ordinary-file rules and 4 MiB
+UTF-8 TOML limit; symlinks are accepted and FIFOs rejected without waiting.
+Reports escape control characters without changing literal paths. Argument errors
+preserve clap's usage layout, output stream, and exit status.
 
 == Apply protocol
 
-The supported `apply` command acquires ownership and validates the selected
-resources, then returns without mutation. The database-change execution helper
-`apply_database_change` implements the backup/transaction protocol below for a
-supplied change; it is not a CLI option or a registered format conversion.
-Configuration is read-only in both paths.
+The supported `apply` command takes ownership, validates, and returns unchanged.
+The existing database-change execution infrastructure supports the protocol below,
+but has no registered conversion or CLI option. It also requires current-format
+preflight; historical conversion needs its own source-format admission. The
+supplied change must validate its postconditions inside the transaction.
+Configuration remains read-only.
 
-. Acquire data-directory ownership and select the fixed targets.
-. Reinspect versions, database structure, and readability; strictly validate existing
-  configuration before mutating the database.
-. Before changing the database, copy it into a unique `.bak.partial` file, close
-  SQLite and sync the file, publish the final `.bak` name without overwriting an
-  existing file, then sync its parent directory. Report the actual location and
-  completion state. Do not back up a resource that will not be changed.
-. Execute the selected migration and update its authoritative markers in one
-  SQLite transaction. The current baseline supplies no conversion steps.
-. Return success only when the selected existing resources meet current contracts.
-  Do not start the application, rewrite configuration, or delete backups as a side effect.
+. Acquire data-directory ownership and fix the selected targets.
+. Recheck database structure and readability and strictly validate configuration.
+. Create a unique SQLite backup, sync its contents, publish its final `.bak` name
+  without replacement, and sync its parent directory before permitting a write.
+. Apply the change, its validation, and authoritative markers in one transaction.
+. Report the outcome and actual backup paths. Do not start the application,
+  rewrite configuration, or delete backups.
 
-A SQLite backup uses SQLite's backup API so committed WAL contents are included.
-Copying only a live database file is not a consistent backup. Backup completion
-and database transaction durability require their own handling; no configuration
-write or cross-resource commit protocol is involved.
-An `unpublished; may be incomplete` report identifies the retained partial file;
-it is not a completed restore point. `published; directory sync uncertain` means
-the final name was published but its directory durability is not established.
-Only `complete; file and directory synced` permits database maintenance to start.
-Failures preserve the actual artifact path, including a complete-content partial
-alias if a no-overwrite publication fallback leaves one. They do not delete
-evidence or trigger automatic rollback.
+SQLite's backup API includes committed WAL contents; copying a live database file
+alone is not a consistent backup. Publication proceeds from `.bak.partial` to
+`.bak`, with these reported durability states:
 
+* `unpublished; may be incomplete`: the retained partial file is not a restore point.
+* `published; directory sync uncertain`: the final name exists, but its directory
+  durability is unconfirmed.
+* `complete; file and directory synced`: database maintenance may start.
 
-Migration execution must not scan the music library, access the network, probe
-decoders or infer missing user intent unless a specific released conversion
-requires it. Its costs include the database backup and SQLite transaction/WAL
-growth. Large database work stays in SQLite rather than copying the library into
-Rust collections. Before backup, preflight checks available capacity on the
-database destination filesystem, including backup and transaction overhead.
-Capacity estimates are advisory: other writers can consume space, so runtime
-storage errors remain errors rather than an excuse to drop data. No speedup is
-implied by this separation.
+Failures retain evidence, including any partial alias left by no-overwrite
+publication, and never trigger automatic restoration. The transaction has its own
+durability boundary; this is not a cross-resource commit protocol.
+
+Backup and transaction/WAL growth consume disk space. Preflight checks an advisory
+capacity estimate on the database filesystem; later storage errors still fail.
+Large data transformations stay in SQLite rather than whole-library Rust buffers.
+No media scanning, network access, decoder probing, or inferred user intent belongs
+in migration unless a specific released conversion requires it.
 
 == Failure and reentry
 
@@ -251,17 +200,14 @@ configuration remains unchanged on both success and failure.
   structure rather than blindly replaying a mutation.
 * Current resources are no-ops: no rewrite, repeated transformation, or backup.
 
-Versions and actual resource state determine remaining work. There is no separate
-step journal, backup manifest, upgrade-group registry, or automatic rollback engine.
-Backups never overwrite earlier backups, including across retries. They are database
-execution backups, not a promise of automatic restoration to one software-upgrade
-boundary. Manual restoration must select an appropriate original backup with all
-writers stopped.
+Persisted versions and actual resource state determine reentry; there is no step
+journal or automatic rollback engine. Backups never overwrite earlier ones and
+are not an automatic paired restore point. Manual restoration requires choosing
+the appropriate backup with all writers stopped.
 
-Errors identify the failed operation, affected targets, available backups, and any
-known already-completed changes. A failure must not be presented as a guarantee that
-nothing changed. The tool must not suppress an error by resetting data or falling
-back to application defaults.
+Errors report targets, retained backups, and known completed changes; failure is
+not a guarantee that nothing changed. Never recover by resetting data, substituting
+defaults, or blindly replaying an uncertain commit.
 
 == Acceptance boundaries
 
@@ -279,38 +225,28 @@ must contain no migration package or historical decoder.
 
 == Future historical conversion
 
-No historical database or configuration conversion is implemented. A future
-supported format needs evidence of its actual source structure and interpretation;
-an absent or invalid version is not permission to guess. Recognition and conversion
-rules belong in the independent tool, never in normal application decoding or SQL.
+No historical conversion is implemented. Supporting one requires evidence of the
+source structure and interpretation; missing or invalid versions do not authorize
+guessing. Database changes need a deliberate schema-version decision and must
+transform and validate data and structure before updating the marker in the same
+transaction. Merely stamping a version is not migration.
 
-Changes to persistent tables or their interpretation require a deliberate database
-schema-version decision. A supported conversion must transform actual structure
-and data, validate constraints and update the authoritative version in the same
-transaction. Merely stamping a version number is not migration. Deterministic local
-conversion must not scan media, use the network or invent missing user intent.
-
-Configuration conversion needs its own source contract, including the meaning of
-omitted settings; today's defaults must not silently redefine historical intent.
-It would add mutation and failure boundaries absent from the current read-only
-configuration path and must define those before implementation. The current
-database backup/transaction protocol is not a cross-resource commit guarantee.
+Configuration conversion additionally needs a source contract for omitted settings
+so current defaults cannot redefine historical intent. It must define its own
+mutation and recovery boundaries; the database protocol does not make both files
+atomic. All historical rules remain in the independent tool.
 
 == Future application invocation
 
-The application may detect a noncurrent format and invoke the independent tool
-before configuration-dependent services or writable database business operations
-start. It does not need historical version tables or conversion rules to do so.
-User confirmation policy is separate from the migration mechanism.
+A future startup integration may invoke the tool before configuration-dependent
+services or writable business operations. The application needs no historical
+decoders for this; user confirmation is a separate policy.
 
-There must be one explicit resource owner during invocation and startup handoff.
-A parent holding ownership cannot ask a child to reacquire the same exclusive
-resource. Any future delegation must define the ownership transfer or inherited
-capability; a caller-controlled skip-lock switch is not an ownership protocol.
+Invocation must define one resource owner and an explicit handoff or inherited
+capability. A parent cannot hold ownership while asking its child to reacquire it;
+a caller-controlled skip-lock flag is not a handoff protocol.
 
-Successful process completion means the selected existing resources are current and
-validated. The application then rereads configuration and opens fresh database
-connections. It must not reuse preconversion objects. Failure prevents normal
-business initialization and presents the tool's error; it does not trigger an
-unrelated fallback or blind automatic retry.
+After successful conversion and validation, startup rereads configuration and opens
+fresh database connections. Failure prevents business initialization and presents
+the tool's error, without unrelated fallback or blind automatic retry.
 

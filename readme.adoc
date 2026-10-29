@@ -5,10 +5,9 @@ access to a shared playback instance that can also run headless.
 
 == Features
 
-* *Performance:* GPU-side geometry expansion and coloring for supported visualizations,
-  plus shared on-demand analysis, avoid repeated CPU work. Bounded track and visualization
-  caches control memory retention; Still Mode suspends visualization work without
-  stopping playback. See link:doc/22_cache.adoc[resource lifecycles]
+* *Performance:* on-demand audio analysis and bounded caches limit background work
+  and memory retention. Still Mode suspends visualizations without stopping playback.
+  See link:doc/22_cache.adoc[resource lifecycles]
 * *Customization:* named layouts, dockable panels, themes, fonts, visualization
   and artwork styles, and i18n support
 * *Library and albums:* folder and link:doc/02_library.adoc#_albums[album browsing],
@@ -84,9 +83,6 @@ selects startup/probe configuration, not settings in an already running core.
 `--json` writes one result to stdout and runtime diagnostics as JSON to stderr;
 it is not available for GUI, serve, or TUI. Usage errors retain ordinary diagnostics.
 Use `rivu --help` or a subcommand's `--help` for exact arguments.
-The link:src/cli/args.rs[argument definitions] and
-link:src/cli/mod.rs[command dispatch] define these entrypoints; application/window
-ownership is implemented in link:src/app.rs[`App`].
 
 [source,sh]
 ----
@@ -121,9 +117,7 @@ typical Linux installation: `~/.local/share/rivu`) and
 
 The data directory contains `library.db` (library and playback state),
 `layout.json` (desktop layouts), the `artwork/` cache, and optional `logs/`.
-The core owns shared library, queue, playback, and configuration state; GUI and
-TUI clients browse and control that state rather than maintaining separate players.
-Closing a client is not a persistence boundary for the core. See
+Shared-state persistence is independent of client lifetime. See
 link:doc/01_config.adoc#_saving_configuration[configuration saving] and
 link:doc/04_playback.adoc#_queue[queue restoration] for their independent guarantees.
 Stop the core before operating on `library.db`; external writes while Rivu runs
@@ -161,7 +155,8 @@ Client access and wire schemas are described in link:doc/21_ipc.adoc[IPC].
 Download `rivu-linux-x86_64.tar.zst` and its SHA-256 checksum from
 https://github.com/rtgiskard/rivu/releases[GitHub Releases].
 Built on Arch Linux, these binaries require an *x86-64-v3-capable CPU*
-and compatible shared libraries; compatibility with older distributions is not guaranteed.
+and matching shared libraries. The archive's `build-info.txt` records the build
+environment and shared-library dependencies.
 
 Verify and extract with GNU tar and zstd:
 
@@ -170,6 +165,10 @@ Verify and extract with GNU tar and zstd:
 sha256sum --check rivu-linux-x86_64.tar.zst.sha256
 tar --zstd -xf rivu-linux-x86_64.tar.zst
 ----
+
+Run `rivu-linux-x86_64/bin/rivu` directly, or install both executables from the
+archive's `bin/` directory into a directory on `PATH`. For desktop launcher
+integration, install the archive's `share/` tree under the same installation prefix.
 
 <<_ffmpeg_and_native_only_builds,FFmpeg support>> is included;
 install a Nerd Font as described under <<_font_embedding,Font embedding>>.
@@ -203,34 +202,30 @@ Keep `Cargo.lock` to retain the resolved dependency versions. Run `make lint`
 to check formatting and all workspace targets with all features, including
 font embedding; install its additional prerequisites below first.
 
-Run `make test` for the Rust and Python behavior suites. `make test-rust` runs
-workspace unit, integration, and documentation tests with default features, all
-features (including font embedding), and no default features (native-only
-decoding). It also tests `rivu-dsp` and `rivu-format` separately without default
-features, so workspace feature unification cannot hide their standalone builds.
-Cargo tests use `Cargo.lock` without updating it and stop on the first failure.
-The build and font prerequisites above and below also apply to tests; additionally
-install `dbus` for the MPRIS lifecycle tests. These tests start private session
-buses and do not require a running desktop bus. GPUI tests use its test platform;
-no display server or audio device is required.
+Run `make test` for all behavior suites, or select a suite:
 
-`make test-python` requires Python with NumPy, SciPy, soundfile, and jsonschema
-(`sudo pacman -S --needed python python-numpy python-scipy python-soundfile python-jsonschema`
-on Arch Linux). Use `PYTHON=/path/to/python` to select a prepared interpreter.
-The base suite requires no model downloads. Torch/torchaudio numerical checks and
-real-model checks remain optional; the latter use explicitly prepared local
-manifests via `RIVU_SPEECH_MANIFEST`, `RIVU_KIM_MANIFEST`, and
-`RIVU_HTDEMUCS_MANIFEST`. Ordinary CI installs the base dependencies, not model
-environments.
+[cols="1,3",options="header"]
+|===
+|Command |Coverage
+|`make test-rust`
+|Workspace tests with default, all, and no default features; standalone
+`rivu-dsp` and `rivu-format` tests without default features
+|`make test-python`
+|Audio-processing worker and evaluation tests with synthetic inputs; no model downloads
+|===
 
-Neural transport tests use synthetic PCM and isolated export fixtures to check
-framing, sample preservation, cancellation, and filesystem side effects. They do
-not establish real-model inference quality or model-runtime memory usage.
+Rust tests use `Cargo.lock`. Install the build/font prerequisites and `dbus`;
+tests use private session buses and require no display server or audio device.
+Python tests require NumPy, SciPy, soundfile, and jsonschema:
+`sudo pacman -S --needed python python-numpy python-scipy python-soundfile python-jsonschema`.
+Use `PYTHON=/path/to/python` to select a prepared interpreter. Real-model checks
+need explicitly prepared environments and local manifests; see
+link:doc/27_audio_processing.adoc#_quality_acceptance[audio-processing acceptance].
+These behavior tests do not establish model quality or runtime memory usage.
 
-The link:.github/workflows/build.yml[CI workflow] runs `make lint` and `make test`
-before release builds on branch pushes, pull requests, and `v*` tags. Tag releases
-also verify the packaged archive checksum and run both binaries with `--version`
-and `--help` before publishing.
+The link:.github/workflows/build.yml[CI workflow] runs lint and behavior suites
+before release builds. Tag releases also check the archive checksum and both
+binaries' `--version` and `--help` output before publishing.
 
 The install command builds the workspace and installs `rivu`, `rivu-migrate`,
 the desktop entry, and icons. Ensure `~/.local/bin` is on `PATH`.

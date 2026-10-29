@@ -11,10 +11,6 @@ database, not the audio files.
 CLI paths are relative to the invoking client's working directory; absolute paths
 are accepted. Except for the local `library probe` and independent migration tool,
 library commands address the running host for the selected data directory.
-Command arguments and dispatch are defined in link:../src/cli/args.rs[CLI arguments]
-and link:../src/cli/mod.rs[CLI execution]. Scans and imports are coordinated by
-link:../src/core/catalog.rs[the core catalog owner]; they update the same database
-used by every connected client.
 
 == Other
 
@@ -122,12 +118,8 @@ source artist is kept. The sheet's `TITLE` supplies the album when present;
 otherwise the source album is kept. Technical metadata comes from the source,
 while duration is the individual segment's length.
 
-Within one scan, CUE sheets and ordinary audio requests sharing a source
-reuse the same source probe result or error. Segment records share source
-and sheet metadata and retain an entry index and duration rather than copying
-effective metadata strings into every segment.
-Database tracks, user overrides, history and playlist references remain independent.
-Changes to a source during the scan are picked up by a subsequent scan.
+CUE subtracks and whole-file tracks retain independent user edits, history, and
+playlist references. Changes to a source during a scan require a subsequent scan.
 
 Track details distinguish whole-file tracks from CUE subtracks and show the audio
 source path. CUE details also show the sheet, track number, and source-relative
@@ -198,8 +190,7 @@ as tree directories; actions deduplicate overlapping track identities.
 
 Scans refresh affected views, including previously empty expanded folders;
 collapsed folders load current contents when reopened. Unchanged scans preserve
-existing views. Query and refresh ownership is described in
-link:21_ipc.adoc#_query_results_and_pagination[IPC query results].
+existing views.
 
 == Desktop list search
 
@@ -275,14 +266,11 @@ for its meaning. Unknown duration is `-`, not a zero-length recording.
 A missing or whitespace-only title falls back to the source filename without its
 extension; untitled CUE entries also include their track number.
 
-Hover the text to see the full title and cached audio specifications: codec,
-sample rate, source bit depth, channels, and bitrate. Unknown specifications are
-omitted, estimated bitrate uses `≈`, and lossy decoding does not invent source
-bit depth. Library track hover puts title, artist, and album on the first line,
-duration and specifications on the second, and the full source path on a separate
-third line in both views, including Other tracks. Long content wraps as needed.
-Directory hover shows its complete path. Hover formatting uses already loaded
-page data, without opening the media or submitting another metadata query.
+Hover track text for full metadata and audio specifications: codec, sample rate,
+source bit depth, channels, and bitrate. Unknown specifications are omitted;
+estimated bitrate uses `≈`. Library hover also shows the full source path,
+including in Other and when information columns are hidden. Directory hover
+shows its complete path.
 
 
 == Albums
@@ -305,18 +293,15 @@ track individually; a single click does not start playback. Track rows also
 offer individual playback and queue actions. Album actions include tracks beyond
 the currently loaded rows.
 
-Missing artists are shown as `-` in album cards and as the shared person symbol
-in album track rows. Album query results preserve a missing artist as an empty
-value rather than a display label.
+Missing artists use `-` in album cards and the shared person symbol in track rows.
 
 Right-click an album card for actions on the complete album, including adding it
 to a playlist and setting or clearing favorites. Drag a card to Queue or a named
 playlist catalog row to append the complete album in album order. Track rows
 offer the shared track menu and can be dragged individually to either destination.
-Album transfers submit the exact album identity and a Core-owned collection token.
-Core rejects stale intent before SQLite resolves and copies all members within
-the destination transaction. Runtime writes are coordinated by Core; external
-database changes while Rivu is running are unsupported.
+Transfers fail if the source album changes before copying, rather than copying
+stale or partial membership. External database edits while Rivu is running are
+unsupported.
 
 Search matches effective album titles or any member artist across the library,
 not just the loaded rows. Matching an artist keeps the complete album visible,
@@ -394,13 +379,11 @@ track first when sorting newest first; title and play-count sorting are unaffect
 The retained snapshot contains up to 256 recent tracks both after startup and
 after subsequent activity or catalog refreshes.
 
-Stopping fences retired audio events even when saving final statistics fails.
-Play-count and recent-activity writes are attempted independently. After a write
-or projection failure, Rivu retains one stopped playback's confirmed facts in
-memory; a new playback must settle them before replacing that owner. Independent
-controls such as volume remain available. Explicit playback transitions and
-orderly shutdown retry these facts without incrementing an already-committed
-count. This in-memory recovery does not survive process exit.
+If saving final listening statistics fails, Rivu keeps the pending facts in memory
+and retries on playback transitions and orderly shutdown, without double-counting
+an already saved play. A new playback may be blocked until recovery succeeds;
+independent controls such as volume remain available. This recovery does not
+survive process exit.
 
 `rivu library history --limit N` returns up to N retained rows in both text and JSON
 output. See <<_cli_output,CLI output>> for result shapes.
@@ -414,13 +397,9 @@ descendant expansion choices
 for reopening. Loading more rows does not clear selections or metadata drafts.
 Failed GUI loads offer a retry button that reloads data without rescanning files;
 TUI loads can be requested again by leaving and reopening the view.
-An accepted desktop query reports a waiting error after 12 seconds rather than
-loading indefinitely. A late result cannot replace that error or newer results.
-Retry or changed demand may still wait for the original read to finish; repeated
-requests do not start parallel reads for the same consumer.
-Pending keyboard navigation is cancelled when library data,
-filters, or batch size change; an old row index is never applied to the refreshed
-collection.
+A desktop query reports a waiting error after 12 seconds. Retry after a timeout
+or failure; late results cannot replace newer results or the error. Pending
+keyboard navigation is cancelled when data, filters, or batch size change.
 GUI row-navigation and selection keys belong to the explicitly targeted visible
 panel. Library, Queue and playlist tracks support row navigation, including
 Home/End. Clicking Albums, a playlist catalog, Recent or any other panel never
@@ -468,10 +447,8 @@ they never delete media files. Missing rows remain visible in playlist views
 until removed or cleaned.
 
 Failed writes leave saved data unchanged. A refresh error after a committed edit
-does not roll it back: older rows may remain visible until refresh succeeds, and
-Rivu does not replay the edit automatically. Repeating an already-saved override
-or cleaning an already-clean library is not a refresh retry. Transaction ownership
-and invalidation are defined in link:21_ipc.adoc#_revisions_and_watching[IPC revisions].
+does not roll it back; older rows may remain visible until refresh succeeds.
+Repeating an already-saved edit is not a refresh retry.
 
 Metadata edits override only fields you change. An omitted CLI option or an
 unchanged Track details field keeps its current value and continues to follow
@@ -563,20 +540,13 @@ the action with keyboard focus. It copies the complete value even when the
 display is truncated; File path copies the original path even for a missing
 file. Empty, unknown, and unloaded values have no copy action.
 
-`bitrate_bps` describes the encoded audio stream, not decoded PCM or the entire
-container file. `bitrate_exact` marks a reliable fixed-encoding calculation or a
-complete-playback measured average, rather than a scan estimate. Human output
-prefixes scan estimates with `≈`. Existing stored values are estimates until
-confirmed. Scans use low-cost probe information and bounded headers, including
-MP3 summaries and Vorbis nominal targets; they do not traverse a whole stream
-solely to measure its bitrate. Unknown values remain unknown.
-PCM bitrate uses the actual encoded sample width. Measured compressed averages
-use selected audio packet bytes and represented sample duration, excluding
-container overhead, tags, artwork, and other streams. Decoder handling of overlap,
-delay, and padding can cause small differences between measured averages; the
-precision flag does not promise bit-for-bit agreement between decoder backends.
-An unchanged-source scan cannot downgrade a confirmed value; a changed source
-invalidates its previous precision. Playback upgrades are described in
+`bitrate_bps` describes the encoded audio stream, not decoded PCM or the whole
+container. `bitrate_exact` distinguishes reliable fixed-encoding values and
+complete-playback measured averages from scan estimates (`≈` in human output).
+Scans do not read an entire stream solely to measure bitrate. Unknown values stay
+unknown, and measurements can differ slightly between decoder backends.
+Unchanged-source scans preserve confirmed values; changed sources invalidate
+their previous precision. See
 link:04_playback.adoc#_playback_metadata_updates[Playback metadata updates].
 
 [source,sh]
@@ -654,45 +624,29 @@ CUE references, must also be ordinary files; normal symlinks to such files work.
 FIFOs, devices, oversized sheets, and unreadable sources report local errors
 without waiting for a producer or blocking unrelated imports.
 
-Probing and fingerprinting analyze the same opened source, not a pathname that
-can be replaced midway. If that source changes during analysis, the scan reports
-a local error rather than saving a mixed-version record. Playback and waveform
-loading use the same ordinary-file admission boundary. The descriptor and bounded
-execution contract is in
-link:21_ipc.adoc#_scanning_and_metadata_ownership[Scanning and metadata ownership].
+A source changed during analysis reports an error rather than saving mixed-version
+metadata. Playback and waveform loading also require ordinary files. See
+link:21_ipc.adoc#_scanning_and_metadata_ownership[Scanning and metadata ownership]
+for source-validation details.
 
 ==== Metadata reuse
-Ordinary scans reuse valid full-source metadata and fingerprints when file size
-and modification time match. Metadata also requires the current probe version.
-CUE imports retain a whole-file track for each source, whose raw metadata supports
-later reuse independently of subtrack labels, durations, and user edits. If that
-record is absent, segment metadata cannot substitute for a full-source probe,
-though a matching source fingerprint can still be reused. Force scans reprobe
-and reread source content. Neither resets user edits.
-An unchanged scan still completes and reports errors, but leaves existing views
-valid. Playlist import still creates its requested playlist when all sources are
-unchanged. The lookup and merge rules belong to
-link:21_ipc.adoc#_scanning_and_metadata_ownership[Scanning and metadata ownership].
+Ordinary scans reuse metadata and fingerprints when file size, modification time,
+and the metadata probe version allow it. Force scans reread the source; neither
+resets user edits. CUE sheets are always reread. An unchanged scan still reports
+errors but preserves existing views; an unchanged playlist import still creates
+its requested playlist.
 
 ==== Bounded execution
 
-Scanning uses bounded background stages so discovery, probing and hashing do not
-occupy the interactive database owner. Started work is joined before a cancelled
-task releases its admission slot. Worker, batch and lookup contracts are described
-in link:21_ipc.adoc#_scanning_and_metadata_ownership[Scanning and metadata ownership].
+Scanning runs in the background. Cancellation waits for an active probe to return
+before another media task can start; see <<_cancellation,Cancellation>>.
+Worker and resource contracts are described in
+link:21_ipc.adoc#_scanning_and_metadata_ownership[Scanning and metadata ownership].
 
-Native probing skips oversized tags and embedded images before buffering their
-full payloads; otherwise decodable audio remains usable, but some metadata may
-be absent. See link:22_cache.adoc#_native_metadata_admission[Native metadata admission]
-for the resource limits and their scope.
-
-Native WAVE probing retains LIST/INFO metadata in file order after any external
-metadata revisions, including embedded title and artist. A recognized OpusTags
-packet with a malformed payload is reported and skipped without treating later
-audio packets as more comments. These parsing rules retain the shared metadata
-budget; they do not add a native Opus decoder. Force a scan to refresh metadata
-already stored in the library.
-INFO lists without admitted tags do not create empty metadata revisions.
+Native probing can skip oversized tags and embedded images while retaining usable
+audio; some metadata may therefore be absent. See
+link:22_cache.adoc#_native_metadata_admission[Native metadata admission]. Force a
+scan to refresh metadata already stored in the library.
 
 === Cancellation
 
@@ -772,16 +726,12 @@ During confirmation, group selection, role selection and both pagers are locked.
 Use Back to selection to revise the pair, Refresh to reset, or Close to leave
 undecided files unchanged.
 
-Confirmation starts one background full-file verification at a time. Rivu checks
-the destination's fresh hash and stable file identity, then revalidates database
-identities and source absence before committing atomically. The old ID, overrides,
-favorite, history and references survive at the destination; its redundant row
+Confirmation verifies the destination's current full-file hash, file identity,
+and source absence before an atomic database update. The old ID, overrides,
+favorite, history, and references survive at the destination; its redundant row
 is removed. Destinations with user state or references, active source/destination
 playback, changed files or database identities, and a reappearing source are
 rejected rather than merged. Correct the reported conflict before retrying.
-Verification reads at most the destination size validated at its start; later
-growth does not extend that read budget. File identity is still checked after
-hashing and again before commit, so changed destinations are rejected.
 
 Closing the review requests cancellation of its ongoing verification. Cancellation
 before commit leaves identities unchanged; it cannot undo a completed commit.
@@ -801,21 +751,19 @@ rivu library keep-independent DESTINATION_ID
 
 == SQLite maintenance
 
-Rivu opens database format `2` only. Existing databases must contain valid current
-format metadata; empty databases are initialized with current tables and triggers.
-The database stores library records, user edits and statistics, ordinary playlists,
-and the queue's occurrences and selection. Runtime query revisions are not saved.
-Stop Rivu before editing the database externally. Queue restoration is described
-in link:04_playback.adoc#_queue[Playback].
+Rivu opens database format `2` only. A new database is initialized automatically;
+existing databases need valid current-format metadata. It stores library records,
+user edits and statistics, playlists, and queue occurrences and selection. Stop
+Rivu before external database edits. Queue restoration:
+link:04_playback.adoc#_queue[Playback].
 
 === Independent migration tool
 
-`rivu-migrate check` inspects selected configuration and database formats without
-starting the player or changing their contents; SQLite may update coordination
-sidecars. `apply` validates those resources under exclusive offline ownership;
-stop the host and external database writers first. It does not rewrite current
-resources, create backups, initialize missing resources, or start Rivu. An
-explicitly selected missing database is an error.
+`rivu-migrate check` inspects configuration and database formats without starting
+the player or changing their contents; SQLite may update coordination sidecars.
+`apply` requires exclusive offline ownership: stop Rivu and external database
+writers first. It validates current resources without rewriting them, creating
+backups, or initializing missing resources.
 
 [source,sh]
 ----
@@ -823,11 +771,10 @@ rivu-migrate --data-dir /path/to/rivu-data --config /path/to/config.toml check
 rivu-migrate --data-dir /path/to/rivu-data --config /path/to/config.toml apply
 ----
 
-Use the same paths as the intended host: `--config` alone does not select the
-database directory. Both commands exit `0` for current valid resources and `2`
-on error. After a failure, inspect its cause and correct the selected resources
-before explicitly retrying. The authoritative ownership, format and command
-reference is link:26_migration.adoc[Database and configuration migration].
+Use the intended host's paths: `--config` alone does not select the database
+directory. Both commands exit `0` for valid current resources and `2` on error.
+See link:26_migration.adoc[Database and configuration migration] for the full
+offline workflow and missing-resource rules.
 
 === Database operations
 
@@ -858,20 +805,16 @@ playback is stopped and no scan is active, then run:
 rivu library optimize
 ----
 
-Optimization requires stopped playback and no active scan, relocation or export.
-Before starting the worker, Rivu recovers queue state and persists any pending
-playback selection. If recovery fails, optimization is not started and prepared
-processing work is left intact.
-It runs in a single background worker; the command waits for its final size report.
-While it runs, database operations are refused promptly, but published state,
-volume and shutdown requests remain available. A waiting timeout does not stop
-the worker or permit a second optimization. Shutdown waits for physical retirement
-without a hard deadline. VACUUM may already have changed the database if a later
-optimization/checkpoint step fails; failure is not a rollback guarantee. Inspect
-the result, close blocking readers, and explicitly retry only when appropriate.
+Optimization requires stopped playback and no active media task, relocation, or
+playlist export. Queue recovery must succeed before it starts. The command waits
+for the final size report. While optimization runs, database operations are
+refused, but published status, volume, and shutdown remain available. A timeout
+does not stop optimization or permit a duplicate; shutdown waits for completion.
 
-An automatically prepared graph cannot start playback while optimization is active;
-its retained snapshot can be selected again afterward.
+Failure does not guarantee rollback: VACUUM may have completed before a later step
+failed. Inspect the result and close blocking readers before explicitly retrying.
+Prepared processing snapshots remain available, but cannot start audition until
+optimization finishes.
 
 == CLI output
 
