@@ -497,8 +497,12 @@ Use link:01_config.adoc#_artwork_cache_maintenance[Settings artwork maintenance]
 to inspect disk usage and manually clean expired, unprotected cover files.
 
 MPRIS supports transport, volume, shuffle, and repeat; only rate `1.0` is supported.
-Relative `Seek` beyond a known end advances when a next occurrence is available;
-out-of-range `SetPosition` is ignored. `OpenUri` is rejected: import media first.
+Relative `Seek` accumulates against Core's position at execution time and stays
+bound to the originating queue occurrence. It preserves pause and does nothing
+after that occurrence is replaced or playback stops. Strictly exceeding a known
+end advances when a next occurrence is available; the exact endpoint seeks within
+the current occurrence, and the queue tail is unchanged when no next item exists.
+Out-of-range `SetPosition` is ignored. `OpenUri` is rejected: import media first.
 `Raise` is unavailable for a headless core, while `Quit` remains available.
 Next and Previous preserve paused or stopped state when used through MPRIS.
 Stopped navigation selects an occurrence without opening its decoder; paused

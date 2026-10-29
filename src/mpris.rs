@@ -485,22 +485,17 @@ impl Player {
         if !can_seek(&state) {
             return Ok(());
         }
-        match relative_seek(state.playback.position, offset, state.playback.duration) {
-            SeekTarget::Next => self.next().await,
-            SeekTarget::Position(seconds) => {
-                request(
-                    &self.handle,
-                    Command::SeekQueue {
-                        queue_id: state
-                            .queue
-                            .current_id
-                            .expect("seekable track has a queue entry"),
-                        seconds,
-                    },
+        acknowledge(
+            self.handle
+                .mpris_seek(
+                    state
+                        .queue
+                        .current_id
+                        .expect("seekable track has a queue entry"),
+                    offset,
                 )
-                .await
-            }
-        }
+                .await,
+        )
     }
 
     async fn set_position(&self, track_id: ObjectPath<'_>, position: i64) -> fdo::Result<()> {
@@ -728,21 +723,6 @@ fn microseconds(seconds: f64) -> i64 {
         return 0;
     }
     (seconds * MICROS_PER_SECOND) as i64
-}
-
-#[derive(Debug, PartialEq)]
-enum SeekTarget {
-    Position(f64),
-    Next,
-}
-
-fn relative_seek(position: f64, offset: i64, duration: Option<f64>) -> SeekTarget {
-    let target = (position + offset as f64 / MICROS_PER_SECOND).max(0.0);
-    if duration.is_some_and(|length| target > length) {
-        SeekTarget::Next
-    } else {
-        SeekTarget::Position(target)
-    }
 }
 
 fn absolute_seek(position: i64, duration: Option<f64>) -> Option<f64> {
@@ -1538,16 +1518,7 @@ mod tests {
         assert!(!can_pause(&state));
     }
     #[test]
-    fn seek_boundaries_use_microseconds_and_distinguish_next() {
-        assert_eq!(
-            relative_seek(5.0, -6_000_000, Some(10.0)),
-            SeekTarget::Position(0.0)
-        );
-        assert_eq!(
-            relative_seek(5.0, 5_000_000, Some(10.0)),
-            SeekTarget::Position(10.0)
-        );
-        assert_eq!(relative_seek(5.0, 5_000_001, Some(10.0)), SeekTarget::Next);
+    fn seek_boundaries_use_microseconds() {
         assert_eq!(absolute_seek(-1, Some(10.0)), None);
         assert_eq!(absolute_seek(10_000_000, Some(10.0)), Some(10.0));
         assert_eq!(absolute_seek(10_000_001, Some(10.0)), None);

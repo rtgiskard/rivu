@@ -783,6 +783,81 @@ fn delayed_keyboard_seeks_cannot_target_next_duplicate_occurrence_or_stopped_pla
 }
 
 #[test]
+fn mpris_relative_seeks_accumulate_at_execution_and_keep_pause() {
+    let (_directory, mut core) = navigation_fixture(PlaybackStatus::Paused);
+    let _commands = recording_audio(&mut core);
+    let (handle, control, worker, _) = navigation_runtime(core);
+    let queue_id = handle.mpris_snapshot().queue.current_id.unwrap();
+    handle.send(Command::Seek { seconds: 2.0 }).unwrap();
+    for expected in [3.25, 4.5] {
+        let ack = futures::executor::block_on(handle.mpris_seek(queue_id, 1_250_000));
+        assert!(ack.is_success(), "{:?}", ack.error);
+        let state = handle.mpris_snapshot();
+        assert_eq!(state.playback.position, expected);
+        assert_eq!(state.playback.status, PlaybackStatus::Paused);
+        assert_eq!(state.queue.current_id, Some(queue_id));
+    }
+    assert!(futures::executor::block_on(handle.mpris_seek(queue_id, -10_000_000)).is_success());
+    assert_eq!(handle.mpris_snapshot().playback.position, 0.0);
+    control.request_shutdown().unwrap();
+    worker.join().unwrap();
+}
+
+#[test]
+fn mpris_over_end_seek_is_occurrence_bound_next_with_tail_noop() {
+    for status in [PlaybackStatus::Playing, PlaybackStatus::Paused] {
+        let (_directory, mut core) = navigation_fixture(status);
+        let _commands = recording_audio(&mut core);
+        let first = core.state.queue.current_id.unwrap();
+        let duplicate = core.store.queue_id_at(2).unwrap().unwrap();
+        let following: Vec<_> = (3..core.state.queue.total)
+            .map(|index| core.store.queue_id_at(index).unwrap().unwrap())
+            .collect();
+        let (handle, control, worker, _) = navigation_runtime(core);
+        assert!(futures::executor::block_on(handle.mpris_seek(first, 10_000_000)).is_success());
+        assert_eq!(handle.mpris_snapshot().queue.current_id, Some(first));
+        assert_eq!(handle.mpris_snapshot().playback.position, 10.0);
+        assert!(futures::executor::block_on(handle.mpris_seek(first, 1)).is_success());
+        let state = handle.mpris_snapshot();
+        assert_eq!(state.queue.current_id, Some(duplicate));
+        assert_eq!(state.playback.status, status);
+        assert_eq!(state.playback.position, 0.0);
+        let revision = state.playback.seek_revision;
+        // This occurrence contains the same track, but an older relative
+        // intent must neither seek it nor navigate past it.
+        for offset in [1_000_000, i64::MAX] {
+            assert!(futures::executor::block_on(handle.mpris_seek(first, offset)).is_success());
+            let state = handle.mpris_snapshot();
+            assert_eq!(state.queue.current_id, Some(duplicate));
+            assert_eq!(state.playback.position, 0.0);
+            assert_eq!(state.playback.seek_revision, revision);
+        }
+        let mut tail = duplicate;
+        for next in following {
+            assert!(futures::executor::block_on(handle.mpris_seek(tail, i64::MAX)).is_success());
+            let state = handle.mpris_snapshot();
+            assert_eq!(state.queue.current_id, Some(next));
+            assert_eq!(state.playback.status, status);
+            assert_eq!(state.playback.position, 0.0);
+            tail = next;
+        }
+        assert!(futures::executor::block_on(handle.mpris_seek(tail, i64::MAX)).is_success());
+        let state = handle.mpris_snapshot();
+        assert_eq!(state.queue.current_id, Some(tail));
+        assert_eq!(state.playback.status, status);
+        assert_eq!(state.playback.position, 0.0);
+        assert!(futures::executor::block_on(handle.request_ack(Command::Stop)).is_success());
+        let revision = handle.mpris_snapshot().playback.seek_revision;
+        assert!(futures::executor::block_on(handle.mpris_seek(tail, i64::MAX)).is_success());
+        let state = handle.mpris_snapshot();
+        assert_eq!(state.playback.status, PlaybackStatus::Stopped);
+        assert_eq!(state.playback.seek_revision, revision);
+        control.request_shutdown().unwrap();
+        worker.join().unwrap();
+    }
+}
+
+#[test]
 fn stale_queue_toggle_recovers_before_stopped_selection() {
     let (directory, mut core) = navigation_fixture(PlaybackStatus::Stopped);
     // Select a surviving occurrence; the old cache still includes both removed

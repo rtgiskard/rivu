@@ -2,6 +2,38 @@ use super::*;
 use anyhow::{bail, ensure};
 
 impl Core {
+    pub(in crate::core) fn mpris_seek(&mut self, queue_id: u64, offset: i64) -> Result<()> {
+        self.ensure_queue_control_ready()?;
+        if self.state.queue.current_id != Some(queue_id)
+            || self.state.playback.status == PlaybackStatus::Stopped
+        {
+            return Ok(());
+        }
+        let target = (self.state.playback.position + offset as f64 / 1_000_000.0).max(0.0);
+        if self
+            .state
+            .playback
+            .duration
+            .is_some_and(|duration| target > duration)
+        {
+            // MPRIS Seek beyond the end is Next, including its no-op at the
+            // queue tail. Keep both decisions inside the occurrence check.
+            if self.state.playback.shuffle
+                || self.state.playback.repeat == RepeatMode::All
+                || self
+                    .state
+                    .queue
+                    .current_position
+                    .is_none_or(|index| index + 1 < self.state.queue.total)
+            {
+                self.navigate(Navigation::Next)?;
+            }
+            Ok(())
+        } else {
+            self.seek(target)
+        }
+    }
+
     pub(in crate::core) fn command(&mut self, command: Command) -> Result<Option<u64>> {
         if self.database_maintenance_active() && self.maintenance_control(&command)? {
             return Ok(None);

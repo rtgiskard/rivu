@@ -85,6 +85,10 @@ enum Operation {
     Command(Command),
     GuiConfig(GuiConfigChange),
     Navigate(Navigation),
+    MprisSeek {
+        queue_id: u64,
+        offset: i64,
+    },
     WaveformSnapshot(
         oneshot::Sender<std::result::Result<Option<audio::WaveformScanSnapshot>, String>>,
     ),
@@ -470,6 +474,12 @@ impl CoreHandle {
             .await
     }
 
+    /// Keep the relative intent and occurrence bound until Core executes it.
+    pub(crate) async fn mpris_seek(&self, queue_id: u64, offset: i64) -> Ack {
+        self.operation_ack_async(Operation::MprisSeek { queue_id, offset }, REPLY_TIMEOUT)
+            .await
+    }
+
     async fn operation_ack_async(&self, operation: Operation, duration: Duration) -> Ack {
         let (tx, rx) = oneshot::channel();
         let request = Request {
@@ -816,6 +826,9 @@ impl Drop for Runtime {
 
 struct PlaybackStats {
     track_id: i64,
+    // The source admitted by Load, shared with the initial current-track projection.
+    // Library refreshes may update metadata but cannot replace this session's source.
+    loaded_track: Arc<Track>,
     source: Option<(crate::store::PlaybackSource, std::fs::Metadata)>,
     heard: f64,
     position: Option<f64>,
@@ -826,9 +839,6 @@ struct PlaybackStats {
     paused_at: Option<i64>,
 }
 impl PlaybackStats {
-    // The source admitted by Load, shared with the initial current-track projection.
-    // Library refreshes may update metadata but cannot replace this session's source.
-    loaded_track: Arc<Track>,
     fn record_heard(&mut self, heard: f64, heard_at: i64) -> bool {
         if !heard.is_finite() || heard <= self.heard {
             return false;
