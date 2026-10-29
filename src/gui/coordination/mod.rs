@@ -2,10 +2,10 @@
 pub(super) mod manual_actions;
 pub(super) mod queue_replace;
 
-use super::*;
+use crate::gui::window::*;
 use manual_actions::ManualAction;
 
-impl GuiApp {
+impl WindowView {
     pub(super) fn subscribe_features(
         &self,
         window: &mut Window,

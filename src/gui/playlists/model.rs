@@ -5,6 +5,17 @@ use gpui::ScrollStrategy;
 use rivu_protocol::model::{Page, PlaylistEntryLocation, PlaylistEntryRow, PlaylistSummary, Query};
 use std::ops::Range;
 
+#[path = "requests.rs"]
+pub(super) mod requests;
+
+#[derive(Default)]
+pub(super) struct PlaylistModel {
+    pub(super) playlists: PlaylistBrowser,
+    requests: requests::ViewRequests,
+    page_size: usize,
+    focus: Option<crate::gui::BrowserFocus>,
+}
+
 #[derive(Default)]
 pub(in crate::gui) struct PlaylistSummaryBuffer {
     pub(in crate::gui) query: Option<String>,
@@ -337,7 +348,6 @@ impl PlaylistBrowser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gui::playlists::requests::PlaylistState as BrowserState;
     use std::sync::Arc;
     fn summary(id: i64, entry_count: usize) -> PlaylistSummary {
         PlaylistSummary {
@@ -435,7 +445,7 @@ mod tests {
 
     #[test]
     fn playlist_lookup_distinguishes_unloaded_empty_and_deleted_playlists() {
-        let mut browser = BrowserState::default();
+        let mut browser = PlaylistModel::default();
         browser.playlists.select(41, "selected".into(), 40);
         browser.playlists.prepare_entries(41);
         browser.playlists.prepare_page(false, 0, 20);
@@ -457,7 +467,7 @@ mod tests {
 
     #[test]
     fn stale_playlist_lookup_cannot_clear_another_selection() {
-        let mut browser = BrowserState::default();
+        let mut browser = PlaylistModel::default();
         browser.playlists.select(1, "one".into(), 0);
         browser.playlists.select(2, "two".into(), 1);
         browser.playlists.prepare_entries(2);

@@ -19,7 +19,7 @@ use rivu_protocol::{
 };
 
 use super::{
-    artwork::{Artwork, ArtworkImages, ArtworkLoader, ArtworkView},
+    artwork::{ArtworkImageRegistry, ArtworkLoader, ArtworkView, DefaultArtwork},
     components::{
         search::{SearchScope, new_search, set_search_counts},
         track::{TrackText, track_list_row, track_title},
@@ -74,7 +74,7 @@ struct AlbumCover {
 }
 
 impl AlbumCover {
-    fn new(images: ArtworkImages) -> Self {
+    fn new(images: ArtworkImageRegistry) -> Self {
         Self {
             view: ArtworkView::new(images),
             negative: None,
@@ -142,7 +142,7 @@ impl AlbumCovers {
         demand: Range<usize>,
         source: impl Fn(usize) -> Option<&'a Track>,
         manager: &ArtworkManager,
-        images: &ArtworkImages,
+        images: &ArtworkImageRegistry,
         cx: &mut App,
     ) -> bool {
         self.sources.clear();
@@ -229,8 +229,8 @@ pub(super) struct AlbumBrowser {
     i18n: Arc<crate::i18n::Localizer>,
     localized_text: BTreeMap<&'static str, SharedString>,
     manager: Arc<ArtworkManager>,
-    images: ArtworkImages,
-    default_album: Entity<Artwork>,
+    images: ArtworkImageRegistry,
+    default_album: Entity<DefaultArtwork>,
     model: AlbumModel,
     loading_text: rivu_ui::loading::LoadingText<()>,
     error: Option<String>,
@@ -261,8 +261,8 @@ impl AlbumBrowser {
         panel_id: u64,
         context: super::feature::FeatureContext,
         manager: Arc<ArtworkManager>,
-        default_album: Entity<Artwork>,
-        images: ArtworkImages,
+        default_album: Entity<DefaultArtwork>,
+        images: ArtworkImageRegistry,
         cx: &mut Context<Self>,
     ) -> Self {
         let handle = context.handle().clone();
@@ -1372,7 +1372,7 @@ mod tests {
             ArtworkIdentity, ArtworkManager,
             tests::{tagged_wav, track},
         },
-        gui::artwork::{ArtworkImages, ArtworkLoader},
+        gui::artwork::{ArtworkImageRegistry, ArtworkLoader},
     };
 
     #[gpui::test]
@@ -1394,7 +1394,7 @@ mod tests {
         pressure.id = 66;
         drop(manager.load(&pressure));
 
-        let mut cover = AlbumCover::new(ArtworkImages::default());
+        let mut cover = AlbumCover::new(ArtworkImageRegistry::default());
         cx.update(|cx| {
             assert!(cover.complete(&source, Some(&source), Some(&completed), cx));
             assert!(cover.view.image(cx).is_some());
@@ -1432,7 +1432,7 @@ mod tests {
                 0..sources.len(),
                 |index| sources.get(index),
                 &manager,
-                &ArtworkImages::default(),
+                &ArtworkImageRegistry::default(),
                 cx,
             );
         });
@@ -1477,7 +1477,7 @@ mod tests {
                 0..sources.len(),
                 |index| sources.get(index),
                 &manager,
-                &ArtworkImages::default(),
+                &ArtworkImageRegistry::default(),
                 cx,
             );
             assert!(
@@ -1515,7 +1515,7 @@ mod tests {
                 0..sources.len(),
                 |index| sources.get(index),
                 &manager,
-                &ArtworkImages::default(),
+                &ArtworkImageRegistry::default(),
                 cx,
             );
         });
@@ -1571,7 +1571,7 @@ mod tests {
         let mut current = source.clone();
         current.path = directory.path().join("available.wav");
         tagged_wav(&current.path);
-        let mut cover = AlbumCover::new(ArtworkImages::default());
+        let mut cover = AlbumCover::new(ArtworkImageRegistry::default());
         let mut replaced = source.clone();
         replaced.fingerprint = Some("replacement".into());
         cx.update(|cx| {
@@ -1609,7 +1609,7 @@ mod tests {
                 0..sources.len(),
                 |index| sources.get(index),
                 &manager,
-                &ArtworkImages::default(),
+                &ArtworkImageRegistry::default(),
                 cx,
             );
         });
@@ -1668,7 +1668,7 @@ mod tests {
                 0..2,
                 |index| previous.get(index),
                 &manager,
-                &ArtworkImages::default(),
+                &ArtworkImageRegistry::default(),
                 cx,
             );
         });
@@ -1682,7 +1682,13 @@ mod tests {
         assert!(ArtworkIdentity::for_track(&old).matches(&active));
         // A page can arrive for the latest viewport while the old load is physical.
         cx.update(|cx| {
-            covers.sync(2..3, |_| None, &manager, &ArtworkImages::default(), cx);
+            covers.sync(
+                2..3,
+                |_| None,
+                &manager,
+                &ArtworkImageRegistry::default(),
+                cx,
+            );
         });
         assert!(
             cx.update(|cx| covers.prepare(|_| None, &manager, &mut loader, cx).0)
@@ -1690,7 +1696,7 @@ mod tests {
         );
         let latest = |index| (index == 2).then_some(&current);
         cx.update(|cx| {
-            covers.sync(2..3, latest, &manager, &ArtworkImages::default(), cx);
+            covers.sync(2..3, latest, &manager, &ArtworkImageRegistry::default(), cx);
         });
         assert!(
             cx.update(|cx| covers.prepare(latest, &manager, &mut loader, cx).0)

@@ -2377,12 +2377,12 @@ impl Render for Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::Runtime;
+    use crate::core::CoreRuntime;
     use rivu_protocol::model::Command;
     // gpui::* also imports its test macro; expansion needs Rust's builtin attribute.
     use core::prelude::v1::test;
 
-    fn fixture(cx: &mut TestAppContext) -> (tempfile::TempDir, Runtime, Entity<Settings>) {
+    fn fixture(cx: &mut TestAppContext) -> (tempfile::TempDir, CoreRuntime, Entity<Settings>) {
         cx.update(|cx| {
             rivu_ui::theme::set_palette(crate::theme::palette(Theme::default()), cx);
             rivu_ui::theme::set_typography(
@@ -2402,7 +2402,7 @@ mod tests {
         }
         .save(&path)
         .unwrap();
-        let runtime = Runtime::start(directory.path(), &path).unwrap();
+        let runtime = CoreRuntime::start(directory.path(), &path).unwrap();
         let config = runtime.handle.config_snapshot();
         let settings = cx.new(|cx| {
             Settings::new(
@@ -2434,7 +2434,7 @@ mod tests {
     }
 
     fn execute(
-        runtime: &Runtime,
+        runtime: &CoreRuntime,
         patch: ConfigPatch,
     ) -> (Arc<Config>, std::result::Result<(), String>) {
         let response = futures::executor::block_on(runtime.handle.apply_gui_settings(patch));

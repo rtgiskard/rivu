@@ -5,11 +5,8 @@
 //! switching a workspace never resets them or takes ownership of save workers.
 
 use super::{
-    layout::{
-        Layout, LayoutSet, Node, Panel,
-        interaction::{Cancellation, LayoutInteraction},
-        save_owner::LayoutSaveHandle,
-    },
+    interaction::{Cancellation, WindowInteraction},
+    layout::{Layout, LayoutSet, Node, Panel, persistence::LayoutPersistenceHandle},
     scrolling::ScrollViews,
 };
 use crate::config::{AlbumArtworkOptions, AudioVisualizerOptions};
@@ -107,9 +104,9 @@ impl WorkspacePanels {
 pub(super) struct Workspace {
     pub(super) layouts: LayoutSet,
     pub(super) panels: WorkspacePanels,
-    pub(super) interaction: LayoutInteraction,
+    pub(super) interaction: WindowInteraction,
     pub(super) scroll_views: Rc<RefCell<ScrollViews>>,
-    save: LayoutSaveHandle,
+    save: LayoutPersistenceHandle,
     save_seen: u64,
     pub(super) save_status: SaveStatus,
     pub(super) save_error: Option<String>,
@@ -117,7 +114,7 @@ pub(super) struct Workspace {
 
 impl Workspace {
     pub(super) fn new(
-        save: LayoutSaveHandle,
+        save: LayoutPersistenceHandle,
         visualizer: AudioVisualizerOptions,
         artwork: AlbumArtworkOptions,
     ) -> (Self, Option<String>) {
@@ -126,7 +123,7 @@ impl Workspace {
         let mut workspace = Self {
             layouts,
             panels: WorkspacePanels::default(),
-            interaction: LayoutInteraction::default(),
+            interaction: WindowInteraction::default(),
             scroll_views: Rc::new(RefCell::new(ScrollViews::default())),
             save,
             save_seen: 0,
@@ -291,12 +288,10 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::super::layout::{
-        Axis, Layout, Panel,
-        interaction::{DockGeometry, Measured},
-        layout_geometry::SplitDrag,
-        save_owner::LayoutSaveOwner,
+        Axis, Layout, Panel, layout_geometry::SplitDrag, persistence::LayoutPersistence,
     };
     use super::*;
+    use crate::gui::interaction::{Measured, WindowGeometry};
     use gpui::{Bounds, point, px, size};
 
     fn defaults() -> (AudioVisualizerOptions, AlbumArtworkOptions) {
@@ -307,9 +302,9 @@ mod tests {
         )
     }
 
-    fn fixture() -> (tempfile::TempDir, LayoutSaveOwner, Workspace) {
+    fn fixture() -> (tempfile::TempDir, LayoutPersistence, Workspace) {
         let directory = tempfile::tempdir().unwrap();
-        let save = LayoutSaveOwner::new(directory.path().join("layout.json"));
+        let save = LayoutPersistence::new(directory.path().join("layout.json"));
         let (visualizer, artwork) = defaults();
         let (workspace, error) = Workspace::new(save.handle(), visualizer, artwork);
         assert!(error.is_none());
@@ -385,7 +380,7 @@ mod tests {
         let scroll = workspace.scroll_views.borrow_mut().list(("library", 3));
         let retired = std::rc::Rc::downgrade(&scroll.0);
         drop(scroll);
-        let geometry = DockGeometry {
+        let geometry = WindowGeometry {
             viewport: size(px(804.), px(400.)),
             scale_factor: 1.,
             ui_scale: 1.,
@@ -425,7 +420,7 @@ mod tests {
     #[test]
     fn removal_cannot_republish_cancelled_split_measurements() {
         let (_directory, save, mut workspace) = fixture();
-        let geometry = DockGeometry {
+        let geometry = WindowGeometry {
             viewport: size(px(804.), px(400.)),
             scale_factor: 1.,
             ui_scale: 1.,
@@ -498,7 +493,7 @@ mod tests {
             if commit {
                 assert!(matches!(
                     workspace.interaction.finish_drag(),
-                    super::super::layout::interaction::DragCommit::PersistSplit
+                    super::super::interaction::DragCommit::PersistSplit
                 ));
             }
 

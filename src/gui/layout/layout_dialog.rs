@@ -1,4 +1,4 @@
-use super::super::*;
+use crate::gui::window::*;
 use rivu_ui::{
     FormField, IconButton, IconButtonDensity, IconButtonStyle, StatusKind, button, caption, column,
     copyable_message, menu_item, row, status_message,
@@ -11,7 +11,7 @@ pub(in crate::gui) enum Action {
     Delete(String),
 }
 
-impl GuiApp {
+impl WindowView {
     pub(in crate::gui) fn layout_management_allowed(&mut self, cx: &mut Context<Self>) -> bool {
         if self.shell.is_open(shell::Surface::Settings) {
             self.error = Some(self.i18n.text("shell-settings-before-layout").to_owned());
@@ -407,7 +407,7 @@ impl GuiApp {
     }
 }
 
-impl GuiApp {
+impl WindowView {
     pub(in crate::gui) fn sync_layout_save(&mut self, cx: &mut Context<Self>) {
         let Some(completion) = self.workspace.take_save_completion() else {
             return;

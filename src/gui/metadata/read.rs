@@ -6,7 +6,7 @@
 //! Logical cancellation preserves that demand and never releases the physical gate.
 
 use super::session::{LoadToken, MetadataDraft, MetadataSession, MetadataValues};
-use crate::{core::QueryTicket, projection::QueryProjection};
+use crate::query_tracking::{QueryTicket, QueryTracker};
 use rivu_protocol::{
     model::Query,
     response::{QueryError, QueryResponse, QueryRevisions, ViewResponse},
@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 #[derive(Default)]
 pub(in crate::gui) struct MetadataReadCoordinator {
-    projection: QueryProjection,
+    projection: QueryTracker,
     selected: Option<i64>,
     quiet_until: Option<Instant>,
     needs_refresh: bool,

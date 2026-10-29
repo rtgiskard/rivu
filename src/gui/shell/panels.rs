@@ -1,7 +1,7 @@
 //! Cached panel instances observe their feature owner, never the window coordinator.
-use crate::gui::layout::interaction::{DockGeometry, Measured, MeasurementHandle};
+use crate::gui::interaction::{Measured, MeasurementHandle, WindowGeometry};
 use crate::gui::{
-    GuiApp, album_artwork, history, layout, library, metadata, playback, playlists, queue,
+    WindowView, album_artwork, history, layout, library, metadata, playback, playlists, queue,
     scrolling,
 };
 use gpui::{prelude::*, *};
@@ -21,7 +21,7 @@ pub(in crate::gui) struct PanelView {
     owner: Owner,
     panel: layout::Panel,
     scroll: Rc<RefCell<scrolling::ScrollViews>>,
-    geometry: DockGeometry,
+    geometry: WindowGeometry,
     measurements: Option<(MeasurementHandle, MeasurementHandle)>,
     _subscription: Subscription,
 }
@@ -31,7 +31,7 @@ impl PanelView {
         owner: Owner,
         panel: &layout::Panel,
         scroll: Rc<RefCell<scrolling::ScrollViews>>,
-        geometry: DockGeometry,
+        geometry: WindowGeometry,
         measurements: Option<(MeasurementHandle, MeasurementHandle)>,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -57,7 +57,7 @@ impl PanelView {
     fn sync(
         &mut self,
         panel: &layout::Panel,
-        geometry: DockGeometry,
+        geometry: WindowGeometry,
         measurements: Option<(MeasurementHandle, MeasurementHandle)>,
         cx: &mut Context<Self>,
     ) {
@@ -72,7 +72,7 @@ impl PanelView {
 
 fn measurement(handle: MeasurementHandle, ui_scale: f32) -> AnyElement {
     canvas(
-        move |bounds, window, _| handle.record(bounds, DockGeometry::current(window, ui_scale)),
+        move |bounds, window, _| handle.record(bounds, WindowGeometry::current(window, ui_scale)),
         |_, _, _, _| {},
     )
     .absolute()
@@ -121,7 +121,7 @@ impl Render for PanelView {
     }
 }
 
-impl GuiApp {
+impl WindowView {
     fn presentation_panel(&mut self, id: u64, cx: &mut Context<Self>) -> AnyElement {
         let panel = self
             .presentation
@@ -167,7 +167,7 @@ impl GuiApp {
             }
             _ => unreachable!("registered panel kind"),
         };
-        let geometry = DockGeometry::current(window, self.state.system.config.ui_scale);
+        let geometry = WindowGeometry::current(window, self.state.system.config.ui_scale);
         let measurements = (panel.kind == "transport").then(|| {
             (
                 self.workspace

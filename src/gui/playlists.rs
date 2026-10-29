@@ -2,10 +2,9 @@
 mod editor;
 mod model;
 mod queries;
-mod requests;
 mod selection;
 pub(super) use editor::PlaylistNameAction;
-use requests::ViewRequestKind;
+use model::requests::{self, ViewRequestKind};
 pub(super) use selection::EntryCommit;
 
 use super::{
@@ -91,7 +90,7 @@ pub(in crate::gui) struct Playlists {
     context: FeatureContext,
     state: Rc<GuiSnapshot>,
     i18n: Arc<crate::i18n::Localizer>,
-    browser: requests::PlaylistState,
+    browser: model::PlaylistModel,
     playlist_search: Entity<SearchField>,
     playlist_entries_search: Entity<SearchField>,
     name_input: Entity<Input>,
@@ -147,7 +146,7 @@ impl Playlists {
                 }
             }),
         ];
-        let mut browser = requests::PlaylistState::default();
+        let mut browser = model::PlaylistModel::default();
         browser.configure_page_size(state.system.config.page_size as usize);
         Self {
             context,
@@ -2090,7 +2089,7 @@ mod playlist_drag_tests {
 mod content_menu_keyboard_tests {
     use super::*;
     use crate::config::ConfigPersistence;
-    use crate::gui::{ContentMenuRequest, GuiApp, layout::save_owner::LayoutSaveOwner};
+    use crate::gui::{ContentMenuRequest, WindowView, layout::persistence::LayoutPersistence};
     use gpui::{
         AnyWindowHandle, InputEvent, KeyDownEvent, KeyUpEvent, Keystroke, TestAppContext,
         VisualTestContext,
@@ -2102,9 +2101,9 @@ mod content_menu_keyboard_tests {
         cx: &mut TestAppContext,
     ) -> (
         tempfile::TempDir,
-        crate::core::Runtime,
-        LayoutSaveOwner,
-        Entity<GuiApp>,
+        crate::core::CoreRuntime,
+        LayoutPersistence,
+        Entity<WindowView>,
         AnyWindowHandle,
     ) {
         cx.update(rivu_ui::input::Input::init);
@@ -2134,7 +2133,7 @@ mod content_menu_keyboard_tests {
             );
         }
         drop(store);
-        let runtime = crate::core::Runtime::start(directory.path(), &path).unwrap();
+        let runtime = crate::core::CoreRuntime::start(directory.path(), &path).unwrap();
         // Startup initially publishes only configuration. Wait for the real
         // catalog before constructing menu state and its enabled tab stops.
         let ViewResponse::PlaylistSummaries(ready) = runtime
@@ -2150,12 +2149,12 @@ mod content_menu_keyboard_tests {
             panic!("expected playlist summaries");
         };
         assert_eq!(ready.total, 72);
-        let save = LayoutSaveOwner::new(directory.path().join("layouts.json"));
+        let save = LayoutPersistence::new(directory.path().join("layouts.json"));
         let handle = runtime.handle.clone();
         let save_handle = save.handle();
         let artwork = Arc::new(crate::artwork::ArtworkManager::new(directory.path()));
         let window = cx.add_window(move |window, cx| {
-            let mut app = GuiApp::new(
+            let mut app = WindowView::new(
                 handle,
                 save_handle,
                 artwork,
@@ -2177,7 +2176,7 @@ mod content_menu_keyboard_tests {
     }
 
     fn page(
-        app: &Entity<GuiApp>,
+        app: &Entity<WindowView>,
         offset: usize,
         loaded: usize,
         total: usize,
@@ -2242,7 +2241,7 @@ mod content_menu_keyboard_tests {
         draw(handle, cx);
     }
 
-    fn open_targets(app: &Entity<GuiApp>, handle: AnyWindowHandle, cx: &mut TestAppContext) {
+    fn open_targets(app: &Entity<WindowView>, handle: AnyWindowHandle, cx: &mut TestAppContext) {
         app.update(cx, |app, cx| {
             app.open_content_menu(
                 ContentMenuRequest {

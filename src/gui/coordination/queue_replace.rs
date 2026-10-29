@@ -1,5 +1,5 @@
 //! Confirmation of commands that replace the playback queue, not playlist management.
-use crate::gui::*;
+use crate::gui::window::*;
 use rivu_ui::{IconButton, IconButtonDensity, IconButtonStyle, danger_control, panel_header, row};
 
 #[derive(Clone)]
@@ -8,7 +8,7 @@ pub(in crate::gui) enum QueueReplacement {
     Album(rivu_protocol::model::AlbumKey),
 }
 
-impl GuiApp {
+impl WindowView {
     pub(in crate::gui) fn request_album_play(
         &mut self,
         key: rivu_protocol::model::AlbumKey,

@@ -1,5 +1,7 @@
+use crate::gui::layout::Node;
 use crate::gui::*;
 use crate::keyboard::{self, Action, Context as KeyContext, Modifiers as KeyModifiers};
+use gpui::{prelude::*, *};
 use rivu_ui::{Dialog, IconButton, IconButtonDensity, IconButtonStyle, caption, column, row};
 
 fn visible_panel(node: &Node, id: u64) -> Option<&layout::Panel> {
@@ -22,7 +24,7 @@ fn modifiers(event: &KeyDownEvent) -> KeyModifiers {
     }
 }
 
-impl GuiApp {
+impl WindowView {
     pub(in crate::gui) fn open_keyboard_help(
         &mut self,
         window: &mut Window,

@@ -2,7 +2,8 @@
 //! Core retains relocation workers and task IDs; dismissal never joins a worker.
 
 use super::{feature::FeatureContext, format_time};
-use crate::projection::{GuiSnapshot, QueryProjection};
+use crate::projection::GuiSnapshot;
+use crate::query_tracking::QueryTracker;
 use gpui::{prelude::*, *};
 use rivu_protocol::{
     model::{
@@ -50,7 +51,7 @@ struct ReviewRead {
     epoch: u64,
     query: Query,
     generation: u64,
-    ticket: crate::core::QueryTicket,
+    ticket: crate::query_tracking::QueryTicket,
 }
 
 type SelectedMembers = Option<(QueryResponse, Vec<Option<bool>>)>;
@@ -79,8 +80,8 @@ impl Drop for Duplicates {
 struct DuplicateReview {
     open: bool,
     epoch: u64,
-    groups_projection: QueryProjection,
-    members_projection: QueryProjection,
+    groups_projection: QueryTracker,
+    members_projection: QueryTracker,
     groups_dirty: bool,
     members_dirty: bool,
     members_current: bool,
@@ -2131,7 +2132,7 @@ mod tests {
         }
         .save(&path)
         .unwrap();
-        let runtime = crate::core::Runtime::start(directory.path(), &path).unwrap();
+        let runtime = crate::core::CoreRuntime::start(directory.path(), &path).unwrap();
         let context = super::FeatureContext {
             snapshots: Rc::new(crate::gui::feature::SnapshotSource::new(
                 runtime.handle.clone(),

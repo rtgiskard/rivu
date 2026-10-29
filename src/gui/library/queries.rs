@@ -406,7 +406,7 @@ mod tests {
     fn library_search_counts_query_resumes_cancelled_reads_and_tracks_scope_changes() {
         use crate::{
             config::Config,
-            core::Runtime,
+            core::CoreRuntime,
             gui::library::model::LibraryBrowser,
             library::{ScanRecord, ScanResult},
             store::Store,
@@ -468,7 +468,7 @@ mod tests {
         }
         .save(&config_path)
         .unwrap();
-        let runtime = Runtime::start(directory.path(), &config_path).unwrap();
+        let runtime = CoreRuntime::start(directory.path(), &config_path).unwrap();
         let response = runtime
             .handle
             .query(Query::LibraryRootCounts { roots: Vec::new() });

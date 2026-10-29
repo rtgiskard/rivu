@@ -1,6 +1,6 @@
 use crate::{
     gui::{coordination::manual_actions::ManualIntentId, paged},
-    projection::QueryProjection,
+    query_tracking::QueryTracker,
 };
 use rivu_protocol::{
     model::{Query, QueryStamp, QueueRow},
@@ -73,7 +73,7 @@ pub(super) struct QueueLocateReveal {
 
 #[derive(Default)]
 pub(super) struct QueueLocate {
-    pub(super) projection: QueryProjection,
+    pub(super) projection: QueryTracker,
     pub(super) query: Option<Query>,
     pub(super) pending: Option<QueueLocateRequest>,
     pub(super) worker: Option<QueueLocateRequest>,
@@ -171,17 +171,17 @@ pub(super) enum QueueWorker {
 }
 
 #[derive(Default)]
-pub(super) struct QueueSelection {
+pub(super) struct QueueBrowser {
     pub(super) rows: paged::PagedRows<QueueRow>,
     pub(super) query: Option<String>,
     pub(super) locate_filtered: Option<u64>,
     pub(super) selected: HashMap<u64, QueueIdentity>,
     pub(super) anchor: Option<QueueIdentity>,
-    pub(super) page_projection: QueryProjection,
+    pub(super) page_projection: QueryTracker,
     pub(super) page_worker: bool,
     pub(super) page_size: usize,
-    pub(super) projection: QueryProjection,
-    pub(super) reconcile_projection: QueryProjection,
+    pub(super) projection: QueryTracker,
+    pub(super) reconcile_projection: QueryTracker,
     pub(super) reconcile_pending: Option<QueueReconcileJob>,
     pub(super) busy: bool,
     // Retained identities need relocation before their positions can authorize actions.
@@ -194,7 +194,7 @@ pub(super) struct QueueSelection {
     pub(super) manual: Option<ManualIntentId>,
     pub(super) locate: QueueLocate,
 }
-impl QueueSelection {
+impl QueueBrowser {
     fn reclaim_selection_capacity(&mut self, len: usize) {
         if self.selected.capacity() > 64.max(len.saturating_mul(4)) {
             self.selected.shrink_to(len.saturating_mul(2));
@@ -648,7 +648,7 @@ impl QueueSelection {
 
 #[cfg(test)]
 mod tests {
-    use super::{QueueIdentity, QueueSelection};
+    use super::{QueueBrowser, QueueIdentity};
     use rivu_protocol::{
         model::{LibraryRow, Page, Query, QueueRow},
         response::QueryRevisions,
@@ -690,8 +690,8 @@ mod tests {
             ..QueryRevisions::default()
         }
     }
-    fn queue(revision: u64) -> QueueSelection {
-        let mut queue = QueueSelection::default();
+    fn queue(revision: u64) -> QueueBrowser {
+        let mut queue = QueueBrowser::default();
         queue.sync(revisions(revision), 200_000);
         queue
     }

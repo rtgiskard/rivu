@@ -1,7 +1,289 @@
 //! Frozen processing-task results and explicit snapshot actions.
+use super::graph_editor::{node_fields, node_label};
 use super::*;
+use rivu_format::config::processing_graph::{GraphNodeKind, GraphPort};
+use rivu_protocol::model::GraphExecutionMode;
+use serde_json::{Value, json};
+
+#[derive(Default)]
+pub(super) struct ResultsState {
+    pub(super) export_draft_generation: u64,
+    pub(super) details: std::collections::HashSet<u64>,
+    pub(super) errors: HashMap<u64, String>,
+    pub(super) task_details: bool,
+}
+
+impl ResultsState {
+    pub(super) fn retain_panels(&mut self, layout: &crate::gui::workspace::WorkspacePanels) {
+        self.details.retain(|id| layout.contains_panel(*id));
+        self.errors.retain(|id, _| layout.contains_panel(*id));
+    }
+}
 
 impl AudioProcessing {
+    fn captured_parameters(&self, prefix: &str, value: &Value, cx: &App) -> Div {
+        let theme = rivu_ui::theme::palette(cx);
+        let mut content = column().min_w_0().gap_1();
+        if let Some(object) = value.as_object() {
+            for (key, value) in object {
+                if value.is_object() {
+                    content = content.child(self.captured_parameters(
+                        &format!("{prefix}.{key}"),
+                        value,
+                        cx,
+                    ));
+                    continue;
+                }
+                let label = self.parameter_path_label(prefix, key);
+                let text = match value {
+                    Value::Null => "—".to_owned(),
+                    Value::Bool(value) => self
+                        .context
+                        .i18n
+                        .text(if *value {
+                            "processing-enabled"
+                        } else {
+                            "processing-off"
+                        })
+                        .to_owned(),
+                    Value::String(value) if key == "mode" => self
+                        .context
+                        .i18n
+                        .text(match value.as_str() {
+                            "off" => "processing-off",
+                            "stationary" => "processing-stationary",
+                            "profile" => "processing-profile",
+                            "adaptive" => "processing-adaptive",
+                            _ => unreachable!("serialized denoise mode"),
+                        })
+                        .to_owned(),
+                    Value::String(value) => value.clone(),
+                    _ => value.to_string(),
+                };
+                content = content.child(caption(theme, format!("{label}: {text}")));
+            }
+        }
+        content
+    }
+
+    fn task_settings(&self, task: &rivu_protocol::model::ProcessingTaskStatus, cx: &App) -> Div {
+        let theme = rivu_ui::theme::palette(cx);
+        let neural = &task.settings.neural;
+        let parameters = match task.operation {
+            ProcessingOperation::Denoise => {
+                serde_json::to_value(&task.settings.denoise).expect("serializable captured denoise")
+            }
+            ProcessingOperation::Speech => json!({
+                "speech_interpreter":neural.speech_interpreter,"worker":neural.worker,
+                "speech_manifest":neural.speech_manifest,"device":neural.device,"threads":neural.threads,
+                "speech_wet_mix":neural.speech_wet_mix,"speech_attenuation_limit_db":neural.speech_attenuation_limit_db,
+                "speech_post_filter":neural.speech_post_filter,
+            }),
+            ProcessingOperation::Separate => json!({
+                "separation_interpreter":neural.separation_interpreter,"worker":neural.worker,
+                "separation_manifest":neural.separation_manifest,"device":neural.device,"threads":neural.threads,
+                "separation_overlap":neural.separation_overlap,
+            }),
+            ProcessingOperation::Graph => {
+                serde_json::to_value(&task.settings.graph).expect("serializable graph snapshot")
+            }
+        };
+        let mut content = column()
+            .min_w_0()
+            .gap_2()
+            .p_2()
+            .border_1()
+            .border_color(rgb(theme.border))
+            .child(
+                caption(theme, self.tr("processing-captured-settings")).text_color(rgb(theme.text)),
+            )
+            .child(self.captured_parameters(
+                if task.operation == ProcessingOperation::Denoise {
+                    "denoise"
+                } else {
+                    "neural"
+                },
+                &parameters,
+                cx,
+            ));
+        if let Some(profile) = task.settings.profile {
+            content = content.child(caption(
+                theme,
+                format!(
+                    "{}: {} · {}: {}",
+                    self.context.i18n.text("processing-profile-start"),
+                    profile.start_seconds,
+                    self.context.i18n.text("processing-profile-end"),
+                    profile.end_seconds
+                ),
+            ));
+        }
+        content
+    }
+
+    fn task_status(&self, panel: u64, cx: &mut Context<Self>) -> Div {
+        let theme = rivu_ui::theme::palette(cx);
+        let mut content = column().gap_2();
+        if let Some(task) = &self.state.system.processing {
+            let id = task.id;
+            let terminal = matches!(
+                task.phase,
+                ProcessingPhase::Complete | ProcessingPhase::Cancelled | ProcessingPhase::Failed
+            );
+            let phase = self.tr(match task.phase {
+                ProcessingPhase::Queued => "processing-queued",
+                ProcessingPhase::Rendering => "processing-rendering",
+                ProcessingPhase::Processing => "processing-processing",
+                ProcessingPhase::Complete => "processing-complete",
+                ProcessingPhase::Cancelled => "processing-cancelled",
+                ProcessingPhase::Failed => "processing-failed",
+            });
+            let operation = self.tr(match task.operation {
+                ProcessingOperation::Denoise => "processing-restoration",
+                ProcessingOperation::Speech => "processing-speech",
+                ProcessingOperation::Separate => "processing-separation",
+                ProcessingOperation::Graph => "processing-routing-graph",
+            });
+            content = content.child(caption(
+                theme,
+                format!(
+                    "{} #{} · {operation} · {} · {phase}",
+                    self.context.i18n.text("processing-task"),
+                    id,
+                    task.source_path
+                        .file_name()
+                        .map(|name| name.to_string_lossy())
+                        .unwrap_or_else(|| "—".into()),
+                ),
+            ));
+            content = content.child(caption(
+                theme,
+                format!(
+                    "{}: {} / {}",
+                    self.context.i18n.text("processing-progress"),
+                    task.completed,
+                    task.total
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| "?".to_owned())
+                ),
+            ));
+            if let Some(total) = task.total.filter(|n| *n > 0) {
+                content = content.child(
+                    rivu_ui::ProgressBar::new(
+                        ("processing-progress", panel),
+                        (task.completed as f64 / total as f64) as f32,
+                        self.tr("processing-progress"),
+                    )
+                    .render(cx),
+                );
+            }
+            if !terminal {
+                content = content.child(
+                    button(
+                        ("cancel-processing", panel),
+                        self.tr("processing-cancel"),
+                        cx,
+                        move |this, _, cx| this.send(Command::CancelProcessing { id }, cx),
+                    )
+                    .self_start(),
+                );
+            }
+            if let Some(error) = &task.error {
+                content = content.child(caption(theme, error.clone()).text_color(rgb(theme.error)));
+            }
+            if task.phase == ProcessingPhase::Complete && task.outputs.is_some() {
+                content = content.child(caption(theme, self.tr("processing-audition-source")));
+                let mut auditions = row().flex_wrap().gap_1();
+                let modes = if task.operation == ProcessingOperation::Separate {
+                    vec![
+                        (AuditionMode::Original, "processing-original"),
+                        (AuditionMode::Vocals, "processing-vocals"),
+                        (AuditionMode::Accompaniment, "processing-accompaniment"),
+                        (AuditionMode::Mix, "processing-mix"),
+                    ]
+                } else {
+                    vec![
+                        (AuditionMode::Original, "processing-original"),
+                        (AuditionMode::Denoised, "processing-processed"),
+                    ]
+                };
+                for (mode, label) in modes {
+                    auditions = auditions.child(button(
+                        SharedString::from(format!("audition-{panel}-{mode:?}")),
+                        self.tr(label),
+                        cx,
+                        move |this, _, cx| this.audition(id, mode, cx),
+                    ));
+                }
+                content = content.child(auditions);
+                if task.operation == ProcessingOperation::Separate {
+                    content = content
+                        .child(self.field_view(
+                            FieldKey::VocalGain,
+                            self.tr("processing-vocal-gain"),
+                            true,
+                            cx,
+                        ))
+                        .child(self.field_view(
+                            FieldKey::AccompanimentGain,
+                            self.tr("processing-accompaniment-gain"),
+                            true,
+                            cx,
+                        ))
+                        .child(
+                            button(
+                                ("apply-mix-gains", panel),
+                                self.tr("processing-apply-mix"),
+                                cx,
+                                move |this, _, cx| this.audition(id, AuditionMode::Mix, cx),
+                            )
+                            .self_start(),
+                        );
+                }
+            }
+            content = content.child(activate_control(
+                dropdown_trigger(
+                    theme,
+                    ("processing-task-details", panel),
+                    self.tr(if self.results.task_details {
+                        "processing-result-hide-details"
+                    } else {
+                        "processing-result-show-details"
+                    }),
+                    self.results.task_details,
+                    cx,
+                ),
+                cx,
+                |this, _, cx| {
+                    this.results.task_details = !this.results.task_details;
+                    cx.notify();
+                },
+            ));
+            if self.results.task_details {
+                if let Some(model) = &task.model_id {
+                    content = content.child(caption(
+                        theme,
+                        format!(
+                            "{} · {}",
+                            model,
+                            task.model_sha256.as_deref().unwrap_or("?")
+                        ),
+                    ));
+                }
+                if let (Some(rate), Some(channels), Some(frames)) =
+                    (task.sample_rate, task.channels, task.frames)
+                {
+                    content = content.child(caption(
+                        theme,
+                        format!("{rate} Hz · {channels} ch · {frames} frames"),
+                    ));
+                }
+                content = content.child(self.task_settings(task, cx));
+            }
+        }
+        content
+    }
+
     pub(in crate::gui) fn processing_results_view(
         &mut self,
         panel: u64,
@@ -30,11 +312,7 @@ impl AudioProcessing {
         let body = self.processing_scroll(panel, "processing-results", results.p_2());
         column().size_full().min_h_0().child(body)
     }
-    pub(in super::super) fn graph_task_summary(
-        &mut self,
-        panel: u64,
-        cx: &mut Context<Self>,
-    ) -> Div {
+    pub(super) fn graph_task_summary(&mut self, panel: u64, cx: &mut Context<Self>) -> Div {
         let theme = rivu_ui::theme::palette(cx);
         let Some(task) = self.state.system.processing.as_ref() else {
             return column();
@@ -123,17 +401,17 @@ impl AudioProcessing {
     }
 
     fn choose_graph_export_path(&mut self, panel: u64, task_id: u64, cx: &mut Context<Self>) {
-        if self.graph_ui.choosing_path.is_some() {
+        if self.choosing_path.is_some() {
             return;
         }
         let Some(field) = self.fields.get(&FieldKey::GraphExport) else {
             return;
         };
         let original = field.input.read(cx).text().to_owned();
-        let draft_generation = self.graph_ui.export_draft_generation;
-        self.graph_ui.chooser_generation += 1;
-        let chooser_generation = self.graph_ui.chooser_generation;
-        self.graph_ui.choosing_path = Some(FieldKey::GraphExport);
+        let draft_generation = self.results.export_draft_generation;
+        self.chooser_generation += 1;
+        let chooser_generation = self.chooser_generation;
+        self.choosing_path = Some(FieldKey::GraphExport);
         let i18n = Arc::clone(&self.context.i18n);
         cx.spawn(async move |this, cx| {
             let result = ashpd::desktop::file_chooser::SelectedFiles::save_file()
@@ -144,13 +422,13 @@ impl AudioProcessing {
                 .await
                 .and_then(|request| request.response());
             let _ = this.update(cx, |this, cx| {
-                if this.graph_ui.chooser_generation != chooser_generation {
+                if this.chooser_generation != chooser_generation {
                     return;
                 }
-                this.graph_ui.choosing_path = None;
+                this.choosing_path = None;
                 cx.notify();
-                if !this.graph_ui.panel_inputs.contains_key(&panel)
-                    || !super::inspector::path_snapshot_current(
+                if !this.panel_inputs.contains_key(&panel)
+                    || !path_snapshot_current(
                         (task_id, draft_generation, &original),
                         (
                             this.state
@@ -158,7 +436,7 @@ impl AudioProcessing {
                                 .processing
                                 .as_ref()
                                 .map_or(0, |task| task.id),
-                            this.graph_ui.export_draft_generation,
+                            this.results.export_draft_generation,
                             this.fields
                                 .get(&FieldKey::GraphExport)
                                 .map(|field| field.input.read(cx).text()),
@@ -173,10 +451,10 @@ impl AudioProcessing {
                             match path.into_os_string().into_string() {
                                 Ok(path) => {
                                     this.stage_graph_text(FieldKey::GraphExport, path, cx);
-                                    this.graph_ui.result_errors.remove(&panel);
+                                    this.results.errors.remove(&panel);
                                 }
                                 Err(_) => {
-                                    this.graph_ui.result_errors.insert(
+                                    this.results.errors.insert(
                                         panel,
                                         this.tr("processing-result-path-encoding").to_string(),
                                     );
@@ -186,7 +464,7 @@ impl AudioProcessing {
                     }
                     Ok(None) => return,
                     Err(error) => {
-                        this.graph_ui.result_errors.insert(panel, error.to_string());
+                        this.results.errors.insert(panel, error.to_string());
                     }
                 }
                 cx.notify();
@@ -196,11 +474,7 @@ impl AudioProcessing {
         cx.notify();
     }
 
-    pub(in super::super) fn graph_task_status(
-        &mut self,
-        panel: u64,
-        cx: &mut Context<Self>,
-    ) -> Div {
+    pub(super) fn graph_task_status(&mut self, panel: u64, cx: &mut Context<Self>) -> Div {
         let theme = rivu_ui::theme::palette(cx);
         let export_input = if self
             .state
@@ -209,7 +483,7 @@ impl AudioProcessing {
             .as_ref()
             .is_some_and(|task| task.phase == ProcessingPhase::Complete)
         {
-            Some(self.graph_panel_input(
+            Some(self.panel_input(
                 panel,
                 FieldKey::GraphExport,
                 &self.tr("processing-export-path"),
@@ -226,7 +500,7 @@ impl AudioProcessing {
             return column();
         };
         let export_receipt = id != task_id;
-        let expanded = self.graph_ui.result_details.contains(&panel);
+        let expanded = self.results.details.contains(&panel);
         let mut content = column().flex_shrink_0().gap_2();
         if let Some(error) = &task.error {
             content = content.child(caption(theme, error.clone()).text_color(rgb(theme.error)));
@@ -293,7 +567,7 @@ impl AudioProcessing {
                 .iter()
                 .flat_map(|graph| graph.nodes.iter())
                 .flat_map(|node| {
-                    (0..output_count(&node.kind)).map(move |index| {
+                    (0..node.kind.outputs()).map(move |index| {
                         (
                             &node.kind,
                             GraphPort {
@@ -363,7 +637,7 @@ impl AudioProcessing {
                                     .map(|field| field.input.read(cx).text().to_owned())
                                     .unwrap_or_default();
                                 if !path.is_empty() {
-                                    this.graph_ui.result_errors.remove(&panel);
+                                    this.results.errors.remove(&panel);
                                     this.send(
                                         Command::ProcessingGraphExport {
                                             id,
@@ -373,7 +647,7 @@ impl AudioProcessing {
                                         cx,
                                     );
                                 } else {
-                                    this.graph_ui.result_errors.insert(
+                                    this.results.errors.insert(
                                         panel,
                                         this.context
                                             .i18n
@@ -387,7 +661,7 @@ impl AudioProcessing {
                 );
             }
         }
-        if let Some(error) = self.graph_ui.result_errors.get(&panel) {
+        if let Some(error) = self.results.errors.get(&panel) {
             content = content.child(caption(theme, error.clone()).text_color(rgb(theme.error)));
         }
         content = content.child(
@@ -400,8 +674,8 @@ impl AudioProcessing {
                 }),
                 cx,
                 move |this, _, cx| {
-                    if !this.graph_ui.result_details.remove(&panel) {
-                        this.graph_ui.result_details.insert(panel);
+                    if !this.results.details.remove(&panel) {
+                        this.results.details.insert(panel);
                     }
                     cx.notify();
                 },
@@ -504,7 +778,7 @@ impl AudioProcessing {
                         theme,
                         format!("#{} · {}", node.id, self.tr(node_label(&node.kind))),
                     ));
-                    for field in fields::node_fields(&node.kind) {
+                    for field in node_fields(&node.kind) {
                         let text = field.text(&node.kind);
                         content = content.child(caption(
                             theme,

@@ -3,7 +3,7 @@ use super::{
     appearance::fonts::tabular_numbers,
     feature::FeatureContext,
     format_time,
-    layout::interaction::{Dragging, SeekCommit},
+    interaction::{Dragging, SeekCommit},
 };
 use crate::projection::GuiSnapshot;
 use gpui::{AnyElement, Context, EventEmitter, Pixels, Point, Window, div, prelude::*, rems, rgb};
@@ -583,7 +583,7 @@ impl Playback {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gui::layout::interaction::{DragCommit, LayoutInteraction};
+    use crate::gui::interaction::{DragCommit, WindowInteraction};
 
     #[test]
     fn seek_keys_require_queue_identity_and_finite_positive_duration() {
@@ -615,7 +615,7 @@ mod tests {
 
     #[test]
     fn slider_key_cancellation_discards_pointer_preview_before_command() {
-        let mut owner = LayoutInteraction::default();
+        let mut owner = WindowInteraction::default();
         owner.begin_slider(Dragging::Seek(3), Some(10), Some(100.));
         owner.update_slider_seek(0.75);
         owner.cancel();

@@ -15,7 +15,9 @@ use crate::{
 use rivu_protocol::model::{PlaybackStatus, Track};
 
 use super::animation_frames::AnimationFrames;
-use super::artwork::{Artwork, ArtworkDecoration, ArtworkImages, ArtworkLoader, ArtworkView};
+use super::artwork::{
+    ArtworkDecoration, ArtworkImageRegistry, ArtworkLoader, ArtworkView, DefaultArtwork,
+};
 
 pub(super) const ALBUM_ARTWORK_STYLES: [AlbumArtworkStyle; 7] = [
     AlbumArtworkStyle::Plain,
@@ -156,14 +158,14 @@ pub(super) struct AlbumArtwork {
     manager: Arc<ArtworkManager>,
     loader: ArtworkLoader,
     view: ArtworkView,
-    default_album: Entity<Artwork>,
+    default_album: Entity<DefaultArtwork>,
     track: Option<Track>,
     status: PlaybackStatus,
     visible: bool,
     instances: HashMap<u64, Instance>,
     window_visible: bool,
     panel_revision: u64,
-    images: ArtworkImages,
+    images: ArtworkImageRegistry,
     decorations: [Option<ArtworkDecoration>; 6],
     fps: u16,
     frames: Entity<AnimationFrames>,
@@ -175,8 +177,8 @@ pub(super) struct AlbumArtwork {
 impl AlbumArtwork {
     pub(super) fn new(
         manager: Arc<ArtworkManager>,
-        default_album: Entity<Artwork>,
-        images: ArtworkImages,
+        default_album: Entity<DefaultArtwork>,
+        images: ArtworkImageRegistry,
         frames: Entity<AnimationFrames>,
     ) -> Self {
         Self {
@@ -687,12 +689,12 @@ mod tests {
             locked: true,
         });
         let owner = cx.update(|cx| {
-            let default = cx.new(|cx| Artwork::new(&Localizer::new("en"), cx));
+            let default = cx.new(|cx| DefaultArtwork::new(&Localizer::new("en"), cx));
             cx.new(|cx| {
                 AlbumArtwork::new(
                     manager,
                     default,
-                    ArtworkImages::default(),
+                    ArtworkImageRegistry::default(),
                     cx.new(|_| crate::gui::animation_frames::AnimationFrames::default()),
                 )
             })

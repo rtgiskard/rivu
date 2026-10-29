@@ -10,7 +10,7 @@ use gpui::{ImageCacheError, RenderImage};
 use image::{ImageDecoder, ImageFormat, ImageReader, codecs::webp::WebPDecoder};
 use parking_lot::Mutex;
 
-use crate::artwork::cache::thumbnail_path;
+use crate::artwork::cache_paths::thumbnail_path;
 
 use super::{Budget, decode, limit_error, preflight_webp, to_bgra};
 
@@ -350,7 +350,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let bytes = super::super::tests::large_encoded_bmp();
         let hash = blake3::hash(&bytes);
-        let path = crate::artwork::cache::original_path(directory.path(), hash, "bmp");
+        let path = crate::artwork::cache_paths::original_path(directory.path(), hash, "bmp");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, bytes).unwrap();
         let admitted = crate::artwork::DEFAULT_MAX_IMAGE_BYTES;
@@ -421,7 +421,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let bytes = png(800, 400, [240, 12, 20, 96]);
         let hash = blake3::hash(&bytes);
-        let path = crate::artwork::cache::original_path(directory.path(), hash, "png");
+        let path = crate::artwork::cache_paths::original_path(directory.path(), hash, "png");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, &bytes).unwrap();
         let loaded = load(
@@ -682,7 +682,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let bytes = png(800, 400, [220, 22, 35, 255]);
         let hash = blake3::hash(&bytes);
-        let path = crate::artwork::cache::original_path(directory.path(), hash, "png");
+        let path = crate::artwork::cache_paths::original_path(directory.path(), hash, "png");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, &bytes).unwrap();
         let thumbnail = thumbnail_path(&path, hash, 256).unwrap();

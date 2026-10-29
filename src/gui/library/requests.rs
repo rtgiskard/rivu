@@ -57,14 +57,14 @@ pub(in crate::gui) struct DirectoryRead {
     pub(in crate::gui) branch: library::TreeBranch,
     pub(in crate::gui) generation: u64,
     pub(in crate::gui) query: Query,
-    pub(in crate::gui) ticket: crate::core::QueryTicket,
+    pub(in crate::gui) ticket: crate::query_tracking::QueryTicket,
     owner_query: Query,
     owner_generation: u64,
 }
 
 pub(in crate::gui) struct RootCountRead {
     pub(in crate::gui) query: Query,
-    pub(in crate::gui) ticket: crate::core::QueryTicket,
+    pub(in crate::gui) ticket: crate::query_tracking::QueryTicket,
     generation: u64,
     offset: usize,
 }
@@ -369,7 +369,7 @@ mod tests {
         }
         .save(&config_path)
         .unwrap();
-        let runtime = crate::core::Runtime::start(directory.path(), &config_path).unwrap();
+        let runtime = crate::core::CoreRuntime::start(directory.path(), &config_path).unwrap();
         let i18n = std::sync::Arc::new(crate::i18n::Localizer::new("en-US"));
         let labels = std::rc::Rc::new(
             i18n.fixed_texts()

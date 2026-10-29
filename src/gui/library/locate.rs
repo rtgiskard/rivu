@@ -1,5 +1,5 @@
 use super::{Library, LibraryEvent, TreeBranch, tree::TreeItem};
-use crate::projection::QueryProjection;
+use crate::query_tracking::QueryTracker;
 use gpui::{Context, ScrollStrategy, Window};
 use rivu_protocol::{
     model::{DirectoryRow, LibraryLocateResult, Query},
@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 #[derive(Default)]
 pub(in crate::gui) struct LibraryLocateState {
-    projection: QueryProjection,
+    projection: QueryTracker,
     // Logical cancellation never releases the physical ancestor worker.
     pub(in crate::gui) pending: bool,
     pub(super) loading: bool,

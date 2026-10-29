@@ -18,7 +18,7 @@ pub(in crate::gui) mod session;
 mod tests;
 
 use super::{
-    artwork::{Artwork, ArtworkImages, ArtworkLoader, ArtworkView},
+    artwork::{ArtworkImageRegistry, ArtworkLoader, ArtworkView, DefaultArtwork},
     components::{artwork::artwork_preview, track::favorite_button},
     feature::FeatureContext,
     format_time,
@@ -77,7 +77,7 @@ pub(in crate::gui) struct Metadata {
     artwork_manager: Arc<ArtworkManager>,
     artwork_loader: ArtworkLoader,
     artwork_view: ArtworkView,
-    default_album: Entity<Artwork>,
+    default_album: Entity<DefaultArtwork>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -89,8 +89,8 @@ impl Metadata {
         context: FeatureContext,
         ui_font: Font,
         artwork_manager: Arc<ArtworkManager>,
-        artwork_images: ArtworkImages,
-        default_album: Entity<Artwork>,
+        artwork_images: ArtworkImageRegistry,
+        default_album: Entity<DefaultArtwork>,
         cx: &mut Context<Self>,
     ) -> Self {
         let state = context.snapshot();

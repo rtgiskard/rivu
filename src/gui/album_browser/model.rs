@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use crate::{core::QueryTicket, projection::QueryProjection};
+use crate::query_tracking::{QueryTicket, QueryTracker};
 use rivu_protocol::{
     model::{AlbumKey, AlbumSort, AlbumSummary, LibraryRow, Query, QueryStamp},
     response::{QueryResponse, QueryRevisions, ViewResponse},
@@ -65,8 +65,8 @@ pub(super) struct Completion {
 pub(super) struct AlbumModel {
     visible: bool,
     revisions: QueryRevisions,
-    albums_projection: QueryProjection,
-    tracks_projection: QueryProjection,
+    albums_projection: QueryTracker,
+    tracks_projection: QueryTracker,
     tracks_key: Option<AlbumKey>,
     page_size: usize,
     worker_pending: bool,
@@ -86,8 +86,8 @@ impl Default for AlbumModel {
         Self {
             visible: false,
             revisions: QueryRevisions::default(),
-            albums_projection: QueryProjection::default(),
-            tracks_projection: QueryProjection::default(),
+            albums_projection: QueryTracker::default(),
+            tracks_projection: QueryTracker::default(),
             tracks_key: None,
             page_size: 1,
             worker_pending: false,
@@ -515,7 +515,7 @@ impl AlbumModel {
         DataChange { albums, tracks }
     }
 
-    fn active_projection(&self) -> &QueryProjection {
+    fn active_projection(&self) -> &QueryTracker {
         if self.selected.is_some() {
             &self.tracks_projection
         } else {
@@ -533,7 +533,7 @@ impl AlbumModel {
 }
 
 fn sync_pages<T>(
-    projection: &mut QueryProjection,
+    projection: &mut QueryTracker,
     pages: &mut PagedRows<T>,
     query: &Query,
     revisions: QueryRevisions,
@@ -551,7 +551,7 @@ fn sync_pages<T>(
     true
 }
 
-fn cancel_pages<T>(projection: &mut QueryProjection, pages: &mut PagedRows<T>) {
+fn cancel_pages<T>(projection: &mut QueryTracker, pages: &mut PagedRows<T>) {
     projection.cancel();
     pages.cancel_pending();
 }
@@ -1173,7 +1173,7 @@ mod tests {
 
     #[test]
     fn album_track_search_replaces_pages_and_rejects_previous_completion() {
-        let mut projection = QueryProjection::default();
+        let mut projection = QueryTracker::default();
         let mut pages = paged::PagedRows::default();
         let revisions = QueryRevisions::default();
         let mut query = queries().into_iter().nth(1).unwrap();
@@ -1209,7 +1209,7 @@ mod tests {
     #[test]
     fn hiding_retains_pages_and_failures_but_cancels_pending_submissions() {
         for query in queries() {
-            let mut projection = QueryProjection::default();
+            let mut projection = QueryTracker::default();
             let mut pages = paged::PagedRows::default();
             let revisions = QueryRevisions::default();
             assert!(sync_pages(&mut projection, &mut pages, &query, revisions));
@@ -1240,7 +1240,7 @@ mod tests {
     #[test]
     fn data_refresh_preserves_viewport_until_authoritative_total_arrives() {
         for query in queries() {
-            let mut projection = QueryProjection::default();
+            let mut projection = QueryTracker::default();
             let mut pages = paged::PagedRows::default();
             let revisions = QueryRevisions::default();
             sync_pages(&mut projection, &mut pages, &query, revisions);
@@ -1286,7 +1286,7 @@ mod tests {
                 ..Default::default()
             };
             for total in [0, 2] {
-                let mut projection = QueryProjection::default();
+                let mut projection = QueryTracker::default();
                 let mut pages = paged::PagedRows::default();
                 sync_pages(
                     &mut projection,
@@ -1325,7 +1325,7 @@ mod tests {
                 }
                 _ => unreachable!(),
             }
-            let mut projection = QueryProjection::default();
+            let mut projection = QueryTracker::default();
             let mut pages = paged::PagedRows::<usize>::default();
             let revisions = QueryRevisions::default();
             sync_pages(&mut projection, &mut pages, &query, revisions);
@@ -1359,7 +1359,7 @@ mod tests {
 
     #[test]
     fn paging_and_unrelated_revisions_do_not_change_album_data_keys() {
-        let mut projection = QueryProjection::default();
+        let mut projection = QueryTracker::default();
         let mut pages = paged::PagedRows::default();
         let query = queries().into_iter().next().unwrap();
         sync_pages(

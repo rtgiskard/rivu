@@ -531,7 +531,7 @@ mod tests {
     }
 
     use super::*;
-    use crate::gui::FullWaveformRequest;
+    use crate::gui::visualization::full_waveform::FullWaveformRequest;
 
     fn track(id: i64, title: &str) -> Track {
         Track {

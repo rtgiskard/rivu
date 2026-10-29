@@ -3,7 +3,7 @@
 //! owns only cross-feature intent identity and the window's confirmation dialog.
 //! Refresh reconciles owners before a frozen target is validated or a draft discarded.
 
-use crate::gui::GuiApp;
+use crate::gui::WindowView;
 use gpui::{AnyElement, Context, Window, prelude::*};
 use rivu_ui::{IconButton, IconButtonDensity, IconButtonStyle, panel_header, row};
 
@@ -82,7 +82,7 @@ pub(in crate::gui) enum ManualAction {
     Quit,
 }
 
-impl GuiApp {
+impl WindowView {
     pub(in crate::gui) fn begin_manual_intent(&mut self, cx: &mut Context<Self>) -> ManualIntentId {
         let confirmation_open = self.manual_confirmation_open();
         let id = self.manual_intents.begin();

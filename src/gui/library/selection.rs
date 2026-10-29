@@ -3,7 +3,7 @@ use crate::gui::library::{
     LibraryNode,
     tree::{TreeBranch, TreeRangeSpan},
 };
-use crate::projection::QueryProjection;
+use crate::query_tracking::QueryTracker;
 use gpui::Context;
 use rivu_protocol::{
     model::{DirectoryRow, LibrarySort, Query, QueryStamp},
@@ -335,7 +335,7 @@ impl RangeJob {
 #[derive(Default)]
 pub(super) struct LibrarySelection {
     anchor: Option<Anchor>,
-    projection: QueryProjection,
+    projection: QueryTracker,
     pending: Option<RangeJob>,
     // Cancellation keeps this slot occupied until the outstanding query returns.
     active: Option<u64>,

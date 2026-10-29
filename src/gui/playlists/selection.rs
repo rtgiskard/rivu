@@ -152,8 +152,8 @@ pub(in crate::gui) struct EntrySelection {
     pub(in crate::gui) active: Option<EntryIdentity>,
     anchor: Option<EntryIdentity>,
     generation: u64,
-    projection: crate::projection::QueryProjection,
-    navigation_projection: crate::projection::QueryProjection,
+    projection: crate::query_tracking::QueryTracker,
+    navigation_projection: crate::query_tracking::QueryTracker,
     pub(in crate::gui) busy: bool,
     pub(in crate::gui) error: Option<String>,
     navigation: Option<EntryNavigationJob>,
@@ -206,7 +206,7 @@ impl EntrySelection {
         self.refresh_pending = true;
     }
 
-    fn prepare_refresh(&mut self) -> Option<(Vec<i64>, u64, crate::core::QueryTicket)> {
+    fn prepare_refresh(&mut self) -> Option<(Vec<i64>, u64, crate::query_tracking::QueryTicket)> {
         if self.refresh_in_flight || !self.refresh_pending {
             return None;
         }

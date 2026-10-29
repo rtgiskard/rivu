@@ -28,13 +28,6 @@ fn draft_revision_current(stamp: Option<&DraftStamp>, revision: u64) -> bool {
     stamp.is_none_or(|stamp| stamp.revision == revision)
 }
 
-pub(super) fn path_snapshot_current(
-    requested: (u64, u64, &str),
-    current: (u64, u64, Option<&str>),
-) -> bool {
-    requested.0 == current.0 && requested.1 == current.1 && current.2 == Some(requested.2)
-}
-
 fn stepped_field_text(timestamp: bool, text: &str, step: f64) -> Option<String> {
     let value = text.parse::<f64>().ok()?;
     let stepped = value + step;
@@ -137,23 +130,32 @@ impl AudioProcessing {
             .any(|(key, field)| key.graph_node().is_some() && field.dirty)
     }
 
-    pub(super) fn stage_graph_text(&mut self, key: FieldKey, text: String, cx: &mut Context<Self>) {
+    pub(in crate::gui::audio_processing) fn stage_graph_text(
+        &mut self,
+        key: FieldKey,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
         let Some(field) = self.fields.get_mut(&key) else {
             return;
         };
         field.dirty = true;
         field.input.update(cx, |input, cx| input.set_text(text, cx));
         if key.graph_node().is_some() {
-            self.graph_ui.draft_generation += 1;
-            let stamp = self.graph_ui.draft_stamps.entry(key).or_insert(DraftStamp {
-                revision: self.state.system.config.processing_graph.revision,
-                generation: 0,
-            });
-            stamp.generation = self.graph_ui.draft_generation;
-            self.graph_ui.field_errors.remove(&key);
+            self.graph_editor.draft_generation += 1;
+            let stamp = self
+                .graph_editor
+                .draft_stamps
+                .entry(key)
+                .or_insert(DraftStamp {
+                    revision: self.state.system.config.processing_graph.revision,
+                    generation: 0,
+                });
+            stamp.generation = self.graph_editor.draft_generation;
+            self.graph_editor.field_errors.remove(&key);
         }
         if key == FieldKey::GraphExport {
-            self.graph_ui.export_draft_generation += 1;
+            self.results.export_draft_generation += 1;
         }
         cx.notify();
     }
@@ -180,11 +182,11 @@ impl AudioProcessing {
         let revision = self.state.system.config.processing_graph.revision;
         let stale = keys
             .iter()
-            .any(|key| !draft_revision_current(self.graph_ui.draft_stamps.get(key), revision));
+            .any(|key| !draft_revision_current(self.graph_editor.draft_stamps.get(key), revision));
         if stale {
             let error = self.tr("processing-fields-stale").to_string();
             for key in keys {
-                self.graph_ui.field_errors.insert(key, error.clone());
+                self.graph_editor.field_errors.insert(key, error.clone());
             }
             cx.notify();
             return;
@@ -245,7 +247,7 @@ impl AudioProcessing {
                     .into_iter()
                     .map(|(key, text)| SubmittedField {
                         generation: self
-                            .graph_ui
+                            .graph_editor
                             .draft_stamps
                             .get(&key)
                             .map_or(0, |stamp| stamp.generation),
@@ -254,7 +256,7 @@ impl AudioProcessing {
                     })
                     .collect();
                 for key in keys {
-                    self.graph_ui.field_errors.remove(&key);
+                    self.graph_editor.field_errors.remove(&key);
                 }
                 self.graph_submit(
                     edit,
@@ -266,11 +268,11 @@ impl AudioProcessing {
             }
             Err((field, error)) => {
                 if let Some(field) = field {
-                    self.graph_ui.field_errors.insert(field, error);
+                    self.graph_editor.field_errors.insert(field, error);
                 } else {
                     self.error = Some(error.clone());
                     for key in keys {
-                        self.graph_ui.field_errors.insert(key, error.clone());
+                        self.graph_editor.field_errors.insert(key, error.clone());
                     }
                 }
                 cx.notify();
@@ -291,12 +293,11 @@ impl AudioProcessing {
     fn discard_graph_node(&mut self, id: u64, cx: &mut Context<Self>) {
         self.discard_node_equalizer_drafts(id, cx);
         if self
-            .graph_ui
             .choosing_path
             .as_ref()
             .is_some_and(|key| key.graph_node() == Some(id))
         {
-            self.graph_ui.chooser_generation += 1;
+            self.chooser_generation += 1;
         }
         for (key, field) in &mut self.fields {
             if key.graph_node() == Some(id) {
@@ -305,8 +306,8 @@ impl AudioProcessing {
                 field
                     .input
                     .update(cx, |input, cx| input.set_text(committed, cx));
-                self.graph_ui.draft_stamps.remove(key);
-                self.graph_ui.field_errors.remove(key);
+                self.graph_editor.draft_stamps.remove(key);
+                self.graph_editor.field_errors.remove(key);
             }
         }
         cx.notify();
@@ -320,7 +321,7 @@ impl AudioProcessing {
                 self.stage_graph_text(key, text, cx);
             }
             None => {
-                self.graph_ui
+                self.graph_editor
                     .field_errors
                     .insert(key, self.tr("processing-fields-number").to_string());
                 cx.notify();
@@ -329,7 +330,7 @@ impl AudioProcessing {
     }
 
     fn choose_graph_path(&mut self, panel: u64, key: FieldKey, cx: &mut Context<Self>) {
-        if self.graph_ui.choosing_path.is_some() {
+        if self.choosing_path.is_some() {
             return;
         }
         let Some(field) = self.fields.get(&key) else {
@@ -337,15 +338,15 @@ impl AudioProcessing {
         };
         let original = field.input.read(cx).text().to_owned();
         let generation = self
-            .graph_ui
+            .graph_editor
             .draft_stamps
             .get(&key)
             .map_or(0, |stamp| stamp.generation);
         let revision = self.state.system.config.processing_graph.revision;
         let title = self.tr("processing-fields-browse").to_string();
-        self.graph_ui.chooser_generation += 1;
-        let chooser_generation = self.graph_ui.chooser_generation;
-        self.graph_ui.choosing_path = Some(key);
+        self.chooser_generation += 1;
+        let chooser_generation = self.chooser_generation;
+        self.choosing_path = Some(key);
         cx.spawn(async move |this, cx| {
             let result = ashpd::desktop::file_chooser::SelectedFiles::open_file()
                 .title(title.as_str())
@@ -354,12 +355,12 @@ impl AudioProcessing {
                 .await
                 .and_then(|request| request.response());
             let _ = this.update(cx, |this, cx| {
-                if this.graph_ui.chooser_generation != chooser_generation {
+                if this.chooser_generation != chooser_generation {
                     cx.notify();
                     return;
                 }
-                this.graph_ui.choosing_path = None;
-                if !this.graph_ui.panel_inputs.contains_key(&panel) {
+                this.choosing_path = None;
+                if !this.panel_inputs.contains_key(&panel) {
                     cx.notify();
                     return;
                 }
@@ -370,7 +371,7 @@ impl AudioProcessing {
                             .get(&key)
                             .map(|field| field.input.read(cx).text());
                         let current_generation = this
-                            .graph_ui
+                            .graph_editor
                             .draft_stamps
                             .get(&key)
                             .map_or(0, |stamp| stamp.generation);
@@ -386,7 +387,7 @@ impl AudioProcessing {
                             match path.into_os_string().into_string() {
                                 Ok(path) => this.stage_graph_text(key, path, cx),
                                 Err(_) => {
-                                    this.graph_ui.field_errors.insert(
+                                    this.graph_editor.field_errors.insert(
                                         key,
                                         this.tr("processing-result-path-encoding").to_string(),
                                     );
@@ -396,7 +397,9 @@ impl AudioProcessing {
                     }
                     Ok(None) => {}
                     Err(error) => {
-                        this.graph_ui.field_errors.insert(key, error.to_string());
+                        this.graph_editor
+                            .field_errors
+                            .insert(key, error.to_string());
                     }
                 }
                 cx.notify();
@@ -449,7 +452,7 @@ impl AudioProcessing {
             )
             .into_any_element()
         } else {
-            let input = self.graph_panel_input(panel, key, &label, cx);
+            let input = self.panel_input(panel, key, &label, cx);
             let mut editor = row()
                 .id(SharedString::from(format!(
                     "graph-path-help-{panel}-{key:?}"
@@ -478,7 +481,7 @@ impl AudioProcessing {
                         cx,
                         move |this, _, cx| this.choose_graph_path(panel, key, cx),
                     ),
-                    self.graph_ui.choosing_path.is_some(),
+                    self.choosing_path.is_some(),
                 ));
             }
             editor.into_any_element()
@@ -495,7 +498,7 @@ impl AudioProcessing {
             .self_start(),
             self.graph_busy() || !dirty,
         ));
-        if let Some(error) = self.graph_ui.field_errors.get(&key) {
+        if let Some(error) = self.graph_editor.field_errors.get(&key) {
             field = field.error(error.clone());
         }
         field.into_div()
@@ -515,7 +518,7 @@ impl AudioProcessing {
             .processing_graph
             .nodes
             .iter()
-            .find(|node| Some(node.id) == self.graph_ui.selected)
+            .find(|node| Some(node.id) == self.graph_editor.selected)
             .cloned()
         else {
             self.deactivate_equalizer_panel(panel, window, cx);
@@ -719,7 +722,7 @@ impl AudioProcessing {
             node.kind,
             GraphNodeKind::Speech { .. } | GraphNodeKind::Separate { .. }
         );
-        let expanded = self.graph_ui.expanded_backends.contains(&id);
+        let expanded = self.graph_editor.expanded_backends.contains(&id);
         if neural {
             content = content.child(caption(theme, self.tr("processing-fields-active")));
         }
@@ -738,8 +741,8 @@ impl AudioProcessing {
                         }),
                         cx,
                         move |this, _, cx| {
-                            if !this.graph_ui.expanded_backends.remove(&id) {
-                                this.graph_ui.expanded_backends.insert(id);
+                            if !this.graph_editor.expanded_backends.remove(&id) {
+                                this.graph_editor.expanded_backends.insert(id);
                             }
                             cx.notify();
                         },
@@ -789,11 +792,11 @@ impl AudioProcessing {
                         }),
                         cx,
                         move |this, _, cx| {
-                            this.graph_ui.target_port = port as u16;
+                            this.graph_editor.target_port = port as u16;
                             cx.notify();
                         },
                     )
-                    .when(self.graph_ui.target_port == port as u16, |view| {
+                    .when(self.graph_editor.target_port == port as u16, |view| {
                         view.bg(rgb(theme.selected))
                     }),
                 );

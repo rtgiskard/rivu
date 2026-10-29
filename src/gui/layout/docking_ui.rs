@@ -1,5 +1,5 @@
-use super::super::*;
 use super::{Layout, docking, layout_geometry};
+use crate::gui::window::*;
 
 fn panel_group(node: &Node, panel: u64) -> Option<(u64, usize)> {
     match node {
@@ -50,7 +50,7 @@ fn docking_candidate(
         })
 }
 
-impl GuiApp {
+impl WindowView {
     pub(in crate::gui) fn panel_docking_blocked(&self) -> bool {
         self.workspace.layouts.current().locked
             || self.shell.is_open(shell::Surface::Settings)
@@ -72,7 +72,7 @@ impl GuiApp {
         self.synchronize_interaction(window, cx);
         let cancellation = self.workspace.interaction.start_docking(
             source,
-            DockGeometry::current(window, self.state.system.config.ui_scale),
+            WindowGeometry::current(window, self.state.system.config.ui_scale),
         );
         self.apply_interaction_cancellation(cancellation, cx);
     }
@@ -105,7 +105,7 @@ impl GuiApp {
         let Some(mut session) = self.workspace.interaction.take_docking() else {
             return;
         };
-        let geometry = DockGeometry::current(window, self.state.system.config.ui_scale);
+        let geometry = WindowGeometry::current(window, self.state.system.config.ui_scale);
         if session.geometry != geometry
             || self.workspace.interaction.measured_geometry() != Some(geometry)
         {

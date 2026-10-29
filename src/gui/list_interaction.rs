@@ -1,4 +1,5 @@
-use super::*;
+use crate::gui::window::*;
+use anyhow::Result;
 use rivu_protocol::response::ViewResponse;
 use rivu_ui::{POPOVER_MAX_REMS, Popover, caption, menu_item};
 
@@ -141,7 +142,7 @@ pub(super) enum ContentGuard {
 }
 
 impl ContentGuard {
-    fn current(&self, app: &GuiApp) -> bool {
+    fn current(&self, app: &WindowView) -> bool {
         match *self {
             Self::None => true,
             Self::Library(library, structure) => {
@@ -280,14 +281,14 @@ enum ContentAction {
 
 struct CollectionRead {
     worker: u64,
-    ticket: crate::core::QueryTicket,
+    ticket: crate::query_tracking::QueryTicket,
 }
 
 // Only one collection worker may run at a time. Cancellation retires its read
 // identity, not its physical gate; only that worker's completion releases it.
 #[derive(Default)]
 pub(super) struct CollectionResolution {
-    epoch: crate::core::QueryEpoch,
+    epoch: crate::query_tracking::QueryEpoch,
     worker: Option<u64>,
 }
 
@@ -331,9 +332,9 @@ impl CollectionResolution {
 }
 
 async fn query_collection_page<F: Future<Output = rivu_protocol::response::QueryResponse>>(
-    query_page: &mut impl FnMut(Query, crate::core::QueryTicket) -> F,
+    query_page: &mut impl FnMut(Query, crate::query_tracking::QueryTicket) -> F,
     query: Query,
-    ticket: &crate::core::QueryTicket,
+    ticket: &crate::query_tracking::QueryTicket,
 ) -> Result<rivu_protocol::response::QueryResponse> {
     anyhow::ensure!(
         ticket.is_current(),
@@ -349,10 +350,10 @@ async fn query_collection_page<F: Future<Output = rivu_protocol::response::Query
 
 // Each request is bounded; no subset is published before the complete collection succeeds.
 async fn resolve_album<F: Future<Output = rivu_protocol::response::QueryResponse>>(
-    mut query_page: impl FnMut(Query, crate::core::QueryTicket) -> F,
+    mut query_page: impl FnMut(Query, crate::query_tracking::QueryTicket) -> F,
     key: rivu_protocol::model::AlbumKey,
     expected: rivu_protocol::model::QueryStamp,
-    ticket: &crate::core::QueryTicket,
+    ticket: &crate::query_tracking::QueryTicket,
 ) -> Result<Vec<i64>> {
     let mut ids = Vec::new();
     let mut total = None;
@@ -399,7 +400,7 @@ fn valid_page(offset: usize, rows: usize, total: usize) -> bool {
         && (rows > 0 || offset == total)
 }
 
-impl GuiApp {
+impl WindowView {
     fn begin_content_resolution(&mut self, cx: &mut Context<Self>) -> Option<CollectionRead> {
         let Some(read) = self.content_resolution.begin() else {
             self.error = Some(self.i18n.text("li-source-busy").to_owned());
@@ -1192,7 +1193,7 @@ impl GuiApp {
     }
 }
 
-impl GuiApp {
+impl WindowView {
     pub(super) fn append_playlist_to_queue(&mut self, playlist_id: i64, cx: &mut Context<Self>) {
         self.refresh(cx);
         let Some(revision) = self
@@ -1217,7 +1218,7 @@ impl GuiApp {
 #[cfg(test)]
 mod tests {
     use super::{CollectionResolution, ContentDrag, TrackSource, resolve_album, valid_page};
-    use crate::core::QueryEpoch;
+    use crate::query_tracking::QueryEpoch;
     use rivu_protocol::{
         model::Query,
         response::{QueryError, QueryRevisions, ViewResponse},

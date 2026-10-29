@@ -1,6 +1,6 @@
 //! One window-local native frame gate for artwork and audio visualization.
 
-use super::{album_artwork::AlbumArtwork, presentation::Presentation};
+use super::{album_artwork::AlbumArtwork, visualization::runtime::VisualizerRuntime};
 use gpui::{App, Context, Entity, Task, WeakEntity, Window};
 use std::time::{Duration, Instant};
 
@@ -62,7 +62,7 @@ fn deadline(epoch: Instant, now: Instant, fps: u16, delivered: Option<Instant>) 
 pub(super) struct AnimationFrames {
     epoch: Instant,
     artwork: Slot<AlbumArtwork>,
-    presentation: Slot<Presentation>,
+    presentation: Slot<VisualizerRuntime>,
     timer: Option<Task<()>>,
     timer_deadline: Option<Instant>,
     native_pending: bool,
@@ -97,7 +97,7 @@ impl AnimationFrames {
 
     pub(super) fn request_presentation(
         &mut self,
-        owner: WeakEntity<Presentation>,
+        owner: WeakEntity<VisualizerRuntime>,
         generation: u64,
         fps: u16,
         window: &mut Window,

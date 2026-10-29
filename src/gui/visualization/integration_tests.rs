@@ -1,6 +1,6 @@
 use super::*;
 use crate::config::{Config, ConfigPersistence};
-use crate::gui::layout::interaction::{DragCommit, LayoutInteraction, SeekCommit};
+use crate::gui::interaction::{DragCommit, SeekCommit, WindowInteraction};
 use gpui::{AppContext, Bounds, Context, point, px, size};
 use rivu_audio::WaveformFrame;
 use rivu_format::decoder_hint::DecoderHint;
@@ -64,10 +64,10 @@ fn track(path: &str, decoder_hint: DecoderHint) -> Track {
     }
 }
 
-fn captured_seek() -> (Waveform, LayoutInteraction) {
+fn captured_seek() -> (Waveform, WindowInteraction) {
     let mut waveform = Waveform::test_preview(WaveformFrame::default());
     waveform.test_capture_seek(7);
-    let mut owner = LayoutInteraction::default();
+    let mut owner = WindowInteraction::default();
     owner.waveform_preview(10., Some(11), 7);
     (waveform, owner)
 }
@@ -154,7 +154,7 @@ fn normal_release_keeps_queued_seek_but_missing_release_is_cancelled() {
 
 #[gpui::test]
 fn presentation_hiding_retains_pending_and_completed_full_previews(cx: &mut gpui::TestAppContext) {
-    use crate::gui::presentation::{Presentation, PresentationState};
+    use crate::gui::visualization::runtime::{VisualizerInputs, VisualizerRuntime};
 
     let directory = tempfile::tempdir().unwrap();
     let config_path = directory.path().join("config.toml");
@@ -166,14 +166,14 @@ fn presentation_hiding_retains_pending_and_completed_full_previews(cx: &mut gpui
     }
     .save(&config_path)
     .unwrap();
-    let runtime = crate::core::Runtime::start(directory.path(), &config_path).unwrap();
+    let runtime = crate::core::CoreRuntime::start(directory.path(), &config_path).unwrap();
     let config = runtime.handle.config_snapshot();
     let window = cx.add_empty_window();
     let waveform =
         window.update(|_, cx| cx.new(|_| Waveform::test_preview(frame(vec![Some(0.25), None]))));
     let owner = window.update(|_, cx| {
         cx.new(|cx| {
-            Presentation::new(
+            VisualizerRuntime::new(
                 runtime.handle.clone(),
                 Arc::new(Localizer::new("en-US")),
                 waveform.clone(),
@@ -200,14 +200,14 @@ fn presentation_hiding_retains_pending_and_completed_full_previews(cx: &mut gpui
     );
     let mut panels = crate::gui::workspace::WorkspacePanels::default();
     window.update(|_window, cx| {
-        let mut sync = |owner: &mut Presentation,
+        let mut sync = |owner: &mut VisualizerRuntime,
                         config: Arc<Config>,
                         visible,
                         has_panel,
-                        cx: &mut Context<Presentation>| {
+                        cx: &mut Context<VisualizerRuntime>| {
             panels.reconcile(if has_panel { &layout } else { &empty_layout });
             owner.sync(
-                PresentationState {
+                VisualizerInputs {
                     config,
                     panels: &panels,
                     status: rivu_protocol::model::PlaybackStatus::Paused,
@@ -279,7 +279,7 @@ fn full_query_identity_distinguishes_content_but_preserves_metadata_edits() {
     ] {
         let mut original = track("track.flac", DecoderHint::Auto);
         original.fingerprint = before.map(str::to_owned);
-        let mut query = crate::gui::FullWaveformRequest::default();
+        let mut query = super::full_waveform::FullWaveformRequest::default();
         let generation = query.begin(&original);
         let mut replaced = original.clone();
         replaced.fingerprint = after.map(str::to_owned);
@@ -289,7 +289,7 @@ fn full_query_identity_distinguishes_content_but_preserves_metadata_edits() {
     }
     let mut original = track("track.flac", DecoderHint::Auto);
     original.fingerprint = Some("same-content".into());
-    let mut query = crate::gui::FullWaveformRequest::default();
+    let mut query = super::full_waveform::FullWaveformRequest::default();
     let generation = query.begin(&original);
     let mut edited = original.clone();
     edited.title = "renamed".into();

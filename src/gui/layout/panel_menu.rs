@@ -1,6 +1,6 @@
 //! Panel catalog and context-menu presentation, options, and layout actions.
 
-use super::super::*;
+use crate::gui::window::*;
 use rivu_ui::{
     Popover, caption, checked_menu_item, column, menu_item, row, surface::MenuIndicator,
 };
@@ -22,7 +22,7 @@ pub(in crate::gui) struct PanelMenu {
     pub(in crate::gui) page: PanelMenuPage,
 }
 
-impl GuiApp {
+impl WindowView {
     fn update_visualizer_options(
         &mut self,
         panel_id: u64,

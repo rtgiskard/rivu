@@ -2,9 +2,9 @@
 //! Business state arrives through `sync`; the animation clock never reads or
 //! refreshes the application root. Panel entities are the only redraw targets.
 
-use super::{animation_frames::AnimationFrames, layout, visualization};
 #[cfg(test)]
 use crate::config::ConfigPersistence;
+use crate::gui::{animation_frames::AnimationFrames, layout, visualization};
 use crate::{
     config::{AudioVisualizerOptions, AudioVisualizerStyle, Config},
     core::CoreHandle,
@@ -49,18 +49,18 @@ impl PanelKind {
     }
 }
 
-pub(super) struct PresentationState<'a> {
-    pub(super) config: Arc<Config>,
-    pub(super) panels: &'a super::workspace::WorkspacePanels,
-    pub(super) status: PlaybackStatus,
-    pub(super) source_generation: u64,
-    pub(super) seek_revision: u64,
-    pub(super) visible: bool,
-    pub(super) shutting_down: bool,
-    pub(super) current_track_id: Option<i64>,
-    pub(super) waveform_track: Option<&'a Track>,
-    pub(super) position: f64,
-    pub(super) duration: Option<f64>,
+pub(in crate::gui) struct VisualizerInputs<'a> {
+    pub(in crate::gui) config: Arc<Config>,
+    pub(in crate::gui) panels: &'a crate::gui::workspace::WorkspacePanels,
+    pub(in crate::gui) status: PlaybackStatus,
+    pub(in crate::gui) source_generation: u64,
+    pub(in crate::gui) seek_revision: u64,
+    pub(in crate::gui) visible: bool,
+    pub(in crate::gui) shutting_down: bool,
+    pub(in crate::gui) current_track_id: Option<i64>,
+    pub(in crate::gui) waveform_track: Option<&'a Track>,
+    pub(in crate::gui) position: f64,
+    pub(in crate::gui) duration: Option<f64>,
 }
 
 /// Display time consumes accepted audio time at wall-clock speed, never inventing
@@ -108,7 +108,7 @@ impl AnimationClock {
     }
 }
 
-pub(super) struct Presentation {
+pub(in crate::gui) struct VisualizerRuntime {
     handle: CoreHandle,
     labels: Arc<visualization::VisualLabels>,
     parameters: visualization::VisualParameters,
@@ -118,7 +118,7 @@ pub(super) struct Presentation {
     waveform: Entity<visualization::Waveform>,
     panels: HashMap<u64, PanelKind>,
     layout_panels: HashMap<u64, PanelKind>,
-    views: HashMap<u64, Entity<PresentationPanel>>,
+    views: HashMap<u64, Entity<VisualizerPanel>>,
     panel_revision: u64,
     demand: DisplayDemand,
     sequence: u64,
@@ -142,8 +142,8 @@ pub(super) struct Presentation {
     _waveform_subscription: Subscription,
 }
 
-impl Presentation {
-    pub(super) fn new(
+impl VisualizerRuntime {
+    pub(in crate::gui) fn new(
         handle: CoreHandle,
         i18n: Arc<Localizer>,
         waveform: Entity<visualization::Waveform>,
@@ -189,8 +189,8 @@ impl Presentation {
         }
     }
 
-    pub(super) fn sync(&mut self, state: PresentationState<'_>, cx: &mut Context<Self>) {
-        let PresentationState {
+    pub(in crate::gui) fn sync(&mut self, state: VisualizerInputs<'_>, cx: &mut Context<Self>) {
+        let VisualizerInputs {
             config,
             panels,
             status,
@@ -464,7 +464,7 @@ impl Presentation {
         }));
     }
 
-    pub(super) fn request_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(in crate::gui) fn request_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.active()
             || !self.demand.enabled
             || (!self.frame_requested
@@ -488,7 +488,7 @@ impl Presentation {
         });
     }
 
-    pub(super) fn animation_frame(
+    pub(in crate::gui) fn animation_frame(
         &mut self,
         generation: u64,
         now: Instant,
@@ -592,12 +592,16 @@ impl Presentation {
         }
     }
 
-    pub(super) fn panel(&mut self, id: u64, cx: &mut Context<Self>) -> Entity<PresentationPanel> {
+    pub(in crate::gui) fn panel(
+        &mut self,
+        id: u64,
+        cx: &mut Context<Self>,
+    ) -> Entity<VisualizerPanel> {
         self.views
             .entry(id)
             .or_insert_with(|| {
                 let owner = cx.weak_entity();
-                cx.new(|_| PresentationPanel { owner, id })
+                cx.new(|_| VisualizerPanel { owner, id })
             })
             .clone()
     }
@@ -642,7 +646,7 @@ impl Presentation {
     }
 
     /// Called by the shell's first paint, after every panel's prepaint.
-    pub(super) fn finish_paint(&self, cx: &mut Context<Self>) {
+    pub(in crate::gui) fn finish_paint(&self, cx: &mut Context<Self>) {
         if self.frequency_views.finish_prepaint() {
             // A resized panel can alter history shared by cached siblings.
             // Repaint siblings to reflect the shared history extent.
@@ -655,7 +659,7 @@ impl Presentation {
     }
 
     /// Destroy the window-local presentation; temporary hide goes through sync.
-    pub(super) fn release_display_resources(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::gui) fn release_display_resources(&mut self, cx: &mut Context<Self>) {
         self.visible = false;
         self.cancel_clock(cx);
         self.demand = DisplayDemand::default();
@@ -676,18 +680,18 @@ impl Presentation {
     }
 }
 
-impl Drop for Presentation {
+impl Drop for VisualizerRuntime {
     fn drop(&mut self) {
         self.handle.set_display_demand(DisplayDemand::default());
     }
 }
 
-pub(super) struct PresentationPanel {
-    owner: WeakEntity<Presentation>,
+pub(in crate::gui) struct VisualizerPanel {
+    owner: WeakEntity<VisualizerRuntime>,
     id: u64,
 }
 
-impl Render for PresentationPanel {
+impl Render for VisualizerPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.owner
             .update(cx, |owner, cx| owner.render_panel(self.id, cx))
@@ -695,7 +699,7 @@ impl Render for PresentationPanel {
     }
 }
 
-pub(super) fn retain_analysis_staging(frame: &mut AnalysisFrame, demand: DisplayDemand) {
+pub(in crate::gui) fn retain_analysis_staging(frame: &mut AnalysisFrame, demand: DisplayDemand) {
     if !demand.enabled {
         *frame = AnalysisFrame::default();
         return;
@@ -724,7 +728,7 @@ pub(super) fn retain_analysis_staging(frame: &mut AnalysisFrame, demand: Display
     }
 }
 
-pub(super) fn stage_analysis_frame(
+pub(in crate::gui) fn stage_analysis_frame(
     staging: &mut AnalysisFrame,
     sequence: &mut u64,
     needs_refresh: bool,
@@ -763,10 +767,10 @@ pub(super) fn stage_analysis_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::Runtime;
+    use crate::core::CoreRuntime;
 
-    fn demand(layout: &layout::Layout) -> super::super::workspace::WorkspacePanels {
-        let mut panels = super::super::workspace::WorkspacePanels::default();
+    fn demand(layout: &layout::Layout) -> crate::gui::workspace::WorkspacePanels {
+        let mut panels = crate::gui::workspace::WorkspacePanels::default();
         panels.reconcile(layout);
         panels
     }
@@ -929,12 +933,12 @@ mod tests {
         }
         .save(&config_path)
         .unwrap();
-        let runtime = Runtime::start(directory.path(), &config_path).unwrap();
+        let runtime = CoreRuntime::start(directory.path(), &config_path).unwrap();
         let config = runtime.handle.config_snapshot();
         let waveform =
             cx.new(|_| visualization::Waveform::new(Arc::clone(&runtime.handle.waveform)));
         let owner = cx.new(|cx| {
-            Presentation::new(
+            VisualizerRuntime::new(
                 runtime.handle.clone(),
                 Arc::new(Localizer::new("en-US")),
                 waveform,
@@ -1006,7 +1010,7 @@ mod tests {
         let mut panels = demand(&layout);
         owner.update(cx, |owner, cx| {
             owner.sync(
-                PresentationState {
+                VisualizerInputs {
                     config: Arc::clone(&config),
                     panels: &panels,
                     status: PlaybackStatus::Playing,
@@ -1037,7 +1041,7 @@ mod tests {
             assert!(layout.activate(9));
             panels.reconcile(&layout);
             owner.sync(
-                PresentationState {
+                VisualizerInputs {
                     config: Arc::clone(&config),
                     panels: &panels,
                     status: PlaybackStatus::Playing,
@@ -1071,7 +1075,7 @@ mod tests {
                 [(1.0, 0, 0), (2.0, 0, 1), (3.0, 1, 1)]
             {
                 owner.sync(
-                    PresentationState {
+                    VisualizerInputs {
                         config: Arc::clone(&config),
                         panels: &panels,
                         status: PlaybackStatus::Playing,
@@ -1103,7 +1107,7 @@ mod tests {
             ));
             panels.reconcile(&layout);
             owner.sync(
-                PresentationState {
+                VisualizerInputs {
                     config: Arc::clone(&config),
                     panels: &panels,
                     status: PlaybackStatus::Playing,
@@ -1138,11 +1142,11 @@ mod tests {
             ..Config::default()
         };
         config.save(&config_path).unwrap();
-        let runtime = Runtime::start(directory.path(), &config_path).unwrap();
+        let runtime = CoreRuntime::start(directory.path(), &config_path).unwrap();
         let waveform =
             cx.new(|_| visualization::Waveform::new(Arc::clone(&runtime.handle.waveform)));
         let owner = cx.new(|cx| {
-            Presentation::new(
+            VisualizerRuntime::new(
                 runtime.handle.clone(),
                 Arc::new(Localizer::new("en-US")),
                 waveform,
@@ -1174,7 +1178,7 @@ mod tests {
             };
             let panels = demand(&layout);
             owner.sync(
-                PresentationState {
+                VisualizerInputs {
                     config: Arc::clone(&owner.config),
                     panels: &panels,
                     status: PlaybackStatus::Paused,
@@ -1228,7 +1232,7 @@ mod tests {
             ..Config::default()
         };
         config.save(&config_path).unwrap();
-        let runtime = Runtime::start(directory.path(), &config_path).unwrap();
+        let runtime = CoreRuntime::start(directory.path(), &config_path).unwrap();
         let config = Arc::new(config);
         let mut layout = layout::Layout {
             root: None,
@@ -1248,7 +1252,7 @@ mod tests {
         let waveform =
             cx.new(|_| visualization::Waveform::new(Arc::clone(&runtime.handle.waveform)));
         let owner = cx.new(|cx| {
-            Presentation::new(
+            VisualizerRuntime::new(
                 runtime.handle.clone(),
                 Arc::new(Localizer::new("en-US")),
                 waveform,
@@ -1269,7 +1273,7 @@ mod tests {
                     changed.still_mode = true;
                 }
                 owner.sync(
-                    PresentationState {
+                    VisualizerInputs {
                         config: Arc::new(changed),
                         panels: &panels,
                         status: PlaybackStatus::Paused,
@@ -1290,7 +1294,7 @@ mod tests {
                 assert_eq!(owner.demand, DisplayDemand::default());
             }
         });
-        let state = |seek_revision| PresentationState {
+        let state = |seek_revision| VisualizerInputs {
             config: Arc::clone(&config),
             panels: &panels,
             status: PlaybackStatus::Paused,
@@ -1339,14 +1343,14 @@ mod tests {
         }
         .save(&config_path)
         .unwrap();
-        let runtime = Runtime::start(directory.path(), &config_path).unwrap();
+        let runtime = CoreRuntime::start(directory.path(), &config_path).unwrap();
         let config = runtime.handle.config_snapshot();
         let window = cx.add_empty_window();
         let owner = window.update(|_, cx| {
             let waveform =
                 cx.new(|_| visualization::Waveform::new(Arc::clone(&runtime.handle.waveform)));
             cx.new(|cx| {
-                Presentation::new(
+                VisualizerRuntime::new(
                     runtime.handle.clone(),
                     Arc::new(Localizer::new("en-US")),
                     waveform,
@@ -1384,7 +1388,7 @@ mod tests {
         window.update(|window, cx| {
             owner.update(cx, |owner, cx| {
                 owner.sync(
-                    PresentationState {
+                    VisualizerInputs {
                         config: Arc::clone(&config),
                         panels: &panels,
                         status: PlaybackStatus::Paused,
@@ -1413,7 +1417,7 @@ mod tests {
                 assert_eq!(owner.frame_generation, generation);
                 assert!(owner.analysis_timer.is_none());
                 owner.sync(
-                    PresentationState {
+                    VisualizerInputs {
                         config: Arc::clone(&config),
                         panels: &panels,
                         status: PlaybackStatus::Paused,
@@ -1440,7 +1444,7 @@ mod tests {
             owner.update(cx, |owner, cx| {
                 assert!(!owner.frame_pending);
                 owner.sync(
-                    PresentationState {
+                    VisualizerInputs {
                         config: Arc::clone(&config),
                         panels: &panels,
                         status: PlaybackStatus::Paused,
@@ -1467,7 +1471,7 @@ mod tests {
                     "paused paints must not start another clock"
                 );
                 owner.sync(
-                    PresentationState {
+                    VisualizerInputs {
                         config: Arc::clone(&config),
                         panels: &panels,
                         status: PlaybackStatus::Playing,
@@ -1494,7 +1498,7 @@ mod tests {
                 let mut capped = config.as_ref().clone();
                 capped.visualization_fps = 1;
                 owner.sync(
-                    PresentationState {
+                    VisualizerInputs {
                         config: Arc::new(capped),
                         panels: &panels,
                         status: PlaybackStatus::Playing,
@@ -1527,7 +1531,7 @@ mod tests {
                 let mut still = config.as_ref().clone();
                 still.still_mode = true;
                 owner.sync(
-                    PresentationState {
+                    VisualizerInputs {
                         config: Arc::new(still),
                         panels: &panels,
                         status: PlaybackStatus::Playing,
@@ -1548,7 +1552,7 @@ mod tests {
                 assert!(owner.analysis_interval().is_none());
                 assert_eq!(owner.staging.settings, None);
                 owner.sync(
-                    PresentationState {
+                    VisualizerInputs {
                         config: Arc::clone(&config),
                         panels: &panels,
                         status: PlaybackStatus::Playing,
@@ -1565,7 +1569,7 @@ mod tests {
                 );
                 assert!(owner.demand.enabled);
                 owner.sync(
-                    PresentationState {
+                    VisualizerInputs {
                         config: Arc::clone(&config),
                         panels: &panels,
                         status: PlaybackStatus::Playing,
@@ -1584,7 +1588,7 @@ mod tests {
                 assert!(owner.analysis_timer.is_none());
                 panels.reconcile(&empty_layout);
                 owner.sync(
-                    PresentationState {
+                    VisualizerInputs {
                         config: Arc::clone(&config),
                         panels: &panels,
                         status: PlaybackStatus::Stopped,
@@ -1603,7 +1607,7 @@ mod tests {
                 assert!(layout.activate(waveform_id));
                 panels.reconcile(&layout);
                 owner.sync(
-                    PresentationState {
+                    VisualizerInputs {
                         config: Arc::clone(&config),
                         panels: &panels,
                         status: PlaybackStatus::Paused,
@@ -1625,7 +1629,7 @@ mod tests {
                 ));
                 assert!(!owner.demand.enabled);
                 owner.sync(
-                    PresentationState {
+                    VisualizerInputs {
                         config: Arc::clone(&config),
                         panels: &panels,
                         status: PlaybackStatus::Paused,
@@ -1649,7 +1653,7 @@ mod tests {
                 panels.reconcile(&layout);
                 let generation = owner.frame_generation;
                 owner.sync(
-                    PresentationState {
+                    VisualizerInputs {
                         config: Arc::clone(&config),
                         panels: &panels,
                         status: PlaybackStatus::Paused,
@@ -1689,7 +1693,7 @@ mod tests {
         }
         .save(&config_path)
         .unwrap();
-        let runtime = Runtime::start(directory.path(), &config_path).unwrap();
+        let runtime = CoreRuntime::start(directory.path(), &config_path).unwrap();
         let config = runtime.handle.config_snapshot();
         let mut layout = layout::Layout {
             root: None,
@@ -1701,7 +1705,7 @@ mod tests {
         let waveform =
             cx.new(|_| visualization::Waveform::new(Arc::clone(&runtime.handle.waveform)));
         let owner = cx.new(|cx| {
-            Presentation::new(
+            VisualizerRuntime::new(
                 runtime.handle.clone(),
                 Arc::new(Localizer::new("en-US")),
                 waveform,
@@ -1711,7 +1715,7 @@ mod tests {
         });
         let before = runtime.handle.gui_snapshot();
         let track = crate::artwork::tests::track(directory.path().join("track.wav"));
-        let state = |status, source_generation, seek_revision| PresentationState {
+        let state = |status, source_generation, seek_revision| VisualizerInputs {
             config: Arc::clone(&config),
             panels: &panels,
             status,
@@ -1806,7 +1810,7 @@ mod tests {
         }
         .save(&config_path)
         .unwrap();
-        let runtime = Runtime::start(directory.path(), &config_path).unwrap();
+        let runtime = CoreRuntime::start(directory.path(), &config_path).unwrap();
         let config = runtime.handle.config_snapshot();
         let mut layout = layout::Layout {
             root: None,
@@ -1822,7 +1826,7 @@ mod tests {
             let waveform =
                 cx.new(|_| visualization::Waveform::new(Arc::clone(&runtime.handle.waveform)));
             let owner = cx.new(|cx| {
-                Presentation::new(
+                VisualizerRuntime::new(
                     runtime.handle.clone(),
                     Arc::new(Localizer::new("en-US")),
                     waveform,
@@ -1830,7 +1834,7 @@ mod tests {
                     cx,
                 )
             });
-            let mut state = PresentationState {
+            let mut state = VisualizerInputs {
                 config: Arc::clone(&config),
                 panels: &panels,
                 status: PlaybackStatus::Playing,
@@ -1845,7 +1849,7 @@ mod tests {
             };
             owner.update(cx, |owner, cx| {
                 owner.sync(
-                    PresentationState {
+                    VisualizerInputs {
                         config: Arc::clone(&state.config),
                         ..state
                     },
@@ -1873,7 +1877,7 @@ mod tests {
                     state.current_track_id = state.waveform_track.map(|track| track.id);
                 }
                 owner.sync(
-                    PresentationState {
+                    VisualizerInputs {
                         config: Arc::clone(&state.config),
                         ..state
                     },
@@ -1919,7 +1923,7 @@ mod tests {
         }
         .save(&config_path)
         .unwrap();
-        let runtime = Runtime::start(directory.path(), &config_path).unwrap();
+        let runtime = CoreRuntime::start(directory.path(), &config_path).unwrap();
         let config = runtime.handle.config_snapshot();
         let mut layout = layout::Layout {
             root: None,
@@ -1985,7 +1989,7 @@ mod tests {
             let waveform =
                 cx.new(|_| visualization::Waveform::new(Arc::clone(&runtime.handle.waveform)));
             let owner = cx.new(|cx| {
-                Presentation::new(
+                VisualizerRuntime::new(
                     runtime.handle.clone(),
                     Arc::new(Localizer::new("en-US")),
                     waveform,
@@ -1995,7 +1999,7 @@ mod tests {
             });
             owner.update(cx, |owner, cx| {
                 let state = |status, current_track_id, source_generation, seek_revision| {
-                    PresentationState {
+                    VisualizerInputs {
                         config: Arc::clone(&config),
                         panels: &panels,
                         status,

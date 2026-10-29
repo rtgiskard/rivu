@@ -20,10 +20,10 @@ use gpui::{
 mod decode;
 
 #[derive(Default)]
-struct ArtworkImagesState {
+struct ArtworkImageRegistryState {
     budget: decode::Budget,
-    entries: HashMap<(Arc<Path>, usize), Weak<ArtworkImageOwner>>,
-    decorations: [Weak<DecorationImageOwner>; 6],
+    entries: HashMap<(Arc<Path>, usize), Weak<ArtworkImageLease>>,
+    decorations: [Weak<DecorationImageLease>; 6],
     retired: Vec<RetiredArtworkImage>,
     pending_retired: Option<Vec<RetiredArtworkImage>>,
     retirement_generation: u64,
@@ -33,13 +33,13 @@ struct ArtworkImagesState {
 /// Shared by one window, never by the application session. Weak entries are
 /// removed with their last consumer instead of retaining an idle decode cache.
 #[derive(Clone, Default)]
-pub(super) struct ArtworkImages(Rc<RefCell<ArtworkImagesState>>);
+pub(super) struct ArtworkImageRegistry(Rc<RefCell<ArtworkImageRegistryState>>);
 
-impl ArtworkImages {
+impl ArtworkImageRegistry {
     pub(super) fn new(retained_mb: u32) -> Self {
-        Self(Rc::new(RefCell::new(ArtworkImagesState {
+        Self(Rc::new(RefCell::new(ArtworkImageRegistryState {
             budget: decode::Budget::new(retained_mb),
-            ..ArtworkImagesState::default()
+            ..ArtworkImageRegistryState::default()
         })))
     }
 
@@ -53,7 +53,7 @@ impl ArtworkImages {
             return false;
         }
         state.budget = budget;
-        let ArtworkImagesState {
+        let ArtworkImageRegistryState {
             entries, retired, ..
         } = &mut *state;
         for owner in entries.values().filter_map(Weak::upgrade) {
@@ -85,7 +85,7 @@ impl ArtworkImages {
         true
     }
 
-    fn acquire(&self, artwork: LoadedArtwork, cx: &mut App) -> Rc<ArtworkImageOwner> {
+    fn acquire(&self, artwork: LoadedArtwork, cx: &mut App) -> Rc<ArtworkImageLease> {
         let key = (artwork.path(), artwork.max_image_bytes());
         let budget = {
             let state = self.0.borrow();
@@ -94,7 +94,7 @@ impl ArtworkImages {
             }
             state.budget
         };
-        let owner = Rc::new(ArtworkImageOwner {
+        let owner = Rc::new(ArtworkImageLease {
             image: ArtworkImage::new(artwork, budget, Rc::downgrade(&self.0), cx),
             registry: Rc::downgrade(&self.0),
             key: key.clone(),
@@ -125,7 +125,7 @@ impl ArtworkImages {
     ) -> ArtworkDecoration {
         let existing = self.0.borrow().decorations[index].upgrade();
         let owner = existing.unwrap_or_else(|| {
-            Rc::new(DecorationImageOwner {
+            Rc::new(DecorationImageLease {
                 image: DecorationImage::new(bytes, cx),
                 registry: Rc::downgrade(&self.0),
                 index,
@@ -187,7 +187,7 @@ impl ArtworkImages {
 enum RetiredArtworkImage {
     Artwork(ArtworkViewImage),
     Demand(Entity<ArtworkImage>, Vec<u64>),
-    Decoration(Rc<DecorationImageOwner>),
+    Decoration(Rc<DecorationImageLease>),
     Decoded(Arc<RenderImage>),
 }
 
@@ -211,8 +211,8 @@ impl RetiredArtworkImage {
 /// A visible style's consumer lease. Scenes hold only the local image entity,
 /// never this lease, so the root can retire the last consumer at a frame edge.
 pub(super) struct ArtworkDecoration {
-    owner: Rc<DecorationImageOwner>,
-    images: ArtworkImages,
+    owner: Rc<DecorationImageLease>,
+    images: ArtworkImageRegistry,
 }
 
 impl ArtworkDecoration {
@@ -236,13 +236,13 @@ impl ArtworkDecoration {
     }
 }
 
-struct DecorationImageOwner {
+struct DecorationImageLease {
     image: Entity<DecorationImage>,
-    registry: Weak<RefCell<ArtworkImagesState>>,
+    registry: Weak<RefCell<ArtworkImageRegistryState>>,
     index: usize,
 }
 
-impl DecorationImageOwner {
+impl DecorationImageLease {
     fn release(self: Rc<Self>, window: &mut Window, cx: &mut App) {
         if Rc::strong_count(&self) == 1 {
             self.image.update(cx, |image, cx| {
@@ -258,7 +258,7 @@ impl DecorationImageOwner {
     }
 }
 
-impl Drop for DecorationImageOwner {
+impl Drop for DecorationImageLease {
     fn drop(&mut self) {
         if let Some(registry) = self.registry.upgrade() {
             let mut registry = registry.borrow_mut();
@@ -355,13 +355,13 @@ impl DecorationImage {
 
 /// A consumer lease, deliberately separate from the ImageCache entity held by
 /// GPUI elements. Old scenes must not prevent the last consumer from unloading.
-struct ArtworkImageOwner {
+struct ArtworkImageLease {
     image: Entity<ArtworkImage>,
-    registry: Weak<RefCell<ArtworkImagesState>>,
+    registry: Weak<RefCell<ArtworkImageRegistryState>>,
     key: (Arc<Path>, usize),
 }
 
-impl ArtworkImageOwner {
+impl ArtworkImageLease {
     fn release(self: Rc<Self>, window: &mut Window, cx: &mut App) {
         if Rc::strong_count(&self) == 1 {
             self.image.update(cx, |image, cx| image.clear(window, cx));
@@ -369,7 +369,7 @@ impl ArtworkImageOwner {
     }
 }
 
-impl Drop for ArtworkImageOwner {
+impl Drop for ArtworkImageLease {
     fn drop(&mut self) {
         if let Some(registry) = self.registry.upgrade() {
             registry.borrow_mut().entries.remove(&self.key);
@@ -380,14 +380,14 @@ impl Drop for ArtworkImageOwner {
 #[derive(Clone)]
 pub(super) struct ArtworkView {
     state: Rc<RefCell<ArtworkViewState>>,
-    images: ArtworkImages,
+    images: ArtworkImageRegistry,
 }
 
 struct ArtworkViewImage {
     // Keep the exact lookup result and its file protection per consumer even
     // when another track's immutable content path shares the decoded image.
     artwork: LoadedArtwork,
-    owner: Rc<ArtworkImageOwner>,
+    owner: Rc<ArtworkImageLease>,
     consumers: HashMap<u64, u64>,
 }
 
@@ -429,7 +429,7 @@ impl ArtworkImageSizing {
 }
 
 impl ArtworkView {
-    pub(super) fn new(images: ArtworkImages) -> Self {
+    pub(super) fn new(images: ArtworkImageRegistry) -> Self {
         Self {
             state: Rc::default(),
             images,
@@ -601,7 +601,7 @@ struct ArtworkImage {
     generation: u64,
     replaced: Vec<ReplacedArtworkImage>,
     downgrade: Option<(u32, Task<()>)>,
-    registry: Weak<RefCell<ArtworkImagesState>>,
+    registry: Weak<RefCell<ArtworkImageRegistryState>>,
     released: bool,
 }
 
@@ -609,7 +609,7 @@ impl ArtworkImage {
     fn new(
         artwork: LoadedArtwork,
         budget: decode::Budget,
-        registry: Weak<RefCell<ArtworkImagesState>>,
+        registry: Weak<RefCell<ArtworkImageRegistryState>>,
         cx: &mut App,
     ) -> Entity<Self> {
         let image = cx.new(|_| Self {
@@ -1056,13 +1056,13 @@ impl DefaultArtworkCache {
 }
 
 /// Square/circular consumers share size-keyed immutable background assets.
-pub(super) struct Artwork {
+pub(super) struct DefaultArtwork {
     fallback: gpui::SharedString,
     cache: Entity<DefaultArtworkCache>,
     circular: bool,
 }
 
-impl Artwork {
+impl DefaultArtwork {
     pub(super) fn new(i18n: &crate::i18n::Localizer, cx: &mut App) -> Self {
         Self {
             fallback: i18n.text("artwork-unavailable").to_owned().into(),
@@ -1095,7 +1095,7 @@ impl Artwork {
     }
 }
 
-impl Render for Artwork {
+impl Render for DefaultArtwork {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = rivu_ui::theme::palette(cx);
         let cache = self.cache.clone();
@@ -1109,7 +1109,7 @@ impl Render for Artwork {
             .child(
                 canvas(
                     move |bounds, window, cx| {
-                        let artwork = Artwork {
+                        let artwork = DefaultArtwork {
                             fallback,
                             cache,
                             circular: false,
@@ -1215,7 +1215,7 @@ mod tests {
             first: Entity<Panel>,
             second: Entity<Panel>,
             side: Pixels,
-            images: ArtworkImages,
+            images: ArtworkImageRegistry,
         }
         impl Render for Root {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -1249,7 +1249,7 @@ mod tests {
             }
         }
         let (_directory, loaded) = loaded_cover(&static_cover(2048, 71));
-        let images = ArtworkImages::default();
+        let images = ArtworkImageRegistry::default();
         let view = ArtworkView::new(images.clone());
         let cache = cx.update(|cx| {
             view.replace(Some(loaded), cx);
@@ -1425,7 +1425,7 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         let (_directory, loaded) = loaded_cover(&static_cover(2048, 72));
-        let images = ArtworkImages::default();
+        let images = ArtworkImageRegistry::default();
         let view = ArtworkView::new(images.clone());
         let window = cx.add_empty_window();
         let cache = window.update(|_, cx| {
@@ -1519,7 +1519,7 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         let (_directory, loaded) = loaded_cover(&static_cover(2048, 73));
-        let images = ArtworkImages::default();
+        let images = ArtworkImageRegistry::default();
         let first = ArtworkView::new(images.clone());
         let second = ArtworkView::new(images.clone());
         let window = cx.add_empty_window();
@@ -1652,7 +1652,7 @@ mod tests {
             (decode::tests::gif(), true),
         ] {
             let (_directory, loaded) = loaded_cover(&bytes);
-            let images = ArtworkImages::default();
+            let images = ArtworkImageRegistry::default();
             let view = ArtworkView::new(images.clone());
             let window = cx.add_empty_window();
             let cache = window.update(|_, cx| {
@@ -1720,7 +1720,7 @@ mod tests {
         let lower = crate::artwork::ArtworkManager::new(directory.path())
             .with_max_image_bytes(8 * 1024 * 1024);
         assert!(lower.load(&track).is_none());
-        let images = ArtworkImages::new(2);
+        let images = ArtworkImageRegistry::new(2);
         let view = ArtworkView::new(images.clone());
         let window = cx.add_empty_window();
         let cache = window.update(|_, cx| {
@@ -1767,7 +1767,7 @@ mod tests {
         // Simulate an external cache-file change: the background reader must
         // still enforce each immutable session policy, including remembered errors.
         std::fs::write(admitted.path(), decode::tests::large_encoded_bmp()).unwrap();
-        let images = ArtworkImages::new(2);
+        let images = ArtworkImageRegistry::new(2);
         let rejected = ArtworkView::new(images.clone());
         let accepted = ArtworkView::new(images.clone());
         let window = cx.add_empty_window();
@@ -1851,7 +1851,7 @@ mod tests {
             cover_wave(&path, &gif);
             let manager = crate::artwork::ArtworkManager::new(directory.path());
             let loaded = manager.load(&crate::artwork::tests::track(path)).unwrap();
-            let images = ArtworkImages::default();
+            let images = ArtworkImageRegistry::default();
             let first = ArtworkView::new(images.clone());
             let second = ArtworkView::new(images.clone());
             let window = cx.add_empty_window();
@@ -1946,7 +1946,7 @@ mod tests {
         cover_wave(&path, &decode::tests::gif());
         let manager = crate::artwork::ArtworkManager::new(directory.path());
         let loaded = manager.load(&crate::artwork::tests::track(path)).unwrap();
-        let images = ArtworkImages::default();
+        let images = ArtworkImageRegistry::default();
         let first = ArtworkView::new(images.clone());
         let second = ArtworkView::new(images.clone());
         let window = cx.add_empty_window();
@@ -2061,7 +2061,7 @@ mod tests {
         let manager = crate::artwork::ArtworkManager::new(directory.path());
         let loaded = manager.load(&crate::artwork::tests::track(path)).unwrap();
         for worker_finished in [false, true] {
-            let images = ArtworkImages::default();
+            let images = ArtworkImageRegistry::default();
             let view = ArtworkView::new(images.clone());
             let window = cx.add_empty_window();
             let cache = window.update(|_, cx| {
@@ -2206,7 +2206,7 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         let window = cx.add_empty_window();
-        let images = ArtworkImages::default();
+        let images = ArtworkImageRegistry::default();
         let (first, second) = window.update(|_, cx| {
             (
                 images.decoration(0, VINYL, cx),
@@ -2245,7 +2245,7 @@ mod tests {
     #[gpui::test]
     fn decoration_reopen_before_retirement_reuses_the_pending_owner(cx: &mut gpui::TestAppContext) {
         let window = cx.add_empty_window();
-        let images = ArtworkImages::default();
+        let images = ArtworkImageRegistry::default();
         let first = window.update(|_, cx| images.decoration(0, VINYL, cx));
         let cache = first.owner.image.clone();
         let (sender, receiver) = futures::channel::oneshot::channel();
@@ -2280,7 +2280,7 @@ mod tests {
     ) {
         for worker_finished in [false, true] {
             let window = cx.add_empty_window();
-            let images = ArtworkImages::default();
+            let images = ArtworkImageRegistry::default();
             let first = window.update(|_, cx| images.decoration(0, VINYL, cx));
             let old_cache = first.owner.image.clone();
             let old_scene = first.image();
@@ -2376,9 +2376,9 @@ mod tests {
         let track = crate::artwork::tests::track(path);
         let manager = Arc::new(crate::artwork::ArtworkManager::new(directory.path()));
         assert!(manager.load(&track).is_some());
-        let images = ArtworkImages::default();
+        let images = ArtworkImageRegistry::default();
         let owner = cx.update(|cx| {
-            let default = cx.new(|cx| Artwork::new(&crate::i18n::Localizer::new("en"), cx));
+            let default = cx.new(|cx| DefaultArtwork::new(&crate::i18n::Localizer::new("en"), cx));
             cx.new(|cx| {
                 AlbumArtwork::new(
                     manager,
@@ -2665,10 +2665,10 @@ mod tests {
 
         let directory = tempfile::tempdir().unwrap();
         let manager = Arc::new(crate::artwork::ArtworkManager::new(directory.path()));
-        let images = ArtworkImages::default();
+        let images = ArtworkImageRegistry::default();
         let config = Config::default();
         let artwork = cx.update(|cx| {
-            let default = cx.new(|cx| Artwork::new(&crate::i18n::Localizer::new("en"), cx));
+            let default = cx.new(|cx| DefaultArtwork::new(&crate::i18n::Localizer::new("en"), cx));
             cx.new(|cx| {
                 AlbumArtwork::new(
                     manager,

@@ -1,13 +1,13 @@
-use super::super::*;
+use crate::gui::window::*;
 use rivu_ui::{column, row};
 
-impl GuiApp {
+impl WindowView {
     pub(in crate::gui) fn measurement(&self, key: Measured) -> AnyElement {
         let measured = self.workspace.interaction.measurement_handle(key);
         let ui_scale = self.state.system.config.ui_scale;
         canvas(
             move |bounds, window, _| {
-                measured.record(bounds, DockGeometry::current(window, ui_scale));
+                measured.record(bounds, WindowGeometry::current(window, ui_scale));
             },
             |_, _, _, _| {},
         )
@@ -582,7 +582,7 @@ impl GuiApp {
     }
 }
 
-impl GuiApp {
+impl WindowView {
     pub(in crate::gui) fn drag_split(
         &mut self,
         position: Point<Pixels>,

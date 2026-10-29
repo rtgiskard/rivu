@@ -322,7 +322,7 @@ impl GraphField {
         Ok(())
     }
 
-    pub(super) fn text(self, kind: &GraphNodeKind) -> String {
+    pub(in crate::gui::audio_processing) fn text(self, kind: &GraphNodeKind) -> String {
         match (self, kind) {
             (Self::Implementation, GraphNodeKind::Equalizer { implementation, .. }) => {
                 match implementation {
@@ -385,7 +385,9 @@ fn finite_f32(text: &str) -> Result<f32, String> {
 
 /// Explicit presentation order, independent of serialization layout. Enumerating
 /// controls does not format values or allocate a temporary editing tree.
-pub(super) fn node_fields(kind: &GraphNodeKind) -> impl Iterator<Item = GraphField> {
+pub(in crate::gui::audio_processing) fn node_fields(
+    kind: &GraphNodeKind,
+) -> impl Iterator<Item = GraphField> {
     use DenoiseField as D;
     use GraphField::{Denoise, Neural};
     use NeuralField as N;

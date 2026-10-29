@@ -108,7 +108,7 @@ display demand never starts playback. Capture restarts fence queued input and
 late publications, including quick hide/show transitions.
 
 Load, audition-source replacement and Seek reserve monotonic audio intent.
-Presentation accepts only frames matching current display demand, the actual
+The visualizer runtime accepts only frames matching current display demand, the actual
 audio epoch and the applied intent. Queued newer commands therefore cannot
 relabel old audio. Capture restarts and rejected seeks remain distinct from a
 successful semantic source change.
@@ -146,7 +146,7 @@ snapshot with newer metrics.
 
 === Presentation scheduling and visibility
 
-One GUI presentation owner shares visual models and staging across panels.
+One window-local `VisualizerRuntime` shares visual models and staging across panels.
 Its analysis timer requests frames at `analysis_fps`; native window callbacks
 consume the latest publication and advance animation independently.
 `visualizations.general.fps` caps Spectrum, Spectrogram and Audio Visualizer animation:

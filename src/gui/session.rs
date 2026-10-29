@@ -1,6 +1,6 @@
 //! Window ownership and release of visual subscriptions and analysis demand.
 
-use super::{GuiApp, layout::save_owner::LayoutSaveOwner};
+use super::{WindowView, layout::persistence::LayoutPersistence};
 use crate::{app::AppHandle, artwork::ArtworkManager, core::CoreHandle, i18n::Localizer};
 use anyhow::Result;
 use gpui::*;
@@ -14,11 +14,11 @@ use std::{
 pub(crate) struct UiSession {
     handle: CoreHandle,
     app: AppHandle,
-    layout_save: LayoutSaveOwner,
+    layout_save: LayoutPersistence,
     artwork_manager: Arc<ArtworkManager>,
     i18n: Arc<Localizer>,
     self_weak: Weak<RefCell<UiSession>>,
-    window: Option<WindowHandle<GuiApp>>,
+    window: Option<WindowHandle<WindowView>>,
 }
 
 impl UiSession {
@@ -33,7 +33,7 @@ impl UiSession {
             RefCell::new(Self {
                 handle,
                 app,
-                layout_save: LayoutSaveOwner::new(layout_path),
+                layout_save: LayoutPersistence::new(layout_path),
                 artwork_manager,
                 i18n,
                 self_weak: self_weak.clone(),
@@ -94,7 +94,7 @@ impl UiSession {
             },
             move |window, cx| {
                 cx.new(|cx| {
-                    let view = GuiApp::new(
+                    let view = WindowView::new(
                         handle,
                         layout_save,
                         artwork_manager,
@@ -140,7 +140,7 @@ impl UiSession {
     }
 }
 
-impl GuiApp {
+impl WindowView {
     fn install_close_guard(&self, window: &Window, cx: &Context<Self>) {
         let view = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {

@@ -4,7 +4,7 @@ use rivu_ui::{
     column, menu_item, row,
 };
 
-impl Render for GuiApp {
+impl Render for WindowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = rivu_ui::theme::palette(cx);
         self.presentation.update(cx, |presentation, cx| {

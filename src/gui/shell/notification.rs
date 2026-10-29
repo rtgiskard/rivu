@@ -1,7 +1,7 @@
 use super::*;
 use rivu_ui::{IconButton, IconButtonDensity, IconButtonStyle, row};
 
-impl GuiApp {
+impl WindowView {
     pub(super) fn footer_notification(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let error = self
             .error

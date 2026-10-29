@@ -1,6 +1,6 @@
 use super::*;
 use crate::config::ConfigPersistence;
-use crate::{config::Config, core::Runtime, i18n::Localizer};
+use crate::{config::Config, core::CoreRuntime, i18n::Localizer};
 use gpui::{EntityInputHandler, TestAppContext};
 use rivu_protocol::response::Ack;
 
@@ -31,7 +31,7 @@ pub(super) fn track(id: i64, title: &str) -> Track {
     }
 }
 
-fn fixture(cx: &mut TestAppContext) -> (tempfile::TempDir, Runtime, Entity<Metadata>) {
+fn fixture(cx: &mut TestAppContext) -> (tempfile::TempDir, CoreRuntime, Entity<Metadata>) {
     cx.update(|cx| {
         crate::gui::appearance::theme::set_theme(crate::theme::Theme::default(), cx);
         crate::gui::appearance::fonts::publish(&gpui::font("sans-serif"), 12, cx);
@@ -46,7 +46,7 @@ fn fixture(cx: &mut TestAppContext) -> (tempfile::TempDir, Runtime, Entity<Metad
     }
     .save(&path)
     .unwrap();
-    let runtime = Runtime::start(directory.path(), &path).unwrap();
+    let runtime = CoreRuntime::start(directory.path(), &path).unwrap();
     let i18n = Arc::new(Localizer::new("en-US"));
     let context = FeatureContext {
         snapshots: Rc::new(crate::gui::feature::SnapshotSource::new(
@@ -60,13 +60,13 @@ fn fixture(cx: &mut TestAppContext) -> (tempfile::TempDir, Runtime, Entity<Metad
         i18n: i18n.clone(),
         scroll: Default::default(),
     };
-    let default_album = cx.new(|cx| Artwork::new(&i18n, cx));
+    let default_album = cx.new(|cx| DefaultArtwork::new(&i18n, cx));
     let metadata = cx.new(|cx| {
         Metadata::new(
             context,
             gpui::font("sans-serif"),
             Arc::new(ArtworkManager::new(directory.path())),
-            ArtworkImages::default(),
+            ArtworkImageRegistry::default(),
             default_album,
             cx,
         )

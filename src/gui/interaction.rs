@@ -12,7 +12,7 @@
 //! Layout replacement and window recreation additionally discard docking and
 //! target-group identity. No frame-time tree or measurement collection is copied.
 
-use super::{Layout, Node, docking, layout_geometry};
+use super::layout::{Layout, Node, docking, layout_geometry};
 use gpui::{Bounds, Pixels, Point, Size, Window};
 use std::{
     cell::{Ref, RefCell},
@@ -40,13 +40,13 @@ pub(in crate::gui) struct DockHover {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-pub(in crate::gui) struct DockGeometry {
+pub(in crate::gui) struct WindowGeometry {
     pub(in crate::gui) viewport: Size<Pixels>,
     pub(in crate::gui) ui_scale: f32,
     pub(in crate::gui) scale_factor: f32,
 }
 
-impl DockGeometry {
+impl WindowGeometry {
     pub(in crate::gui) fn current(window: &Window, ui_scale: f32) -> Self {
         Self {
             viewport: window.viewport_size(),
@@ -65,7 +65,7 @@ pub(in crate::gui) enum DockSource {
 pub(in crate::gui) struct PanelDocking {
     pub(in crate::gui) source: DockSource,
     pub(in crate::gui) hover: Option<DockHover>,
-    pub(in crate::gui) geometry: DockGeometry,
+    pub(in crate::gui) geometry: WindowGeometry,
 }
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
@@ -127,7 +127,7 @@ struct SeekSession {
 #[derive(Default)]
 struct Measurements {
     epoch: u64,
-    geometry: Option<DockGeometry>,
+    geometry: Option<WindowGeometry>,
     tree_measured: bool,
     allowed: HashSet<Measured>,
     bounds: HashMap<Measured, Bounds<Pixels>>,
@@ -150,7 +150,7 @@ pub(in crate::gui) struct MeasurementHandle {
 }
 
 impl MeasurementHandle {
-    pub(in crate::gui) fn record(&self, bounds: Bounds<Pixels>, geometry: DockGeometry) {
+    pub(in crate::gui) fn record(&self, bounds: Bounds<Pixels>, geometry: WindowGeometry) {
         let mut measurements = self.measurements.borrow_mut();
         if measurements.epoch != self.epoch
             || measurements.geometry != Some(geometry)
@@ -169,7 +169,7 @@ impl MeasurementHandle {
 }
 
 #[derive(Default)]
-pub(in crate::gui) struct LayoutInteraction {
+pub(in crate::gui) struct WindowInteraction {
     target_group: Option<u64>,
     dragging: Option<Dragging>,
     docking: Option<PanelDocking>,
@@ -179,7 +179,7 @@ pub(in crate::gui) struct LayoutInteraction {
     measurements: Rc<RefCell<Measurements>>,
 }
 
-impl LayoutInteraction {
+impl WindowInteraction {
     pub(in crate::gui) fn target_group(&self) -> Option<u64> {
         self.target_group
     }
@@ -221,7 +221,7 @@ impl LayoutInteraction {
     pub(in crate::gui) fn start_docking(
         &mut self,
         source: DockSource,
-        geometry: DockGeometry,
+        geometry: WindowGeometry,
     ) -> Cancellation {
         let cancellation = self.cancel();
         self.docking = Some(PanelDocking {
@@ -246,7 +246,7 @@ impl LayoutInteraction {
         }
     }
 
-    pub(in crate::gui) fn measured_geometry(&self) -> Option<DockGeometry> {
+    pub(in crate::gui) fn measured_geometry(&self) -> Option<WindowGeometry> {
         let measurements = self.measurements.borrow();
         measurements
             .tree_measured
@@ -270,7 +270,7 @@ impl LayoutInteraction {
     /// Bounds notifications can precede repaint; old canvas handles are rejected.
     pub(in crate::gui) fn synchronize_geometry(
         &mut self,
-        geometry: DockGeometry,
+        geometry: WindowGeometry,
     ) -> Option<Cancellation> {
         if self.measurements.borrow().geometry == Some(geometry) {
             return None;
@@ -564,8 +564,8 @@ mod tests {
     use super::*;
     use gpui::{point, px, size};
 
-    fn geometry(width: f32, ui_scale: f32, scale_factor: f32) -> DockGeometry {
-        DockGeometry {
+    fn geometry(width: f32, ui_scale: f32, scale_factor: f32) -> WindowGeometry {
+        WindowGeometry {
             viewport: size(px(width), px(400.)),
             ui_scale,
             scale_factor,
@@ -575,7 +575,7 @@ mod tests {
     fn tree(id: u64, panel_id: u64) -> Node {
         Node::Tabs {
             id,
-            panels: vec![super::super::Panel {
+            panels: vec![crate::gui::layout::Panel {
                 id: panel_id,
                 kind: "transport".into(),
                 show_tab_bar: true,
@@ -588,7 +588,7 @@ mod tests {
 
     #[test]
     fn slider_keeps_initial_queue_and_duration_and_finishes_once() {
-        let mut owner = LayoutInteraction::default();
+        let mut owner = WindowInteraction::default();
         owner.begin_slider(Dragging::Seek(3), Some(10), Some(100.));
         assert!(owner.update_slider_seek(0.25));
         assert!(owner.update_slider_seek(0.75));
@@ -605,7 +605,7 @@ mod tests {
 
     #[test]
     fn cancelled_seek_never_commits_and_waveform_keeps_queue_identity() {
-        let mut owner = LayoutInteraction::default();
+        let mut owner = WindowInteraction::default();
         owner.begin_slider(Dragging::Seek(3), Some(10), Some(100.));
         owner.update_slider_seek(0.25);
         owner.cancel();
@@ -627,7 +627,7 @@ mod tests {
 
     #[test]
     fn root_mouse_up_does_not_clear_waveform_preview() {
-        let mut owner = LayoutInteraction::default();
+        let mut owner = WindowInteraction::default();
         owner.waveform_preview(10., Some(11), 7);
         assert_eq!(owner.finish_drag(), DragCommit::None);
         assert_eq!(owner.seek_preview(), Some(10.));
@@ -642,7 +642,7 @@ mod tests {
 
     #[test]
     fn delayed_surface_cancellation_cannot_clear_a_new_waveform_capture_or_slider() {
-        let mut owner = LayoutInteraction::default();
+        let mut owner = WindowInteraction::default();
         owner.waveform_preview(10., Some(11), 7);
         assert!(owner.cancel_waveform(7));
         assert_eq!(owner.seek_preview(), None);
@@ -671,7 +671,7 @@ mod tests {
 
     #[test]
     fn old_canvases_cannot_repopulate_replaced_layout_or_geometry() {
-        let mut owner = LayoutInteraction::default();
+        let mut owner = WindowInteraction::default();
         let root = tree(1, 2);
         let initial = geometry(800., 1., 1.);
         let bounds = Bounds::new(point(px(0.), px(0.)), initial.viewport);
@@ -700,7 +700,7 @@ mod tests {
 
     #[test]
     fn geometry_changes_cancel_seek_and_keep_docking_without_old_targets() {
-        let mut owner = LayoutInteraction::default();
+        let mut owner = WindowInteraction::default();
         let initial = geometry(800., 1., 1.);
         owner.synchronize_geometry(initial);
         owner.begin_slider(Dragging::Seek(3), Some(10), Some(100.));
@@ -716,7 +716,7 @@ mod tests {
 
     #[test]
     fn locking_does_not_cancel_playback_controls() {
-        let mut owner = LayoutInteraction::default();
+        let mut owner = WindowInteraction::default();
         owner.begin_slider(Dragging::Seek(3), Some(10), Some(100.));
         owner.update_slider_seek(0.5);
         owner.lock_layout();
@@ -731,7 +731,7 @@ mod tests {
 
     #[test]
     fn measured_keys_and_target_are_bounded_by_current_tree() {
-        let mut owner = LayoutInteraction::default();
+        let mut owner = WindowInteraction::default();
         let first = tree(1, 2);
         let geometry = geometry(800., 1., 1.);
         owner.layout_changed(Some(&first));
@@ -753,7 +753,7 @@ mod tests {
         Layout {
             root: Some(Node::Split {
                 id: 1,
-                axis: super::super::Axis::Horizontal,
+                axis: crate::gui::layout::Axis::Horizontal,
                 children: vec![tree(2, 3), tree(4, 5)],
                 boundaries: vec![0.5],
             }),
@@ -766,7 +766,7 @@ mod tests {
         layout_geometry::SplitDrag {
             id: 1,
             index: 0,
-            axis: super::super::Axis::Horizontal,
+            axis: crate::gui::layout::Axis::Horizontal,
             bounds: Bounds::new(point(px(0.), px(0.)), size(px(804.), px(400.))),
             content_length: 800.,
             gutter: 4.,
@@ -779,7 +779,7 @@ mod tests {
 
     #[test]
     fn cancelling_split_restores_live_preview_without_a_commit() {
-        let mut owner = LayoutInteraction::default();
+        let mut owner = WindowInteraction::default();
         let mut layout = split_layout();
         owner.begin_split(split_drag(), 0.5, layout.root.as_ref().unwrap());
         let (id, index, fraction) = owner
@@ -795,7 +795,7 @@ mod tests {
 
     #[test]
     fn geometry_cancel_restores_split_but_tree_replacement_never_applies_old_rollback() {
-        let mut owner = LayoutInteraction::default();
+        let mut owner = WindowInteraction::default();
         let mut layout = split_layout();
         owner.synchronize_geometry(geometry(804., 1., 1.));
         owner.begin_split(split_drag(), 0.5, layout.root.as_ref().unwrap());
@@ -813,7 +813,7 @@ mod tests {
 
     #[test]
     fn lock_and_window_invalidation_discard_docking_and_stale_target_identity() {
-        let mut owner = LayoutInteraction::default();
+        let mut owner = WindowInteraction::default();
         owner.start_docking(DockSource::Existing(3), geometry(800., 1., 1.));
         assert!(owner.lock_layout().docking);
         assert!(owner.docking().is_none());
@@ -826,7 +826,7 @@ mod tests {
 
     #[test]
     fn empty_workspace_measurements_enable_docking_without_accepting_stale_callbacks() {
-        let mut owner = LayoutInteraction::default();
+        let mut owner = WindowInteraction::default();
         let initial = geometry(800., 1., 1.);
         let bounds = Bounds::new(point(px(0.), px(40.)), size(px(800.), px(360.)));
         owner.layout_changed(None);

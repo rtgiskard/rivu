@@ -5,7 +5,7 @@ pub(super) mod panels;
 mod shortcuts;
 mod view;
 
-use super::*;
+use crate::gui::window::*;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum KeyboardSurface {
@@ -189,7 +189,7 @@ impl WindowShell {
     }
 }
 
-impl GuiApp {
+impl WindowView {
     pub(super) fn menu_surface(
         &self,
         surface: gpui::Stateful<Div>,

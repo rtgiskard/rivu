@@ -55,14 +55,14 @@ struct Shared {
 }
 
 #[derive(Clone)]
-pub(in crate::gui) struct LayoutSaveHandle(Arc<Shared>);
+pub(in crate::gui) struct LayoutPersistenceHandle(Arc<Shared>);
 
-pub(in crate::gui) struct LayoutSaveOwner {
-    handle: LayoutSaveHandle,
+pub(in crate::gui) struct LayoutPersistence {
+    handle: LayoutPersistenceHandle,
     worker: Option<JoinHandle<()>>,
 }
 
-impl LayoutSaveOwner {
+impl LayoutPersistence {
     pub fn new(path: PathBuf) -> Self {
         // This is the session's only startup read, not an interactive save or a
         // window-reopen read. All runtime validation/encoding/writes are below.
@@ -166,12 +166,12 @@ impl LayoutSaveOwner {
             })
             .expect("starting layout save worker");
         Self {
-            handle: LayoutSaveHandle(shared),
+            handle: LayoutPersistenceHandle(shared),
             worker: Some(worker),
         }
     }
 
-    pub fn handle(&self) -> LayoutSaveHandle {
+    pub fn handle(&self) -> LayoutPersistenceHandle {
         self.handle.clone()
     }
 
@@ -181,7 +181,7 @@ impl LayoutSaveOwner {
     }
 }
 
-impl LayoutSaveHandle {
+impl LayoutPersistenceHandle {
     pub fn snapshot(&self) -> (LayoutSet, Option<String>) {
         let state = self.0.state.lock();
         (state.latest.clone(), state.load_error.clone())
@@ -264,7 +264,7 @@ impl LayoutSaveHandle {
     }
 }
 
-impl Drop for LayoutSaveOwner {
+impl Drop for LayoutPersistence {
     fn drop(&mut self) {
         self.handle.0.state.lock().stopping = true;
         self.handle.0.changed.notify_one();
@@ -295,7 +295,7 @@ mod tests {
         set
     }
 
-    fn wait_for_completion(handle: &LayoutSaveHandle, request_id: u64) -> Completion {
+    fn wait_for_completion(handle: &LayoutPersistenceHandle, request_id: u64) -> Completion {
         let mut state = handle.0.state.lock();
         loop {
             if let Some(completion) = &state.completion
@@ -312,7 +312,7 @@ mod tests {
         let written = Arc::new(Mutex::new(Vec::new()));
         let writes = Arc::clone(&written);
         let original = named("disk");
-        let owner = LayoutSaveOwner::start(original.clone(), None, true, move |snapshot| {
+        let owner = LayoutPersistence::start(original.clone(), None, true, move |snapshot| {
             writes.lock().push(snapshot.active_name().to_owned());
             Ok(())
         });
@@ -340,7 +340,7 @@ mod tests {
         let (started, starts) = mpsc::channel();
         let (release, releases) = mpsc::channel();
         let original = named("disk");
-        let owner = LayoutSaveOwner::start(original.clone(), None, true, move |snapshot| {
+        let owner = LayoutPersistence::start(original.clone(), None, true, move |snapshot| {
             started.send(snapshot.active_name().to_owned()).unwrap();
             releases.recv().unwrap();
             Ok(())
@@ -363,7 +363,7 @@ mod tests {
     fn missing_file_is_initialized_on_flush() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("layout.json");
-        let owner = LayoutSaveOwner::new(path.clone());
+        let owner = LayoutPersistence::new(path.clone());
         let expected = owner.handle().snapshot().0;
         owner.flush().unwrap();
         assert!(LayoutSet::load(&path).unwrap().persisted_eq(&expected));
@@ -375,7 +375,7 @@ mod tests {
         let path = directory.path().join("layout.json");
         let invalid = b"{\"layouts\": damaged but recoverable";
         std::fs::write(&path, invalid).unwrap();
-        let owner = LayoutSaveOwner::new(path.clone());
+        let owner = LayoutPersistence::new(path.clone());
         let handle = owner.handle();
         assert!(handle.snapshot().1.is_some());
         handle.submit(&named("replacement"));
@@ -399,7 +399,7 @@ mod tests {
         assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
         let path = directory.path().join("layout.json");
         symlink(&fifo, &path).unwrap();
-        let owner = LayoutSaveOwner::new(path.clone());
+        let owner = LayoutPersistence::new(path.clone());
         assert!(owner.handle().snapshot().1.is_some());
         owner.flush().unwrap();
         assert!(std::fs::symlink_metadata(path).unwrap().is_symlink());
@@ -409,7 +409,7 @@ mod tests {
     #[test]
     fn equal_content_still_rejects_invalid_runtime_state() {
         let original = named("disk");
-        let owner = LayoutSaveOwner::start(original.clone(), None, true, |_| {
+        let owner = LayoutPersistence::start(original.clone(), None, true, |_| {
             panic!("equal persisted content must not reach the file writer")
         });
         let mut invalid = original;
@@ -423,7 +423,7 @@ mod tests {
     #[test]
     fn edits_stay_in_memory_across_window_reopen_and_owner_drop() {
         let (write, writes) = mpsc::channel();
-        let owner = LayoutSaveOwner::start(named("disk"), None, true, move |snapshot| {
+        let owner = LayoutPersistence::start(named("disk"), None, true, move |snapshot| {
             write.send(snapshot.active_name().to_owned()).unwrap();
             Ok(())
         });
@@ -445,7 +445,7 @@ mod tests {
     fn flush_saves_latest_dirty_memory_once_and_skips_clean_state() {
         let written = Arc::new(Mutex::new(Vec::new()));
         let writes = Arc::clone(&written);
-        let owner = LayoutSaveOwner::start(named("disk"), None, true, move |snapshot| {
+        let owner = LayoutPersistence::start(named("disk"), None, true, move |snapshot| {
             writes.lock().push(snapshot.active_name().to_owned());
             Ok(())
         });
@@ -470,7 +470,7 @@ mod tests {
         let written = Arc::new(Mutex::new(Vec::new()));
         let writes = Arc::clone(&written);
         let gui_thread = std::thread::current().id();
-        let owner = LayoutSaveOwner::start(LayoutSet::default(), None, true, move |snapshot| {
+        let owner = LayoutPersistence::start(LayoutSet::default(), None, true, move |snapshot| {
             assert_ne!(std::thread::current().id(), gui_thread);
             started.send(snapshot.active_name().to_owned()).unwrap();
             releases.recv().unwrap();
@@ -502,7 +502,7 @@ mod tests {
     fn flush_waits_for_latest_memory_including_edits_during_a_write() {
         let (started, starts) = mpsc::channel();
         let (release, releases) = mpsc::channel();
-        let owner = LayoutSaveOwner::start(LayoutSet::default(), None, true, move |snapshot| {
+        let owner = LayoutPersistence::start(LayoutSet::default(), None, true, move |snapshot| {
             started.send(snapshot.active_name().to_owned()).unwrap();
             releases.recv().unwrap();
             Ok(())
@@ -542,7 +542,7 @@ mod tests {
         let (started, starts) = mpsc::channel();
         let (release, releases) = mpsc::channel();
         let mut attempts = 0;
-        let owner = LayoutSaveOwner::start(
+        let owner = LayoutPersistence::start(
             LayoutSet::default(),
             Some("load failure".into()),
             false,
@@ -585,7 +585,7 @@ mod tests {
         let (release, releases) = mpsc::channel();
         let written = Arc::new(Mutex::new(Vec::new()));
         let writes = Arc::clone(&written);
-        let owner = LayoutSaveOwner::start(LayoutSet::default(), None, true, move |snapshot| {
+        let owner = LayoutPersistence::start(LayoutSet::default(), None, true, move |snapshot| {
             started.send(snapshot.active_name().to_owned()).unwrap();
             releases.recv().unwrap();
             writes.lock().push(snapshot.active_name().to_owned());
@@ -632,7 +632,7 @@ mod tests {
         let original = named("original");
         original.save(&path).unwrap();
         let previous = fs::read(&path).unwrap();
-        let owner = LayoutSaveOwner::new(path.clone());
+        let owner = LayoutPersistence::new(path.clone());
         let handle = owner.handle();
         let mut invalid = named("invalid");
         invalid.current_mut().next_id = 0;

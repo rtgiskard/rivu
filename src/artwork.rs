@@ -2,7 +2,7 @@
 //! reads never probe media; blocking loads belong on existing background workers.
 //! No decoder or audio output is opened; failures never propagate into playback.
 
-pub(crate) mod cache;
+pub(crate) mod cache_paths;
 
 use parking_lot::{Mutex, RwLock};
 use rivu_protocol::model::Track;
@@ -249,7 +249,7 @@ impl ArtworkManager {
         let _acquisition = self.maintenance.read();
         self.default
             .get_or_init(|| {
-                let path = cache::original_path(
+                let path = cache_paths::original_path(
                     &self.directory.join("cache"),
                     blake3::hash(DEFAULT_IMAGE),
                     "png",
@@ -579,7 +579,7 @@ impl ArtworkManager {
             _ => return None,
         };
         let hash = blake3::hash(bytes);
-        let path = cache::original_path(&self.directory.join("cache"), hash, extension);
+        let path = cache_paths::original_path(&self.directory.join("cache"), hash, extension);
         let uri = write_image(&path, bytes).ok()?;
         Some(artwork_file(uri, self.max_image_bytes))
     }
@@ -723,7 +723,7 @@ pub(crate) mod tests {
     fn existing_originals_require_bounded_content_equality_without_overwriting() {
         let directory = tempfile::tempdir().unwrap();
         let manager = ArtworkManager::new(directory.path());
-        let path = cache::original_path(
+        let path = cache_paths::original_path(
             &directory.path().join("artwork/cache"),
             blake3::hash(DEFAULT_IMAGE),
             "png",
@@ -1994,7 +1994,7 @@ pub(crate) mod tests {
         let source = original.path();
         let hash = blake3::hash(DEFAULT_IMAGE);
         let thumbnails =
-            [256, 512, 1024].map(|tier| cache::thumbnail_path(&source, hash, tier).unwrap());
+            [256, 512, 1024].map(|tier| cache_paths::thumbnail_path(&source, hash, tier).unwrap());
         for thumbnail in &thumbnails {
             fs::write(thumbnail, b"thumbnail").unwrap();
         }
@@ -2077,7 +2077,7 @@ pub(crate) mod tests {
         let manager = ArtworkManager::new(directory.path());
         let selected = track(source);
         let cache = directory.path().join("artwork/cache");
-        let path = cache::original_path(&cache, blake3::hash(DEFAULT_IMAGE), "png");
+        let path = cache_paths::original_path(&cache, blake3::hash(DEFAULT_IMAGE), "png");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, DEFAULT_IMAGE).unwrap();
         age_file(&path);

@@ -1,6 +1,6 @@
 //! Playlist demand and physical gates; cancellation never releases a worker.
-use super::model::{PlaylistBrowser, PlaylistRefresh};
-use crate::projection::QueryProjection;
+use super::{PlaylistBrowser, PlaylistModel, PlaylistRefresh};
+use crate::query_tracking::QueryTracker;
 use rivu_protocol::{
     model::{Page, PlaylistSummary, Query},
     response::{QueryResponse, QueryRevisions, ViewResponse},
@@ -36,10 +36,10 @@ struct ViewDemand {
 pub(in crate::gui) type SelectionKey = (u64, rivu_protocol::model::QueryStamp);
 
 #[derive(Default)]
-pub(in crate::gui) struct ViewRequests {
+pub(super) struct ViewRequests {
     generation: u64,
     generations: HashMap<ViewRequestKind, u64>,
-    projections: HashMap<ViewRequestKind, QueryProjection>,
+    projections: HashMap<ViewRequestKind, QueryTracker>,
     workers: HashSet<ViewRequestKind>,
     queued: HashMap<ViewRequestKind, (Query, u64)>,
     // Latest intent outlives logical cancellation, hiding and worker completion.
@@ -145,7 +145,7 @@ impl ViewRequests {
 pub(in crate::gui) struct ViewRequest {
     kind: ViewRequestKind,
     pending_generation: Option<u64>,
-    read: Option<(ViewRead, crate::core::QueryTicket)>,
+    read: Option<(ViewRead, crate::query_tracking::QueryTicket)>,
 }
 
 impl ViewRequest {
@@ -157,7 +157,9 @@ impl ViewRequest {
         self.pending_generation
     }
 
-    pub(in crate::gui) fn into_read(self) -> Option<(ViewRead, crate::core::QueryTicket)> {
+    pub(in crate::gui) fn into_read(
+        self,
+    ) -> Option<(ViewRead, crate::query_tracking::QueryTicket)> {
         self.read
     }
 }
@@ -174,15 +176,11 @@ pub(in crate::gui) struct ViewRead {
     selected_playlist: Option<i64>,
 }
 
-#[derive(Default)]
-pub(super) struct PlaylistState {
-    pub(super) playlists: PlaylistBrowser,
-    requests: ViewRequests,
-    page_size: usize,
-    focus: Option<crate::gui::BrowserFocus>,
-}
-impl PlaylistState {
-    pub(super) fn sync_entry_projection(&mut self, revisions: QueryRevisions) -> bool {
+impl PlaylistModel {
+    pub(in crate::gui::playlists) fn sync_entry_projection(
+        &mut self,
+        revisions: QueryRevisions,
+    ) -> bool {
         let Some(id) = self.playlists.selected() else {
             return false;
         };
@@ -192,46 +190,52 @@ impl PlaylistState {
             .sync_projection(id, query, revisions)
     }
 
-    pub(super) fn playlists(&self) -> &PlaylistBrowser {
+    pub(in crate::gui::playlists) fn playlists(&self) -> &PlaylistBrowser {
         &self.playlists
     }
 
     /// Selection jobs may mutate identities, never the paired page lifecycle.
-    pub(super) fn playlist_selection_mut(&mut self) -> &mut super::selection::EntrySelection {
+    pub(in crate::gui::playlists) fn playlist_selection_mut(
+        &mut self,
+    ) -> &mut super::super::selection::EntrySelection {
         &mut self.playlists.track_selection
     }
 
-    pub(super) fn view_pending(&self, kind: ViewRequestKind) -> bool {
+    pub(in crate::gui::playlists) fn view_pending(&self, kind: ViewRequestKind) -> bool {
         self.requests.pending(kind)
     }
 
-    pub(super) fn view_loading(&self, kind: ViewRequestKind, token: u64) -> bool {
+    pub(in crate::gui::playlists) fn view_loading(
+        &self,
+        kind: ViewRequestKind,
+        token: u64,
+    ) -> bool {
         self.requests.is_current(kind, token)
     }
 
-    pub(super) fn sync_active_playlist_entry(&mut self) {
+    pub(in crate::gui::playlists) fn sync_active_playlist_entry(&mut self) {
         self.playlists.sync_active_entry();
     }
 
-    pub(super) fn accept_playlist_entry_locations(
+    pub(in crate::gui::playlists) fn accept_playlist_entry_locations(
         &mut self,
         rows: Vec<rivu_protocol::model::PlaylistEntryLocation>,
     ) {
         self.playlists.accept_entry_locations(rows);
     }
 
-    pub(super) fn focus(&self) -> Option<crate::gui::BrowserFocus> {
+    pub(in crate::gui::playlists) fn focus(&self) -> Option<crate::gui::BrowserFocus> {
         self.focus
     }
 
-    pub(super) fn focus_list(&mut self, focus: crate::gui::ListFocus) {
+    pub(in crate::gui::playlists) fn focus_list(&mut self, focus: crate::gui::ListFocus) {
         self.focus = Some(crate::gui::BrowserFocus::List(focus));
     }
 
-    pub(super) fn focus_playlists(&mut self) {
+    pub(in crate::gui::playlists) fn focus_playlists(&mut self) {
         self.focus = Some(crate::gui::BrowserFocus::Playlists);
     }
-    pub(super) fn remove_playlist_selection(&mut self) {
+    pub(in crate::gui::playlists) fn remove_playlist_selection(&mut self) {
         self.cancel_playlist_read(ViewRequestKind::Selection);
         self.cancel_playlist_read(ViewRequestKind::Entries);
         self.playlists.clear_selection();
@@ -262,7 +266,11 @@ impl PlaylistState {
     }
 
     /// The first row after `id - 1` proves existence without scanning other pages.
-    pub(super) fn accept_playlist_lookup(&mut self, id: i64, first: Option<PlaylistSummary>) {
+    pub(in crate::gui::playlists) fn accept_playlist_lookup(
+        &mut self,
+        id: i64,
+        first: Option<PlaylistSummary>,
+    ) {
         if self.playlists.selected() != Some(id) {
             return;
         }
@@ -486,7 +494,9 @@ impl PlaylistState {
         Some((query, key))
     }
 
-    pub(super) fn playlist_lookup_failure(&self) -> Option<(SelectionKey, &str)> {
+    pub(in crate::gui::playlists) fn playlist_lookup_failure(
+        &self,
+    ) -> Option<(SelectionKey, &str)> {
         self.requests
             .selection_failure
             .as_ref()
@@ -509,7 +519,7 @@ impl PlaylistState {
         self.prepare_playlist_read(query, generation, revisions)
     }
 
-    pub(super) fn retry_playlist_lookup(
+    pub(in crate::gui::playlists) fn retry_playlist_lookup(
         &mut self,
         failed_key: SelectionKey,
         revisions: QueryRevisions,
@@ -733,7 +743,7 @@ mod tests {
 
     #[test]
     fn bitrate_revision_retains_identity_counts_viewport_catalog_and_worker() {
-        let mut browser = PlaylistState::default();
+        let mut browser = PlaylistModel::default();
         let previous = GuiLibrarySnapshot::default();
         let latest = GuiLibrarySnapshot {
             bitrate_revision: 1,
@@ -807,7 +817,7 @@ mod tests {
 
     #[test]
     fn playlist_payload_rejects_stale_bitrate_and_accepts_current_reply() {
-        let mut browser = PlaylistState::default();
+        let mut browser = PlaylistModel::default();
         browser.select_playlist(1, "one".into(), 0);
         let revisions = QueryRevisions {
             bitrate: 1,
@@ -855,7 +865,7 @@ mod tests {
 
     #[test]
     fn stale_playlist_source_completion_is_not_published() {
-        let mut browser = PlaylistState::default();
+        let mut browser = PlaylistModel::default();
         let revisions = QueryRevisions::default();
         browser.select_playlist(1, "one".into(), 0);
         let (read, _) = browser
@@ -903,7 +913,7 @@ mod tests {
 
     #[test]
     fn failed_summary_parks_until_explicit_retry_and_recovers_in_place() {
-        let mut browser = PlaylistState::default();
+        let mut browser = PlaylistModel::default();
         let revisions = QueryRevisions::default();
         browser.select_playlist(41, "one".into(), 0);
         let (read, _) = browser
@@ -957,7 +967,7 @@ mod tests {
 
     #[test]
     fn timed_out_summary_retry_waits_for_original_worker_and_ignores_late_results() {
-        let mut browser = PlaylistState::default();
+        let mut browser = PlaylistModel::default();
         let revisions = QueryRevisions::default();
         browser.select_playlist(41, "one".into(), 0);
         let (old, _) = browser
@@ -1000,7 +1010,7 @@ mod tests {
 
     #[test]
     fn summary_revision_rejects_old_retry_and_old_timeout_cannot_replace_new_failure() {
-        let mut browser = PlaylistState::default();
+        let mut browser = PlaylistModel::default();
         let revisions = QueryRevisions::default();
         browser.select_playlist(41, "one".into(), 0);
         let (old, _) = browser
@@ -1055,7 +1065,7 @@ mod tests {
 
     #[test]
     fn current_catalog_page_restores_summary_without_cancelling_retry() {
-        let mut browser = PlaylistState::default();
+        let mut browser = PlaylistModel::default();
         let revisions = QueryRevisions::default();
         browser.select_playlist(41, "one".into(), 0);
         let (read, _) = browser
@@ -1107,7 +1117,7 @@ mod tests {
 
     #[test]
     fn catalog_revision_makes_count_unknown_until_selected_summary_is_current() {
-        let mut browser = PlaylistState::default();
+        let mut browser = PlaylistModel::default();
         let revisions = QueryRevisions::default();
         browser.select_playlist(41, "one".into(), 0);
         browser.accept_playlist_lookup(41, Some(summary(41, 0)));
@@ -1162,7 +1172,7 @@ mod tests {
     #[test]
     fn selection_cancellation_change_and_removal_clear_summary_failure() {
         for action in 0..3 {
-            let mut browser = PlaylistState::default();
+            let mut browser = PlaylistModel::default();
             let revisions = QueryRevisions::default();
             browser.select_playlist(41, "one".into(), 0);
             let (read, _) = browser
@@ -1203,7 +1213,7 @@ mod tests {
             ViewRequestKind::Entries,
             ViewRequestKind::Selection,
         ] {
-            let mut browser = PlaylistState::default();
+            let mut browser = PlaylistModel::default();
             let revisions = QueryRevisions::default();
             browser.select_playlist(1, "one".into(), 0);
             let prepared = match kind {
@@ -1244,7 +1254,7 @@ mod tests {
 
     #[test]
     fn obsolete_view_timeout_and_final_return_preserve_latest_queued_demand() {
-        let mut browser = PlaylistState::default();
+        let mut browser = PlaylistModel::default();
         let revisions = QueryRevisions::default();
         browser.select_playlist(1, "one".into(), 0);
         let (read, _) = browser
@@ -1288,7 +1298,7 @@ mod tests {
 
     #[test]
     fn search_replacement_keeps_worker_and_rejects_old_completion() {
-        let mut browser = PlaylistState::default();
+        let mut browser = PlaylistModel::default();
         let revisions = QueryRevisions::default();
         browser.select_playlist(1, "one".into(), 0);
         let (old, _) = browser
@@ -1343,7 +1353,7 @@ mod tests {
 
     #[test]
     fn catalog_demand_survives_entry_selection_removal() {
-        let mut browser = PlaylistState::default();
+        let mut browser = PlaylistModel::default();
         let revisions = QueryRevisions::default();
         let absent = browser.demand_playlist_entries(0..1, 20, revisions);
         assert_eq!(absent.pending_generation(), None);
@@ -1371,7 +1381,7 @@ mod tests {
 
     #[test]
     fn page_resize_preserves_lookup_and_stale_completion_releases_page_reservation() {
-        let mut browser = PlaylistState::default();
+        let mut browser = PlaylistModel::default();
         let revisions = QueryRevisions::default();
         browser.select_playlist(1, "one".into(), 0);
         let (lookup, _) = browser
@@ -1657,7 +1667,7 @@ mod tests {
 
     #[test]
     fn empty_playlist_completion_ends_loading_and_failed_refresh_stays_retryable() {
-        let mut browser = PlaylistState::default();
+        let mut browser = PlaylistModel::default();
         let revisions = QueryRevisions::default();
         let kind = ViewRequestKind::Entries;
         let empty = || QueryResponse {
@@ -1747,7 +1757,7 @@ mod tests {
 
     #[test]
     fn empty_catalog_releases_selected_playlist_and_pending_entry_requests() {
-        let mut browser = PlaylistState::default();
+        let mut browser = PlaylistModel::default();
         assert!(browser.playlists.entries().rows.is_empty());
         browser.playlists.select(41, "deleted".into(), 0);
         browser.playlists.prepare_entries(41);
@@ -1797,7 +1807,7 @@ mod tests {
 
     #[test]
     fn clearing_selection_releases_entry_owner_and_outstanding_requests() {
-        let mut browser = PlaylistState::default();
+        let mut browser = PlaylistModel::default();
         browser.playlists.select(41, "selected".into(), 0);
         browser.playlists.prepare_entries(41);
         browser.playlists.prepare_page(true, 0, 20);

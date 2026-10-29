@@ -75,7 +75,7 @@ struct EqAvailability {
 }
 
 #[derive(Default)]
-pub(super) struct EqualizerUi {
+pub(super) struct EqualizerEditors {
     editors: HashMap<(u64, EqTarget), Entity<EqualizerEditor>>,
     active: HashMap<u64, EqTarget>,
     pointer_count: Rc<Cell<usize>>,
@@ -122,7 +122,7 @@ struct NodeDrag {
     original_frequency: f64,
     original_gain: f64,
     bounds: Bounds<Pixels>,
-    geometry: DockGeometry,
+    geometry: WindowGeometry,
     geometry_epoch: u64,
     frequency: f64,
     gain: f64,
@@ -132,7 +132,7 @@ struct NodeDrag {
 struct FieldDrag {
     key: EqField,
     bounds: Bounds<Pixels>,
-    geometry: DockGeometry,
+    geometry: WindowGeometry,
     geometry_epoch: u64,
     revision: u64,
     _subscriptions: [Subscription; 2],
@@ -233,7 +233,7 @@ impl EqualizerEditor {
             removing_band: None,
             pending_added_band: None,
             geometry_epoch,
-            pointer_count: Rc::clone(&parent.equalizer_ui.pointer_count),
+            pointer_count: Rc::clone(&parent.equalizer_editors.pointer_count),
         };
         editor.sync_fields(cx);
         editor.update_response();
@@ -469,7 +469,7 @@ impl EqualizerEditor {
             && (self.target == EqTarget::Monitor
                 || snapshot.system.config.processing_graph.revision == self.revision)
             && self.drag.as_ref().is_some_and(|drag| {
-                drag.geometry == DockGeometry::current(window, snapshot.system.config.ui_scale)
+                drag.geometry == WindowGeometry::current(window, snapshot.system.config.ui_scale)
                     && drag.geometry_epoch == self.geometry_epoch
             });
         if !valid {
@@ -1010,7 +1010,7 @@ impl EqualizerEditor {
         if !self.active
             || self.input_locked()
             || drag.geometry_epoch != self.geometry_epoch
-            || drag.geometry != DockGeometry::current(window, snapshot.system.config.ui_scale)
+            || drag.geometry != WindowGeometry::current(window, snapshot.system.config.ui_scale)
             || equalizer_format(&snapshot) != self.format
             || self
                 .fields
@@ -1102,7 +1102,10 @@ impl EqualizerEditor {
                     this.field_drag = Some(FieldDrag {
                         key: name,
                         bounds,
-                        geometry: DockGeometry::current(window, this.state.system.config.ui_scale),
+                        geometry: WindowGeometry::current(
+                            window,
+                            this.state.system.config.ui_scale,
+                        ),
                         geometry_epoch: this.geometry_epoch,
                         revision: this.revision,
                         _subscriptions: subscriptions,
@@ -1587,7 +1590,7 @@ impl EqualizerEditor {
                     };
                     if geometry_epoch != this.geometry_epoch
                         || geometry
-                            != DockGeometry::current(
+                            != WindowGeometry::current(
                                 window,
                                 this.context.snapshot().system.config.ui_scale,
                             )
@@ -1669,7 +1672,7 @@ impl EqualizerEditor {
             .child(
                 canvas(
                     move |bounds, window, cx| {
-                        let geometry = DockGeometry::current(window, ui_scale);
+                        let geometry = WindowGeometry::current(window, ui_scale);
                         let _ = geometry_owner.update(cx, |this, cx| {
                             if geometry_epoch != this.geometry_epoch {
                                 return;
@@ -2321,7 +2324,7 @@ impl AudioProcessing {
             return;
         }
         let config = config.clone();
-        for ((_, candidate), editor) in &self.equalizer_ui.editors {
+        for ((_, candidate), editor) in &self.equalizer_editors.editors {
             if *candidate != target {
                 continue;
             }
@@ -2400,7 +2403,7 @@ impl AudioProcessing {
         if matches!(target, EqTarget::Node(_))
             && let EqualizerEdit::RemoveBand { index } = &edit
         {
-            self.equalizer_ui
+            self.equalizer_editors
                 .removing
                 .insert(target, (expected.clone(), *index));
         }
@@ -2459,7 +2462,7 @@ impl AudioProcessing {
                         };
                         let config = std::mem::take(&mut submission.config);
                         if replaces_band_identity {
-                            self.equalizer_ui.pending_node_focus_reset = Some((id, revision));
+                            self.equalizer_editors.pending_node_focus_reset = Some((id, revision));
                         }
                         self.graph_edit_equalizer(
                             GraphEdit::Replace {
@@ -2499,12 +2502,12 @@ impl AudioProcessing {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<EqualizerEditor> {
-        if self.equalizer_ui.active.get(&panel) != Some(&target) {
+        if self.equalizer_editors.active.get(&panel) != Some(&target) {
             self.deactivate_equalizer_panel(panel, window, cx);
-            self.equalizer_ui.active.insert(panel, target);
+            self.equalizer_editors.active.insert(panel, target);
         }
         let key = (panel, target);
-        if let Some(editor) = self.equalizer_ui.editors.get(&key) {
+        if let Some(editor) = self.equalizer_editors.editors.get(&key) {
             let editor = editor.clone();
             let availability = EqAvailability {
                 blocked: self.equalizer_blocked(target),
@@ -2535,7 +2538,7 @@ impl AudioProcessing {
         }
         let owner = cx.entity().downgrade();
         let editor = cx.new(|cx| EqualizerEditor::new(owner, target, panel, self, config, cx));
-        self.equalizer_ui.editors.insert(key, editor.clone());
+        self.equalizer_editors.editors.insert(key, editor.clone());
         editor
     }
 
@@ -2587,14 +2590,20 @@ impl AudioProcessing {
     }
 
     pub(super) fn notify_preset_panel(&self, panel: u64, cx: &mut Context<Self>) {
-        if let Some(editor) = self.equalizer_ui.editors.get(&(panel, EqTarget::Monitor)) {
+        if let Some(editor) = self
+            .equalizer_editors
+            .editors
+            .get(&(panel, EqTarget::Monitor))
+        {
             editor.update(cx, |_, cx| cx.notify());
         }
     }
 
     pub(super) fn notify_preset_labels(&self, cx: &mut Context<Self>) {
-        for ((panel, target), editor) in &self.equalizer_ui.editors {
-            if *target == EqTarget::Monitor && self.equalizer_ui.active.get(panel) == Some(target) {
+        for ((panel, target), editor) in &self.equalizer_editors.editors {
+            if *target == EqTarget::Monitor
+                && self.equalizer_editors.active.get(panel) == Some(target)
+            {
                 editor.update(cx, |editor, cx| {
                     if editor.active {
                         cx.notify();
@@ -2609,57 +2618,61 @@ impl AudioProcessing {
         let blocked = self.equalizer_blocked(EqTarget::Node(0));
         let collecting = self.collecting_equalizer_target();
         let format = equalizer_format(&state);
-        let removals = &self.equalizer_ui.removing;
-        let reset_band_focus = self.equalizer_ui.reset_band_focus;
+        let removals = &self.equalizer_editors.removing;
+        let reset_band_focus = self.equalizer_editors.reset_band_focus;
         let command_active = self.command_active;
-        self.equalizer_ui.editors.retain(|(_, target), editor| {
-            let Some(config) = target_config(&state, *target) else {
-                editor.update(cx, |editor, cx| editor.cancel_pointer(cx));
-                return false;
-            };
-            editor.update(cx, |editor, cx| {
-                if reset_band_focus == Some(*target)
-                    && (!command_active || editor.config.bands != config.bands)
-                {
-                    editor.retire_band_focus();
-                    cx.notify();
-                }
-                if editor.config.bands.len() != config.bands.len()
-                    && let Some((previous, index)) = removals.get(target)
-                {
-                    editor.removing_band = Some((previous.clone(), *index));
-                }
-                editor.reconcile(
-                    Rc::clone(&state),
-                    config,
-                    EqAvailability {
-                        blocked: matches!(target, EqTarget::Node(_)) && blocked,
-                        pending: self.pending,
-                        format,
-                        collecting_revision: collecting
-                            .filter(|(pending_target, _)| pending_target == target)
-                            .map(|(_, revision)| revision),
-                    },
-                    self.geometry_epoch,
-                    cx,
-                );
+        self.equalizer_editors
+            .editors
+            .retain(|(_, target), editor| {
+                let Some(config) = target_config(&state, *target) else {
+                    editor.update(cx, |editor, cx| editor.cancel_pointer(cx));
+                    return false;
+                };
+                editor.update(cx, |editor, cx| {
+                    if reset_band_focus == Some(*target)
+                        && (!command_active || editor.config.bands != config.bands)
+                    {
+                        editor.retire_band_focus();
+                        cx.notify();
+                    }
+                    if editor.config.bands.len() != config.bands.len()
+                        && let Some((previous, index)) = removals.get(target)
+                    {
+                        editor.removing_band = Some((previous.clone(), *index));
+                    }
+                    editor.reconcile(
+                        Rc::clone(&state),
+                        config,
+                        EqAvailability {
+                            blocked: matches!(target, EqTarget::Node(_)) && blocked,
+                            pending: self.pending,
+                            format,
+                            collecting_revision: collecting
+                                .filter(|(pending_target, _)| pending_target == target)
+                                .map(|(_, revision)| revision),
+                        },
+                        self.geometry_epoch,
+                        cx,
+                    );
+                });
+                true
             });
-            true
-        });
-        self.equalizer_ui
+        self.equalizer_editors
             .active
             .retain(|_, target| target_config(&state, *target).is_some());
-        self.equalizer_ui.removing.retain(|target, (previous, _)| {
-            target_config(&state, *target).is_some_and(|config| config.bands == previous.bands)
-        });
+        self.equalizer_editors
+            .removing
+            .retain(|target, (previous, _)| {
+                target_config(&state, *target).is_some_and(|config| config.bands == previous.bands)
+            });
         if !command_active {
-            self.equalizer_ui.reset_band_focus = None;
+            self.equalizer_editors.reset_band_focus = None;
         }
     }
 
     pub(super) fn cancel_equalizer_pointer(&mut self, cx: &mut Context<Self>) -> bool {
         let mut cancelled = false;
-        for editor in self.equalizer_ui.editors.values() {
+        for editor in self.equalizer_editors.editors.values() {
             editor.update(cx, |editor, cx| {
                 cancelled |= editor.drag.is_some() || editor.field_drag.is_some();
                 editor.cancel_pointer(cx);
@@ -2669,7 +2682,7 @@ impl AudioProcessing {
     }
 
     pub(super) fn invalidate_equalizer_geometry(&mut self, cx: &mut Context<Self>) {
-        for editor in self.equalizer_ui.editors.values() {
+        for editor in self.equalizer_editors.editors.values() {
             editor.update(cx, |editor, cx| {
                 editor.geometry_epoch = self.geometry_epoch;
                 editor.bounds.set(None);
@@ -2679,12 +2692,12 @@ impl AudioProcessing {
     }
 
     pub(super) fn equalizer_pointer_active(&self) -> bool {
-        self.equalizer_ui.pointer_count.get() > 0
+        self.equalizer_editors.pointer_count.get() > 0
     }
 
     pub(super) fn equalizer_input_focused(&self, window: &Window, cx: &App) -> bool {
-        self.equalizer_ui.active.iter().any(|(panel, target)| {
-            self.equalizer_ui
+        self.equalizer_editors.active.iter().any(|(panel, target)| {
+            self.equalizer_editors
                 .editors
                 .get(&(*panel, *target))
                 .is_some_and(|editor| {
@@ -2704,7 +2717,7 @@ impl AudioProcessing {
         visible: bool,
         cx: &mut Context<Self>,
     ) {
-        self.equalizer_ui.editors.retain(|(panel, _), editor| {
+        self.equalizer_editors.editors.retain(|(panel, _), editor| {
             let exists = layout.contains_panel(*panel);
             if !visible || !layout.is_panel_active(*panel) {
                 editor.update(cx, |editor, cx| {
@@ -2715,7 +2728,7 @@ impl AudioProcessing {
             }
             exists
         });
-        self.equalizer_ui
+        self.equalizer_editors
             .active
             .retain(|panel, _| layout.contains_panel(*panel));
     }
@@ -2735,7 +2748,7 @@ fn merge_draft_edit(
 
 impl AudioProcessing {
     pub(super) fn node_equalizer_dirty_count(&self, cx: &App) -> usize {
-        self.equalizer_ui
+        self.equalizer_editors
             .editors
             .iter()
             .filter(|((_, target), _)| matches!(target, EqTarget::Node(_)))
@@ -2751,7 +2764,7 @@ impl AudioProcessing {
     }
 
     pub(super) fn node_equalizer_dirty_count_for(&self, id: u64, cx: &App) -> usize {
-        self.equalizer_ui
+        self.equalizer_editors
             .editors
             .iter()
             .filter(|((_, target), _)| *target == EqTarget::Node(id))
@@ -2775,7 +2788,7 @@ impl AudioProcessing {
         let revision = self.state.system.config.processing_graph.revision;
         let mut edits = HashMap::new();
         let mut fields = Vec::new();
-        for ((_, target), entity) in &self.equalizer_ui.editors {
+        for ((_, target), entity) in &self.equalizer_editors.editors {
             if *target != EqTarget::Node(id) {
                 continue;
             }
@@ -2839,7 +2852,7 @@ impl AudioProcessing {
     ) {
         let revision = self.state.system.config.processing_graph.revision;
         if !success || submitted.revision.checked_add(1) != Some(revision) {
-            for ((_, target), editor) in &self.equalizer_ui.editors {
+            for ((_, target), editor) in &self.equalizer_editors.editors {
                 if *target == EqTarget::Node(submitted.node) {
                     editor.update(cx, |editor, cx| {
                         editor.cancel_pointer(cx);
@@ -2856,7 +2869,7 @@ impl AudioProcessing {
     }
 
     pub(super) fn discard_node_equalizer_drafts(&mut self, id: u64, cx: &mut Context<Self>) {
-        for ((_, target), editor) in &self.equalizer_ui.editors {
+        for ((_, target), editor) in &self.equalizer_editors.editors {
             if *target != EqTarget::Node(id) {
                 continue;
             }
@@ -2940,8 +2953,8 @@ impl AudioProcessing {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(target) = self.equalizer_ui.active.remove(&panel)
-            && let Some(editor) = self.equalizer_ui.editors.get(&(panel, target))
+        if let Some(target) = self.equalizer_editors.active.remove(&panel)
+            && let Some(editor) = self.equalizer_editors.editors.get(&(panel, target))
         {
             let focused = editor
                 .read(cx)
@@ -3065,7 +3078,7 @@ impl AudioProcessing {
         if from.checked_add(1) != Some(to) || to != current {
             return;
         }
-        for ((_, target), editor) in &self.equalizer_ui.editors {
+        for ((_, target), editor) in &self.equalizer_editors.editors {
             if *target != EqTarget::Node(id) {
                 continue;
             }
@@ -3095,7 +3108,7 @@ fn replaces_band_identity(edit: &EqualizerEdit) -> bool {
 
 impl AudioProcessing {
     pub(super) fn begin_equalizer_command(&mut self, command: &Command) {
-        self.equalizer_ui.reset_band_focus = match command {
+        self.equalizer_editors.reset_band_focus = match command {
             Command::EqualizerEdit { edit } if replaces_band_identity(edit) => {
                 Some(EqTarget::Monitor)
             }
@@ -3105,10 +3118,10 @@ impl AudioProcessing {
             } if matches!(
                 edit.as_ref(),
                 GraphEdit::Replace { id, .. }
-                    if self.equalizer_ui.pending_node_focus_reset == Some((*id, *expected_revision))
+                    if self.equalizer_editors.pending_node_focus_reset == Some((*id, *expected_revision))
             ) =>
             {
-                self.equalizer_ui
+                self.equalizer_editors
                     .pending_node_focus_reset
                     .take()
                     .map(|(id, _)| EqTarget::Node(id))
@@ -3119,7 +3132,7 @@ impl AudioProcessing {
             edit: EqualizerEdit::RemoveBand { index },
         } = command
         {
-            self.equalizer_ui.removing.insert(
+            self.equalizer_editors.removing.insert(
                 EqTarget::Monitor,
                 (self.state.system.config.equalizer.clone(), *index),
             );
@@ -3128,8 +3141,8 @@ impl AudioProcessing {
 
     pub(super) fn finish_equalizer_command(&mut self, success: bool) {
         if !success {
-            self.equalizer_ui.removing.clear();
-            self.equalizer_ui.reset_band_focus = None;
+            self.equalizer_editors.removing.clear();
+            self.equalizer_editors.reset_band_focus = None;
         }
     }
 }
@@ -3138,7 +3151,7 @@ mod tests {
     use super::*;
     use crate::{
         config::{Config, ConfigPersistence},
-        core::Runtime,
+        core::CoreRuntime,
         gui::feature::SnapshotSource,
         i18n::Localizer,
     };
@@ -3462,7 +3475,7 @@ mod tests {
     // deliver its real ack through the production reconciliation/identity guards.
     fn acknowledge_front(
         cx: &mut TestAppContext,
-        runtime: &Runtime,
+        runtime: &CoreRuntime,
         owner: &Entity<AudioProcessing>,
         success: bool,
     ) {
@@ -3844,7 +3857,7 @@ mod tests {
 
     fn select_node_target(
         cx: &mut TestAppContext,
-        runtime: &Runtime,
+        runtime: &CoreRuntime,
         owner: &Entity<AudioProcessing>,
         editor: &Entity<EqualizerEditor>,
     ) -> u64 {
@@ -3884,14 +3897,14 @@ mod tests {
                 );
             });
             owner
-                .equalizer_ui
+                .equalizer_editors
                 .editors
                 .remove(&(PANEL, EqTarget::Monitor));
             owner
-                .equalizer_ui
+                .equalizer_editors
                 .editors
                 .insert((PANEL, target), editor.clone());
-            owner.equalizer_ui.active.insert(PANEL, target);
+            owner.equalizer_editors.active.insert(PANEL, target);
             owner.command_active = true;
         });
         id
@@ -4077,7 +4090,7 @@ mod tests {
     // leave the GUI graph owner waiting for ACK across arbitrary event turns.
     fn publish_graph_front(
         cx: &mut TestAppContext,
-        runtime: &Runtime,
+        runtime: &CoreRuntime,
         owner: &Entity<AudioProcessing>,
     ) -> bool {
         let submission = owner.update(cx, |owner, _| owner.commands.pop_front().unwrap());
@@ -4405,7 +4418,7 @@ mod tests {
         // The production panel measures the workbench before showing its inspector.
         draw(cx, handle);
         let node_position = owner.read_with(cx, |owner, _| {
-            let bounds = owner.graph_ui.bounds[&PANEL].get().unwrap().0;
+            let bounds = owner.graph_editor.bounds[&PANEL].get().unwrap().0;
             bounds.origin + point(px(24. + 120. + 200.), px(24. + 120. + 16.))
         });
         dispatch_pointer_event(
@@ -4594,7 +4607,7 @@ mod tests {
                 )
             });
             parent
-                .equalizer_ui
+                .equalizer_editors
                 .editors
                 .insert((PANEL + 1, EqTarget::Monitor), sibling.clone());
             parent.command_active = true;
@@ -4767,7 +4780,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) -> (
         tempfile::TempDir,
-        Runtime,
+        CoreRuntime,
         Entity<AudioProcessing>,
         Entity<EqualizerEditor>,
         AnyWindowHandle,
@@ -4803,7 +4816,7 @@ mod tests {
             })
             .collect();
         config.save(&path).unwrap();
-        let runtime = Runtime::start(directory.path(), &path).unwrap();
+        let runtime = CoreRuntime::start(directory.path(), &path).unwrap();
         let i18n = Arc::new(Localizer::new("en-US"));
         let context = FeatureContext {
             snapshots: Rc::new(SnapshotSource::new(runtime.handle.clone())),
@@ -4829,10 +4842,13 @@ mod tests {
                 )
             });
             parent
-                .equalizer_ui
+                .equalizer_editors
                 .editors
                 .insert((PANEL, EqTarget::Monitor), editor.clone());
-            parent.equalizer_ui.active.insert(PANEL, EqTarget::Monitor);
+            parent
+                .equalizer_editors
+                .active
+                .insert(PANEL, EqTarget::Monitor);
             editor
         });
         let window = cx.open_window(size(px(1200.), px(900.)), {
@@ -4851,7 +4867,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) -> (
         tempfile::TempDir,
-        Runtime,
+        CoreRuntime,
         Entity<EqualizerEditor>,
         AnyWindowHandle,
     ) {

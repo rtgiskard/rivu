@@ -80,7 +80,7 @@ state-section tokens does not invalidate the GUI root; audio frames still have
 their independent processing path.
 
 Workspace publishes panel membership and active-tab demand when layout structure
-or panel options change. Presentation and artwork owners reconcile their retained
+or panel options change. Visualizer and artwork owners reconcile their retained
 consumers against that publication; ordinary playback position updates do not
 rediscover the layout. Window visibility and Still Mode gate existing demand.
 Source/seek identity, playback state and waveform progress remain dynamic inputs:
@@ -99,6 +99,11 @@ Feature owners reconcile configuration and freshness even while hidden, but subm
 reads only for demand. Hiding immediately revokes pending publication rights while
 preserving accepted rows, selections, and Details drafts. An open Add to playlist
 chooser has independent demand; cover acquisition has separate owners.
+
+GUI and TUI consumers use `QueryTracker` for query identity, freshness stamps, and
+owner-scoped cancellation generations. It owns neither result rows nor worker
+slots. `QueryTicket` carries submission validity into Core; cancelling a tracker
+invalidates its tickets without invalidating an otherwise current cached payload.
 
 Every submitted read holds its physical slot until the actual reply or channel
 disconnection. Replacement, hiding, cancellation, and logical timeout cannot free

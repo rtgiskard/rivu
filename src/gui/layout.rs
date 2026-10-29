@@ -11,11 +11,10 @@
 
 pub(super) mod docking;
 mod docking_ui;
-pub(super) mod interaction;
+pub(super) mod layout_dialog;
 pub(super) mod layout_geometry;
-pub(super) mod layout_manager;
 pub(super) mod panel_menu;
-pub(super) mod save_owner;
+pub(super) mod persistence;
 mod view;
 
 use std::{
@@ -252,7 +251,7 @@ pub struct LayoutSet {
 
 // Runtime types intentionally do not implement serde: IDs can never leak into
 // the file, and saving does not construct an owned copy of any layout.
-mod persistence {
+mod serialized {
     use super::*;
     use serde::ser::{SerializeMap, SerializeSeq};
 
@@ -1596,7 +1595,7 @@ impl LayoutSet {
                         |((name, layout), (other_name, other_layout))| {
                             name == other_name
                                 && (Arc::ptr_eq(layout, other_layout)
-                                    || persistence::roots_eq(
+                                    || serialized::roots_eq(
                                         layout.root.as_ref(),
                                         other_layout.root.as_ref(),
                                     ))
@@ -1721,7 +1720,7 @@ impl LayoutSet {
     pub fn load(path: &Path) -> Result<Self> {
         let file = rivu_format::regular_file::open_regular_file(path)
             .with_context(|| format!("opening layout {}", path.display()))?;
-        let input: persistence::Input = serde_json::from_reader(BufReader::new(file))
+        let input: serialized::Input = serde_json::from_reader(BufReader::new(file))
             .with_context(|| format!("decoding layout {}", path.display()))?;
         input
             .into_set()
@@ -1762,7 +1761,7 @@ impl LayoutSet {
         };
         let result = (|| -> Result<()> {
             let mut writer = BufWriter::new(file);
-            serde_json::to_writer_pretty(&mut writer, &persistence::View::from(self))
+            serde_json::to_writer_pretty(&mut writer, &serialized::View::from(self))
                 .context("encoding layouts")?;
             writer.write_all(b"\n")?;
             writer.flush().context("flushing layouts")?;
@@ -2027,11 +2026,11 @@ mod tests {
     }
 
     fn encoded(set: &LayoutSet) -> Value {
-        serde_json::to_value(persistence::View::from(set)).unwrap()
+        serde_json::to_value(serialized::View::from(set)).unwrap()
     }
 
     fn decoded(value: Value) -> Result<LayoutSet> {
-        serde_json::from_value::<persistence::Input>(value)?.into_set()
+        serde_json::from_value::<serialized::Input>(value)?.into_set()
     }
 
     fn one_layout(root: Value) -> Value {
@@ -3031,7 +3030,7 @@ mod tests {
             assert!(decoded(value.clone()).is_err(), "accepted {value}");
         }
         assert!(
-            serde_json::from_str::<persistence::Input>(
+            serde_json::from_str::<serialized::Input>(
                 r#"{"active":"Work","layouts":{"Work":{"root":null},"Work":{"root":null}}}"#
             )
             .is_err()

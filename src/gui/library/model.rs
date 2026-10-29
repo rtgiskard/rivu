@@ -1,7 +1,7 @@
 //! Library projection and selection identities, independent of the window shell.
 use super::{DirectoryTree, LibraryNode, TreeBranch, selection::LibrarySelection};
 use crate::gui::coordination::manual_actions::ManualIntentId;
-use crate::projection::QueryProjection;
+use crate::query_tracking::QueryTracker;
 use gpui::ScrollStrategy;
 use rivu_protocol::model::{DirectoryRow, LibrarySort, Page, Query};
 use rivu_protocol::response::QueryRevisions;
@@ -30,7 +30,7 @@ pub(in crate::gui) fn merge_selection(
 }
 #[derive(Default)]
 struct RootCounts {
-    owner: QueryProjection,
+    owner: QueryTracker,
     roots: Vec<std::path::PathBuf>,
     totals: std::collections::HashMap<std::path::PathBuf, usize>,
     pending: HashSet<usize>,
@@ -50,7 +50,7 @@ impl RootCounts {
 
 #[derive(Default)]
 struct SearchCounts {
-    pub(super) projection: QueryProjection,
+    pub(super) projection: QueryTracker,
     // Logical cancellation retires the epoch, not the physical worker slot.
     worker: Option<u64>,
     failed: bool,
@@ -67,7 +67,7 @@ pub(super) struct SearchCountRequest {
     pub(super) query: Query,
     pub(super) roots: Vec<std::path::PathBuf>,
     pub(super) revisions: QueryRevisions,
-    pub(super) ticket: crate::core::QueryTicket,
+    pub(super) ticket: crate::query_tracking::QueryTicket,
     generation: u64,
 }
 
@@ -86,7 +86,7 @@ pub(super) struct LibraryViewBuffer {
 }
 
 pub(super) struct LibraryBrowser {
-    pub(super) projection: QueryProjection,
+    pub(super) projection: QueryTracker,
     search_counts: SearchCounts,
     pub(super) buffer: LibraryViewBuffer,
     pub(super) tree: DirectoryTree,
@@ -362,7 +362,7 @@ impl LibraryBrowser {
         }
     }
 
-    pub(super) fn root_count_ticket(&mut self) -> crate::core::QueryTicket {
+    pub(super) fn root_count_ticket(&mut self) -> crate::query_tracking::QueryTicket {
         self.counts.owner.ticket()
     }
 

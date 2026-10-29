@@ -26,7 +26,7 @@ use crate::{
     projection::GuiSnapshot,
 };
 use gpui::{Context, Entity, SharedString, Window, prelude::*};
-use model::QueueSelection;
+use model::QueueBrowser;
 pub(in crate::gui) use model::{QueueCommit, QueueIdentity};
 use rivu_protocol::model::Command;
 use rivu_ui::loading::LoadingText;
@@ -72,7 +72,7 @@ pub(in crate::gui) enum QueueEvent {
 pub(in crate::gui) struct Queue {
     context: FeatureContext,
     state: Rc<GuiSnapshot>,
-    model: QueueSelection,
+    model: QueueBrowser,
     queue_search: Entity<SearchField>,
     loading: LoadingText<()>,
     visible: bool,
@@ -92,7 +92,7 @@ impl Queue {
             let SearchEvent::Changed(query) = event;
             this.apply_queue_search(query.clone(), cx);
         });
-        let mut model = QueueSelection::default();
+        let mut model = QueueBrowser::default();
         model.sync(state.query_revisions(None), state.queue.total);
         Self {
             context,
@@ -321,7 +321,7 @@ mod tests {
         }
         .save(&path)
         .unwrap();
-        let runtime = crate::core::Runtime::start(directory.path(), &path).unwrap();
+        let runtime = crate::core::CoreRuntime::start(directory.path(), &path).unwrap();
         let i18n = Arc::new(crate::i18n::Localizer::new("en-US"));
         let labels = Rc::new(
             i18n.fixed_texts()

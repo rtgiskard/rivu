@@ -9,12 +9,11 @@ use rivu_protocol::model::GraphExecutionMode;
 
 mod workbench;
 use workbench::{WorkbenchChoice, WorkbenchMenu, WorkbenchPanel};
-mod results;
 
 mod inspector;
 use inspector::{DraftStamp, SubmittedField};
 mod fields;
-pub(super) use fields::{GraphField, NodeField};
+pub(super) use fields::{GraphField, NodeField, node_fields};
 
 const NODE_WIDTH: f32 = 220.;
 const HEADER: f32 = 36.;
@@ -45,19 +44,14 @@ pub(super) struct GraphPointer {
     node: Option<u64>,
     preview: [f32; 2],
     bounds: Bounds<Pixels>,
-    geometry: DockGeometry,
+    geometry: WindowGeometry,
     epoch: u64,
     revision: u64,
     button: MouseButton,
     _subscriptions: [Subscription; 2],
 }
 
-struct PanelInput {
-    input: Entity<Input>,
-    _subscriptions: [Subscription; 2],
-}
-
-pub(super) struct GraphUi {
+pub(super) struct GraphEditorState {
     selected: Option<u64>,
     connecting: Option<GraphPort>,
     highlight_connection: Option<GraphPort>,
@@ -72,23 +66,17 @@ pub(super) struct GraphUi {
     pending: Option<PendingEdit>,
     pub(super) pointer: Option<GraphPointer>,
     pub(super) bounds: HashMap<u64, MeasuredGraph>,
-    panel_inputs: HashMap<u64, HashMap<FieldKey, PanelInput>>,
     draft_stamps: HashMap<FieldKey, DraftStamp>,
     draft_generation: u64,
     field_errors: HashMap<FieldKey, String>,
     expanded_backends: std::collections::HashSet<u64>,
-    choosing_path: Option<FieldKey>,
-    chooser_generation: u64,
-    export_draft_generation: u64,
     workbenches: HashMap<u64, WorkbenchPanel>,
     workbench_choices: rivu_ui::ChoiceState<WorkbenchChoice>,
     workbench_menu: Option<(u64, WorkbenchMenu)>,
     workbench_anchor: Cell<Option<Bounds<Pixels>>>,
-    result_details: std::collections::HashSet<u64>,
-    result_errors: HashMap<u64, String>,
 }
 
-impl Default for GraphUi {
+impl Default for GraphEditorState {
     fn default() -> Self {
         Self {
             selected: None,
@@ -105,46 +93,25 @@ impl Default for GraphUi {
             pending: None,
             pointer: None,
             bounds: HashMap::new(),
-            panel_inputs: HashMap::new(),
             draft_stamps: HashMap::new(),
             draft_generation: 0,
             field_errors: HashMap::new(),
             expanded_backends: std::collections::HashSet::new(),
-            choosing_path: None,
-            chooser_generation: 0,
-            export_draft_generation: 0,
             workbenches: HashMap::new(),
             workbench_choices: rivu_ui::ChoiceState::default(),
             workbench_menu: None,
             workbench_anchor: Cell::new(None),
-            result_details: std::collections::HashSet::new(),
-            result_errors: HashMap::new(),
         }
     }
 }
 
-impl GraphUi {
-    pub(super) fn input_focused(&self, window: &Window, cx: &App) -> bool {
-        self.panel_inputs.values().any(|fields| {
-            fields
-                .values()
-                .any(|field| field.input.read(cx).is_focused(window))
-        })
-    }
-
-    pub(super) fn retain_panel_inputs(
-        &mut self,
-        layout: &super::super::workspace::WorkspacePanels,
-    ) {
-        self.panel_inputs.retain(|id, _| layout.contains_panel(*id));
+impl GraphEditorState {
+    pub(super) fn retain_panels(&mut self, layout: &super::super::workspace::WorkspacePanels) {
         self.workbenches.retain(|id, _| layout.contains_panel(*id));
-        self.result_details.retain(|id| layout.contains_panel(*id));
-        self.result_errors
-            .retain(|id, _| layout.contains_panel(*id));
     }
 }
 
-fn node_label(kind: &GraphNodeKind) -> &'static str {
+pub(super) fn node_label(kind: &GraphNodeKind) -> &'static str {
     match kind {
         GraphNodeKind::Source => "processing-source",
         GraphNodeKind::Equalizer { .. } => "processing-equalizer",
@@ -182,72 +149,12 @@ impl AudioProcessing {
         }
     }
 
-    fn graph_panel_input(
-        &mut self,
-        panel: u64,
-        key: FieldKey,
-        label: &str,
-        cx: &mut Context<Self>,
-    ) -> Entity<Input> {
-        if let Some(field) = self
-            .graph_ui
-            .panel_inputs
-            .get(&panel)
-            .and_then(|fields| fields.get(&key))
-        {
-            return field.input.clone();
-        }
-        let backing = self.fields[&key].input.clone();
-        let placeholder = self
-            .path_placeholder(key)
-            .unwrap_or_else(|| label.to_owned().into());
-        let input = cx.new(|cx| {
-            Input::new(
-                label.to_owned(),
-                backing.read(cx).text().to_owned(),
-                placeholder,
-                cx,
-            )
-        });
-        let name = key;
-        let edited = cx.subscribe(&input, move |this, input, event, cx| match event {
-            InputEvent::Changed {
-                user: true,
-                composing: false,
-            } => {
-                let text = input.read(cx).text().to_owned();
-                this.stage_graph_text(name, text, cx);
-                cx.notify();
-            }
-            InputEvent::Submit => this.apply_field(name, cx),
-            _ => {}
-        });
-        let replica = input.downgrade();
-        let changed = cx.subscribe(&backing, move |_, backing, event, cx| {
-            if matches!(event, InputEvent::Changed { .. })
-                && let Some(input) = replica.upgrade()
-                && input.read(cx).text() != backing.read(cx).text()
-            {
-                let text = backing.read(cx).text().to_owned();
-                input.update(cx, |input, cx| input.set_text(text, cx));
-            }
-        });
-        self.graph_ui.panel_inputs.entry(panel).or_default().insert(
-            key,
-            PanelInput {
-                input: input.clone(),
-                _subscriptions: [edited, changed],
-            },
-        );
-        input
-    }
-
     pub(super) fn graph_busy(&self) -> bool {
-        self.graph_ui.pending.is_some() || self.pending > 0
+        self.graph_editor.pending.is_some() || self.pending > 0
     }
 
     pub(super) fn graph_collecting_equalizer_input(&self) -> Option<(u64, u64)> {
-        let pending = self.graph_ui.pending.as_ref()?;
+        let pending = self.graph_editor.pending.as_ref()?;
         pending
             .equalizer_submitted
             .as_ref()?
@@ -261,19 +168,23 @@ impl AudioProcessing {
         let mut equalizer_rebased = None;
         let graph = &self.state.system.config.processing_graph;
         let revision = graph.revision;
-        if self.graph_ui.revision != Some(revision) {
-            self.graph_ui.pointer = None;
-            if self.graph_ui.pending.is_none() && self.graph_ui.revision.is_some() {
-                self.graph_ui.undo.clear();
-                self.graph_ui.redo.clear();
+        if self.graph_editor.revision != Some(revision) {
+            self.graph_editor.pointer = None;
+            if self.graph_editor.pending.is_none() && self.graph_editor.revision.is_some() {
+                self.graph_editor.undo.clear();
+                self.graph_editor.redo.clear();
             }
-            self.graph_ui.revision = Some(revision);
+            self.graph_editor.revision = Some(revision);
         }
-        if let Some(pending) = self.graph_ui.pending.as_ref()
+        if let Some(pending) = self.graph_editor.pending.as_ref()
             && pending.accepted
             && revision > pending.before.revision
         {
-            let pending = self.graph_ui.pending.take().expect("pending graph edit");
+            let pending = self
+                .graph_editor
+                .pending
+                .take()
+                .expect("pending graph edit");
             let accepted_revision = pending.before.revision + 1;
             equalizer_completed = pending
                 .equalizer_submitted
@@ -283,42 +194,42 @@ impl AudioProcessing {
                     .equalizer_target
                     .map(|id| (id, accepted_revision - 1, revision));
                 if let Some(id) = pending.select_after {
-                    self.graph_ui.selected = Some(id);
-                    self.graph_ui.target_port = 0;
+                    self.graph_editor.selected = Some(id);
+                    self.graph_editor.target_port = 0;
                 }
                 match pending.action {
                     HistoryAction::Edit => {
-                        self.graph_ui.undo.push_back(pending.before);
-                        self.graph_ui.redo.clear();
+                        self.graph_editor.undo.push_back(pending.before);
+                        self.graph_editor.redo.clear();
                     }
                     HistoryAction::Undo => {
-                        self.graph_ui.undo.pop_back();
-                        self.graph_ui.redo.push_back(pending.before);
+                        self.graph_editor.undo.pop_back();
+                        self.graph_editor.redo.push_back(pending.before);
                     }
                     HistoryAction::Redo => {
-                        self.graph_ui.redo.pop_back();
-                        self.graph_ui.undo.push_back(pending.before);
+                        self.graph_editor.redo.pop_back();
+                        self.graph_editor.undo.push_back(pending.before);
                     }
                 }
-                while self.graph_ui.undo.len() > HISTORY_LIMIT {
-                    self.graph_ui.undo.pop_front();
+                while self.graph_editor.undo.len() > HISTORY_LIMIT {
+                    self.graph_editor.undo.pop_front();
                 }
-                while self.graph_ui.redo.len() > HISTORY_LIMIT {
-                    self.graph_ui.redo.pop_front();
+                while self.graph_editor.redo.len() > HISTORY_LIMIT {
+                    self.graph_editor.redo.pop_front();
                 }
             } else {
-                self.graph_ui.undo.clear();
-                self.graph_ui.redo.clear();
+                self.graph_editor.undo.clear();
+                self.graph_editor.redo.clear();
             }
             if revision == accepted_revision {
-                for stamp in self.graph_ui.draft_stamps.values_mut() {
+                for stamp in self.graph_editor.draft_stamps.values_mut() {
                     if stamp.revision + 1 == revision {
                         stamp.revision = revision;
                     }
                 }
                 for submitted in pending.submitted {
                     if inspector::submission_current(
-                        self.graph_ui.draft_stamps.get(&submitted.key),
+                        self.graph_editor.draft_stamps.get(&submitted.key),
                         &submitted,
                         self.fields
                             .get(&submitted.key)
@@ -326,28 +237,28 @@ impl AudioProcessing {
                     ) && let Some(field) = self.fields.get_mut(&submitted.key)
                     {
                         field.dirty = false;
-                        self.graph_ui.draft_stamps.remove(&submitted.key);
-                        self.graph_ui.field_errors.remove(&submitted.key);
+                        self.graph_editor.draft_stamps.remove(&submitted.key);
+                        self.graph_editor.field_errors.remove(&submitted.key);
                     }
                 }
             }
         }
         if self
-            .graph_ui
+            .graph_editor
             .selected
             .is_none_or(|id| !graph.nodes.iter().any(|n| n.id == id))
         {
-            self.graph_ui.selected = graph.nodes.first().map(|n| n.id);
-            self.graph_ui.target_port = 0;
+            self.graph_editor.selected = graph.nodes.first().map(|n| n.id);
+            self.graph_editor.target_port = 0;
         }
         if self
-            .graph_ui
+            .graph_editor
             .connecting
             .is_some_and(|p| !graph.nodes.iter().any(|n| n.id == p.node))
         {
-            self.graph_ui.connecting = None;
+            self.graph_editor.connecting = None;
         }
-        let selected = self.graph_ui.selected;
+        let selected = self.graph_editor.selected;
         self.fields.retain(|key, field| {
             let Some(id) = key.graph_node() else {
                 return true;
@@ -358,13 +269,13 @@ impl AudioProcessing {
                 .any(|node| matches!(key, FieldKey::Graph(binding) if binding.matches(node)))
                 && (Some(id) == selected || field.dirty)
         });
-        self.graph_ui
+        self.graph_editor
             .draft_stamps
             .retain(|key, _| self.fields.contains_key(key));
-        self.graph_ui
+        self.graph_editor
             .field_errors
             .retain(|key, _| self.fields.contains_key(key));
-        self.graph_ui
+        self.graph_editor
             .expanded_backends
             .retain(|id| graph.nodes.iter().any(|node| node.id == *id));
         self.sync_graph_fields(cx);
@@ -378,10 +289,10 @@ impl AudioProcessing {
 
     pub(super) fn graph_ack(&mut self, success: bool, cx: &mut Context<Self>) {
         if !success {
-            if let Some(pending) = self.graph_ui.pending.take() {
+            if let Some(pending) = self.graph_editor.pending.take() {
                 if pending.before.revision != self.state.system.config.processing_graph.revision {
-                    self.graph_ui.undo.clear();
-                    self.graph_ui.redo.clear();
+                    self.graph_editor.undo.clear();
+                    self.graph_editor.redo.clear();
                 }
                 let error = self
                     .error
@@ -389,7 +300,7 @@ impl AudioProcessing {
                     .unwrap_or_else(|| self.tr("processing-command-failed").to_string());
                 for submitted in pending.submitted {
                     if self.fields.contains_key(&submitted.key) {
-                        self.graph_ui
+                        self.graph_editor
                             .field_errors
                             .insert(submitted.key, error.clone());
                     }
@@ -398,7 +309,7 @@ impl AudioProcessing {
                     self.finish_node_equalizer_submission(submission, false, cx);
                 }
             }
-        } else if let Some(pending) = self.graph_ui.pending.as_mut() {
+        } else if let Some(pending) = self.graph_editor.pending.as_mut() {
             pending.accepted = true;
         }
         self.reconcile_graph(cx);
@@ -440,7 +351,7 @@ impl AudioProcessing {
             } => Some(*id),
             _ => None,
         };
-        self.graph_ui.pending = Some(PendingEdit {
+        self.graph_editor.pending = Some(PendingEdit {
             before: graph,
             action,
             submitted,
@@ -464,9 +375,9 @@ impl AudioProcessing {
             return;
         }
         let graph = if redo {
-            self.graph_ui.redo.back()
+            self.graph_editor.redo.back()
         } else {
-            self.graph_ui.undo.back()
+            self.graph_editor.undo.back()
         }
         .cloned();
         if let Some(graph) = graph {
@@ -485,27 +396,27 @@ impl AudioProcessing {
     }
 
     fn graph_select(&mut self, id: u64, cx: &mut Context<Self>) {
-        if self.graph_ui.selected != Some(id) {
-            self.graph_ui.selected = Some(id);
-            self.graph_ui.target_port = 0;
+        if self.graph_editor.selected != Some(id) {
+            self.graph_editor.selected = Some(id);
+            self.graph_editor.target_port = 0;
         }
         self.sync_graph_fields(cx);
         cx.notify();
     }
 
     fn sync_graph_fields(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self.graph_ui.selected else {
-            self.graph_ui.fields_revision = None;
-            for fields in self.graph_ui.panel_inputs.values_mut() {
+        let Some(id) = self.graph_editor.selected else {
+            self.graph_editor.fields_revision = None;
+            for fields in self.panel_inputs.values_mut() {
                 fields.retain(|key, _| *key == FieldKey::GraphExport);
             }
             return;
         };
         let stamp = (self.state.system.config.processing_graph.revision, id);
-        if self.graph_ui.fields_revision == Some(stamp) {
+        if self.graph_editor.fields_revision == Some(stamp) {
             return;
         }
-        self.graph_ui.fields_revision = Some(stamp);
+        self.graph_editor.fields_revision = Some(stamp);
         let node = self
             .state
             .system
@@ -513,7 +424,7 @@ impl AudioProcessing {
             .processing_graph
             .nodes
             .iter()
-            .find(|n| Some(n.id) == self.graph_ui.selected)
+            .find(|n| Some(n.id) == self.graph_editor.selected)
             .cloned();
         let Some(node) = node else {
             return;
@@ -533,7 +444,7 @@ impl AudioProcessing {
         });
         // Keep only the current inspector's replicas. Drafts for other nodes
         // remain in the backing fields; removed controls drop subscriptions.
-        for fields in self.graph_ui.panel_inputs.values_mut() {
+        for fields in self.panel_inputs.values_mut() {
             fields.retain(|key, _| *key == FieldKey::GraphExport || active_keys.contains(key));
         }
         if !self.fields.contains_key(&FieldKey::GraphExport) {
@@ -546,7 +457,7 @@ impl AudioProcessing {
         }
     }
 
-    fn graph_parameter_label(&self, field: GraphField) -> String {
+    pub(super) fn graph_parameter_label(&self, field: GraphField) -> String {
         let label = self.tr(field.label()).to_string();
         match field {
             GraphField::MixGain(index)
@@ -568,15 +479,16 @@ impl AudioProcessing {
 
     fn graph_add(&mut self, panel: u64, kind: GraphNodeKind, cx: &mut Context<Self>) {
         let viewport = self
-            .graph_ui
+            .graph_editor
             .bounds
             .get(&panel)
             .and_then(|b| b.get())
             .map(|(bounds, _)| [f32::from(bounds.size.width), f32::from(bounds.size.height)])
             .unwrap_or([600., 380.]);
         let position = [
-            (viewport[0] * 0.5 - self.graph_ui.pan[0]) / self.graph_ui.zoom - NODE_WIDTH * 0.5,
-            (viewport[1] * 0.5 - self.graph_ui.pan[1]) / self.graph_ui.zoom
+            (viewport[0] * 0.5 - self.graph_editor.pan[0]) / self.graph_editor.zoom
+                - NODE_WIDTH * 0.5,
+            (viewport[1] * 0.5 - self.graph_editor.pan[1]) / self.graph_editor.zoom
                 - node_height(&kind) * 0.5,
         ];
         self.graph_edit(GraphEdit::Add { kind, position }, cx);
@@ -584,7 +496,7 @@ impl AudioProcessing {
 
     fn graph_remove(&mut self, cx: &mut Context<Self>) {
         if self
-            .graph_ui
+            .graph_editor
             .selected
             .is_some_and(|id| self.graph_node_dirty_count(id, cx) > 0)
         {
@@ -598,7 +510,7 @@ impl AudioProcessing {
             .nodes
             .iter()
             .find(|n| {
-                Some(n.id) == self.graph_ui.selected && !matches!(n.kind, GraphNodeKind::Source)
+                Some(n.id) == self.graph_editor.selected && !matches!(n.kind, GraphNodeKind::Source)
             })
         {
             self.graph_edit(GraphEdit::Remove { id: node.id }, cx);
@@ -607,7 +519,7 @@ impl AudioProcessing {
 
     fn graph_duplicate(&mut self, cx: &mut Context<Self>) {
         if self
-            .graph_ui
+            .graph_editor
             .selected
             .is_some_and(|id| self.graph_node_dirty_count(id, cx) > 0)
         {
@@ -621,7 +533,7 @@ impl AudioProcessing {
             .nodes
             .iter()
             .find(|n| {
-                Some(n.id) == self.graph_ui.selected && !matches!(n.kind, GraphNodeKind::Source)
+                Some(n.id) == self.graph_editor.selected && !matches!(n.kind, GraphNodeKind::Source)
             })
         {
             self.graph_edit(
@@ -637,16 +549,16 @@ impl AudioProcessing {
     fn graph_connect(&mut self, port: GraphPort, output: bool, cx: &mut Context<Self>) {
         self.graph_select(port.node, cx);
         if output {
-            self.graph_ui.connecting = Some(port);
-            self.graph_ui.target_port = port.port;
+            self.graph_editor.connecting = Some(port);
+            self.graph_editor.target_port = port.port;
             cx.notify();
-        } else if let Some(from) = self.graph_ui.connecting.take() {
+        } else if let Some(from) = self.graph_editor.connecting.take() {
             self.graph_edit(GraphEdit::Connect { from, to: port }, cx);
         }
     }
 
     fn graph_position(&self, node: &GraphNode) -> [f32; 2] {
-        self.graph_ui
+        self.graph_editor
             .pointer
             .as_ref()
             .filter(|p| p.node == Some(node.id))
@@ -655,12 +567,12 @@ impl AudioProcessing {
     }
 
     fn graph_pan(&self) -> [f32; 2] {
-        self.graph_ui
+        self.graph_editor
             .pointer
             .as_ref()
             .filter(|p| p.node.is_none())
             .map(|p| p.preview)
-            .unwrap_or(self.graph_ui.pan)
+            .unwrap_or(self.graph_editor.pan)
     }
 
     fn graph_start_pointer(
@@ -678,11 +590,11 @@ impl AudioProcessing {
         if self.graph_busy() && node.is_some() {
             return;
         }
-        let Some((bounds, geometry)) = self.graph_ui.bounds.get(&panel).and_then(|b| b.get())
+        let Some((bounds, geometry)) = self.graph_editor.bounds.get(&panel).and_then(|b| b.get())
         else {
             return;
         };
-        if geometry != DockGeometry::current(window, self.state.system.config.ui_scale) {
+        if geometry != WindowGeometry::current(window, self.state.system.config.ui_scale) {
             return;
         }
         let origin = if let Some(id) = node {
@@ -700,7 +612,7 @@ impl AudioProcessing {
             };
             node.position
         } else {
-            self.graph_ui.pan
+            self.graph_editor.pan
         };
         let subscriptions = [
             cx.observe_window_activation(window, |this, window, cx| {
@@ -714,7 +626,7 @@ impl AudioProcessing {
                 }
             }),
         ];
-        self.graph_ui.pointer = Some(GraphPointer {
+        self.graph_editor.pointer = Some(GraphPointer {
             panel,
             node,
             start: event.position,
@@ -736,18 +648,19 @@ impl AudioProcessing {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(pointer) = self.graph_ui.pointer.as_mut() else {
+        let Some(pointer) = self.graph_editor.pointer.as_mut() else {
             return;
         };
         if pointer.epoch != self.geometry_epoch
-            || pointer.geometry != DockGeometry::current(window, self.state.system.config.ui_scale)
+            || pointer.geometry
+                != WindowGeometry::current(window, self.state.system.config.ui_scale)
             || pointer.revision != self.state.system.config.processing_graph.revision
         {
             self.cancel_pointer(cx);
             return;
         }
         let scale = if pointer.node.is_some() {
-            self.graph_ui.zoom
+            self.graph_editor.zoom
         } else {
             1.
         };
@@ -764,13 +677,13 @@ impl AudioProcessing {
             if phase == DispatchPhase::Capture {
                 let _ = entity.update(cx, |this, cx| {
                     if this
-                        .graph_ui
+                        .graph_editor
                         .pointer
                         .as_ref()
                         .is_some_and(|p| p.panel == panel)
                     {
                         if this
-                            .graph_ui
+                            .graph_editor
                             .pointer
                             .as_ref()
                             .is_some_and(|pointer| event.pressed_button == Some(pointer.button))
@@ -789,13 +702,13 @@ impl AudioProcessing {
             if phase == DispatchPhase::Capture {
                 let _ = entity.update(cx, |this, cx| {
                     if this
-                        .graph_ui
+                        .graph_editor
                         .pointer
                         .as_ref()
                         .is_some_and(|p| p.panel == panel && p.button == event.button)
                     {
                         this.graph_move_pointer(event.position, window, cx);
-                        if let Some(pointer) = this.graph_ui.pointer.take() {
+                        if let Some(pointer) = this.graph_editor.pointer.take() {
                             if let Some(id) = pointer.node {
                                 if pointer.preview != pointer.origin {
                                     this.graph_edit(
@@ -807,7 +720,7 @@ impl AudioProcessing {
                                     );
                                 }
                             } else {
-                                this.graph_ui.pan = pointer.preview;
+                                this.graph_editor.pan = pointer.preview;
                             }
                         }
                         cx.notify();
@@ -824,16 +737,17 @@ impl AudioProcessing {
 
     fn graph_zoom(&mut self, factor: f32, anchor: [f32; 2], cx: &mut Context<Self>) {
         self.cancel_pointer(cx);
-        self.graph_zoom_to(self.graph_ui.zoom * factor, anchor, cx);
+        self.graph_zoom_to(self.graph_editor.zoom * factor, anchor, cx);
     }
 
     fn graph_zoom_to(&mut self, zoom: f32, anchor: [f32; 2], cx: &mut Context<Self>) {
-        let old = self.graph_ui.zoom;
+        let old = self.graph_editor.zoom;
         let next = zoom.clamp(0.35, 2.);
         for (i, coordinate) in anchor.into_iter().enumerate() {
-            self.graph_ui.pan[i] = coordinate - (coordinate - self.graph_ui.pan[i]) * next / old;
+            self.graph_editor.pan[i] =
+                coordinate - (coordinate - self.graph_editor.pan[i]) * next / old;
         }
-        self.graph_ui.zoom = next;
+        self.graph_editor.zoom = next;
         cx.notify();
     }
 
@@ -851,7 +765,7 @@ impl AudioProcessing {
             match key {
                 "escape" => {
                     self.cancel_pointer(cx);
-                    self.graph_ui.connecting = None;
+                    self.graph_editor.connecting = None;
                     cx.notify();
                 }
                 "delete" | "backspace" => self.graph_remove(cx),
@@ -859,8 +773,8 @@ impl AudioProcessing {
                 "-" => self.graph_zoom(1. / 1.2, [250., 160.], cx),
                 "home" => {
                     self.cancel_pointer(cx);
-                    self.graph_ui.pan = [24., 24.];
-                    self.graph_ui.zoom = 1.;
+                    self.graph_editor.pan = [24., 24.];
+                    self.graph_editor.zoom = 1.;
                     cx.notify();
                 }
                 "left" | "right" | "up" | "down" => {
@@ -873,8 +787,8 @@ impl AudioProcessing {
                     };
                     if modifiers.alt {
                         self.cancel_pointer(cx);
-                        self.graph_ui.pan[0] += delta[0];
-                        self.graph_ui.pan[1] += delta[1];
+                        self.graph_editor.pan[0] += delta[0];
+                        self.graph_editor.pan[1] += delta[1];
                         cx.notify();
                     } else if let Some(node) = self
                         .state
@@ -883,7 +797,7 @@ impl AudioProcessing {
                         .processing_graph
                         .nodes
                         .iter()
-                        .find(|n| Some(n.id) == self.graph_ui.selected)
+                        .find(|n| Some(n.id) == self.graph_editor.selected)
                     {
                         self.graph_edit(
                             GraphEdit::Move {
@@ -905,7 +819,7 @@ impl AudioProcessing {
 
     fn routing_canvas(&mut self, panel: u64, cx: &mut Context<Self>) -> AnyElement {
         let focus = self
-            .graph_ui
+            .graph_editor
             .workbenches
             .entry(panel)
             .or_default()
@@ -915,11 +829,11 @@ impl AudioProcessing {
         let theme = rivu_ui::theme::palette(cx);
         let graph = &self.state.system.config.processing_graph;
         let edges = graph.edges.clone();
-        let highlighted = self.graph_ui.highlight_connection;
+        let highlighted = self.graph_editor.highlight_connection;
         let pan = self.graph_pan();
-        let zoom = self.graph_ui.zoom;
+        let zoom = self.graph_editor.zoom;
         let measured = self
-            .graph_ui
+            .graph_editor
             .bounds
             .entry(panel)
             .or_insert_with(|| Rc::new(Cell::new(None)))
@@ -944,7 +858,7 @@ impl AudioProcessing {
                 .h(px(node_height(&node.kind) * zoom))
                 .bg(rgb(theme.panel))
                 .border_1()
-                .border_color(rgb(if self.graph_ui.selected == Some(id) {
+                .border_color(rgb(if self.graph_editor.selected == Some(id) {
                     theme.accent
                 } else {
                     theme.border
@@ -1000,7 +914,7 @@ impl AudioProcessing {
                     } else {
                         format!("PCM {}", port + 1)
                     };
-                    let active = output && self.graph_ui.connecting == Some(endpoint);
+                    let active = output && self.graph_editor.connecting == Some(endpoint);
                     let control = div()
                         .id(SharedString::from(format!(
                             "graph-port-{panel}-{id}-{output}-{port}"
@@ -1094,8 +1008,8 @@ impl AudioProcessing {
                     this.graph_zoom((delta[1] * 0.006).exp(), anchor, cx);
                 } else {
                     this.cancel_pointer(cx);
-                    this.graph_ui.pan[0] += delta[0];
-                    this.graph_ui.pan[1] += delta[1];
+                    this.graph_editor.pan[0] += delta[0];
+                    this.graph_editor.pan[1] += delta[1];
                     cx.notify();
                 }
                 cx.stop_propagation();
@@ -1103,10 +1017,10 @@ impl AudioProcessing {
             .child(
                 canvas(
                     move |bounds, window, cx| {
-                        let geometry = DockGeometry::current(window, scale);
+                        let geometry = WindowGeometry::current(window, scale);
                         measure.set(Some((bounds, geometry)));
                         let _ = owner.update(cx, |this, cx| {
-                            if this.graph_ui.pointer.as_ref().is_some_and(|p| {
+                            if this.graph_editor.pointer.as_ref().is_some_and(|p| {
                                 p.panel == panel
                                     && (p.bounds != bounds
                                         || p.geometry != geometry
@@ -1209,20 +1123,24 @@ impl AudioProcessing {
             graph
                 .nodes
                 .iter()
-                .find(|n| Some(n.id) == self.graph_ui.selected)
+                .find(|n| Some(n.id) == self.graph_editor.selected)
         };
         let (Some(node), Some(track)) = (node, self.input_track()) else {
             return;
         };
         let target = GraphPort {
             node: node.id,
-            port: if output { 0 } else { self.graph_ui.target_port },
+            port: if output {
+                0
+            } else {
+                self.graph_editor.target_port
+            },
         };
         self.send(
             Command::ProcessingGraphRun {
                 track_id: track.id,
                 target,
-                mode: self.graph_ui.mode,
+                mode: self.graph_editor.mode,
             },
             cx,
         );
@@ -1243,7 +1161,7 @@ mod tests {
     use super::*;
     use crate::{
         config::{Config, ConfigPersistence},
-        core::Runtime,
+        core::CoreRuntime,
         gui::feature::SnapshotSource,
         i18n::Localizer,
     };
@@ -1271,7 +1189,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) -> (
         tempfile::TempDir,
-        Runtime,
+        CoreRuntime,
         Entity<AudioProcessing>,
         AnyWindowHandle,
     ) {
@@ -1303,7 +1221,7 @@ mod tests {
         });
         config.processing_graph.next_id = 4;
         config.save(&path).unwrap();
-        let runtime = Runtime::start(directory.path(), &path).unwrap();
+        let runtime = CoreRuntime::start(directory.path(), &path).unwrap();
         let i18n = Arc::new(Localizer::new("en-US"));
         let context = FeatureContext {
             snapshots: Rc::new(SnapshotSource::new(runtime.handle.clone())),
@@ -1352,7 +1270,7 @@ mod tests {
         cx: &TestAppContext,
     ) -> Point<Pixels> {
         processing.read_with(cx, |this, _| {
-            let bounds = this.graph_ui.bounds[&PANEL].get().unwrap().0;
+            let bounds = this.graph_editor.bounds[&PANEL].get().unwrap().0;
             let node = this
                 .state
                 .system
@@ -1545,7 +1463,9 @@ mod tests {
         release(cx, handle, output);
         key(cx, handle, "ctrl-d");
         wait_for_commands(cx, &processing, handle).await;
-        processing.read_with(cx, |this, _| assert_eq!(this.graph_ui.selected, Some(4)));
+        processing.read_with(cx, |this, _| {
+            assert_eq!(this.graph_editor.selected, Some(4))
+        });
         assert!(
             runtime
                 .handle
@@ -1571,29 +1491,31 @@ mod tests {
         let port = node_point(&processing, 3, cx)
             + point(px(NODE_WIDTH - 92.), px(HEADER + PORT_ROW * 1.5 - 16.));
         press(cx, handle, port);
-        processing.read_with(cx, |this, _| assert!(this.graph_ui.pointer.is_none()));
+        processing.read_with(cx, |this, _| assert!(this.graph_editor.pointer.is_none()));
         release(cx, handle, port);
         processing.read_with(cx, |this, _| {
             assert_eq!(
-                this.graph_ui.connecting,
+                this.graph_editor.connecting,
                 Some(GraphPort { node: 3, port: 1 })
             );
-            assert_eq!(this.graph_ui.target_port, 1);
+            assert_eq!(this.graph_editor.target_port, 1);
         });
         key(cx, handle, "escape");
         processing.read_with(cx, |this, _| {
-            assert_eq!(this.graph_ui.selected, Some(3));
-            assert!(this.graph_ui.connecting.is_none());
-            assert_eq!(this.graph_ui.target_port, 1);
+            assert_eq!(this.graph_editor.selected, Some(3));
+            assert!(this.graph_editor.connecting.is_none());
+            assert_eq!(this.graph_editor.target_port, 1);
         });
         assert_eq!(runtime.handle.config_snapshot().processing_graph, original);
         // An input port also owns selection, even without a pending connection.
         let input =
             node_point(&processing, 2, cx) + point(px(-68.), px(HEADER + PORT_ROW * 0.5 - 16.));
         press(cx, handle, input);
-        processing.read_with(cx, |this, _| assert!(this.graph_ui.pointer.is_none()));
+        processing.read_with(cx, |this, _| assert!(this.graph_editor.pointer.is_none()));
         release(cx, handle, input);
-        processing.read_with(cx, |this, _| assert_eq!(this.graph_ui.selected, Some(2)));
+        processing.read_with(cx, |this, _| {
+            assert_eq!(this.graph_editor.selected, Some(2))
+        });
         let output = node_point(&processing, 2, cx)
             + point(px(NODE_WIDTH - 92.), px(HEADER + PORT_ROW * 0.5 - 16.));
         let free_input =
@@ -1618,7 +1540,9 @@ mod tests {
                 },
             ]
         );
-        processing.read_with(cx, |this, _| assert_eq!(this.graph_ui.selected, Some(3)));
+        processing.read_with(cx, |this, _| {
+            assert_eq!(this.graph_editor.selected, Some(3))
+        });
     }
     struct WorkbenchWindow(Entity<AudioProcessing>);
 
@@ -1682,7 +1606,7 @@ mod tests {
         let handle = window.into();
         draw(cx, handle);
         let input = processing.read_with(cx, |this, _| {
-            this.graph_ui.panel_inputs[&PANEL][&FieldKey::GraphExport]
+            this.panel_inputs[&PANEL][&FieldKey::GraphExport]
                 .input
                 .clone()
         });

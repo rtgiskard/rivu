@@ -1,5 +1,5 @@
 use super::Settings;
-use crate::{core::QueryTicket, projection::QueryProjection};
+use crate::query_tracking::{QueryTicket, QueryTracker};
 use gpui::{Context, SharedString};
 use rivu_protocol::{
     model::{LibraryRootStats, MAX_QUERY_ROWS, Query},
@@ -12,7 +12,7 @@ use std::{
 
 #[derive(Default)]
 pub(super) struct RootStats {
-    owner: QueryProjection,
+    owner: QueryTracker,
     roots: Vec<PathBuf>,
     revision: u64,
     values: HashMap<PathBuf, LibraryRootStats>,

@@ -1,3 +1,6 @@
+pub(super) mod full_waveform;
+pub(super) mod runtime;
+
 pub(super) use rivu_visuals::{
     FrequencyViews, StyleCoordinator, VisualLabels, VisualParameters, Waveform, WaveformEvent,
     WaveformScanParameters,

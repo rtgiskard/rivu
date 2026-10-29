@@ -23,9 +23,9 @@ pub(super) struct WorkbenchPanel {
     parameters: bool,
     inspector_open: bool,
     inspector_width: f32,
-    resize: Option<(Pixels, f32, DockGeometry)>,
+    resize: Option<(Pixels, f32, WindowGeometry)>,
     zoom_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
-    zoom_drag: Option<DockGeometry>,
+    zoom_drag: Option<WindowGeometry>,
     connections: bool,
     menu_bounds: Rc<Cell<[Option<Bounds<Pixels>>; 2]>>,
     pub(super) canvas_focus: Option<FocusHandle>,
@@ -60,18 +60,13 @@ impl AudioProcessing {
                 task.operation == ProcessingOperation::Graph
                     && task.phase == ProcessingPhase::Complete
             });
-        if self
-            .graph_ui
-            .panel_inputs
-            .get(&panel)
-            .is_some_and(|fields| {
-                fields.iter().any(|(key, field)| {
-                    // Results owns its export editor even though graph parameters are hidden.
-                    (*key != FieldKey::GraphExport || !export_visible)
-                        && field.input.read(cx).is_focused(window)
-                })
+        if self.panel_inputs.get(&panel).is_some_and(|fields| {
+            fields.iter().any(|(key, field)| {
+                // Results owns its export editor even though graph parameters are hidden.
+                (*key != FieldKey::GraphExport || !export_visible)
+                    && field.input.read(cx).is_focused(window)
             })
-        {
+        }) {
             window.blur(cx);
         }
     }
@@ -106,7 +101,7 @@ impl AudioProcessing {
             move |bounds, window, cx| {
                 let wide = bounds.size.width >= window.rem_size() * 64.;
                 let _ = owner.update(cx, |this, cx| {
-                    let state = this.graph_ui.workbenches.entry(panel).or_default();
+                    let state = this.graph_editor.workbenches.entry(panel).or_default();
                     if state.wide != wide {
                         state.wide = wide;
                         this.cancel_pointer(cx);
@@ -129,11 +124,11 @@ impl AudioProcessing {
         cx: &mut Context<Self>,
     ) -> Div {
         self.reconcile_graph(cx);
-        let state = self.graph_ui.workbenches.entry(panel).or_default();
+        let state = self.graph_editor.workbenches.entry(panel).or_default();
         let wide = state.wide;
         let parameters = state.parameters;
         let inspector_width = state.inspector_width;
-        let selected = self.graph_ui.selected.is_some_and(|id| {
+        let selected = self.graph_editor.selected.is_some_and(|id| {
             self.state
                 .system
                 .config
@@ -151,17 +146,12 @@ impl AudioProcessing {
         if !parameters_visible {
             self.deactivate_equalizer_panel(panel, window, cx);
         }
-        if self
-            .graph_ui
-            .panel_inputs
-            .get(&panel)
-            .is_some_and(|fields| {
-                fields.iter().any(|(key, field)| {
-                    (*key == FieldKey::GraphExport || !parameters_visible)
-                        && field.input.read(cx).is_focused(window)
-                })
+        if self.panel_inputs.get(&panel).is_some_and(|fields| {
+            fields.iter().any(|(key, field)| {
+                (*key == FieldKey::GraphExport || !parameters_visible)
+                    && field.input.read(cx).is_focused(window)
             })
-        {
+        }) {
             window.blur(cx);
         }
         let toolbar = self.graph_toolbar(panel, selected, parameters_visible, cx);
@@ -216,11 +206,11 @@ impl AudioProcessing {
                     .child(body),
             );
         if self
-            .graph_ui
+            .graph_editor
             .workbench_menu
             .is_some_and(|(owner, _)| owner == panel)
-            && self.graph_ui.workbench_choices.is_open()
-            && let Some(anchor) = self.graph_ui.workbench_anchor.get()
+            && self.graph_editor.workbench_choices.is_open()
+            && let Some(anchor) = self.graph_editor.workbench_anchor.get()
         {
             let mut anchor = anchor;
             anchor.size.width = anchor.size.width.max(window.rem_size() * 16.);
@@ -232,7 +222,7 @@ impl AudioProcessing {
                 )
                 .render(
                     self,
-                    |this| &this.graph_ui.workbench_choices,
+                    |this| &this.graph_editor.workbench_choices,
                     Self::choose_workbench_item,
                     Self::dismiss_workbench_menu,
                     window,
@@ -273,9 +263,9 @@ impl AudioProcessing {
             (true, "󰑎", "processing-graph-redo"),
         ] {
             let empty = if redo {
-                self.graph_ui.redo.is_empty()
+                self.graph_editor.redo.is_empty()
             } else {
-                self.graph_ui.undo.is_empty()
+                self.graph_editor.undo.is_empty()
             };
             editing = editing.child(
                 IconButton::new(
@@ -323,7 +313,7 @@ impl AudioProcessing {
                     IconButtonDensity::Compact,
                     cx,
                     move |this, _, cx| {
-                        if let Some(id) = this.graph_ui.selected {
+                        if let Some(id) = this.graph_editor.selected {
                             this.graph_fit(panel, Some((id, id)), cx);
                         }
                     },
@@ -341,8 +331,8 @@ impl AudioProcessing {
                     cx,
                     |this, _, cx| {
                         this.cancel_pointer(cx);
-                        this.graph_ui.pan = [24., 24.];
-                        this.graph_ui.zoom = 1.;
+                        this.graph_editor.pan = [24., 24.];
+                        this.graph_editor.zoom = 1.;
                         cx.notify();
                     },
                 ),
@@ -367,14 +357,14 @@ impl AudioProcessing {
                     "󰌷",
                     self.tr("processing-graph-connections"),
                 )
-                .toggled(self.graph_ui.workbenches[&panel].connections)
+                .toggled(self.graph_editor.workbenches[&panel].connections)
                 .build(
                     IconButtonStyle::Quiet,
                     IconButtonDensity::Compact,
                     cx,
                     move |this, _, cx| {
                         this.cancel_pointer(cx);
-                        let state = this.graph_ui.workbenches.entry(panel).or_default();
+                        let state = this.graph_editor.workbenches.entry(panel).or_default();
                         state.connections = !state.connections;
                         cx.notify();
                     },
@@ -398,7 +388,7 @@ impl AudioProcessing {
                     cx,
                     move |this, _, cx| {
                         this.cancel_pointer(cx);
-                        let state = this.graph_ui.workbenches.entry(panel).or_default();
+                        let state = this.graph_editor.workbenches.entry(panel).or_default();
                         if state.wide {
                             state.inspector_open = !state.inspector_open;
                         } else {
@@ -408,7 +398,7 @@ impl AudioProcessing {
                     },
                 ),
             );
-        if !self.graph_ui.workbenches[&panel].wide && parameters_visible {
+        if !self.graph_editor.workbenches[&panel].wide && parameters_visible {
             inspection = inspection.child(
                 button(
                     ("workbench-back", panel),
@@ -416,7 +406,7 @@ impl AudioProcessing {
                     cx,
                     move |this, _, cx| {
                         this.cancel_pointer(cx);
-                        this.graph_ui
+                        this.graph_editor
                             .workbenches
                             .entry(panel)
                             .or_default()
@@ -450,7 +440,7 @@ impl AudioProcessing {
                 .min_h_0()
                 .child(self.routing_canvas(panel, cx)),
         );
-        if let Some(port) = self.graph_ui.connecting {
+        if let Some(port) = self.graph_editor.connecting {
             view = view.child(
                 row()
                     .flex_wrap()
@@ -469,13 +459,13 @@ impl AudioProcessing {
                         self.tr("processing-cancel"),
                         cx,
                         |this, _, cx| {
-                            this.graph_ui.connecting = None;
+                            this.graph_editor.connecting = None;
                             cx.notify();
                         },
                     )),
             );
         }
-        if self.graph_ui.workbenches[&panel].connections {
+        if self.graph_editor.workbenches[&panel].connections {
             let mut connections = column().gap_1().p_1();
             for edge in &self.state.system.config.processing_graph.edges {
                 let from = edge.from;
@@ -493,7 +483,7 @@ impl AudioProcessing {
                             cx,
                             move |this, _, cx| {
                                 this.graph_select(to.node, cx);
-                                this.graph_ui.highlight_connection = Some(to);
+                                this.graph_editor.highlight_connection = Some(to);
                                 this.graph_fit(panel, Some((from.node, to.node)), cx);
                             },
                         ))
@@ -533,7 +523,7 @@ impl AudioProcessing {
             .as_ref()
             .is_some_and(|task| !task.phase.is_terminal());
         let busy = self.graph_busy() || running;
-        let mode = self.tr(mode_label(self.graph_ui.mode));
+        let mode = self.tr(mode_label(self.graph_editor.mode));
         let mode_control = self.workbench_dropdown(panel, WorkbenchMenu::Mode, mode, cx);
         let mut controls = row().flex_wrap().gap_2().child(
             row()
@@ -561,10 +551,14 @@ impl AudioProcessing {
                     if output {
                         matches!(node.kind, GraphNodeKind::Output)
                     } else {
-                        Some(node.id) == self.graph_ui.selected
+                        Some(node.id) == self.graph_editor.selected
                     }
                 });
-            let port = if output { 0 } else { self.graph_ui.target_port };
+            let port = if output {
+                0
+            } else {
+                self.graph_editor.target_port
+            };
             let label = target.map_or_else(
                 || self.tr(label).to_string(),
                 |node| {
@@ -618,21 +612,21 @@ impl AudioProcessing {
     }
 
     pub(in crate::gui) fn close_workbench_controls(&mut self) {
-        self.graph_ui.workbench_choices.close();
-        self.graph_ui.workbench_menu = None;
-        self.graph_ui.workbench_anchor.set(None);
+        self.graph_editor.workbench_choices.close();
+        self.graph_editor.workbench_menu = None;
+        self.graph_editor.workbench_anchor.set(None);
         self.cancel_workbench_resize();
     }
 
     pub(in crate::gui) fn cancel_workbench_resize(&mut self) {
-        for state in self.graph_ui.workbenches.values_mut() {
+        for state in self.graph_editor.workbenches.values_mut() {
             state.resize = None;
             state.zoom_drag = None;
         }
     }
 
     pub(in crate::gui) fn workbench_pointer_active(&self) -> bool {
-        self.graph_ui
+        self.graph_editor
             .workbenches
             .values()
             .any(|state| state.resize.is_some() || state.zoom_drag.is_some())
@@ -643,14 +637,14 @@ impl AudioProcessing {
         layout: &crate::gui::workspace::WorkspacePanels,
         visible: bool,
     ) {
-        for (panel, state) in &mut self.graph_ui.workbenches {
+        for (panel, state) in &mut self.graph_editor.workbenches {
             if !visible || !layout.is_panel_active(*panel) {
                 state.resize = None;
                 state.zoom_drag = None;
             }
         }
         if self
-            .graph_ui
+            .graph_editor
             .workbench_menu
             .is_some_and(|(panel, _)| !visible || !layout.is_panel_active(panel))
         {
@@ -665,15 +659,15 @@ impl AudioProcessing {
         label: SharedString,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let open = self.graph_ui.workbench_menu == Some((panel, menu))
-            && self.graph_ui.workbench_choices.is_open();
+        let open = self.graph_editor.workbench_menu == Some((panel, menu))
+            && self.graph_editor.workbench_choices.is_open();
         let hint = self.tr(match menu {
             WorkbenchMenu::Add => "processing-workspace-add-node",
             WorkbenchMenu::Mode => "processing-workspace-mode",
         });
         let measured = Rc::clone(
             &self
-                .graph_ui
+                .graph_editor
                 .workbenches
                 .entry(panel)
                 .or_default()
@@ -691,7 +685,7 @@ impl AudioProcessing {
                     let owner = owner.clone();
                     cx.defer(move |cx| {
                         let _ = owner.update(cx, |this, cx| {
-                            if this.graph_ui.workbench_menu == Some((panel, menu)) {
+                            if this.graph_editor.workbench_menu == Some((panel, menu)) {
                                 this.close_workbench_controls();
                                 cx.notify();
                             }
@@ -720,7 +714,7 @@ impl AudioProcessing {
         .tooltip(rivu_ui::text_tooltip(hint))
         .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
             match this
-                .graph_ui
+                .graph_editor
                 .workbench_choices
                 .key(event, ChoiceMode::Select, false, window)
                 .apply(window, cx)
@@ -736,8 +730,8 @@ impl AudioProcessing {
         }))
         .child(measure);
         activate_control(trigger, cx, move |this, _, cx| {
-            if this.graph_ui.workbench_menu == Some((panel, menu))
-                && this.graph_ui.workbench_choices.is_open()
+            if this.graph_editor.workbench_menu == Some((panel, menu))
+                && this.graph_editor.workbench_choices.is_open()
             {
                 this.close_workbench_controls();
             } else {
@@ -745,7 +739,7 @@ impl AudioProcessing {
                 let Some(anchor) = trigger_bounds.get()[menu as usize] else {
                     return;
                 };
-                this.graph_ui.workbench_anchor.set(Some(anchor));
+                this.graph_editor.workbench_anchor.set(Some(anchor));
                 let (items, selected) = match menu {
                     WorkbenchMenu::Add => (
                         [
@@ -773,7 +767,7 @@ impl AudioProcessing {
                         ];
                         let selected = modes
                             .iter()
-                            .position(|mode| *mode == this.graph_ui.mode)
+                            .position(|mode| *mode == this.graph_editor.mode)
                             .unwrap_or(0);
                         (
                             modes
@@ -789,8 +783,8 @@ impl AudioProcessing {
                         )
                     }
                 };
-                this.graph_ui.workbench_menu = Some((panel, menu));
-                this.graph_ui.workbench_choices.open(items, selected);
+                this.graph_editor.workbench_menu = Some((panel, menu));
+                this.graph_editor.workbench_choices.open(items, selected);
             }
             cx.notify();
         })
@@ -798,14 +792,14 @@ impl AudioProcessing {
 
     fn choose_workbench_item(&mut self, index: usize, _: &mut Window, cx: &mut Context<Self>) {
         let Some(choice) = self
-            .graph_ui
+            .graph_editor
             .workbench_choices
             .item(index)
             .map(|item| item.value)
         else {
             return;
         };
-        let Some((panel, _)) = self.graph_ui.workbench_menu else {
+        let Some((panel, _)) = self.graph_editor.workbench_menu else {
             return;
         };
         self.close_workbench_controls();
@@ -841,7 +835,7 @@ impl AudioProcessing {
                 };
                 self.graph_add(panel, kind, cx);
             }
-            WorkbenchChoice::Mode(mode) => self.graph_ui.mode = mode,
+            WorkbenchChoice::Mode(mode) => self.graph_editor.mode = mode,
         }
         cx.notify();
     }
@@ -872,11 +866,11 @@ impl AudioProcessing {
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                     this.cancel_pointer(cx);
-                    let state = this.graph_ui.workbenches.entry(panel).or_default();
+                    let state = this.graph_editor.workbenches.entry(panel).or_default();
                     state.resize = Some((
                         event.position.x,
                         state.inspector_width,
-                        DockGeometry::current(window, this.state.system.config.ui_scale),
+                        WindowGeometry::current(window, this.state.system.config.ui_scale),
                     ));
                     cx.stop_propagation();
                 }),
@@ -887,7 +881,7 @@ impl AudioProcessing {
                     "right" => -1.,
                     _ => return,
                 };
-                let state = this.graph_ui.workbenches.entry(panel).or_default();
+                let state = this.graph_editor.workbenches.entry(panel).or_default();
                 state.inspector_width = (state.inspector_width + change).clamp(16., 42.);
                 this.cancel_pointer(cx);
                 cx.stop_propagation();
@@ -902,15 +896,19 @@ impl AudioProcessing {
                 return;
             }
             let _ = moved.update(cx, |this, cx| {
-                let zoom_drag = this.graph_ui.workbenches[&panel].zoom_drag;
+                let zoom_drag = this.graph_editor.workbenches[&panel].zoom_drag;
                 if let Some(geometry) = zoom_drag {
                     if event.pressed_button != Some(MouseButton::Left)
                         || !window.is_window_active()
                         || geometry
-                            != DockGeometry::current(window, this.state.system.config.ui_scale)
+                            != WindowGeometry::current(window, this.state.system.config.ui_scale)
                     {
-                        this.graph_ui.workbenches.get_mut(&panel).unwrap().zoom_drag = None;
-                    } else if let Some(value) = this.graph_ui.workbenches[&panel]
+                        this.graph_editor
+                            .workbenches
+                            .get_mut(&panel)
+                            .unwrap()
+                            .zoom_drag = None;
+                    } else if let Some(value) = this.graph_editor.workbenches[&panel]
                         .zoom_bounds
                         .get()
                         .and_then(|b| Slider::value_at(b, event.position))
@@ -921,13 +919,14 @@ impl AudioProcessing {
                     cx.notify();
                     return;
                 }
-                let state = this.graph_ui.workbenches.entry(panel).or_default();
+                let state = this.graph_editor.workbenches.entry(panel).or_default();
                 let Some((start, width, geometry)) = state.resize else {
                     return;
                 };
                 if event.pressed_button != Some(MouseButton::Left)
                     || !window.is_window_active()
-                    || geometry != DockGeometry::current(window, this.state.system.config.ui_scale)
+                    || geometry
+                        != WindowGeometry::current(window, this.state.system.config.ui_scale)
                 {
                     state.resize = None;
                     return;
@@ -943,7 +942,7 @@ impl AudioProcessing {
         window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
             if phase == DispatchPhase::Capture {
                 let _ = released.update(cx, |this, cx| {
-                    let state = this.graph_ui.workbenches.entry(panel).or_default();
+                    let state = this.graph_editor.workbenches.entry(panel).or_default();
                     let active = state.resize.take().is_some() | state.zoom_drag.take().is_some();
                     if active {
                         cx.notify();
@@ -954,7 +953,7 @@ impl AudioProcessing {
         window.on_mouse_event(move |_: &MouseExitEvent, phase, _, cx| {
             if phase == DispatchPhase::Capture {
                 let _ = owner.update(cx, |this, cx| {
-                    let state = this.graph_ui.workbenches.entry(panel).or_default();
+                    let state = this.graph_editor.workbenches.entry(panel).or_default();
                     let active = state.resize.take().is_some() | state.zoom_drag.take().is_some();
                     if active {
                         cx.notify();
@@ -965,12 +964,12 @@ impl AudioProcessing {
     }
 
     fn graph_zoom_slider(&self, panel: u64, cx: &mut Context<Self>) -> Stateful<Div> {
-        let state = &self.graph_ui.workbenches[&panel];
+        let state = &self.graph_editor.workbenches[&panel];
         let bounds = state.zoom_bounds.clone();
         let measured = bounds.clone();
         Slider::new(
             ("graph-zoom", panel),
-            (self.graph_ui.zoom - 0.35) / 1.65,
+            (self.graph_editor.zoom - 0.35) / 1.65,
             self.tr("processing-workspace-zoom"),
         )
         .dragging(state.zoom_drag.is_some())
@@ -982,16 +981,21 @@ impl AudioProcessing {
                     else {
                         return;
                     };
-                    this.graph_ui.workbenches.get_mut(&panel).unwrap().zoom_drag = Some(
-                        DockGeometry::current(window, this.state.system.config.ui_scale),
-                    );
+                    this.graph_editor
+                        .workbenches
+                        .get_mut(&panel)
+                        .unwrap()
+                        .zoom_drag = Some(WindowGeometry::current(
+                        window,
+                        this.state.system.config.ui_scale,
+                    ));
                     0.35 + value * 1.65
                 }
                 SliderInput::Key(key) => match key {
                     SliderKey::Start => 0.35,
                     SliderKey::End => 2.,
-                    SliderKey::Decrease => this.graph_ui.zoom - 0.05,
-                    SliderKey::Increase => this.graph_ui.zoom + 0.05,
+                    SliderKey::Decrease => this.graph_editor.zoom - 0.05,
+                    SliderKey::Increase => this.graph_editor.zoom + 0.05,
                 },
             };
             this.graph_zoom_to(zoom, [250., 160.], cx);
@@ -1001,7 +1005,7 @@ impl AudioProcessing {
         .flex_shrink_0()
         .tooltip(rivu_ui::text_tooltip(format!(
             "{:.0}%",
-            self.graph_ui.zoom * 100.
+            self.graph_editor.zoom * 100.
         )))
         .child(
             canvas(
@@ -1015,7 +1019,7 @@ impl AudioProcessing {
 
     fn graph_fit(&mut self, panel: u64, nodes: Option<(u64, u64)>, cx: &mut Context<Self>) {
         let Some((bounds, _)) = self
-            .graph_ui
+            .graph_editor
             .bounds
             .get(&panel)
             .and_then(|bounds| bounds.get())
@@ -1027,8 +1031,8 @@ impl AudioProcessing {
             fitted_view(&self.state.system.config.processing_graph, size, nodes)
         {
             self.cancel_pointer(cx);
-            self.graph_ui.pan = pan;
-            self.graph_ui.zoom = zoom;
+            self.graph_editor.pan = pan;
+            self.graph_editor.zoom = zoom;
             cx.notify();
         }
     }
