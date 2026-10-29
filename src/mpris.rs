@@ -14,7 +14,15 @@ use anyhow::{Context, Result, anyhow};
 use futures::{FutureExt, channel::oneshot};
 use rivu_protocol::AppCommand;
 use rivu_protocol::model::{Command, PlaybackStatus, RepeatMode};
-use std::{collections::HashMap, panic::AssertUnwindSafe, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    panic::AssertUnwindSafe,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 use zbus::{
     Connection,
     connection::Builder,
@@ -229,61 +237,94 @@ impl Mpris {
             let mut previous_can_raise = initial_can_raise;
             let mut metadata = TrackMetadata::from_snapshot(&previous, &artwork);
             let mut loaded_artwork = None;
-            if !publish_until_cancelled(
-                &mut cancelled,
-                &handle,
-                publish_artwork(
-                    &bus,
-                    &handle,
-                    &previous,
-                    &mut metadata,
-                    &artwork,
-                    &mut loaded_artwork,
-                ),
-            )
-            .await
-            {
-                return;
-            }
-            loop {
-                futures::select_biased! {
-                    _ = (&mut cancelled).fuse() => break,
-                    update = updates.recv().fuse() => {
-                        if update.is_err() { break; }
+            let mut artwork_load = None;
+            let publication = AssertUnwindSafe(async {
+                loop {
+                    if artwork_load.is_none() {
+                        artwork_load = load_artwork(
+                            &handle,
+                            &handle.mpris_snapshot(),
+                            &artwork,
+                            &loaded_artwork,
+                        );
+                    }
+                    let event = {
+                        let completion = async {
+                            match artwork_load.as_mut() {
+                                Some(load) => (&mut load.completion).await,
+                                None => futures::future::pending().await,
+                            }
+                        }
+                        .fuse();
+                        futures::pin_mut!(completion);
+                        futures::select_biased! {
+                            _ = (&mut cancelled).fuse() => break,
+                            update = updates.recv().fuse() => {
+                                if update.is_err() { break; }
+                                PublisherEvent::Revision
+                            },
+                            result = completion => PublisherEvent::Artwork(result),
+                        }
+                    };
+                    match event {
+                        PublisherEvent::Revision => {
+                            let current = handle.mpris_snapshot();
+                            let current_can_raise = app.can_raise();
+                            if !publish_until_cancelled(
+                                &mut cancelled,
+                                &handle,
+                                publish_changes(
+                                    &bus,
+                                    &previous,
+                                    &current,
+                                    &mut metadata,
+                                    &artwork,
+                                    previous_can_raise,
+                                    current_can_raise,
+                                ),
+                            )
+                            .await
+                            {
+                                break;
+                            }
+                            if current.shutting_down {
+                                break;
+                            }
+                            previous = current;
+                            previous_can_raise = current_can_raise;
+                        }
+                        PublisherEvent::Artwork(result) => {
+                            // Only physical completion frees this single-flight slot.
+                            artwork_load = None;
+                            if !publish_until_cancelled(&mut cancelled, &handle, async {
+                                publish_artwork(
+                                    &bus,
+                                    &handle,
+                                    result?,
+                                    &mut metadata,
+                                    &artwork,
+                                    &mut loaded_artwork,
+                                )
+                                .await
+                            })
+                            .await
+                            {
+                                break;
+                            }
+                        }
                     }
                 }
-                let current = handle.mpris_snapshot();
-                let current_can_raise = app.can_raise();
-                if !publish_until_cancelled(&mut cancelled, &handle, async {
-                    publish_changes(
-                        &bus,
-                        &previous,
-                        &current,
-                        &mut metadata,
-                        &artwork,
-                        previous_can_raise,
-                        current_can_raise,
-                    )
-                    .await?;
-                    publish_artwork(
-                        &bus,
-                        &handle,
-                        &current,
-                        &mut metadata,
-                        &artwork,
-                        &mut loaded_artwork,
-                    )
-                    .await
-                })
-                .await
-                {
-                    break;
-                }
-                if current.shutting_down {
-                    break;
-                }
-                previous = current;
-                previous_can_raise = current_can_raise;
+            })
+            .catch_unwind()
+            .await;
+            // Cancellation stops publication, not the blocking closure. Retain
+            // its waiter through physical completion before service retirement
+            // or replacement, even if publication itself panicked.
+            if let Some(load) = artwork_load {
+                load.retire().await;
+            }
+            if let Err(panic) = publication {
+                std::panic::resume_unwind(panic);
             }
         });
         Self {
@@ -830,37 +871,78 @@ fn refresh_metadata(
     true
 }
 
-/// Cold probes use the application's blocking pool, never its reactor.
-/// Re-read playback after loading: stale completion may only warm the cache.
-async fn publish_artwork(
-    connection: &Connection,
+struct ArtworkLoad {
+    cancelled: Arc<AtomicBool>,
+    completion:
+        futures::future::BoxFuture<'static, zbus::Result<(ArtworkIdentity, Option<Artwork>)>>,
+}
+
+impl ArtworkLoad {
+    async fn retire(self) {
+        // Skip cold I/O if the pool has not started it. If it has, await the
+        // actual closure rather than dropping its logical waiter.
+        self.cancelled.store(true, Ordering::Release);
+        let _ = self.completion.await;
+    }
+}
+
+enum PublisherEvent {
+    Revision,
+    Artwork(zbus::Result<(ArtworkIdentity, Option<Artwork>)>),
+}
+
+/// Cold probes use the application's blocking pool, never its reactor. The
+/// publisher retains this future until physical completion, including shutdown.
+fn load_artwork(
     handle: &CoreHandle,
     requested: &MprisSnapshot,
-    metadata: &mut Option<TrackMetadata>,
     artwork: &Arc<ArtworkManager>,
-    loaded: &mut Option<ArtworkIdentity>,
-) -> zbus::Result<()> {
-    let Some(track) = requested
+    loaded: &Option<ArtworkIdentity>,
+) -> Option<ArtworkLoad> {
+    let track = requested
         .current_track()
-        .filter(|_| !requested.shutting_down)
-    else {
-        *loaded = None;
-        return Ok(());
-    };
+        .filter(|_| !requested.shutting_down)?;
     if loaded
         .as_ref()
         .is_some_and(|identity| identity.matches(track))
     {
-        return Ok(());
+        return None;
     }
     let identity = ArtworkIdentity::for_track(track);
     let manager = Arc::clone(artwork);
     let track = track.clone();
-    let result = handle
-        .workers()
-        .execute(move || manager.load(&track).or_else(|| manager.export_default()))
-        .await
-        .map_err(|error| zbus::Error::Failure(format!("Loading MPRIS artwork: {error:#}")))?;
+    let workers = Arc::clone(handle.workers());
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancellation = Arc::clone(&cancelled);
+    let completion = async move {
+        let result = workers
+            .execute(move || {
+                if cancellation.load(Ordering::Acquire) {
+                    None
+                } else {
+                    manager.load(&track).or_else(|| manager.export_default())
+                }
+            })
+            .await
+            .map_err(|error| zbus::Error::Failure(format!("Loading MPRIS artwork: {error:#}")))?;
+        Ok((identity, result))
+    }
+    .boxed();
+    Some(ArtworkLoad {
+        cancelled,
+        completion,
+    })
+}
+
+/// Re-read playback after physical completion: stale artwork may only warm the cache.
+async fn publish_artwork(
+    connection: &Connection,
+    handle: &CoreHandle,
+    (identity, result): (ArtworkIdentity, Option<Artwork>),
+    metadata: &mut Option<TrackMetadata>,
+    artwork: &ArtworkManager,
+    loaded: &mut Option<ArtworkIdentity>,
+) -> zbus::Result<()> {
     let current = handle.mpris_snapshot();
     if current.shutting_down
         || !current
@@ -1102,6 +1184,61 @@ mod tests {
     }
 
     #[test]
+    fn artwork_retirement_waits_for_physical_completion() {
+        let pool = crate::execution::BlockingPool::new(1);
+        let retired = Arc::new(AtomicBool::new(false));
+        let worker_retired = Arc::clone(&retired);
+        let (started, entered) = bounded(1);
+        let (release, released) = bounded(1);
+        let completion = async move {
+            pool.execute(move || {
+                started.send(()).unwrap();
+                released.recv().unwrap();
+                worker_retired.store(true, Ordering::Release);
+            })
+            .await
+            .map_err(|error| zbus::Error::Failure(error.to_string()))?;
+            Ok((ArtworkIdentity::for_track(&track(1)), None))
+        }
+        .boxed();
+        let mut load = ArtworkLoad {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            completion,
+        };
+        assert!((&mut load.completion).now_or_never().is_none());
+        entered.recv_timeout(Duration::from_secs(5)).unwrap();
+        let mut retirement = Box::pin(load.retire());
+        assert!(retirement.as_mut().now_or_never().is_none());
+        assert!(!retired.load(Ordering::Acquire));
+        release.send(()).unwrap();
+        async_io::block_on(retirement);
+        assert!(retired.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn cancelling_unstarted_artwork_preserves_cache_only_behavior() {
+        let (directory, mut runtime) = runtime_fixture();
+        let artwork = Arc::new(ArtworkManager::new(directory.path()));
+        let state = MprisSnapshot {
+            queue: QueueState {
+                total: 1,
+                current_id: Some(1),
+                current_position: Some(0),
+                revision: 0,
+            },
+            current_track: Some(Arc::new(track(1))),
+            playback: PlaybackState::default(),
+            shutting_down: false,
+        };
+        let load = load_artwork(&runtime.handle, &state, &artwork, &None).unwrap();
+        async_io::block_on(load.retire());
+        assert!(!artwork.is_loaded(state.current_track().unwrap()));
+        assert!(artwork.cached_default().is_none());
+        runtime.control.request_shutdown().unwrap();
+        runtime.join().unwrap();
+    }
+
+    #[test]
     fn publisher_cancellation_drops_pending_send_before_retirement_returns() {
         let (_directory, mut runtime) = runtime_fixture();
         let handle = runtime.handle.clone();
@@ -1335,6 +1472,70 @@ mod tests {
             play_count: 0,
             last_played: None,
         }
+    }
+
+    #[test]
+    fn late_artwork_completion_cannot_replace_the_selected_occurrence_metadata() {
+        let bus = TestBus::start();
+        let (directory, mut runtime) = runtime_fixture();
+        let paths: Vec<_> = (1..=2)
+            .map(|id| directory.path().join(format!("{id}.wav")))
+            .collect();
+        for path in &paths {
+            let mut writer = hound::WavWriter::create(
+                path,
+                hound::WavSpec {
+                    channels: 1,
+                    sample_rate: 8_000,
+                    bits_per_sample: 16,
+                    sample_format: hound::SampleFormat::Int,
+                },
+            )
+            .unwrap();
+            writer.write_sample(0_i16).unwrap();
+            writer.finalize().unwrap();
+        }
+        let ack = async_io::block_on(runtime.handle.request_ack(Command::QueueExternalPaths {
+            paths,
+            index: None,
+            expected_revision: None,
+        }));
+        assert!(ack.is_success(), "{:?}", ack.error);
+        async_io::block_on(
+            runtime
+                .handle
+                .wait_task(rivu_protocol::model::TaskTarget::Scan {
+                    id: ack.scan_id.unwrap(),
+                }),
+        )
+        .unwrap();
+        assert!(async_io::block_on(runtime.handle.navigate(Navigation::Next)).is_success());
+        let old = runtime.handle.mpris_snapshot();
+        let identity = ArtworkIdentity::for_track(old.current_track().unwrap());
+        assert!(async_io::block_on(runtime.handle.navigate(Navigation::Next)).is_success());
+        let current = runtime.handle.mpris_snapshot();
+        assert_ne!(old.queue.current_id, current.queue.current_id);
+        let artwork = ArtworkManager::new(directory.path());
+        let mut metadata = TrackMetadata::from_snapshot(&current, &artwork);
+        let mut loaded = None;
+        let connection = bus.connect();
+        let image = artwork.export_default();
+        async_io::block_on(publish_artwork(
+            &connection,
+            &runtime.handle,
+            (identity, image),
+            &mut metadata,
+            &artwork,
+            &mut loaded,
+        ))
+        .unwrap();
+        assert!(loaded.is_none());
+        let metadata = metadata.unwrap();
+        assert_eq!(metadata.queue_id, current.queue.current_id.unwrap());
+        assert!(metadata.art_url.is_none());
+        async_io::block_on(connection.close()).unwrap();
+        runtime.control.request_shutdown().unwrap();
+        runtime.join().unwrap();
     }
 
     #[test]

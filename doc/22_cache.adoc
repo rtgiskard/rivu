@@ -453,6 +453,10 @@ are matched by track ID, fingerprint, and source path before updating the select
 publishing MPRIS metadata; a late result can warm the cache, never replace a
 newer identity. MPRIS signals metadata after artwork becomes available, including
 an initial cold load without another playback update.
+MPRIS handles playback revisions while one physical artwork load remains in flight;
+volume, transport and metadata notifications do not wait for its completion.
+Disabling or replacing the service waits for that load to physically retire,
+and late completion still cannot publish against a different source identity.
 
 The Album artwork panel initiates acquisition only while visible. Hiding it
 clears queued demand without cancelling a submitted shared load; completion may
@@ -489,14 +493,14 @@ Album cards retain explicit negative completions only for their current visible
 source identity/path, so eviction from the shared cache does not trigger repeated
 probes. Leaving demand, hiding, or source changes release those records. Positive
 covers remain owned by their views; neither changes the shared 64-entry target.
-
-=== Encoded files and maintenance
-
-Encoded images use immutable content-derived paths under `artwork/cache`.
 Viewport and album-page changes synchronize card demand with the shared cache.
 An individual completion updates only cards demanding that source and advances
 the bounded waiting queue; it does not rescan every visible card or re-read all
 completed cache entries.
+
+=== Encoded files and maintenance
+
+Encoded images use immutable content-derived paths under `artwork/cache`.
 Disk names use the first 128 bits of BLAKE3 as 32 lowercase hexadecimal characters:
 the first two form a bucket directory and the remaining 30 form the filename.
 For example, originals use `ab/<30-hex>.png` and thumbnails use
