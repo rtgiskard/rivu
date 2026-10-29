@@ -145,6 +145,16 @@ into one device-aligned immutable slab; its full initialized capacity remains
 charged until completion. Changed fields still copy/upload their whole numerical
 payload: there are no partial-field updates or reusable upload pages.
 
+Ordinary GPUI rendering retains the last viewport/alpha and glyph gamma parameters
+with their device-local uniform buffer. Unchanged parameters need no queue write;
+resize/alpha changes refresh viewport uniforms, while gamma, contrast or RGB/BGR
+changes refresh glyph uniforms. New resource generations start without cached
+values. Failed frame encoding still flushes staged writes, so cached values remain
+consistent with the buffer. This is separate from per-placement material uniforms.
+Absent ordinary primitive kinds allocate neither an instance binding nor aligned
+instance storage. Nonempty kinds retain the same alignment, transport limits and
+scene order; MSAA admission starts at the resulting actual upload cursor.
+
 === Different consumers and interface extraction
 
 The vendor interface covers numerical fields, existing path coloring and

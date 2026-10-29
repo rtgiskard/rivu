@@ -133,7 +133,7 @@ fn least_common_multiple(left: u64, right: u64) -> u64 {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 struct GlobalParams {
     viewport_size: [f32; 2],
     premultiplied_alpha: u32,
@@ -164,7 +164,7 @@ struct SurfaceParams {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 struct GammaParams {
     gamma_ratios: [f32; 4],
     grayscale_enhanced_contrast: f32,
@@ -247,12 +247,12 @@ struct InstanceBinding {
 }
 
 struct InstanceBindings {
-    quads: InstanceBinding,
-    shadows: InstanceBinding,
-    underlines: InstanceBinding,
-    monochrome_sprites: InstanceBinding,
-    subpixel_sprites: InstanceBinding,
-    polychrome_sprites: InstanceBinding,
+    quads: Option<InstanceBinding>,
+    shadows: Option<InstanceBinding>,
+    underlines: Option<InstanceBinding>,
+    monochrome_sprites: Option<InstanceBinding>,
+    subpixel_sprites: Option<InstanceBinding>,
+    polychrome_sprites: Option<InstanceBinding>,
 }
 
 struct WgpuBindGroupLayouts {
@@ -288,6 +288,10 @@ struct WgpuResources {
     atlas_sampler: wgpu::Sampler,
     atlas_texture_bind_groups: FxHashMap<AtlasTextureId, CachedTextureBindGroup>,
     globals_buffer: wgpu::Buffer,
+    // Mirrors queue writes for this buffer generation, including failed frames
+    // whose pending writes are flushed by record_frame's error path.
+    last_globals: Option<GlobalParams>,
+    last_gamma: Option<GammaParams>,
     globals_bind_group: wgpu::BindGroup,
     path_globals_bind_group: wgpu::BindGroup,
     instance_data: InstanceData,
@@ -1455,6 +1459,8 @@ impl WgpuRendererCore {
                 atlas_sampler,
                 atlas_texture_bind_groups: FxHashMap::default(),
                 globals_buffer,
+                last_globals: None,
+                last_gamma: None,
                 globals_bind_group,
                 path_globals_bind_group,
                 instance_data,
@@ -1686,21 +1692,27 @@ impl WgpuRendererCore {
             premultiplied_alpha: 0,
             ..globals
         };
-        self.resources.queue.write_buffer(
-            &self.resources.globals_buffer,
-            0,
-            bytemuck::bytes_of(&globals),
-        );
-        self.resources.queue.write_buffer(
-            &self.resources.globals_buffer,
-            self.path_globals_offset,
-            bytemuck::bytes_of(&path_globals),
-        );
-        self.resources.queue.write_buffer(
-            &self.resources.globals_buffer,
-            self.gamma_offset,
-            bytemuck::bytes_of(&gamma_params),
-        );
+        if self.resources.last_globals != Some(globals) {
+            self.resources.queue.write_buffer(
+                &self.resources.globals_buffer,
+                0,
+                bytemuck::bytes_of(&globals),
+            );
+            self.resources.queue.write_buffer(
+                &self.resources.globals_buffer,
+                self.path_globals_offset,
+                bytemuck::bytes_of(&path_globals),
+            );
+            self.resources.last_globals = Some(globals);
+        }
+        if self.resources.last_gamma != Some(gamma_params) {
+            self.resources.queue.write_buffer(
+                &self.resources.globals_buffer,
+                self.gamma_offset,
+                bytemuck::bytes_of(&gamma_params),
+            );
+            self.resources.last_gamma = Some(gamma_params);
+        }
 
         self.record_frame(scene, target_view, size, clear_color)
     }
@@ -1892,13 +1904,19 @@ impl WgpuRendererCore {
                         }
                     }
                     PrimitiveBatch::Quads(range) => self.draw_instances(
-                        &instance_bindings.quads,
+                        instance_bindings
+                            .quads
+                            .as_ref()
+                            .expect("quad batch has instances"),
                         &self.resources().pipelines.quads,
                         instance_range(range),
                         &mut pass,
                     ),
                     PrimitiveBatch::Shadows(range) => self.draw_instances(
-                        &instance_bindings.shadows,
+                        instance_bindings
+                            .shadows
+                            .as_ref()
+                            .expect("shadow batch has instances"),
                         &self.resources().pipelines.shadows,
                         instance_range(range),
                         &mut pass,
@@ -1948,14 +1966,20 @@ impl WgpuRendererCore {
                         )?;
                     }
                     PrimitiveBatch::Underlines(range) => self.draw_instances(
-                        &instance_bindings.underlines,
+                        instance_bindings
+                            .underlines
+                            .as_ref()
+                            .expect("underline batch has instances"),
                         &self.resources().pipelines.underlines,
                         instance_range(range),
                         &mut pass,
                     ),
                     PrimitiveBatch::MonochromeSprites { texture_id, range } => {
                         self.draw_sprites(
-                            &instance_bindings.monochrome_sprites,
+                            instance_bindings
+                                .monochrome_sprites
+                                .as_ref()
+                                .expect("monochrome batch has instances"),
                             texture_id,
                             &self.resources().pipelines.mono_sprites,
                             instance_range(range),
@@ -1965,7 +1989,10 @@ impl WgpuRendererCore {
                     PrimitiveBatch::SubpixelSprites { texture_id, range } => {
                         let resources = self.resources();
                         self.draw_sprites(
-                            &instance_bindings.subpixel_sprites,
+                            instance_bindings
+                                .subpixel_sprites
+                                .as_ref()
+                                .expect("subpixel batch has instances"),
                             texture_id,
                             resources
                                 .pipelines
@@ -1978,7 +2005,10 @@ impl WgpuRendererCore {
                     }
                     PrimitiveBatch::PolychromeSprites { texture_id, range } => {
                         self.draw_sprites(
-                            &instance_bindings.polychrome_sprites,
+                            instance_bindings
+                                .polychrome_sprites
+                                .as_ref()
+                                .expect("polychrome batch has instances"),
                             texture_id,
                             &self.resources().pipelines.poly_sprites,
                             instance_range(range),
@@ -2040,37 +2070,52 @@ impl WgpuRendererCore {
         instance_offset: &mut u64,
     ) -> Result<InstanceBindings> {
         Ok(InstanceBindings {
-            quads: self.write_instance_binding(
+            quads: self.write_optional_instance_binding(
                 "quads_bind_group",
                 instance_offset,
                 &scene.quads,
             )?,
-            shadows: self.write_instance_binding(
+            shadows: self.write_optional_instance_binding(
                 "shadows_bind_group",
                 instance_offset,
                 &scene.shadows,
             )?,
-            underlines: self.write_instance_binding(
+            underlines: self.write_optional_instance_binding(
                 "underlines_bind_group",
                 instance_offset,
                 &scene.underlines,
             )?,
-            monochrome_sprites: self.write_instance_binding(
+            monochrome_sprites: self.write_optional_instance_binding(
                 "monochrome_sprites_bind_group",
                 instance_offset,
                 &scene.monochrome_sprites,
             )?,
-            subpixel_sprites: self.write_instance_binding(
+            subpixel_sprites: self.write_optional_instance_binding(
                 "subpixel_sprites_bind_group",
                 instance_offset,
                 &scene.subpixel_sprites,
             )?,
-            polychrome_sprites: self.write_instance_binding(
+            polychrome_sprites: self.write_optional_instance_binding(
                 "polychrome_sprites_bind_group",
                 instance_offset,
                 &scene.polychrome_sprites,
             )?,
         })
+    }
+
+    fn write_optional_instance_binding<T>(
+        &mut self,
+        label: &str,
+        instance_offset: &mut u64,
+        instances: &[T],
+    ) -> Result<Option<InstanceBinding>> {
+        // An absent primitive kind has no scene batches, so it needs neither a
+        // binding nor a padded allocation. MSAA preflight starts at this cursor.
+        if instances.is_empty() {
+            return Ok(None);
+        }
+        self.write_instance_binding(label, instance_offset, instances)
+            .map(Some)
     }
 
     fn create_texture_bind_group(
@@ -3522,6 +3567,105 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    #[test]
+    fn uniforms_follow_resize_alpha_changes_and_new_resource_generations() -> anyhow::Result<()> {
+        let mut renderer = WgpuHeadlessRenderer::new()?;
+        let mut scene = Scene::default();
+        scene.insert_primitive(solid_quad(2.0, 2.0, 8.0, 8.0, gpui::red().opacity(0.5)));
+        let mut path = rectangle_path(16.0, 2.0, 8.0, 8.0);
+        path.color = gpui::blue().opacity(0.5).into();
+        scene.insert_primitive(path);
+        scene.finish();
+        for (width, height, transparent, rebuild) in [
+            (32, 24, false, false),
+            (64, 40, false, false),
+            (64, 40, true, false),
+            (64, 40, true, true),
+            (32, 24, false, false),
+        ] {
+            let mode = if transparent {
+                wgpu::CompositeAlphaMode::PreMultiplied
+            } else {
+                wgpu::CompositeAlphaMode::Opaque
+            };
+            if rebuild {
+                renderer.core = WgpuRendererCore::new(
+                    &renderer.context,
+                    renderer.core.atlas.clone(),
+                    renderer.core.target_format,
+                    mode,
+                );
+            } else {
+                renderer.core.update_alpha_mode(mode);
+            }
+            renderer.transparent = transparent;
+            let alpha = if transparent { 128 } else { 255 };
+            for _ in 0..2 {
+                let image = renderer.render_scene_to_image(&scene, device_size(width, height))?;
+                assert_pixel(&image, 6, 6, [128, 0, 0, alpha]);
+                assert_pixel(&image, 20, 6, [0, 0, 128, alpha]);
+                assert_pixel(&image, 28, 20, if transparent { [0; 4] } else { BLACK });
+            }
+            let empty =
+                renderer.render_scene_to_image(&Scene::default(), device_size(width, height))?;
+            assert_pixel(&empty, 6, 6, if transparent { [0; 4] } else { BLACK });
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn glyph_uniform_changes_refresh_coverage_without_viewport_changes() -> anyhow::Result<()> {
+        let mut renderer = WgpuHeadlessRenderer::new()?;
+        // Asymmetric RGB coverage makes a stale RGB/BGR switch observable.
+        let tile = image_tile(&renderer, 0, 1, 1, &[192, 128, 64, 255])?;
+        let bounds = solid_quad(0.0, 0.0, 16.0, 16.0, gpui::white()).bounds;
+        let mut mono = Scene::default();
+        mono.insert_primitive(MonochromeSprite {
+            order: 0,
+            pad: 0,
+            bounds,
+            content_mask: ContentMask { bounds },
+            color: gpui::hsla(0.0, 0.0, 0.25, 1.0),
+            tile,
+            transformation: gpui::TransformationMatrix::default(),
+        });
+        mono.finish();
+        renderer.core.rendering_params.gamma_ratios = get_gamma_correction_ratios(1.0);
+        renderer.core.rendering_params.grayscale_enhanced_contrast = 0.0;
+        let size = device_size(16, 16);
+        let initial = renderer.render_scene_to_image(&mono, size)?;
+        renderer.core.rendering_params.gamma_ratios = get_gamma_correction_ratios(2.2);
+        let gamma = renderer.render_scene_to_image(&mono, size)?;
+        assert_ne!(initial.get_pixel(8, 8), gamma.get_pixel(8, 8));
+        renderer.core.rendering_params.grayscale_enhanced_contrast = 1.0;
+        let contrast = renderer.render_scene_to_image(&mono, size)?;
+        assert_ne!(gamma.get_pixel(8, 8), contrast.get_pixel(8, 8));
+        assert_eq!(contrast, renderer.render_scene_to_image(&mono, size)?);
+        if renderer.core.dual_source_blending {
+            let mut subpixel = Scene::default();
+            subpixel.insert_primitive(SubpixelSprite {
+                order: 0,
+                pad: 0,
+                bounds,
+                content_mask: ContentMask { bounds },
+                color: gpui::white(),
+                tile,
+                transformation: gpui::TransformationMatrix::default(),
+            });
+            subpixel.finish();
+            let rgb = renderer.render_scene_to_image(&subpixel, size)?;
+            renderer.core.is_bgr = true;
+            let bgr = renderer.render_scene_to_image(&subpixel, size)?;
+            let rgb = rgb.get_pixel(8, 8).0;
+            let bgr = bgr.get_pixel(8, 8).0;
+            assert!(rgb[0] < rgb[2]);
+            assert_eq!([rgb[2], rgb[1], rgb[0], rgb[3]], bgr);
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
     fn image_tile(
         renderer: &WgpuHeadlessRenderer,
         id: usize,
@@ -4382,6 +4526,7 @@ mod tests {
         )?;
         let bounds = solid_quad(4.0, 4.0, 16.0, 16.0, gpui::red()).bounds;
         let mut scene = Scene::default();
+        scene.insert_primitive(solid_quad(0.0, 0.0, 32.0, 32.0, gpui::blue()));
         for _ in 0..8 {
             scene.insert_primitive(gpui::GpuDraw {
                 order: 0,
