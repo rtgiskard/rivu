@@ -331,6 +331,7 @@ fn processing_tables_roundtrip_and_reject_invalid_controls() {
         .push(rivu_dsp::equalizer::config::EqBand::default());
     config.equalizer.bands[0].gain_db = 6.0;
     config.denoise.mode = rivu_dsp::denoise::DenoiseMode::Adaptive;
+    config.denoise.spectral_gain_floor_db = -18.5;
     config.neural.speech_interpreter = "/models/df-env/bin/python".into();
     config.neural.separation_interpreter = "/models/unblend-env/bin/python".into();
     config.equalizer_presets.push(EqualizerPreset {
@@ -340,6 +341,16 @@ fn processing_tables_roundtrip_and_reject_invalid_controls() {
     config.equalizer_ab = Some(EqualizerConfig::default());
     let text = to_toml(&config).unwrap();
     assert_eq!(from_toml(&text).unwrap(), config);
+    let input = "[denoise]\nspectral_gain_floor_db = -31.5\n";
+    let mut edited = from_toml(input).unwrap();
+    assert_eq!(edited.denoise.spectral_gain_floor_db, -31.5);
+    let baseline = edited.clone();
+    edited.denoise.spectral_gain_floor_db = -18.5;
+    let saved = update_toml(input, Some(&baseline), &edited).unwrap();
+    assert_eq!(from_toml(&saved).unwrap(), edited);
+    for prefix in ["", "schema_version = 1\n"] {
+        assert!(from_toml(&format!("{prefix}[denoise]\nnoise_floor_db = -18.5\n")).is_err());
+    }
     assert!(from_toml("[neural]\nthreads = 9\n").is_err());
     assert!(from_toml("[neural]\nspeech_wet_mix = 1.5\n").is_err());
     assert!(from_toml("[denoise]\nstrength = -1\n").is_err());
@@ -364,7 +375,10 @@ fn processing_graph_roundtrip_preserves_node_local_settings_and_layout() {
             implementation: EqImplementation::LinearPhase { taps: 257 },
         },
         GraphNodeKind::Denoise {
-            config: DenoiseConfig::default(),
+            config: DenoiseConfig {
+                spectral_gain_floor_db: -37.5,
+                ..Default::default()
+            },
             profile: Some(NoiseSelection {
                 start_seconds: 0.5,
                 end_seconds: 2.0,

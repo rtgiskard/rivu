@@ -118,7 +118,7 @@ pub struct DenoiseConfig {
     /// Noise subtraction / noise-power multiplier (0..=4).
     pub strength: f32,
     /// Minimum spectral amplitude gain in dB (-100..=0), not an input gate.
-    pub noise_floor_db: f32,
+    pub spectral_gain_floor_db: f32,
     /// Gain-reduction time constant. Zero means immediate reduction.
     pub attack_ms: f32,
     /// Gain-recovery time constant. Zero means immediate recovery.
@@ -142,7 +142,7 @@ impl Default for DenoiseConfig {
         Self {
             mode: DenoiseMode::Off,
             strength: 1.0,
-            noise_floor_db: -24.0,
+            spectral_gain_floor_db: -24.0,
             attack_ms: 8.0,
             release_ms: 70.0,
             smoothing_bins: 2,
@@ -188,7 +188,12 @@ impl DenoiseConfig {
             "denoise FFT size must be a power of two in 256..=8192"
         );
         in_range(self.strength, 0.0, 4.0, "denoise strength")?;
-        in_range(self.noise_floor_db, -100.0, 0.0, "spectral gain floor")?;
+        in_range(
+            self.spectral_gain_floor_db,
+            -100.0,
+            0.0,
+            "spectral gain floor",
+        )?;
         in_range(self.attack_ms, 0.0, 2000.0, "denoise attack")?;
         in_range(self.release_ms, 0.0, 10_000.0, "denoise release")?;
         ensure!(
@@ -291,9 +296,18 @@ mod tests {
 
     #[test]
     fn serde_and_validation_reject_invalid_parameters() {
-        let config = DenoiseConfig::default();
+        let config = DenoiseConfig {
+            spectral_gain_floor_db: -18.5,
+            ..Default::default()
+        };
         let json = serde_json::to_string(&config).unwrap();
         assert_eq!(config, serde_json::from_str(&json).unwrap());
+        assert!(serde_json::from_str::<DenoiseConfig>(r#"{"noise_floor_db":-18.5}"#).is_err());
+        for spectral_gain_floor_db in [f32::NAN, f32::INFINITY, -100.1, 0.1] {
+            let mut bad = config.clone();
+            bad.spectral_gain_floor_db = spectral_gain_floor_db;
+            assert!(bad.validate().is_err());
+        }
         let mut bad = config.clone();
         bad.strength = f32::NAN;
         assert!(bad.validate().is_err());

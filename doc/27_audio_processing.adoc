@@ -201,9 +201,11 @@ Stationary mode derives fixed white-noise power from the declared RMS level
 (`stationary_noise_dbfs`); it does not learn colored noise from the track.
 Profile uses a selected noise-only source-relative time range; Adaptive tracks
 changing noise. Choose a range without wanted content: a profile containing voice
-or music can remove that content. Strength scales noise power, noise floor is
-the minimum spectral gain (not an input gate), attack/release control gain timing,
-smoothing spans frequency bins, and transient protection preserves positive flux.
+or music can remove that content. Strength scales noise power.
+`spectral_gain_floor_db` is the minimum spectral amplitude gain (−100…0 dB,
+default −24 dB), not an input gate or an estimate of the source noise level.
+Attack/release control gain timing, smoothing spans frequency bins, and transient
+protection preserves positive flux.
 FFT size trades time/frequency resolution (power of two, 256–8192). Spectral gains
 are shared across channels, preserving their per-bin phase and level ratios rather
 than gating each channel independently. Wet blends the entire restoration chain
@@ -232,7 +234,7 @@ Separation. Collapsing an advanced section preserves its drafts.
 
 [source,shell]
 ----
-rivu processing denoise '{"mode":"adaptive","strength":1.0,"noise_floor_db":-18.0,"wet":0.8}'
+rivu processing denoise '{"mode":"adaptive","strength":1.0,"spectral_gain_floor_db":-18.0,"wet":0.8}'
 rivu processing denoise '{"hum_enabled":true,"hum_fundamental_hz":50.0,"hum_harmonics":6,"hum_q":30.0,"impulse_enabled":true,"impulse_max_width":3}'
 rivu processing start 42 denoise --wait
 rivu processing denoise '{"mode":"profile"}'

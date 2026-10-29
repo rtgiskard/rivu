@@ -43,7 +43,7 @@ pub(super) enum Page {
 pub(super) enum DenoiseField {
     Mode,
     Strength,
-    NoiseFloorDb,
+    SpectralGainFloorDb,
     AttackMs,
     ReleaseMs,
     SmoothingBins,
@@ -67,7 +67,7 @@ impl DenoiseField {
         match self {
             Self::Mode => "mode",
             Self::Strength => "strength",
-            Self::NoiseFloorDb => "noise_floor_db",
+            Self::SpectralGainFloorDb => "spectral_gain_floor_db",
             Self::AttackMs => "attack_ms",
             Self::ReleaseMs => "release_ms",
             Self::SmoothingBins => "smoothing_bins",
@@ -96,7 +96,7 @@ impl DenoiseField {
             }
             .to_owned(),
             Self::Strength => config.strength.to_string(),
-            Self::NoiseFloorDb => config.noise_floor_db.to_string(),
+            Self::SpectralGainFloorDb => config.spectral_gain_floor_db.to_string(),
             Self::AttackMs => config.attack_ms.to_string(),
             Self::ReleaseMs => config.release_ms.to_string(),
             Self::SmoothingBins => config.smoothing_bins.to_string(),
@@ -127,7 +127,9 @@ impl DenoiseField {
                 }
             }
             Self::Strength => config.strength = parse_processing_number(text)?,
-            Self::NoiseFloorDb => config.noise_floor_db = parse_processing_number(text)?,
+            Self::SpectralGainFloorDb => {
+                config.spectral_gain_floor_db = parse_processing_number(text)?
+            }
             Self::AttackMs => config.attack_ms = parse_processing_number(text)?,
             Self::ReleaseMs => config.release_ms = parse_processing_number(text)?,
             Self::SmoothingBins => {
@@ -179,7 +181,9 @@ impl DenoiseField {
                 })
             }
             Self::Strength => patch.strength = Some(parse_processing_number(text)?),
-            Self::NoiseFloorDb => patch.noise_floor_db = Some(parse_processing_number(text)?),
+            Self::SpectralGainFloorDb => {
+                patch.spectral_gain_floor_db = Some(parse_processing_number(text)?)
+            }
             Self::AttackMs => patch.attack_ms = Some(parse_processing_number(text)?),
             Self::ReleaseMs => patch.release_ms = Some(parse_processing_number(text)?),
             Self::SmoothingBins => {
@@ -773,7 +777,7 @@ impl AudioProcessing {
     fn sync_fields(&mut self, cx: &mut Context<Self>) {
         for field in [
             DenoiseField::Strength,
-            DenoiseField::NoiseFloorDb,
+            DenoiseField::SpectralGainFloorDb,
             DenoiseField::AttackMs,
             DenoiseField::ReleaseMs,
             DenoiseField::SmoothingBins,
@@ -913,7 +917,7 @@ impl AudioProcessing {
             "mode" => "processing-denoise-mode",
             "device" => "processing-device",
             "strength" => "processing-strength",
-            "noise_floor_db" => "processing-noise-floor",
+            "spectral_gain_floor_db" => "processing-spectral-gain-floor",
             "attack_ms" => "processing-attack",
             "release_ms" => "processing-release",
             "smoothing_bins" => "processing-smoothing",
@@ -1400,7 +1404,7 @@ impl AudioProcessing {
             content = content.child(self.parameter_controls(
                 &[
                     DenoiseField::Strength,
-                    DenoiseField::NoiseFloorDb,
+                    DenoiseField::SpectralGainFloorDb,
                     DenoiseField::AttackMs,
                     DenoiseField::ReleaseMs,
                     DenoiseField::SmoothingBins,
@@ -2426,6 +2430,16 @@ mod field_tests {
             .unwrap();
         assert_eq!(patch.impulse_transient_protection, Some(0.25));
         assert_eq!(patch.transient_protection, None);
+        DenoiseField::SpectralGainFloorDb
+            .apply(&mut config, "-18.5")
+            .unwrap();
+        assert_eq!(config.spectral_gain_floor_db, -18.5);
+        assert_eq!(DenoiseField::SpectralGainFloorDb.text(&config), "-18.5");
+        assert_eq!(config.strength, original.strength);
+        let patch = DenoiseField::SpectralGainFloorDb.patch("-31.5").unwrap();
+        assert_eq!(patch.spectral_gain_floor_db, Some(-31.5));
+        assert_eq!(patch.strength, None);
+        assert_eq!(patch.impulse_floor_dbfs, None);
         for invalid in ["NaN", "inf", "1e", ""] {
             let previous = config.clone();
             assert!(DenoiseField::Strength.apply(&mut config, invalid).is_err());

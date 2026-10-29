@@ -274,6 +274,7 @@ q = 0.8
 [denoise]
 mode = "adaptive"
 strength = 1.0
+spectral_gain_floor_db = -18.0
 wet = 0.8
 
 [neural]

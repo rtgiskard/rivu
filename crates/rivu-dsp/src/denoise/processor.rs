@@ -470,7 +470,7 @@ impl Denoiser {
         let release = coefficient(config.release_ms);
         let (floor, adaptive_smoothing, adaptive_base) = if spectral {
             (
-                10.0_f32.powf(config.noise_floor_db / 20.0),
+                10.0_f32.powf(config.spectral_gain_floor_db / 20.0),
                 (-(hop as f32) / (0.08 * sample_rate as f32)).exp(),
                 (-(hop as f32) / (0.25 * sample_rate as f32)).exp(),
             )
@@ -1542,7 +1542,7 @@ mod tests {
             fft_size: 512,
             transient_protection: 0.0,
             smoothing_bins: 1,
-            noise_floor_db: -30.0,
+            spectral_gain_floor_db: -30.0,
             attack_ms: 0.0,
             release_ms: 30.0,
             ..Default::default()

@@ -3225,8 +3225,17 @@ fn large_explicit_occurrence_selections_fit_bounded_request_frames() {
 #[test]
 fn processing_commands_and_configuration_use_current_positional_contract() {
     use rivu_protocol::model::{
-        EqBandEdit, EqualizerEdit, NeuralPatch, NoiseSelection, ProcessingOperation,
+        DenoisePatch, EqBandEdit, EqualizerEdit, NeuralPatch, NoiseSelection, ProcessingOperation,
     };
+    let patch: DenoisePatch = serde_json::from_str(r#"{"spectral_gain_floor_db":-18.5}"#).unwrap();
+    assert_eq!(patch.spectral_gain_floor_db, Some(-18.5));
+    assert!(serde_json::from_str::<DenoisePatch>(r#"{"noise_floor_db":-18.5}"#).is_err());
+    // The renamed control remains the third positional field; neighboring
+    // absent controls retain their positions and no named key is sent over IPC.
+    let mut expected = vec![0, 0, 1];
+    expected.extend_from_slice(&(-18.5_f32).to_le_bytes());
+    expected.resize(23, 0);
+    assert_eq!(postcard::to_allocvec(&patch).unwrap(), expected);
     let commands = [
         Command::StartProcessing {
             track_id: 17,
@@ -3244,6 +3253,9 @@ fn processing_commands_and_configuration_use_current_positional_contract() {
                     gain_db: 4.0,
                 },
             },
+        },
+        Command::DenoiseEdit {
+            patch: Box::new(patch),
         },
         Command::NeuralEdit {
             patch: Box::new(NeuralPatch {
@@ -3269,6 +3281,7 @@ fn processing_commands_and_configuration_use_current_positional_contract() {
         .equalizer
         .bands
         .push(rivu_dsp::equalizer::config::EqBand::default());
+    config.denoise.spectral_gain_floor_db = -31.5;
     config.neural.speech_manifest = Some("/models/speech.json".into());
     config.neural.separation_overlap = 0.5;
     config.spectrogram_flow_speed = 1.25;

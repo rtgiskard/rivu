@@ -248,7 +248,7 @@ fn manifest_patch<'de, D: serde::Deserializer<'de>>(
 pub struct DenoisePatch {
     pub mode: Option<rivu_dsp::denoise::DenoiseMode>,
     pub strength: Option<f32>,
-    pub noise_floor_db: Option<f32>,
+    pub spectral_gain_floor_db: Option<f32>,
     pub attack_ms: Option<f32>,
     pub release_ms: Option<f32>,
     pub smoothing_bins: Option<usize>,

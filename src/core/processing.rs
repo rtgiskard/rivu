@@ -372,7 +372,7 @@ impl Core {
         apply!(
             mode,
             strength,
-            noise_floor_db,
+            spectral_gain_floor_db,
             attack_ms,
             release_ms,
             smoothing_bins,

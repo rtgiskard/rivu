@@ -489,6 +489,7 @@ fn equalizer_and_denoise_edits_merge_on_the_core_owner() {
     );
     core.denoise_edit(DenoisePatch {
         strength: Some(2.0),
+        spectral_gain_floor_db: Some(-18.5),
         ..Default::default()
     })
     .unwrap();
@@ -499,6 +500,14 @@ fn equalizer_and_denoise_edits_merge_on_the_core_owner() {
     .unwrap();
     assert_eq!(core.state.configuration.config.denoise.strength, 2.0);
     assert_eq!(core.state.configuration.config.denoise.wet, 0.25);
+    assert_eq!(
+        core.state
+            .configuration
+            .config
+            .denoise
+            .spectral_gain_floor_db,
+        -18.5
+    );
 }
 #[test]
 fn empty_equalizer_batches_use_log_uniform_neutral_cell_centers() {

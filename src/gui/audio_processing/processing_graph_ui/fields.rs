@@ -88,7 +88,7 @@ impl GraphField {
             Self::Denoise(field) => match field {
                 D::Mode => "processing-denoise-mode",
                 D::Strength => "processing-strength",
-                D::NoiseFloorDb => "processing-noise-floor",
+                D::SpectralGainFloorDb => "processing-spectral-gain-floor",
                 D::AttackMs => "processing-attack",
                 D::ReleaseMs => "processing-release",
                 D::SmoothingBins => "processing-smoothing",
@@ -169,7 +169,7 @@ impl GraphField {
             | Self::MixGain(_)
             | Self::Denoise(
                 D::Strength
-                | D::NoiseFloorDb
+                | D::SpectralGainFloorDb
                 | D::AttackMs
                 | D::ReleaseMs
                 | D::TransientProtection
@@ -412,7 +412,7 @@ pub(super) fn node_fields(kind: &GraphNodeKind) -> impl Iterator<Item = GraphFie
                     Denoise(D::ImpulseThreshold),
                     Denoise(D::ImpulseTransientProtection),
                     Denoise(D::Mode),
-                    Denoise(D::NoiseFloorDb),
+                    Denoise(D::SpectralGainFloorDb),
                     Denoise(D::ReleaseMs),
                     Denoise(D::SmoothingBins),
                     Denoise(D::StationaryNoiseDbfs),
