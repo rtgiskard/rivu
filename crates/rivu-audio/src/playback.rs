@@ -374,7 +374,7 @@ impl Playback {
             scan_source,
         })
     }
-    // Input rejection leaves the source and current output/analysis epoch intact.
+    // Explicit input rejection leaves the source and current output/analysis epoch intact.
     // Decoder execution errors may have changed state and remain fatal.
     pub(super) fn restart_output(
         &mut self,
@@ -406,9 +406,19 @@ impl Playback {
         target: Option<f64>,
         create: impl FnOnce(&Source, bool) -> Result<Output>,
     ) -> Result<()> {
-        let position = target.unwrap_or_else(|| self.position());
-        self.source.seek(position)?;
-        let heard = self.prior_heard + self.output.close();
+        let (position, output_heard) = if let Some(position) = target {
+            // Explicit input rejection must leave queued PCM and analysis intact.
+            self.source.seek(position)?;
+            (position, self.output.close())
+        } else {
+            // The callback can confirm more audible frames while retiring. Resume
+            // from that final cursor, not a snapshot taken before a decoder seek.
+            let output_heard = self.output.close();
+            let position = self.base_position + output_heard;
+            self.source.seek(position)?;
+            (position, output_heard)
+        };
+        let heard = self.prior_heard + output_heard;
         self.equalizer.reset();
         if let Some(graph) = &mut self.graph {
             graph.reset();
@@ -2382,6 +2392,77 @@ pub(super) mod tests {
             render(&mut samples, 20);
             for (index, sample) in samples.iter().enumerate() {
                 assert!((*sample - (2000 + index) as f32 / 32768.0).abs() < 1e-6);
+            }
+        }
+    }
+
+    #[test]
+    fn output_restart_resumes_after_final_audible_frame_without_replaying_pcm() {
+        for memory in [false, true] {
+            for paused in [false, true] {
+                for target in [None, Some(0.125)] {
+                    let file = pcm();
+                    let (mut playback, _) =
+                        test_playback_with_waveform(file.path(), None, Arc::default());
+                    if memory {
+                        let budget = crate::PcmBudget::new(128 * 1024);
+                        let mut builder = crate::PcmBuilder::new(
+                            8_000,
+                            Arc::from([crate::Channel::FrontCenter]),
+                            budget,
+                        )
+                        .unwrap();
+                        let samples: Vec<_> =
+                            (0..16_000).map(|frame| frame as f32 / 32768.0).collect();
+                        builder.push(&samples).unwrap();
+                        playback.source = Source::from_pcm(builder.finish().unwrap(), 0.0).unwrap();
+                    }
+                    let (output, mut old_render) =
+                        crate::output::test_backend(8_000, false, playback.source.layout());
+                    playback
+                        .restart_output_with(Some(0.25), |_, _| Ok(output))
+                        .unwrap();
+                    playback.prior_heard = 12.0;
+                    playback.fill().unwrap();
+                    old_render(&mut [0.0; 64], 0);
+                    old_render(&mut [0.0; 64], 24);
+                    assert_eq!(playback.position(), 0.25 + 32.0 / 8_000.0);
+                    playback.pause(paused);
+                    // Model the last callback confirming the rest of an already
+                    // scheduled span while close retires the old output owner.
+                    playback.output.on_close_for_test(move || {
+                        let mut silent = [1.0; 64];
+                        old_render(&mut silent, 28);
+                        assert_eq!(silent, [0.0; 64]);
+                    });
+                    let (output, mut render) =
+                        crate::output::test_backend(8_000, paused, playback.source.layout());
+                    playback
+                        .restart_output_with(target, |_, is_paused| {
+                            assert_eq!(is_paused, paused);
+                            Ok(output)
+                        })
+                        .unwrap();
+                    let position = target.unwrap_or(0.25 + 64.0 / 8_000.0);
+                    assert_eq!(playback.position(), position);
+                    assert_eq!(playback.heard(), 12.0 + 64.0 / 8_000.0);
+                    assert!(!playback.finished());
+                    playback.fill().unwrap();
+                    if paused {
+                        let mut silent = [1.0; 64];
+                        render(&mut silent, 0);
+                        assert_eq!(silent, [0.0; 64]);
+                        playback.pause(false);
+                        playback.fill().unwrap();
+                    }
+                    let mut samples = [0.0; 64];
+                    render(&mut samples, 1);
+                    let first = (position * 8_000.0).round() as usize;
+                    assert_eq!(
+                        samples,
+                        std::array::from_fn(|offset| (first + offset) as f32 / 32768.0)
+                    );
+                }
             }
         }
     }

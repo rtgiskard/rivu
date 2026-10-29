@@ -238,6 +238,8 @@ pub(super) struct Output {
     source_channels: usize,
     errors: Receiver<OutputError>,
     submitted: u64,
+    #[cfg(test)]
+    on_close: Option<Box<dyn FnOnce() + Send>>,
 }
 impl Output {
     pub(super) fn new(
@@ -290,6 +292,8 @@ impl Output {
             source_channels,
             errors,
             submitted: 0,
+            #[cfg(test)]
+            on_close: None,
         })
     }
 
@@ -386,7 +390,16 @@ impl Output {
     pub(super) fn close(&mut self) -> f64 {
         self.shared.paused.store(true, Ordering::Release);
         self.stream.take();
+        #[cfg(test)]
+        if let Some(on_close) = self.on_close.take() {
+            on_close();
+        }
         self.heard()
+    }
+
+    #[cfg(test)]
+    pub(super) fn on_close_for_test(&mut self, on_close: impl FnOnce() + Send + 'static) {
+        self.on_close = Some(Box::new(on_close));
     }
 }
 
@@ -1569,6 +1582,7 @@ mod pcm_tests {
             source_channels: source.len(),
             errors,
             submitted: 0,
+            on_close: None,
         };
         let callback = OutputCallback {
             consumer,
