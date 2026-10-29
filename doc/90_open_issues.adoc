@@ -66,6 +66,45 @@ Extend the same 64px-width/40px-height rule to the remaining consumers, includin
 tooltip and scrolling access. Verify small saved layouts, separator resizing and
 interface scale 2 without changing saved proportions.
 
+=== Structural GUI demand reconciliation during transport updates
+
+Status: deferred, 2026-10-29; repeated work established by code inspection,
+not a measured rendering bottleneck.
+
+Playback-position updates still reconcile layout consumers and presentation
+demand even when layout structure and visibility are unchanged. Multiple album
+panels also repeat layout searches. Splitting this work requires invalidation
+at layout, active-tab, visibility and relevant configuration boundaries without
+skipping source/seek identity, playback-state or progressive-waveform updates.
+The album-cover completion path is optimized independently; it does not resolve
+this broader demand ownership. Revisit with a transport-heavy, multi-panel
+workload and verify hide/reopen, tab changes and seek invalidation together.
+
+=== Stable configuration in high-frequency System IPC state
+
+Status: deferred, 2026-10-29; redundant materialization and transfer established
+by code inspection, with no measured latency or memory claim.
+
+System updates include the complete configuration even when only task progress
+changes. Connected TUI clients encode, transfer and decode unchanged roots,
+presets and processing graphs. A separate configuration section or lightweight
+projection requires a coordinated protocol/client cutover and revision semantics;
+discarding fields in the client would not remove producer work. Revisit with
+large configurations and multiple clients, preserving section-scoped revisions.
+
+=== Different data directories sharing one database file
+
+Status: deferred, 2026-10-29; conditional ownership risk, not observed corruption.
+
+Exclusive ownership identifies the data-directory inode, not the database inode.
+Distinct directories whose `library.db` aliases the same file can therefore
+coexist. SQLite locking does not establish the application's offline migration
+precondition. A fix must define supported database aliases and involve both the
+host and maintenance tool; a maintenance-only lock is insufficient. Current
+migration CLI Apply validates rather than executing registered transformations.
+Revisit before enabling such transformations or supporting shared-file aliases;
+see link:26_migration.adoc[Migration ownership and backups].
+
 == Resolved investigations
 
 === Query timeout and physical worker retirement
