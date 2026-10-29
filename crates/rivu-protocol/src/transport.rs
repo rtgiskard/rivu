@@ -1,5 +1,5 @@
 use super::wire::{
-    HelloResponse, MAX_REQUEST, MAX_RESPONSE, PROTOCOL_VERSION, RequestType, ResponseType,
+    HelloResponse, MAX_REQUEST, MAX_RESPONSE, PROTOCOL_VERSION, RequestTag, ResponseTag,
     UNKNOWN_INSTANCE, WireRequest, WireResponse,
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -79,16 +79,16 @@ fn decode_body<T: for<'de> Deserialize<'de>>(bytes: &[u8], context: &'static str
 
 pub fn decode_request_frame(bytes: &[u8]) -> Result<WireRequest> {
     let (message_type, body) = decode_message_header(bytes, MAX_REQUEST)?;
-    let message_type = RequestType::try_from(message_type)?;
+    let message_type = RequestTag::try_from(message_type)?;
     let request = match message_type {
-        RequestType::Hello => WireRequest::Hello(decode_body(body, "Decoding IPC Hello request")?),
-        RequestType::State => WireRequest::State(decode_body(body, "Decoding IPC state request")?),
-        RequestType::Query => WireRequest::Query(decode_body(body, "Decoding IPC query request")?),
-        RequestType::Command => {
+        RequestTag::Hello => WireRequest::Hello(decode_body(body, "Decoding IPC Hello request")?),
+        RequestTag::State => WireRequest::State(decode_body(body, "Decoding IPC state request")?),
+        RequestTag::Query => WireRequest::Query(decode_body(body, "Decoding IPC query request")?),
+        RequestTag::Command => {
             WireRequest::Command(decode_body(body, "Decoding IPC command request")?)
         }
-        RequestType::Watch => WireRequest::Watch(decode_body(body, "Decoding IPC watch request")?),
-        RequestType::WaitTask => {
+        RequestTag::Watch => WireRequest::Watch(decode_body(body, "Decoding IPC watch request")?),
+        RequestTag::WaitTask => {
             WireRequest::WaitTask(decode_body(body, "Decoding IPC task wait request")?)
         }
     };
@@ -97,23 +97,23 @@ pub fn decode_request_frame(bytes: &[u8]) -> Result<WireRequest> {
 
 pub fn decode_response_frame(bytes: &[u8]) -> Result<WireResponse> {
     let (message_type, body) = decode_message_header(bytes, MAX_RESPONSE)?;
-    let message_type = ResponseType::try_from(message_type)?;
+    let message_type = ResponseTag::try_from(message_type)?;
     let response = match message_type {
-        ResponseType::Hello => {
+        ResponseTag::Hello => {
             WireResponse::Hello(decode_body(body, "Decoding IPC Hello response")?)
         }
-        ResponseType::State => {
+        ResponseTag::State => {
             WireResponse::State(decode_body(body, "Decoding IPC state response")?)
         }
-        ResponseType::Query => {
+        ResponseTag::Query => {
             WireResponse::Query(decode_body(body, "Decoding IPC query response")?)
         }
-        ResponseType::Ack => WireResponse::Ack(decode_body(body, "Decoding IPC acknowledgement")?),
-        ResponseType::Watch => {
+        ResponseTag::Ack => WireResponse::Ack(decode_body(body, "Decoding IPC acknowledgement")?),
+        ResponseTag::Watch => {
             WireResponse::Watch(decode_body(body, "Decoding IPC watch response")?)
         }
-        ResponseType::Task => WireResponse::Task(decode_body(body, "Decoding IPC task response")?),
-        ResponseType::Error => {
+        ResponseTag::Task => WireResponse::Task(decode_body(body, "Decoding IPC task response")?),
+        ResponseTag::Error => {
             WireResponse::Error(decode_body(body, "Decoding IPC error response")?)
         }
     };
@@ -178,12 +178,12 @@ pub fn encode_request_frame_into(request: &WireRequest, bytes: &mut Vec<u8>) -> 
         limit: MAX_REQUEST,
     };
     match request {
-        WireRequest::Hello(value) => writer.encode(RequestType::Hello as u8, value),
-        WireRequest::State(value) => writer.encode(RequestType::State as u8, value),
-        WireRequest::Query(value) => writer.encode(RequestType::Query as u8, value),
-        WireRequest::Command(value) => writer.encode(RequestType::Command as u8, value),
-        WireRequest::Watch(value) => writer.encode(RequestType::Watch as u8, value),
-        WireRequest::WaitTask(value) => writer.encode(RequestType::WaitTask as u8, value),
+        WireRequest::Hello(value) => writer.encode(RequestTag::Hello as u8, value),
+        WireRequest::State(value) => writer.encode(RequestTag::State as u8, value),
+        WireRequest::Query(value) => writer.encode(RequestTag::Query as u8, value),
+        WireRequest::Command(value) => writer.encode(RequestTag::Command as u8, value),
+        WireRequest::Watch(value) => writer.encode(RequestTag::Watch as u8, value),
+        WireRequest::WaitTask(value) => writer.encode(RequestTag::WaitTask as u8, value),
     }
 }
 
@@ -193,13 +193,13 @@ pub fn encode_response_frame_into(response: &WireResponse, bytes: &mut Vec<u8>) 
         limit: MAX_RESPONSE,
     };
     match response {
-        WireResponse::Hello(value) => writer.encode(ResponseType::Hello as u8, value),
-        WireResponse::State(value) => writer.encode(ResponseType::State as u8, value),
-        WireResponse::Query(value) => writer.encode(ResponseType::Query as u8, value),
-        WireResponse::Ack(value) => writer.encode(ResponseType::Ack as u8, value),
-        WireResponse::Watch(value) => writer.encode(ResponseType::Watch as u8, value),
-        WireResponse::Task(value) => writer.encode(ResponseType::Task as u8, value),
-        WireResponse::Error(value) => writer.encode(ResponseType::Error as u8, value),
+        WireResponse::Hello(value) => writer.encode(ResponseTag::Hello as u8, value),
+        WireResponse::State(value) => writer.encode(ResponseTag::State as u8, value),
+        WireResponse::Query(value) => writer.encode(ResponseTag::Query as u8, value),
+        WireResponse::Ack(value) => writer.encode(ResponseTag::Ack as u8, value),
+        WireResponse::Watch(value) => writer.encode(ResponseTag::Watch as u8, value),
+        WireResponse::Task(value) => writer.encode(ResponseTag::Task as u8, value),
+        WireResponse::Error(value) => writer.encode(ResponseTag::Error as u8, value),
     }
 }
 /// Read and consume one request, retaining only reusable receive storage.

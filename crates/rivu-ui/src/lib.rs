@@ -14,7 +14,7 @@ mod slider;
 pub mod surface;
 pub mod theme;
 
-pub use choice::{ChoiceAction, ChoiceMode, ChoicePopup, ChoiceState, DropdownItem};
+pub use choice::{ChoiceAction, ChoiceItem, ChoiceMode, ChoicePopup, ChoiceState};
 pub use control::{
     IconButton, IconButtonDensity, IconButtonGroup, IconButtonStyle, activate_control,
     active_control, button, button_style, checkbox, danger_control, disabled_control,

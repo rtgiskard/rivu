@@ -23,7 +23,7 @@ use crate::{
 use anyhow::{Context as _, Result};
 use gpui::{prelude::*, *};
 use rivu_ui::{
-    ButtonTooltip, ChoiceAction, ChoiceMode, ChoicePopup, ChoiceState, Dialog, DropdownItem,
+    ButtonTooltip, ChoiceAction, ChoiceItem, ChoiceMode, ChoicePopup, ChoiceState, Dialog,
     FocusScope, FormField, IconButton, IconButtonDensity, IconButtonGroup, IconButtonStyle,
     StatusKind, activate_control, active_control, column, copyable_message, dropdown_trigger,
     input::{Input, InputEvent},
@@ -913,7 +913,7 @@ impl Settings {
         self.fill(cx);
     }
 
-    fn font_items(&self, query: &str) -> Vec<DropdownItem<SettingChoice>> {
+    fn font_items(&self, query: &str) -> Vec<ChoiceItem<SettingChoice>> {
         let query = query.trim();
         let search = query.to_lowercase();
         let mut items: Vec<_> = self
@@ -922,7 +922,7 @@ impl Settings {
             .enumerate()
             .filter(|(_, option)| option.search.contains(&search))
             .map(|(index, option)| {
-                DropdownItem::new(SettingChoice::Font(index), option.family.clone())
+                ChoiceItem::new(SettingChoice::Font(index), option.family.clone())
             })
             .collect();
         if !query.is_empty()
@@ -931,7 +931,7 @@ impl Settings {
                 .iter()
                 .any(|option| option.family.eq_ignore_ascii_case(query))
         {
-            items.push(DropdownItem::new(
+            items.push(ChoiceItem::new(
                 SettingChoice::CustomFont,
                 self.i18n
                     .format("settings-use-font", &[("font", query.into())]),
@@ -2040,7 +2040,7 @@ impl Settings {
         cx.notify();
     }
 
-    fn open_setting_dropdown(&mut self, items: Vec<DropdownItem<SettingChoice>>, selected: usize) {
+    fn open_setting_dropdown(&mut self, items: Vec<ChoiceItem<SettingChoice>>, selected: usize) {
         if let Some(item) = items.first() {
             self.dropdown_anchor = match item.value {
                 SettingChoice::Language(_) => Measured::Language,
@@ -2473,7 +2473,7 @@ mod tests {
                         .into_iter()
                         .map(|value| {
                             let choice = SettingChoice::AlbumArtworkMode(value);
-                            DropdownItem::new(choice, choice.label(&this.i18n))
+                            ChoiceItem::new(choice, choice.label(&this.i18n))
                         })
                         .collect(),
                     0,
@@ -2546,7 +2546,7 @@ mod tests {
                 this.set_value(Field::AlbumArtworkPeriod, "1e", None, cx);
                 let input = this.inputs[&Field::AlbumArtworkPeriod].clone();
                 this.open_setting_dropdown(
-                    vec![DropdownItem::new(
+                    vec![ChoiceItem::new(
                         SettingChoice::AlbumArtworkMode(AlbumArtworkMode::Static),
                         "Static",
                     )],
@@ -2559,7 +2559,7 @@ mod tests {
                 assert_eq!(this.value(Field::AlbumArtworkPeriod, cx), "1e");
                 assert_eq!(this.inputs[&Field::AlbumArtworkPeriod], input);
                 this.open_setting_dropdown(
-                    vec![DropdownItem::new(
+                    vec![ChoiceItem::new(
                         SettingChoice::AlbumArtworkMode(AlbumArtworkMode::Rotating),
                         "Rotating",
                     )],

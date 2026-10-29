@@ -139,7 +139,7 @@ pub use graph::GraphRunner;
 pub use output::devices;
 pub use render::{RenderFormat, SourceRenderer};
 pub use source::{
-    ProbeBackend, ProbeResult, SourceIdentity, metadata_budget, probe, probe_details, probe_file,
+    AudioBackend, ProbeResult, SourceIdentity, metadata_budget, probe, probe_details, probe_file,
     probe_with_cancel,
 };
 pub use waveform::{WaveformFrame, WaveformIdentity};

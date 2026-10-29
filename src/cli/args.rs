@@ -1,4 +1,4 @@
-use super::output::Terminal;
+use super::output::TerminalEscaped;
 use clap::{Parser, Subcommand, ValueEnum};
 use rivu::i18n::Localizer;
 use std::path::PathBuf;
@@ -573,10 +573,10 @@ pub(super) fn terminal_cli_error(mut error: clap::Error) -> clap::Error {
     ] {
         if let Some(mut value) = error.remove(kind) {
             match &mut value {
-                ContextValue::String(text) => *text = Terminal(&*text).to_string(),
+                ContextValue::String(text) => *text = TerminalEscaped(&*text).to_string(),
                 ContextValue::Strings(texts) => {
                     for text in texts {
-                        *text = Terminal(&*text).to_string();
+                        *text = TerminalEscaped(&*text).to_string();
                     }
                 }
                 _ => {}

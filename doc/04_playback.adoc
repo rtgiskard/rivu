@@ -531,6 +531,8 @@ and are lost when the core exits.
 == Audio runtime crate
 
 The `rivu-audio` crate provides decoding, probing, output, and playback workers.
+`ProbeResult` reports the actual probing and decoding implementations independently
+using `AudioBackend`; these results are distinct from the requested `DecoderHint`.
 Application ownership is described in
 link:21_ipc.adoc#_core_and_client_boundary[IPC]; build and runtime prerequisites
 are in link:../readme.adoc[README].

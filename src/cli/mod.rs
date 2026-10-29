@@ -9,7 +9,8 @@ use self::{
         QueueAction, Repeat, Switch, localize_help, terminal_cli_error,
     },
     output::{
-        Terminal, list_library, list_playlists, list_queue, show_ack, show_state, terminal_text,
+        TerminalEscaped, list_library, list_playlists, list_queue, show_ack, show_state,
+        terminal_text,
     },
 };
 use anyhow::{Context, Result, bail};
@@ -104,7 +105,7 @@ fn execute(args: Args, i18n: Localizer) -> Result<()> {
                 i18n.format(
                     "core-probe",
                     &[
-                        ("path", Terminal(path.display()).to_string().into()),
+                        ("path", TerminalEscaped(path.display()).to_string().into()),
                         ("title", terminal_text(&info.title).into()),
                         ("artist", terminal_text(&info.artist).into()),
                         ("album", terminal_text(&info.album).into()),
@@ -166,7 +167,7 @@ fn execute(args: Args, i18n: Localizer) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&devices)?);
             } else {
                 for device in devices {
-                    println!("{}", Terminal(device));
+                    println!("{}", TerminalEscaped(device));
                 }
             }
             Ok(())
@@ -234,7 +235,7 @@ fn execute(args: Args, i18n: Localizer) -> Result<()> {
                     "{}\t{}\t{}",
                     entry.played_at,
                     entry.track_id,
-                    Terminal(&entry.title)
+                    TerminalEscaped(&entry.title)
                 );
             }
             Ok(())
@@ -320,7 +321,7 @@ fn execute(args: Args, i18n: Localizer) -> Result<()> {
                                         ("id", member.track.id.to_string().into()),
                                         (
                                             "path",
-                                            Terminal(member.track.path.display())
+                                            TerminalEscaped(member.track.path.display())
                                                 .to_string()
                                                 .into()
                                         ),

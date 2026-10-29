@@ -2,7 +2,7 @@
 //! A component consumer: all values, filtering and loading transitions are host-owned.
 use gpui::{prelude::*, *};
 use rivu_ui::{
-    ChoiceAction, ChoiceMode, ChoicePopup, ChoiceState, DropdownItem, FocusScope, FormField,
+    ChoiceAction, ChoiceItem, ChoiceMode, ChoicePopup, ChoiceState, FocusScope, FormField,
     IconButton, IconButtonDensity, IconButtonGroup, IconButtonStyle, ProgressBar, Slider,
     SliderInput, SliderKey, VirtualList, button, checkbox, column, disabled_control,
     dropdown_trigger,
@@ -298,7 +298,7 @@ impl Render for Showcase {
                     ]
                     .into_iter()
                     .enumerate()
-                    .map(|(i, label)| DropdownItem::new(i, label)),
+                    .map(|(i, label)| ChoiceItem::new(i, label)),
                     this.choice,
                 );
             }

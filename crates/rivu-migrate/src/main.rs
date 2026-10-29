@@ -3,7 +3,7 @@ mod terminal;
 use clap::{Parser, Subcommand};
 use rivu_migrate::{Mode, Options, Report, run};
 use std::{path::PathBuf, process::ExitCode};
-use terminal::Terminal;
+use terminal::TerminalEscaped;
 
 #[derive(Parser)]
 #[command(
@@ -49,27 +49,27 @@ fn main() -> ExitCode {
     let mut report = Report::default();
     let result = run(&options, mode, &mut report);
     for line in &report.resources {
-        println!("{}", Terminal(line));
+        println!("{}", TerminalEscaped(line));
     }
     for backup in &report.backups {
         println!(
             "Backup: {} ({})",
-            Terminal(backup.path.display()),
+            TerminalEscaped(backup.path.display()),
             backup.status.description()
         );
         if let Some(partial) = &backup.retained_partial {
             println!(
                 "Retained complete backup alias: {}",
-                Terminal(partial.display())
+                TerminalEscaped(partial.display())
             );
         }
     }
     if let Err(error) = result {
-        eprintln!("Migration failed: {:#}", Terminal(error));
+        eprintln!("Migration failed: {:#}", TerminalEscaped(error));
         eprintln!(
             "Resource status: configuration {}; database {}. No automatic rollback was performed.",
-            Terminal(report.config_status),
-            Terminal(report.database_status)
+            TerminalEscaped(report.config_status),
+            TerminalEscaped(report.database_status)
         );
         return ExitCode::from(2);
     }

@@ -9,7 +9,7 @@ fn injected_watcher(update: Option<WatchedSnapshot>) -> (Watcher, Sender<()>) {
     let watcher = Watcher {
         receiver,
         latest: Arc::new(Mutex::new(update)),
-        stopping: rivu_client::SessionStop::default(),
+        stopping: rivu_client::SessionCancellation::default(),
         worker: None,
     };
     (watcher, sender)

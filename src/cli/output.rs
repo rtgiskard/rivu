@@ -10,9 +10,9 @@ use std::{
 };
 
 // Escape only untrusted display values, never stored data or layout separators.
-pub(super) struct Terminal<T>(pub(super) T);
+pub(super) struct TerminalEscaped<T>(pub(super) T);
 
-impl<T: std::fmt::Display> std::fmt::Display for Terminal<T> {
+impl<T: std::fmt::Display> std::fmt::Display for TerminalEscaped<T> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         struct Escaped<'a, 'b>(&'a mut std::fmt::Formatter<'b>);
 
@@ -51,7 +51,7 @@ impl<T: std::fmt::Display> std::fmt::Display for Terminal<T> {
 
 pub(super) fn terminal_text(value: &str) -> std::borrow::Cow<'_, str> {
     if value.chars().any(char::is_control) {
-        Terminal(value).to_string().into()
+        TerminalEscaped(value).to_string().into()
     } else {
         value.into()
     }
@@ -101,7 +101,7 @@ pub(super) fn list_queue(i18n: &Localizer, data_dir: &Path, json: bool) -> Resul
                     row.position,
                     row.id,
                     row.track_id,
-                    Terminal(&row.track.title),
+                    TerminalEscaped(&row.track.title),
                     if current == Some(row.id) { " *" } else { "" }
                 )?;
             }
@@ -164,10 +164,10 @@ pub(super) fn list_library(
                     output,
                     "{}\t{}\t{}\t{}\t{}{}{}\t",
                     track.id,
-                    Terminal(&track.title),
-                    Terminal(&track.artist),
-                    Terminal(&track.album),
-                    Terminal(track.path.display()),
+                    TerminalEscaped(&track.title),
+                    TerminalEscaped(&track.artist),
+                    TerminalEscaped(&track.album),
+                    TerminalEscaped(track.path.display()),
                     if track.missing {
                         i18n.text("core-missing-marker")
                     } else {
@@ -218,10 +218,10 @@ pub(super) fn show_other_tracks(i18n: &Localizer, view: ViewResponse, json: bool
                     println!(
                         "{}\t{}\t{}\t{}\t{}{}{}",
                         track.id,
-                        Terminal(&track.title),
-                        Terminal(&track.artist),
-                        Terminal(&track.album),
-                        Terminal(track.path.display()),
+                        TerminalEscaped(&track.title),
+                        TerminalEscaped(&track.artist),
+                        TerminalEscaped(&track.album),
+                        TerminalEscaped(track.path.display()),
                         if track.missing {
                             i18n.text("core-missing-marker")
                         } else {
@@ -410,7 +410,7 @@ pub(super) fn write_error(
         serde_json::to_writer(&mut *output, &value)?;
         writeln!(output)?;
     } else {
-        writeln!(output, "rivu: {:#}", Terminal(error))?;
+        writeln!(output, "rivu: {:#}", TerminalEscaped(error))?;
     }
     Ok(())
 }
@@ -593,7 +593,7 @@ pub(super) fn show_state(i18n: &Localizer, response: &StateResponse, json: bool)
         )
     );
     if let Some(error) = &system.last_error {
-        eprintln!("{}", Terminal(error));
+        eprintln!("{}", TerminalEscaped(error));
     }
     Ok(())
 }
@@ -625,13 +625,13 @@ pub(super) fn show_scan(i18n: &Localizer, progress: &rivu_protocol::model::ScanP
         )
     );
     if let Some(path) = &progress.path {
-        println!("{}", Terminal(path.display()));
+        println!("{}", TerminalEscaped(path.display()));
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Terminal, show_history, write_error};
+    use super::{TerminalEscaped, show_history, write_error};
     use std::path::Path;
 
     #[test]
@@ -646,10 +646,10 @@ mod tests {
                 _ if value <= 0x7f => format!("\\x{value:02x}"),
                 _ => format!("\\u{{{value:04x}}}"),
             };
-            assert_eq!(Terminal(character).to_string(), expected);
+            assert_eq!(TerminalEscaped(character).to_string(), expected);
         }
         assert_eq!(
-            Terminal("\x1b[31mRed\x1b[0m\u{009b}31m").to_string(),
+            TerminalEscaped("\x1b[31mRed\x1b[0m\u{009b}31m").to_string(),
             "\\x1b[31mRed\\x1b[0m\\u{009b}31m"
         );
     }
@@ -659,7 +659,11 @@ mod tests {
         let title = "音楽 café e\u{301} 🎵\\literal\tline\nnext\x1b[31m";
         let path = Path::new("音楽/\x1bsong\n.flac");
         assert_eq!(
-            format!("7\t{}\t{}\n", Terminal(title), Terminal(path.display())),
+            format!(
+                "7\t{}\t{}\n",
+                TerminalEscaped(title),
+                TerminalEscaped(path.display())
+            ),
             "7\t音楽 café e\u{301} 🎵\\literal\\tline\\nnext\\x1b[31m\t音楽/\\x1bsong\\n.flac\n"
         );
     }

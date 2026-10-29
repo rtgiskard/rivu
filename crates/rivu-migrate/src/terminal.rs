@@ -1,9 +1,9 @@
 //! Escape untrusted display values only at the terminal boundary.
 use std::fmt;
 
-pub(super) struct Terminal<T>(pub(super) T);
+pub(super) struct TerminalEscaped<T>(pub(super) T);
 
-impl<T: fmt::Display> fmt::Display for Terminal<T> {
+impl<T: fmt::Display> fmt::Display for TerminalEscaped<T> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         struct Escaped<'a, 'b>(&'a mut fmt::Formatter<'b>);
         impl fmt::Write for Escaped<'_, '_> {
@@ -50,10 +50,10 @@ pub(super) fn cli_error(mut error: clap::Error) -> clap::Error {
     ] {
         if let Some(mut value) = error.remove(kind) {
             match &mut value {
-                ContextValue::String(text) => *text = Terminal(&*text).to_string(),
+                ContextValue::String(text) => *text = TerminalEscaped(&*text).to_string(),
                 ContextValue::Strings(texts) => {
                     for text in texts {
-                        *text = Terminal(&*text).to_string();
+                        *text = TerminalEscaped(&*text).to_string();
                     }
                 }
                 _ => {}
@@ -72,9 +72,12 @@ mod tests {
     fn alternate_format_preserves_and_escapes_every_error_cause() {
         let error = anyhow::anyhow!("cause\u{1b}[2J\n\u{009b}red").context("context\r\t\0\u{7f}");
         assert_eq!(
-            format!("{:#}", Terminal(&error)),
+            format!("{:#}", TerminalEscaped(&error)),
             "context\\r\\t\\0\\x7f: cause\\x1b[2J\\n\\u{009b}red"
         );
-        assert_eq!(format!("{}", Terminal("ordinary 中文")), "ordinary 中文");
+        assert_eq!(
+            format!("{}", TerminalEscaped("ordinary 中文")),
+            "ordinary 中文"
+        );
     }
 }

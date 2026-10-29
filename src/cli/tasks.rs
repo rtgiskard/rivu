@@ -1,6 +1,6 @@
 use super::{
     args::{TaskAction, TaskKind},
-    output::{Terminal, show_scan},
+    output::{TerminalEscaped, show_scan},
 };
 use anyhow::{Context, Result, bail, ensure};
 use rivu::i18n::Localizer;
@@ -176,7 +176,7 @@ pub(super) fn emit_processing(
             )
         );
         if let Some(error) = &task.error {
-            println!("{}", Terminal(error));
+            println!("{}", TerminalEscaped(error));
         }
     }
     Ok(())
@@ -228,7 +228,7 @@ fn emit_scan(i18n: &Localizer, instance_id: u32, task: &ScanTaskStatus, json: bo
         );
         show_scan(i18n, &task.progress);
         if let Some(error) = &task.error {
-            println!("{}", Terminal(error));
+            println!("{}", TerminalEscaped(error));
         }
     }
     Ok(())
@@ -273,7 +273,7 @@ fn emit_relocation(
             )
         );
         if let Some(error) = &task.error {
-            println!("{}", Terminal(error));
+            println!("{}", TerminalEscaped(error));
         }
     }
     Ok(())

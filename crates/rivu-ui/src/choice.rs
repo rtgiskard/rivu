@@ -12,12 +12,12 @@ use std::cell::Cell;
 
 /// A candidate shown by a dropdown or autocomplete popup.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DropdownItem<T> {
+pub struct ChoiceItem<T> {
     pub value: T,
     pub label: SharedString,
 }
 
-impl<T> DropdownItem<T> {
+impl<T> ChoiceItem<T> {
     pub fn new(value: T, label: impl Into<SharedString>) -> Self {
         Self {
             value,
@@ -91,7 +91,7 @@ fn key_action(open: bool, mode: ChoiceMode, composing: bool, key: &str) -> Choic
 
 /// Candidate and scroll state only. Owners retain filtering, values and commit policy.
 pub struct ChoiceState<T> {
-    items: Vec<DropdownItem<T>>,
+    items: Vec<ChoiceItem<T>>,
     selected: usize,
     open: bool,
     scroll: UniformListScrollHandle,
@@ -115,7 +115,7 @@ impl<T> Default for ChoiceState<T> {
 }
 
 impl<T> ChoiceState<T> {
-    pub fn open(&mut self, items: impl IntoIterator<Item = DropdownItem<T>>, selected: usize) {
+    pub fn open(&mut self, items: impl IntoIterator<Item = ChoiceItem<T>>, selected: usize) {
         self.revision = self.revision.wrapping_add(1);
         self.items = items.into_iter().collect();
         self.open = !self.items.is_empty();
@@ -134,7 +134,7 @@ impl<T> ChoiceState<T> {
     pub fn selected_index(&self) -> Option<usize> {
         (!self.items.is_empty()).then_some(self.selected)
     }
-    pub fn item(&self, index: usize) -> Option<&DropdownItem<T>> {
+    pub fn item(&self, index: usize) -> Option<&ChoiceItem<T>> {
         self.items.get(index)
     }
 
@@ -387,7 +387,7 @@ mod tests {
     fn closing_releases_candidates_and_removes_selection() {
         let value = std::rc::Rc::new(());
         let mut state = ChoiceState::default();
-        state.open([DropdownItem::new(value.clone(), "candidate")], 0);
+        state.open([ChoiceItem::new(value.clone(), "candidate")], 0);
         assert_eq!(std::rc::Rc::strong_count(&value), 2);
         state.close();
         assert_eq!(std::rc::Rc::strong_count(&value), 1);
@@ -417,9 +417,9 @@ mod tests {
             let mut state = ChoiceState::default();
             state.open(
                 [
-                    DropdownItem::new(1, "one"),
-                    DropdownItem::new(2, "two"),
-                    DropdownItem::new(3, "three"),
+                    ChoiceItem::new(1, "one"),
+                    ChoiceItem::new(2, "two"),
+                    ChoiceItem::new(3, "three"),
                 ],
                 0,
             );
@@ -437,17 +437,14 @@ mod tests {
         with_choice_window(|window| {
             let mut state = ChoiceState::default();
             state.open(
-                [
-                    DropdownItem::new(10, "ten"),
-                    DropdownItem::new(20, "twenty"),
-                ],
+                [ChoiceItem::new(10, "ten"), ChoiceItem::new(20, "twenty")],
                 1,
             );
             assert_eq!(state.selected_index(), Some(1));
             state.close();
             assert!(!state.is_open());
 
-            state.open([DropdownItem::new(30, "thirty")], usize::MAX);
+            state.open([ChoiceItem::new(30, "thirty")], usize::MAX);
             assert!(state.is_open());
             assert_eq!(state.selected_index(), Some(0));
             assert_eq!(state.item(0).map(|item| item.value), Some(30));
@@ -565,19 +562,17 @@ mod tests {
         let choice = window.root(&mut cx).unwrap();
         cx.update_window(window.into(), |_, window, cx| {
             choice.update(cx, |this, cx| {
-                this.choices.open([DropdownItem::new(1, "Old")], 0);
+                this.choices.open([ChoiceItem::new(1, "Old")], 0);
                 let old = this.callback(0);
                 this.choices.close();
                 old(this, window, cx);
                 assert!(this.committed.is_empty());
 
-                this.choices.open([DropdownItem::new(2, "Reopened")], 0);
+                this.choices.open([ChoiceItem::new(2, "Reopened")], 0);
                 old(this, window, cx);
                 let replaced = this.callback(0);
-                this.choices.open(
-                    [DropdownItem::new(3, "Three"), DropdownItem::new(4, "Four")],
-                    0,
-                );
+                this.choices
+                    .open([ChoiceItem::new(3, "Three"), ChoiceItem::new(4, "Four")], 0);
                 replaced(this, window, cx);
                 this.callback(2)(this, window, cx);
                 assert!(this.committed.is_empty());
@@ -602,12 +597,12 @@ mod tests {
                 assert_eq!(this.committed, [4]);
                 assert!(!this.choices.is_open());
 
-                this.choices.open([DropdownItem::new(5, "Five")], 0);
+                this.choices.open([ChoiceItem::new(5, "Five")], 0);
                 let emptied = this.callback(0);
                 this.choices.open([], 0);
                 emptied(this, window, cx);
                 assert_eq!(this.committed, [4]);
-                this.choices.open([DropdownItem::new(6, "Six")], 0);
+                this.choices.open([ChoiceItem::new(6, "Six")], 0);
                 this.callback(0)(this, window, cx);
                 assert_eq!(this.committed, [4, 6]);
             });
@@ -631,7 +626,7 @@ mod tests {
             cx.update_window(window.into(), |_, window, cx| {
                 choice.update(cx, |this, cx| {
                     this.choices
-                        .open((0..100).map(|i| DropdownItem::new(i, "Old")), 0);
+                        .open((0..100).map(|i| ChoiceItem::new(i, "Old")), 0);
                     cx.notify();
                 });
                 window.draw(cx).clear(cx);
@@ -651,7 +646,7 @@ mod tests {
                 for count in [50, 200] {
                     choice.update(cx, |this, _| {
                         this.choices
-                            .open((0..count).map(|i| DropdownItem::new(i, "New")), 0);
+                            .open((0..count).map(|i| ChoiceItem::new(i, "New")), 0);
                         // No frame has measured the replacement count yet.
                         navigate(&mut this.choices, "pagedown", window);
                         assert_eq!(this.choices.selected_index(), Some(page));
@@ -677,7 +672,7 @@ mod tests {
         cx.update_window(window.into(), |_, window, cx| {
             for close_first in [false, true] {
                 choice.update(cx, |this, cx| {
-                    this.choices.open([DropdownItem::new(1, "Old")], 0);
+                    this.choices.open([ChoiceItem::new(1, "Old")], 0);
                     cx.notify();
                 });
                 window.draw(cx).clear(cx);
@@ -685,7 +680,7 @@ mod tests {
                     if close_first {
                         this.choices.close();
                     }
-                    this.choices.open([DropdownItem::new(2, "New")], 0);
+                    this.choices.open([ChoiceItem::new(2, "New")], 0);
                 });
                 let outside = MouseDownEvent {
                     position: point(px(400.), px(400.)),
@@ -743,7 +738,7 @@ mod tests {
                 (false, None),
             ] {
                 choice.update(cx, |this, cx| {
-                    this.choices.open([DropdownItem::new(1, "Old")], 0);
+                    this.choices.open([ChoiceItem::new(1, "Old")], 0);
                     cx.notify();
                 });
                 window.draw(cx).clear(cx);
@@ -753,7 +748,7 @@ mod tests {
                         this.choices.close();
                     }
                     if let Some(value) = replacement {
-                        this.choices.open([DropdownItem::new(value, "New")], 0);
+                        this.choices.open([ChoiceItem::new(value, "New")], 0);
                     } else if !close_first {
                         this.choices.open([], 0);
                     }
@@ -790,10 +785,8 @@ mod tests {
             // the same pointer position and row index.
             for (close_first, replace) in [(false, true), (true, true), (false, false)] {
                 choice.update(cx, |this, cx| {
-                    this.choices.open(
-                        [DropdownItem::new(1, "Old"), DropdownItem::new(3, "Other")],
-                        0,
-                    );
+                    this.choices
+                        .open([ChoiceItem::new(1, "Old"), ChoiceItem::new(3, "Other")], 0);
                     cx.notify();
                 });
                 window.draw(cx).clear(cx);
@@ -812,7 +805,7 @@ mod tests {
                         this.choices.close();
                     }
                     if replace {
-                        this.choices.open([DropdownItem::new(2, "New")], 0);
+                        this.choices.open([ChoiceItem::new(2, "New")], 0);
                     } else {
                         this.choices.select_index(1);
                     }
@@ -871,10 +864,8 @@ mod tests {
                 cx,
                 |this, _, cx| {
                     this.opens += 1;
-                    this.choices.open(
-                        [DropdownItem::new(1, "One"), DropdownItem::new(2, "Two")],
-                        0,
-                    );
+                    this.choices
+                        .open([ChoiceItem::new(1, "One"), ChoiceItem::new(2, "Two")], 0);
                     cx.notify();
                 },
             );

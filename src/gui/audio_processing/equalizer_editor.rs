@@ -1939,7 +1939,7 @@ impl EqualizerEditor {
                     } else {
                         this.channel_choices.open(
                             (0..channel_count as usize).map(|channel| {
-                                rivu_ui::DropdownItem::new(channel, (channel + 1).to_string())
+                                rivu_ui::ChoiceItem::new(channel, (channel + 1).to_string())
                             }),
                             this.response_channel,
                         );

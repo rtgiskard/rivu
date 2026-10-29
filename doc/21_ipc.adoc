@@ -237,8 +237,9 @@ Response types:
 * `Task` (`5`) — returns the task-specific terminal status or a task-wait error
 * `Error` (`255`) — returns a protocol or request error
 
-These numbers are the frame's `message_type` byte, not Postcard enum ordinals
-inside a body. Wire enum variant and field order are part of the binary schema.
+These numbers are the frame's `message_type` byte, represented by `wire::RequestTag`
+and `wire::ResponseTag`, not Postcard enum ordinals inside a body. Wire enum variant
+and field order are part of the binary schema.
 
 === Wire schemas
 
@@ -339,8 +340,9 @@ Failed exchanges, including an unexpected response type, discard the client
 connection and its bound instance identity. A later explicit request can reconnect
 and perform a fresh Hello, but clients never automatically replay a failed command.
 
-Stopping a client session is permanent and wakes current and future waits. It
-does not cancel accepted work; replacing a query only revokes its result.
+`rivu_client::SessionCancellation` permanently cancels a client session and wakes
+current and future waits. It does not cancel accepted work; replacing a query only
+revokes its result.
 
 == Consistency
 

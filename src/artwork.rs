@@ -970,12 +970,12 @@ pub(crate) mod tests {
     }
 
     fn assert_budget_audio(path: &Path) {
-        use rivu_audio::{PcmBudget, ProbeBackend, SourceRenderer};
+        use rivu_audio::{AudioBackend, PcmBudget, SourceRenderer};
         use rivu_format::decoder_hint::DecoderHint;
         use std::sync::atomic::AtomicBool;
 
         let details = rivu_audio::probe_details(path, false, false).unwrap();
-        assert!(matches!(details.decoder_backend, ProbeBackend::Native));
+        assert!(matches!(details.decoder_backend, AudioBackend::Native));
         assert_eq!(details.info.sample_rate, 8_000);
         let rendered = SourceRenderer::open(
             path,

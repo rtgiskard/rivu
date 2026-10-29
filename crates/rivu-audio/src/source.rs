@@ -161,12 +161,12 @@ pub(super) fn check_cancelled(cancelled: Option<&AtomicBool>) -> Result<()> {
 
 #[derive(Clone, Copy, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
-pub enum ProbeBackend {
+pub enum AudioBackend {
     Native,
     Ffmpeg,
 }
 
-impl std::fmt::Display for ProbeBackend {
+impl std::fmt::Display for AudioBackend {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::Native => "native",
@@ -177,8 +177,8 @@ impl std::fmt::Display for ProbeBackend {
 
 pub struct ProbeResult {
     pub info: MediaInfo,
-    pub probe_backend: ProbeBackend,
-    pub decoder_backend: ProbeBackend,
+    pub probe_backend: AudioBackend,
+    pub decoder_backend: AudioBackend,
 }
 
 pub fn probe(path: &Path, ffmpeg_enabled: bool) -> Result<MediaInfo> {
@@ -230,9 +230,9 @@ pub fn probe_details(path: &Path, ffmpeg_enabled: bool, enhanced: bool) -> Resul
         ffmpeg_enabled || enhanced,
     )?;
     let decoder_backend = if source.uses_ffmpeg() {
-        ProbeBackend::Ffmpeg
+        AudioBackend::Ffmpeg
     } else {
-        ProbeBackend::Native
+        AudioBackend::Native
     };
     Ok(ProbeResult {
         probe_backend: source.probe_backend,
@@ -468,7 +468,7 @@ pub(super) struct Source {
     vorbis_timing: Option<VorbisTiming>,
     layout: Arc<[Channel]>,
     info: MediaInfo,
-    probe_backend: ProbeBackend,
+    probe_backend: AudioBackend,
     range_start: f64,
     range_end: Option<f64>,
     seek_target: Option<f64>,
@@ -525,7 +525,7 @@ impl Source {
             vorbis_timing: None,
             layout,
             info,
-            probe_backend: ProbeBackend::Native,
+            probe_backend: AudioBackend::Native,
             range_start: 0.0,
             range_end: None,
             seek_target: None,
@@ -675,7 +675,7 @@ impl Source {
         match Self::open_native(path, buffer_len, file, cancelled) {
             Ok(mut source) => {
                 if input.is_some() {
-                    source.probe_backend = ProbeBackend::Ffmpeg;
+                    source.probe_backend = AudioBackend::Ffmpeg;
                 }
                 source.opening_fallback =
                     fallback.map(|file| (path.to_owned(), file, SourceSelection::default()));
@@ -722,7 +722,7 @@ impl Source {
             vorbis_timing,
             layout,
             info,
-            probe_backend: ProbeBackend::Ffmpeg,
+            probe_backend: AudioBackend::Ffmpeg,
             range_start: 0.0,
             range_end: None,
             seek_target: None,
@@ -931,7 +931,7 @@ impl Source {
             vorbis_timing,
             layout: Arc::from([]),
             info,
-            probe_backend: ProbeBackend::Native,
+            probe_backend: AudioBackend::Native,
             range_start: 0.0,
             range_end: None,
             seek_target: None,
@@ -3281,7 +3281,7 @@ pub(super) mod tests {
         source.seek(0.5).unwrap();
         assert_eq!(decode_remaining(&mut source).len(), 22_050);
         let details = probe_details(file.path(), false, false).unwrap();
-        assert!(matches!(details.decoder_backend, ProbeBackend::Native));
+        assert!(matches!(details.decoder_backend, AudioBackend::Native));
         assert!(details.info.duration.unwrap() < actual_duration / 2.0);
     }
 
@@ -3442,7 +3442,7 @@ pub(super) mod tests {
         let mut native =
             Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, true).unwrap();
         assert!(!native.uses_ffmpeg());
-        assert!(matches!(native.probe_backend, ProbeBackend::Native));
+        assert!(matches!(native.probe_backend, AudioBackend::Native));
         assert_eq!(decode_remaining(&mut native), expected);
         native.seek(0.0).unwrap();
         assert!(!native.uses_ffmpeg());
@@ -3532,8 +3532,8 @@ pub(super) mod tests {
         let file = pcm_file();
         assert!(!crate::ffmpeg::load_attempted());
         let cold = probe_details(file.path(), true, false).unwrap();
-        assert!(matches!(cold.probe_backend, ProbeBackend::Native));
-        assert!(matches!(cold.decoder_backend, ProbeBackend::Native));
+        assert!(matches!(cold.probe_backend, AudioBackend::Native));
+        assert!(matches!(cold.decoder_backend, AudioBackend::Native));
         assert!(!crate::ffmpeg::load_attempted());
 
         let mut reference =
@@ -3541,12 +3541,12 @@ pub(super) mod tests {
         let expected = decode_remaining(&mut reference);
         let enhanced = probe_details(file.path(), true, true).unwrap();
         assert!(crate::ffmpeg::load_attempted());
-        assert!(matches!(enhanced.probe_backend, ProbeBackend::Ffmpeg));
-        assert!(matches!(enhanced.decoder_backend, ProbeBackend::Native));
+        assert!(matches!(enhanced.probe_backend, AudioBackend::Ffmpeg));
+        assert!(matches!(enhanced.decoder_backend, AudioBackend::Native));
 
         let mut forced_native =
             Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, true).unwrap();
-        assert!(matches!(forced_native.probe_backend, ProbeBackend::Native));
+        assert!(matches!(forced_native.probe_backend, AudioBackend::Native));
         assert!(!forced_native.uses_ffmpeg());
         assert_eq!(decode_remaining(&mut forced_native), expected);
 
@@ -3555,8 +3555,8 @@ pub(super) mod tests {
         assert!(!ready.uses_ffmpeg());
         assert_eq!(decode_remaining(&mut ready), expected);
         let disabled = probe_details(file.path(), false, false).unwrap();
-        assert!(matches!(disabled.probe_backend, ProbeBackend::Native));
-        assert!(matches!(disabled.decoder_backend, ProbeBackend::Native));
+        assert!(matches!(disabled.probe_backend, AudioBackend::Native));
+        assert!(matches!(disabled.decoder_backend, AudioBackend::Native));
     }
 
     #[cfg(feature = "ffmpeg")]
@@ -3632,7 +3632,7 @@ pub(super) mod tests {
         let mut source =
             Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Ffmpeg, true).unwrap();
         assert!(source.uses_ffmpeg());
-        assert!(matches!(source.probe_backend, ProbeBackend::Ffmpeg));
+        assert!(matches!(source.probe_backend, AudioBackend::Ffmpeg));
         assert!(crate::ffmpeg::load_attempted());
         assert_ffmpeg_pcm(&mut source, &reference, 0.0);
         source.seek(0.2).unwrap();

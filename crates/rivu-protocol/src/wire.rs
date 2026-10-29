@@ -20,7 +20,7 @@ pub const UNKNOWN_INSTANCE: u32 = 0;
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RequestType {
+pub enum RequestTag {
     Hello = 0,
     State = 1,
     Query = 2,
@@ -29,7 +29,7 @@ pub enum RequestType {
     WaitTask = 5,
 }
 
-impl TryFrom<u8> for RequestType {
+impl TryFrom<u8> for RequestTag {
     type Error = anyhow::Error;
 
     fn try_from(value: u8) -> Result<Self> {
@@ -47,7 +47,7 @@ impl TryFrom<u8> for RequestType {
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ResponseType {
+pub enum ResponseTag {
     Hello = 0,
     State = 1,
     Query = 2,
@@ -57,7 +57,7 @@ pub enum ResponseType {
     Error = 255,
 }
 
-impl TryFrom<u8> for ResponseType {
+impl TryFrom<u8> for ResponseTag {
     type Error = anyhow::Error;
 
     fn try_from(value: u8) -> Result<Self> {

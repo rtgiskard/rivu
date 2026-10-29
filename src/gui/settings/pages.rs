@@ -17,8 +17,8 @@ use crate::{
 };
 use gpui::{Context, Div, SharedString, div, prelude::*, rems, rgb};
 use rivu_ui::{
-    DropdownItem, FormField, StatusKind, button, caption, column, copyable_message,
-    disabled_control, row, status_message, text_tooltip, theme::palette, two_column,
+    ChoiceItem, FormField, StatusKind, button, caption, column, copyable_message, disabled_control,
+    row, status_message, text_tooltip, theme::palette, two_column,
 };
 
 impl Settings {
@@ -368,12 +368,12 @@ impl Settings {
                                     this.devices.iter().position(|device| device == name)
                                 })
                                 .map_or(0, |index| index + 1);
-                            let items = std::iter::once(DropdownItem::new(
+                            let items = std::iter::once(ChoiceItem::new(
                                 SettingChoice::Device(0),
                                 this.i18n.text("settings-system-default").to_owned(),
                             ))
                             .chain(this.devices.iter().enumerate().map(|(index, device)| {
-                                DropdownItem::new(SettingChoice::Device(index + 1), device.clone())
+                                ChoiceItem::new(SettingChoice::Device(index + 1), device.clone())
                             }))
                             .collect();
                             this.open_setting_dropdown(items, selected);
@@ -501,7 +501,7 @@ impl Settings {
                     .into_iter()
                     .enumerate()
                     .map(|(index, label)| {
-                        DropdownItem::new(SettingChoice::Language(index), label.to_owned())
+                        ChoiceItem::new(SettingChoice::Language(index), label.to_owned())
                     })
                     .collect();
                 this.open_setting_dropdown(items, selected);
@@ -523,7 +523,7 @@ impl Settings {
                     .unwrap_or(0);
                 let items = Theme::ALL
                     .into_iter()
-                    .map(|value| DropdownItem::new(SettingChoice::Theme(value), value.label()))
+                    .map(|value| ChoiceItem::new(SettingChoice::Theme(value), value.label()))
                     .collect();
                 this.open_setting_dropdown(items, selected);
             },
@@ -644,7 +644,7 @@ impl Settings {
                     values
                         .into_iter()
                         .map(|value| {
-                            DropdownItem::new(
+                            ChoiceItem::new(
                                 SettingChoice::LogLevel(value),
                                 SettingChoice::LogLevel(value).label(&this.i18n),
                             )
@@ -767,7 +767,7 @@ impl Settings {
                         .into_iter()
                         .map(|value| {
                             let choice = SettingChoice::AlbumArtworkStyle(value);
-                            DropdownItem::new(choice, choice.label(&this.i18n))
+                            ChoiceItem::new(choice, choice.label(&this.i18n))
                         })
                         .collect(),
                     selected,
@@ -793,7 +793,7 @@ impl Settings {
                         .into_iter()
                         .map(|value| {
                             let choice = SettingChoice::AlbumArtworkMode(value);
-                            DropdownItem::new(choice, choice.label(&this.i18n))
+                            ChoiceItem::new(choice, choice.label(&this.i18n))
                         })
                         .collect(),
                     selected,
@@ -822,7 +822,7 @@ impl Settings {
                         .into_iter()
                         .map(|value| {
                             let choice = SettingChoice::AlbumArtworkDirection(value);
-                            DropdownItem::new(choice, choice.label(&this.i18n))
+                            ChoiceItem::new(choice, choice.label(&this.i18n))
                         })
                         .collect(),
                     selected,
@@ -903,7 +903,7 @@ impl Settings {
                         .into_iter()
                         .map(|value| {
                             let choice = SettingChoice::AudioVisualizerStyle(value);
-                            DropdownItem::new(choice, choice.label(&this.i18n))
+                            ChoiceItem::new(choice, choice.label(&this.i18n))
                         })
                         .collect(),
                     selected,
@@ -1027,7 +1027,7 @@ impl Settings {
                             values
                                 .into_iter()
                                 .map(|value| {
-                                    DropdownItem::new(
+                                    ChoiceItem::new(
                                         SettingChoice::Palette(value),
                                         visualization_palette_label(&this.i18n, value),
                                     )
@@ -1055,7 +1055,7 @@ impl Settings {
                             values
                                 .into_iter()
                                 .map(|value| {
-                                    DropdownItem::new(SettingChoice::Fft(value), value.to_string())
+                                    ChoiceItem::new(SettingChoice::Fft(value), value.to_string())
                                 })
                                 .collect(),
                             selected,
@@ -1084,7 +1084,7 @@ impl Settings {
                             values
                                 .into_iter()
                                 .map(|value| {
-                                    DropdownItem::new(
+                                    ChoiceItem::new(
                                         SettingChoice::Window(value),
                                         SettingChoice::Window(value).label(&this.i18n),
                                     )
@@ -1112,7 +1112,7 @@ impl Settings {
                             values
                                 .into_iter()
                                 .map(|value| {
-                                    DropdownItem::new(
+                                    ChoiceItem::new(
                                         SettingChoice::Signal(value),
                                         SettingChoice::Signal(value).label(&this.i18n),
                                     )
@@ -1227,7 +1227,7 @@ impl Settings {
                             values
                                 .into_iter()
                                 .map(|value| {
-                                    DropdownItem::new(
+                                    ChoiceItem::new(
                                         SettingChoice::SpectrumStyle(value),
                                         spectrum_style_label(&this.i18n, value),
                                     )

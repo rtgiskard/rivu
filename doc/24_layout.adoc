@@ -544,9 +544,9 @@ SearchField owns expansion, clear/Escape and cancellable debounce. The host
 supplies timing, labels and count formatting. Reset or return to the applied
 trimmed query cancels obsolete work; IME preedit participates in live filtering.
 
-Choice state owns candidates, highlight, popup lifetime and scrolling; hosts
-supply filtering, mapping, commit and dismissal. Select and editable modes share
-navigation, but text/IME submission stays with Input. Closing releases candidates.
+`ChoiceState<T>` owns `ChoiceItem<T>` candidates, highlight, popup lifetime and
+scrolling; hosts supply filtering, mapping, commit and dismissal. Select and editable
+modes share navigation, but text/IME submission stays with Input. Closing releases candidates.
 Callbacks and retained row presses belong to the candidate generation: replacement
 or reopening invalidates them, while highlight movement does not. Page movement
 uses rendered row height. Select-mode keys are handled before native Enter/Space

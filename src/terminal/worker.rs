@@ -19,7 +19,7 @@ type WatchedSnapshot = Result<(u32, ClientSnapshot), String>;
 pub(super) struct Watcher {
     pub(super) receiver: Receiver<()>,
     pub(super) latest: Arc<Mutex<Option<WatchedSnapshot>>>,
-    stopping: rivu_client::SessionStop,
+    stopping: rivu_client::SessionCancellation,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -59,7 +59,7 @@ pub(super) fn spawn_watcher(data_dir: &Path) -> Watcher {
     let (sender, receiver) = bounded(1);
     let latest = Arc::new(Mutex::new(None));
     let latest_worker = Arc::clone(&latest);
-    let stopping = rivu_client::SessionStop::default();
+    let stopping = rivu_client::SessionCancellation::default();
     let stop = stopping.clone();
     let worker = std::thread::spawn(move || {
         let Ok(mut session) = rivu_client::client_session_with_cancel(&data_dir, stop) else {
@@ -171,7 +171,7 @@ impl WorkerFailure {
 pub(super) struct CommandWorker {
     pub(super) sender: Option<Sender<Command>>,
     stopping: Option<Sender<()>>,
-    shutdown: rivu_client::SessionStop,
+    shutdown: rivu_client::SessionCancellation,
     pub(super) results: Receiver<Result<Ack, WorkerFailure>>,
     worker: Option<JoinHandle<()>>,
 }
@@ -194,7 +194,7 @@ pub(super) fn spawn_command_worker(data_dir: &Path, instance_id: u32) -> Command
     let (sender, receiver) = bounded::<Command>(8);
     let (stopping, stop_receiver) = bounded::<()>(1);
     let (result_sender, results) = bounded::<Result<Ack, WorkerFailure>>(8);
-    let shutdown = rivu_client::SessionStop::default();
+    let shutdown = rivu_client::SessionCancellation::default();
     let stop = shutdown.clone();
     let worker = std::thread::spawn(move || {
         let mut session = rivu_client::client_session_with_cancel(&data_dir, stop.clone())
@@ -396,7 +396,7 @@ pub(super) struct QueryWorker {
     pending: Arc<Mutex<Option<QueryJob>>>,
     pub(super) latest: Arc<Mutex<Option<QueryCompletion>>>,
     cancellation: Option<Arc<AtomicBool>>,
-    shutdown: rivu_client::SessionStop,
+    shutdown: rivu_client::SessionCancellation,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -440,7 +440,7 @@ pub(super) fn spawn_query_worker(data_dir: &Path, instance_id: u32) -> QueryWork
     let requests = Arc::clone(&pending);
     let latest = Arc::new(Mutex::new(None));
     let results = Arc::clone(&latest);
-    let shutdown = rivu_client::SessionStop::default();
+    let shutdown = rivu_client::SessionCancellation::default();
     let stopping = shutdown.clone();
     let worker = std::thread::spawn(move || {
         let mut session = rivu_client::client_session_with_cancel(&data_dir, stopping.clone())

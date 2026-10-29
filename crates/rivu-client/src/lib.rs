@@ -54,17 +54,17 @@ impl std::fmt::Display for CommandFailure {
 impl std::error::Error for CommandFailure {}
 
 #[derive(Clone, Default)]
-pub struct SessionStop {
-    state: Arc<SessionStopState>,
+pub struct SessionCancellation {
+    state: Arc<SessionCancellationState>,
 }
 
 #[derive(Default)]
-struct SessionStopState {
+struct SessionCancellationState {
     cancelled: AtomicBool,
     notify: event_listener::Event,
 }
 
-impl SessionStop {
+impl SessionCancellation {
     pub fn cancel(&self) {
         self.state.cancelled.store(true, Ordering::Release);
         self.state.notify.notify(usize::MAX);
@@ -90,7 +90,7 @@ impl SessionStop {
 pub struct ClientSession {
     data_dir: PathBuf,
     stream: Option<Async<UnixStream>>,
-    stop: SessionStop,
+    stop: SessionCancellation,
     read_buffer: BytesMut,
     write_buffer: Vec<u8>,
     session: SessionState,
@@ -101,10 +101,13 @@ pub struct ClientSession {
 
 /// Create a session for a data directory; connect and handshake on its first request.
 pub fn client_session(data_dir: &Path) -> Result<ClientSession> {
-    client_session_with_cancel(data_dir, SessionStop::default())
+    client_session_with_cancel(data_dir, SessionCancellation::default())
 }
 
-pub fn client_session_with_cancel(data_dir: &Path, stop: SessionStop) -> Result<ClientSession> {
+pub fn client_session_with_cancel(
+    data_dir: &Path,
+    stop: SessionCancellation,
+) -> Result<ClientSession> {
     Ok(ClientSession {
         data_dir: data_dir.to_owned(),
         stream: None,
@@ -144,7 +147,7 @@ impl ClientSession {
         Ok(())
     }
 
-    pub fn cancellation(&self) -> SessionStop {
+    pub fn cancellation(&self) -> SessionCancellation {
         self.stop.clone()
     }
 
@@ -638,10 +641,10 @@ mod tests {
     }
 
     #[test]
-    fn session_stop_wakes_all_waiters_and_remains_cancelled() {
+    fn session_cancellation_wakes_all_waiters_and_remains_cancelled() {
         use std::{future::Future, task::Context};
 
-        let stop = SessionStop::default();
+        let stop = SessionCancellation::default();
         let clone = stop.clone();
         let mut first = Box::pin(stop.cancelled());
         let mut second = Box::pin(clone.cancelled());

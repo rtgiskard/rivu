@@ -1575,7 +1575,7 @@ fn ack_wire_round_trip_has_explicit_response_type() {
     };
     let mut encoded = Vec::new();
     encode_response_frame_into(&WireResponse::Ack(ack.clone()), &mut encoded).unwrap();
-    assert_eq!(encoded[5], ResponseType::Ack as u8);
+    assert_eq!(encoded[5], ResponseTag::Ack as u8);
     let response = decode_response_frame(&encoded[4..]).unwrap();
     let WireResponse::Ack(decoded) = response else {
         panic!("expected ack")
@@ -1821,12 +1821,12 @@ fn request_round_trip_uses_explicit_message_types() {
     ];
     for request in requests {
         let expected_type = match &request {
-            WireRequest::Hello(_) => RequestType::Hello,
-            WireRequest::State(_) => RequestType::State,
-            WireRequest::Query(_) => RequestType::Query,
-            WireRequest::Command(_) => RequestType::Command,
-            WireRequest::Watch(_) => RequestType::Watch,
-            WireRequest::WaitTask(_) => RequestType::WaitTask,
+            WireRequest::Hello(_) => RequestTag::Hello,
+            WireRequest::State(_) => RequestTag::State,
+            WireRequest::Query(_) => RequestTag::Query,
+            WireRequest::Command(_) => RequestTag::Command,
+            WireRequest::Watch(_) => RequestTag::Watch,
+            WireRequest::WaitTask(_) => RequestTag::WaitTask,
         };
         let mut encoded = Vec::new();
         encode_request_frame_into(&request, &mut encoded).unwrap();
@@ -2015,13 +2015,13 @@ fn postcard_frame_headers_and_bodies_preserve_wire_contract() {
 fn incompatible_versions_are_rejected_before_any_body_decode_including_hello() {
     async_io::block_on(async {
         for version in [PROTOCOL_VERSION - 1, PROTOCOL_VERSION + 1] {
-            for message_type in [RequestType::Hello, RequestType::Command] {
+            for message_type in [RequestTag::Hello, RequestTag::Command] {
                 let error = decode_request_frame(&[version, message_type as u8, 0xff])
                     .err()
                     .unwrap();
                 assert!(error.downcast_ref::<postcard::Error>().is_none());
             }
-            for message_type in [ResponseType::Hello, ResponseType::Error] {
+            for message_type in [ResponseTag::Hello, ResponseTag::Error] {
                 let encoded = [3, 0, 0, 0, version, message_type as u8, 0xff];
                 let mut stream = encoded.as_slice();
                 let mut pending = bytes::BytesMut::new();
@@ -2055,7 +2055,7 @@ fn response_decode_rejects_malicious_postcard_string_length_without_payload() {
         &[0x81, 0x80, 0x80, 0x08][..],
         &[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01][..],
     ] {
-        let mut encoded = vec![PROTOCOL_VERSION, ResponseType::Error as u8];
+        let mut encoded = vec![PROTOCOL_VERSION, ResponseTag::Error as u8];
         encoded.extend_from_slice(length);
         assert!(decode_response_frame(&encoded).is_err());
     }
@@ -2134,7 +2134,7 @@ fn truncated_postcard_bodies_and_malformed_varints_are_rejected() {
         error.downcast_ref::<postcard::Error>(),
         Some(&postcard::Error::DeserializeUnexpectedEnd)
     );
-    let mut malformed = vec![PROTOCOL_VERSION, ResponseType::Error as u8];
+    let mut malformed = vec![PROTOCOL_VERSION, ResponseTag::Error as u8];
     malformed.extend([0xff; 20]);
     let error = decode_response_frame(&malformed).err().unwrap();
     assert_eq!(
@@ -2188,11 +2188,11 @@ fn oversized_frame_is_rejected_before_consuming_or_reserving_its_body() {
 fn direct_decoders_enforce_frame_limits_before_body_decode() {
     let mut encoded = vec![0xff; MAX_REQUEST + 1];
     encoded[0] = PROTOCOL_VERSION;
-    encoded[1] = RequestType::Command as u8;
+    encoded[1] = RequestTag::Command as u8;
     let error = decode_request_frame(&encoded).err().unwrap();
     assert!(error.downcast_ref::<postcard::Error>().is_none());
     encoded.resize(MAX_RESPONSE + 1, 0xff);
-    encoded[1] = ResponseType::Error as u8;
+    encoded[1] = ResponseTag::Error as u8;
     let error = decode_response_frame(&encoded).err().unwrap();
     assert!(error.downcast_ref::<postcard::Error>().is_none());
 }

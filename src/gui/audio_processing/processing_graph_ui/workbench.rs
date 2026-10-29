@@ -2,7 +2,7 @@
 //! committed graph, selection and task ownership remain with their existing owners.
 use super::*;
 use rivu_ui::{
-    ChoiceAction, ChoiceMode, ChoicePopup, DropdownItem, IconButton, IconButtonDensity,
+    ChoiceAction, ChoiceItem, ChoiceMode, ChoicePopup, IconButton, IconButtonDensity,
     IconButtonStyle, Slider, SliderInput, SliderKey, activate_control, dropdown_trigger,
 };
 
@@ -759,7 +759,7 @@ impl AudioProcessing {
                         .into_iter()
                         .enumerate()
                         .map(|(index, label)| {
-                            DropdownItem::new(WorkbenchChoice::Add(index), this.tr(label))
+                            ChoiceItem::new(WorkbenchChoice::Add(index), this.tr(label))
                         })
                         .collect::<Vec<_>>(),
                         0,
@@ -779,7 +779,7 @@ impl AudioProcessing {
                             modes
                                 .into_iter()
                                 .map(|mode| {
-                                    DropdownItem::new(
+                                    ChoiceItem::new(
                                         WorkbenchChoice::Mode(mode),
                                         this.tr(mode_label(mode)),
                                     )
