@@ -8,6 +8,7 @@ pub(super) mod tree;
 
 use super::components::track::{AudioSpecs, audio_specs, track_title};
 use super::feature::FeatureContext;
+use super::list_interaction::LibraryDrag;
 use crate::config::{LibraryColumn, LibraryColumns};
 use gpui::{AnyElement, Context, Div, Render, SharedString, Window, div, prelude::*, px, rgb};
 use rivu_protocol::model::{Command, DirectoryRow, LibraryRow};
@@ -160,27 +161,6 @@ pub(super) enum LibraryNode {
     OtherTracks,
     Directory(Arc<Path>),
     Track(i64),
-}
-
-pub(super) struct LibraryDrag {
-    source: LibraryNode,
-    nodes: std::cell::OnceCell<Vec<LibraryNode>>,
-}
-
-impl LibraryDrag {
-    pub(in crate::gui) fn can_resolve(
-        &self,
-        _snapshot: &crate::projection::GuiSnapshot,
-        selection_pending: bool,
-    ) -> bool {
-        !selection_pending && !self.nodes().is_empty()
-    }
-
-    pub(super) fn nodes(&self) -> &[LibraryNode] {
-        self.nodes
-            .get()
-            .expect("drag nodes initialized at drag start")
-    }
 }
 
 struct LibraryDragPreview {
@@ -884,16 +864,16 @@ impl Library {
                         .when(!this.library_range_pending(), |view| {
                             let drag_owner = cx.weak_entity();
                             let drag_i18n = Arc::clone(&this.i18n);
+                            let drag_source = id.clone();
                             view.on_drag(
                                 LibraryDrag {
-                                    source: id.clone(),
                                     nodes: std::cell::OnceCell::new(),
                                 },
                                 move |drag, _, window, cx| {
                                     rivu_ui::begin_list_drag(window, cx);
                                     let nodes = drag.nodes.get_or_init(|| {
                                         drag_owner
-                                            .update(cx, |this, _| this.library.drag_nodes(&drag.source))
+                                            .update(cx, |this, _| this.library.drag_nodes(&drag_source))
                                             .unwrap_or_default()
                                     });
                                     cx.new(|_| {

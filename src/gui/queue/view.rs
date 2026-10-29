@@ -1,13 +1,13 @@
-use super::{Queue, QueueEvent, QueueIdentity};
+use super::{Queue, QueueDrag, QueueEvent, QueueIdentity};
 use crate::gui::{
     DragDestination,
     components::{
         search::set_search_counts,
         track::{TrackText, favorite_button, track_list_row},
     },
-    library::{LibraryDrag, LibraryNode},
-    list_interaction::{ContentDrag, ContentMenuRequest, TrackSource},
-    playlists::PlaylistDrag,
+    list_interaction::{
+        ContentDrag, ContentMenuRequest, LibraryDrag, ListDrag, TrackSource, can_transfer,
+    },
 };
 use gpui::{
     AnyElement, Context, Div, EntityId, ExternalPaths, SharedString, Window, prelude::*, rgb,
@@ -20,34 +20,7 @@ use rivu_ui::{
 };
 use std::cell::RefCell;
 
-pub(in crate::gui) struct QueueDrag {
-    owner: EntityId,
-    source: QueueIdentity,
-    // GPUI retains this payload; the drag constructor only creates its preview.
-    entries: std::cell::OnceCell<Vec<QueueIdentity>>,
-    revision: u64,
-}
-
 impl QueueDrag {
-    pub(in crate::gui) fn can_transfer(
-        &self,
-        queue_revision: u64,
-        destination: DragDestination,
-    ) -> bool {
-        destination.playlist_id().is_some()
-            && self.revision == queue_revision
-            && self.entries.get().is_some_and(|rows| !rows.is_empty())
-    }
-
-    pub(in crate::gui) fn track_ids(&self) -> Vec<i64> {
-        self.entries
-            .get()
-            .unwrap()
-            .iter()
-            .map(|row| row.track_id)
-            .collect()
-    }
-
     fn insertion_index(
         &self,
         target: Option<(QueueIdentity, bool)>,
@@ -258,29 +231,33 @@ impl Queue {
                 this.drop_external_paths(paths, DragDestination::Queue, cx);
             }))
             .drag_over::<ExternalPaths>(|style, _, _, _| style.border_color(rgb(theme.accent)))
-            .on_drop(cx.listener(|this, drag: &QueueDrag, window, cx| {
+            .on_drop(cx.listener(|this, drag: &ListDrag, window, cx| {
                 window.prevent_default();
-                this.move_queue_entry(drag, None, cx);
+                this.drop_list_drag(drag, None, DragDestination::Queue, cx);
             }))
             .can_drop(move |value, _, cx| {
                 panel_drop_owner.upgrade().is_some_and(|owner| {
                     let this = owner.read(cx);
-                    if let Some(drag) = value.downcast_ref::<QueueDrag>() {
+                    if let Some(drag) = value.downcast_ref::<ListDrag>().and_then(ListDrag::queue) {
                         this.queue_drop_index(drag, None, owner.entity_id())
                             .is_some()
                     } else if value.is::<ExternalPaths>() {
                         true
-                    } else if let Some(drag) = value.downcast_ref::<LibraryDrag>() {
-                        this.can_resolve_library_drag(drag)
                     } else {
-                        this.can_transfer_content(value, DragDestination::Queue)
+                        can_transfer(
+                            value,
+                            &this.state,
+                            DragDestination::Queue,
+                            this.library_selection_pending,
+                            this.content_resolution,
+                        )
                     }
                 })
             })
-            .drag_over::<QueueDrag>(|style, _, _, _| style.border_color(rgb(theme.accent)))
+            .drag_over::<ListDrag>(|style, _, _, _| style.border_color(rgb(theme.accent)))
             .on_drop(cx.listener(|this, drag: &LibraryDrag, window, cx| {
                 window.prevent_default();
-                this.resolve_library_drag(drag.nodes(), DragDestination::Queue, cx);
+                this.resolve_library_drag(drag, DragDestination::Queue, cx);
             }))
             .drag_over::<LibraryDrag>(|style, _, _, _| style.border_color(rgb(theme.accent)))
             .on_drop(cx.listener(|this, drag: &ContentDrag, window, cx| {
@@ -288,13 +265,7 @@ impl Queue {
                 cx.stop_propagation();
                 this.drop_content(drag, DragDestination::Queue, cx);
             }))
-            .on_drop(cx.listener(|this, drag: &PlaylistDrag, window, cx| {
-                window.prevent_default();
-                cx.stop_propagation();
-                this.transfer_playlist_drag(drag, DragDestination::Queue, cx);
-            }))
             .drag_over::<ContentDrag>(|style, _, _, _| style.border_color(rgb(theme.accent)))
-            .drag_over::<PlaylistDrag>(|style, _, _, _| style.border_color(rgb(theme.accent)))
             .child(rivu_ui::panel_heading_row(header, tools))
             .when(
                 self.model
@@ -569,42 +540,52 @@ impl Queue {
                                         && this.model.query.is_none()
                                         && this.model.selection_error.is_none(),
                                     |row| {
-                                        row.on_drag(drag, move |drag, _, window, cx| {
-                                            rivu_ui::begin_list_drag(window, cx);
-                                            drag.entries.get_or_init(|| {
-                                                drag_owner
-                                                    .update(cx, |this, cx| {
-                                                        this.refresh(cx);
-                                                        if drag.revision
-                                                            != this.state.queue.revision
-                                                            || !this.model.ready()
-                                                            || this.model.query.is_some()
-                                                            || this.model.selection_error.is_some()
-                                                        {
-                                                            return Vec::new();
-                                                        }
-                                                        if this.model.contains(&drag.source.id) {
-                                                            this.model.ordered()
-                                                        } else {
-                                                            vec![drag.source]
-                                                        }
-                                                    })
-                                                    .unwrap_or_default()
-                                            });
-                                            let label = drag_i18n
-                                                .format(
-                                                    "gl-move-queue-entries",
-                                                    &[(
-                                                        "count",
-                                                        drag.entries
-                                                            .get()
-                                                            .map_or(0, Vec::len)
-                                                            .into(),
-                                                    )],
-                                                )
-                                                .into();
-                                            cx.new(|_| rivu_ui::ListDragPreview { label })
-                                        })
+                                        row.on_drag(
+                                            ListDrag::Queue(drag),
+                                            move |drag, _, window, cx| {
+                                                let ListDrag::Queue(drag) = drag else {
+                                                    unreachable!()
+                                                };
+                                                rivu_ui::begin_list_drag(window, cx);
+                                                drag.entries.get_or_init(|| {
+                                                    drag_owner
+                                                        .update(cx, |this, cx| {
+                                                            this.refresh(cx);
+                                                            if drag.revision
+                                                                != this.state.queue.revision
+                                                                || !this.model.ready()
+                                                                || this.model.query.is_some()
+                                                                || this
+                                                                    .model
+                                                                    .selection_error
+                                                                    .is_some()
+                                                            {
+                                                                return Vec::new();
+                                                            }
+                                                            if this.model.contains(&drag.source.id)
+                                                            {
+                                                                this.model.ordered()
+                                                            } else {
+                                                                vec![drag.source]
+                                                            }
+                                                        })
+                                                        .unwrap_or_default()
+                                                });
+                                                let label = drag_i18n
+                                                    .format(
+                                                        "gl-move-queue-entries",
+                                                        &[(
+                                                            "count",
+                                                            drag.entries
+                                                                .get()
+                                                                .map_or(0, Vec::len)
+                                                                .into(),
+                                                        )],
+                                                    )
+                                                    .into();
+                                                cx.new(|_| rivu_ui::ListDragPreview { label })
+                                            },
+                                        )
                                     },
                                 )
                                 .children([false, true].map(|after| {
@@ -627,29 +608,35 @@ impl Queue {
                     this.drop_external_paths(paths, DragDestination::Queue, cx);
                 }))
                 .drag_over::<ExternalPaths>(|style, _, _, _| style.border_color(rgb(theme.accent)))
-                .on_drop(cx.listener(|this, drag: &QueueDrag, window, cx| {
+                .on_drop(cx.listener(|this, drag: &ListDrag, window, cx| {
                     window.prevent_default();
-                    this.move_queue_entry(drag, None, cx);
+                    this.drop_list_drag(drag, None, DragDestination::Queue, cx);
                 }))
                 .can_drop(move |value, _, cx| {
                     list_drop_owner.upgrade().is_some_and(|owner| {
                         let this = owner.read(cx);
-                        if let Some(drag) = value.downcast_ref::<QueueDrag>() {
+                        if let Some(drag) =
+                            value.downcast_ref::<ListDrag>().and_then(ListDrag::queue)
+                        {
                             this.queue_drop_index(drag, None, owner.entity_id())
                                 .is_some()
                         } else if value.is::<ExternalPaths>() {
                             true
-                        } else if let Some(drag) = value.downcast_ref::<LibraryDrag>() {
-                            this.can_resolve_library_drag(drag)
                         } else {
-                            this.can_transfer_content(value, DragDestination::Queue)
+                            can_transfer(
+                                value,
+                                &this.state,
+                                DragDestination::Queue,
+                                this.library_selection_pending,
+                                this.content_resolution,
+                            )
                         }
                     })
                 })
-                .drag_over::<QueueDrag>(|style, _, _, _| style.border_color(rgb(theme.accent)))
+                .drag_over::<ListDrag>(|style, _, _, _| style.border_color(rgb(theme.accent)))
                 .on_drop(cx.listener(|this, drag: &LibraryDrag, window, cx| {
                     window.prevent_default();
-                    this.resolve_library_drag(drag.nodes(), DragDestination::Queue, cx);
+                    this.resolve_library_drag(drag, DragDestination::Queue, cx);
                 }))
                 .drag_over::<LibraryDrag>(|style, _, _, _| style.border_color(rgb(theme.accent)))
                 .on_drop(cx.listener(|this, drag: &ContentDrag, window, cx| {
@@ -657,13 +644,7 @@ impl Queue {
                     cx.stop_propagation();
                     this.drop_content(drag, DragDestination::Queue, cx);
                 }))
-                .on_drop(cx.listener(|this, drag: &PlaylistDrag, window, cx| {
-                    window.prevent_default();
-                    cx.stop_propagation();
-                    this.transfer_playlist_drag(drag, DragDestination::Queue, cx);
-                }))
                 .drag_over::<ContentDrag>(|style, _, _, _| style.border_color(rgb(theme.accent)))
-                .drag_over::<PlaylistDrag>(|style, _, _, _| style.border_color(rgb(theme.accent)))
                 .h_full()
                 .min_h_0()
                 .w_full()
@@ -682,15 +663,19 @@ impl Queue {
         if self.model.query.is_some() || !destination.current(&self.state) {
             return false;
         }
-        if let Some(drag) = value.downcast_ref::<QueueDrag>() {
+        if let Some(drag) = value.downcast_ref::<ListDrag>().and_then(ListDrag::queue) {
             self.queue_drop_index(drag, Some((target, after)), owner)
                 .is_some()
         } else if value.is::<ExternalPaths>() {
             true
-        } else if let Some(drag) = value.downcast_ref::<LibraryDrag>() {
-            self.can_resolve_library_drag(drag)
         } else {
-            self.can_transfer_content(value, destination)
+            can_transfer(
+                value,
+                &self.state,
+                destination,
+                self.library_selection_pending,
+                self.content_resolution,
+            )
         }
     }
 
@@ -739,10 +724,9 @@ impl Queue {
             after,
         )
         .can_drop(|value, _, _| {
-            value.is::<QueueDrag>()
+            value.is::<ListDrag>()
                 || value.is::<LibraryDrag>()
                 || value.is::<ContentDrag>()
-                || value.is::<PlaylistDrag>()
                 || value.is::<ExternalPaths>()
         })
         .on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
@@ -751,12 +735,12 @@ impl Queue {
             // Consume rejected positional drops instead of falling back to append.
             this.drop_external_paths(paths, destination, cx);
         }))
-        .on_drop(cx.listener(move |this, drag: &QueueDrag, window, cx| {
+        .on_drop(cx.listener(move |this, drag: &ListDrag, window, cx| {
             window.prevent_default();
             cx.stop_propagation();
             this.refresh(cx);
             if this.queue_row_drop_valid(drag, id, after, destination, cx.entity().entity_id()) {
-                this.move_queue_entry(drag, Some((id, after)), cx);
+                this.drop_list_drag(drag, Some((id, after)), destination, cx);
             }
         }))
         .on_drop(cx.listener(move |this, drag: &LibraryDrag, window, cx| {
@@ -764,7 +748,7 @@ impl Queue {
             cx.stop_propagation();
             this.refresh(cx);
             if this.queue_row_drop_valid(drag, id, after, destination, cx.entity().entity_id()) {
-                this.resolve_library_drag(drag.nodes(), destination, cx);
+                this.resolve_library_drag(drag, destination, cx);
             }
         }))
         .on_drop(cx.listener(move |this, drag: &ContentDrag, window, cx| {
@@ -774,59 +758,31 @@ impl Queue {
             if this.queue_row_drop_valid(drag, id, after, destination, cx.entity().entity_id()) {
                 this.drop_content(drag, destination, cx);
             }
-        }))
-        .on_drop(cx.listener(move |this, drag: &PlaylistDrag, window, cx| {
-            window.prevent_default();
-            cx.stop_propagation();
-            this.refresh(cx);
-            if this.queue_row_drop_valid(drag, id, after, destination, cx.entity().entity_id()) {
-                this.transfer_playlist_drag(drag, destination, cx);
-            }
         }));
-        let zone = indicator!(zone, QueueDrag);
+        let zone = indicator!(zone, ListDrag);
         let zone = indicator!(zone, LibraryDrag);
         let zone = indicator!(zone, ContentDrag);
-        let zone = indicator!(zone, ExternalPaths);
-        indicator!(zone, PlaylistDrag)
+        indicator!(zone, ExternalPaths)
     }
 }
 
 impl Queue {
-    pub(super) fn can_resolve_library_drag(&self, drag: &LibraryDrag) -> bool {
-        drag.can_resolve(&self.state, self.library_selection_pending)
-    }
-
-    pub(super) fn can_transfer_content(
-        &self,
-        value: &dyn std::any::Any,
-        destination: DragDestination,
-    ) -> bool {
-        if !destination.current(&self.state) {
-            return false;
-        }
-        if let Some(drag) = value.downcast_ref::<ContentDrag>() {
-            return match drag.source() {
-                Some(TrackSource::Tracks(ids)) => !ids.is_empty(),
-                Some(TrackSource::Album(_)) => !self.content_resolution,
-                None => false,
-            };
-        }
-        value
-            .downcast_ref::<PlaylistDrag>()
-            .is_some_and(|drag| drag.can_transfer(&self.state, destination))
-    }
-
     pub(super) fn resolve_library_drag(
         &mut self,
-        nodes: &[LibraryNode],
+        drag: &LibraryDrag,
         destination: DragDestination,
         cx: &mut Context<Self>,
     ) {
         self.refresh(cx);
-        if !self.library_selection_pending && !nodes.is_empty() && destination.current(&self.state)
-        {
+        if can_transfer(
+            drag,
+            &self.state,
+            destination,
+            self.library_selection_pending,
+            self.content_resolution,
+        ) {
             cx.emit(QueueEvent::DropLibrary(
-                RefCell::new(Some(nodes.to_vec())),
+                RefCell::new(Some(drag.nodes().to_vec())),
                 destination,
             ));
         }
@@ -839,8 +795,13 @@ impl Queue {
         cx: &mut Context<Self>,
     ) {
         self.refresh(cx);
-        if self.can_transfer_content(drag, destination)
-            && let Some(source) = drag.source()
+        if can_transfer(
+            drag,
+            &self.state,
+            destination,
+            self.library_selection_pending,
+            self.content_resolution,
+        ) && let Some(source) = drag.source()
         {
             cx.emit(QueueEvent::DropContent(
                 RefCell::new(Some(source.clone())),
@@ -849,12 +810,17 @@ impl Queue {
         }
     }
 
-    pub(super) fn transfer_playlist_drag(
+    fn drop_list_drag(
         &mut self,
-        drag: &PlaylistDrag,
+        drag: &ListDrag,
+        target_id: Option<(u64, bool)>,
         destination: DragDestination,
         cx: &mut Context<Self>,
     ) {
+        if let Some(source) = drag.queue() {
+            self.move_queue_entry(source, target_id, cx);
+            return;
+        }
         self.refresh(cx);
         if drag.can_transfer(&self.state, destination) {
             cx.emit(QueueEvent::DropPlaylist(
@@ -941,23 +907,31 @@ mod queue_drag_tests {
 
     #[test]
     fn queue_transfer_requires_current_initialized_occurrences_and_playlist_destination() {
-        let selected = drag(&[1, 3]);
-        assert!(selected.can_transfer(4, super::DragDestination::Playlist(7)));
-        assert!(!selected.can_transfer(5, super::DragDestination::Playlist(7)));
-        assert!(!selected.can_transfer(4, super::DragDestination::Queue));
+        use crate::{gui::list_interaction::ListDrag, projection::GuiSnapshot};
+        let selected = ListDrag::Queue(drag(&[1, 3]));
+        let mut state = GuiSnapshot::default();
+        state.queue.revision = 4;
+        std::sync::Arc::make_mut(&mut state.library.playlist_entry_revisions).insert(7, 9);
+        assert!(selected.can_transfer(&state, super::DragDestination::Playlist(7)));
+        assert!(!selected.can_transfer(&state, super::DragDestination::Queue));
         assert_eq!(selected.track_ids(), vec![7, 7]);
+        state.queue.revision = 5;
+        assert!(!selected.can_transfer(&state, super::DragDestination::Playlist(7)));
+        state.queue.revision = 4;
         let pending = QueueDrag {
             owner: 1_u64.into(),
             source: identity(1),
             entries: Default::default(),
             revision: 4,
         };
-        assert!(!pending.can_transfer(4, super::DragDestination::Playlist(7)));
         let empty = QueueDrag {
             entries: std::cell::OnceCell::from(Vec::new()),
             ..pending
         };
-        assert!(!empty.can_transfer(4, super::DragDestination::Playlist(7)));
+        assert!(!ListDrag::Queue(empty).can_transfer(&state, super::DragDestination::Playlist(7)));
+        assert!(
+            !ListDrag::Queue(pending).can_transfer(&state, super::DragDestination::Playlist(7))
+        );
     }
 
     #[test]

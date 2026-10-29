@@ -381,6 +381,12 @@ row collections. Core serializes business commits and persistence; GUI refresh
 failure cannot undo an accepted commit. See
 link:21_ipc.adoc#_business_ownership_and_transactions[Business ownership and transactions].
 
+`list_interaction` owns shared drag-transfer descriptions and source-validity
+checks. Source features freeze identities and selections, retain their own
+occurrence-reordering rules, and resolve Library nodes asynchronously. Targets
+decide acceptance and insertion position; the coordinator retains cross-feature
+business actions. Copying tracks and reordering occurrences remain distinct.
+
 Settings owns its baseline, draft, target and submission identity independently
 of controls. Inputs own editable text/caret. Successful completion rebases later
 edits onto committed configuration; failure or obsolete completion cannot erase

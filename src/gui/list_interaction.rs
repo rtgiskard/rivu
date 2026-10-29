@@ -31,6 +31,100 @@ impl ContentDrag {
     }
 }
 
+pub(super) enum ListDrag {
+    Queue(queue::QueueDrag),
+    Playlist(playlists::PlaylistDrag),
+}
+
+impl ListDrag {
+    pub(super) fn queue(&self) -> Option<&queue::QueueDrag> {
+        match self {
+            Self::Queue(drag) => Some(drag),
+            Self::Playlist(_) => None,
+        }
+    }
+
+    pub(super) fn playlist(&self) -> Option<&playlists::PlaylistDrag> {
+        match self {
+            Self::Playlist(drag) => Some(drag),
+            Self::Queue(_) => None,
+        }
+    }
+
+    pub(super) fn can_transfer(&self, state: &GuiSnapshot, destination: DragDestination) -> bool {
+        destination.current(state)
+            && match self {
+                Self::Queue(drag) => {
+                    destination.playlist_id().is_some()
+                        && drag.revision == state.queue.revision
+                        && drag.entries.get().is_some_and(|rows| !rows.is_empty())
+                }
+                Self::Playlist(drag) => {
+                    destination.playlist_id() != Some(drag.playlist_id)
+                        && state
+                            .library
+                            .playlist_entry_revisions
+                            .get(&drag.playlist_id)
+                            == Some(&drag.revision)
+                        && drag.track_ids.get().is_some_and(|ids| !ids.is_empty())
+                }
+            }
+    }
+
+    pub(super) fn track_ids(&self) -> Vec<i64> {
+        match self {
+            Self::Queue(drag) => drag
+                .entries
+                .get()
+                .unwrap()
+                .iter()
+                .map(|row| row.track_id)
+                .collect(),
+            Self::Playlist(drag) => drag.track_ids.get().unwrap().clone(),
+        }
+    }
+}
+
+pub(super) struct LibraryDrag {
+    pub(super) nodes: std::cell::OnceCell<Vec<LibraryNode>>,
+}
+
+impl LibraryDrag {
+    pub(super) fn can_resolve(&self, selection_pending: bool) -> bool {
+        !selection_pending && self.nodes.get().is_some_and(|nodes| !nodes.is_empty())
+    }
+
+    pub(super) fn nodes(&self) -> &[LibraryNode] {
+        self.nodes
+            .get()
+            .expect("drag nodes initialized at drag start")
+    }
+}
+
+pub(super) fn can_transfer(
+    value: &dyn std::any::Any,
+    state: &GuiSnapshot,
+    destination: DragDestination,
+    library_selection_pending: bool,
+    content_resolution: bool,
+) -> bool {
+    if let Some(drag) = value.downcast_ref::<ListDrag>() {
+        return drag.can_transfer(state, destination);
+    }
+    if !destination.current(state) {
+        return false;
+    }
+    if let Some(drag) = value.downcast_ref::<LibraryDrag>() {
+        return drag.can_resolve(library_selection_pending);
+    }
+    value.downcast_ref::<ContentDrag>().is_some_and(|drag| {
+        drag.source().is_some_and(|source| match source {
+            TrackSource::Tracks(ids) => !ids.is_empty(),
+            TrackSource::Album(_) => !content_resolution,
+        })
+    })
+}
+
 #[derive(Clone)]
 pub(super) struct ContentMenuRequest {
     pub(super) source: TrackSource,
@@ -1236,6 +1330,116 @@ mod tests {
         drag.initialize(TrackSource::Tracks(vec![8, 3, 8]));
         drag.initialize(TrackSource::Tracks(vec![99]));
         assert!(matches!(drag.source(), Some(TrackSource::Tracks(ids)) if ids == &[8, 3, 8]));
+    }
+
+    #[test]
+    fn library_transfer_requires_initialized_nodes_and_idle_resolution() {
+        use super::{LibraryDrag, LibraryNode, can_transfer};
+        use crate::{gui::DragDestination, projection::GuiSnapshot};
+        let state = GuiSnapshot::default();
+        let drag = LibraryDrag {
+            nodes: Default::default(),
+        };
+        assert!(!can_transfer(
+            &drag,
+            &state,
+            DragDestination::Queue,
+            false,
+            false
+        ));
+        drag.nodes
+            .set(vec![LibraryNode::Track(8), LibraryNode::Track(3)])
+            .unwrap();
+        assert!(can_transfer(
+            &drag,
+            &state,
+            DragDestination::Queue,
+            false,
+            false
+        ));
+        assert!(!can_transfer(
+            &drag,
+            &state,
+            DragDestination::Queue,
+            true,
+            false
+        ));
+        assert!(!can_transfer(
+            &drag,
+            &state,
+            DragDestination::QueueAt {
+                index: 0,
+                revision: 1
+            },
+            false,
+            false
+        ));
+        let empty = LibraryDrag {
+            nodes: std::cell::OnceCell::from(Vec::new()),
+        };
+        assert!(!can_transfer(
+            &empty,
+            &state,
+            DragDestination::Queue,
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn content_transfer_checks_initialization_destination_and_collection_gate() {
+        use super::can_transfer;
+        use crate::{gui::DragDestination, projection::GuiSnapshot};
+        let state = GuiSnapshot::default();
+        let drag = ContentDrag::pending();
+        assert!(!can_transfer(
+            &drag,
+            &state,
+            DragDestination::Queue,
+            false,
+            false
+        ));
+        drag.initialize(TrackSource::Tracks(vec![8, 3, 8]));
+        assert!(can_transfer(
+            &drag,
+            &state,
+            DragDestination::Queue,
+            true,
+            true
+        ));
+        assert!(!can_transfer(
+            &drag,
+            &state,
+            DragDestination::Playlist(9),
+            false,
+            false
+        ));
+        let empty = ContentDrag::new(TrackSource::Tracks(Vec::new()));
+        assert!(!can_transfer(
+            &empty,
+            &state,
+            DragDestination::Queue,
+            false,
+            false
+        ));
+        let Query::AlbumTracks { key, .. } = album_query() else {
+            unreachable!()
+        };
+        let album = ContentDrag::new(TrackSource::Album(key));
+        assert!(can_transfer(
+            &album,
+            &state,
+            DragDestination::Queue,
+            false,
+            false
+        ));
+        assert!(!can_transfer(
+            &album,
+            &state,
+            DragDestination::Queue,
+            false,
+            true
+        ));
     }
 
     #[test]

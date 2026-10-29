@@ -11,9 +11,8 @@ pub(super) use selection::EntryCommit;
 use super::{
     ListFocus,
     components::track::{TrackText, favorite_button, row_text, track_list_row},
-    library::LibraryDrag,
+    list_interaction::{LibraryDrag, ListDrag},
 };
-use crate::gui::queue::QueueDrag;
 use gpui::{AnyElement, Context, Div, SharedString, Window, div, prelude::*, px, rgb};
 use rivu_protocol::model::Command;
 
@@ -527,15 +526,18 @@ impl Playlists {
         ))));
     }
     fn resolve_library_drag(
-        &self,
-        nodes: Vec<crate::gui::library::LibraryNode>,
+        &mut self,
+        drag: &LibraryDrag,
         destination: crate::gui::DragDestination,
         cx: &mut Context<Self>,
     ) {
-        cx.emit(PlaylistEvent::ResolveLibrary(
-            RefCell::new(Some(nodes)),
-            destination,
-        ));
+        self.refresh(cx);
+        if self.can_transfer_content(drag, destination) {
+            cx.emit(PlaylistEvent::ResolveLibrary(
+                RefCell::new(Some(drag.nodes().to_vec())),
+                destination,
+            ));
+        }
     }
     fn drop_content(
         &mut self,
@@ -553,23 +555,9 @@ impl Playlists {
             ));
         }
     }
-    fn transfer_queue_drag(
+    fn transfer_list_drag(
         &mut self,
-        drag: &QueueDrag,
-        destination: crate::gui::DragDestination,
-        cx: &mut Context<Self>,
-    ) {
-        self.refresh(cx);
-        if self.can_transfer_content(drag, destination) {
-            cx.emit(PlaylistEvent::Transfer(
-                RefCell::new(Some(TrackSource::Tracks(drag.track_ids()))),
-                destination,
-            ));
-        }
-    }
-    pub(in crate::gui) fn transfer_playlist_drag(
-        &mut self,
-        drag: &PlaylistDrag,
+        drag: &ListDrag,
         destination: crate::gui::DragDestination,
         cx: &mut Context<Self>,
     ) {
@@ -577,9 +565,12 @@ impl Playlists {
         if !self.can_transfer_content(drag, destination) {
             return;
         }
-        if drag.targets_source(destination) {
+        if let Some(source) = drag
+            .playlist()
+            .filter(|source| source.targets_source(destination))
+        {
             if matches!(destination, super::DragDestination::Playlist(_)) {
-                self.move_playlist_entries(drag, None, false, cx);
+                self.move_playlist_entries(source, None, false, cx);
             }
         } else {
             cx.emit(PlaylistEvent::Transfer(
@@ -593,38 +584,21 @@ impl Playlists {
         value: &dyn std::any::Any,
         destination: crate::gui::DragDestination,
     ) -> bool {
-        if !destination.current(&self.state) {
-            return false;
-        }
-        if let Some(id) = destination.playlist_id()
-            && !self
-                .state
-                .library
-                .playlist_entry_revisions
-                .contains_key(&id)
+        if let Some(source) = value
+            .downcast_ref::<ListDrag>()
+            .and_then(ListDrag::playlist)
+            .filter(|source| source.targets_source(destination))
         {
-            return false;
+            return destination.current(&self.state)
+                && self.can_drop_playlist_entries(source, None);
         }
-        if let Some(drag) = value.downcast_ref::<LibraryDrag>() {
-            return drag.can_resolve(&self.state, self.library_selection_pending);
-        }
-        if let Some(drag) = value.downcast_ref::<QueueDrag>() {
-            return drag.can_transfer(self.state.queue.revision, destination);
-        }
-        if let Some(drag) = value.downcast_ref::<PlaylistDrag>() {
-            return if drag.targets_source(destination) {
-                self.can_drop_playlist_entries(drag, None)
-            } else {
-                drag.can_transfer(&self.state, destination)
-            };
-        }
-        if let Some(drag) = value.downcast_ref::<crate::gui::ContentDrag>() {
-            return drag.source().is_some_and(|source| match source {
-                TrackSource::Tracks(ids) => !ids.is_empty(),
-                TrackSource::Album(_) => !self.content_resolution,
-            });
-        }
-        false
+        super::list_interaction::can_transfer(
+            value,
+            &self.state,
+            destination,
+            self.library_selection_pending,
+            self.content_resolution,
+        )
     }
     fn can_drop_playlist_row(
         &self,
@@ -637,10 +611,13 @@ impl Playlists {
             && self.browser.playlists().entries().query.is_none()
             && self.browser.playlists().track_selection.ready()
             && self.can_transfer_content(value, destination)
-            && value.downcast_ref::<PlaylistDrag>().is_none_or(|drag| {
-                !drag.targets_source(destination)
-                    || self.can_drop_playlist_entries(drag, Some(anchor))
-            })
+            && value
+                .downcast_ref::<ListDrag>()
+                .and_then(ListDrag::playlist)
+                .is_none_or(|drag| {
+                    !drag.targets_source(destination)
+                        || self.can_drop_playlist_entries(drag, Some(anchor))
+                })
     }
 
     fn drop_playlist_row(
@@ -656,16 +633,17 @@ impl Playlists {
             return;
         }
         if let Some(drag) = value.downcast_ref::<LibraryDrag>() {
-            self.resolve_library_drag(drag.nodes().to_vec(), destination, cx);
+            self.resolve_library_drag(drag, destination, cx);
         } else if let Some(drag) = value.downcast_ref::<super::ContentDrag>() {
             self.drop_content(drag, destination, cx);
-        } else if let Some(drag) = value.downcast_ref::<QueueDrag>() {
-            self.transfer_queue_drag(drag, destination, cx);
-        } else if let Some(drag) = value.downcast_ref::<PlaylistDrag>() {
-            if drag.targets_source(destination) {
-                self.move_playlist_entries(drag, Some(anchor), after, cx);
+        } else if let Some(drag) = value.downcast_ref::<ListDrag>() {
+            if let Some(source) = drag
+                .playlist()
+                .filter(|source| source.targets_source(destination))
+            {
+                self.move_playlist_entries(source, Some(anchor), after, cx);
             } else {
-                self.transfer_playlist_drag(drag, destination, cx);
+                self.transfer_list_drag(drag, destination, cx);
             }
         }
     }
@@ -673,12 +651,12 @@ impl Playlists {
 
 pub(super) struct PlaylistDrag {
     i18n: std::sync::Arc<crate::i18n::Localizer>,
-    playlist_id: i64,
+    pub(super) playlist_id: i64,
     source_id: i64,
     // GPUI keeps the original on_drag value; the constructor creates only its preview.
     entry_ids: std::cell::OnceCell<Vec<i64>>,
-    track_ids: std::cell::OnceCell<Vec<i64>>,
-    revision: u64,
+    pub(super) track_ids: std::cell::OnceCell<Vec<i64>>,
+    pub(super) revision: u64,
     stamp: rivu_protocol::model::QueryStamp,
     selection_generation: u64,
 }
@@ -686,25 +664,6 @@ pub(super) struct PlaylistDrag {
 impl PlaylistDrag {
     pub(super) fn targets_source(&self, destination: super::DragDestination) -> bool {
         destination.playlist_id() == Some(self.playlist_id)
-    }
-
-    pub(super) fn can_transfer(
-        &self,
-        state: &GuiSnapshot,
-        destination: super::DragDestination,
-    ) -> bool {
-        destination.current(state)
-            && !self.targets_source(destination)
-            && state
-                .library
-                .playlist_entry_revisions
-                .get(&self.playlist_id)
-                == Some(&self.revision)
-            && self.track_ids.get().is_some_and(|ids| !ids.is_empty())
-    }
-
-    pub(super) fn track_ids(&self) -> Vec<i64> {
-        self.track_ids.get().unwrap().clone()
     }
 
     fn accepts(&self, target: Option<i64>) -> bool {
@@ -1323,11 +1282,7 @@ impl Playlists {
                         .on_drop(cx.listener(move |this, drag: &LibraryDrag, window, cx| {
                             window.prevent_default();
                             cx.stop_propagation();
-                            this.resolve_library_drag(
-                                drag.nodes().to_vec(),
-                                super::DragDestination::Playlist(id),
-                                cx,
-                            );
+                            this.resolve_library_drag(drag, super::DragDestination::Playlist(id), cx);
                         }))
                         .on_drop(
                             cx.listener(move |this, drag: &super::ContentDrag, window, cx| {
@@ -1336,23 +1291,10 @@ impl Playlists {
                                 this.drop_content(drag, super::DragDestination::Playlist(id), cx);
                             }),
                         )
-                        .on_drop(cx.listener(move |this, drag: &QueueDrag, window, cx| {
+                        .on_drop(cx.listener(move |this, drag: &ListDrag, window, cx| {
                             window.prevent_default();
                             cx.stop_propagation();
-                            this.transfer_queue_drag(
-                                drag,
-                                super::DragDestination::Playlist(id),
-                                cx,
-                            );
-                        }))
-                        .on_drop(cx.listener(move |this, drag: &PlaylistDrag, window, cx| {
-                            window.prevent_default();
-                            cx.stop_propagation();
-                            this.transfer_playlist_drag(
-                                drag,
-                                super::DragDestination::Playlist(id),
-                                cx,
-                            );
+                            this.transfer_list_drag(drag, super::DragDestination::Playlist(id), cx);
                         }))
                         .can_drop({
                             let owner = cx.weak_entity();
@@ -1369,8 +1311,7 @@ impl Playlists {
                         .drag_over::<super::ContentDrag>(|style, _, _, _| {
                             style.bg(rgb(theme.highlight))
                         })
-                        .drag_over::<QueueDrag>(|style, _, _, _| style.bg(rgb(theme.highlight)))
-                        .drag_over::<PlaylistDrag>(|style, _, _, _| style.bg(rgb(theme.highlight)))
+                        .drag_over::<ListDrag>(|style, _, _, _| style.bg(rgb(theme.highlight)))
                         .into_any_element()
                     })
                     .collect::<Vec<_>>()
@@ -1631,83 +1572,92 @@ impl Playlists {
                                 !selection_unavailable
                                     && this.browser.playlists().entries().query.is_none(),
                                 |row| {
-                                    row.on_drag(drag, move |drag, _, window, cx| {
-                                        rivu_ui::begin_list_drag(window, cx);
-                                        drag.entry_ids.get_or_init(|| {
-                                            drag_owner
-                                                .update(cx, |this, cx| {
-                                                    this.refresh(cx);
-                                                    if this.playlist_revision(drag.playlist_id)
-                                                        != drag.revision
-                                                        || this
-                                                            .browser
-                                                            .playlists()
-                                                            .selection_generation()
-                                                            != drag.selection_generation
-                                                        || this
-                                                            .browser
-                                                            .playlists()
-                                                            .entries()
-                                                            .query
-                                                            .is_some()
-                                                        || !this
+                                    row.on_drag(
+                                        ListDrag::Playlist(drag),
+                                        move |drag, _, window, cx| {
+                                            let ListDrag::Playlist(drag) = drag else {
+                                                unreachable!()
+                                            };
+                                            rivu_ui::begin_list_drag(window, cx);
+                                            drag.entry_ids.get_or_init(|| {
+                                                drag_owner
+                                                    .update(cx, |this, cx| {
+                                                        this.refresh(cx);
+                                                        if this.playlist_revision(drag.playlist_id)
+                                                            != drag.revision
+                                                            || this
+                                                                .browser
+                                                                .playlists()
+                                                                .selection_generation()
+                                                                != drag.selection_generation
+                                                            || this
+                                                                .browser
+                                                                .playlists()
+                                                                .entries()
+                                                                .query
+                                                                .is_some()
+                                                            || !this
+                                                                .browser
+                                                                .playlists()
+                                                                .track_selection
+                                                                .ready()
+                                                        {
+                                                            return Vec::new();
+                                                        }
+                                                        if !this
                                                             .browser
                                                             .playlists()
                                                             .track_selection
-                                                            .ready()
-                                                    {
-                                                        return Vec::new();
-                                                    }
-                                                    if !this
-                                                        .browser
-                                                        .playlists()
-                                                        .track_selection
-                                                        .contains(drag.source_id)
-                                                    {
-                                                        this.select_playlist_entry(
-                                                            drag.source_id,
-                                                            index,
-                                                            false,
-                                                            false,
-                                                            cx,
-                                                        );
-                                                    }
-                                                    let tracks = if this
-                                                        .browser
-                                                        .playlists()
-                                                        .track_selection
-                                                        .contains(drag.source_id)
-                                                    {
+                                                            .contains(drag.source_id)
+                                                        {
+                                                            this.select_playlist_entry(
+                                                                drag.source_id,
+                                                                index,
+                                                                false,
+                                                                false,
+                                                                cx,
+                                                            );
+                                                        }
+                                                        let tracks = if this
+                                                            .browser
+                                                            .playlists()
+                                                            .track_selection
+                                                            .contains(drag.source_id)
+                                                        {
+                                                            this.browser
+                                                                .playlists()
+                                                                .track_selection
+                                                                .ordered()
+                                                                .iter()
+                                                                .map(|row| row.track_id)
+                                                                .collect()
+                                                        } else {
+                                                            vec![track_id]
+                                                        };
+                                                        let _ = drag.track_ids.set(tracks);
                                                         this.browser
                                                             .playlists()
                                                             .track_selection
-                                                            .ordered()
-                                                            .iter()
-                                                            .map(|row| row.track_id)
-                                                            .collect()
-                                                    } else {
-                                                        vec![track_id]
-                                                    };
-                                                    let _ = drag.track_ids.set(tracks);
-                                                    this.browser
-                                                        .playlists()
-                                                        .track_selection
-                                                        .drag_ids(drag.source_id)
-                                                })
-                                                .unwrap_or_default()
-                                        });
-                                        let label = drag
-                                            .i18n
-                                            .format(
-                                                "gl-move-playlist-entries",
-                                                &[(
-                                                    "count",
-                                                    drag.entry_ids.get().map_or(0, Vec::len).into(),
-                                                )],
-                                            )
-                                            .into();
-                                        cx.new(|_| rivu_ui::ListDragPreview { label })
-                                    })
+                                                            .drag_ids(drag.source_id)
+                                                    })
+                                                    .unwrap_or_default()
+                                            });
+                                            let label = drag
+                                                .i18n
+                                                .format(
+                                                    "gl-move-playlist-entries",
+                                                    &[(
+                                                        "count",
+                                                        drag.entry_ids
+                                                            .get()
+                                                            .map_or(0, Vec::len)
+                                                            .into(),
+                                                    )],
+                                                )
+                                                .into();
+                                            cx.new(|_| rivu_ui::ListDragPreview { label })
+                                        },
+                                    )
                                 },
                             )
                             .children([false, true].into_iter().map(|after| {
@@ -1736,8 +1686,7 @@ impl Playlists {
                                 .can_drop(|value, _, _| {
                                     value.is::<LibraryDrag>()
                                         || value.is::<super::ContentDrag>()
-                                        || value.is::<QueueDrag>()
-                                        || value.is::<PlaylistDrag>()
+                                        || value.is::<ListDrag>()
                                 })
                                 .on_drop(cx.listener(
                                     move |this, drag: &LibraryDrag, window, cx| {
@@ -1753,18 +1702,11 @@ impl Playlists {
                                         this.drop_playlist_row(drag, destination, id, after, cx);
                                     },
                                 ))
-                                .on_drop(cx.listener(move |this, drag: &QueueDrag, window, cx| {
+                                .on_drop(cx.listener(move |this, drag: &ListDrag, window, cx| {
                                     window.prevent_default();
                                     cx.stop_propagation();
                                     this.drop_playlist_row(drag, destination, id, after, cx);
                                 }))
-                                .on_drop(cx.listener(
-                                    move |this, drag: &PlaylistDrag, window, cx| {
-                                        window.prevent_default();
-                                        cx.stop_propagation();
-                                        this.drop_playlist_row(drag, destination, id, after, cx);
-                                    },
-                                ))
                                 .drag_over::<LibraryDrag>({
                                     let valid = valid.clone();
                                     move |style, drag, _, cx| {
@@ -1785,17 +1727,7 @@ impl Playlists {
                                         }
                                     }
                                 })
-                                .drag_over::<QueueDrag>({
-                                    let valid = valid.clone();
-                                    move |style, drag, _, cx| {
-                                        if valid(drag, cx) {
-                                            style.border_color(rgb(theme.accent))
-                                        } else {
-                                            style
-                                        }
-                                    }
-                                })
-                                .drag_over::<PlaylistDrag>(
+                                .drag_over::<ListDrag>(
                                     move |style, drag, _, cx| {
                                         if valid(drag, cx) {
                                             style.border_color(rgb(theme.accent))
@@ -1815,19 +1747,15 @@ impl Playlists {
                     this.ensure_entry_range(range, cx);
                 }
             })
-            .on_drop(cx.listener(move |this, drag: &PlaylistDrag, window, cx| {
+            .on_drop(cx.listener(move |this, drag: &ListDrag, window, cx| {
                 window.prevent_default();
-                this.transfer_playlist_drag(
-                    drag,
-                    super::DragDestination::Playlist(playlist_id),
-                    cx,
-                );
+                this.transfer_list_drag(drag, super::DragDestination::Playlist(playlist_id), cx);
             }))
             .can_drop({
                 let owner = cx.weak_entity();
                 move |value, _, cx| {
                     owner.upgrade().is_some_and(|owner| {
-                        value.downcast_ref::<PlaylistDrag>().is_some_and(|drag| {
+                        value.downcast_ref::<ListDrag>().is_some_and(|drag| {
                             owner.read(cx).can_transfer_content(
                                 drag,
                                 super::DragDestination::Playlist(playlist_id),
@@ -1864,9 +1792,9 @@ impl Playlists {
                             .flex_1()
                             .min_h_4()
                             .w_full()
-                            .on_drop(cx.listener(move |this, drag: &PlaylistDrag, window, cx| {
+                            .on_drop(cx.listener(move |this, drag: &ListDrag, window, cx| {
                                 window.prevent_default();
-                                this.transfer_playlist_drag(
+                                this.transfer_list_drag(
                                     drag,
                                     super::DragDestination::Playlist(playlist_id),
                                     cx,
@@ -1876,7 +1804,7 @@ impl Playlists {
                                 let owner = cx.weak_entity();
                                 move |value, _, cx| {
                                     owner.upgrade().is_some_and(|owner| {
-                                        value.downcast_ref::<PlaylistDrag>().is_some_and(|drag| {
+                                        value.downcast_ref::<ListDrag>().is_some_and(|drag| {
                                             owner.read(cx).can_transfer_content(
                                                 drag,
                                                 super::DragDestination::Playlist(playlist_id),
@@ -1885,9 +1813,7 @@ impl Playlists {
                                     })
                                 }
                             })
-                            .drag_over::<PlaylistDrag>(|style, _, _, _| {
-                                style.bg(rgb(theme.highlight))
-                            }),
+                            .drag_over::<ListDrag>(|style, _, _, _| style.bg(rgb(theme.highlight))),
                     ),
             );
         }
@@ -1895,11 +1821,7 @@ impl Playlists {
             .on_drop(cx.listener(|this, drag: &LibraryDrag, window, cx| {
                 window.prevent_default();
                 if let Some(id) = this.browser.playlists().selected() {
-                    this.resolve_library_drag(
-                        drag.nodes().to_vec(),
-                        super::DragDestination::Playlist(id),
-                        cx,
-                    );
+                    this.resolve_library_drag(drag, super::DragDestination::Playlist(id), cx);
                 }
             }))
             .can_drop({
@@ -1921,23 +1843,15 @@ impl Playlists {
                     this.drop_content(drag, super::DragDestination::Playlist(id), cx);
                 }
             }))
-            .on_drop(cx.listener(|this, drag: &QueueDrag, window, cx| {
+            .on_drop(cx.listener(|this, drag: &ListDrag, window, cx| {
                 window.prevent_default();
                 cx.stop_propagation();
                 if let Some(id) = this.browser.playlists().selected() {
-                    this.transfer_queue_drag(drag, super::DragDestination::Playlist(id), cx);
-                }
-            }))
-            .on_drop(cx.listener(|this, drag: &PlaylistDrag, window, cx| {
-                window.prevent_default();
-                cx.stop_propagation();
-                if let Some(id) = this.browser.playlists().selected() {
-                    this.transfer_playlist_drag(drag, super::DragDestination::Playlist(id), cx);
+                    this.transfer_list_drag(drag, super::DragDestination::Playlist(id), cx);
                 }
             }))
             .drag_over::<super::ContentDrag>(|style, _, _, _| style.border_color(rgb(theme.accent)))
-            .drag_over::<QueueDrag>(|style, _, _, _| style.border_color(rgb(theme.accent)))
-            .drag_over::<PlaylistDrag>(|style, _, _, _| style.border_color(rgb(theme.accent)))
+            .drag_over::<ListDrag>(|style, _, _, _| style.border_color(rgb(theme.accent)))
             .child(panel_heading_row(
                 list_panel_header(
                     theme,
@@ -2056,7 +1970,7 @@ mod playlist_drag_tests {
             stamp: Default::default(),
             selection_generation: 4,
         };
-        assert_eq!(drag.track_ids(), [9, 9, 3]);
+        assert_eq!(drag.track_ids.get().unwrap(), &[9, 9, 3]);
         for target in [7, 40, 2] {
             assert!(drag.command(Some(target), false).is_none());
             assert!(drag.command(Some(target), true).is_none());
@@ -2097,6 +2011,78 @@ mod playlist_drag_tests {
             ..drag
         };
         assert!(empty.command(None, false).is_none());
+    }
+
+    #[test]
+    fn playlist_transfer_preserves_occurrences_and_rejects_invalid_sources_and_targets() {
+        use crate::{
+            gui::{DragDestination, list_interaction::ListDrag},
+            projection::GuiSnapshot,
+        };
+        let drag = || PlaylistDrag {
+            i18n: std::sync::Arc::new(crate::i18n::Localizer::new("en-US")),
+            playlist_id: 8,
+            source_id: 40,
+            entry_ids: std::cell::OnceCell::from(vec![7, 40, 2]),
+            track_ids: std::cell::OnceCell::from(vec![9, 9, 3]),
+            revision: 19,
+            stamp: Default::default(),
+            selection_generation: 4,
+        };
+        let mut state = GuiSnapshot::default();
+        state.queue.revision = 6;
+        std::sync::Arc::make_mut(&mut state.library.playlist_entry_revisions).insert(8, 19);
+        std::sync::Arc::make_mut(&mut state.library.playlist_entry_revisions).insert(9, 20);
+        let pending = PlaylistDrag {
+            track_ids: Default::default(),
+            ..drag()
+        };
+        assert!(!ListDrag::Playlist(pending).can_transfer(&state, DragDestination::Queue));
+        let empty = PlaylistDrag {
+            track_ids: std::cell::OnceCell::from(Vec::new()),
+            ..drag()
+        };
+        assert!(!ListDrag::Playlist(empty).can_transfer(&state, DragDestination::Queue));
+        let drag = ListDrag::Playlist(drag());
+        assert_eq!(drag.track_ids(), [9, 9, 3]);
+        assert!(drag.can_transfer(&state, DragDestination::Queue));
+        assert!(drag.can_transfer(
+            &state,
+            DragDestination::PlaylistAt {
+                playlist_id: 9,
+                index: 1,
+                revision: 20
+            }
+        ));
+        // Same-source drops belong to the owner's occurrence reorder, never copy transfer.
+        assert!(!drag.can_transfer(&state, DragDestination::Playlist(8)));
+        assert!(!drag.can_transfer(
+            &state,
+            DragDestination::PlaylistAt {
+                playlist_id: 8,
+                index: 1,
+                revision: 19
+            }
+        ));
+        assert!(!drag.can_transfer(
+            &state,
+            DragDestination::QueueAt {
+                index: 1,
+                revision: 5
+            }
+        ));
+        assert!(!drag.can_transfer(
+            &state,
+            DragDestination::PlaylistAt {
+                playlist_id: 9,
+                index: 1,
+                revision: 19
+            }
+        ));
+        std::sync::Arc::make_mut(&mut state.library.playlist_entry_revisions).insert(8, 21);
+        assert!(!drag.can_transfer(&state, DragDestination::Queue));
+        std::sync::Arc::make_mut(&mut state.library.playlist_entry_revisions).remove(&8);
+        assert!(!drag.can_transfer(&state, DragDestination::Queue));
     }
 }
 

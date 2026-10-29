@@ -32,7 +32,13 @@ use rivu_protocol::model::Command;
 use rivu_ui::loading::LoadingText;
 use rivu_ui::search::{SearchEvent, SearchField};
 use std::{cell::RefCell, rc::Rc};
-pub(in crate::gui) use view::QueueDrag;
+pub(in crate::gui) struct QueueDrag {
+    owner: gpui::EntityId,
+    source: QueueIdentity,
+    // GPUI retains this payload; the drag constructor only creates its preview.
+    pub(super) entries: std::cell::OnceCell<Vec<QueueIdentity>>,
+    pub(super) revision: u64,
+}
 
 #[derive(Clone, Copy)]
 pub(in crate::gui) enum QueueSelectionRequest {
