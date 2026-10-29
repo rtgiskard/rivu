@@ -53,20 +53,6 @@ Verify hide/reopen and search replacement behind a query longer than 150 ms,
 including failed-page retry. See
 link:22_cache.adoc#_query_projection_retention[Query projection retention].
 
-=== Structural GUI demand reconciliation during transport updates
-
-Status: deferred, 2026-10-29; repeated work established by code inspection,
-not a measured rendering bottleneck.
-
-Playback-position updates still reconcile layout consumers and presentation
-demand even when layout structure and visibility are unchanged. Multiple album
-panels also repeat layout searches. Splitting this work requires invalidation
-at layout, active-tab, visibility and relevant configuration boundaries without
-skipping source/seek identity, playback-state or progressive-waveform updates.
-The album-cover completion path is optimized independently; it does not resolve
-this broader demand ownership. Revisit with a transport-heavy, multi-panel
-workload and verify hide/reopen, tab changes and seek invalidation together.
-
 === Different data directories sharing one database file
 
 Status: deferred, 2026-10-29; conditional ownership risk, not observed corruption.
@@ -81,6 +67,26 @@ Revisit before enabling such transformations or supporting shared-file aliases;
 see link:26_migration.adoc[Migration ownership and backups].
 
 == Resolved investigations
+
+=== Structural GUI demand reconciliation during transport updates
+
+Status: resolved in implementation, 2026-10-29.
+
+Workspace publishes panel membership, active tabs and instance preferences at
+structural boundaries. Presentation and artwork owners consume that publication
+while retaining their resources; source/seek identity, exact Stop fences and
+progressive waveform state remain dynamic. See link:24_layout.adoc[GUI layout].
+
+Recorded acceptance used a real nested Wayland window with visualization tabs,
+Waveform and multiple album panels. Temporary probes observed no workspace-tree
+discovery during playback, Seek, Stop, Still Mode, resize or lock changes; active
+tab/style edits and window recreation each discovered once. The exact Stop fence
+advanced source and seek identities once. The final uninstrumented build was
+also exercised through GUI and TUI input. These are traversal counts, not
+frame-time measurements.
+
+The nested backend did not report workspace occlusion as `visible=false`;
+deterministic regressions cover hidden/shutdown demand and full-preview retention.
 
 === Stable configuration in high-frequency System IPC state
 
@@ -99,7 +105,6 @@ to zero. Temporary probes at both Config wire conversions observed zero calls
 during runtime reads, then one encode/decode per explicit configuration read.
 Real configuration-only Watch, selective reads and restart recovery were also
 exercised. These are transfer/work-count results, not latency or RSS claims.
-
 
 === Query timeout and physical worker retirement
 

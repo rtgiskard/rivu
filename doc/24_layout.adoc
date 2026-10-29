@@ -438,6 +438,22 @@ advancing selection, retiring work, or synchronizing cross-feature eligibility.
 Directory publication resumes deferred navigation; transfer state changes notify
 their dependent owners even when no root frame would otherwise be needed.
 
+The workspace publishes panel membership, active tabs, and instance preferences
+when a structural edit, tab activation, or panel preference edit commits. Initial
+load, layout switching/duplication, and window reopen establish this demand before
+feature synchronization. Geometry-only separator commits, resize, lock changes,
+and cancelled previews do not rediscover the panel tree. Rename and inactive-layout
+deletion leave the active demand intact.
+
+Playback updates consume these published facts rather than searching the layout
+for each feature or album panel. Visibility, Still mode, and shutdown gate existing
+demand. Presentation retains ownership of its panel maps and rendering resources;
+it reconciles membership on workspace publication or relevant global visualizer
+style changes, independently of dynamic source generation, Seek revision, status,
+position, interaction, and progressive/full-waveform synchronization. Inactive
+panel removal still retires its retained resources even when active demand is
+unchanged. The exact Stop fence remains distinct from Seek and source replacement.
+
 Business panels have cached view boundaries separate from shell traversal and
 observe their feature owner directly; rendering never calls back into the window
 root. Feature dependencies invalidate their content. Playback timeline updates

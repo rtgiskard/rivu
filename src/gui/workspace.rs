@@ -6,7 +6,7 @@
 
 use super::{
     layout::{
-        LayoutSet, Node,
+        Layout, LayoutSet, Node, Panel,
         interaction::{Cancellation, LayoutInteraction},
         save_owner::LayoutSaveHandle,
     },
@@ -14,7 +14,11 @@ use super::{
 };
 use crate::config::{AlbumArtworkOptions, AudioVisualizerOptions};
 use anyhow::Result;
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+    rc::Rc,
+};
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub(super) enum SaveStatus {
@@ -24,8 +28,85 @@ pub(super) enum SaveStatus {
     Finished,
 }
 
+/// Membership and active-tab facts published only by workspace edits. Feature
+/// owners retain their own resources; visibility merely gates these facts.
+#[derive(Default)]
+pub(super) struct WorkspacePanels {
+    pub(super) revision: u64,
+    panels: HashMap<u64, Panel>,
+    active: HashSet<u64>,
+    kinds: HashSet<String>,
+    active_kinds: HashSet<String>,
+    metadata: Vec<u64>,
+}
+
+impl WorkspacePanels {
+    pub(super) fn reconcile(&mut self, layout: &Layout) {
+        fn visit(node: &Node, demand: &mut WorkspacePanels) {
+            match node {
+                Node::Split { children, .. } => {
+                    for child in children {
+                        visit(child, demand);
+                    }
+                }
+                Node::Tabs { panels, active, .. } => {
+                    for panel in panels {
+                        demand.panels.insert(panel.id, panel.clone());
+                        demand.kinds.insert(panel.kind.clone());
+                        if panel.id == *active {
+                            demand.active.insert(panel.id);
+                            demand.active_kinds.insert(panel.kind.clone());
+                            if panel.kind == "metadata" {
+                                demand.metadata.push(panel.id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.panels.clear();
+        self.active.clear();
+        self.metadata.clear();
+        self.kinds.clear();
+        self.active_kinds.clear();
+        if let Some(root) = &layout.root {
+            visit(root, self);
+        }
+        self.revision = self
+            .revision
+            .checked_add(1)
+            .expect("workspace panel revision");
+    }
+
+    pub(super) fn panels(&self) -> impl Iterator<Item = &Panel> {
+        self.panels.values()
+    }
+    pub(super) fn active_panels(&self) -> impl Iterator<Item = &Panel> {
+        self.active.iter().filter_map(|id| self.panels.get(id))
+    }
+    pub(super) fn contains_panel(&self, id: u64) -> bool {
+        self.panels.contains_key(&id)
+    }
+    pub(super) fn is_panel_active(&self, id: u64) -> bool {
+        self.active.contains(&id)
+    }
+    pub(super) fn contains_kind(&self, kind: &str) -> bool {
+        self.kinds.contains(kind)
+    }
+    pub(super) fn panel(&self, id: u64) -> Option<&Panel> {
+        self.panels.get(&id)
+    }
+    pub(super) fn metadata_consumers(&self) -> &[u64] {
+        &self.metadata
+    }
+    fn demanded(&self, kind: &str) -> bool {
+        self.active_kinds.contains(kind)
+    }
+}
+
 pub(super) struct Workspace {
     pub(super) layouts: LayoutSet,
+    pub(super) panels: WorkspacePanels,
     pub(super) interaction: LayoutInteraction,
     pub(super) scroll_views: Rc<RefCell<ScrollViews>>,
     save: LayoutSaveHandle,
@@ -44,6 +125,7 @@ impl Workspace {
         layouts.reset_edit_mode();
         let mut workspace = Self {
             layouts,
+            panels: WorkspacePanels::default(),
             interaction: LayoutInteraction::default(),
             scroll_views: Rc::new(RefCell::new(ScrollViews::default())),
             save,
@@ -54,30 +136,15 @@ impl Workspace {
         if workspace.initialize_panels(visualizer, artwork) {
             workspace.submit_save();
         }
+        workspace.panels.reconcile(workspace.layouts.current());
         workspace
             .interaction
             .retain_layout(workspace.layouts.current().root.as_ref());
         (workspace, load_error)
     }
 
-    /// Demand is a read-only traversal of active tabs, without allocating a
-    /// temporary panel list on every feature refresh.
     pub(super) fn panel_demand(&self, kind: &str, visible: bool) -> bool {
-        fn demanded(node: &Node, kind: &str) -> bool {
-            match node {
-                Node::Split { children, .. } => children.iter().any(|node| demanded(node, kind)),
-                Node::Tabs { panels, active, .. } => panels
-                    .iter()
-                    .any(|panel| panel.id == *active && panel.kind == kind),
-            }
-        }
-        visible
-            && self
-                .layouts
-                .current()
-                .root
-                .as_ref()
-                .is_some_and(|root| demanded(root, kind))
+        visible && self.panels.demanded(kind)
     }
 
     /// Failed/no-op activation leaves live drag previews and scroll state intact.
@@ -127,14 +194,24 @@ impl Workspace {
         artwork: AlbumArtworkOptions,
     ) {
         *self.scroll_views.borrow_mut() = ScrollViews::default();
+        self.publish_structure(visualizer, artwork);
+    }
+
+    pub(super) fn publish_structure(
+        &mut self,
+        visualizer: AudioVisualizerOptions,
+        artwork: AlbumArtworkOptions,
+    ) -> Cancellation {
         self.initialize_panels(visualizer, artwork);
-        self.reconcile_structure();
+        let cancellation = self.reconcile_structure();
         self.submit_save();
+        cancellation
     }
 
     /// Structural edits invalidate geometry but retain surviving panels' scroll
     /// positions, including tabs that are not currently painted.
-    pub(super) fn reconcile_structure(&mut self) -> Cancellation {
+    fn reconcile_structure(&mut self) -> Cancellation {
+        self.panels.reconcile(self.layouts.current());
         self.scroll_views
             .borrow_mut()
             .retain_layout(self.layouts.current());
@@ -171,8 +248,19 @@ impl Workspace {
         artwork: AlbumArtworkOptions,
     ) {
         self.initialize_panels(visualizer, artwork);
+        self.panels.reconcile(self.layouts.current());
         self.interaction
             .retain_layout(self.layouts.current().root.as_ref());
+        self.submit_save();
+    }
+
+    pub(super) fn publish_panel_options(&mut self) {
+        self.panels.reconcile(self.layouts.current());
+        self.submit_save();
+    }
+
+    /// Geometry-only commits do not change membership, styles or active tabs.
+    pub(super) fn persist_geometry(&self) {
         self.submit_save();
     }
 
@@ -478,6 +566,54 @@ mod tests {
             .list(("library", library));
         assert!(std::rc::Rc::ptr_eq(&scroll.0, &retained.0));
         assert_eq!(retained.0.borrow().base_handle.offset().y, px(-120.));
+    }
+
+    #[test]
+    fn demand_tracks_preferences_inactive_removal_layout_switch_and_reopen() {
+        let (_directory, save, mut workspace) = fixture();
+        let (visualizer, artwork) = defaults();
+        *workspace.layouts.current_mut() = Layout {
+            root: None,
+            next_id: 1,
+            locked: false,
+        };
+        let metadata = workspace.layouts.current_mut().add("metadata", None);
+        let art = workspace.layouts.current_mut().add("album_artwork", None);
+        workspace.publish_structure(visualizer, artwork);
+        assert_eq!(
+            workspace.panels.panel(art).unwrap().album_artwork,
+            Some(artwork)
+        );
+        assert!(workspace.panels.metadata_consumers().is_empty());
+        assert!(workspace.panel_demand("album_artwork", true));
+
+        workspace.layouts.current_mut().activate(metadata);
+        workspace.persist(visualizer, artwork);
+        assert_eq!(workspace.panels.metadata_consumers(), &[metadata]);
+        assert!(!workspace.panel_demand("album_artwork", true));
+        assert!(workspace.panels.contains_panel(art));
+        // Resize/lock changes and rollback do not change the published demand.
+        workspace.layouts.current_mut().locked = true;
+        workspace.persist_geometry();
+        assert_eq!(workspace.panels.metadata_consumers(), &[metadata]);
+        assert!(!workspace.panel_demand("metadata", false));
+        assert!(workspace.panel_demand("metadata", true));
+
+        workspace.duplicate("Work", visualizer, artwork).unwrap();
+        assert!(workspace.panel_demand("metadata", true));
+        assert!(workspace.layouts.current_mut().remove(art));
+        workspace.publish_structure(visualizer, artwork);
+        assert!(!workspace.panels.contains_panel(art));
+        assert!(workspace.panel_demand("metadata", true));
+        workspace.activate("Default", visualizer, artwork).unwrap();
+        assert!(workspace.panels.contains_panel(art));
+        workspace.activate("Work", visualizer, artwork).unwrap();
+        assert!(!workspace.panels.contains_panel(art));
+        let (reopened, error) = Workspace::new(save.handle(), visualizer, artwork);
+        assert!(error.is_none());
+        assert!(reopened.panel_demand("metadata", true));
+        assert!(!reopened.panels.contains_panel(art));
+        assert_eq!(reopened.panels.metadata_consumers(), &[metadata]);
     }
 
     #[test]

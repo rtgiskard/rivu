@@ -3346,21 +3346,34 @@ mod tests {
         };
         let mut layout = empty_layout.clone();
         layout.add("waveform", None);
+        let mut panels = crate::gui::workspace::WorkspacePanels::default();
         window.update(|_window, cx| {
-            let state = |visible, has_panel| PresentationState {
-                config: Arc::clone(&config),
-                layout: if has_panel { &layout } else { &empty_layout },
-                status: rivu_protocol::model::PlaybackStatus::Paused,
-                visible,
-                shutting_down: false,
-                current_track_id: Some(track.id),
-                waveform_track: Some(&track),
-                position: 0.0,
-                duration: track.duration,
-                source_generation: 0,
-                seek_revision: 0,
+            let mut sync = |owner: &mut Presentation,
+                            config: Arc<Config>,
+                            visible,
+                            has_panel,
+                            cx: &mut Context<Presentation>| {
+                panels.reconcile(if has_panel { &layout } else { &empty_layout });
+                owner.sync(
+                    PresentationState {
+                        config,
+                        panels: &panels,
+                        status: rivu_protocol::model::PlaybackStatus::Paused,
+                        visible,
+                        shutting_down: false,
+                        current_track_id: Some(track.id),
+                        waveform_track: Some(&track),
+                        position: 0.0,
+                        duration: track.duration,
+                        source_generation: 0,
+                        seek_revision: 0,
+                    },
+                    cx,
+                );
             };
-            owner.update(cx, |owner, cx| owner.sync(state(true, true), cx));
+            owner.update(cx, |owner, cx| {
+                sync(owner, Arc::clone(&config), true, true, cx)
+            });
             for complete in [false, true] {
                 let (generation, cancelled) =
                     waveform.update(cx, |waveform, _| waveform.start_full(DecoderHint::Auto));
@@ -3377,7 +3390,7 @@ mod tests {
                     (true, true, false),
                 ] {
                     owner.update(cx, |owner, cx| {
-                        owner.sync(state(visible, has_panel), cx);
+                        sync(owner, Arc::clone(&config), visible, has_panel, cx);
                         if release {
                             owner.release_display_resources(cx);
                         }
@@ -3401,11 +3414,7 @@ mod tests {
             }
             let mut still = config.as_ref().clone();
             still.still_mode = true;
-            owner.update(cx, |owner, cx| {
-                let mut state = state(true, true);
-                state.config = Arc::new(still);
-                owner.sync(state, cx);
-            });
+            owner.update(cx, |owner, cx| sync(owner, Arc::new(still), true, true, cx));
             assert!(waveform.read(cx).full.is_none());
             assert!(waveform.read(cx).manual.is_none());
         });

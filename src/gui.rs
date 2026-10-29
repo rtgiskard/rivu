@@ -603,7 +603,6 @@ impl GuiApp {
                 self.library
                     .update(cx, |owner, cx| owner.focus_search(window, cx));
             }
-            self.persist_layout(cx);
         }
     }
 
@@ -619,6 +618,7 @@ impl GuiApp {
             .map(|panel| panel.id);
         let panel_id = if let Some(panel) = panel {
             self.workspace.layouts.current_mut().activate(panel);
+            self.persist_layout(cx);
             panel
         } else if self.workspace.layouts.current().locked {
             self.error = Some(self.i18n.text("gl-locate-queue-locked").to_owned());
@@ -637,7 +637,6 @@ impl GuiApp {
         self.shell.dismiss(shell::Surface::PanelCatalog);
         self.set_browser_focus(Some(BrowserFocus::List(ListFocus::Queue)), cx);
         self.focus_layout(window, cx);
-        self.persist_layout(cx);
         true
     }
 
@@ -775,7 +774,7 @@ impl GuiApp {
                         .current_mut()
                         .set_audio_visualizer_options(*panel_id, *options)
                     {
-                        this.workspace.submit_save();
+                        this.workspace.publish_panel_options();
                         settings.update(cx, |settings, cx| {
                             settings.complete_panel_apply(*session, Ok(()), cx)
                         });
@@ -802,7 +801,7 @@ impl GuiApp {
                         .current_mut()
                         .set_album_artwork_options(*panel_id, *options)
                     {
-                        this.workspace.submit_save();
+                        this.workspace.publish_panel_options();
                         settings.update(cx, |settings, cx| {
                             settings.complete_panel_apply(*session, Ok(()), cx)
                         });
@@ -1123,13 +1122,18 @@ impl GuiApp {
     }
 
     fn layout_changed(&mut self, cx: &mut Context<Self>) {
-        let cancellation = self.workspace.reconcile_structure();
+        let cancellation = self.workspace.publish_structure(
+            AudioVisualizerOptions::from(self.state.system.config.as_ref()),
+            crate::config::AlbumArtworkOptions::from(self.state.system.config.as_ref()),
+        );
         self.apply_layout_change(cancellation, cx);
+        self.sync_analysis(cx);
+        cx.notify();
     }
 
     fn apply_layout_change(&mut self, cancellation: Cancellation, cx: &mut Context<Self>) {
         self.panel_views
-            .retain(|id, _| self.workspace.layouts.current().contains_panel(*id));
+            .retain(|id, _| self.workspace.panels.contains_panel(*id));
         self.apply_interaction_cancellation(cancellation, cx);
         self.panel_menu = None;
         self.replace_content_menu(None, cx);
@@ -1159,6 +1163,7 @@ impl GuiApp {
             && !changed.library
             && !changed.queue
             && !changed.system
+            && !changed.configuration
             && same_track
             && state.playback.status == self.state.playback.status;
         if !Arc::ptr_eq(&self.state.system.devices, &state.system.devices)
@@ -1293,21 +1298,17 @@ impl GuiApp {
         if self.album_browsers.is_empty() {
             return;
         }
-        let layout = self.workspace.layouts.current();
+        let panels = &self.workspace.panels;
         let visible = self.window_visible && !self.state.system.shutting_down;
         let revisions = self.state.query_revisions(None);
         let page_size = self.state.system.config.page_size as usize;
         let current_track = self.state.current_track().map(|track| track.id);
         let playback_status = self.state.playback.status;
         self.album_browsers.retain(|id, albums| {
-            let exists = layout
-                .root
-                .as_ref()
-                .and_then(|root| {
-                    root.find_panel(&|panel| panel.id == *id && panel.kind == "albums")
-                })
-                .is_some();
-            let shown = visible && layout.is_panel_active(*id);
+            let exists = panels
+                .panel(*id)
+                .is_some_and(|panel| panel.kind == "albums");
+            let shown = visible && panels.is_panel_active(*id);
             albums.update(cx, |albums, cx| {
                 albums.sync(
                     shown,
@@ -1326,17 +1327,16 @@ impl GuiApp {
         self.sync_album_browser(cx);
         self.artwork_panels.retain(|id, _| {
             self.workspace
-                .layouts
-                .current()
-                .album_artwork_options(*id)
-                .is_some()
+                .panels
+                .panel(*id)
+                .is_some_and(|panel| panel.album_artwork.is_some())
         });
         self.album_artwork.update(cx, |artwork, cx| {
             artwork.sync(
                 self.state.current_track(),
                 self.state.playback.status,
                 &self.state.system.config,
-                self.workspace.layouts.current().root.as_ref(),
+                &self.workspace.panels,
                 self.window_visible && !self.state.system.shutting_down,
                 cx,
             );
@@ -1381,7 +1381,7 @@ impl GuiApp {
             presentation.sync(
                 presentation::PresentationState {
                     config: Arc::clone(&self.state.system.config),
-                    layout: self.workspace.layouts.current(),
+                    panels: &self.workspace.panels,
                     status: self.state.playback.status,
                     source_generation: self.state.source_generation,
                     seek_revision: self.state.playback.seek_revision,
@@ -1561,7 +1561,10 @@ impl GuiApp {
             DragCommit::Seek(seek) => self
                 .playback
                 .update(cx, |owner, cx| owner.commit_seek(seek, cx)),
-            DragCommit::PersistSplit => self.persist_layout(cx),
+            DragCommit::PersistSplit => {
+                self.workspace.persist_geometry();
+                cx.notify();
+            }
         }
         self.sync_playback_interaction(cx);
     }

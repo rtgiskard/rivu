@@ -79,6 +79,14 @@ current revisions, not a submission-time snapshot. A publication with unchanged
 state-section tokens does not invalidate the GUI root; audio frames still have
 their independent processing path.
 
+Workspace publishes panel membership and active-tab demand when layout structure
+or panel options change. Presentation and artwork owners reconcile their retained
+consumers against that publication; ordinary playback position updates do not
+rediscover the layout. Window visibility and Still Mode gate existing demand.
+Source/seek identity, playback state and waveform progress remain dynamic inputs:
+an unchanged panel set does not authorize retaining semantically obsolete data.
+See link:24_layout.adoc[GUI layout] for structural ownership and update boundaries.
+
 Bitrate revision changes retire retained display payloads for demand-driven
 reload while preserving selection, counts, and navigation geometry. There is no
 bitrate history, replay cache, or track-to-view reverse index. Old responses fail

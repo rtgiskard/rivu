@@ -178,7 +178,6 @@ impl Rotation {
 struct Instance {
     options: AlbumArtworkOptions,
     rotation: Rotation,
-    retained: bool,
     visible: bool,
 }
 
@@ -214,6 +213,8 @@ pub(super) struct AlbumArtwork {
     status: PlaybackStatus,
     visible: bool,
     instances: HashMap<u64, Instance>,
+    window_visible: bool,
+    panel_revision: u64,
     images: ArtworkImages,
     decorations: [Option<ArtworkDecoration>; 6],
     pacing: FramePacing,
@@ -237,7 +238,9 @@ impl AlbumArtwork {
             track: None,
             status: PlaybackStatus::Stopped,
             visible: false,
+            window_visible: false,
             instances: HashMap::new(),
+            panel_revision: 0,
             images,
             decorations: std::array::from_fn(|_| None),
             pacing: FramePacing::new(),
@@ -253,7 +256,7 @@ impl AlbumArtwork {
         track: Option<&Track>,
         status: PlaybackStatus,
         config: &Config,
-        root: Option<&super::layout::Node>,
+        panels: &super::workspace::WorkspacePanels,
         window_visible: bool,
         cx: &mut Context<Self>,
     ) {
@@ -268,89 +271,72 @@ impl AlbumArtwork {
             || matches!((&self.track, track), (Some(previous), Some(next)) if previous.path != next.path);
         let stopped = status == PlaybackStatus::Stopped && self.status != status;
         let mut changed = source_changed || self.status != status;
-        for instance in self.instances.values_mut() {
-            instance.retained = false;
+        let demand_changed =
+            self.panel_revision != panels.revision || self.window_visible != window_visible;
+        if self.panel_revision != panels.revision {
+            self.instances.retain(|id, _| {
+                panels
+                    .panel(*id)
+                    .is_some_and(|panel| panel.album_artwork.is_some())
+            });
+            for panel in panels.panels() {
+                let Some(options) = panel.album_artwork else {
+                    continue;
+                };
+                let instance = self.instances.entry(panel.id).or_insert_with(|| {
+                    changed = true;
+                    Instance {
+                        options,
+                        rotation: Rotation::new(),
+                        visible: false,
+                    }
+                });
+                changed |= instance.options != options;
+                instance.options = options;
+            }
+            self.panel_revision = panels.revision;
         }
         let now = Instant::now();
-        fn reconcile(
-            node: &super::layout::Node,
-            instances: &mut HashMap<u64, Instance>,
-            now: Instant,
-            playing: bool,
-            visible: bool,
-            reset: bool,
-            changed: &mut bool,
-        ) {
-            match node {
-                super::layout::Node::Split { children, .. } => {
-                    for child in children {
-                        reconcile(child, instances, now, playing, visible, reset, changed);
-                    }
-                }
-                super::layout::Node::Tabs { panels, active, .. } => {
-                    for panel in panels {
-                        let Some(options) = panel.album_artwork else {
-                            continue;
-                        };
-                        let instance = instances.entry(panel.id).or_insert_with(|| {
-                            *changed = true;
-                            Instance {
-                                options,
-                                rotation: Rotation::new(),
-                                retained: true,
-                                visible: false,
-                            }
-                        });
-                        instance.retained = true;
-                        instance.visible = visible && panel.id == *active;
-                        *changed |= instance.options != options;
-                        instance.options = options;
-                        *changed |= instance.rotation.sync(
-                            now,
-                            RotationSettings::from_options(options),
-                            playing && instance.visible,
-                            reset,
-                        );
-                    }
-                }
+        for (id, instance) in &mut self.instances {
+            if demand_changed {
+                let visible = window_visible && panels.is_panel_active(*id);
+                changed |= instance.visible != visible;
+                instance.visible = visible;
             }
-        }
-        if let Some(root) = root {
-            reconcile(
-                root,
-                &mut self.instances,
+            changed |= instance.rotation.sync(
                 now,
-                status == PlaybackStatus::Playing,
-                window_visible,
+                RotationSettings::from_options(instance.options),
+                status == PlaybackStatus::Playing && instance.visible,
                 switched || stopped,
-                &mut changed,
             );
         }
-        self.instances.retain(|_, instance| instance.retained);
-        let visible_consumers: Vec<_> = self
-            .instances
-            .iter()
-            .filter_map(|(id, instance)| instance.visible.then_some(*id))
-            .collect();
-        self.view.retain_consumers(&visible_consumers);
-        let mut visible_styles = [false; 6];
-        for instance in self.instances.values().filter(|instance| instance.visible) {
-            if let Some(index) = decoration_index(instance.options.style) {
-                visible_styles[index] = true;
+        let mut visible = self.visible;
+        if demand_changed {
+            let visible_consumers: Vec<_> = self
+                .instances
+                .iter()
+                .filter_map(|(id, instance)| instance.visible.then_some(*id))
+                .collect();
+            visible = !visible_consumers.is_empty();
+            self.view.retain_consumers(&visible_consumers);
+            let mut visible_styles = [false; 6];
+            for instance in self.instances.values().filter(|instance| instance.visible) {
+                if let Some(index) = decoration_index(instance.options.style) {
+                    visible_styles[index] = true;
+                }
             }
-        }
-        for (index, decoration) in self.decorations.iter_mut().enumerate() {
-            if visible_styles[index] {
-                if decoration.is_none() {
-                    *decoration = Some(self.images.decoration(index, DECORATIONS[index], cx));
+            for (index, decoration) in self.decorations.iter_mut().enumerate() {
+                if visible_styles[index] {
+                    if decoration.is_none() {
+                        *decoration = Some(self.images.decoration(index, DECORATIONS[index], cx));
+                        changed = true;
+                    }
+                } else if let Some(previous) = decoration.take() {
+                    previous.retire();
                     changed = true;
                 }
-            } else if let Some(previous) = decoration.take() {
-                previous.retire();
-                changed = true;
             }
         }
-        let visible = self.instances.values().any(|instance| instance.visible);
         changed |= self.visible != visible || self.pacing.fps != config.album_artwork_fps;
         if source_changed {
             self.track = track.cloned();
@@ -362,6 +348,7 @@ impl AlbumArtwork {
         }
         self.status = status;
         self.visible = visible;
+        self.window_visible = window_visible;
         if self.pacing.set_fps(config.album_artwork_fps) || changed {
             self.cancel_frame();
         }
@@ -758,6 +745,12 @@ mod tests {
                 }),
             }],
         };
+        let mut panels = super::super::workspace::WorkspacePanels::default();
+        panels.reconcile(&super::super::layout::Layout {
+            root: Some(root),
+            next_id: 3,
+            locked: true,
+        });
         let owner = cx.update(|cx| {
             let default = cx.new(|cx| Artwork::new(&Localizer::new("en"), cx));
             cx.new(|_| AlbumArtwork::new(manager, default, ArtworkImages::default()))
@@ -767,7 +760,7 @@ mod tests {
                 Some(&original),
                 PlaybackStatus::Paused,
                 &config,
-                Some(&root),
+                &panels,
                 true,
                 cx,
             );
@@ -777,7 +770,7 @@ mod tests {
                 Some(&relocated),
                 PlaybackStatus::Paused,
                 &config,
-                Some(&root),
+                &panels,
                 true,
                 cx,
             );

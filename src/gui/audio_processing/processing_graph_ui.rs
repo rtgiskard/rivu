@@ -132,7 +132,10 @@ impl GraphUi {
         })
     }
 
-    pub(super) fn retain_panel_inputs(&mut self, layout: &super::super::layout::Layout) {
+    pub(super) fn retain_panel_inputs(
+        &mut self,
+        layout: &super::super::workspace::WorkspacePanels,
+    ) {
         self.panel_inputs.retain(|id, _| layout.contains_panel(*id));
         self.workbenches.retain(|id, _| layout.contains_panel(*id));
         self.result_details.retain(|id| layout.contains_panel(*id));

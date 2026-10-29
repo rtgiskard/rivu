@@ -640,7 +640,7 @@ impl AudioProcessing {
 
     pub(in crate::gui) fn retain_workbench_controls(
         &mut self,
-        layout: &crate::gui::layout::Layout,
+        layout: &crate::gui::workspace::WorkspacePanels,
         visible: bool,
     ) {
         for (panel, state) in &mut self.graph_ui.workbenches {

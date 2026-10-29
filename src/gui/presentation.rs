@@ -50,7 +50,7 @@ impl PanelKind {
 
 pub(super) struct PresentationState<'a> {
     pub(super) config: Arc<Config>,
-    pub(super) layout: &'a layout::Layout,
+    pub(super) panels: &'a super::workspace::WorkspacePanels,
     pub(super) status: PlaybackStatus,
     pub(super) source_generation: u64,
     pub(super) seek_revision: u64,
@@ -117,6 +117,7 @@ pub(super) struct Presentation {
     panels: HashMap<u64, PanelKind>,
     layout_panels: HashMap<u64, PanelKind>,
     views: HashMap<u64, Entity<PresentationPanel>>,
+    panel_revision: u64,
     demand: DisplayDemand,
     sequence: u64,
     staging: AnalysisFrame,
@@ -161,6 +162,7 @@ impl Presentation {
             panels: HashMap::new(),
             layout_panels: HashMap::new(),
             views: HashMap::new(),
+            panel_revision: 0,
             demand: DisplayDemand::default(),
             sequence: 0,
             staging: AnalysisFrame::default(),
@@ -188,7 +190,7 @@ impl Presentation {
     pub(super) fn sync(&mut self, state: PresentationState<'_>, cx: &mut Context<Self>) {
         let PresentationState {
             config,
-            layout,
+            panels,
             status,
             source_generation,
             seek_revision,
@@ -225,29 +227,31 @@ impl Presentation {
             && !settings_changed;
         let invalidate =
             signal_changed || track_changed || still_changed || shutting_down || stopping;
-        let mut panel_count = 0;
+        let membership_changed = self.panel_revision != panels.revision
+            || AudioVisualizerOptions::from(self.config.as_ref())
+                != AudioVisualizerOptions::from(config.as_ref());
         let mut panels_changed = false;
-        if let Some(root) = &layout.root {
-            root.visit_panels(true, &mut |panel| {
-                if let Some(kind) = PanelKind::from_panel(panel, &config) {
-                    panel_count += 1;
-                    panels_changed |= self.panels.get(&panel.id) != Some(&kind);
-                }
-            });
-        }
-        let panels_changed = panels_changed || self.panels.len() != panel_count;
-        let mut layout_panel_count = 0;
         let mut layout_panels_changed = false;
-        if let Some(root) = &layout.root {
-            root.visit_panels(false, &mut |panel| {
-                if let Some(kind) = PanelKind::from_panel(panel, &config) {
-                    layout_panel_count += 1;
-                    layout_panels_changed |= self.layout_panels.get(&panel.id) != Some(&kind);
-                }
-            });
+        if membership_changed {
+            let active = panels
+                .active_panels()
+                .filter_map(|panel| {
+                    PanelKind::from_panel(panel, &config).map(|kind| (panel.id, kind))
+                })
+                .collect::<HashMap<_, _>>();
+            let all = panels
+                .panels()
+                .filter_map(|panel| {
+                    PanelKind::from_panel(panel, &config).map(|kind| (panel.id, kind))
+                })
+                .collect::<HashMap<_, _>>();
+            panels_changed = self.panels != active;
+            layout_panels_changed = self.layout_panels != all;
+            self.panels = active;
+            self.layout_panels = all;
+            self.panel_revision = panels.revision;
+            self.views.retain(|id, _| self.panels.contains_key(id));
         }
-        let layout_panels_changed =
-            layout_panels_changed || self.layout_panels.len() != layout_panel_count;
         let was_running = self.analysis_interval();
         self.config = config;
         self.visible = visible;
@@ -263,27 +267,6 @@ impl Presentation {
             self.animation_clock.suspend();
         }
 
-        if panels_changed {
-            self.panels.clear();
-            if let Some(root) = &layout.root {
-                root.visit_panels(true, &mut |panel| {
-                    if let Some(kind) = PanelKind::from_panel(panel, &self.config) {
-                        self.panels.insert(panel.id, kind);
-                    }
-                });
-            }
-            self.views.retain(|id, _| self.panels.contains_key(id));
-        }
-        if layout_panels_changed {
-            self.layout_panels.clear();
-            if let Some(root) = &layout.root {
-                root.visit_panels(false, &mut |panel| {
-                    if let Some(kind) = PanelKind::from_panel(panel, &self.config) {
-                        self.layout_panels.insert(panel.id, kind);
-                    }
-                });
-            }
-        }
         if invalidate {
             self.staging = AnalysisFrame::default();
             self.sequence = self.handle.analysis.read().sequence;
@@ -305,25 +288,26 @@ impl Presentation {
             // Do not animate old targets while acquiring replacement audio.
             self.awaiting_replacement = status != PlaybackStatus::Stopped;
         }
-        if config_changed || panels_changed || layout_panels_changed || visibility_changed {
-            let enabled = self.active();
+        let enabled = self.active();
+        let demand_changed = panels_changed || visibility_changed || still_changed;
+        let mut spectrum_restored = false;
+        if layout_panels_changed {
             let mut retained_spectrum = Vec::new();
             let mut retained_spectrogram = Vec::new();
             let mut retained_audio = Vec::new();
-            if let Some(root) = &layout.root {
-                root.visit_panels(false, &mut |panel| match PanelKind::from_panel(
-                    panel,
-                    &self.config,
-                ) {
-                    Some(PanelKind::Spectrum) => retained_spectrum.push(panel.id),
-                    Some(PanelKind::Spectrogram) => retained_spectrogram.push(panel.id),
-                    Some(PanelKind::Audio(options)) => retained_audio.push(options),
+            for (id, kind) in &self.layout_panels {
+                match kind {
+                    PanelKind::Spectrum => retained_spectrum.push(*id),
+                    PanelKind::Spectrogram => retained_spectrogram.push(*id),
+                    PanelKind::Audio(options) => retained_audio.push(*options),
                     _ => {}
-                });
+                }
             }
             self.visuals
                 .retain_presentation_panels(&retained_spectrum, &retained_spectrogram);
             self.audio_visualizer.retain_presentations(retained_audio);
+        }
+        if demand_changed {
             self.visuals.set_enabled(enabled);
             let spectrum_ids = self
                 .panels
@@ -339,15 +323,7 @@ impl Presentation {
                 .collect::<Vec<_>>();
             self.visuals.retain_spectrum_panels(&spectrum_ids);
             self.visuals.retain_spectrogram_panels(&spectrogram_ids);
-            let spectrum_restored = self.visuals.set_spectrum_visible(!spectrum_ids.is_empty());
-            let audio_changed = self.audio_visualizer.sync(
-                &self.config,
-                self.panels.values().filter_map(|kind| match kind {
-                    PanelKind::Audio(options) => Some(*options),
-                    _ => None,
-                }),
-                enabled,
-            );
+            spectrum_restored = self.visuals.set_spectrum_visible(!spectrum_ids.is_empty());
             let mut visualizer = VisualizerDemand::default();
             for kind in self.panels.values().filter(|_| enabled) {
                 if let PanelKind::Audio(options) = kind {
@@ -366,18 +342,28 @@ impl Presentation {
                 enabled: enabled && self.panels.values().any(|kind| kind.analysis()),
                 visualizer,
             };
-            if demand.enabled {
-                let spectrum_changed = self.visuals.configure(&self.config);
-                self.needs_refresh |= spectrum_restored || spectrum_changed || audio_changed;
-            } else {
-                self.needs_refresh = false;
-            }
             retain_analysis_staging(&mut self.staging, demand);
             self.handle.set_display_demand(demand);
             if self.demand.enabled != demand.enabled {
                 self.cancel_clock();
             }
             self.demand = demand;
+        }
+        if config_changed || demand_changed {
+            let audio_changed = self.audio_visualizer.sync(
+                &self.config,
+                self.panels.values().filter_map(|kind| match kind {
+                    PanelKind::Audio(options) => Some(*options),
+                    _ => None,
+                }),
+                enabled,
+            );
+            if self.demand.enabled {
+                let spectrum_changed = self.visuals.configure(&self.config);
+                self.needs_refresh |= spectrum_restored || spectrum_changed || audio_changed;
+            } else {
+                self.needs_refresh = false;
+            }
         }
         if was_running != self.analysis_interval()
             || visibility_changed
@@ -778,6 +764,12 @@ mod tests {
     use super::*;
     use crate::core::Runtime;
 
+    fn demand(layout: &layout::Layout) -> super::super::workspace::WorkspacePanels {
+        let mut panels = super::super::workspace::WorkspacePanels::default();
+        panels.reconcile(layout);
+        panels
+    }
+
     #[test]
     fn display_clock_moves_between_analysis_frames_and_stops_at_accepted_audio() {
         let start = Instant::now();
@@ -1001,11 +993,12 @@ mod tests {
             next_id: 11,
             locked: false,
         };
+        let mut panels = demand(&layout);
         owner.update(cx, |owner, cx| {
             owner.sync(
                 PresentationState {
                     config: Arc::clone(&config),
-                    layout: &layout,
+                    panels: &panels,
                     status: PlaybackStatus::Playing,
                     source_generation: 0,
                     seek_revision: 0,
@@ -1032,10 +1025,11 @@ mod tests {
             let generation = owner.frame_generation;
             assert!(!owner.demand.visualizer.pcm);
             assert!(layout.activate(9));
+            panels.reconcile(&layout);
             owner.sync(
                 PresentationState {
                     config: Arc::clone(&config),
-                    layout: &layout,
+                    panels: &panels,
                     status: PlaybackStatus::Playing,
                     source_generation: 0,
                     seek_revision: 0,
@@ -1056,6 +1050,65 @@ mod tests {
             assert_eq!(owner.staging.sequence, 7);
             assert!(owner.panels.get(&4) == Some(&PanelKind::Spectrum));
             assert!(owner.panels.get(&6) == Some(&PanelKind::Spectrogram));
+            let view = owner.panel(4, cx);
+            let demand = owner.demand;
+            // Transport, Seek and source fences all use the same workspace
+            // demand, but must still update dynamic state and invalidate input.
+            for (position, source_generation, seek_revision) in
+                [(1.0, 0, 0), (2.0, 0, 1), (3.0, 1, 1)]
+            {
+                owner.sync(
+                    PresentationState {
+                        config: Arc::clone(&config),
+                        panels: &panels,
+                        status: PlaybackStatus::Playing,
+                        source_generation,
+                        seek_revision,
+                        visible: true,
+                        shutting_down: false,
+                        current_track_id: None,
+                        waveform_track: None,
+                        position,
+                        duration: Some(120.0),
+                    },
+                    cx,
+                );
+                assert_eq!(owner.position, position);
+                assert_eq!(owner.demand, demand);
+                assert_eq!(owner.panel(4, cx).entity_id(), view.entity_id());
+                if seek_revision != 0 {
+                    assert!(owner.staging.settings.is_none());
+                }
+            }
+            assert!(layout.set_audio_visualizer_options(
+                9,
+                AudioVisualizerOptions {
+                    style: AudioVisualizerStyle::StereoDensity,
+                    reference_lines: false,
+                    labels: false,
+                }
+            ));
+            panels.reconcile(&layout);
+            owner.sync(
+                PresentationState {
+                    config: Arc::clone(&config),
+                    panels: &panels,
+                    status: PlaybackStatus::Playing,
+                    source_generation: 1,
+                    seek_revision: 1,
+                    visible: true,
+                    shutting_down: false,
+                    current_track_id: None,
+                    waveform_track: None,
+                    position: 3.0,
+                    duration: Some(120.0),
+                },
+                cx,
+            );
+            assert!(owner.demand.visualizer.stereo_density);
+            assert!(!owner.demand.visualizer.pcm);
+            assert!(owner.demand.visualizer.band_energy);
+            assert_eq!(owner.panel(4, cx).entity_id(), view.entity_id());
         });
     }
 
@@ -1105,10 +1158,11 @@ mod tests {
                 next_id: 1,
                 locked: false,
             };
+            let panels = demand(&layout);
             owner.sync(
                 PresentationState {
                     config: Arc::clone(&owner.config),
-                    layout: &layout,
+                    panels: &panels,
                     status: PlaybackStatus::Paused,
                     source_generation: owner.source_generation,
                     seek_revision: owner.seek_revision,
@@ -1168,6 +1222,7 @@ mod tests {
             locked: false,
         };
         let panel_id = layout.add("spectrum", None);
+        let panels = demand(&layout);
         let waveform =
             cx.new(|_| visualization::Waveform::new(Arc::clone(&runtime.handle.waveform)));
         let owner = cx.new(|cx| {
@@ -1193,7 +1248,7 @@ mod tests {
                 owner.sync(
                     PresentationState {
                         config: Arc::new(changed),
-                        layout: &layout,
+                        panels: &panels,
                         status: PlaybackStatus::Paused,
                         source_generation: u64::from(transition >= 1),
                         seek_revision: 1,
@@ -1214,7 +1269,7 @@ mod tests {
         });
         let state = |seek_revision| PresentationState {
             config: Arc::clone(&config),
-            layout: &layout,
+            panels: &panels,
             status: PlaybackStatus::Paused,
             source_generation: 1,
             seek_revision,
@@ -1285,12 +1340,13 @@ mod tests {
         let panel_id = layout.add("spectrogram", None);
         let waveform_id = layout.add("waveform", None);
         assert!(layout.activate(panel_id));
+        let mut panels = demand(&layout);
         window.update(|window, cx| {
             owner.update(cx, |owner, cx| {
                 owner.sync(
                     PresentationState {
                         config: Arc::clone(&config),
-                        layout: &layout,
+                        panels: &panels,
                         status: PlaybackStatus::Paused,
                         visible: true,
                         shutting_down: false,
@@ -1316,7 +1372,7 @@ mod tests {
                 owner.sync(
                     PresentationState {
                         config: Arc::clone(&config),
-                        layout: &layout,
+                        panels: &panels,
                         status: PlaybackStatus::Paused,
                         visible: false,
                         shutting_down: false,
@@ -1343,7 +1399,7 @@ mod tests {
                 owner.sync(
                     PresentationState {
                         config: Arc::clone(&config),
-                        layout: &layout,
+                        panels: &panels,
                         status: PlaybackStatus::Paused,
                         visible: true,
                         shutting_down: false,
@@ -1370,7 +1426,7 @@ mod tests {
                 owner.sync(
                     PresentationState {
                         config: Arc::clone(&config),
-                        layout: &layout,
+                        panels: &panels,
                         status: PlaybackStatus::Playing,
                         visible: true,
                         shutting_down: false,
@@ -1397,7 +1453,7 @@ mod tests {
                 owner.sync(
                     PresentationState {
                         config: Arc::new(capped),
-                        layout: &layout,
+                        panels: &panels,
                         status: PlaybackStatus::Playing,
                         visible: true,
                         shutting_down: false,
@@ -1433,7 +1489,7 @@ mod tests {
                 owner.sync(
                     PresentationState {
                         config: Arc::new(still),
-                        layout: &layout,
+                        panels: &panels,
                         status: PlaybackStatus::Playing,
                         visible: true,
                         shutting_down: false,
@@ -1455,7 +1511,7 @@ mod tests {
                 owner.sync(
                     PresentationState {
                         config: Arc::clone(&config),
-                        layout: &layout,
+                        panels: &panels,
                         status: PlaybackStatus::Playing,
                         visible: true,
                         shutting_down: false,
@@ -1472,7 +1528,7 @@ mod tests {
                 owner.sync(
                     PresentationState {
                         config: Arc::clone(&config),
-                        layout: &layout,
+                        panels: &panels,
                         status: PlaybackStatus::Playing,
                         visible: true,
                         shutting_down: true,
@@ -1487,10 +1543,11 @@ mod tests {
                 );
                 assert_eq!(owner.demand, DisplayDemand::default());
                 assert!(owner.analysis_timer.is_none());
+                panels.reconcile(&empty_layout);
                 owner.sync(
                     PresentationState {
                         config: Arc::clone(&config),
-                        layout: &empty_layout,
+                        panels: &panels,
                         status: PlaybackStatus::Stopped,
                         visible: true,
                         shutting_down: false,
@@ -1505,10 +1562,11 @@ mod tests {
                 );
                 assert!(owner.views.is_empty());
                 assert!(layout.activate(waveform_id));
+                panels.reconcile(&layout);
                 owner.sync(
                     PresentationState {
                         config: Arc::clone(&config),
-                        layout: &layout,
+                        panels: &panels,
                         status: PlaybackStatus::Paused,
                         visible: true,
                         shutting_down: false,
@@ -1527,7 +1585,7 @@ mod tests {
                 owner.sync(
                     PresentationState {
                         config: Arc::clone(&config),
-                        layout: &layout,
+                        panels: &panels,
                         status: PlaybackStatus::Paused,
                         visible: true,
                         shutting_down: false,
@@ -1546,11 +1604,12 @@ mod tests {
                 // though config, active demand, status and position are stable.
                 assert!(owner.layout_panels.contains_key(&panel_id));
                 assert!(layout.remove(panel_id));
+                panels.reconcile(&layout);
                 let generation = owner.frame_generation;
                 owner.sync(
                     PresentationState {
                         config: Arc::clone(&config),
-                        layout: &layout,
+                        panels: &panels,
                         status: PlaybackStatus::Paused,
                         visible: true,
                         shutting_down: false,
@@ -1596,6 +1655,7 @@ mod tests {
             locked: false,
         };
         layout.add("audio_visualizer", None);
+        let panels = demand(&layout);
         let waveform =
             cx.new(|_| visualization::Waveform::new(Arc::clone(&runtime.handle.waveform)));
         let owner = cx.new(|cx| {
@@ -1610,7 +1670,7 @@ mod tests {
         let track = crate::artwork::tests::track(directory.path().join("track.wav"));
         let state = |status, source_generation, seek_revision| PresentationState {
             config: Arc::clone(&config),
-            layout: &layout,
+            panels: &panels,
             status,
             source_generation,
             seek_revision,
@@ -1712,6 +1772,7 @@ mod tests {
             locked: false,
         };
         layout.add("audio_visualizer", None);
+        let panels = demand(&layout);
         let track = crate::artwork::tests::track(directory.path().join("track.wav"));
         let mut replacement = track.clone();
         replacement.id += 1;
@@ -1728,7 +1789,7 @@ mod tests {
             });
             let mut state = PresentationState {
                 config: Arc::clone(&config),
-                layout: &layout,
+                panels: &panels,
                 status: PlaybackStatus::Playing,
                 source_generation: 1,
                 seek_revision: 1,
@@ -1823,6 +1884,7 @@ mod tests {
             locked: false,
         };
         layout.add("audio_visualizer", None);
+        let panels = demand(&layout);
         let track = crate::artwork::tests::track(directory.path().join("track.wav"));
         let current = Some(track.id);
         let wrap = u64::MAX;
@@ -1891,7 +1953,7 @@ mod tests {
                 let state = |status, current_track_id, source_generation, seek_revision| {
                     PresentationState {
                         config: Arc::clone(&config),
-                        layout: &layout,
+                        panels: &panels,
                         status,
                         source_generation,
                         seek_revision,

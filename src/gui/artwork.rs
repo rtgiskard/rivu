@@ -2404,7 +2404,8 @@ mod tests {
             let default = cx.new(|cx| Artwork::new(&crate::i18n::Localizer::new("en"), cx));
             cx.new(|_| AlbumArtwork::new(manager, default, images.clone()))
         });
-        let sync = |mode, status, fps, visible, cx: &mut gpui::TestAppContext| {
+        let mut panels = crate::gui::workspace::WorkspacePanels::default();
+        let mut sync = |mode, status, fps, visible, cx: &mut gpui::TestAppContext| {
             let config = Config {
                 album_artwork_fps: fps,
                 ..Config::default()
@@ -2432,8 +2433,13 @@ mod tests {
                     })
                     .collect(),
             };
+            panels.reconcile(&crate::gui::layout::Layout {
+                root: Some(root),
+                next_id: 200,
+                locked: true,
+            });
             owner.update(cx, |owner, cx| {
-                owner.sync(Some(&track), status, &config, Some(&root), visible, cx);
+                owner.sync(Some(&track), status, &config, &panels, visible, cx);
             });
         };
         sync(
@@ -2633,9 +2639,15 @@ mod tests {
                 })
                 .collect(),
         };
-        let sync = |root: Option<&Node>, visible, cx: &mut gpui::TestAppContext| {
+        let mut panels = crate::gui::workspace::WorkspacePanels::default();
+        let mut sync = |root: Option<&Node>, visible, cx: &mut gpui::TestAppContext| {
+            panels.reconcile(&crate::gui::layout::Layout {
+                root: root.cloned(),
+                next_id: 200,
+                locked: true,
+            });
             artwork.update(cx, |artwork, cx| {
-                artwork.sync(None, PlaybackStatus::Stopped, &config, root, visible, cx);
+                artwork.sync(None, PlaybackStatus::Stopped, &config, &panels, visible, cx);
             });
         };
         let initial = root(&[

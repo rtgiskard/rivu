@@ -553,7 +553,7 @@ impl AudioProcessing {
 
     pub(super) fn sync_panels(
         &mut self,
-        layout: &super::layout::Layout,
+        layout: &super::workspace::WorkspacePanels,
         visible: bool,
         cx: &mut Context<Self>,
     ) {

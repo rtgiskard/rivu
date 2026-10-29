@@ -243,6 +243,7 @@ impl Render for GuiApp {
             this.workspace.layouts.current_mut().locked = !this.workspace.layouts.current().locked;
             this.shell.dismiss(shell::Surface::PanelCatalog);
             this.panel_menu = None;
+            this.reconcile_feature_demand(cx);
             cx.notify();
         });
         let tools = IconButtonGroup::new(IconButtonStyle::Quiet, IconButtonDensity::Compact)

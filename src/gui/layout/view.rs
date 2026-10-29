@@ -99,7 +99,6 @@ impl GuiApp {
                         _ => None,
                     }
                 });
-            self.persist_layout(cx);
         }
     }
     pub(in crate::gui) fn begin_split_drag(

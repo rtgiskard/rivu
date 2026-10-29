@@ -443,18 +443,15 @@ impl GuiApp {
 
     pub(super) fn reconcile_feature_demand(&self, cx: &mut Context<Self>) {
         self.audio_processing.update(cx, |owner, cx| {
-            owner.sync_panels(self.workspace.layouts.current(), self.window_visible, cx)
+            owner.sync_panels(
+                &self.workspace.panels,
+                self.window_visible && !self.state.system.shutting_down,
+                cx,
+            )
         });
         let library_visible = self.panel_demand("library");
         let available = !self.workspace.layouts.current().locked
-            || self
-                .workspace
-                .layouts
-                .current()
-                .root
-                .as_ref()
-                .and_then(|root| root.find_panel(&|panel| panel.kind == "library"))
-                .is_some();
+            || self.workspace.panels.contains_kind("library");
         self.library.update(cx, |owner, cx| {
             owner.set_available(available);
             owner.set_visible(library_visible, cx);
@@ -472,35 +469,17 @@ impl GuiApp {
                 cx,
             )
         });
-        fn visible_metadata(node: &layout::Node, consumers: &mut Vec<u64>) {
-            match node {
-                layout::Node::Split { children, .. } => {
-                    for child in children {
-                        visible_metadata(child, consumers);
-                    }
-                }
-                layout::Node::Tabs { panels, active, .. } => {
-                    if let Some(panel) = panels.iter().find(|panel| panel.id == *active)
-                        && panel.kind == "metadata"
-                    {
-                        consumers.push(panel.id);
-                    }
-                }
-            }
-        }
-        let mut artwork_consumers = Vec::new();
-        if self.window_visible
-            && !self.state.system.shutting_down
-            && let Some(root) = self.workspace.layouts.current().root.as_ref()
-        {
-            visible_metadata(root, &mut artwork_consumers);
-        }
+        let artwork_consumers = if self.window_visible && !self.state.system.shutting_down {
+            self.workspace.panels.metadata_consumers()
+        } else {
+            &[]
+        };
         self.metadata.update(cx, |owner, cx| {
             owner.set_visible(
                 self.panel_demand("metadata") || self.panel_demand("audio_processing"),
                 cx,
             );
-            owner.retain_artwork_consumers(&artwork_consumers);
+            owner.retain_artwork_consumers(artwork_consumers);
         });
     }
 

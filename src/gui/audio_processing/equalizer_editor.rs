@@ -2700,7 +2700,7 @@ impl AudioProcessing {
 
     pub(super) fn retain_equalizer_panels(
         &mut self,
-        layout: &super::super::layout::Layout,
+        layout: &super::super::workspace::WorkspacePanels,
         visible: bool,
         cx: &mut Context<Self>,
     ) {
@@ -4996,7 +4996,11 @@ mod tests {
             8
         );
         owner.update(cx, |owner, cx| {
-            owner.sync_panels(&crate::gui::layout::Layout::default(), false, cx);
+            owner.sync_panels(
+                &crate::gui::workspace::WorkspacePanels::default(),
+                false,
+                cx,
+            );
             cx.notify();
         });
         draw(cx, handle);

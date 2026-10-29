@@ -286,7 +286,6 @@ impl GuiApp {
                     .as_ref()
                     .and_then(|root| panel_group(root, panel).map(|group| group.0)),
             );
-            self.persist_layout(cx);
         }
         cx.notify();
     }
