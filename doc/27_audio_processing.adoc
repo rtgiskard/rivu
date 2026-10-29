@@ -603,6 +603,9 @@ resampling and latency compensation are explicit, not silent quality fallbacks.
 Non-finite input/intermediate PCM fails without publishing partial audio; finite
 over-range samples are not clipped or silenced. A failed DSP/profile operation
 requires reset before reuse because a finite prefix may have advanced history.
+Graph execution relies on finite PCM at its source boundary and on successful DSP
+operations preserving that guarantee. Pure copies do not rescan samples; edge gain
+and summation check their new arithmetic results, including delayed tails.
 Seeking, source changes and incompatible formats reset history; pause does not
 advance audio time. Source identity and captured settings bind every result,
 while playback generation separately controls automatic audition handoff.

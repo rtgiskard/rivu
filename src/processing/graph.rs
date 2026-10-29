@@ -410,7 +410,10 @@ impl Engine {
                             }
                         }
                         for (sample, sum) in output.iter_mut().zip(sum) {
+                            // Finite sources and DSP outputs can overflow when
+                            // mixed, including at the f64-to-f32 boundary.
                             *sample = *sum as f32;
+                            ensure!(sample.is_finite(), "Nonfinite graph output");
                         }
                     }
                     let input_frames = input_end.map_or(frames, |end| {
@@ -429,10 +432,6 @@ impl Engine {
                     }
                 }
             }
-            ensure!(
-                output.iter().all(|sample| sample.is_finite()),
-                "Nonfinite graph output"
-            );
         }
         Ok(())
     }

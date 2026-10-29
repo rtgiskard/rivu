@@ -591,6 +591,13 @@ impl GraphRunner {
                             input.gain,
                         );
                     }
+                    // Copies and DSP outputs are already finite; edge gain/sum
+                    // arithmetic can still overflow, including delayed tails.
+                    ensure!(
+                        output.iter().all(|value| value.is_finite()),
+                        "graph node {} produced non-finite PCM",
+                        node.id
+                    );
                 }
                 let input_frames = self.source_frames.map_or(output_frames, |source| {
                     (source + node.input_tail as u64)
@@ -609,11 +616,6 @@ impl GraphRunner {
                     }
                 }
             }
-            ensure!(
-                output.iter().all(|value| value.is_finite()),
-                "graph node {} produced non-finite PCM",
-                node.id
-            );
             node.blocks = node.blocks.saturating_add(1);
         }
         chunk.copy_from_slice(&self.nodes.last().expect("compiled target").output[..chunk.len()]);
