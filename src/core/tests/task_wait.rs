@@ -277,7 +277,7 @@ fn unknown_and_expired_waits_are_errors_and_core_drop_retires_pending_waits() {
     for id in 2..=MAX_RETAINED_SCAN_RESULTS as u64 + 1 {
         let mut retained = status.clone();
         retained.id = id;
-        core.retain_scan_outcome(retained, crate::projection::MediaTaskOwner::Library);
+        core.retain_scan_outcome(retained, crate::core::state::MediaTaskOwner::Library);
     }
     let (handle, requests) = wait_handle(&core);
     for (target, message) in [

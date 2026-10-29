@@ -1156,7 +1156,7 @@ impl Library {
         if self
             .state
             .system
-            .scan_visible(crate::projection::MediaTaskOwner::Library)
+            .scan_visible(crate::core::state::MediaTaskOwner::Library)
         {
             panel = panel.child(crate::gui::components::media_task::media_task_status(
                 &self.state.system,

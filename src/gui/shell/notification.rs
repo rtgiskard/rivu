@@ -16,7 +16,7 @@ impl GuiApp {
             Some(error) => error.clone().into(),
             None if self.state.system.scanning
                 && self.state.system.scan_owner
-                    != Some(crate::projection::MediaTaskOwner::Library) =>
+                    != Some(crate::core::state::MediaTaskOwner::Library) =>
             {
                 self.state.system.scan_message.clone().into()
             }

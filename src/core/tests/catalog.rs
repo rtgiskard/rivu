@@ -820,9 +820,9 @@ fn save_prepared_scan(core: &mut Core, scan: ScanFinished) -> ScanTaskStatus {
             error: None,
         },
         owner: if scan.import.is_some() {
-            crate::projection::MediaTaskOwner::Playlist
+            crate::core::state::MediaTaskOwner::Playlist
         } else {
-            crate::projection::MediaTaskOwner::Library
+            crate::core::state::MediaTaskOwner::Library
         },
         cancellation: library::ScanCancellation::default(),
         worker: core.executor.spawn(async {}),
@@ -1086,7 +1086,7 @@ fn rejected_library_scan_ack_preserves_unrelated_global_errors() {
 
 #[test]
 fn library_scan_failures_stay_in_their_result_while_import_errors_remain_global() {
-    use crate::projection::{GuiSnapshot, MediaTaskOwner};
+    use crate::{core::state::MediaTaskOwner, projection::GuiSnapshot};
     for import in [false, true] {
         let (_directory, mut core) = fixture();
         core.state.system.last_error = Some("Unrelated audio failure".into());

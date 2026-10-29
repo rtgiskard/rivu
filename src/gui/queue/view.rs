@@ -333,7 +333,7 @@ impl Queue {
             .when(
                 self.state
                     .system
-                    .scan_visible(crate::projection::MediaTaskOwner::Queue),
+                    .scan_visible(crate::core::state::MediaTaskOwner::Queue),
                 |panel| {
                     panel.child(crate::gui::components::media_task::media_task_status(
                         &self.state.system,

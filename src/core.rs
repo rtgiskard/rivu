@@ -36,6 +36,8 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+pub mod state;
+
 mod query_worker;
 
 mod query_epoch;
@@ -126,10 +128,10 @@ pub(crate) struct CoreState {
     pub(crate) playback: PlaybackState,
     /// Audio source ownership, independent of metadata and transport state.
     pub(crate) source_generation: u64,
-    pub(crate) processing_audition: Option<crate::projection::ProcessingAudition>,
+    pub(crate) processing_audition: Option<state::ProcessingAudition>,
     pub(crate) system: SystemState,
     pub(crate) configuration: ConfigurationState,
-    pub(crate) scan_owner: Option<crate::projection::MediaTaskOwner>,
+    pub(crate) scan_owner: Option<state::MediaTaskOwner>,
     pub(crate) revisions: StateRevisions,
 }
 
@@ -882,7 +884,7 @@ enum ScanEvent {
 const MAX_RETAINED_SCAN_RESULTS: usize = 32;
 struct ScanTask {
     status: ScanTaskStatus,
-    owner: crate::projection::MediaTaskOwner,
+    owner: state::MediaTaskOwner,
     cancellation: library::ScanCancellation,
     worker: async_executor::Task<()>,
     pending_save: Option<ScanFinished>,

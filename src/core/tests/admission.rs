@@ -65,12 +65,12 @@ fn external_admission_appends_valid_subset_without_roots_autoplay_or_playlist_ch
     assert!(
         snapshot
             .system
-            .scan_visible(crate::projection::MediaTaskOwner::Queue)
+            .scan_visible(crate::core::state::MediaTaskOwner::Queue)
     );
     assert!(
         !snapshot
             .system
-            .scan_visible(crate::projection::MediaTaskOwner::Library)
+            .scan_visible(crate::core::state::MediaTaskOwner::Library)
     );
     assert_eq!(core.store.queue_ids().unwrap(), before_queue);
     let ViewResponse::ScanTask(status) = core.view(&Query::ScanTask { id }).unwrap() else {
@@ -84,12 +84,12 @@ fn external_admission_appends_valid_subset_without_roots_autoplay_or_playlist_ch
     assert!(
         snapshot
             .system
-            .scan_visible(crate::projection::MediaTaskOwner::Queue)
+            .scan_visible(crate::core::state::MediaTaskOwner::Queue)
     );
     assert!(
         !snapshot
             .system
-            .scan_visible(crate::projection::MediaTaskOwner::Library)
+            .scan_visible(crate::core::state::MediaTaskOwner::Library)
     );
     assert!(snapshot.system.last_error.is_some());
     let added = core
@@ -134,7 +134,7 @@ fn external_admission_appends_valid_subset_without_roots_autoplay_or_playlist_ch
     assert!(
         !snapshot
             .system
-            .scan_visible(crate::projection::MediaTaskOwner::Queue)
+            .scan_visible(crate::core::state::MediaTaskOwner::Queue)
     );
     assert!(snapshot.system.scan_task_id.is_none());
 }

@@ -582,6 +582,9 @@ and interaction state, submitting typed, validated edits; graph commits require
 the expected revision. Failed validation leaves committed settings unchanged.
 JSON is the IPC/import format, not a second configuration owner.
 
+Core state owns the selected audition and media-task identity; projections consume
+those facts rather than defining them.
+
 Prepared DSP owns its coefficients, history and stream format. Device callbacks
 do no model loading, FFT planning or file I/O. Allocation, block work and retained
 storage are bounded; long-running preparation stays on workers. Bypass, gain,

@@ -1,21 +1,16 @@
-use crate::{config::Config, core::CoreState};
+use crate::{
+    config::Config,
+    core::{
+        CoreState,
+        state::{MediaTaskOwner, ProcessingAudition},
+    },
+};
 use rivu_protocol::model::{
     ClientSnapshot, DatabaseOptimization, HistoryEntry, PlaybackState, PlaybackStatus, QueueState,
     RepeatMode, Track,
 };
-use rivu_protocol::model::{GraphExecutionMode, GraphPort};
 use std::{collections::BTreeMap, sync::Arc};
 
-/// Selected audio source admitted by Core, independent of the latest task and editor.
-/// Transport status remains separate: a selected source can be paused.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ProcessingAudition {
-    pub id: u64,
-    pub output: Option<GraphPort>,
-    /// Cached graph output is Offline; a prepared live runner is Realtime or Hybrid.
-    /// Standalone denoise/separation audition has no graph mode.
-    pub mode: Option<GraphExecutionMode>,
-}
 #[derive(Clone, Debug, Default)]
 pub struct GuiSnapshot {
     pub library: GuiLibrarySnapshot,
@@ -43,14 +38,6 @@ pub struct GuiLibrarySnapshot {
     pub history: Arc<Vec<HistoryEntry>>,
 }
 
-/// GUI routing for the shared scan/import/admission progress projection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MediaTaskOwner {
-    Library,
-    Playlist,
-    Queue,
-}
-
 #[derive(Clone, Debug, Default)]
 pub struct GuiSystemSnapshot {
     pub scanning: bool,
@@ -70,7 +57,7 @@ pub struct GuiSystemSnapshot {
     pub shutting_down: bool,
     pub relocation_task: Option<rivu_protocol::model::RelocationTaskStatus>,
     pub processing: Option<rivu_protocol::model::ProcessingTaskStatus>,
-    pub processing_audition: Option<crate::projection::ProcessingAudition>,
+    pub processing_audition: Option<ProcessingAudition>,
 }
 
 impl GuiSystemSnapshot {

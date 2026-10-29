@@ -2022,7 +2022,7 @@ impl Playlists {
             .when(
                 self.state
                     .system
-                    .scan_visible(crate::projection::MediaTaskOwner::Playlist),
+                    .scan_visible(crate::core::state::MediaTaskOwner::Playlist),
                 |panel| {
                     panel.child(crate::gui::components::media_task::media_task_status(
                         &self.state.system,
