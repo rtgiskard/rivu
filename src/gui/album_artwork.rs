@@ -376,20 +376,18 @@ impl AlbumArtwork {
 
     fn prepare_artwork(&mut self, cx: &mut Context<Self>) {
         if !self.visible {
-            // Forget queued demand, but let the shared in-flight load finish.
-            let _ = self.loader.prepare(None);
+            // The physical load retires normally; hidden panels own no demand.
             return;
         }
-        let artwork = self
+        let cached = self
             .track
             .as_ref()
-            .and_then(|track| self.manager.cached(track));
-        self.replace_artwork(artwork, cx);
-        let current = self
-            .track
-            .as_ref()
-            .filter(|track| !self.manager.is_loaded(track));
-        if let Some(track) = self.loader.prepare(current) {
+            .and_then(|track| self.manager.cached_result(track));
+        let cold = cached.is_none();
+        self.replace_artwork(cached.flatten(), cx);
+        if let Some(track) = self.track.as_ref().filter(|_| cold)
+            && let Some(track) = self.loader.prepare(track)
+        {
             self.start_artwork(track, cx);
         }
     }
@@ -403,6 +401,9 @@ impl AlbumArtwork {
                 .spawn(async move { manager.load(&track) })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                if !this.loader.finish(&identity) {
+                    return;
+                }
                 if this.visible
                     && this
                         .track
@@ -410,13 +411,6 @@ impl AlbumArtwork {
                         .is_some_and(|track| identity.matches(track))
                 {
                     this.replace_artwork(loaded, cx);
-                }
-                let current = this
-                    .track
-                    .as_ref()
-                    .filter(|track| this.visible && !this.manager.is_loaded(track));
-                if let Some(next) = this.loader.finish(&identity, current) {
-                    this.start_artwork(next, cx);
                 } else {
                     this.prepare_artwork(cx);
                 }
@@ -492,7 +486,6 @@ impl AlbumArtwork {
     pub(super) fn release_all_images(&mut self, window: &mut Window, cx: &mut App) {
         self.visible = false;
         self.track = None;
-        let _ = self.loader.prepare(None);
         self.instances.clear();
         self.cancel_frame();
         self.view.release_all_images(window, cx);
@@ -777,6 +770,95 @@ mod tests {
             assert!(!owner.view.replace(Some(new), cx));
             assert_eq!(owner.instances[&2].rotation.angle, 0.75);
             assert!(!ArtworkIdentity::for_track(&original).matches(owner.track.as_ref().unwrap()));
+        });
+        owner.update(cx, |owner, cx| {
+            owner.sync(
+                Some(&relocated),
+                PlaybackStatus::Paused,
+                &config,
+                &panels,
+                false,
+                cx,
+            );
+            assert!(owner.view.image(cx).is_none());
+        });
+        cx.run_until_parked();
+        owner.update(cx, |owner, cx| {
+            for id in 100..170 {
+                let mut pressure = relocated.clone();
+                pressure.id = id;
+                pressure.path = directory.path().join("pressure").join(format!("{id}.wav"));
+                assert!(owner.manager.load(&pressure).is_none());
+            }
+            assert!(owner.manager.cached_result(&relocated).is_none());
+            owner.sync(
+                Some(&relocated),
+                PlaybackStatus::Paused,
+                &config,
+                &panels,
+                true,
+                cx,
+            );
+            assert!(owner.view.image(cx).is_none());
+            assert!(owner.loader.prepare(&relocated).is_none());
+            // Hide while the physical worker remains active, then change demand.
+            owner.sync(
+                Some(&relocated),
+                PlaybackStatus::Paused,
+                &config,
+                &panels,
+                false,
+                cx,
+            );
+        });
+        let mut missing = relocated.clone();
+        missing.path = directory.path().join("missing/track.wav");
+        owner.update(cx, |owner, cx| {
+            owner.sync(
+                Some(&missing),
+                PlaybackStatus::Paused,
+                &config,
+                &panels,
+                false,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        owner.update(cx, |owner, cx| {
+            assert!(owner.manager.cached_result(&relocated).is_some());
+            assert!(owner.manager.cached_result(&missing).is_none());
+            assert!(owner.view.image(cx).is_none());
+            owner.sync(
+                Some(&missing),
+                PlaybackStatus::Paused,
+                &config,
+                &panels,
+                true,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        owner.update(cx, |owner, cx| {
+            assert_eq!(owner.manager.cached_result(&missing), Some(None));
+            owner.sync(
+                Some(&missing),
+                PlaybackStatus::Paused,
+                &config,
+                &panels,
+                false,
+                cx,
+            );
+            owner.sync(
+                Some(&missing),
+                PlaybackStatus::Paused,
+                &config,
+                &panels,
+                true,
+                cx,
+            );
+            assert!(owner.view.image(cx).is_none());
+            assert!(owner.loader.prepare(&missing).is_some());
+            assert!(owner.loader.finish(&ArtworkIdentity::for_track(&missing)));
         });
     }
 

@@ -81,12 +81,23 @@ impl AlbumCover {
         }
     }
 
-    fn needs_load(&self, track: &Track, manager: &ArtworkManager) -> bool {
-        !self
+    /// Reconcile a cached completion before deciding whether to schedule a load.
+    /// Returns whether the view changed and whether the source is still cold.
+    fn sync(&mut self, track: &Track, manager: &ArtworkManager, cx: &mut App) -> (bool, bool) {
+        if self
             .negative
             .as_ref()
             .is_some_and(|negative| negative.matches(track))
-            && !manager.is_loaded(track)
+        {
+            return (false, false);
+        }
+        let cached = manager.cached_result(track);
+        let cold = cached.is_none();
+        self.negative = cached
+            .as_ref()
+            .is_some_and(Option::is_none)
+            .then(|| ArtworkIdentity::for_track(track));
+        (self.view.replace(cached.flatten(), cx), cold)
     }
 
     fn complete(
@@ -150,15 +161,9 @@ impl AlbumCovers {
                 .views
                 .entry(index)
                 .or_insert_with(|| AlbumCover::new(images.clone()));
-            if cover
-                .negative
-                .as_ref()
-                .is_some_and(|negative| !negative.matches(track))
-            {
-                cover.negative = None;
-            }
-            changed |= cover.view.replace(manager.cached(track), cx);
-            if cover.needs_load(track, manager) {
+            let (updated, cold) = cover.sync(track, manager, cx);
+            changed |= updated;
+            if cold {
                 self.pending.push_back(index);
             }
             self.sources.entry(track.id).or_default().push(index);
@@ -171,23 +176,27 @@ impl AlbumCovers {
         source: impl Fn(usize) -> Option<&'a Track>,
         manager: &ArtworkManager,
         loader: &mut ArtworkLoader,
-    ) -> Option<Track> {
+        cx: &mut App,
+    ) -> (Option<Track>, bool) {
+        let mut changed = false;
         while let Some(&index) = self.pending.front() {
             if let Some(track) = source(index)
-                && self
-                    .views
-                    .get(&index)
-                    .is_some_and(|cover| cover.needs_load(track, manager))
+                && let Some(cover) = self.views.get_mut(&index)
             {
-                // Keep this candidate while an obsolete physical worker retires.
-                let track = loader.prepare(Some(track))?;
-                self.pending.pop_front();
-                return Some(track);
+                let (updated, cold) = cover.sync(track, manager, cx);
+                changed |= updated;
+                if cold {
+                    // Keep this candidate while an obsolete physical worker retires.
+                    let next = loader.prepare(track);
+                    if next.is_some() {
+                        self.pending.pop_front();
+                    }
+                    return (next, changed);
+                }
             }
             self.pending.pop_front();
         }
-        let _ = loader.prepare(None);
-        None
+        (None, changed)
     }
 
     fn complete<'a>(
@@ -405,7 +414,6 @@ impl AlbumBrowser {
 
     fn clear_covers(&mut self, cx: &mut App) {
         self.demand = 0..0;
-        let _ = self.loader.prepare(None);
         self.covers.clear(cx);
     }
 
@@ -714,11 +722,16 @@ impl AlbumBrowser {
 
     fn load_next_cover(&mut self, cx: &mut Context<Self>) {
         let albums = self.model.albums();
-        if let Some(track) = self.covers.prepare(
+        let (next, changed) = self.covers.prepare(
             |index| albums.get(index).map(|album| &album.representative),
             &self.manager,
             &mut self.loader,
-        ) {
+            cx,
+        );
+        if changed {
+            cx.notify();
+        }
+        if let Some(track) = next {
             let identity = ArtworkIdentity::for_track(&track);
             let manager = Arc::clone(&self.manager);
             cx.spawn(async move |this, cx| {
@@ -732,8 +745,10 @@ impl AlbumBrowser {
                 let _ = this.update(cx, |this, cx| {
                     // The worker result remains leased through direct delivery.
                     // Hidden/obsolete demand can warm the shared cache only.
-                    let _ = this.loader.finish(&identity, None);
-                    if !this.model.visible() || this.model.selected().is_some() {
+                    if !this.loader.finish(&identity)
+                        || !this.model.visible()
+                        || this.model.selected().is_some()
+                    {
                         return;
                     }
                     let albums = this.model.albums();
@@ -1391,9 +1406,95 @@ mod tests {
             pressure.id = id;
             drop(manager.load(&pressure));
         }
-        assert!(manager.is_loaded(&source));
-        assert!(!cover.needs_load(&source, &manager));
-        cx.update(|cx| assert!(cover.view.image(cx).is_some()));
+        assert!(manager.cached_result(&source).is_some());
+        cx.update(|cx| {
+            assert_eq!(cover.sync(&source, &manager, cx), (false, false));
+            assert!(cover.view.image(cx).is_some());
+        });
+    }
+
+    #[gpui::test]
+    fn shared_completions_reach_waiting_cards_without_new_loads(cx: &mut gpui::TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("cover.wav");
+        tagged_wav(&path);
+        let first = track(path.clone());
+        let mut second = track(path);
+        second.id += 1;
+        let mut negative = track(directory.path().join("missing.wav"));
+        negative.id += 2;
+        let sources = [first, second, negative];
+        let manager = ArtworkManager::new(directory.path());
+        let mut covers = AlbumCovers::default();
+        let mut loader = ArtworkLoader::default();
+        cx.update(|cx| {
+            covers.sync(
+                0..sources.len(),
+                |index| sources.get(index),
+                &manager,
+                &ArtworkImages::default(),
+                cx,
+            );
+        });
+        let active = cx
+            .update(|cx| {
+                covers
+                    .prepare(|index| sources.get(index), &manager, &mut loader, cx)
+                    .0
+            })
+            .unwrap();
+        // Another consumer finishes both waiting sources while this panel loads A.
+        let external = manager.load(&sources[1]).unwrap();
+        assert!(manager.load(&sources[2]).is_none());
+        let completed = manager.load(&active).unwrap();
+        assert!(loader.finish(&ArtworkIdentity::for_track(&active)));
+        cx.update(|cx| {
+            covers.complete(&active, Some(&completed), |index| sources.get(index), cx);
+            let (next, changed) =
+                covers.prepare(|index| sources.get(index), &manager, &mut loader, cx);
+            assert!(next.is_none());
+            assert!(changed);
+            assert!(covers.views[&0].view.image(cx).is_some());
+            assert!(covers.views[&1].view.image(cx).is_some());
+            assert!(covers.views[&2].view.image(cx).is_none());
+            assert!(
+                covers.views[&2]
+                    .negative
+                    .as_ref()
+                    .unwrap()
+                    .matches(&sources[2])
+            );
+        });
+        drop(external);
+        let mut pressure = sources[2].clone();
+        for id in 10..106 {
+            pressure.id = id;
+            drop(manager.load(&pressure));
+        }
+        assert!(manager.cached_result(&sources[2]).is_none());
+        cx.update(|cx| {
+            covers.sync(
+                0..sources.len(),
+                |index| sources.get(index),
+                &manager,
+                &ArtworkImages::default(),
+                cx,
+            );
+            assert!(
+                covers
+                    .prepare(|index| sources.get(index), &manager, &mut loader, cx)
+                    .0
+                    .is_none()
+            );
+            assert!(covers.views[&1].view.image(cx).is_some());
+            assert!(
+                covers.views[&2]
+                    .negative
+                    .as_ref()
+                    .unwrap()
+                    .matches(&sources[2])
+            );
+        });
     }
 
     #[gpui::test]
@@ -1419,34 +1520,41 @@ mod tests {
             );
         });
         for source in &sources {
-            let next = covers
-                .prepare(|index| sources.get(index), &manager, &mut loader)
+            let next = cx
+                .update(|cx| {
+                    covers
+                        .prepare(|index| sources.get(index), &manager, &mut loader, cx)
+                        .0
+                })
                 .unwrap();
             assert!(ArtworkIdentity::for_track(source).matches(&next));
             assert!(
-                covers
-                    .prepare(|index| sources.get(index), &manager, &mut loader)
+                cx.update(|cx| covers
+                    .prepare(|index| sources.get(index), &manager, &mut loader, cx)
+                    .0)
                     .is_none()
             );
             let completed = manager.load(&next);
             assert!(completed.is_none());
-            assert!(manager.is_loaded(source));
-            assert!(manager.cached(source).is_none());
-            let _ = loader.finish(&ArtworkIdentity::for_track(&next), None);
+            assert_eq!(manager.cached_result(source), Some(None));
+            assert!(loader.finish(&ArtworkIdentity::for_track(&next)));
             cx.update(|cx| {
                 covers.complete(&next, completed.as_ref(), |index| sources.get(index), cx);
             });
         }
-        assert!(!manager.is_loaded(&sources[0]));
+        assert!(manager.cached_result(&sources[0]).is_none());
         assert!(
-            covers
-                .prepare(|index| sources.get(index), &manager, &mut loader)
+            cx.update(|cx| covers
+                .prepare(|index| sources.get(index), &manager, &mut loader, cx)
+                .0)
                 .is_none()
         );
         for (index, source) in sources.iter().enumerate() {
-            let cover = &covers.views[&index];
-            assert!(!cover.needs_load(source, &manager));
-            cx.update(|cx| assert!(cover.view.image(cx).is_none()));
+            let cover = covers.views.get_mut(&index).unwrap();
+            cx.update(|cx| {
+                assert_eq!(cover.sync(source, &manager, cx), (false, false));
+                assert!(cover.view.image(cx).is_none());
+            });
         }
     }
 
@@ -1459,7 +1567,7 @@ mod tests {
         let source = track(directory.path().join("missing.wav"));
         let negative = manager.load(&source);
         assert!(negative.is_none());
-        assert!(manager.is_loaded(&source));
+        assert_eq!(manager.cached_result(&source), Some(None));
         let mut current = source.clone();
         current.path = directory.path().join("available.wav");
         tagged_wav(&current.path);
@@ -1475,7 +1583,7 @@ mod tests {
             assert!(cover.negative.is_none());
             cover.complete(&source, Some(&source), negative.as_ref(), cx);
         });
-        assert!(cover.needs_load(&current, &manager));
+        cx.update(|cx| assert!(cover.sync(&current, &manager, cx).1));
         let recovered = manager.load(&current).unwrap();
         cx.update(|cx| {
             assert!(cover.complete(&current, Some(&current), Some(&recovered), cx));
@@ -1505,30 +1613,39 @@ mod tests {
                 cx,
             );
         });
-        let next = covers
-            .prepare(|index| sources.get(index), &manager, &mut loader)
+        let next = cx
+            .update(|cx| {
+                covers
+                    .prepare(|index| sources.get(index), &manager, &mut loader, cx)
+                    .0
+            })
             .unwrap();
         assert!(ArtworkIdentity::for_track(&first).matches(&next));
         let completed = manager.load(&next).unwrap();
-        let _ = loader.finish(&ArtworkIdentity::for_track(&next), None);
+        assert!(loader.finish(&ArtworkIdentity::for_track(&next)));
         cx.update(|cx| {
             assert!(covers.complete(&next, Some(&completed), |index| sources.get(index), cx));
             assert!(covers.views[&0].view.image(cx).is_some());
             assert!(covers.views[&1].view.image(cx).is_none());
             assert!(covers.views[&2].view.image(cx).is_some());
         });
-        let next = covers
-            .prepare(|index| sources.get(index), &manager, &mut loader)
+        let next = cx
+            .update(|cx| {
+                covers
+                    .prepare(|index| sources.get(index), &manager, &mut loader, cx)
+                    .0
+            })
             .unwrap();
         assert!(ArtworkIdentity::for_track(&second).matches(&next));
         let completed = manager.load(&next);
-        let _ = loader.finish(&ArtworkIdentity::for_track(&next), None);
+        assert!(loader.finish(&ArtworkIdentity::for_track(&next)));
         cx.update(|cx| {
             covers.complete(&next, completed.as_ref(), |index| sources.get(index), cx);
         });
         assert!(
-            covers
-                .prepare(|index| sources.get(index), &manager, &mut loader)
+            cx.update(|cx| covers
+                .prepare(|index| sources.get(index), &manager, &mut loader, cx)
+                .0)
                 .is_none()
         );
     }
@@ -1555,37 +1672,52 @@ mod tests {
                 cx,
             );
         });
-        let active = covers
-            .prepare(|index| previous.get(index), &manager, &mut loader)
+        let active = cx
+            .update(|cx| {
+                covers
+                    .prepare(|index| previous.get(index), &manager, &mut loader, cx)
+                    .0
+            })
             .unwrap();
         assert!(ArtworkIdentity::for_track(&old).matches(&active));
         // A page can arrive for the latest viewport while the old load is physical.
         cx.update(|cx| {
             covers.sync(2..3, |_| None, &manager, &ArtworkImages::default(), cx);
         });
-        assert!(covers.prepare(|_| None, &manager, &mut loader).is_none());
+        assert!(
+            cx.update(|cx| covers.prepare(|_| None, &manager, &mut loader, cx).0)
+                .is_none()
+        );
         let latest = |index| (index == 2).then_some(&current);
         cx.update(|cx| {
             covers.sync(2..3, latest, &manager, &ArtworkImages::default(), cx);
         });
-        assert!(covers.prepare(latest, &manager, &mut loader).is_none());
+        assert!(
+            cx.update(|cx| covers.prepare(latest, &manager, &mut loader, cx).0)
+                .is_none()
+        );
         let negative = manager.load(&active);
         assert!(negative.is_none());
-        let _ = loader.finish(&ArtworkIdentity::for_track(&active), None);
+        assert!(loader.finish(&ArtworkIdentity::for_track(&active)));
         cx.update(|cx| {
             assert!(!covers.complete(&active, negative.as_ref(), latest, cx));
             assert!(covers.views[&2].negative.is_none());
             assert!(covers.views[&2].view.image(cx).is_none());
         });
-        let next = covers.prepare(latest, &manager, &mut loader).unwrap();
+        let next = cx
+            .update(|cx| covers.prepare(latest, &manager, &mut loader, cx).0)
+            .unwrap();
         assert!(ArtworkIdentity::for_track(&current).matches(&next));
         let completed = manager.load(&next).unwrap();
-        let _ = loader.finish(&ArtworkIdentity::for_track(&next), None);
+        assert!(loader.finish(&ArtworkIdentity::for_track(&next)));
         cx.update(|cx| {
             assert!(covers.complete(&next, Some(&completed), latest, cx));
             assert!(covers.views[&2].view.image(cx).is_some());
         });
-        assert!(covers.prepare(latest, &manager, &mut loader).is_none());
+        assert!(
+            cx.update(|cx| covers.prepare(latest, &manager, &mut loader, cx).0)
+                .is_none()
+        );
     }
 
     #[test]

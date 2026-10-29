@@ -456,15 +456,20 @@ lazily exports its PNG fallback on the background publisher. Extraction runs on
 existing background executors and admits only regular sources, rejecting FIFOs
 without waiting. Regular-file probing can still block its caller.
 
-The GUI keeps one active load and only the latest pending selection. Completions
-are matched by track ID, fingerprint, and source path before updating the selected preview or
-publishing MPRIS metadata; a late result can warm the cache, never replace a
+Each GUI consumer keeps one physical load; its selected track or viewport remains
+the source of latest demand. Only matching physical completion frees that slot,
+then the consumer rechecks current visible demand. Completions match track ID,
+fingerprint, and source path before updating the preview or publishing MPRIS
+metadata; a late result can warm the cache, never replace a
 newer identity. MPRIS signals metadata after artwork becomes available, including
 an initial cold load without another playback update.
 MPRIS handles playback revisions while one physical artwork load remains in flight;
 volume, transport and metadata notifications do not wait for its completion.
 Disabling or replacing the service waits for that load to physically retire,
 and late completion still cannot publish against a different source identity.
+MPRIS retains its completed-load identity only while it matches the current source.
+Clearing or changing selection forgets it even with another load in flight, so
+returning to an evicted source reacquires its cover after the physical slot retires.
 
 The Album artwork panel initiates acquisition only while visible. Hiding it
 clears queued demand without cancelling a submitted shared load; completion may
@@ -493,9 +498,12 @@ subsequent loads. Cache-only reads neither insert entries nor probe on misses.
 Revisiting an evicted identity requires another source probe. Late completions
 cannot replace a newer identity, even when both resolve to identical image bytes.
 
-Completed workers deliver a result lease directly to matching visible demand, so
-shared-cache eviction cannot lose a cover before delivery. Hidden or obsolete
-completion cannot restore a display owner or start hidden acquisition.
+Cache-only acquisition returns cold, completed-negative, or a leased positive
+result in one lookup. Consumers decide delivery and scheduling from that same
+result, never a separate loaded-state check; eviction cannot reclaim a positive
+result before it is installed in a view. Completed workers likewise deliver their
+lease directly to matching visible demand. Hidden or obsolete completion cannot
+restore a display owner or start hidden acquisition.
 
 Album cards retain explicit negative completions only for their current visible
 source identity/path, so eviction from the shared cache does not trigger repeated
@@ -504,7 +512,8 @@ covers remain owned by their views; neither changes the shared 64-entry target.
 Viewport and album-page changes synchronize card demand with the shared cache.
 An individual completion updates only cards demanding that source and advances
 the bounded waiting queue; it does not rescan every visible card or re-read all
-completed cache entries.
+completed cache entries. A waiting card acquires any result completed by another
+consumer before leaving the queue; a shared cache hit alone is not display ownership.
 
 === Encoded files and maintenance
 

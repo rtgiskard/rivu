@@ -449,12 +449,16 @@ fn completed_negative_artwork_keeps_fallback_when_details_reopen(cx: &mut TestAp
     selected.path = directory.path().join("missing-cover.wav");
     metadata.update(cx, |this, cx| {
         assert!(this.artwork_manager.load(&selected).is_none());
-        assert!(this.artwork_manager.is_loaded(&selected));
-        assert!(this.artwork_manager.cached(&selected).is_none());
+        assert_eq!(this.artwork_manager.cached_result(&selected), Some(None));
         artwork_selection(this, selected.clone(), cx);
         this.visible = true;
         this.prepare_artwork(cx);
         assert!(this.artwork_view.image(cx).is_none());
+        assert!(this.artwork_loader.prepare(&selected).is_some());
+        assert!(
+            this.artwork_loader
+                .finish(&crate::artwork::ArtworkIdentity::for_track(&selected))
+        );
         this.set_visible(false, cx);
     });
     // A completed miss is not a new acquisition demand on every render/reopen.
@@ -466,11 +470,73 @@ fn completed_negative_artwork_keeps_fallback_when_details_reopen(cx: &mut TestAp
     });
     cx.run_until_parked();
     metadata.update(cx, |this, cx| {
-        assert!(this.artwork_manager.is_loaded(&selected));
-        assert!(this.artwork_manager.cached(&selected).is_none());
+        assert_eq!(this.artwork_manager.cached_result(&selected), Some(None));
         assert!(this.artwork_view.image(cx).is_none());
         this.prepare_artwork(cx);
+        assert!(this.artwork_loader.prepare(&selected).is_some());
+        assert!(
+            this.artwork_loader
+                .finish(&crate::artwork::ArtworkIdentity::for_track(&selected))
+        );
         assert!(this.artwork_view.image(cx).is_none());
+    });
+}
+
+#[gpui::test]
+fn cached_relocation_is_delivered_while_old_artwork_is_in_flight(cx: &mut TestAppContext) {
+    let (directory, _runtime, metadata) = fixture(cx);
+    for (name, colour) in [("before", [255, 0, 0]), ("after", [0, 255, 0])] {
+        let path = directory.path().join(name);
+        std::fs::create_dir(&path).unwrap();
+        image::RgbImage::from_pixel(2, 2, image::Rgb(colour))
+            .save(path.join("cover.png"))
+            .unwrap();
+    }
+    let mut first = track(7, "Cover");
+    first.path = directory.path().join("before/track.wav");
+    let mut latest = first.clone();
+    latest.path = directory.path().join("after/track.wav");
+    let expected = metadata.update(cx, |this, cx| {
+        artwork_selection(this, first.clone(), cx);
+        this.visible = true;
+        this.prepare_artwork(cx);
+        assert!(this.artwork_loader.prepare(&latest).is_none());
+        let expected = this.artwork_manager.load(&latest).unwrap();
+        artwork_selection(this, latest.clone(), cx);
+        this.prepare_artwork(cx);
+        assert!(!this.artwork_view.replace(Some(expected.clone()), cx));
+        expected
+    });
+    cx.run_until_parked();
+    metadata.update(cx, |this, cx| {
+        assert!(!this.artwork_view.replace(Some(expected), cx));
+        assert!(this.artwork_loader.prepare(&latest).is_some());
+        assert!(
+            this.artwork_loader
+                .finish(&crate::artwork::ArtworkIdentity::for_track(&latest))
+        );
+        this.set_visible(false, cx);
+    });
+    cx.run_until_parked();
+    metadata.update(cx, |this, cx| {
+        for id in 100..170 {
+            let mut pressure = track(id, "Missing");
+            pressure.path = directory.path().join("pressure").join(format!("{id}.wav"));
+            assert!(this.artwork_manager.load(&pressure).is_none());
+        }
+        assert!(this.artwork_manager.cached_result(&latest).is_none());
+        this.set_visible(true, cx);
+        this.prepare_artwork(cx);
+        assert!(this.artwork_view.image(cx).is_none());
+    });
+    cx.run_until_parked();
+    metadata.update(cx, |this, cx| {
+        let expected = this
+            .artwork_manager
+            .cached_result(&latest)
+            .unwrap()
+            .unwrap();
+        assert!(!this.artwork_view.replace(Some(expected), cx));
     });
 }
 
@@ -493,8 +559,8 @@ fn hidden_artwork_completion_retires_without_loading_replacement(cx: &mut TestAp
     });
     cx.run_until_parked();
     metadata.update(cx, |this, cx| {
-        assert!(this.artwork_manager.is_loaded(&first));
-        assert!(!this.artwork_manager.is_loaded(&replacement));
+        assert!(this.artwork_manager.cached_result(&first).is_some());
+        assert!(this.artwork_manager.cached_result(&replacement).is_none());
         assert!(this.artwork_view.image(cx).is_none());
         assert_eq!(this.metadata.identity(), Some(8));
         this.set_visible(true, cx);
@@ -502,7 +568,7 @@ fn hidden_artwork_completion_retires_without_loading_replacement(cx: &mut TestAp
     });
     cx.run_until_parked();
     metadata.update(cx, |this, cx| {
-        assert!(this.artwork_manager.is_loaded(&replacement));
+        assert!(this.artwork_manager.cached_result(&replacement).is_some());
         assert!(this.artwork_view.image(cx).is_some());
         assert_eq!(this.metadata.identity(), Some(8));
     });

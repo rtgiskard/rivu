@@ -10,20 +10,17 @@ impl Metadata {
     pub(super) fn prepare_artwork(&mut self, cx: &mut Context<Self>) {
         if !self.visible {
             // Shared acquisition may finish, but hidden consumers own no demand.
-            let _ = self.artwork_loader.prepare(None);
             return;
         }
-        self.artwork_view.replace(
-            self.metadata
-                .track()
-                .and_then(|track| self.artwork_manager.cached(track)),
-            cx,
-        );
-        let current = self
+        let cached = self
             .metadata
             .track()
-            .filter(|track| !self.artwork_manager.is_loaded(track));
-        if let Some(track) = self.artwork_loader.prepare(current) {
+            .and_then(|track| self.artwork_manager.cached_result(track));
+        let cold = cached.is_none();
+        self.artwork_view.replace(cached.flatten(), cx);
+        if let Some(track) = self.metadata.track().filter(|_| cold)
+            && let Some(track) = self.artwork_loader.prepare(track)
+        {
             self.start_artwork(track, cx);
         }
     }
@@ -37,6 +34,9 @@ impl Metadata {
                 .spawn(async move { manager.load(&track) })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                if !this.artwork_loader.finish(&identity) {
+                    return;
+                }
                 // A completion may warm the cache, never revive a hidden consumer.
                 if this.visible
                     && this
@@ -46,13 +46,6 @@ impl Metadata {
                 {
                     this.artwork_view.replace(loaded, cx);
                     cx.notify();
-                }
-                let current = this
-                    .metadata
-                    .track()
-                    .filter(|track| this.visible && !this.artwork_manager.is_loaded(track));
-                if let Some(next) = this.artwork_loader.finish(&identity, current) {
-                    this.start_artwork(next, cx);
                 } else {
                     this.prepare_artwork(cx);
                 }

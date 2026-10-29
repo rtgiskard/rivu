@@ -267,32 +267,18 @@ impl ArtworkManager {
 
     /// Cache-only acquisition: no filesystem work or probe waiting.
     pub fn cached(&self, track: &Track) -> Option<Artwork> {
-        let cache = self.entries.lock();
-        cache
-            .find(track)
-            .filter(|entry| {
-                entry
-                    .lookup
-                    .get()
-                    .is_some_and(|lookup| lookup.applies_to(&track.path) && lookup.image.is_some())
-            })
-            .and_then(|entry| {
-                entry
-                    .lookup
-                    .get()?
-                    .image
-                    .as_ref()
-                    .map(|file| Artwork(Arc::clone(file)))
-            })
+        self.cached_result(track).flatten()
     }
 
-    pub fn is_loaded(&self, track: &Track) -> bool {
-        self.entries.lock().find(track).is_some_and(|entry| {
-            entry
-                .lookup
-                .get()
-                .is_some_and(|lookup| lookup.applies_to(&track.path))
-        })
+    /// Cache-only acquisition: `None` is cold/in-flight, `Some(None)` a completed
+    /// miss, and `Some(Some(_))` a positive lease acquired before eviction can
+    /// remove it. Never performs filesystem work or waits for a probe.
+    pub(crate) fn cached_result(&self, track: &Track) -> Option<Option<Artwork>> {
+        let cache = self.entries.lock();
+        let lookup = cache.find(track)?.lookup.get()?;
+        lookup
+            .applies_to(&track.path)
+            .then(|| lookup.image.as_ref().map(|file| Artwork(Arc::clone(file))))
     }
 
     /// Blocking singleflight load; a late old version never replaces its successor.
@@ -863,7 +849,7 @@ pub(crate) mod tests {
         assert!(manager.cached_default().is_none());
         assert!(!data.exists());
         assert!(manager.load(&selected).is_none());
-        assert!(manager.is_loaded(&selected));
+        assert_eq!(manager.cached_result(&selected), Some(None));
         assert!(
             manager
                 .load_with(&selected, || panic!("negative lookup reprobed"))
@@ -1437,7 +1423,7 @@ pub(crate) mod tests {
         let manager = ArtworkManager::new(directory.path());
         let selected = track(path);
         assert!(manager.load(&selected).is_none());
-        assert!(manager.is_loaded(&selected));
+        assert_eq!(manager.cached_result(&selected), Some(None));
     }
 
     fn file_path(uri: &str) -> PathBuf {
@@ -1494,14 +1480,14 @@ pub(crate) mod tests {
                 fs::write(&selected.path, b"not an audio file").unwrap();
             }
             assert!(manager.load(&selected).is_none());
-            assert!(manager.is_loaded(&selected));
+            assert_eq!(manager.cached_result(&selected), Some(None));
             assert_eq!(
                 manager.load_with(&selected, || panic!("unchanged failure reprobed")),
                 None
             );
 
             selected.path = cover_source.clone();
-            assert!(!manager.is_loaded(&selected));
+            assert!(manager.cached_result(&selected).is_none());
             assert!(manager.cached(&selected).is_none());
             let recovered = manager.load(&selected).unwrap();
             assert_eq!(fs::read(file_path(recovered.uri())).unwrap(), DEFAULT_IMAGE);
@@ -1521,7 +1507,7 @@ pub(crate) mod tests {
         let manager = ArtworkManager::new(directory.path());
         let mut selected = track(source);
         assert!(manager.load(&selected).is_none());
-        assert!(manager.is_loaded(&selected));
+        assert_eq!(manager.cached_result(&selected), Some(None));
         assert_eq!(
             manager.load_with(&selected, || panic!("unchanged negative reprobed")),
             None
@@ -1531,7 +1517,7 @@ pub(crate) mod tests {
         selected.path = moved.join("track.wav");
         write_test_wave(&mut File::create(&selected.path).unwrap());
         fs::write(moved.join("cover.png"), DEFAULT_IMAGE).unwrap();
-        assert!(!manager.is_loaded(&selected));
+        assert!(manager.cached_result(&selected).is_none());
         assert!(manager.cached(&selected).is_none());
         let recovered = manager.load(&selected).unwrap();
         assert_eq!(fs::read(file_path(recovered.uri())).unwrap(), DEFAULT_IMAGE);
@@ -1701,7 +1687,7 @@ pub(crate) mod tests {
         selected.path = second.join("unprobeable.wav");
         fs::write(&selected.path, b"not audio").unwrap();
         assert!(!original_identity.matches(&selected));
-        assert!(!manager.is_loaded(&selected));
+        assert!(manager.cached_result(&selected).is_none());
         assert!(manager.cached(&selected).is_none());
         let new = manager.load(&selected).unwrap();
         assert_ne!(new.uri(), old.uri());
@@ -1740,7 +1726,7 @@ pub(crate) mod tests {
                 })
             });
             loading.recv().unwrap();
-            assert!(!manager.is_loaded(&relocated));
+            assert!(manager.cached_result(&relocated).is_none());
             assert!(manager.cached(&relocated).is_none());
             let new = scope.spawn(|| manager.load(&relocated).unwrap());
             release.send(()).unwrap();
@@ -1803,11 +1789,11 @@ pub(crate) mod tests {
         let worker = std::thread::spawn(move || {
             let mut selected = track(source);
             let direct = result_uri(manager.load(&selected));
-            assert!(manager.is_loaded(&selected));
+            assert_eq!(manager.cached_result(&selected), Some(None));
             selected.id = 2;
             selected.path = alias;
             let linked = result_uri(manager.load(&selected));
-            assert!(manager.is_loaded(&selected));
+            assert_eq!(manager.cached_result(&selected), Some(None));
             let report = manager.maintain(Duration::ZERO, true).unwrap();
             complete
                 .send((direct, linked, report.removed_files))
@@ -1841,18 +1827,33 @@ pub(crate) mod tests {
                 })
             });
             loading.recv().unwrap();
-            scope.spawn(move || {
-                read.send((manager.cached(selected), manager.is_loaded(selected)))
-                    .unwrap()
-            });
+            scope.spawn(move || read.send(manager.cached_result(selected)).unwrap());
             let observed = reads.recv_timeout(Duration::from_secs(2));
             release.send(()).unwrap();
-            assert_eq!(observed.unwrap(), (None, false));
+            assert_eq!(observed.unwrap(), None);
             loader.join().unwrap();
         });
         let _cleaning = manager.maintenance.write();
-        assert!(manager.is_loaded(&selected));
+        assert_eq!(manager.cached_result(&selected), Some(None));
         assert!(manager.cached(&selected).is_none());
+    }
+
+    /// Hold a real singleflight probe until the test drops its release sender.
+    pub(crate) fn block_probe(
+        manager: Arc<ArtworkManager>,
+        selected: Track,
+    ) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+        let (started, entered) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _ = manager.load_with(&selected, || {
+                started.send(()).unwrap();
+                let _ = released.recv();
+                manager.source_uri(&selected.path, manager.max_image_bytes)
+            });
+        });
+        entered.recv_timeout(Duration::from_secs(5)).unwrap();
+        (release, worker)
     }
 
     #[test]
@@ -1905,18 +1906,19 @@ pub(crate) mod tests {
         let mut held = Vec::new();
         for id in 1..=MAX_ARTWORK_ENTRIES + 2 {
             selected.id = id as i64;
-            held.push(manager.load(&selected).unwrap());
+            drop(manager.load(&selected).unwrap());
+            held.push(manager.cached_result(&selected).unwrap().unwrap());
         }
         selected.id = 1;
         assert_eq!(manager.cached(&selected), Some(held[0].clone()));
-        assert!(manager.is_loaded(&selected));
+        assert!(manager.cached_result(&selected).is_some());
         drop(held);
         selected.id = 1000;
         manager.load(&selected);
         selected.id = 1;
-        assert!(!manager.is_loaded(&selected));
+        assert!(manager.cached_result(&selected).is_none());
         selected.id = (MAX_ARTWORK_ENTRIES + 2) as i64;
-        assert!(manager.is_loaded(&selected));
+        assert!(manager.cached_result(&selected).is_some());
     }
 
     #[test]
@@ -1978,7 +1980,7 @@ pub(crate) mod tests {
             (1, DEFAULT_IMAGE.len() as u64)
         );
         assert!(!protected.exists());
-        assert!(!manager.is_loaded(&selected));
+        assert!(manager.cached_result(&selected).is_none());
         let reloaded = manager.load(&selected).unwrap();
         assert_eq!(file_path(reloaded.uri()), protected);
         assert_eq!(fs::read(protected).unwrap(), DEFAULT_IMAGE);
@@ -2119,7 +2121,7 @@ pub(crate) mod tests {
                 .load_with(&missing, || panic!("cached failure reprobed"))
                 .is_none()
         );
-        assert!(manager.is_loaded(&missing));
+        assert_eq!(manager.cached_result(&missing), Some(None));
         assert_eq!(manager.maintain(Duration::ZERO, false).unwrap().files, 0);
         fs::create_dir_all(directory.path().join("artwork")).unwrap();
         fs::write(directory.path().join("artwork/cache"), b"blocked").unwrap();
@@ -2128,6 +2130,6 @@ pub(crate) mod tests {
         fs::write(&blocked, b"not a directory").unwrap();
         let unavailable = ArtworkManager::new(&blocked);
         assert_eq!(unavailable.load(&missing), None);
-        assert!(unavailable.is_loaded(&missing));
+        assert_eq!(unavailable.cached_result(&missing), Some(None));
     }
 }

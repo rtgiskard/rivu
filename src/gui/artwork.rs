@@ -857,50 +857,27 @@ impl ImageCache for ArtworkImage {
     }
 }
 
-/// One executor load plus the latest requested identity, never a task per render.
+/// One physical executor load; the consumer owns the latest demand.
 #[derive(Default)]
 pub(super) struct ArtworkLoader {
     active: Option<ArtworkIdentity>,
-    pending: Option<Track>,
 }
 
 impl ArtworkLoader {
-    pub(super) fn prepare(&mut self, track: Option<&Track>) -> Option<Track> {
-        let Some(track) = track else {
-            self.pending = None;
-            return None;
-        };
-        if let Some(active) = &self.active {
-            if active.matches(track) {
-                self.pending = None;
-            } else if !self.pending.as_ref().is_some_and(|pending| {
-                pending.id == track.id
-                    && pending.fingerprint == track.fingerprint
-                    && pending.path == track.path
-            }) {
-                self.pending = Some(track.clone());
-            }
+    pub(super) fn prepare(&mut self, track: &Track) -> Option<Track> {
+        if self.active.is_some() {
             return None;
         }
         self.active = Some(ArtworkIdentity::for_track(track));
         Some(track.clone())
     }
 
-    pub(super) fn finish(
-        &mut self,
-        identity: &ArtworkIdentity,
-        current: Option<&Track>,
-    ) -> Option<Track> {
-        debug_assert_eq!(self.active.as_ref(), Some(identity));
-        self.active = None;
-        let pending = self.pending.take()?;
-        let current = current?;
-        let identity = ArtworkIdentity::for_track(&pending);
-        if !identity.matches(current) {
-            return None;
+    pub(super) fn finish(&mut self, identity: &ArtworkIdentity) -> bool {
+        if self.active.as_ref() != Some(identity) {
+            return false;
         }
-        self.active = Some(identity);
-        Some(pending)
+        self.active = None;
+        true
     }
 }
 
@@ -2816,57 +2793,24 @@ mod tests {
     }
 
     #[test]
-    fn rapid_selection_keeps_only_the_latest_pending_identity() {
+    fn physical_slot_retires_only_matching_completion_before_latest_demand() {
         let mut loader = ArtworkLoader::default();
         let first = track(1, "original");
         let skipped = track(2, "original");
-        let latest = track(1, "replacement");
-        assert!(loader.prepare(Some(&first)).is_some());
+        let mut latest = first.clone();
+        latest.path = "/moved/latest.wav".into();
         let active = ArtworkIdentity::for_track(&first);
-        assert!(loader.prepare(Some(&skipped)).is_none());
-        assert!(loader.prepare(Some(&latest)).is_none());
-        assert!(loader.prepare(Some(&latest)).is_none());
-        assert!(!active.matches(&latest));
-        let next = loader.finish(&active, Some(&latest)).unwrap();
-        assert_eq!(next.id, latest.id);
-        assert_eq!(next.fingerprint, latest.fingerprint);
-        assert!(loader.pending.is_none());
-    }
-
-    #[test]
-    fn relocation_keeps_latest_path_pending_and_rejects_old_completion_identity() {
-        let mut loader = ArtworkLoader::default();
-        let first = track(1, "original");
-        let mut skipped = first.clone();
-        skipped.path = "/moved/first.wav".into();
-        let mut latest = skipped.clone();
-        latest.path = "/moved/second.wav".into();
-        assert!(loader.prepare(Some(&first)).is_some());
-        let active = ArtworkIdentity::for_track(&first);
-        assert!(loader.prepare(Some(&skipped)).is_none());
-        assert!(loader.prepare(Some(&latest)).is_none());
-        assert!(!active.matches(&latest));
-        let next = loader.finish(&active, Some(&latest)).unwrap();
-        assert_eq!(next.path, latest.path);
-        assert!(loader.pending.is_none());
-    }
-
-    #[test]
-    fn returning_to_active_or_clearing_selection_drops_pending_work() {
-        let first = track(1, "original");
-        let other = track(2, "original");
-        for current in [Some(&first), None] {
-            let mut loader = ArtworkLoader::default();
-            loader.prepare(Some(&first));
-            loader.prepare(Some(&other));
-            loader.prepare(current);
-            assert!(
-                loader
-                    .finish(&ArtworkIdentity::for_track(&first), current)
-                    .is_none()
-            );
-            assert!(loader.active.is_none());
-            assert!(loader.pending.is_none());
-        }
+        let replacement = ArtworkIdentity::for_track(&latest);
+        assert!(loader.prepare(&first).is_some());
+        assert!(loader.prepare(&skipped).is_none());
+        assert!(loader.prepare(&latest).is_none());
+        assert!(!loader.finish(&replacement));
+        assert!(loader.prepare(&latest).is_none());
+        assert!(loader.finish(&active));
+        assert_eq!(loader.prepare(&latest).unwrap().path, latest.path);
+        assert!(!loader.finish(&active));
+        assert!(loader.prepare(&first).is_none());
+        assert!(loader.finish(&replacement));
+        assert!(loader.active.is_none());
     }
 }

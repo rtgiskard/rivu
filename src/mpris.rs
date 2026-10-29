@@ -269,6 +269,15 @@ impl Mpris {
                     match event {
                         PublisherEvent::Revision => {
                             let current = handle.mpris_snapshot();
+                            // Selection changes release the old metadata lease even
+                            // while another physical load still occupies the slot.
+                            if !loaded_artwork.as_ref().is_some_and(|identity| {
+                                current
+                                    .current_track()
+                                    .is_some_and(|track| identity.matches(track))
+                            }) {
+                                loaded_artwork = None;
+                            }
                             let current_can_raise = app.can_raise();
                             if !publish_until_cancelled(
                                 &mut cancelled,
@@ -1232,7 +1241,11 @@ mod tests {
         };
         let load = load_artwork(&runtime.handle, &state, &artwork, &None).unwrap();
         async_io::block_on(load.retire());
-        assert!(!artwork.is_loaded(state.current_track().unwrap()));
+        assert!(
+            artwork
+                .cached_result(state.current_track().unwrap())
+                .is_none()
+        );
         assert!(artwork.cached_default().is_none());
         runtime.control.request_shutdown().unwrap();
         runtime.join().unwrap();
@@ -1475,6 +1488,223 @@ mod tests {
     }
 
     #[test]
+    fn reselected_artwork_reloads_after_eviction_with_clear_or_another_load_in_flight() {
+        use futures::StreamExt;
+
+        async fn next_property(
+            signals: &mut (impl futures::Stream<Item = zbus::Message> + Unpin),
+            property: &str,
+        ) -> OwnedValue {
+            rivu_protocol::transport::timeout(Duration::from_secs(5), async {
+                loop {
+                    let signal = signals.next().await.expect("properties signal stream");
+                    let (interface, mut changed, _): (String, Metadata, Vec<String>) =
+                        signal.body().deserialize().unwrap();
+                    if interface == PLAYER_INTERFACE
+                        && let Some(value) = changed.remove(property)
+                    {
+                        return value;
+                    }
+                }
+            })
+            .await
+            .expect("consumer receives property changes without polling")
+        }
+
+        async fn next_metadata(
+            signals: &mut (impl futures::Stream<Item = zbus::Message> + Unpin),
+        ) -> Metadata {
+            Metadata::try_from(next_property(signals, "Metadata").await).unwrap()
+        }
+
+        let bus = TestBus::start();
+        let (directory, mut runtime) = runtime_fixture();
+        let path = directory.path().join("selected.wav");
+        let mut writer = hound::WavWriter::create(
+            &path,
+            hound::WavSpec {
+                channels: 1,
+                sample_rate: 8_000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            },
+        )
+        .unwrap();
+        writer.write_sample(0_i16).unwrap();
+        writer.finalize().unwrap();
+        let other_path = directory.path().join("other.wav");
+        std::fs::copy(&path, &other_path).unwrap();
+        // Distinct from the default export, so a fallback cannot satisfy the test.
+        let mut cover = crate::artwork::DEFAULT_IMAGE.to_vec();
+        cover.push(1);
+        std::fs::write(directory.path().join("cover.png"), cover).unwrap();
+        let ack = async_io::block_on(runtime.handle.request_ack(Command::QueueExternalPaths {
+            paths: vec![path, other_path],
+            index: None,
+            expected_revision: None,
+        }));
+        assert!(ack.is_success(), "{:?}", ack.error);
+        async_io::block_on(
+            runtime
+                .handle
+                .wait_task(rivu_protocol::model::TaskTarget::Scan {
+                    id: ack.scan_id.unwrap(),
+                }),
+        )
+        .unwrap();
+        // Navigation while stopped selects metadata without opening audio output.
+        assert!(async_io::block_on(runtime.handle.navigate(Navigation::Next)).is_success());
+        let selected = runtime.handle.mpris_snapshot();
+        assert_eq!(selected.playback.status, PlaybackStatus::Stopped);
+        let selected_track = selected.current_track().unwrap();
+        assert!(async_io::block_on(runtime.handle.navigate(Navigation::Next)).is_success());
+        let other = runtime
+            .handle
+            .mpris_snapshot()
+            .current_track()
+            .unwrap()
+            .clone();
+        assert_ne!(other.id, selected_track.id);
+        assert!(async_io::block_on(runtime.handle.navigate(Navigation::Previous)).is_success());
+        let artwork = Arc::new(ArtworkManager::new(directory.path()));
+        let app = AppHandle::new(&runtime, false);
+        let connection = bus.serve_root(app.clone());
+        let client = bus.connect();
+        async_io::block_on(async {
+            let proxy = zbus::Proxy::new(
+                &client,
+                BUS_NAME,
+                OBJECT_PATH,
+                "org.freedesktop.DBus.Properties",
+            )
+            .await
+            .unwrap();
+            let mut signals = proxy.receive_signal("PropertiesChanged").await.unwrap();
+            let publisher = Mpris::start(
+                connection,
+                runtime.handle.clone(),
+                app,
+                Arc::clone(&artwork),
+            );
+            let first = next_metadata(&mut signals).await;
+            let original_uri = <&str>::try_from(&first["mpris:artUrl"]).unwrap().to_owned();
+            assert_eq!(original_uri, artwork.cached(selected_track).unwrap().uri());
+            assert_ne!(original_uri, artwork.export_default().unwrap().uri());
+
+            for (round, clear) in [false, true].into_iter().enumerate() {
+                let blocked = if clear {
+                    assert!(
+                        runtime
+                            .handle
+                            .request_ack(Command::ClearQueue)
+                            .await
+                            .is_success()
+                    );
+                    assert_eq!(next_metadata(&mut signals).await, metadata_map(None));
+                    assert!(runtime.handle.mpris_snapshot().current_track().is_none());
+                    None
+                } else {
+                    let blocked =
+                        crate::artwork::tests::block_probe(Arc::clone(&artwork), other.clone());
+                    assert!(runtime.handle.navigate(Navigation::Next).await.is_success());
+                    let changed = next_metadata(&mut signals).await;
+                    assert_eq!(
+                        changed["mpris:trackid"],
+                        metadata_map(
+                            TrackMetadata::from_snapshot(
+                                &runtime.handle.mpris_snapshot(),
+                                &artwork
+                            )
+                            .as_ref()
+                        )["mpris:trackid"]
+                    );
+                    // A later transport revision proves the publisher has entered
+                    // the next iteration with B's physical load occupying its slot.
+                    assert!(
+                        runtime
+                            .handle
+                            .request_ack(Command::Volume { value: 0.25 })
+                            .await
+                            .is_success()
+                    );
+                    assert_eq!(
+                        f64::try_from(next_property(&mut signals, "Volume").await).unwrap(),
+                        0.25
+                    );
+                    Some(blocked)
+                };
+                // The consumer has observed selection replacement and released A.
+                for id in 1..=65 {
+                    let mut pressure = track(-((round * 100 + id) as i64));
+                    pressure.path = directory.path().join("pressure").join(format!("{id}.wav"));
+                    assert!(artwork.load(&pressure).is_none());
+                }
+                assert!(artwork.cached_result(selected_track).is_none());
+
+                if clear {
+                    assert!(
+                        runtime
+                            .handle
+                            .request_ack(Command::Enqueue {
+                                track_ids: vec![selected_track.id],
+                            })
+                            .await
+                            .is_success()
+                    );
+                    assert!(runtime.handle.navigate(Navigation::Next).await.is_success());
+                } else {
+                    assert!(
+                        runtime
+                            .handle
+                            .navigate(Navigation::Previous)
+                            .await
+                            .is_success()
+                    );
+                    let waiting = next_metadata(&mut signals).await;
+                    assert_eq!(
+                        <&str>::try_from(&waiting["mpris:artUrl"]).unwrap(),
+                        artwork.cached_default().unwrap().uri()
+                    );
+                    assert!(artwork.cached_result(selected_track).is_none());
+                }
+                let reselected = runtime.handle.mpris_snapshot();
+                assert!(
+                    ArtworkIdentity::for_track(selected_track)
+                        .matches(reselected.current_track().unwrap())
+                );
+                assert_eq!(reselected.playback.status, PlaybackStatus::Stopped);
+                if let Some((release, worker)) = blocked {
+                    drop(release);
+                    worker.join().unwrap();
+                }
+                // Require A's real cover notification after B physically retires,
+                // not just populated fallback metadata or an already-warm lookup.
+                loop {
+                    let metadata = next_metadata(&mut signals).await;
+                    if metadata
+                        .get("mpris:artUrl")
+                        .and_then(|value| <&str>::try_from(value).ok())
+                        == Some(original_uri.as_str())
+                    {
+                        assert_eq!(
+                            metadata["mpris:trackid"],
+                            metadata_map(
+                                TrackMetadata::from_snapshot(&reselected, &artwork).as_ref()
+                            )["mpris:trackid"]
+                        );
+                        break;
+                    }
+                }
+                assert!(artwork.cached_result(selected_track).is_some());
+            }
+            publisher.retire().await;
+            client.close().await.unwrap();
+        });
+        runtime.control.request_shutdown().unwrap();
+        runtime.join().unwrap();
+    }
+
+    #[test]
     fn late_artwork_completion_cannot_replace_the_selected_occurrence_metadata() {
         let bus = TestBus::start();
         let (directory, mut runtime) = runtime_fixture();
@@ -1563,7 +1793,7 @@ mod tests {
                 .art_url,
             artwork.cached(current)
         );
-        assert!(!artwork.is_loaded(current));
+        assert!(artwork.cached_result(current).is_none());
         assert!(!directory.path().join("artwork").exists());
         assert!(
             !metadata_map(TrackMetadata::from_snapshot(&state, &artwork).as_ref())
@@ -1577,12 +1807,16 @@ mod tests {
             Some(default)
         );
         artwork.load(current);
-        assert!(artwork.is_loaded(current));
+        assert!(artwork.cached_result(current).is_some());
         let mut replacement = current.clone();
         replacement.fingerprint = Some("replacement".into());
         state.current_track = Some(Arc::new(replacement));
         assert!(TrackMetadata::from_snapshot(&state, &artwork).is_some());
-        assert!(!artwork.is_loaded(state.current_track().unwrap()));
+        assert!(
+            artwork
+                .cached_result(state.current_track().unwrap())
+                .is_none()
+        );
     }
 
     #[test]
