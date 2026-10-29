@@ -1,8 +1,5 @@
 //! Fixed-scale, analysis-backed stereo plots. GPU field storage is independent of panel size.
-use crate::{
-    config::{AudioVisualizerOptions, AudioVisualizerStyle, Config},
-    i18n::Localizer,
-};
+use crate::{VisualLabels, VisualParameters};
 use gpui::{
     AnyElement, App, Bounds, GpuFieldParams, GpuLimits, GpuPalette, GpuSchema, GpuSource, GpuState,
     GpuValueMapping, Hsla, Pixels, Point, SharedString, TextAlign, Window, canvas, div, fill,
@@ -11,6 +8,7 @@ use gpui::{
 use rivu_audio::analysis::{
     AnalysisFrame, AnalysisSettings, DENSITY_SIDE, DensitySnapshot, SpatialBin,
 };
+use rivu_format::config::{AudioVisualizerOptions, AudioVisualizerStyle};
 use std::{cell::RefCell, rc::Rc, sync::Arc, time::Duration};
 
 const SPATIAL_WIDTH: usize = 256;
@@ -44,12 +42,13 @@ impl SpatialMapping {
 }
 
 #[derive(Clone)]
-pub(super) struct AnalysisVisualizer {
-    data: Rc<RefCell<PlotData>>,
+pub(super) struct StereoRenderer {
+    data: Rc<RefCell<StereoState>>,
 }
 
-struct PlotData {
+struct StereoState {
     labels: Option<[SharedString; 4]>,
+    labels_source: Option<Arc<VisualLabels>>,
     style: AudioVisualizerStyle,
     visible: bool,
     background: u32,
@@ -86,10 +85,10 @@ pub(super) fn analysis_style(style: AudioVisualizerStyle) -> bool {
     )
 }
 
-impl AnalysisVisualizer {
+impl StereoRenderer {
     pub(super) fn new(style: AudioVisualizerStyle) -> Self {
         assert!(analysis_style(style));
-        let config = Config::default();
+        let config = VisualParameters::default();
         let palette = field_palette(
             style,
             config.audio_visualizer_primary_color.rgb(),
@@ -107,8 +106,9 @@ impl AnalysisVisualizer {
             GpuState::empty(GpuSchema::Field, limits)
         });
         Self {
-            data: Rc::new(RefCell::new(PlotData {
+            data: Rc::new(RefCell::new(StereoState {
                 labels: None,
+                labels_source: None,
                 style,
                 visible: true,
                 background: config.visual_background.rgb(),
@@ -116,7 +116,7 @@ impl AnalysisVisualizer {
                 secondary: config.audio_visualizer_secondary_color.rgb(),
                 palette,
                 db_range: config.audio_visualizer_db_range(),
-                settings: AnalysisSettings::from(&config),
+                settings: config.analysis_settings(),
                 generation: None,
                 sample_rate: 0,
                 sample_time: None,
@@ -137,9 +137,9 @@ impl AnalysisVisualizer {
         }
     }
 
-    pub(super) fn configure(&self, config: &Config) -> bool {
+    pub(super) fn configure(&self, config: &VisualParameters) -> bool {
         let mut data = self.data.borrow_mut();
-        let settings = AnalysisSettings::from(config);
+        let settings = config.analysis_settings();
         let reset = settings.fft_size != data.settings.fft_size
             || settings.window != data.settings.window
             || settings.signal != data.settings.signal;
@@ -193,20 +193,29 @@ impl AnalysisVisualizer {
 
     pub(super) fn view(
         &self,
-        i18n: &Arc<Localizer>,
+        i18n: &Arc<VisualLabels>,
         panel_id: u64,
         options: AudioVisualizerOptions,
     ) -> AnyElement {
         let data = Rc::clone(&self.data);
-        self.data.borrow_mut().labels.get_or_insert_with(|| {
-            [
-                "visual-density-title",
-                "visual-spatial-title",
-                "visual-mid",
-                "visual-side",
-            ]
-            .map(|id| i18n.text(id).to_owned().into())
-        });
+        {
+            let mut data = self.data.borrow_mut();
+            if data
+                .labels_source
+                .as_ref()
+                .is_none_or(|labels| !Arc::ptr_eq(labels, i18n))
+            {
+                data.labels = Some([
+                    i18n.density_title.clone(),
+                    i18n.spatial_title.clone(),
+                    i18n.mid.clone(),
+                    i18n.side.clone(),
+                ]);
+                data.labels_source = Some(Arc::clone(i18n));
+                data.range_label = "".into();
+                data.readout = "".into();
+            }
+        }
         let i18n = Arc::clone(i18n);
         div()
             .id(("analysis-visualizer", panel_id))
@@ -227,7 +236,7 @@ impl AnalysisVisualizer {
     }
 }
 
-impl PlotData {
+impl StereoState {
     fn retire(&mut self) {
         self.density = DensitySnapshot::default();
         self.field = Vec::new();
@@ -441,7 +450,7 @@ impl PlotData {
 
     fn paint(
         &mut self,
-        i18n: &Localizer,
+        i18n: &VisualLabels,
         bounds: Bounds<Pixels>,
         options: AudioVisualizerOptions,
         window: &mut Window,
@@ -453,7 +462,7 @@ impl PlotData {
         if width < 24.0 || height < 24.0 || !self.visible {
             return;
         }
-        let labels = options.labels && width >= 250.0 && height >= 155.0;
+        let labels = options.label && width >= 250.0 && height >= 155.0;
         let density = self.style == AudioVisualizerStyle::StereoDensity;
         let left = if labels { 49.0 } else { 6.0 };
         let top = if labels { 25.0 } else { 6.0 };
@@ -486,7 +495,7 @@ impl PlotData {
         {
             self.publication_failed("paint", &error);
         }
-        if options.reference_lines {
+        if options.grid {
             for fraction in [0.0, 0.25, 0.5, 0.75, 1.0] {
                 let alpha = if fraction == 0.5 { 0.26 } else { 0.10 };
                 window.paint_quad(fill(
@@ -513,7 +522,7 @@ impl PlotData {
                 }
             }
         }
-        if !density && (options.reference_lines || labels) {
+        if !density && (options.grid || labels) {
             let high = high_frequency(if self.sample_rate == 0 {
                 48_000
             } else {
@@ -530,7 +539,7 @@ impl PlotData {
                 }
                 let fraction = 1.0 - (hz / 20.0).ln() / log_span;
                 let y = plot.top() + plot.size.height * fraction;
-                if options.reference_lines {
+                if options.grid {
                     window.paint_quad(fill(
                         Bounds::new(point(plot.left(), y), size(plot.size.width, px(1.0))),
                         rgb(0xb1bbc5).alpha(0.10),
@@ -552,16 +561,7 @@ impl PlotData {
             return;
         }
         if self.range_label.is_empty() {
-            self.range_label = i18n
-                .format(
-                    if density {
-                        "visual-density-range"
-                    } else {
-                        "visual-power-range"
-                    },
-                    &[("range", format!("{:.0}", self.db_range).into())],
-                )
-                .into();
+            self.range_label = i18n.range(density, self.db_range).into();
         }
         let title = self.labels.as_ref().expect("localized plot labels")
             [if density { 0 } else { 1 }]
@@ -737,7 +737,7 @@ fn decay_spatial(source: &[f32], target: &mut [f32], elapsed: f32) {
     }
 }
 
-fn stereo_readout(i18n: &Localizer, metrics: [Option<f32>; 3]) -> String {
+fn stereo_readout(i18n: &VisualLabels, metrics: [Option<f32>; 3]) -> String {
     let value = |value: Option<f32>| value.filter(|value| value.is_finite());
     let correlation = value(metrics[0])
         .map(|v| format!("{:+.2}", v.clamp(-1.0, 1.0)))
@@ -751,14 +751,7 @@ fn stereo_readout(i18n: &Localizer, metrics: [Option<f32>; 3]) -> String {
     let side = value(metrics[2])
         .map(|v| format!("{:.0}%", v.clamp(0.0, 1.0) * 100.0))
         .unwrap_or_else(|| "—".into());
-    i18n.format(
-        "visual-stereo-readout",
-        &[
-            ("correlation", correlation.into()),
-            ("balance", balance.into()),
-            ("side", side.into()),
-        ],
-    )
+    i18n.stereo_readout(&correlation, &balance, &side)
 }
 
 fn frequency_label(hz: f32) -> String {
@@ -876,10 +869,17 @@ fn label(
 }
 
 #[cfg(test)]
+impl StereoRenderer {
+    fn configure_config(&self, config: &rivu_format::config::Config) -> bool {
+        self.configure(&crate::VisualParameters::from(config))
+    }
+}
+#[cfg(test)]
 mod tests {
     use super::*;
     use gpui::GpuFrame;
     use rivu_audio::analysis::{SpatialBin, VisualizerDemand, VisualizerFrame};
+    use rivu_format::config::Config;
 
     fn frame(style: AudioVisualizerStyle) -> AnalysisFrame {
         AnalysisFrame {
@@ -917,9 +917,9 @@ mod tests {
         frame.visualizer.density = cells.into();
     }
 
-    fn plot(style: AudioVisualizerStyle) -> AnalysisVisualizer {
-        let plot = AnalysisVisualizer::new(style);
-        plot.configure(&Config::default());
+    fn plot(style: AudioVisualizerStyle) -> StereoRenderer {
+        let plot = StereoRenderer::new(style);
+        plot.configure_config(&Config::default());
         plot
     }
     #[test]
@@ -969,7 +969,7 @@ mod tests {
                 audio_visualizer_secondary_color: "#ff7700".parse().unwrap(),
                 ..Config::default()
             };
-            plot.configure(&config);
+            plot.configure_config(&config);
             plot.update(&frame(style));
             let first = publication(&plot).unwrap();
             let gpui::GpuContent::Field {
@@ -997,7 +997,7 @@ mod tests {
             assert_eq!(first.palette().colors()[0][3], 0.0);
             assert!(first.palette().colors()[128][0] > first.palette().colors()[128][2]);
             config.audio_visualizer_db_range = Some(50.0);
-            plot.configure(&config);
+            plot.configure_config(&config);
             let remapped = publication(&plot).unwrap();
             assert!(!Arc::ptr_eq(&first, &remapped));
             assert!(Arc::ptr_eq(first.palette(), remapped.palette()));
@@ -1016,16 +1016,16 @@ mod tests {
             );
             config.audio_visualizer_primary_color = "#0033ff".parse().unwrap();
             config.audio_visualizer_secondary_color = "#0077ff".parse().unwrap();
-            plot.configure(&config);
+            plot.configure_config(&config);
             let recolored = publication(&plot).unwrap();
             assert!(!Arc::ptr_eq(remapped.palette(), recolored.palette()));
             assert!(recolored.palette().colors()[128][2] > recolored.palette().colors()[128][0]);
-            plot.configure(&config);
+            plot.configure_config(&config);
             assert!(Arc::ptr_eq(&recolored, &publication(&plot).unwrap()));
         }
     }
 
-    fn publication(plot: &AnalysisVisualizer) -> Option<Arc<GpuFrame>> {
+    fn publication(plot: &StereoRenderer) -> Option<Arc<GpuFrame>> {
         plot.data.borrow().gpu.as_ref().unwrap().snapshot()
     }
 
@@ -1160,7 +1160,7 @@ mod tests {
         frame.visualizer.demand.spatial_spectrum = true;
         plot.update(&frame);
         assert!(publication(&plot).is_some());
-        plot.configure(&Config {
+        plot.configure_config(&Config {
             audio_visualizer_style: AudioVisualizerStyle::SpatialSpectrum,
             analysis_fft_size: 16384,
             ..Config::default()
@@ -1173,7 +1173,7 @@ mod tests {
         plot.update(&frame);
         assert!(plot.data.borrow().field.is_empty());
         plot.set_visible(true);
-        plot.configure(&Config {
+        plot.configure_config(&Config {
             audio_visualizer_style: AudioVisualizerStyle::StereoDensity,
             ..Config::default()
         });
@@ -1199,13 +1199,14 @@ mod tests {
             let mut input = frame(style);
             plot.update(&input);
             let expected = plot.data.borrow().field().to_vec();
-            plot.configure(&Config {
-                visualization_signal: crate::config::VisualizationSignal::Before,
+            plot.configure_config(&Config {
+                visualization_signal: rivu_format::config::VisualizationSignal::Before,
                 ..Config::default()
             });
             plot.update(&input);
             assert!(plot.data.borrow().field().is_empty());
-            input.settings.as_mut().unwrap().signal = crate::config::VisualizationSignal::Before;
+            input.settings.as_mut().unwrap().signal =
+                rivu_format::config::VisualizationSignal::Before;
             plot.update(&input);
             assert_eq!(plot.data.borrow().field(), expected);
         }
@@ -1350,7 +1351,7 @@ mod tests {
             plot.update(&frame);
             assert!(publication(&plot).is_none());
         }
-        plot.configure(&Config::default());
+        plot.configure_config(&Config::default());
         assert!(publication(&plot).is_some());
         assert!(!plot.data.borrow().gpu_error_reported);
         assert!(!plot.data.borrow().publication_pending);
@@ -1446,7 +1447,7 @@ mod tests {
             assert!(plot.data.borrow().density.is_empty());
             assert_eq!(plot.data.borrow().spatial_next.capacity(), 0);
             assert_eq!(plot.data.borrow().spatial_mapping.rows.capacity(), 0);
-            plot.configure(&Config {
+            plot.configure_config(&Config {
                 audio_visualizer_style: style,
                 audio_visualizer_db_range: Some(50.0),
                 ..Config::default()
@@ -1483,8 +1484,8 @@ mod tests {
             audio_visualizer_style: AudioVisualizerStyle::FractalFlow,
             ..Config::default()
         };
-        assert!(!density.configure(&config));
-        assert!(!spatial.configure(&config));
+        assert!(!density.configure_config(&config));
+        assert!(!spatial.configure_config(&config));
         density.set_visible(false);
         assert!(density_slot.snapshot().is_some());
         assert_eq!(density.data.borrow().field.capacity(), 0);

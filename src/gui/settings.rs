@@ -144,6 +144,8 @@ enum Field {
     WaveformRmsGain,
     WaveformPeakGain,
     WaveformPeakGamma,
+    OscilloscopeTimeSpan,
+    OscilloscopeGain,
     AlbumArtworkPeriod,
     AlbumArtworkFps,
 }
@@ -173,8 +175,21 @@ impl Field {
             | Self::WaveformRmsGain
             | Self::WaveformPeakGain
             | Self::WaveformPeakGamma
+            | Self::OscilloscopeTimeSpan
+            | Self::OscilloscopeGain
             | Self::AlbumArtworkPeriod => Some(2),
             _ => None,
+        }
+    }
+
+    fn enabled(self, config: &Config) -> bool {
+        match self {
+            Self::AlbumArtworkPeriod => config.album_artwork_mode == AlbumArtworkMode::Rotating,
+            Self::SpectrumBars | Self::SpectrumBarWidth | Self::SpectrumGap => {
+                config.spectrum_style != SpectrumStyle::Solid
+            }
+            Self::SpectrumHold | Self::SpectrumGravity => config.spectrum_peaks,
+            _ => true,
         }
     }
 
@@ -226,6 +241,8 @@ impl Field {
             Self::WaveformRmsGain => "settings-rms-gain",
             Self::WaveformPeakGain => "settings-peak-gain",
             Self::WaveformPeakGamma => "settings-peak-gamma",
+            Self::OscilloscopeTimeSpan => "settings-oscilloscope-time-span-ms",
+            Self::OscilloscopeGain => "settings-oscilloscope-gain-x",
             Self::AlbumArtworkPeriod => "settings-seconds-per-circle",
             Self::AlbumArtworkFps => "settings-animation-rate-fps",
         }
@@ -237,17 +254,15 @@ impl Field {
 
     fn hint(self, settings: &Settings) -> SharedString {
         match self {
-            Self::AlbumArtworkPeriod
-                if settings.model.draft.album_artwork_mode == AlbumArtworkMode::Static =>
-            {
+            Self::AlbumArtworkPeriod if !self.enabled(&settings.model.draft) => {
                 settings.tr("settings-artwork-recovery")
             }
             Self::SpectrumBars | Self::SpectrumBarWidth | Self::SpectrumGap
-                if settings.model.draft.spectrum_style == SpectrumStyle::Solid =>
+                if !self.enabled(&settings.model.draft) =>
             {
                 settings.tr("settings-spectrum-style-recovery")
             }
-            Self::SpectrumHold | Self::SpectrumGravity if !settings.model.draft.spectrum_peaks => {
+            Self::SpectrumHold | Self::SpectrumGravity if !self.enabled(&settings.model.draft) => {
                 settings.tr("settings-spectrum-peaks-recovery")
             }
             Self::AlbumArtworkPeriod => settings.tr("settings-artwork-period-hint"),
@@ -307,6 +322,8 @@ impl Field {
             Self::Glow => settings.tr("settings-waveform-glow-hint"),
             Self::WaveformRmsGain => settings.tr("settings-waveform-rms-hint"),
             Self::WaveformPeakGamma => settings.tr("settings-waveform-gamma-hint"),
+            Self::OscilloscopeTimeSpan => settings.tr("settings-oscilloscope-time-span-hint"),
+            Self::OscilloscopeGain => settings.tr("settings-oscilloscope-gain-hint"),
         }
     }
 
@@ -460,13 +477,78 @@ enum SettingsPage {
     Interface,
     Visualizations,
 }
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum VisualPage {
     Common,
+    Waveform,
     Spectrum,
     Spectrogram,
-    AudioVisualizer,
-    Waveform,
+    BarsRings,
+    StereoDensity,
+    SpatialSpectrum,
+    Fractal,
+    Oscilloscope,
+    Other,
+}
+
+impl VisualPage {
+    const ALL: [Self; 10] = [
+        Self::Common,
+        Self::Waveform,
+        Self::Spectrum,
+        Self::Spectrogram,
+        Self::BarsRings,
+        Self::StereoDensity,
+        Self::SpatialSpectrum,
+        Self::Fractal,
+        Self::Oscilloscope,
+        Self::Other,
+    ];
+
+    fn for_style(style: AudioVisualizerStyle) -> Self {
+        match style {
+            AudioVisualizerStyle::Waveform => Self::Waveform,
+            AudioVisualizerStyle::Spectrum => Self::Spectrum,
+            AudioVisualizerStyle::Spectrogram => Self::Spectrogram,
+            AudioVisualizerStyle::Bars
+            | AudioVisualizerStyle::Rings
+            | AudioVisualizerStyle::BarsRings => Self::BarsRings,
+            AudioVisualizerStyle::StereoDensity => Self::StereoDensity,
+            AudioVisualizerStyle::SpatialSpectrum => Self::SpatialSpectrum,
+            AudioVisualizerStyle::FractalBeams | AudioVisualizerStyle::FractalFlow => Self::Fractal,
+            AudioVisualizerStyle::Oscilloscope => Self::Oscilloscope,
+        }
+    }
+
+    fn label_id(self) -> &'static str {
+        match self {
+            Self::Common => "settings-shared-settings",
+            Self::Waveform => "settings-waveform",
+            Self::Spectrum => "settings-spectrum",
+            Self::Spectrogram => "settings-spectrogram",
+            Self::BarsRings => "settings-bars-rings-family",
+            Self::StereoDensity => "settings-stereo-density",
+            Self::SpatialSpectrum => "settings-spatial-spectrum",
+            Self::Fractal => "settings-fractal-family",
+            Self::Oscilloscope => "settings-oscilloscope",
+            Self::Other => "settings-other",
+        }
+    }
+
+    fn scroll_id(self) -> &'static str {
+        match self {
+            Self::Common => "settings-common-scroll",
+            Self::Waveform => "settings-waveform-scroll",
+            Self::Spectrum => "settings-spectrum-scroll",
+            Self::Spectrogram => "settings-spectrogram-scroll",
+            Self::BarsRings => "settings-bars-rings-scroll",
+            Self::StereoDensity => "settings-stereo-density-scroll",
+            Self::SpatialSpectrum => "settings-spatial-spectrum-scroll",
+            Self::Fractal => "settings-fractal-scroll",
+            Self::Oscilloscope => "settings-oscilloscope-scroll",
+            Self::Other => "settings-other-scroll",
+        }
+    }
 }
 
 struct FontOption {
@@ -488,6 +570,7 @@ enum Measured {
     Device,
     SettingsFont,
     SettingsStyle,
+    AudioVisualizerStyle,
     SettingsFft,
     SettingsLogLevel,
     SettingsWindow,
@@ -776,6 +859,8 @@ impl Settings {
             Field::WaveformRmsGain,
             Field::WaveformPeakGain,
             Field::WaveformPeakGamma,
+            Field::OscilloscopeTimeSpan,
+            Field::OscilloscopeGain,
             Field::AlbumArtworkPeriod,
             Field::AlbumArtworkFps,
         ]
@@ -913,20 +998,18 @@ impl Settings {
     }
 
     fn sync_field_enabled(&self, cx: &mut App) {
-        let solid = self.model.draft.spectrum_style == SpectrumStyle::Solid;
-        for (field, enabled) in [
-            (
-                Field::AlbumArtworkPeriod,
-                self.model.draft.album_artwork_mode == AlbumArtworkMode::Rotating,
-            ),
-            (Field::SpectrumBars, !solid),
-            (Field::SpectrumBarWidth, !solid),
-            (Field::SpectrumGap, !solid),
-            (Field::SpectrumHold, self.model.draft.spectrum_peaks),
-            (Field::SpectrumGravity, self.model.draft.spectrum_peaks),
+        for field in [
+            Field::AlbumArtworkPeriod,
+            Field::SpectrumBars,
+            Field::SpectrumBarWidth,
+            Field::SpectrumGap,
+            Field::SpectrumHold,
+            Field::SpectrumGravity,
         ] {
             if let Some(input) = self.inputs.get(&field) {
-                input.update(cx, |input, cx| input.set_enabled(enabled, cx));
+                input.update(cx, |input, cx| {
+                    input.set_enabled(field.enabled(&self.model.draft), cx)
+                });
             }
         }
     }
@@ -1345,6 +1428,18 @@ impl Settings {
             cx,
         );
         self.set_float(
+            Field::OscilloscopeTimeSpan,
+            Some(self.model.draft.oscilloscope_time_span_ms),
+            unchanged,
+            cx,
+        );
+        self.set_float(
+            Field::OscilloscopeGain,
+            Some(self.model.draft.oscilloscope_gain),
+            unchanged,
+            cx,
+        );
+        self.set_float(
             Field::AlbumArtworkPeriod,
             Some(self.model.draft.album_artwork_period_seconds),
             unchanged,
@@ -1502,6 +1597,16 @@ impl Settings {
         config.waveform_peak_gamma = self.float(
             Field::WaveformPeakGamma,
             self.model.draft.waveform_peak_gamma,
+            cx,
+        )?;
+        config.oscilloscope_time_span_ms = self.float(
+            Field::OscilloscopeTimeSpan,
+            self.model.draft.oscilloscope_time_span_ms,
+            cx,
+        )?;
+        config.oscilloscope_gain = self.float(
+            Field::OscilloscopeGain,
+            self.model.draft.oscilloscope_gain,
             cx,
         )?;
         config.album_artwork_period_seconds = self.float(
@@ -1734,7 +1839,7 @@ impl Settings {
         self.model
             .reset_visualizer(&self.handle.config_snapshot(), panel_id, options);
         self.page = SettingsPage::Visualizations;
-        self.visual_page = VisualPage::AudioVisualizer;
+        self.visual_page = VisualPage::for_style(options.style);
         self.show_session(window, cx);
     }
 
@@ -1913,7 +2018,10 @@ impl Settings {
             }
             SettingChoice::SpectrumStyle(value) => self.model.draft.spectrum_style = value,
             SettingChoice::AudioVisualizerStyle(value) => {
-                self.model.draft.audio_visualizer_style = value
+                self.model.draft.audio_visualizer_style = value;
+                if matches!(self.model.target(), Target::Visualizer(_)) {
+                    self.visual_page = VisualPage::for_style(value);
+                }
             }
             SettingChoice::Palette(value) => self.model.draft.visual_palette = value,
             SettingChoice::Fft(value) => self.model.draft.analysis_fft_size = value,
@@ -1943,7 +2051,7 @@ impl Settings {
                 SettingChoice::LogLevel(_) => Measured::SettingsLogLevel,
                 SettingChoice::Window(_) => Measured::SettingsWindow,
                 SettingChoice::Signal(_) => Measured::SettingsSignal,
-                SettingChoice::AudioVisualizerStyle(_) => Measured::SettingsStyle,
+                SettingChoice::AudioVisualizerStyle(_) => Measured::AudioVisualizerStyle,
                 SettingChoice::Palette(_) => Measured::SettingsStyle,
                 SettingChoice::Device(_) => Measured::Device,
                 SettingChoice::AlbumArtworkStyle(_) => Measured::AlbumArtworkStyle,
@@ -2064,13 +2172,7 @@ impl Settings {
                     .child(self.logging_settings(cx)),
             ),
             SettingsPage::Visualizations => {
-                let id = match self.visual_page {
-                    VisualPage::Common => "settings-common-scroll",
-                    VisualPage::Spectrum => "settings-spectrum-scroll",
-                    VisualPage::Spectrogram => "settings-spectrogram-scroll",
-                    VisualPage::Waveform => "settings-waveform-scroll",
-                    VisualPage::AudioVisualizer => "settings-audio-visualizer-scroll",
-                };
+                let id = self.visual_page.scroll_id();
                 (id, self.visual_settings(cx))
             }
         };
@@ -2472,6 +2574,85 @@ mod tests {
             });
         })
         .unwrap();
+    }
+
+    #[gpui::test]
+    fn disabled_retained_fields_still_validate_global_apply(cx: &mut TestAppContext) {
+        let (_directory, _runtime, settings) = fixture(cx);
+        settings.update(cx, |this, cx| {
+            this.model.draft.album_artwork_mode = AlbumArtworkMode::Static;
+            this.model.draft.spectrum_style = SpectrumStyle::Solid;
+            this.model.draft.spectrum_peaks = false;
+            this.sync_field_enabled(cx);
+            for field in [
+                Field::AlbumArtworkPeriod,
+                Field::SpectrumBars,
+                Field::SpectrumBarWidth,
+                Field::SpectrumGap,
+                Field::SpectrumHold,
+                Field::SpectrumGravity,
+            ] {
+                assert!(!field.enabled(&this.model.draft));
+                let retained = this.value(field, cx);
+                this.set_value(field, "invalid", None, cx);
+                assert!(this.parse(cx).is_err());
+                assert_eq!(this.value(field, cx), "invalid");
+                this.set_value(field, retained, None, cx);
+            }
+            assert!(this.parse(cx).is_ok());
+        });
+    }
+
+    #[gpui::test]
+    fn visualizer_apply_ignores_hidden_global_numeric_editors(cx: &mut TestAppContext) {
+        let (_directory, runtime, settings) = fixture(cx);
+        let applied = Rc::new(RefCell::new(Vec::new()));
+        let _subscription = cx.update(|cx| {
+            let applied = applied.clone();
+            cx.subscribe(&settings, move |_, event, _| {
+                if let SettingsEvent::ApplyVisualizer {
+                    panel_id, options, ..
+                } = event
+                {
+                    applied.borrow_mut().push((*panel_id, *options));
+                }
+            })
+        });
+        settings.update(cx, |this, cx| {
+            let config = runtime.handle.config_snapshot();
+            let options = AudioVisualizerOptions {
+                style: AudioVisualizerStyle::Oscilloscope,
+                grid: false,
+                label: true,
+            };
+            this.model.reset_visualizer(&config, 7, options);
+            this.fill(cx);
+            for field in [
+                Field::OscilloscopeTimeSpan,
+                Field::OscilloscopeGain,
+                Field::VisualizationFps,
+                Field::SpectrumBars,
+                Field::AlbumArtworkPeriod,
+            ] {
+                this.set_value(field, "invalid", None, cx);
+            }
+            assert!(this.parse(cx).is_err());
+            this.apply_settings(cx);
+            assert!(this.model.applying());
+            assert_eq!(AudioVisualizerOptions::from(&this.model.draft), options);
+            assert_eq!(*runtime.handle.config_snapshot(), *config);
+        });
+        assert_eq!(
+            *applied.borrow(),
+            vec![(
+                7,
+                AudioVisualizerOptions {
+                    style: AudioVisualizerStyle::Oscilloscope,
+                    grid: false,
+                    label: true,
+                },
+            )]
+        );
     }
 
     fn precise_config(base: &Config) -> Config {

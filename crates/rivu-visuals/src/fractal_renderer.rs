@@ -1,12 +1,13 @@
 //! Shared generative light views with accepted targets and display-clocked simulation.
 use super::{fractal_beams, fractal_flow};
-use crate::config::{AudioVisualizerOptions, AudioVisualizerStyle, Config};
-use crate::i18n::Localizer;
+use crate::VisualLabels;
+use crate::VisualParameters;
 use gpui::{
     AnyElement, App, Bounds, GpuFrame, GpuLimits, GpuPalette, GpuSegment, GpuSource,
     GpuStrokeLayer, Pixels, TextAlign, Window, canvas, div, fill, point, prelude::*, px, rgb, size,
 };
 use rivu_audio::analysis::{AnalysisFrame, AnalysisSettings};
+use rivu_format::config::{AudioVisualizerOptions, AudioVisualizerStyle};
 use std::{cell::RefCell, rc::Rc, sync::Arc, time::Duration};
 
 #[derive(Clone, Copy, Default)]
@@ -61,11 +62,11 @@ impl Scene {
 }
 
 #[derive(Clone)]
-pub(super) struct FractalVisualizer {
-    data: Rc<RefCell<Data>>,
+pub(super) struct FractalRenderer {
+    data: Rc<RefCell<FractalState>>,
 }
 
-struct Data {
+struct FractalState {
     guide_labels: Option<[gpui::SharedString; 7]>,
     style: AudioVisualizerStyle,
     visible: bool,
@@ -90,12 +91,12 @@ struct Data {
     retained: bool,
 }
 
-impl FractalVisualizer {
+impl FractalRenderer {
     pub(super) fn new(style: AudioVisualizerStyle) -> Self {
         assert!(fractal_style(style));
-        let config = Config::default();
+        let config = VisualParameters::default();
         Self {
-            data: Rc::new(RefCell::new(Data {
+            data: Rc::new(RefCell::new(FractalState {
                 guide_labels: None,
                 style,
                 visible: true,
@@ -107,7 +108,7 @@ impl FractalVisualizer {
                 sensitivity: config.audio_visualizer_sensitivity,
                 db_range: config.audio_visualizer_db_range(),
                 bloom: config.audio_visualizer_bloom_intensity,
-                settings: AnalysisSettings::from(&config),
+                settings: config.analysis_settings(),
                 source: None,
                 last_time: None,
                 last_presentation_time: None,
@@ -125,9 +126,9 @@ impl FractalVisualizer {
         }
     }
 
-    pub(super) fn configure(&self, config: &Config) -> bool {
+    pub(super) fn configure(&self, config: &VisualParameters) -> bool {
         let mut data = self.data.borrow_mut();
-        let settings = AnalysisSettings::from(config);
+        let settings = config.analysis_settings();
         let reset = data.settings.fft_size != settings.fft_size
             || data.settings.window != settings.window
             || data.settings.signal != settings.signal;
@@ -191,23 +192,29 @@ impl FractalVisualizer {
 
     pub(super) fn view(
         &self,
-        i18n: &Arc<Localizer>,
+        i18n: &Arc<VisualLabels>,
         panel_id: u64,
         options: AudioVisualizerOptions,
     ) -> AnyElement {
         let data = Rc::clone(&self.data);
-        self.data.borrow_mut().guide_labels.get_or_insert_with(|| {
-            [
-                i18n.text("visual-scene"),
-                "x −1",
-                "x 0",
-                "x +1",
-                "y −1",
-                "y 0",
-                "y +1",
-            ]
-            .map(|text| text.to_owned().into())
-        });
+        {
+            let mut data = self.data.borrow_mut();
+            if data
+                .guide_labels
+                .as_ref()
+                .is_none_or(|labels| labels[0] != i18n.scene)
+            {
+                data.guide_labels = Some([
+                    i18n.scene.clone(),
+                    "x −1".into(),
+                    "x 0".into(),
+                    "x +1".into(),
+                    "y −1".into(),
+                    "y 0".into(),
+                    "y +1".into(),
+                ]);
+            }
+        }
         div()
             .id(("fractal-visualizer", panel_id))
             .size_full()
@@ -225,7 +232,7 @@ impl FractalVisualizer {
     }
 }
 
-impl Data {
+impl FractalState {
     fn suspend(&mut self) {
         self.last_time = None;
         self.last_presentation_time = None;
@@ -549,7 +556,7 @@ fn paint_scene_guides(
     window: &mut Window,
     cx: &mut App,
 ) {
-    if !options.reference_lines && !options.labels {
+    if !options.grid && !options.label {
         return;
     }
     let side = (bounds.size.width / px(1.0)).min(bounds.size.height / px(1.0));
@@ -561,7 +568,7 @@ fn paint_scene_guides(
         bounds.top() + bounds.size.height * 0.5,
     );
     let scale = px(side * 0.47);
-    if options.reference_lines {
+    if options.grid {
         for coordinate in [-1.0, -0.5, 0.0, 0.5, 1.0] {
             let color = rgb(0xb1bbc5).alpha(if coordinate == 0.0 { 0.30 } else { 0.14 });
             window.paint_quad(fill(
@@ -580,7 +587,7 @@ fn paint_scene_guides(
             ));
         }
     }
-    if !options.labels || side < 180.0 {
+    if !options.label || side < 180.0 {
         return;
     }
     // Static text and the exact same transform as the scene; no per-frame format.
@@ -649,9 +656,16 @@ fn blend(from: u32, to: u32, t: f32) -> u32 {
 }
 
 #[cfg(test)]
+impl FractalRenderer {
+    fn configure_config(&self, config: &rivu_format::config::Config) -> bool {
+        self.configure(&crate::VisualParameters::from(config))
+    }
+}
+#[cfg(test)]
 mod tests {
     use super::*;
-    fn accept(visual: &FractalVisualizer, frame: &AnalysisFrame) {
+    use rivu_format::config::Config;
+    fn accept(visual: &FractalRenderer, frame: &AnalysisFrame) {
         visual.update(frame, frame.sample_time);
         visual.animate(frame.sample_time);
     }
@@ -701,7 +715,7 @@ mod tests {
                 // A material refresh and repeated accepted payload must neither
                 // reset motion nor treat changed payload values as another onset.
                 if tick == 4 {
-                    visual.configure(&Config {
+                    visual.configure_config(&Config {
                         audio_visualizer_primary_color: "#ff0000".parse().unwrap(),
                         ..Config::default()
                     });
@@ -741,9 +755,9 @@ mod tests {
     }
     use rivu_audio::analysis::{VisualizerDemand, VisualizerFrame};
 
-    fn plot(style: AudioVisualizerStyle) -> FractalVisualizer {
-        let plot = FractalVisualizer::new(style);
-        plot.configure(&Config::default());
+    fn plot(style: AudioVisualizerStyle) -> FractalRenderer {
+        let plot = FractalRenderer::new(style);
+        plot.configure_config(&Config::default());
         plot
     }
 
@@ -767,7 +781,7 @@ mod tests {
         }
     }
 
-    fn publication(visual: &FractalVisualizer) -> Arc<GpuFrame> {
+    fn publication(visual: &FractalRenderer) -> Arc<GpuFrame> {
         Arc::clone(visual.data.borrow().gpu_frame.as_ref().unwrap())
     }
 
@@ -817,8 +831,8 @@ mod tests {
                 let geometry = visual.data.borrow().segments().to_vec();
                 let drive = visual.data.borrow().drive;
                 let previous_energy = visual.data.borrow().previous_energy;
-                assert!(visual.configure(&config));
-                assert!(!visual.configure(&config));
+                assert!(visual.configure_config(&config));
+                assert!(!visual.configure_config(&config));
                 let mut paused = frame(1000);
                 paused.sequence += 1;
                 paused.visualizer.band_rms = [1.0; 3];
@@ -878,7 +892,7 @@ mod tests {
                     2 => config.audio_visualizer_bloom_intensity = 0.9,
                     _ => config.audio_visualizer_bloom_intensity = 0.0,
                 }
-                assert!(visual.configure(&config));
+                assert!(visual.configure_config(&config));
                 let after = publication(&visual);
                 assert!(!Arc::ptr_eq(&before, &after));
                 assert!(!Arc::ptr_eq(before.palette(), after.palette()));
@@ -898,7 +912,7 @@ mod tests {
                         assert!(after.palette().colors()[0][3] > before.palette().colors()[0][3]);
                     }
                 }
-                assert!(!visual.configure(&config));
+                assert!(!visual.configure_config(&config));
                 accept(&visual, &frame(1000));
                 assert!(Arc::ptr_eq(&after, &publication(&visual)));
                 let data = visual.data.borrow();
@@ -923,7 +937,7 @@ mod tests {
                     ..Config::default()
                 },
                 Config {
-                    analysis_window: crate::config::AnalysisWindow::Hann,
+                    analysis_window: rivu_format::config::AnalysisWindow::Hann,
                     ..Config::default()
                 },
             ] {
@@ -931,19 +945,19 @@ mod tests {
                 accept(&visual, &frame(50));
                 let old = publication(&visual);
                 config.audio_visualizer_primary_color = "#ff0000".parse().unwrap();
-                assert!(visual.configure(&config));
+                assert!(visual.configure_config(&config));
                 assert!(visual.data.borrow().gpu_frame.is_none());
                 assert!(visual.data.borrow().segments().is_empty());
                 accept(&visual, &frame(50));
                 assert!(visual.data.borrow().last_time.is_none());
                 config.audio_visualizer_secondary_color = "#0000ff".parse().unwrap();
-                assert!(visual.configure(&config));
+                assert!(visual.configure_config(&config));
                 assert!(visual.data.borrow().gpu_frame.is_none());
                 let mut accepted = frame(50);
                 accepted.settings = Some(AnalysisSettings::from(&config));
                 accept(&visual, &accepted);
                 let fresh = plot(style);
-                fresh.configure(&config);
+                fresh.configure_config(&config);
                 accept(&fresh, &accepted);
                 assert!(!Arc::ptr_eq(&old, &publication(&visual)));
                 assert_eq!(
@@ -970,7 +984,7 @@ mod tests {
             audio_visualizer_primary_color: "#ff0000".parse().unwrap(),
             ..Config::default()
         };
-        assert!(visual.configure(&config));
+        assert!(visual.configure_config(&config));
         accept(&visual, &frame(550));
         assert_eq!(visual.data.borrow().last_time, accepted_time);
         assert_eq!(visual.data.borrow().segments(), before);
@@ -978,7 +992,7 @@ mod tests {
         gap.generation += 1;
         accept(&visual, &gap);
         let fresh = plot(AudioVisualizerStyle::FractalFlow);
-        fresh.configure(&config);
+        fresh.configure_config(&config);
         accept(&fresh, &gap);
         assert_eq!(
             visual.data.borrow().segments(),
@@ -987,7 +1001,7 @@ mod tests {
         gap.sample_time = Duration::from_millis(100);
         accept(&visual, &gap);
         let rewound = plot(AudioVisualizerStyle::FractalFlow);
-        rewound.configure(&config);
+        rewound.configure_config(&config);
         accept(&rewound, &gap);
         assert_eq!(
             visual.data.borrow().segments(),
@@ -1005,18 +1019,19 @@ mod tests {
             accept(&visual, &frame(50));
             accept(&visual, &frame(100));
             let config = Config {
-                visualization_signal: crate::config::VisualizationSignal::Before,
+                visualization_signal: rivu_format::config::VisualizationSignal::Before,
                 ..Config::default()
             };
-            visual.configure(&config);
+            visual.configure_config(&config);
             accept(&visual, &frame(150));
             assert_eq!(visual.data.borrow().last_time, None);
             assert!(visual.data.borrow().gpu_frame.is_none());
             let mut selected = frame(200);
-            selected.settings.as_mut().unwrap().signal = crate::config::VisualizationSignal::Before;
+            selected.settings.as_mut().unwrap().signal =
+                rivu_format::config::VisualizationSignal::Before;
             accept(&visual, &selected);
             let fresh = plot(style);
-            fresh.configure(&config);
+            fresh.configure_config(&config);
             accept(&fresh, &selected);
             assert_eq!(visual.data.borrow().last_time, Some(selected.sample_time));
             assert_eq!(
@@ -1190,12 +1205,12 @@ mod tests {
                     assert!(visual.data.borrow().gpu_frame.is_none());
                     assert!(visual.data.borrow().segments().is_empty());
                     // Material changes cannot resurrect a reset scene before audio arrives.
-                    visual.configure(&Config {
+                    visual.configure_config(&Config {
                         audio_visualizer_bloom_intensity: 0.9,
                         ..Config::default()
                     });
                     assert!(visual.data.borrow().gpu_frame.is_none());
-                    visual.configure(&Config::default());
+                    visual.configure_config(&Config::default());
                 }
                 accept(&visual, &next);
                 let fresh = plot(style);
@@ -1248,7 +1263,7 @@ mod tests {
             accept(&visual, &frame(1100));
             assert!(visual.data.borrow().last_time.is_none());
             visual.set_activity(true, true);
-            visual.configure(&Config {
+            visual.configure_config(&Config {
                 audio_visualizer_style: style,
                 analysis_fft_size: 4096,
                 ..Config::default()
@@ -1279,8 +1294,8 @@ mod tests {
             audio_visualizer_style: AudioVisualizerStyle::StereoDensity,
             ..Config::default()
         };
-        assert!(!beams.configure(&config));
-        assert!(!flow.configure(&config));
+        assert!(!beams.configure_config(&config));
+        assert!(!flow.configure_config(&config));
         assert_eq!(beams.data.borrow().segments(), &beams_before);
         assert_eq!(flow.data.borrow().segments(), &flow_before);
         beams.set_activity(false, false);

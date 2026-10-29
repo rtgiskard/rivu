@@ -162,7 +162,7 @@ impl GuiApp {
                     .clone()
                     .into_any_element();
             }
-            "spectrum" | "spectrogram" | "waveform" | "audio_visualizer" => {
+            "audio_visualizer" => {
                 return self.presentation_panel(panel.id, cx);
             }
             _ => unreachable!("registered panel kind"),

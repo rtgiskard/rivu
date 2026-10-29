@@ -4,7 +4,7 @@
 //! pulse, not a beat clock. History and render storage stay bounded for the
 //! entire playback session; the bounded display clock advances held audio targets.
 
-use super::fractal_visualizer::{Drive, LightSegment};
+use super::fractal_renderer::{Drive, LightSegment};
 use std::f32::consts::TAU;
 
 const PARTICLES: usize = 96;

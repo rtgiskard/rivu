@@ -24,27 +24,28 @@ use std::{
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PanelKind {
-    Spectrum,
-    Spectrogram,
+    Spectrum(AudioVisualizerOptions),
+    Spectrogram(AudioVisualizerOptions),
     Audio(AudioVisualizerOptions),
-    Waveform,
+    Waveform(AudioVisualizerOptions),
 }
 
 impl PanelKind {
     fn from_panel(panel: &layout::Panel, config: &Config) -> Option<Self> {
-        match panel.kind.as_str() {
-            "spectrum" => Some(Self::Spectrum),
-            "spectrogram" => Some(Self::Spectrogram),
-            "audio_visualizer" => Some(Self::Audio(
-                panel.audio_visualizer.unwrap_or_else(|| config.into()),
-            )),
-            "waveform" => Some(Self::Waveform),
-            _ => None,
+        if panel.kind != "audio_visualizer" {
+            return None;
         }
+        let options = panel.audio_visualizer.unwrap_or_else(|| config.into());
+        Some(match options.style {
+            AudioVisualizerStyle::Spectrum => Self::Spectrum(options),
+            AudioVisualizerStyle::Spectrogram => Self::Spectrogram(options),
+            AudioVisualizerStyle::Waveform => Self::Waveform(options),
+            _ => Self::Audio(options),
+        })
     }
 
     fn analysis(self) -> bool {
-        !matches!(self, Self::Waveform)
+        !matches!(self, Self::Waveform(_))
     }
 }
 
@@ -109,10 +110,11 @@ impl AnimationClock {
 
 pub(super) struct Presentation {
     handle: CoreHandle,
-    i18n: Arc<Localizer>,
+    labels: Arc<visualization::VisualLabels>,
+    parameters: visualization::VisualParameters,
     config: Arc<Config>,
-    visuals: visualization::Visuals,
-    audio_visualizer: visualization::AudioVisualizer,
+    frequency_views: visualization::FrequencyViews,
+    style_coordinator: visualization::StyleCoordinator,
     waveform: Entity<visualization::Waveform>,
     panels: HashMap<u64, PanelKind>,
     layout_panels: HashMap<u64, PanelKind>,
@@ -154,10 +156,11 @@ impl Presentation {
         });
         Self {
             handle,
-            i18n,
+            labels: visualization::visual_labels(&i18n),
+            parameters: visualization::VisualParameters::from(config.as_ref()),
             config,
-            visuals: visualization::Visuals::new(),
-            audio_visualizer: visualization::AudioVisualizer::new(),
+            frequency_views: visualization::FrequencyViews::new(),
+            style_coordinator: visualization::StyleCoordinator::new(),
             waveform,
             panels: HashMap::new(),
             layout_panels: HashMap::new(),
@@ -201,6 +204,9 @@ impl Presentation {
             duration,
         } = state;
         let config_changed = !Arc::ptr_eq(&self.config, &config);
+        if config_changed {
+            self.parameters = visualization::VisualParameters::from(config.as_ref());
+        }
         let still_changed = self.config.still_mode != config.still_mode;
         let fps_changed = self.config.visualization_fps != config.visualization_fps;
         let visibility_changed = self.visible != visible || self.shutting_down != shutting_down;
@@ -262,7 +268,7 @@ impl Presentation {
         self.position = position;
         self.duration = duration;
         if status_changed && status == PlaybackStatus::Paused {
-            self.audio_visualizer.suspend();
+            self.style_coordinator.suspend();
             self.animation_clock.suspend();
         }
 
@@ -271,16 +277,16 @@ impl Presentation {
             self.sequence = self.handle.analysis.read().sequence;
             self.needs_refresh = false;
             self.animation_clock = AnimationClock::default();
-            self.visuals.clear_presentation();
+            self.frequency_views.clear_presentation();
             if fade_on_stop {
-                self.audio_visualizer
+                self.style_coordinator
                     .stop(Instant::now(), self.config.audio_visualizer_fade_when_idle);
             } else {
-                self.audio_visualizer.clear();
+                self.style_coordinator.clear();
             }
         }
         if status_changed && status != PlaybackStatus::Stopped {
-            self.audio_visualizer.retire_idle_fade();
+            self.style_coordinator.retire_idle_fade();
         }
         if invalidate || visibility_changed || status_changed {
             // A suspension retires input, not its bounded last presentation.
@@ -296,33 +302,36 @@ impl Presentation {
             let mut retained_audio = Vec::new();
             for (id, kind) in &self.layout_panels {
                 match kind {
-                    PanelKind::Spectrum => retained_spectrum.push(*id),
-                    PanelKind::Spectrogram => retained_spectrogram.push(*id),
+                    PanelKind::Spectrum(_) => retained_spectrum.push(*id),
+                    PanelKind::Spectrogram(_) => retained_spectrogram.push(*id),
                     PanelKind::Audio(options) => retained_audio.push(*options),
                     _ => {}
                 }
             }
-            self.visuals
+            self.frequency_views
                 .retain_presentation_panels(&retained_spectrum, &retained_spectrogram);
-            self.audio_visualizer.retain_presentations(retained_audio);
+            self.style_coordinator.retain_presentations(retained_audio);
         }
         if demand_changed {
-            self.visuals.set_enabled(enabled);
+            self.frequency_views.set_enabled(enabled);
             let spectrum_ids = self
                 .panels
                 .iter()
-                .filter(|(_, kind)| enabled && **kind == PanelKind::Spectrum)
+                .filter(|(_, kind)| enabled && matches!(kind, PanelKind::Spectrum(_)))
                 .map(|(id, _)| *id)
                 .collect::<Vec<_>>();
             let spectrogram_ids = self
                 .panels
                 .iter()
-                .filter(|(_, kind)| enabled && **kind == PanelKind::Spectrogram)
+                .filter(|(_, kind)| enabled && matches!(kind, PanelKind::Spectrogram(_)))
                 .map(|(id, _)| *id)
                 .collect::<Vec<_>>();
-            self.visuals.retain_spectrum_panels(&spectrum_ids);
-            self.visuals.retain_spectrogram_panels(&spectrogram_ids);
-            spectrum_restored = self.visuals.set_spectrum_visible(!spectrum_ids.is_empty());
+            self.frequency_views.retain_spectrum_panels(&spectrum_ids);
+            self.frequency_views
+                .retain_spectrogram_panels(&spectrogram_ids);
+            spectrum_restored = self
+                .frequency_views
+                .set_spectrum_visible(!spectrum_ids.is_empty());
             let mut visualizer = VisualizerDemand::default();
             for kind in self.panels.values().filter(|_| enabled) {
                 if let PanelKind::Audio(options) = kind {
@@ -349,8 +358,8 @@ impl Presentation {
             self.demand = demand;
         }
         if config_changed || demand_changed {
-            let audio_changed = self.audio_visualizer.sync(
-                &self.config,
+            let audio_changed = self.style_coordinator.sync(
+                &self.parameters,
                 self.panels.values().filter_map(|kind| match kind {
                     PanelKind::Audio(options) => Some(*options),
                     _ => None,
@@ -358,7 +367,7 @@ impl Presentation {
                 enabled,
             );
             if self.demand.enabled {
-                let spectrum_changed = self.visuals.configure(&self.config);
+                let spectrum_changed = self.frequency_views.configure(&self.parameters);
                 self.needs_refresh |= spectrum_restored || spectrum_changed || audio_changed;
             } else {
                 self.needs_refresh = false;
@@ -375,7 +384,9 @@ impl Presentation {
         let waveform_visible = self.active();
         self.waveform.update(cx, |waveform, cx| {
             waveform.retain_panels(
-                |id| waveform_visible && self.panels.get(&id) == Some(&PanelKind::Waveform),
+                |id| {
+                    waveform_visible && matches!(self.panels.get(&id), Some(PanelKind::Waveform(_)))
+                },
                 cx,
             );
             // Visibility retires rendering resources, not explicit scan results.
@@ -458,7 +469,7 @@ impl Presentation {
             || !self.demand.enabled
             || (!self.frame_requested
                 && self.analysis_interval().is_none()
-                && !self.audio_visualizer.idle_fading(Instant::now()))
+                && !self.style_coordinator.idle_fading(Instant::now()))
             || self.frame_pending
         {
             return;
@@ -496,13 +507,13 @@ impl Presentation {
             self.consume_analysis(now, cx);
             if !self.awaiting_replacement {
                 let time = self.animation_clock.advance(now);
-                let visuals_changed = self.visuals.animate(time);
-                let audio_changed = self.audio_visualizer.animate(time);
+                let visuals_changed = self.frequency_views.animate(time);
+                let audio_changed = self.style_coordinator.animate(time);
                 self.notify_animation(visuals_changed, audio_changed, cx);
             }
         } else {
             self.animation_clock.suspend();
-            self.audio_visualizer.advance_idle_fade(now);
+            self.style_coordinator.advance_idle_fade(now);
             self.notify_animation(false, true, cx);
         }
         self.request_frame(window, cx);
@@ -537,8 +548,8 @@ impl Presentation {
         self.awaiting_replacement = false;
         self.animation_clock.accept(&self.staging, now);
         let time = self.animation_clock.advance(now);
-        self.visuals.update(&self.staging, time);
-        self.audio_visualizer.update(&self.staging, time);
+        self.frequency_views.update(&self.staging, time);
+        self.style_coordinator.update(&self.staging, time);
         for (id, view) in &self.views {
             if let Some(kind) = self.panels.get(id)
                 && kind.analysis()
@@ -551,7 +562,7 @@ impl Presentation {
     fn notify_animation(&self, visuals: bool, audio: bool, cx: &mut Context<Self>) {
         for (id, view) in &self.views {
             let changed = match self.panels.get(id) {
-                Some(PanelKind::Spectrum | PanelKind::Spectrogram) => visuals,
+                Some(PanelKind::Spectrum(_) | PanelKind::Spectrogram(_)) => visuals,
                 Some(PanelKind::Audio(options)) => {
                     audio
                         && !matches!(
@@ -600,19 +611,29 @@ impl Presentation {
         }
         let theme = rivu_ui::theme::palette(cx);
         match self.panels.get(&id).copied() {
-            Some(PanelKind::Spectrum) => self.visuals.spectrum(theme, &self.i18n, id),
-            Some(PanelKind::Spectrogram) => self.visuals.spectrogram(theme, &self.i18n, id),
-            Some(PanelKind::Audio(options)) => {
-                self.audio_visualizer
-                    .view(&self.i18n, id, self.status, options)
+            Some(PanelKind::Spectrum(options)) => {
+                self.frequency_views
+                    .spectrum(theme, &self.labels, id, options)
             }
-            Some(PanelKind::Waveform) => self.waveform.update(cx, |waveform, cx| {
+            Some(PanelKind::Spectrogram(options)) => {
+                self.frequency_views
+                    .spectrogram(theme, &self.labels, id, options)
+            }
+            Some(PanelKind::Audio(options)) => {
+                self.style_coordinator
+                    .view(&self.labels, id, self.status, options)
+            }
+            Some(PanelKind::Waveform(options)) => self.waveform.update(cx, |waveform, cx| {
                 waveform.view(
-                    &self.i18n,
-                    id,
-                    self.position,
-                    self.duration,
-                    &self.config,
+                    theme,
+                    &self.labels,
+                    rivu_visuals::WaveformViewState {
+                        panel_id: id,
+                        position: self.position,
+                        duration: self.duration,
+                        options,
+                    },
+                    &self.parameters,
                     cx,
                 )
             }),
@@ -622,11 +643,11 @@ impl Presentation {
 
     /// Called by the shell's first paint, after every panel's prepaint.
     pub(super) fn finish_paint(&self, cx: &mut Context<Self>) {
-        if self.visuals.finish_prepaint() {
+        if self.frequency_views.finish_prepaint() {
             // A resized panel can alter history shared by cached siblings.
             // Repaint siblings to reflect the shared history extent.
             for (id, view) in &self.views {
-                if self.panels.get(id) == Some(&PanelKind::Spectrogram) {
+                if matches!(self.panels.get(id), Some(PanelKind::Spectrogram(_))) {
                     view.update(cx, |_, cx| cx.notify());
                 }
             }
@@ -642,13 +663,13 @@ impl Presentation {
         self.staging = AnalysisFrame::default();
         self.needs_refresh = false;
         self.awaiting_replacement = false;
-        self.visuals.clear_presentation();
-        self.audio_visualizer.clear();
-        self.visuals.set_enabled(false);
-        self.visuals.retain_spectrogram_panels(&[]);
-        self.visuals.retain_spectrum_panels(&[]);
-        self.visuals.set_spectrum_visible(false);
-        self.audio_visualizer.sync(&self.config, [], false);
+        self.frequency_views.clear_presentation();
+        self.style_coordinator.clear();
+        self.frequency_views.set_enabled(false);
+        self.frequency_views.retain_spectrogram_panels(&[]);
+        self.frequency_views.retain_spectrum_panels(&[]);
+        self.frequency_views.set_spectrum_visible(false);
+        self.style_coordinator.sync(&self.parameters, [], false);
         self.waveform.update(cx, |waveform, cx| {
             waveform.retain_panels(|_| false, cx);
         });
@@ -927,8 +948,8 @@ mod tests {
             show_tab_bar: true,
             audio_visualizer: style.map(|style| AudioVisualizerOptions {
                 style,
-                reference_lines: false,
-                labels: false,
+                grid: false,
+                label: false,
             }),
             album_artwork: None,
         };
@@ -949,12 +970,20 @@ mod tests {
                     },
                     layout::Node::Tabs {
                         id: 3,
-                        panels: vec![panel(4, "spectrum", None)],
+                        panels: vec![panel(
+                            4,
+                            "audio_visualizer",
+                            Some(AudioVisualizerStyle::Spectrum),
+                        )],
                         active: 4,
                     },
                     layout::Node::Tabs {
                         id: 5,
-                        panels: vec![panel(6, "spectrogram", None)],
+                        panels: vec![panel(
+                            6,
+                            "audio_visualizer",
+                            Some(AudioVisualizerStyle::Spectrogram),
+                        )],
                         active: 6,
                     },
                     layout::Node::Tabs {
@@ -1029,8 +1058,11 @@ mod tests {
             assert_eq!(owner.frame_generation, generation);
             assert_eq!(owner.animation_clock.last_tick, Some(now));
             assert_eq!(owner.staging.sequence, 7);
-            assert!(owner.panels.get(&4) == Some(&PanelKind::Spectrum));
-            assert!(owner.panels.get(&6) == Some(&PanelKind::Spectrogram));
+            assert!(matches!(owner.panels.get(&4), Some(PanelKind::Spectrum(_))));
+            assert!(matches!(
+                owner.panels.get(&6),
+                Some(PanelKind::Spectrogram(_))
+            ));
             let view = owner.panel(4, cx);
             let demand = owner.demand;
             // Transport, Seek and source fences all use the same workspace
@@ -1065,8 +1097,8 @@ mod tests {
                 9,
                 AudioVisualizerOptions {
                     style: AudioVisualizerStyle::StereoDensity,
-                    reference_lines: false,
-                    labels: false,
+                    grid: false,
+                    label: false,
                 }
             ));
             panels.reconcile(&layout);
@@ -1203,7 +1235,15 @@ mod tests {
             next_id: 1,
             locked: false,
         };
-        let panel_id = layout.add("spectrum", None);
+        let panel_id = layout.add("audio_visualizer", None);
+        layout.set_audio_visualizer_options(
+            panel_id,
+            AudioVisualizerOptions {
+                style: AudioVisualizerStyle::Spectrum,
+                grid: false,
+                label: false,
+            },
+        );
         let panels = demand(&layout);
         let waveform =
             cx.new(|_| visualization::Waveform::new(Arc::clone(&runtime.handle.waveform)));
@@ -1321,8 +1361,24 @@ mod tests {
             locked: false,
         };
         let mut layout = empty_layout.clone();
-        let panel_id = layout.add("spectrogram", None);
-        let waveform_id = layout.add("waveform", None);
+        let panel_id = layout.add("audio_visualizer", None);
+        layout.set_audio_visualizer_options(
+            panel_id,
+            AudioVisualizerOptions {
+                style: AudioVisualizerStyle::Spectrogram,
+                grid: false,
+                label: false,
+            },
+        );
+        let waveform_id = layout.add("audio_visualizer", None);
+        layout.set_audio_visualizer_options(
+            waveform_id,
+            AudioVisualizerOptions {
+                style: AudioVisualizerStyle::Waveform,
+                grid: false,
+                label: false,
+            },
+        );
         assert!(layout.activate(panel_id));
         let mut panels = demand(&layout);
         window.update(|window, cx| {
@@ -1344,7 +1400,10 @@ mod tests {
                     cx,
                 );
                 assert_eq!(owner.panels.len(), 1);
-                assert!(owner.panels.get(&panel_id) == Some(&PanelKind::Spectrogram));
+                assert!(matches!(
+                    owner.panels.get(&panel_id),
+                    Some(PanelKind::Spectrogram(_))
+                ));
                 let view = owner.panel(panel_id, cx);
                 assert_eq!(view.entity_id(), owner.panel(panel_id, cx).entity_id());
                 owner.request_frame(window, cx);
@@ -1560,7 +1619,10 @@ mod tests {
                     cx,
                 );
                 assert_eq!(owner.panels.len(), 1);
-                assert!(owner.panels.get(&waveform_id) == Some(&PanelKind::Waveform));
+                assert!(matches!(
+                    owner.panels.get(&waveform_id),
+                    Some(PanelKind::Waveform(_))
+                ));
                 assert!(!owner.demand.enabled);
                 owner.sync(
                     PresentationState {
@@ -1680,7 +1742,7 @@ mod tests {
                 spectrum_db: vec![-12.0; 4],
                 ..Default::default()
             };
-            owner.audio_visualizer.update(&frame, frame.sample_time);
+            owner.style_coordinator.update(&frame, frame.sample_time);
             owner.staging = frame;
         });
         // Execute the real Core Stop command: it advances both source and seek
@@ -1706,17 +1768,17 @@ mod tests {
                 ),
                 cx,
             );
-            assert!(owner.audio_visualizer.idle_fading(Instant::now()));
+            assert!(owner.style_coordinator.idle_fading(Instant::now()));
             assert!(owner.staging.settings.is_none());
             assert!(owner.staging.spectrum_db.is_empty());
             assert!(owner.analysis_interval().is_none());
             owner.consume_analysis(Instant::now(), cx);
-            assert!(owner.audio_visualizer.idle_fading(Instant::now()));
+            assert!(owner.style_coordinator.idle_fading(Instant::now()));
             assert!(owner.staging.settings.is_none());
             owner
-                .audio_visualizer
+                .style_coordinator
                 .advance_idle_fade(Instant::now() + Duration::from_secs(3));
-            assert!(!owner.audio_visualizer.idle_fading(Instant::now()));
+            assert!(!owner.style_coordinator.idle_fading(Instant::now()));
             owner.frame_requested = false;
         });
         let window = cx.add_empty_window();
@@ -1798,7 +1860,7 @@ mod tests {
                     spectrum_db: vec![-12.0; 4],
                     ..Default::default()
                 };
-                owner.audio_visualizer.update(&frame, frame.sample_time);
+                owner.style_coordinator.update(&frame, frame.sample_time);
                 state.status = PlaybackStatus::Stopped;
                 state.source_generation += 1;
                 state.seek_revision += 1;
@@ -1818,10 +1880,10 @@ mod tests {
                     cx,
                 );
                 if boundary >= 5 {
-                    assert!(!owner.audio_visualizer.idle_fading(Instant::now()));
+                    assert!(!owner.style_coordinator.idle_fading(Instant::now()));
                     return;
                 }
-                assert!(owner.audio_visualizer.idle_fading(Instant::now()));
+                assert!(owner.style_coordinator.idle_fading(Instant::now()));
                 match boundary {
                     0 => state.status = PlaybackStatus::Playing,
                     1 => state.source_generation += 1,
@@ -1835,7 +1897,7 @@ mod tests {
                     _ => state.shutting_down = true,
                 }
                 owner.sync(state, cx);
-                assert!(!owner.audio_visualizer.idle_fading(Instant::now()));
+                assert!(!owner.style_coordinator.idle_fading(Instant::now()));
                 assert!(owner.staging.settings.is_none());
                 assert!(owner.staging.spectrum_db.is_empty());
             });
@@ -1968,7 +2030,7 @@ mod tests {
                     spectrum_db: vec![-12.0; 4],
                     ..Default::default()
                 };
-                owner.audio_visualizer.update(&frame, frame.sample_time);
+                owner.style_coordinator.update(&frame, frame.sample_time);
                 owner.staging = frame;
                 owner.sync(
                     state(
@@ -1981,7 +2043,7 @@ mod tests {
                 );
                 assert_eq!(owner.current_track_id, after_current, "{case}");
                 assert_eq!(
-                    owner.audio_visualizer.idle_fading(Instant::now()),
+                    owner.style_coordinator.idle_fading(Instant::now()),
                     fades,
                     "{case}"
                 );

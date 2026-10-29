@@ -24,8 +24,9 @@ access to a shared playback instance that can also run headless.
   execution, auditioning, and WAV export without changing source media.
   Neural backends require prepared local models; see
   link:doc/27_audio_processing.adoc#_practical_workflow[workflow and quality limits]
-* *Visualizations and artwork:* waveform, spectrum, spectrogram, eight audio
-  visualizer styles, and album artwork
+* *Visualizations and artwork:* one Visualization panel with eleven styles,
+  including waveform, spectrum, spectrogram, stereo analysis, and oscilloscope;
+  independent album artwork
 
 Rivu plays local files; it does not fetch network media or cover art.
 The desktop requires Wayland; audio output requires a running PipeWire 1.2 or newer server.

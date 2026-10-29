@@ -1,0 +1,23 @@
+[package]
+name = "rivu-visuals"
+version = "0.2.0"
+edition = "2024"
+description = "Rivu GPUI audio visualization renderers"
+
+[features]
+test-support = []
+
+[dependencies]
+rivu-audio = { path = "../rivu-audio", default-features = false }
+rivu-format = { path = "../rivu-format", default-features = false }
+rivu-protocol = { path = "../rivu-protocol" }
+rivu-ui = { path = "../rivu-ui" }
+gpui.workspace = true
+parking_lot = "0.12"
+anyhow = "1"
+futures = "0.3"
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+rivu-audio = { path = "../rivu-audio", default-features = false, features = ["test-support"] }
+tempfile = "3.27"

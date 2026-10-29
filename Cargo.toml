@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/rivu-ui", "crates/rivu-format", "crates/rivu-migrate", "crates/rivu-dsp", "crates/rivu-audio", "crates/rivu-protocol", "crates/rivu-client"]
+members = ["crates/rivu-ui", "crates/rivu-format", "crates/rivu-migrate", "crates/rivu-dsp", "crates/rivu-audio", "crates/rivu-protocol", "crates/rivu-client", "crates/rivu-visuals"]
 resolver = "3"
 
 [workspace.dependencies]
@@ -23,6 +23,7 @@ rivu-ui = { path = "crates/rivu-ui" }
 rivu-dsp = { path = "crates/rivu-dsp", default-features = false, features = ["execution"] }
 rivu-protocol = { path = "crates/rivu-protocol" }
 rivu-client = { path = "crates/rivu-client" }
+rivu-visuals = { path = "crates/rivu-visuals" }
 hound = "3.5"
 anyhow = "1"
 blake3 = "1"
@@ -70,6 +71,7 @@ image = { version = "0.25", default-features = false, features = ["png", "gif", 
 [dev-dependencies]
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 rivu-audio = { path = "crates/rivu-audio", default-features = false, features = ["test-support"] }
+rivu-visuals = { path = "crates/rivu-visuals", features = ["test-support"] }
 ringbuf = "0.5"
 toml = "1.1.8"
 gpui = { workspace = true, features = ["test-support"] }

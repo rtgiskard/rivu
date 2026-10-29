@@ -102,24 +102,12 @@ const PANELS: &[PanelSpec] = &[
         title_id: "shell-panel-album-artwork",
     },
     PanelSpec {
-        kind: "spectrum",
-        title_id: "shell-panel-spectrum",
-    },
-    PanelSpec {
-        kind: "spectrogram",
-        title_id: "shell-panel-spectrogram",
-    },
-    PanelSpec {
-        kind: "waveform",
-        title_id: "shell-panel-waveform",
+        kind: "audio_processing",
+        title_id: "shell-panel-audio-processing",
     },
     PanelSpec {
         kind: "audio_visualizer",
         title_id: "shell-panel-audio-visualizer",
-    },
-    PanelSpec {
-        kind: "audio_processing",
-        title_id: "shell-panel-audio-processing",
     },
 ];
 fn panel_spec(kind: &str) -> Option<&'static PanelSpec> {
@@ -1423,8 +1411,10 @@ impl GuiApp {
             .state
             .current_track()
             .map(|_| self.handle.waveform_snapshot());
+        let parameters =
+            visualization::WaveformScanParameters::from(self.state.system.config.as_ref());
         self.waveform.update(cx, |waveform, cx| {
-            waveform.prepare_full(&track, &self.state.system.config, snapshot, cx);
+            waveform.prepare_full(&track, &parameters, snapshot, cx);
         });
         self.dispatch_full_waveform_query(cx);
     }

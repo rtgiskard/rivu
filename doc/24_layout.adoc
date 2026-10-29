@@ -111,6 +111,12 @@ sizes.
 
 == Panel insertion
 
+The catalog uses two rows. The first contains Playback, Library, Albums, Queue,
+Playlists, and Recent tracks. The second contains Track details, Album artwork,
+Audio processing, and Visualization. Visualization inserts one `audio_visualizer`
+instance, initialized from global style and overlay defaults; Spectrum,
+Spectrogram, and Waveform are selectable styles rather than catalog entries.
+
 Catalog insertion is drag-only. It shares docking geometry, preview and commit
 with existing tabs; click, double-click and keyboard activation insert nothing.
 The preview owns a candidate tree with the actual new panel identity. Only a
@@ -230,9 +236,10 @@ overlays use window coordinates.
 Tab and footer heights follow text and scaled padding, not fixed heights.
 Unlocking adds tab-close controls without changing tab height. Footer messages
 shrink and truncate before the fixed action group. Menus anchor to actual footer
-bounds, size to contents and scroll when taller than the viewport; catalog items
-wrap and overlong individual labels truncate. Shared menus, tooltips and drag
-previews retain viewport clearance rather than expanding the workspace minimum.
+bounds, size to contents and scroll when taller than the viewport; each catalog
+row wraps within its own group and overlong individual labels truncate. Shared
+menus, tooltips and drag previews retain viewport clearance rather than expanding
+the workspace minimum.
 
 === Headings and inline actions
 

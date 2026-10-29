@@ -1,7 +1,7 @@
 //! Deterministic, display-clocked branching light. The topology is built once;
 //! only its retained geometry and bounded travelling pulses change during playback.
 
-use super::fractal_visualizer::{Drive, LightSegment};
+use super::fractal_renderer::{Drive, LightSegment};
 use std::f32::consts::{FRAC_1_SQRT_2, FRAC_PI_2, TAU};
 
 const ROOTS: usize = 3;

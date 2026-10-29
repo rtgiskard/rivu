@@ -11,9 +11,7 @@
 //! Pointer captures require a live interactive panel, not just cached peaks.
 //! Losing that surface cancels its generation and the matching window seek;
 //! ordinary MouseUp keeps the queued final Seek valid until consumption.
-#[cfg(test)]
-use crate::config::ConfigPersistence;
-use crate::i18n::Localizer;
+use crate::VisualLabels;
 
 use std::{
     cell::RefCell,
@@ -33,10 +31,13 @@ use gpui::{
 };
 use parking_lot::RwLock;
 
-use crate::config::Config;
+use crate::VisualParameters;
 use rivu_audio::{PlaybackRange, WaveformFrame};
 use rivu_format::media::DecoderHint;
 use rivu_protocol::model::Track;
+
+#[cfg(feature = "test-support")]
+mod test_support;
 
 #[derive(Clone, PartialEq)]
 struct Source {
@@ -47,7 +48,7 @@ struct Source {
 }
 
 impl Source {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn from_frame(frame: &WaveformFrame) -> Option<Self> {
         frame.path.as_ref().map(|path| Self {
             path: path.clone(),
@@ -80,7 +81,6 @@ struct ManualRequest {
     identity: Option<rivu_audio::WaveformIdentity>,
 }
 
-#[derive(Clone)]
 struct FullPreview {
     source: Rc<Source>,
     suspension_generation: u64,
@@ -417,25 +417,8 @@ fn merge_progressive(
 }
 
 enum PaintFrame<'a> {
-    Full(&'a Rc<FullPreview>),
+    Full(&'a FullPreview),
     Progressive(parking_lot::RwLockReadGuard<'a, WaveformFrame>),
-}
-
-fn paint_frame<'a>(
-    shared: &'a RwLock<WaveformFrame>,
-    full: Option<&'a Rc<FullPreview>>,
-) -> PaintFrame<'a> {
-    let progressive = shared.read();
-    // Even a captured full preview must observe an intervening Still transition.
-    if let Some(full) =
-        full.filter(|full| full.suspension_generation == progressive.suspension_generation())
-    {
-        drop(progressive);
-        PaintFrame::Full(full)
-    } else {
-        // Keep progressive bins borrowed instead of copying them each paint.
-        PaintFrame::Progressive(progressive)
-    }
 }
 
 fn track_range(track: &Track) -> Option<PlaybackRange> {
@@ -507,7 +490,7 @@ struct ColumnsKey {
 struct ColumnData {
     values: Vec<WaveformColumn>,
     has_known_component: bool,
-    publication: RefCell<Option<(crate::config::VisualizationPalette, Arc<GpuFrame>)>>,
+    publication: RefCell<Option<(rivu_format::config::VisualizationPalette, Arc<GpuFrame>)>>,
 }
 
 struct Columns {
@@ -571,8 +554,8 @@ impl WaveformPlot {
     fn publication(
         &mut self,
         panel_id: u64,
-        palette_id: crate::config::VisualizationPalette,
-        palette: &super::visuals::PaletteLut,
+        palette_id: rivu_format::config::VisualizationPalette,
+        palette: &super::palette::PaletteLut,
     ) -> Result<Option<Arc<GpuFrame>>, String> {
         let columns = &self.columns.get(&panel_id).unwrap().data;
         if !columns.has_known_component {
@@ -847,14 +830,22 @@ impl WaveformInteraction {
     }
 }
 
-pub(in crate::gui) enum WaveformEvent {
+pub enum WaveformEvent {
     Preview { generation: u64, seconds: f64 },
     Seek { generation: u64, seconds: f64 },
     Cancelled { generation: u64 },
 }
 impl EventEmitter<WaveformEvent> for Waveform {}
 
-pub(in crate::gui) struct Waveform {
+#[derive(Clone, Copy, Debug)]
+pub struct WaveformViewState {
+    pub panel_id: u64,
+    pub position: f64,
+    pub duration: Option<f64>,
+    pub options: rivu_format::config::AudioVisualizerOptions,
+}
+
+pub struct Waveform {
     enabled: bool,
     shared: Arc<RwLock<WaveformFrame>>,
     source: Option<Rc<Source>>,
@@ -863,7 +854,7 @@ pub(in crate::gui) struct Waveform {
     generation: u64,
     manual: Option<ManualRequest>,
     prepared_scan: Option<PreparedScan>,
-    full: Option<Rc<FullPreview>>,
+    full: Option<FullPreview>,
     manual_error: Option<SharedString>,
     interaction: Rc<RefCell<WaveformInteraction>>,
     dragging: bool,
@@ -872,7 +863,7 @@ pub(in crate::gui) struct Waveform {
 }
 
 impl Waveform {
-    pub(in crate::gui) fn new(shared: Arc<RwLock<WaveformFrame>>) -> Self {
+    pub fn new(shared: Arc<RwLock<WaveformFrame>>) -> Self {
         Self {
             enabled: true,
             shared,
@@ -893,7 +884,7 @@ impl Waveform {
 
     /// Suspend display work and cancel explicit scans. The audio worker discards
     /// shared results; resuming ordinary sync never starts a decoder scan.
-    pub(in crate::gui) fn set_enabled(&mut self, enabled: bool) {
+    pub fn set_enabled(&mut self, enabled: bool) {
         if self.enabled == enabled {
             return;
         }
@@ -919,18 +910,18 @@ impl Waveform {
         interaction.seek_duration = None;
     }
 
-    pub(in crate::gui) fn cancel_seek(&mut self) {
+    pub fn cancel_seek(&mut self) {
         self.seek_generation = self.seek_generation.wrapping_add(1);
         self.release_seek_capture();
     }
 
-    pub(in crate::gui) fn accepts_seek_event(&self, generation: u64) -> bool {
+    pub fn accepts_seek_event(&self, generation: u64) -> bool {
         self.seek_generation == generation
     }
 
     /// Called after the window's release dispatch. A normally released capture
     /// must keep its queued Seek valid; only an unhandled release is cancelled.
-    pub(in crate::gui) fn cancel_unreleased_seek(&mut self) -> Option<u64> {
+    pub fn cancel_unreleased_seek(&mut self) -> Option<u64> {
         if !self.dragging {
             return None;
         }
@@ -962,18 +953,14 @@ impl Waveform {
         self.cancel_unavailable_capture()
     }
 
-    pub(in crate::gui) fn set_seek_enabled(&mut self, enabled: bool) {
+    pub fn set_seek_enabled(&mut self, enabled: bool) {
         self.seek_enabled = enabled;
         if !enabled {
             self.cancel_seek();
         }
     }
 
-    pub(in crate::gui) fn retain_panels(
-        &mut self,
-        keep: impl Fn(u64) -> bool,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn retain_panels(&mut self, keep: impl Fn(u64) -> bool, cx: &mut Context<Self>) {
         self.plot.borrow_mut().retain_panels(&keep);
         if let Some(generation) = self.retain_interaction_panels(keep) {
             cx.emit(WaveformEvent::Cancelled { generation });
@@ -981,7 +968,7 @@ impl Waveform {
     }
     /// The caller chooses the playing track, or the selected track before play.
     /// Content fingerprints invalidate previews; metadata and visibility do not.
-    pub(in crate::gui) fn sync(&mut self, track: Option<&Track>, cx: &mut Context<Self>) {
+    pub fn sync(&mut self, track: Option<&Track>, cx: &mut Context<Self>) {
         if self.sync_state(track) {
             cx.notify();
         }
@@ -1023,7 +1010,6 @@ impl Waveform {
                 && full.source.matches_target(&shared)
                 && full.matches_progressive(&shared)
             {
-                let full = Rc::make_mut(full);
                 merge_progressive(
                     &mut full.frame,
                     &shared,
@@ -1066,7 +1052,7 @@ impl Waveform {
 
     /// A committed hint edit invalidates only this target's explicit preview.
     /// The playback frame and its decoder identity remain untouched.
-    pub(in crate::gui) fn saved_hint_changed(&mut self, track: &Track, cx: &mut Context<Self>) {
+    pub fn saved_hint_changed(&mut self, track: &Track, cx: &mut Context<Self>) {
         if self.invalidate_saved_hint(track) {
             cx.notify();
         }
@@ -1088,10 +1074,10 @@ impl Waveform {
     }
 
     /// Capture the click before querying the saved hint; keep the old display.
-    pub(in crate::gui) fn prepare_full(
+    pub fn prepare_full(
         &mut self,
         track: &Track,
-        config: &Config,
+        config: &crate::WaveformScanParameters,
         snapshot: Option<anyhow::Result<SnapshotReply>>,
         cx: &mut Context<Self>,
     ) {
@@ -1104,16 +1090,16 @@ impl Waveform {
                 track.path.clone(),
                 track_range(track),
                 track.decoder_hint,
-                config.visualization_signal,
-                Arc::new(config.equalizer.clone()),
+                config.signal,
+                Arc::clone(&config.equalizer),
             ),
-            buffer_mb: config.media_read_buffer_mb,
+            buffer_mb: config.buffer_mb,
             ffmpeg_enabled: config.ffmpeg_enabled,
         });
         cx.notify();
     }
 
-    pub(in crate::gui) fn fail_full_query(&mut self, error: String, cx: &mut Context<Self>) {
+    pub fn fail_full_query(&mut self, error: String, cx: &mut Context<Self>) {
         if let Some(request) = self.manual.take() {
             request.cancelled.store(true, Ordering::Relaxed);
         }
@@ -1123,7 +1109,7 @@ impl Waveform {
     }
 
     /// Explicit context-menu action; ordinary sync never opens a decoder.
-    pub(in crate::gui) fn load_full(&mut self, track: &Track, cx: &mut Context<Self>) {
+    pub fn load_full(&mut self, track: &Track, cx: &mut Context<Self>) {
         let Some(mut setup) = self.prepared_scan.take() else {
             return;
         };
@@ -1267,7 +1253,7 @@ impl Waveform {
                     request.progressive_revision,
                 );
             }
-            completed = Some(Rc::new(FullPreview {
+            completed = Some(FullPreview {
                 source: Rc::clone(&request.source),
                 suspension_generation: request.suspension_generation,
                 generation,
@@ -1275,7 +1261,7 @@ impl Waveform {
                 progressive_revision: shared.revision,
                 baseline_revision: request.progressive_revision,
                 identity: request.identity,
-            }));
+            });
             Ok(())
         })();
         if let Some(completed) = completed {
@@ -1287,7 +1273,7 @@ impl Waveform {
         true
     }
 
-    fn full_preview(&self, progressive: &WaveformFrame) -> Option<&Rc<FullPreview>> {
+    fn full_preview(&self, progressive: &WaveformFrame) -> Option<&FullPreview> {
         self.full.as_ref().filter(|full| {
             full.suspension_generation == progressive.suspension_generation()
                 && full.matches_progressive(progressive)
@@ -1298,19 +1284,42 @@ impl Waveform {
         })
     }
 
+    fn paint_frame(&self, source: &Source, generation: Option<u64>) -> Option<PaintFrame<'_>> {
+        if !self.enabled
+            || !self
+                .source
+                .as_ref()
+                .is_some_and(|current| current.same_target(source))
+        {
+            return None;
+        }
+        let progressive = self.shared.read();
+        if let Some(generation) = generation {
+            // Cached scenes may observe rolling updates to their scan, but must
+            // never adopt a replacement scan or revive an invalidated source.
+            let full = self
+                .full_preview(&progressive)
+                .filter(|full| full.generation == generation)?;
+            drop(progressive);
+            Some(PaintFrame::Full(full))
+        } else {
+            // Borrow progressive bins only while pooling, not during GPU paint.
+            Some(PaintFrame::Progressive(progressive))
+        }
+    }
+
     fn display_frame<'a>(&'a self, progressive: &'a WaveformFrame) -> &'a WaveformFrame {
         self.full_preview(progressive)
             .map_or(progressive, |full| &full.frame)
     }
 
-    fn manual_message(&self, i18n: &Localizer) -> Option<SharedString> {
+    fn manual_message(&self, i18n: &VisualLabels) -> Option<SharedString> {
         if self.manual.is_some() {
-            Some(i18n.text("waveform-loading").to_owned().into())
+            Some(i18n.waveform_loading.clone())
         } else {
-            self.manual_error.as_ref().map(|error| {
-                i18n.format("waveform-error", &[("error", error.as_ref().into())])
-                    .into()
-            })
+            self.manual_error
+                .as_ref()
+                .map(|error| i18n.waveform_error(error.as_ref()).into())
         }
     }
 
@@ -1382,15 +1391,20 @@ impl Waveform {
     /// Position and duration are relative to the selected track/CUE segment.
     /// Pass position zero for a selection preview rather than another track's
     /// playback position. The caller observes this entity for data changes.
-    pub(in crate::gui) fn view(
+    pub fn view(
         &mut self,
-        i18n: &Arc<Localizer>,
-        panel_id: u64,
-        position: f64,
-        duration: Option<f64>,
-        config: &Config,
+        theme: &'static rivu_ui::theme::Palette,
+        i18n: &Arc<VisualLabels>,
+        state: WaveformViewState,
+        config: &VisualParameters,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let WaveformViewState {
+            panel_id,
+            position,
+            duration,
+            options,
+        } = state;
         self.set_seek_enabled(config.waveform_seek_enabled);
         let panel = div()
             .id(("waveform", panel_id))
@@ -1408,14 +1422,18 @@ impl Waveform {
             return panel.into_any_element();
         };
         let status = self.manual_message(i18n);
-        let (available, label_duration, full) = {
+        let (available, label_duration, full_generation, source) = {
             let shared = self.shared.read();
             let frame = self.display_frame(&shared);
-            let full = self.full_preview(&shared).map(Rc::clone);
+            let full = self.full_preview(&shared);
             (
                 preview_available(source, frame),
                 timeline(frame, duration),
-                full,
+                full.map(|full| full.generation),
+                Rc::clone(full.map_or_else(
+                    || self.source.as_ref().expect("preview source is present"),
+                    |full| &full.source,
+                )),
             )
         };
         if !available {
@@ -1427,20 +1445,15 @@ impl Waveform {
                 .children(status.map(super::visualization_status))
                 .into_any_element();
         }
-        let source = full.as_ref().map_or_else(
-            || Rc::clone(self.source.as_ref().expect("preview source is present")),
-            |full| Rc::clone(&full.source),
-        );
-        let shared = Arc::clone(&self.shared);
         let waveform = Rc::clone(&self.plot);
-        let palette = super::visuals::active_palette_lut(config.visual_palette);
+        let palette = super::palette::active_palette_lut(config.visual_palette);
         let config_palette = config.visual_palette;
         let error_i18n = Arc::clone(i18n);
-        let error_theme = crate::theme::palette(config.ui_theme);
+        let error_theme = theme;
         let water = rgb(config.waveform_cursor_color.rgb());
         let background = rgb(config.visual_background.rgb());
         let glow = config.waveform_glow;
-        let labels = config.waveform_labels;
+        let labels = options.label;
         let rms_gain = config.waveform_rms_gain;
         let peak_gain = config.waveform_peak_gain;
         let peak_gamma = config.waveform_peak_gamma;
@@ -1455,6 +1468,7 @@ impl Waveform {
         }
         let prepaint_interaction = Rc::clone(&interaction);
         let owner = cx.entity().downgrade();
+        let paint_owner = owner.clone();
         let mouse_down = cx.listener(Self::mouse_down);
         let mouse_move = cx.listener(Self::mouse_move);
         let mouse_up = cx.listener(Self::mouse_up);
@@ -1521,7 +1535,16 @@ impl Waveform {
                                     );
                                     let mut waveform = waveform.borrow_mut();
                                     let progress = {
-                                        let selected = paint_frame(&shared, full.as_ref());
+                                        let Some(owner) = paint_owner.upgrade() else {
+                                            waveform.columns.remove(&panel_id);
+                                            return;
+                                        };
+                                        let Some(selected) =
+                                            owner.read(cx).paint_frame(&source, full_generation)
+                                        else {
+                                            waveform.columns.remove(&panel_id);
+                                            return;
+                                        };
                                         let (frame, identity) = match &selected {
                                             PaintFrame::Full(full) => (
                                                 &full.frame,
@@ -1581,13 +1604,8 @@ impl Waveform {
                                             ),
                                             rgb(error_theme.error_bg),
                                         ));
-                                        super::visuals::paint_label(
-                                            error_i18n
-                                                .format(
-                                                    "visual-error",
-                                                    &[("error", error.as_str().into())],
-                                                )
-                                                .into(),
+                                        super::labels::paint_label(
+                                            error_i18n.visual_error(error.as_str()).into(),
                                             plot.origin + point(px(6.0), px(3.0)),
                                             error_theme.error,
                                             window,
@@ -1689,10 +1707,7 @@ impl Waveform {
                             .text_xs()
                             .text_color(rgb(0xb1bbc5))
                             .child("0:00")
-                            .child(
-                                label_duration
-                                    .map_or_else(|| "—".into(), super::super::format_time),
-                            ),
+                            .child(label_duration.map_or_else(|| "—".into(), super::format_time)),
                     )
                 })
                 .children(status.map(|message| {
@@ -1715,47 +1730,42 @@ impl Drop for Waveform {
 
 #[cfg(test)]
 mod tests {
-    use crate::gui::layout::interaction::{DragCommit, LayoutInteraction, SeekCommit};
     #[test]
     fn full_paint_releases_playback_lock_but_observes_still_generation() {
-        let data = frame(vec![Some(0.25); 2]);
-        let full = Rc::new(FullPreview {
-            source: Rc::new(Source::from_frame(&data).unwrap()),
-            suspension_generation: data.suspension_generation(),
-            generation: 1,
-            progressive_revision: data.revision,
-            baseline_revision: data.revision,
-            identity: data.identity,
-            frame: frame(vec![Some(0.75); 2]),
-        });
-        let shared = RwLock::new(data);
-        let selected = paint_frame(&shared, Some(&full));
+        let mut waveform = preview(frame(vec![Some(0.25); 2]));
+        let source = Rc::clone(waveform.source.as_ref().unwrap());
+        let (generation, _) = waveform.start_full(DecoderHint::Auto);
+        assert!(waveform.finish_full(generation, Ok(frame(vec![Some(0.75); 2]))));
+        let selected = waveform.paint_frame(&source, Some(generation)).unwrap();
         assert!(matches!(&selected, PaintFrame::Full(_)));
         assert!(
-            shared.try_write().is_some(),
+            waveform.shared.try_write().is_some(),
             "independent full pooling must not lock playback"
         );
         drop(selected);
         {
-            let mut frame = shared.write();
+            let mut frame = waveform.shared.write();
             frame.set_still_mode(true);
             frame.set_still_mode(false);
         }
-        let selected = paint_frame(&shared, Some(&full));
+        assert!(waveform.paint_frame(&source, Some(generation)).is_none());
+        let selected = waveform.paint_frame(&source, None).unwrap();
         let PaintFrame::Progressive(frame) = &selected else {
-            panic!("a full preview captured before Still Mode must not be painted");
+            panic!("progressive scene must continue borrowing playback");
         };
         assert!(frame.peaks.is_empty());
         assert!(
-            shared.try_write().is_none(),
+            waveform.shared.try_write().is_none(),
             "progressive paint borrows without copying"
         );
+        drop(selected);
+        assert!(waveform.shared.try_write().is_some());
     }
 
     #[test]
     fn equivalent_panels_share_columns_and_revision_publications_then_fork() {
-        let palette_id = crate::config::VisualizationPalette::Deadbeef;
-        let palette = super::super::visuals::active_palette_lut(palette_id);
+        let palette_id = rivu_format::config::VisualizationPalette::Deadbeef;
+        let palette = super::super::palette::active_palette_lut(palette_id);
         let mut data = frame(vec![Some(0.25), None, Some(0.0)]);
         let mut plot = WaveformPlot::default();
         plot.columns(1, 100, &data);
@@ -1789,8 +1799,8 @@ mod tests {
 
     #[test]
     fn mapping_changes_reuse_zero_and_saturated_output_but_fork_changed_values() {
-        let palette_id = crate::config::VisualizationPalette::Deadbeef;
-        let palette = super::super::visuals::active_palette_lut(palette_id);
+        let palette_id = rivu_format::config::VisualizationPalette::Deadbeef;
+        let palette = super::super::palette::active_palette_lut(palette_id);
         let data = frame(vec![Some(0.0), Some(1.0), None]);
         for with_sibling in [false, true] {
             let mut plot = WaveformPlot::default();
@@ -1836,8 +1846,8 @@ mod tests {
 
     #[test]
     fn removing_a_sibling_retains_only_the_live_shared_owner() {
-        let palette_id = crate::config::VisualizationPalette::Deadbeef;
-        let palette = super::super::visuals::active_palette_lut(palette_id);
+        let palette_id = rivu_format::config::VisualizationPalette::Deadbeef;
+        let palette = super::super::palette::active_palette_lut(palette_id);
         let data = frame(vec![Some(0.25); 4]);
         let mut plot = WaveformPlot::default();
         plot.columns(1, 4, &data);
@@ -1858,8 +1868,8 @@ mod tests {
 
     #[test]
     fn same_revision_different_sources_and_full_results_do_not_alias() {
-        let palette_id = crate::config::VisualizationPalette::Deadbeef;
-        let palette = super::super::visuals::active_palette_lut(palette_id);
+        let palette_id = rivu_format::config::VisualizationPalette::Deadbeef;
+        let palette = super::super::palette::active_palette_lut(palette_id);
         let data = frame(vec![Some(0.25); 2]);
         let mut other = frame(vec![Some(0.25); 2]);
         other.path = Some("other.flac".into());
@@ -1876,7 +1886,7 @@ mod tests {
         assert!(!Rc::ptr_eq(&plot.columns[&1].data, &plot.columns[&2].data));
 
         let source = Rc::new(Source::from_frame(&data).unwrap());
-        let mut full = Rc::new(FullPreview {
+        let mut full = FullPreview {
             source,
             suspension_generation: data.suspension_generation(),
             generation: 1,
@@ -1884,7 +1894,7 @@ mod tests {
             baseline_revision: data.revision,
             identity: data.identity,
             frame: frame(vec![Some(0.25); 2]),
-        });
+        };
         let mapping = WaveformMapping {
             rms_gain: 1.0,
             peak_gain: 1.0,
@@ -1909,10 +1919,9 @@ mod tests {
         let full_scene = plot.publication(2, palette_id, &palette).unwrap().unwrap();
         assert!(!Arc::ptr_eq(&progressive, &full_scene));
 
-        // Rolling PCM may replace the snapshot without changing pooled values.
+        // Rolling PCM may update the preview without changing pooled values.
         // The cache must not hold the full payload or discard its publication.
-        let updated = Rc::make_mut(&mut full);
-        updated.frame.revision += 1;
+        full.frame.revision += 1;
         plot.columns_for_frame(
             2,
             2,
@@ -1924,8 +1933,7 @@ mod tests {
         assert!(Arc::ptr_eq(&full_scene, &rolling_scene));
 
         // A replacement scan is a different result even at the same revision.
-        let replacement = Rc::make_mut(&mut full);
-        replacement.generation += 1;
+        full.generation += 1;
         plot.columns_for_frame(
             2,
             2,
@@ -1941,12 +1949,16 @@ mod tests {
     fn removed_panels_retire_without_repainting() {
         let mut plot = WaveformPlot::default();
         let data = frame(vec![Some(0.25); 100]);
-        let palette = super::super::visuals::active_palette_lut(
-            crate::config::VisualizationPalette::Deadbeef,
+        let palette = super::super::palette::active_palette_lut(
+            rivu_format::config::VisualizationPalette::Deadbeef,
         );
         plot.columns(1, 100, &data);
         let scene = plot
-            .publication(1, crate::config::VisualizationPalette::Deadbeef, &palette)
+            .publication(
+                1,
+                rivu_format::config::VisualizationPalette::Deadbeef,
+                &palette,
+            )
             .unwrap()
             .unwrap();
         let publication = Arc::downgrade(&scene);
@@ -1962,8 +1974,8 @@ mod tests {
 
     #[test]
     fn unchanged_columns_reuse_publication_across_resize_and_revisions() {
-        let palette_id = crate::config::VisualizationPalette::Deadbeef;
-        let palette = super::super::visuals::active_palette_lut(palette_id);
+        let palette_id = rivu_format::config::VisualizationPalette::Deadbeef;
+        let palette = super::super::palette::active_palette_lut(palette_id);
         let mut data = frame(vec![Some(0.25), None, Some(0.0)]);
         let mut plot = WaveformPlot::default();
         plot.columns(1, 100, &data);
@@ -2001,8 +2013,8 @@ mod tests {
 
     #[test]
     fn unknown_silence_and_partially_known_transitions_control_publication() {
-        let palette_id = crate::config::VisualizationPalette::Deadbeef;
-        let palette = super::super::visuals::active_palette_lut(palette_id);
+        let palette_id = rivu_format::config::VisualizationPalette::Deadbeef;
+        let palette = super::super::palette::active_palette_lut(palette_id);
         let mut plot = WaveformPlot::default();
         let mut data = frame(vec![None; 2]);
         let mapping = WaveformMapping {
@@ -2041,8 +2053,8 @@ mod tests {
 
     #[test]
     fn numerical_publication_preserves_asymmetric_stereo_and_mono_duplication() {
-        let palette_id = crate::config::VisualizationPalette::Deadbeef;
-        let palette = super::super::visuals::active_palette_lut(palette_id);
+        let palette_id = rivu_format::config::VisualizationPalette::Deadbeef;
+        let palette = super::super::palette::active_palette_lut(palette_id);
         let mut data = frame(vec![Some(0.25), None]);
         data.left_rms[0] = Some(0.2);
         data.left_peaks[0] = Some(0.4);
@@ -2333,134 +2345,6 @@ mod tests {
         );
     }
 
-    fn captured_seek() -> (Waveform, LayoutInteraction) {
-        let mut waveform = preview(WaveformFrame::default());
-        waveform.seek_generation = 7;
-        waveform.dragging = true;
-        {
-            let mut interaction = waveform.interaction.borrow_mut();
-            interaction
-                .panels
-                .insert(1, (Bounds::default(), Some(20.0)));
-            interaction.active_panel = Some(1);
-            interaction.seek_duration = Some(20.0);
-        }
-        let mut owner = LayoutInteraction::default();
-        owner.waveform_preview(10., Some(11), 7);
-        (waveform, owner)
-    }
-
-    #[test]
-    fn collapsed_waveform_geometry_cannot_produce_a_seek() {
-        let (mut waveform, mut owner) = captured_seek();
-        let position = point(px(60.0), px(5.0));
-        let bounds = Bounds::new(point(px(10.0), px(0.0)), size(px(100.0), px(20.0)));
-        waveform
-            .interaction
-            .borrow_mut()
-            .panels
-            .insert(1, (bounds, Some(20.0)));
-        assert_eq!(
-            waveform.interaction.borrow().seek_seconds(position, None),
-            Some(10.0)
-        );
-        for size in [size(px(0.0), px(20.0)), size(px(100.0), px(0.0))] {
-            waveform
-                .interaction
-                .borrow_mut()
-                .panels
-                .insert(1, (Bounds::new(bounds.origin, size), Some(20.0)));
-            assert_eq!(
-                waveform.interaction.borrow().seek_seconds(position, None),
-                None
-            );
-        }
-        let cancelled = waveform.remove_interaction_panel(1).unwrap();
-        assert!(!waveform.accepts_seek_event(7));
-        assert!(owner.cancel_waveform(cancelled));
-        assert_eq!(owner.finish_waveform(20.0, 7), None);
-        waveform
-            .interaction
-            .borrow_mut()
-            .panels
-            .insert(1, (bounds, Some(20.0)));
-        assert_eq!(
-            waveform.interaction.borrow().seek_seconds(position, None),
-            None
-        );
-        waveform.interaction.borrow_mut().seek_duration = Some(20.0);
-        assert_eq!(
-            waveform
-                .interaction
-                .borrow()
-                .seek_seconds(position, Some(1)),
-            Some(10.0)
-        );
-    }
-
-    #[test]
-    fn hidden_and_unavailable_surfaces_cancel_both_owners_without_committing() {
-        for hidden in [true, false] {
-            let (mut waveform, mut owner) = captured_seek();
-            waveform
-                .interaction
-                .borrow_mut()
-                .panels
-                .insert(2, (Bounds::default(), Some(40.0)));
-            assert_eq!(waveform.remove_interaction_panel(2), None);
-            assert_eq!(waveform.retain_interaction_panels(|id| id == 1), None);
-            assert!(waveform.accepts_seek_event(7));
-            let cancelled = if hidden {
-                waveform.retain_interaction_panels(|_| false)
-            } else {
-                // This is the same transition used by source/status/timeline early exits.
-                waveform.remove_interaction_panel(1)
-            }
-            .unwrap();
-            assert_eq!(cancelled, 7);
-            assert!(!waveform.accepts_seek_event(7));
-            assert!(!waveform.dragging);
-            assert!(owner.cancel_waveform(cancelled));
-            assert_eq!(owner.seek_preview(), None);
-            assert_eq!(owner.finish_drag(), DragCommit::None);
-            assert_eq!(owner.finish_waveform(12., 7), None);
-            assert_eq!(waveform.remove_interaction_panel(1), None);
-            assert_eq!(waveform.cancel_unreleased_seek(), None);
-            assert!(owner.waveform_preview(20., Some(12), 8));
-            assert!(!owner.cancel_waveform(cancelled));
-            assert_eq!(
-                owner.finish_waveform(21., 8),
-                Some(SeekCommit {
-                    queue_id: 12,
-                    seconds: 21.
-                })
-            );
-        }
-    }
-
-    #[test]
-    fn normal_release_keeps_queued_seek_but_missing_release_is_cancelled() {
-        let (mut waveform, mut owner) = captured_seek();
-        // Root release may run before the entity listener and must not commit it.
-        assert_eq!(owner.finish_drag(), DragCommit::None);
-        waveform.release_seek_capture();
-        assert_eq!(waveform.cancel_unreleased_seek(), None);
-        assert!(waveform.accepts_seek_event(7));
-        assert_eq!(
-            owner.finish_waveform(12., 7),
-            Some(SeekCommit {
-                queue_id: 11,
-                seconds: 12.
-            })
-        );
-        assert_eq!(owner.finish_waveform(12., 7), None);
-        let (mut waveform, mut owner) = captured_seek();
-        let cancelled = waveform.cancel_unreleased_seek().unwrap();
-        assert!(owner.cancel_waveform(cancelled));
-        assert!(!waveform.accepts_seek_event(7));
-        assert_eq!(owner.finish_waveform(12., 7), None);
-    }
-
     #[test]
     fn unknown_duration_cursor_uses_the_progressive_span_and_clamps_endpoints() {
         let mut frame = frame(vec![Some(0.25), None]);
@@ -2487,14 +2371,18 @@ mod tests {
         let mut waveform = preview(data);
         waveform.revision = Some(1);
         let (generation, cancelled) = waveform.start_full(DecoderHint::Auto);
-        let palette = super::super::visuals::active_palette_lut(
-            crate::config::VisualizationPalette::Deadbeef,
+        let palette = super::super::palette::active_palette_lut(
+            rivu_format::config::VisualizationPalette::Deadbeef,
         );
         let cached = {
             let mut plot = waveform.plot.borrow_mut();
             plot.columns(1, 100, &waveform.shared.read());
             let frame = plot
-                .publication(1, crate::config::VisualizationPalette::Deadbeef, &palette)
+                .publication(
+                    1,
+                    rivu_format::config::VisualizationPalette::Deadbeef,
+                    &palette,
+                )
                 .unwrap()
                 .unwrap();
             Arc::downgrade(&frame)
@@ -2561,9 +2449,9 @@ mod tests {
         assert!(waveform.sync_state(Some(&track)));
         let (request, _) = waveform.start_full(DecoderHint::Auto);
         assert!(waveform.finish_full(request, Ok(frame(vec![Some(0.5), Some(0.75)]))));
-        let completed = Rc::downgrade(waveform.full.as_ref().unwrap());
-        let palette = super::super::visuals::active_palette_lut(
-            crate::config::VisualizationPalette::Deadbeef,
+        let source = Rc::clone(waveform.source.as_ref().unwrap());
+        let palette = super::super::palette::active_palette_lut(
+            rivu_format::config::VisualizationPalette::Deadbeef,
         );
         let cached = {
             let shared = waveform.shared.read();
@@ -2573,7 +2461,11 @@ mod tests {
             let mut plot = waveform.plot.borrow_mut();
             plot.columns(1, 100, full);
             let frame = plot
-                .publication(1, crate::config::VisualizationPalette::Deadbeef, &palette)
+                .publication(
+                    1,
+                    rivu_format::config::VisualizationPalette::Deadbeef,
+                    &palette,
+                )
                 .unwrap()
                 .unwrap();
             Arc::downgrade(&frame)
@@ -2592,7 +2484,7 @@ mod tests {
             assert!(std::ptr::eq(waveform.display_frame(&shared), &*shared));
         }
         assert!(waveform.sync_state(Some(&track)));
-        assert!(completed.upgrade().is_none());
+        assert!(waveform.paint_frame(&source, Some(request)).is_none());
         assert!(waveform.full.is_none());
         assert!(waveform.manual.is_none());
         assert!(waveform.manual_error.is_none());
@@ -2698,7 +2590,7 @@ mod tests {
         let mut waveform = preview(frame(vec![Some(0.25), None]));
         let (generation, _) = waveform.start_full(DecoderHint::Auto);
         assert_eq!(waveform.shared.read().peaks, vec![Some(0.25), None]);
-        assert!(waveform.manual_message(&Localizer::new("en-US")).is_some());
+        assert!(waveform.manual_message(&VisualLabels::default()).is_some());
         assert!(waveform.finish_full(generation, Err(anyhow::anyhow!("decode failed"))));
         assert!(
             waveform
@@ -2746,6 +2638,67 @@ mod tests {
         assert_eq!(display.peaks, [Some(0.25), Some(0.0625)]);
         assert_eq!(display.rms, [Some(0.25), Some(0.0625)]);
         assert_eq!(display.right_rms_counts, [1, 1]);
+    }
+
+    #[test]
+    fn cached_full_scene_observes_merges_but_rejects_replacement_and_cancellation() {
+        let mut waveform = preview(frame(vec![Some(1.0), None]));
+        let source = Rc::clone(waveform.source.as_ref().unwrap());
+        let (first, _) = waveform.start_full(DecoderHint::Auto);
+        assert!(waveform.finish_full(first, Ok(frame(vec![Some(0.5), Some(0.75)]))));
+        {
+            let PaintFrame::Full(full) = waveform.paint_frame(&source, Some(first)).unwrap() else {
+                panic!("the original scene must paint its scan");
+            };
+            assert_eq!(full.frame.peaks, [Some(0.5), Some(0.75)]);
+        }
+        let mut fresh = frame(vec![Some(0.125), None]);
+        fresh.revision = 2;
+        fresh.bin_revisions = vec![2, 0];
+        *waveform.shared.write() = fresh;
+        waveform.sync_state(Some(&track("track.flac", DecoderHint::Auto)));
+        {
+            let PaintFrame::Full(full) = waveform.paint_frame(&source, Some(first)).unwrap() else {
+                panic!("a cached scene must see new PCM in the same full generation");
+            };
+            assert_eq!(full.frame.peaks, [Some(0.125), Some(0.75)]);
+            assert_eq!(full.frame.rms, [Some(0.125), Some(0.75)]);
+        }
+        let (obsolete, cancelled) = waveform.start_full(DecoderHint::Auto);
+        let (failed, _) = waveform.start_full(DecoderHint::Auto);
+        assert!(cancelled.load(Ordering::Relaxed));
+        assert!(!waveform.finish_full(obsolete, Ok(frame(vec![Some(1.0); 2]))));
+        assert!(waveform.finish_full(failed, Err(anyhow::anyhow!("decode failed"))));
+        {
+            let PaintFrame::Full(full) = waveform.paint_frame(&source, Some(first)).unwrap() else {
+                panic!("a cancelled or failed reload must preserve the rolling baseline");
+            };
+            assert_eq!(full.frame.peaks, [Some(0.125), Some(0.75)]);
+        }
+        let (replacement, _) = waveform.start_full(DecoderHint::Ffmpeg);
+        let mut result = frame(vec![Some(0.25); 2]);
+        result.decoder_hint = DecoderHint::Ffmpeg;
+        assert!(waveform.finish_full(replacement, Ok(result)));
+        assert!(waveform.paint_frame(&source, Some(first)).is_none());
+        let replacement_source = Rc::clone(&waveform.full.as_ref().unwrap().source);
+        {
+            let PaintFrame::Full(full) = waveform
+                .paint_frame(&replacement_source, Some(replacement))
+                .unwrap()
+            else {
+                panic!("a new scene must accept the replacement scan");
+            };
+            // PCM preceding this explicit request must not overwrite its baseline.
+            assert_eq!(full.frame.peaks, [Some(0.25); 2]);
+            assert_eq!(full.frame.decoder_hint, DecoderHint::Ffmpeg);
+        }
+        waveform.cancel_full();
+        assert!(
+            waveform
+                .paint_frame(&replacement_source, Some(replacement))
+                .is_none()
+        );
+        assert!(!waveform.finish_full(replacement, Ok(frame(vec![Some(1.0); 2]))));
     }
 
     #[test]
@@ -2963,6 +2916,7 @@ mod tests {
         let mut baseline = frame(vec![Some(0.75); 2]);
         baseline.scan_source_identity = Some(original);
         assert!(waveform.finish_full(request, Ok(baseline)));
+        let source = Rc::clone(waveform.source.as_ref().unwrap());
         {
             let mut shared = waveform.shared.write();
             shared.identity = Some(rivu_audio::WaveformIdentity::Progressive {
@@ -2974,6 +2928,7 @@ mod tests {
             });
             shared.revision += 1;
         }
+        assert!(waveform.paint_frame(&source, Some(request)).is_none());
         assert!(waveform.sync_state(Some(&track("track.flac", DecoderHint::Auto))));
         assert!(waveform.full.is_none());
         let shared = waveform.shared.read();
@@ -3028,12 +2983,10 @@ mod tests {
         for complete in [false, true] {
             let mut waveform = preview(frame(vec![Some(0.25), None]));
             let (generation, cancelled) = waveform.start_full(DecoderHint::Auto);
-            let completed = if complete {
+            if complete {
                 assert!(waveform.finish_full(generation, Ok(frame(vec![Some(0.5), Some(0.75)]))));
-                Some(Rc::downgrade(waveform.full.as_ref().unwrap()))
-            } else {
-                None
-            };
+            }
+            let source = Rc::clone(waveform.source.as_ref().unwrap());
             assert!(!waveform.invalidate_saved_hint(&track("other.flac", DecoderHint::Ffmpeg)));
             assert!(!waveform.invalidate_saved_hint(&cue_track()));
             assert!(waveform.invalidate_saved_hint(&track("track.flac", DecoderHint::Ffmpeg)));
@@ -3041,7 +2994,7 @@ mod tests {
             assert!(waveform.manual.is_none());
             assert!(waveform.full.is_none());
             assert!(waveform.manual_error.is_none());
-            assert!(completed.is_none_or(|completed| completed.upgrade().is_none()));
+            assert!(waveform.paint_frame(&source, Some(generation)).is_none());
             assert!(!waveform.finish_full(generation, Ok(frame(vec![Some(1.0), Some(1.0)]))));
             let shared = waveform.shared.read();
             assert_eq!(shared.decoder_hint, DecoderHint::Auto);
@@ -3058,9 +3011,14 @@ mod tests {
         assert!(!waveform.sync_source(Some(&saved)));
         assert!(!cancelled.load(Ordering::Relaxed));
         assert!(waveform.finish_full(generation, Ok(frame(vec![Some(0.5), Some(0.75)]))));
-        let completed = Rc::clone(waveform.full.as_ref().unwrap());
+        let source = Rc::clone(waveform.source.as_ref().unwrap());
         assert!(!waveform.sync_source(Some(&saved)));
-        assert!(Rc::ptr_eq(waveform.full.as_ref().unwrap(), &completed));
+        let selected = waveform.paint_frame(&source, Some(generation)).unwrap();
+        let PaintFrame::Full(full) = selected else {
+            panic!("ordinary hint sync must preserve the existing full display");
+        };
+        assert_eq!(full.frame.peaks, [Some(0.5), Some(0.75)]);
+        drop(selected);
         assert!(waveform.invalidate_saved_hint(&saved));
         assert!(!waveform.sync_source(Some(&saved)));
         let shared = waveform.shared.read();
@@ -3086,26 +3044,19 @@ mod tests {
                 original.fingerprint = before.map(str::to_owned);
                 let mut waveform = preview(frame(vec![Some(0.25), None]));
                 waveform.sync_state(Some(&original));
-                let mut query = crate::gui::FullWaveformRequest::default();
-                let query_generation = query.begin(&original);
                 let (generation, cancelled) = waveform.start_full(DecoderHint::Auto);
-                let completed = if complete {
+                if complete {
                     assert!(waveform.finish_full(generation, Ok(frame(vec![Some(0.5); 2]))));
-                    Some(Rc::downgrade(waveform.full.as_ref().unwrap()))
-                } else {
-                    None
-                };
+                }
+                let source = Rc::clone(waveform.source.as_ref().unwrap());
                 let mut replaced = original.clone();
                 replaced.fingerprint = after.map(str::to_owned);
-                assert!(!query.accepts(query_generation, Some(&replaced)));
-                query.retain_target(Some(&replaced), false);
-                assert!(!query.accepts(query_generation, Some(&original)));
                 assert!(waveform.sync_state(Some(&replaced)));
                 assert!(complete || cancelled.load(Ordering::Relaxed));
                 assert!(waveform.manual.is_none());
                 assert!(waveform.full.is_none());
                 assert!(waveform.manual_error.is_none());
-                assert!(completed.is_none_or(|completed| completed.upgrade().is_none()));
+                assert!(waveform.paint_frame(&source, Some(generation)).is_none());
                 assert!(!waveform.finish_full(generation, Ok(frame(vec![Some(1.0); 2]))));
                 let shared = waveform.shared.read();
                 assert_eq!(shared.peaks, vec![Some(0.25), None]);
@@ -3125,129 +3076,18 @@ mod tests {
             if complete {
                 assert!(waveform.finish_full(generation, Ok(frame(vec![Some(0.5); 2]))));
             }
+            let source = Rc::clone(waveform.source.as_ref().unwrap());
             // Exercise the install/display guards independently of sync's cancellation.
             Rc::make_mut(waveform.source.as_mut().unwrap()).fingerprint = Some("new".into());
             if !complete {
                 assert!(waveform.finish_full(generation, Ok(frame(vec![Some(1.0); 2]))));
                 assert!(waveform.full.is_none());
             }
+            assert!(waveform.paint_frame(&source, Some(generation)).is_none());
             let shared = waveform.shared.read();
             assert!(std::ptr::eq(waveform.display_frame(&shared), &*shared));
             assert!(waveform.full_preview(&shared).is_none());
         }
-    }
-
-    #[gpui::test]
-    fn presentation_hiding_retains_pending_and_completed_full_previews(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        use crate::gui::presentation::{Presentation, PresentationState};
-
-        let directory = tempfile::tempdir().unwrap();
-        let config_path = directory.path().join("config.toml");
-        Config {
-            volume: 0.0,
-            ffmpeg_enabled: false,
-            mpris_enabled: false,
-            ..Config::default()
-        }
-        .save(&config_path)
-        .unwrap();
-        let runtime = crate::core::Runtime::start(directory.path(), &config_path).unwrap();
-        let config = runtime.handle.config_snapshot();
-        let window = cx.add_empty_window();
-        let waveform = window.update(|_, cx| cx.new(|_| preview(frame(vec![Some(0.25), None]))));
-        let owner = window.update(|_, cx| {
-            cx.new(|cx| {
-                Presentation::new(
-                    runtime.handle.clone(),
-                    Arc::new(Localizer::new("en-US")),
-                    waveform.clone(),
-                    cx.new(|_| crate::gui::animation_frames::AnimationFrames::default()),
-                    cx,
-                )
-            })
-        });
-        let track = track("track.flac", DecoderHint::Auto);
-        let empty_layout = crate::gui::layout::Layout {
-            root: None,
-            next_id: 1,
-            locked: false,
-        };
-        let mut layout = empty_layout.clone();
-        layout.add("waveform", None);
-        let mut panels = crate::gui::workspace::WorkspacePanels::default();
-        window.update(|_window, cx| {
-            let mut sync = |owner: &mut Presentation,
-                            config: Arc<Config>,
-                            visible,
-                            has_panel,
-                            cx: &mut Context<Presentation>| {
-                panels.reconcile(if has_panel { &layout } else { &empty_layout });
-                owner.sync(
-                    PresentationState {
-                        config,
-                        panels: &panels,
-                        status: rivu_protocol::model::PlaybackStatus::Paused,
-                        visible,
-                        shutting_down: false,
-                        current_track_id: Some(track.id),
-                        waveform_track: Some(&track),
-                        position: 0.0,
-                        duration: track.duration,
-                        source_generation: 0,
-                        seek_revision: 0,
-                    },
-                    cx,
-                );
-            };
-            owner.update(cx, |owner, cx| {
-                sync(owner, Arc::clone(&config), true, true, cx)
-            });
-            for complete in [false, true] {
-                let (generation, cancelled) =
-                    waveform.update(cx, |waveform, _| waveform.start_full(DecoderHint::Auto));
-                if complete {
-                    waveform.update(cx, |waveform, _| {
-                        assert!(waveform.finish_full(generation, Ok(frame(vec![Some(0.5); 2]))));
-                    });
-                }
-                for (visible, has_panel, release) in [
-                    (true, false, false),
-                    (true, true, false),
-                    (false, true, false),
-                    (false, true, true),
-                    (true, true, false),
-                ] {
-                    owner.update(cx, |owner, cx| {
-                        sync(owner, Arc::clone(&config), visible, has_panel, cx);
-                        if release {
-                            owner.release_display_resources(cx);
-                        }
-                    });
-                    assert!(!cancelled.load(Ordering::Relaxed));
-                    let waveform = waveform.read(cx);
-                    if complete {
-                        assert_eq!(
-                            waveform.full.as_ref().unwrap().frame.peaks,
-                            vec![Some(0.5); 2]
-                        );
-                    } else {
-                        assert!(waveform.manual.is_some());
-                    }
-                }
-                if !complete {
-                    waveform.update(cx, |waveform, _| {
-                        assert!(waveform.finish_full(generation, Ok(frame(vec![Some(0.5); 2]))));
-                    });
-                }
-            }
-            let mut still = config.as_ref().clone();
-            still.still_mode = true;
-            owner.update(cx, |owner, cx| sync(owner, Arc::new(still), true, true, cx));
-            assert!(waveform.read(cx).full.is_none());
-            assert!(waveform.read(cx).manual.is_none());
-        });
     }
 
     #[test]
@@ -3257,8 +3097,6 @@ mod tests {
         let mut waveform = preview(frame(vec![Some(0.25), None]));
         waveform.sync_state(Some(&original));
         let source = Rc::clone(waveform.source.as_ref().unwrap());
-        let mut query = crate::gui::FullWaveformRequest::default();
-        let query_generation = query.begin(&original);
         let (generation, cancelled) = waveform.start_full(DecoderHint::Auto);
         let mut edited = original.clone();
         edited.title = "renamed".into();
@@ -3266,8 +3104,6 @@ mod tests {
         edited.play_count += 1;
         edited.decoder_hint = DecoderHint::Ffmpeg;
         for complete in [false, true] {
-            query.retain_target(Some(&edited), false);
-            assert!(query.accepts(query_generation, Some(&edited)));
             assert!(!waveform.sync_state(Some(&edited)));
             // These are the same owners retained by sync when no panel is visible.
             waveform.plot.borrow_mut().retain_panels(|_| false);
@@ -3282,8 +3118,6 @@ mod tests {
                 assert_eq!(waveform.display_frame(&shared).peaks, vec![Some(0.5); 2]);
             }
         }
-        query.saved_hint_changed(&edited);
-        assert!(!query.accepts(query_generation, Some(&original)));
         assert!(waveform.invalidate_saved_hint(&edited));
         let shared = waveform.shared.read();
         assert_eq!(shared.decoder_hint, DecoderHint::Auto);
@@ -3305,10 +3139,12 @@ mod tests {
                         waveform.finish_full(generation, Ok(frame(vec![Some(0.5), Some(0.75)])))
                     );
                 }
+                let source = Rc::clone(waveform.source.as_ref().unwrap());
                 assert!(waveform.sync_source(Some(&changed)));
                 assert!(complete || cancelled.load(Ordering::Relaxed));
                 assert!(waveform.manual.is_none());
                 assert!(waveform.full.is_none());
+                assert!(waveform.paint_frame(&source, Some(generation)).is_none());
                 assert!(!waveform.finish_full(generation, Ok(frame(vec![Some(1.0), Some(1.0)]))));
             }
         }
@@ -3319,9 +3155,9 @@ mod tests {
         let mut waveform = preview(frame(vec![Some(0.25), None]));
         let (generation, _) = waveform.start_full(DecoderHint::Auto);
         assert!(waveform.finish_full(generation, Ok(frame(vec![Some(0.5), Some(0.75)]))));
-        let completed = Rc::downgrade(waveform.full.as_ref().unwrap());
+        let source = Rc::clone(waveform.source.as_ref().unwrap());
         waveform.set_enabled(false);
-        assert!(completed.upgrade().is_none());
+        assert!(waveform.paint_frame(&source, Some(generation)).is_none());
         assert_eq!(waveform.shared.read().peaks, vec![Some(0.25), None]);
         waveform.set_enabled(true);
         assert!(waveform.full.is_none());

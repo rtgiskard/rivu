@@ -87,6 +87,8 @@ impl SettingsModel {
         self.feedback = None;
     }
 
+    // The draft reuses the canonical option fields for controls, but the target
+    // routes Apply exclusively to the layout instance, never global persistence.
     pub(super) fn reset_visualizer(
         &mut self,
         config: &Arc<Config>,
@@ -96,8 +98,8 @@ impl SettingsModel {
         self.reset(config);
         self.target = Target::Visualizer(panel_id);
         self.draft.audio_visualizer_style = options.style;
-        self.draft.audio_visualizer_grid = options.reference_lines;
-        self.draft.audio_visualizer_labels = options.labels;
+        self.draft.audio_visualizer_grid = options.grid;
+        self.draft.audio_visualizer_labels = options.label;
     }
 
     pub(super) fn reset_artwork(
@@ -224,8 +226,8 @@ mod tests {
 
         let visualizer = AudioVisualizerOptions {
             style: AudioVisualizerStyle::Rings,
-            reference_lines: false,
-            labels: true,
+            grid: false,
+            label: true,
         };
         model.reset_visualizer(&config, 11, visualizer);
         assert_eq!(model.target(), Target::Visualizer(11));
@@ -289,6 +291,44 @@ mod tests {
         assert!(!model.applying());
         assert!(model.feedback().is_none());
         assert!(model.begin_panel_apply(Some(17.0)).is_none());
+    }
+
+    #[test]
+    fn every_visualizer_style_keeps_instance_options_out_of_global_defaults() {
+        use crate::gui::visualization::AUDIO_VISUALIZER_STYLES;
+
+        let config = Arc::new(Config::default());
+        let defaults = AudioVisualizerOptions::from(config.as_ref());
+        let mut model = SettingsModel::new(&config);
+        for style in AUDIO_VISUALIZER_STYLES {
+            let options = AudioVisualizerOptions {
+                style,
+                grid: !defaults.grid,
+                label: !defaults.label,
+            };
+            model.reset_visualizer(&config, 7, options);
+            assert_eq!(AudioVisualizerOptions::from(model.baseline()), defaults);
+            assert!(model.begin_apply(model.draft.clone()).is_none());
+            let Some(PanelApply::Visualizer {
+                panel_id,
+                options: applied,
+                session,
+            }) = model.begin_panel_apply(None)
+            else {
+                panic!("expected local visualizer options");
+            };
+            assert_eq!(panel_id, 7);
+            assert_eq!(applied, options);
+            assert!(model.complete_panel_apply(session, Ok(())));
+            assert_eq!(AudioVisualizerOptions::from(model.baseline()), defaults);
+
+            // Reopening global settings (also the discard boundary) restores
+            // new-instance defaults rather than retaining the instance's style.
+            model.reset(&config);
+            assert_eq!(model.target(), Target::Global);
+            assert_eq!(AudioVisualizerOptions::from(&model.draft), defaults);
+            assert_eq!(model.draft, *config);
+        }
     }
 
     #[test]

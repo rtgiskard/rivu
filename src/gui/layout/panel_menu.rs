@@ -23,6 +23,32 @@ pub(in crate::gui) struct PanelMenu {
 }
 
 impl GuiApp {
+    fn update_visualizer_options(
+        &mut self,
+        panel_id: u64,
+        update: impl FnOnce(&mut AudioVisualizerOptions),
+        cx: &mut Context<Self>,
+    ) {
+        self.panel_menu = None;
+        if let Some(previous) = self
+            .workspace
+            .layouts
+            .current()
+            .audio_visualizer_options(panel_id)
+        {
+            let mut options = previous;
+            update(&mut options);
+            if options != previous {
+                self.workspace
+                    .layouts
+                    .current_mut()
+                    .set_audio_visualizer_options(panel_id, options);
+                self.persist_layout(cx);
+            }
+        }
+        cx.notify();
+    }
+
     pub(in crate::gui) fn open_keyboard_panel_menu(
         &mut self,
         panel_id: u64,
@@ -100,12 +126,7 @@ impl GuiApp {
                 });
             if matches!(
                 kind,
-                "spectrum"
-                    | "waveform"
-                    | "spectrogram"
-                    | "audio_visualizer"
-                    | "album_artwork"
-                    | "audio_processing"
+                "metadata" | "album_artwork" | "audio_processing" | "audio_visualizer"
             ) {
                 visualizations = visualizations.child(choice);
             } else {
@@ -154,7 +175,12 @@ impl GuiApp {
             .map(|panel| panel.kind.as_str());
         let is_queue = panel_kind == Some("queue");
         let is_library = panel_kind == Some("library");
-        let is_waveform = panel_kind == Some("waveform");
+        let is_waveform = self
+            .workspace
+            .layouts
+            .current()
+            .audio_visualizer_options(state.panel_id)
+            .is_some_and(|options| options.style == crate::config::AudioVisualizerStyle::Waveform);
         let is_audio_visualizer = panel_kind == Some("audio_visualizer");
         let is_album_artwork = panel_kind == Some("album_artwork");
         let mut menu = Popover::menu(theme, "panel-context-menu", window)
@@ -326,50 +352,41 @@ impl GuiApp {
                         ))
                         .child(div().h(px(1.)).mx_2().my_1().bg(rgb(theme.border)));
                     menu = menu
-                        .child(checked_menu_item(
-                            "audio-visualizer-grid",
-                            self.tr("shell-reference-lines"),
-                            options.reference_lines,
-                            MenuIndicator::Check,
-                            cx,
-                            move |this, _, cx| {
-                                this.panel_menu = None;
-                                if let Some(mut options) = this
-                                    .workspace
-                                    .layouts
-                                    .current()
-                                    .audio_visualizer_options(state.panel_id)
-                                {
-                                    options.reference_lines = !options.reference_lines;
-                                    this.workspace
-                                        .layouts
-                                        .current_mut()
-                                        .set_audio_visualizer_options(state.panel_id, options);
-                                    this.persist_layout(cx);
-                                }
+                        .when(
+                            !matches!(
+                                options.style,
+                                crate::config::AudioVisualizerStyle::Waveform
+                                    | crate::config::AudioVisualizerStyle::Spectrogram
+                            ),
+                            |menu| {
+                                menu.child(checked_menu_item(
+                                    "audio-visualizer-grid",
+                                    self.tr("shell-reference-lines"),
+                                    options.grid,
+                                    MenuIndicator::Check,
+                                    cx,
+                                    move |this, _, cx| {
+                                        this.update_visualizer_options(
+                                            state.panel_id,
+                                            |options| options.grid = !options.grid,
+                                            cx,
+                                        );
+                                    },
+                                ))
                             },
-                        ))
+                        )
                         .child(checked_menu_item(
                             "audio-visualizer-labels",
                             self.tr("shell-labels"),
-                            options.labels,
+                            options.label,
                             MenuIndicator::Check,
                             cx,
                             move |this, _, cx| {
-                                this.panel_menu = None;
-                                if let Some(mut options) = this
-                                    .workspace
-                                    .layouts
-                                    .current()
-                                    .audio_visualizer_options(state.panel_id)
-                                {
-                                    options.labels = !options.labels;
-                                    this.workspace
-                                        .layouts
-                                        .current_mut()
-                                        .set_audio_visualizer_options(state.panel_id, options);
-                                    this.persist_layout(cx);
-                                }
+                                this.update_visualizer_options(
+                                    state.panel_id,
+                                    |options| options.label = !options.label,
+                                    cx,
+                                );
                             },
                         ))
                         .child(div().h(px(1.)).mx_2().my_1().bg(rgb(theme.border)))
@@ -589,20 +606,11 @@ impl GuiApp {
                             MenuIndicator::Radio,
                             cx,
                             move |this, _, cx| {
-                                this.panel_menu = None;
-                                if let Some(mut options) = this
-                                    .workspace
-                                    .layouts
-                                    .current()
-                                    .audio_visualizer_options(state.panel_id)
-                                {
-                                    options.style = style;
-                                    this.workspace
-                                        .layouts
-                                        .current_mut()
-                                        .set_audio_visualizer_options(state.panel_id, options);
-                                    this.persist_layout(cx);
-                                }
+                                this.update_visualizer_options(
+                                    state.panel_id,
+                                    |options| options.style = style,
+                                    cx,
+                                );
                             },
                         ));
                     }

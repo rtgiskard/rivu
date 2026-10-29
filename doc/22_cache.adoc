@@ -265,9 +265,13 @@ aggregation; only changed mapped values or palette replace the publication.
 Raw-width changes preserving that count, height, and cursor movement reuse it.
 
 A scan generation remains its display identity across rolling PCM updates;
-replacement scans stay distinct. Keys do not pin preview snapshots. All-unknown
-data produces no publication, while known silence remains drawable. The renderer
-owns upload reuse and completion-aware retirement. Signal semantics are in
+replacement scans stay distinct. The Waveform owner holds the full preview
+directly and merges PCM into it without sharing mutable frame storage. Cached
+paint closures retain only source/generation tokens and briefly borrow the current
+owner for column pooling; they reject invalidated or replacement previews. Keys
+do not pin preview snapshots. All-unknown data produces no publication, while
+known silence remains drawable. The renderer owns upload reuse and
+completion-aware retirement. Signal semantics are in
 link:23_visuals.adoc#_waveform[Waveform].
 
 ==== Spectrum

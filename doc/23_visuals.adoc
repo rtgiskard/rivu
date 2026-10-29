@@ -21,8 +21,33 @@ consumer behavior is described here; a proposal there does not change it.
 
 == Analysis boundary
 
+`rivu-visuals` owns visual models, rendering, and track-preview rendering events.
+It receives immutable analysis frames, typed `VisualParameters`, and localized
+`VisualLabels`; it does not depend on the application root, layout tree,
+localizer, or playback commands. The GUI presentation owner reconciles demand,
+accepts current source/seek identities, and owns the shared scheduling clock.
+The host routes Waveform seek, full-scan, and decoder-hint events through its
+existing playback and scan owners. Moving rendering into this crate does not
+introduce another analysis worker, PCM pool, or animation loop.
+Renderer constructors use the same `VisualParameters` defaults as configuration
+projection; they do not maintain independent initial style, interpolation, or
+envelope settings. History and GPU material allocation remain demand-driven.
+
+`FrequencyViews` accepts shared analysis frames and coordinates the frequency
+plots. Its `spectrum` module owns `Spectrum` state, envelopes, bin mapping, and
+GPU publications; its `spectrogram` module owns `Spectrogram` state, bounded
+history, sampling, and tiled publications. Palette lookup and text painting are
+shared with Waveform through the `palette` and `labels` modules.
+`StyleCoordinator` reconciles style visibility and layout retention, then routes
+borrowed frames to `RadialRenderer`, `StereoRenderer`, `FractalRenderer`, and
+`OscilloscopeRenderer`. Each concrete renderer owns its numerical state and
+drawing. The six layout-retention slots live inline in the coordinator; radial
+canvas closures continue sharing the original single UI-thread state owner,
+without another heap allocation or frame copy. `Waveform` owns the track-preview
+view.
+
 Visualization analysis is separate from audio output and observes samples before
-master volume gain. One global `visualizations.signal` setting selects `before`
+master volume gain. One global `visualizations.general.signal` setting selects `before`
 or `after` (default): before the active realtime processing chain, or after that
 chain including monitor EQ. The audio worker sends only the selected stereo
 signal to a bounded ring; analysis consumes it off the real-time thread. There
@@ -124,7 +149,7 @@ snapshot with newer metrics.
 One GUI presentation owner shares visual models and staging across panels.
 Its analysis timer requests frames at `analysis_fps`; native window callbacks
 consume the latest publication and advance animation independently.
-`visualizations.fps` caps Spectrum, Spectrogram and Audio Visualizer animation:
+`visualizations.general.fps` caps Spectrum, Spectrogram and Audio Visualizer animation:
 `0` follows window frames, and `1`–`240` limits requests per second. It does not
 throttle analysis, Waveform or artwork. Artwork and audio visualization share one
 window-local native-frame gate and one cancellable deadline timer, while retaining
@@ -358,6 +383,10 @@ per-palette-interval submissions, but those counts alone prove no timing gain.
 
 == Audio Visualizer ownership
 
+All eleven styles use one `audio_visualizer` panel kind. Layout instances retain
+style, reference lines, and labels, while style-specific global parameters keep
+their existing configuration groups. Titles resolve from each instance's style.
+
 Panel instances own presentation options, while analysis and simulation results
 are shared by rendering style. Multiple panels of one style do not duplicate its
 field or advance its simulation independently; distinct styles do not overwrite
@@ -392,16 +421,20 @@ The worker shares immutable snapshots of the latest
 PCM without blocking audio or other analysis. Panels share the selected sweep,
 never old PCM paired with newer timing or metrics.
 
-A rising zero crossing on the left anchors at most 10 ms of samples. A silent
-left channel selects the right trigger; a window shorter than two sweeps shows
-its available half-window. Without a crossing, the latest complete sweep is used.
-Trigger selection happens once per accepted publication. Painting partitions the
-sweep into at most one bucket per physical pixel, preserving finite minimum and
-maximum amplitudes in each channel instead of dropping peaks. Invalid amplitudes
-are omitted, and finite values are clipped to the fixed ±1 scale. Left and right
-use separate vertical centers and solid primary/secondary colors. The measured
-label is omitted when the panel cannot fit it; neither labels nor geometry
-changes alter the samples or trigger.
+A rising zero crossing on the left anchors a sweep selected by
+`visualizations.oscilloscope.time_span_ms` (1–50 ms, default 10). A silent left
+channel selects the right trigger; a window shorter than two requested sweeps
+shows its available half-window. Without a crossing, the latest complete sweep
+is used. Trigger selection happens once per accepted publication. Painting
+partitions the sweep into at most one bucket per physical pixel, preserving
+finite minimum and maximum amplitudes in each channel instead of dropping peaks.
+Invalid amplitudes are omitted. `visualizations.oscilloscope.gain` (0.1–10,
+default 1) scales drawing before clipping, without modifying retained PCM or
+playback volume. Left and right use separate vertical centers and solid
+primary/secondary colors. The label reports input amplitude limits of ±1/gain
+and the actual source endpoint duration `(samples - 1) / sample_rate`, rather
+than promising a span longer than the available buffer. It is omitted when the
+panel cannot fit it; overlay changes do not alter the samples or trigger.
 
 Hiding the style or disabling presentation releases the GUI's retained PCM,
 keeping only a compact normalized final sweep of at most 2048 stereo points.

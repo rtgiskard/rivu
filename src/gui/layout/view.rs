@@ -327,10 +327,14 @@ impl GuiApp {
                     .border_color(rgb(theme.structure_border));
                 for panel in panels.iter().filter(|_| show_tab_bar) {
                     let panel_id = panel.id;
-                    let title = panel_spec(&panel.kind).map_or_else(
-                        || SharedString::from(panel.kind.clone()),
-                        |spec| self.tr(spec.title_id),
-                    );
+                    let title = if let Some(options) = panel.audio_visualizer {
+                        self.tr(visualization::audio_visualizer_style_id(options.style))
+                    } else {
+                        panel_spec(&panel.kind).map_or_else(
+                            || SharedString::from(panel.kind.clone()),
+                            |spec| self.tr(spec.title_id),
+                        )
+                    };
                     let tab_bar_visible = panel.show_tab_bar;
                     let drag = PanelDrag {
                         source: DockSource::Existing(panel_id),
@@ -491,12 +495,7 @@ impl GuiApp {
                     .iter()
                     .find(|panel| panel.id == active)
                     .map(|panel| {
-                        if self.state.system.config.still_mode
-                            && matches!(
-                                panel.kind.as_str(),
-                                "spectrum" | "spectrogram" | "audio_visualizer" | "waveform"
-                            )
-                        {
+                        if self.state.system.config.still_mode && panel.kind == "audio_visualizer" {
                             return div()
                                 .size_full()
                                 .flex()
