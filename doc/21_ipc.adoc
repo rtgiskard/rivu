@@ -824,6 +824,10 @@ or all registered sources with no roots. It does not discover, relocate, or dele
 tracks; commit rechecks current scope. `force` bypasses metadata reuse. File checks
 and external queue admission share the scan task slot, saving boundary, cancellation,
 and shutdown joining contract.
+External-file preparation owns path normalization and occurrence indexing. Its
+prepared records and indices are read-only outside that owner; Saving consumes
+them without repeating normalization or an index-validation pass. Queue insertion
+positions and database identities are still checked against the saving transaction.
 
 Accepted scan, playlist-import, file-check, and external-admission commands return
 `Ack.scan_id` with their `u64` task ID. Acceptance is not completion. The CLI sends

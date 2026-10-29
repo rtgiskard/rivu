@@ -11,13 +11,36 @@ use std::path::PathBuf;
 /// writes, traversal, playlist/CUE expansion or duration filtering occur here.
 #[derive(Debug, Default)]
 pub(crate) struct ExternalAdmission {
-    pub(crate) records: Vec<ScanRecord>,
-    pub(crate) occurrences: Vec<usize>,
+    records: Vec<ScanRecord>,
+    occurrences: Vec<usize>,
     pub(crate) rejected: usize,
     pub(crate) errors: Vec<String>,
 }
 
 impl ExternalAdmission {
+    pub(crate) fn records(&self) -> &[ScanRecord] {
+        &self.records
+    }
+
+    pub(crate) fn occurrences(&self) -> &[usize] {
+        &self.occurrences
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_test_records(records: Vec<ScanRecord>, occurrences: Vec<usize>) -> Self {
+        assert!(occurrences.iter().all(|&index| index < records.len()));
+        assert!(
+            records
+                .iter()
+                .all(|record| logical_path(&record.path).unwrap() == record.path)
+        );
+        Self {
+            records,
+            occurrences,
+            ..Self::default()
+        }
+    }
+
     fn report(&mut self, error: String) {
         if self.errors.len() < MAX_REPORTED_SCAN_ERRORS - 1 {
             self.errors.push(error);

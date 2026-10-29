@@ -361,11 +361,11 @@ impl Core {
                 return;
             }
         };
-        let requested = prepared.occurrences.len() + prepared.rejected;
+        let requested = prepared.occurrences().len() + prepared.rejected;
         task.status.progress.processed = requested;
         task.status.progress.total = Some(requested);
         task.status.progress.errors = prepared.rejected;
-        if prepared.occurrences.is_empty() {
+        if prepared.occurrences().is_empty() {
             task.status.progress.phase = ScanPhase::Failed;
             task.status.message = "No supported, accessible external audio files".into();
             task.status.error = Some(prepared.errors.join("\n"));

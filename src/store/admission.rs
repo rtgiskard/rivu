@@ -14,13 +14,6 @@ impl Store {
         index: Option<usize>,
         current_id: Option<u64>,
     ) -> Result<(usize, ScanImpacts, usize)> {
-        ensure!(
-            admission
-                .occurrences
-                .iter()
-                .all(|&index| index < admission.records.len()),
-            "Invalid external source occurrence"
-        );
         let tx = self.conn.unchecked_transaction()?;
         let total = usize::try_from(tx.query_row(
             "SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=0",
@@ -40,11 +33,7 @@ impl Store {
         {
             let mut existing = tx.prepare_cached("SELECT id FROM tracks INDEXED BY tracks_path WHERE path=?1 AND CASE WHEN cue_sheet IS NULL THEN 0 ELSE NULL END = 0 ORDER BY id LIMIT 1")?;
             let mut stage = tx.prepare("INSERT INTO external_sources VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)")?;
-            for (ordinal, record) in admission.records.iter().enumerate() {
-                ensure!(
-                    crate::library::logical_path(&record.path)? == record.path,
-                    "External source path is not normalized"
-                );
+            for (ordinal, record) in admission.records().iter().enumerate() {
                 let path = record
                     .path
                     .to_str()
@@ -144,7 +133,7 @@ impl Store {
             .query_map([], |row| row.get::<_, i64>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let ids: Vec<_> = admission
-            .occurrences
+            .occurrences()
             .iter()
             .map(|&index| resolved[index])
             .collect();
@@ -201,12 +190,10 @@ mod tests {
     }
 
     fn admission(paths: &[&str], occurrences: Vec<usize>) -> ExternalAdmission {
-        ExternalAdmission {
-            records: paths.iter().map(|path| record(path)).collect(),
+        ExternalAdmission::from_test_records(
+            paths.iter().map(|path| record(path)).collect(),
             occurrences,
-            rejected: 0,
-            errors: Vec::new(),
-        }
+        )
     }
 
     #[test]
@@ -214,7 +201,9 @@ mod tests {
         let store = Store::open(Path::new(":memory:")).unwrap();
         let mut prepared = admission(&["/outside/existing.wav"], vec![0]);
         store.admit_external_queue(&prepared, None, None).unwrap();
-        prepared.records[0].size = 1234;
+        let mut updated = record("/outside/existing.wav");
+        updated.size = 1234;
+        prepared = ExternalAdmission::from_test_records(vec![updated], vec![0]);
         let (_, impacts, added) = store.admit_external_queue(&prepared, None, None).unwrap();
         assert_eq!(added, 0);
         assert!(impacts.library);
@@ -362,15 +351,16 @@ mod tests {
             .unwrap()
             .unwrap();
         store.conn.execute("UPDATE tracks SET title_override='Keep title',favorite=1,play_count=7,missing=1 WHERE id=?1", [ordinary_id]).unwrap();
-        let mut prepared = admission(
-            &[
-                "/outside/shared.wav",
-                "/outside/existing.wav",
-                "/outside/copied.wav",
+        let mut copied = record("/outside/copied.wav");
+        copied.fingerprint = record("/outside/absent.wav").fingerprint;
+        let prepared = ExternalAdmission::from_test_records(
+            vec![
+                record("/outside/shared.wav"),
+                record("/outside/existing.wav"),
+                copied,
             ],
             vec![1, 0, 1, 2],
         );
-        prepared.records[2].fingerprint = record("/outside/absent.wav").fingerprint;
         let (_, _, added) = store.admit_external_queue(&prepared, None, None).unwrap();
         assert_eq!(added, 2);
         let track = store.track(ordinary_id).unwrap().unwrap();
@@ -427,11 +417,11 @@ mod tests {
             .unwrap();
         store.conn.execute("UPDATE tracks SET title_override='User title',artist_override='User artist',album_override='User album',favorite=1,play_count=7,last_played=42,missing=1 WHERE id=?1", [id]).unwrap();
         let before = store.track(id).unwrap().unwrap();
-        prepared.records[0].size = 1234;
-        prepared.records[0].modified_ns = 5678;
-        prepared.records[0].fingerprint =
-            Some(blake3::hash(b"fresh encoded content").to_hex().to_string());
-        let media = &mut prepared.records[0].media;
+        let mut updated = record("/outside/existing.wav");
+        updated.size = 1234;
+        updated.modified_ns = 5678;
+        updated.fingerprint = Some(blake3::hash(b"fresh encoded content").to_hex().to_string());
+        let media = &mut updated.media;
         media.title = "Fresh raw title".into();
         media.artist = "Fresh raw artist".into();
         media.album = "Fresh raw album".into();
@@ -441,7 +431,7 @@ mod tests {
         media.channels = 2;
         media.bitrate_bps = Some(512_000);
         media.bitrate_exact = true;
-        prepared.occurrences = vec![0, 0];
+        prepared = ExternalAdmission::from_test_records(vec![updated], vec![0, 0]);
         let (inserted, impacts, added) = store
             .admit_external_queue(&prepared, None, Some(old_queue[0]))
             .unwrap();
@@ -474,7 +464,7 @@ mod tests {
             .known_source(Path::new("/outside/existing.wav"))
             .unwrap()
             .unwrap();
-        assert_eq!(known.fingerprint, prepared.records[0].fingerprint);
+        assert_eq!(known.fingerprint, prepared.records()[0].fingerprint);
         assert_eq!(known.size, 1234);
         assert_eq!(known.modified_ns, 5678);
         assert_eq!(known.media.unwrap().title, "Fresh raw title");
