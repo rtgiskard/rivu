@@ -111,6 +111,57 @@ class FramingTests(unittest.TestCase):
             source.window(0, 100)
 
 
+class StreamEntrypointTests(unittest.TestCase):
+    def test_invalid_requests_fail_without_pcm_or_manifest_access(self):
+        request = {"version":2,"task_id":"invalid-stream","operation":"speech","sample_rate":8000,
+                   "channels":1,"frames":8,"model_manifest":"/missing-manifest.json"}
+        for fields, code in (
+            ({"channels":3}, "input_channels"),
+            ({"frames":0}, "input_duration"),
+            ({"parameters":{"wet_mix":2}}, "invalid_request"),
+            ({"unexpected":True}, "invalid_request"),
+        ):
+            with self.subTest(fields=fields):
+                wire = encode(worker.JSON_FRAME, json.dumps({**request, **fields}).encode())
+                completed = subprocess.run([sys.executable, "-B", worker.__file__, "--stream"],
+                                           input=wire, capture_output=True, timeout=30)
+                self.assertNotEqual(completed.returncode, 0)
+                stream = io.BytesIO(completed.stdout)
+                kind, payload = worker.read_frame(stream)
+                self.assertEqual(kind, worker.JSON_FRAME)
+                event = json.loads(payload)
+                self.assertEqual((event["type"], event["code"], event["task_id"]),
+                                 ("error", code, request["task_id"]))
+                self.assertEqual(stream.read(), b"")
+
+    def test_real_dry_worker_preserves_pcm_bits(self):
+        import numpy as np
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            bundle_fixture(base)
+            audio = np.linspace(-1.25, 1.25, 2*(8000+37), dtype="<f4").reshape(-1, 2)
+            audio[0, 0] = -0.0
+            request = {"version":2,"task_id":"real-dry-stream","operation":"speech","sample_rate":8000,
+                       "channels":2,"frames":len(audio),"model_manifest":str(base / "manifest.json"),
+                       "parameters":{"wet_mix":0}}
+            completed = subprocess.run([sys.executable, "-B", worker.__file__, "--stream"],
+                                       input=input_stream(request, audio), capture_output=True, cwd=base, timeout=30)
+            self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+            stream, pcm, events = io.BytesIO(completed.stdout), bytearray(), []
+            while stream.tell() < len(completed.stdout):
+                self.assertFalse(events and events[-1]["type"] in ("complete", "error"))
+                kind, payload = worker.read_frame(stream)
+                if kind == worker.JSON_FRAME:
+                    events.append(json.loads(payload))
+                else:
+                    self.assertEqual(kind, worker.STEM_KINDS["speech"])
+                    pcm.extend(payload)
+            self.assertEqual(pcm, audio.tobytes())
+            self.assertEqual(events[-1]["type"], "complete")
+            self.assertEqual((events[-1]["frames"], events[-1]["channels"], events[-1]["sample_rate"]),
+                             (len(audio), 2, 8000))
+
+
 class LocalBackendTransportTests(unittest.TestCase):
     # This substitutes only model inference. It does not claim model quality,
     # artifact correctness or prepared-runtime dependency compatibility.

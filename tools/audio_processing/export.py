@@ -3,7 +3,7 @@
 
 --request names an evaluation job with input_path/output_dir and model controls.
 The destination must be new. Only this explicitly requested directory is written;
-worker.process itself consumes/produces PCM and never writes artifacts.
+the worker's internal processing consumes/produces PCM and never writes artifacts.
 """
 import argparse
 from contextlib import ExitStack
@@ -67,7 +67,7 @@ def process_export(request, emit):
             reader = stack.enter_context(sf.SoundFile(source))
             writers = {stem:stack.enter_context(sf.SoundFile(path, mode="w", samplerate=info.samplerate,
                        channels=info.channels, format=output_format, subtype="FLOAT")) for stem, path in outputs.items()}
-            report = worker.process(control, FileInput(source, reader), lambda stem, samples:writers[stem].write(samples), capture)
+            report = worker._process_validated(control, FileInput(source, reader), lambda stem, samples:writers[stem].write(samples), capture)
         for path in outputs.values():
             actual = sf.info(path)
             worker.require((actual.frames, actual.channels, actual.samplerate) == (info.frames, info.channels, info.samplerate),

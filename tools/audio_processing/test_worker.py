@@ -228,6 +228,31 @@ class ExplicitExportTests(unittest.TestCase):
             self.assertIn("copy", [event.get("stage") for event in events])
             for event in events:
                 validator.validate(event)
+            output, rate = sf.read(base / "result/speech.wav", dtype="float32", always_2d=True)
+            source_pcm, source_rate = sf.read(source, dtype="float32", always_2d=True)
+            np.testing.assert_array_equal(output.view("uint32"), source_pcm.view("uint32"))
+            self.assertEqual(rate, source_rate)
+
+    def test_invalid_export_controls_leave_source_and_destination_untouched(self):
+        import numpy as np
+        import soundfile as sf
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            source = base / "input.wav"
+            sf.write(source, np.zeros((8, 1), dtype="float32"), 8000, subtype="FLOAT")
+            original = source.read_bytes()
+            destination = base / "result"
+            request = {**export_request(), "input_path":str(source), "output_dir":str(destination),
+                       "model_manifest":str(base / "missing-manifest.json")}
+            for fields in ({"parameters":{"wet_mix":2}}, {"threads":9}, {"unexpected":True}):
+                with self.subTest(fields=fields):
+                    events = []
+                    with self.assertRaises(WorkerError) as error:
+                        process_export({**request, **fields}, lambda kind, **values: events.append((kind, values)))
+                    self.assertEqual(error.exception.code, "invalid_request")
+                    self.assertEqual(events, [])
+                    self.assertFalse(destination.exists())
+                    self.assertEqual(source.read_bytes(), original)
 
     def test_fractional_speech_blends_source_with_transformed_model_output(self):
         import numpy as np

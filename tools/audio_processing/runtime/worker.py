@@ -303,11 +303,10 @@ class StreamInput:
         return self.hasher.hexdigest()
 
 
-def process(request, source, write_pcm, emit):
-    """Infer source.window(left,right); emit PCM via callback, return evidence in RAM."""
-    request = validate_request(request)
+def _process_validated(request, source, write_pcm, emit):
+    """Infer an entrypoint-validated request; emit PCM and return evidence in RAM."""
     rate, channels, frames = (request[key] for key in ("sample_rate", "channels", "frames"))
-    manifest_path = absolute_path(request["model_manifest"], "model_manifest")
+    manifest_path = Path(request["model_manifest"]).resolve()
     emit("progress", stage="inspect", completed=0, total=1)
     manifest = validate_manifest(manifest_path, request["operation"])
     controls = request.get("parameters", {})
@@ -447,7 +446,7 @@ def main():
             write_frame(output, STEM_KINDS[stem], memoryview(samples).cast("B"))
         # Package diagnostics must never corrupt the binary stdout protocol.
         with redirect_stdout(sys.stderr):
-            process(request, source, write_pcm, emit)
+            _process_validated(request, source, write_pcm, emit)
         return 0
     except Exception as exc:
         emit("error", code=exc.code if isinstance(exc, WorkerError) else "worker_failure", message=str(exc)[:8192])

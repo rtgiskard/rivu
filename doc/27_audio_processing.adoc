@@ -328,6 +328,9 @@ from application execution. Its version-1 file job requires absolute `input_path
 and `output_dir`: input must be IEEE float32 WAV/WAVEX/RF64 and destination must
 be new with an existing parent. It writes stem WAVs and `result.json`, with an
 8 GiB total audio-output limit and 256 MiB additional free-space reserve.
+Both Python entrypoints validate inference controls once before constructing stream
+input or creating export outputs. Their shared internal execution path consumes
+the validated request; model assets and PCM/output protocol checks remain separate.
 Reprovision workers from this checkout when migrating to the framed protocol.
 
 
