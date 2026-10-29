@@ -937,7 +937,7 @@ fn classical_native(
             ProfileCollector::new(rate, usize::from(channels), config.fft_size, end - start)?;
         let mut block = Vec::new();
         let mut position = 0_u64;
-        while capture.read_block(&mut block, cancel)? {
+        while position < end && capture.read_block(&mut block, cancel)? {
             ensure!(
                 block.len().is_multiple_of(usize::from(channels)),
                 "Incomplete profile source frame"
@@ -960,6 +960,7 @@ fn classical_native(
             end <= position,
             "Noise profile selection lies outside the source"
         );
+        capture.finish(cancel)?;
         Some(collector.finish()?)
     } else {
         None

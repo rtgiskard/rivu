@@ -380,11 +380,11 @@ changes to its registered source or media invalidate publication. Switching the
 playback track is different: it suppresses a pending automatic graph-audition
 handoff through the playback generation, but does not discard a valid completed
 result. Use task IDs for completion and the selected-audio line for playback.
-
 Numeric progress within a phase is coalesced at a 100 ms publication policy and
 does not accumulate behind a slow consumer. Phase changes, graph-node stages and
 terminal results remain reliable; a progress counter is a snapshot, not one
 notification per decoder or inference block.
+
 Preparation and backend validation run on a worker, so accepted starts can fail
 asynchronously. Queued can include waiting for retired audio to release its
 reservation. Failure or unwinding reaches a terminal task result; neural children
@@ -426,10 +426,13 @@ See link:22_cache.adoc#_processing_output_retention[Processing output retention]
 
 Native denoise and native-only graphs decode in blocks, retaining final PCM and
 bounded DSP/delay state rather than whole-track native intermediates. Profile
-capture can reread the original source with identity checks. Graphs containing
-neural nodes retain budgeted PCM at model boundaries; their source PCM also
-counts against the budget. Input files remain bounded to 8 GiB. Actual decoded
-frames, including unknown-duration streams, determine EOF and output coverage.
+capture rereads only the required prefix, including upstream causal context and
+latency in a graph. Early completion validates cancellation and the opened source
+without inventing EOF or flushing artificial tails. Real EOF still flushes the
+required DSP context; a selection beyond the actual source remains invalid.
+Graphs containing neural nodes retain budgeted PCM at model boundaries; their
+source PCM also counts against the budget. Input files remain bounded to 8 GiB.
+Actual decoded frames, including unknown-duration streams, determine EOF and coverage.
 
 Neural input must be nonempty and no longer than four hours; each Python source
 context window is bounded to 128 MiB. Model weights/workspace remain additional

@@ -436,13 +436,18 @@ impl Engine {
         }
         Ok(())
     }
+    /// Exclusive end on the causal output timeline, including upstream latency.
+    /// Input lengths remain real: only actual EOF can trigger a processor flush.
     fn stream(
         &mut self,
         target: usize,
+        prefix_end: Option<u64>,
         cancel: &AtomicBool,
         mut consume: impl FnMut(u64, &[f32]) -> Result<()>,
     ) -> Result<()> {
-        let total = self.nodes[target].frames;
+        let total = prefix_end.map_or(self.nodes[target].frames, |end| {
+            end.min(self.nodes[target].frames)
+        });
         let mut position = 0;
         while position < total {
             let count = (total - position).min(BLOCK as u64) as usize;
@@ -455,10 +460,13 @@ impl Engine {
         }
         Ok(())
     }
+    /// Returns the source frames traversed, or the exact length after real EOF.
+    /// A bounded prefix therefore still proves any earlier source selection fits.
     fn decode(
         &mut self,
         target: usize,
         mut renderer: audio::SourceRenderer,
+        prefix_end: Option<u64>,
         cancel: &AtomicBool,
         mut consume: impl FnMut(u64, &[f32]) -> Result<()>,
     ) -> Result<u64> {
@@ -468,15 +476,33 @@ impl Engine {
         );
         let mut decoded = Vec::new();
         let mut position = 0_u64;
-        while renderer.read_block(&mut decoded, cancel)? {
+        loop {
+            if prefix_end.is_some_and(|end| position >= end) {
+                // A requested prefix is not EOF. Keep the real input used by
+                // causal FIR/STFT lookahead, but do not synthesize a DSP flush.
+                renderer.finish(cancel)?;
+                return Ok(position);
+            }
+            if !renderer.read_block(&mut decoded, cancel)? {
+                break;
+            }
             ensure!(
                 decoded.len().is_multiple_of(self.channels),
                 "Incomplete graph source frame"
             );
             for block in decoded.chunks(BLOCK * self.channels) {
+                if prefix_end.is_some_and(|end| position >= end) {
+                    renderer.finish(cancel)?;
+                    return Ok(position);
+                }
                 let count = block.len() / self.channels;
+                let count =
+                    prefix_end.map_or(count, |end| (end - position).min(count as u64) as usize);
                 self.round(position, count, Some(block), None, cancel)?;
-                consume(position, &self.nodes[target].output[..block.len()])?;
+                consume(
+                    position,
+                    &self.nodes[target].output[..count * self.channels],
+                )?;
                 position = position
                     .checked_add(count as u64)
                     .context("Decoded source length overflow")?;
@@ -487,6 +513,7 @@ impl Engine {
         let total = frames
             .checked_add(self.nodes[target].frames)
             .context("Graph tail length overflow")?;
+        let total = prefix_end.map_or(total, |end| end.min(total));
         while position < total {
             let count = (total - position).min(BLOCK as u64) as usize;
             self.round(position, count, None, Some(frames), cancel)?;
@@ -524,7 +551,7 @@ impl Engine {
             return Ok(GraphPcm { pcm, start_frame });
         }
         let mut builder = audio::PcmBuilder::new(self.rate, Arc::clone(&self.layout), budget)?;
-        self.stream(target, cancel, |_, block| builder.push(block))?;
+        self.stream(target, None, cancel, |_, block| builder.push(block))?;
         Ok(GraphPcm {
             pcm: builder.finish()?,
             start_frame,
@@ -580,6 +607,7 @@ pub(super) fn execute(
     cancel: &AtomicBool,
     progress: &mut ProgressReporter<'_>,
 ) -> Result<BTreeMap<GraphPort, GraphAudioOutput>> {
+    let tx = progress.sender;
     let graph = status
         .settings
         .graph
@@ -608,7 +636,6 @@ pub(super) fn execute(
             } = &graph.node(id)?.kind
             {
                 selection.validate()?;
-    let tx = progress.sender;
                 ensure!(
                     (selection.end_seconds * f64::from(input.sample_rate())).floor()
                         <= input.frames() as f64,
@@ -650,7 +677,7 @@ pub(super) fn execute(
                         config.fft_size,
                         end - start,
                     )?;
-                    engine.stream(upstream, cancel, |position, samples| {
+                    engine.stream(upstream, Some(end), cancel, |position, samples| {
                         let begin = position.max(start);
                         let finish = (position + (samples.len() / channels) as u64).min(end);
                         if begin < finish {
@@ -866,6 +893,7 @@ pub(super) fn execute_native(
     cancel: &AtomicBool,
     progress: &mut ProgressReporter<'_>,
 ) -> Result<BTreeMap<GraphPort, GraphAudioOutput>> {
+    let tx = progress.sender;
     let graph = status
         .settings
         .graph
@@ -895,7 +923,6 @@ pub(super) fn execute_native(
             active_node = Some(id);
             if let GraphNodeKind::Denoise { config, profile } = &graph.node(id)?.kind
                 && config.mode == DenoiseMode::Profile
-    let tx = progress.sender;
             {
                 let selection = profile
                     .context("Profile mode requires an explicit selected noise-only range")?;
@@ -925,8 +952,12 @@ pub(super) fn execute_native(
                     config.fft_size,
                     end - start,
                 )?;
-                let source_frames =
-                    engine.decode(upstream, reopen()?, cancel, |position, samples| {
+                let source_frames = engine.decode(
+                    upstream,
+                    reopen()?,
+                    Some(finish),
+                    cancel,
+                    |position, samples| {
                         let from = position.max(begin);
                         let to =
                             (position + (samples.len() / usize::from(channels)) as u64).min(finish);
@@ -938,7 +969,8 @@ pub(super) fn execute_native(
                             )?;
                         }
                         Ok(())
-                    })?;
+                    },
+                )?;
                 ensure!(
                     end <= source_frames,
                     "Noise profile selection lies outside the source"
@@ -954,7 +986,9 @@ pub(super) fn execute_native(
         let start_frame = -i64::try_from(engine.nodes[index].latency)?;
         drop(profiles);
         let mut builder = audio::PcmBuilder::new(rate, layout, budget)?;
-        let frames = engine.decode(index, renderer, cancel, |_, block| builder.push(block))?;
+        let frames = engine.decode(index, renderer, None, cancel, |_, block| {
+            builder.push(block)
+        })?;
         for &id in &order {
             active_node = Some(id);
             if let GraphNodeKind::Denoise {
@@ -1280,7 +1314,7 @@ mod tests {
         let result: Result<audio::PcmAudio> = (|| {
             let mut builder =
                 audio::PcmBuilder::new(48000, Arc::clone(input.layout()), Arc::clone(&budget))?;
-            engine.decode(target, renderer, &cancel, |_, block| {
+            engine.decode(target, renderer, None, &cancel, |_, block| {
                 builder.push(block)?;
                 blocks += 1;
                 cancel.store(true, Ordering::Release);
@@ -1324,6 +1358,266 @@ mod tests {
         for (a, e) in samples(&cropped).into_iter().zip(expected) {
             assert!((a - e).abs() < 1e-5);
         }
+    }
+
+    #[test]
+    fn native_graph_preserves_speaker_layout_and_sample_order() {
+        let budget = audio::PcmBudget::new(MEMORY_LIMIT);
+        let layout: Arc<[audio::Channel]> =
+            Arc::from([audio::Channel::SideRight, audio::Channel::SideLeft]);
+        let data = [0.125, -0.25, 0.5, 0.75, -0.1, 0.2];
+        let mut builder =
+            audio::PcmBuilder::new(48000, Arc::clone(&layout), Arc::clone(&budget)).unwrap();
+        builder.push(&data).unwrap();
+        let input = builder.finish().unwrap();
+        let graph = chain(vec![GraphNodeKind::Equalizer {
+            config: rivu_dsp::equalizer::config::EqualizerConfig {
+                enabled: true,
+                preamp_db: 6.020599913,
+                ..Default::default()
+            },
+            implementation: EqImplementation::Iir,
+        }]);
+        let output = render(&graph, &input, &budget);
+        assert_eq!(output.pcm.layout(), &layout);
+        let mut actual = [0.0; 6];
+        assert_eq!(output.pcm.read_frames(0, &mut actual), 3);
+        for (&actual, &expected) in actual.iter().zip(&data) {
+            assert!((actual - expected * 2.0).abs() < 1e-6);
+        }
+        let metadata = fs::metadata(std::env::current_exe().unwrap()).unwrap();
+        let renderer =
+            audio::SourceRenderer::from_pcm(input, audio::SourceIdentity::from_metadata(&metadata))
+                .unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut engine = Engine::for_decoder(48000, Arc::clone(&renderer.format().layout));
+        let target = engine
+            .compile(
+                &graph,
+                GraphPort { node: 2, port: 0 },
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &cancel,
+            )
+            .unwrap();
+        let mut builder =
+            audio::PcmBuilder::new(48000, Arc::clone(&renderer.format().layout), budget).unwrap();
+        engine
+            .decode(target, renderer, None, &cancel, |_, block| {
+                builder.push(block)
+            })
+            .unwrap();
+        let decoded = builder.finish().unwrap();
+        assert_eq!(decoded.layout(), &layout);
+        let mut streamed = [0.0; 6];
+        assert_eq!(decoded.read_frames(0, &mut streamed), 3);
+        assert_eq!(streamed, actual);
+    }
+
+    #[test]
+    fn output_prefix_matches_full_iir_fir_stft_and_profile_chains() {
+        let budget = audio::PcmBudget::new(MEMORY_LIMIT);
+        let data: Vec<f32> = (0..4093).map(|i| (i as f32 * 0.037).sin() * 0.3).collect();
+        let input = pcm(&data, &budget);
+        let cancel = AtomicBool::new(false);
+        let eq = rivu_dsp::equalizer::config::EqualizerConfig {
+            enabled: true,
+            preamp_db: 3.0,
+            ..Default::default()
+        };
+        let denoise = rivu_dsp::denoise::DenoiseConfig {
+            mode: DenoiseMode::Adaptive,
+            fft_size: 256,
+            ..Default::default()
+        };
+        let kinds = [
+            GraphNodeKind::Equalizer {
+                config: eq.clone(),
+                implementation: EqImplementation::Iir,
+            },
+            GraphNodeKind::Equalizer {
+                config: eq,
+                implementation: EqImplementation::LinearPhase { taps: 65 },
+            },
+            GraphNodeKind::Denoise {
+                config: denoise.clone(),
+                profile: None,
+            },
+            GraphNodeKind::Denoise {
+                config: rivu_dsp::denoise::DenoiseConfig {
+                    mode: DenoiseMode::Profile,
+                    ..denoise
+                },
+                profile: Some(NoiseSelection {
+                    start_seconds: 0.0,
+                    end_seconds: 0.02,
+                }),
+            },
+        ];
+        let mut collector = ProfileCollector::new(48000, 1, 256, 960).unwrap();
+        collector.push_block(&data[..960], &mut || false).unwrap();
+        let profiles = BTreeMap::from([(6, collector.finish().unwrap())]);
+        let metadata = fs::metadata(std::env::current_exe().unwrap()).unwrap();
+        let identity = audio::SourceIdentity::from_metadata(&metadata);
+        for length in 1..=kinds.len() {
+            let graph = chain(kinds[..length].to_vec());
+            let compile = |mut engine: Engine| {
+                let target = engine
+                    .compile(
+                        &graph,
+                        GraphPort { node: 2, port: 0 },
+                        &BTreeMap::new(),
+                        &profiles,
+                        &cancel,
+                    )
+                    .unwrap();
+                (engine, target)
+            };
+            let (engine, target) = compile(Engine::new(&input));
+            let full = engine.render(target, Arc::clone(&budget), &cancel).unwrap();
+            let reference = samples(&full.pcm);
+            let latency = full.start_frame.unsigned_abs();
+            for end in [
+                latency + 517,
+                latency + input.frames(),
+                reference.len() as u64 + 17,
+            ] {
+                let expected = &reference[..(end as usize).min(reference.len())];
+                let (mut engine, target) = compile(Engine::new(&input));
+                let mut retained = Vec::new();
+                engine
+                    .stream(target, Some(end), &cancel, |_, block| {
+                        retained.extend_from_slice(block);
+                        Ok(())
+                    })
+                    .unwrap();
+                assert_eq!(retained, expected);
+                let (mut engine, target) =
+                    compile(Engine::for_decoder(48000, Arc::clone(input.layout())));
+                let renderer = audio::SourceRenderer::from_pcm(input.clone(), identity).unwrap();
+                let mut decoded = Vec::new();
+                let source_frames = engine
+                    .decode(target, renderer, Some(end), &cancel, |_, block| {
+                        decoded.extend_from_slice(block);
+                        Ok(())
+                    })
+                    .unwrap();
+                assert_eq!(source_frames, end.min(input.frames()));
+                assert_eq!(decoded.len(), expected.len());
+                for (actual, &expected) in decoded.into_iter().zip(expected) {
+                    assert!((actual - expected).abs() < 1e-5);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn output_prefix_does_not_process_later_dsp_failure() {
+        let budget = audio::PcmBudget::new(MEMORY_LIMIT);
+        let mut data = vec![0.125; 2048];
+        data[1024..].fill(f32::MAX);
+        let input = pcm(&data, &budget);
+        let graph = chain(vec![GraphNodeKind::Equalizer {
+            config: rivu_dsp::equalizer::config::EqualizerConfig {
+                enabled: true,
+                preamp_db: 24.0,
+                ..Default::default()
+            },
+            implementation: EqImplementation::Iir,
+        }]);
+        let cancel = AtomicBool::new(false);
+        for decoder in [false, true] {
+            for prefix in [Some(517), None] {
+                let mut engine = if decoder {
+                    Engine::for_decoder(48000, Arc::clone(input.layout()))
+                } else {
+                    Engine::new(&input)
+                };
+                let target = engine
+                    .compile(
+                        &graph,
+                        GraphPort { node: 2, port: 0 },
+                        &BTreeMap::new(),
+                        &BTreeMap::new(),
+                        &cancel,
+                    )
+                    .unwrap();
+                let mut output = Vec::new();
+                let mut consume = |_: u64, block: &[f32]| {
+                    output.extend_from_slice(block);
+                    Ok(())
+                };
+                let result = if decoder {
+                    let metadata = fs::metadata(std::env::current_exe().unwrap()).unwrap();
+                    let renderer = audio::SourceRenderer::from_pcm(
+                        input.clone(),
+                        audio::SourceIdentity::from_metadata(&metadata),
+                    )
+                    .unwrap();
+                    engine
+                        .decode(target, renderer, prefix, &cancel, &mut consume)
+                        .map(|_| ())
+                } else {
+                    engine.stream(target, prefix, &cancel, &mut consume)
+                };
+                assert_eq!(result.is_ok(), prefix.is_some());
+                if prefix.is_some() {
+                    assert_eq!(output.len(), 517);
+                    let expected = 0.125 * 10.0_f32.powf(24.0 / 20.0);
+                    assert!(
+                        output
+                            .iter()
+                            .all(|&sample| (sample - expected).abs() < 1e-5)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn output_prefix_validates_the_opened_source_before_returning() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("source.wav");
+        let mut writer = hound::WavWriter::create(
+            &path,
+            hound::WavSpec {
+                channels: 1,
+                sample_rate: 48000,
+                bits_per_sample: 32,
+                sample_format: hound::SampleFormat::Float,
+            },
+        )
+        .unwrap();
+        for _ in 0..2048 {
+            writer.write_sample(0.125_f32).unwrap();
+        }
+        writer.finalize().unwrap();
+        let cancel = AtomicBool::new(false);
+        let renderer = audio::SourceRenderer::open(
+            &path,
+            None,
+            rivu_format::media::DecoderHint::Native,
+            1,
+            false,
+            &cancel,
+        )
+        .unwrap();
+        let mut engine = Engine::for_decoder(48000, Arc::clone(&renderer.format().layout));
+        let target = engine
+            .compile(
+                &ProcessingGraph::default(),
+                GraphPort { node: 2, port: 0 },
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &cancel,
+            )
+            .unwrap();
+        let result = engine.decode(target, renderer, Some(97), &cancel, |_, block| {
+            assert_eq!(block, &[0.125; 97]);
+            fs::OpenOptions::new().write(true).open(&path)?.set_len(0)?;
+            Ok(())
+        });
+        assert!(format!("{:#}", result.unwrap_err()).contains("source changed"));
     }
 
     #[test]
@@ -1373,10 +1667,16 @@ mod tests {
             .unwrap();
         let mut decoded = Vec::new();
         let frames = decoder
-            .decode(target, renderer, &AtomicBool::new(false), |_, block| {
-                decoded.extend_from_slice(block);
-                Ok(())
-            })
+            .decode(
+                target,
+                renderer,
+                None,
+                &AtomicBool::new(false),
+                |_, block| {
+                    decoded.extend_from_slice(block);
+                    Ok(())
+                },
+            )
             .unwrap();
         assert_eq!(frames, input.frames());
         let causal = samples(&output.pcm);

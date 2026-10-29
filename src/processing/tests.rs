@@ -174,6 +174,45 @@ fn shutdown_releases_worker_with_a_full_progress_channel() {
     });
 }
 
+#[test]
+fn standalone_profile_rejects_empty_frame_and_out_of_source_selections() {
+    let (_directory, mut service, track, _) = fixture();
+    let mut config = Config::default();
+    config.denoise.mode = rivu_dsp::denoise::DenoiseMode::Profile;
+    config.denoise.fft_size = 256;
+    let config = Arc::new(config);
+    for selection in [
+        NoiseSelection {
+            start_seconds: 0.0,
+            end_seconds: 0.5 / 8_000.0,
+        },
+        NoiseSelection {
+            start_seconds: 0.0,
+            end_seconds: 5.0 / 8_000.0,
+        },
+        NoiseSelection {
+            start_seconds: 5.0 / 8_000.0,
+            end_seconds: 6.0 / 8_000.0,
+        },
+    ] {
+        service
+            .start(
+                track.clone(),
+                Arc::clone(&config),
+                ProcessingOperation::Denoise,
+                Some(selection),
+            )
+            .unwrap();
+        loop {
+            if let Event::Finished { result, .. } = next_event(&mut service) {
+                service.active.take().unwrap().worker.join().unwrap();
+                assert!(result.is_err(), "invalid selection must not publish PCM");
+                break;
+            }
+        }
+    }
+}
+
 fn graph_config(kinds: Vec<GraphNodeKind>) -> Arc<Config> {
     let mut config = Config::default();
     let graph = &mut config.processing_graph;
@@ -768,45 +807,6 @@ fn explicit_wav_export_is_atomic_and_no_clobber() {
 }
 
 #[test]
-fn unpinned_audio_release_preserves_frozen_history_and_selected_audition() {
-    let (_directory, mut service, track, config) = fixture();
-    let result = completed(&mut service, &track, &config);
-    service.results.push_back(result);
-    service.audition = Some(1);
-    service.release_unpinned_audio();
-    assert!(service.results[0].outputs.vocals.is_some());
-    assert!(service.results[1].outputs.denoised.is_none());
-    assert!(service.results[1].status.outputs.is_none());
-    assert_eq!(service.results[1].track.path, track.path);
-    assert_eq!(service.results[1].status.settings.denoise, config.denoise);
-    service.shutdown();
-    assert_eq!(
-        service.memory_bytes(),
-        service.results[0]
-            .outputs
-            .vocals
-            .as_ref()
-            .unwrap()
-            .retained_bytes()
-    );
-}
-
-#[test]
-fn realtime_preparation_never_creates_processing_storage() {
-    let (directory, mut service, track, config) = fixture();
-    let before = service.memory_bytes();
-    service
-        .start_graph(
-            track,
-            config,
-            GraphRequest {
-                target: GraphPort { node: 2, port: 0 },
-                mode: GraphExecutionMode::Realtime,
-                export_path: None,
-                source_run: None,
-                cached_output: None,
-            },
-#[test]
 fn wav_export_preserves_side_speakers_and_reorders_custom_frames() {
     use audio::Channel::*;
     let directory = tempfile::tempdir().unwrap();
@@ -877,6 +877,45 @@ fn wav_export_preserves_side_speakers_and_reorders_custom_frames() {
     }
 }
 
+#[test]
+fn unpinned_audio_release_preserves_frozen_history_and_selected_audition() {
+    let (_directory, mut service, track, config) = fixture();
+    let result = completed(&mut service, &track, &config);
+    service.results.push_back(result);
+    service.audition = Some(1);
+    service.release_unpinned_audio();
+    assert!(service.results[0].outputs.vocals.is_some());
+    assert!(service.results[1].outputs.denoised.is_none());
+    assert!(service.results[1].status.outputs.is_none());
+    assert_eq!(service.results[1].track.path, track.path);
+    assert_eq!(service.results[1].status.settings.denoise, config.denoise);
+    service.shutdown();
+    assert_eq!(
+        service.memory_bytes(),
+        service.results[0]
+            .outputs
+            .vocals
+            .as_ref()
+            .unwrap()
+            .retained_bytes()
+    );
+}
+
+#[test]
+fn realtime_preparation_never_creates_processing_storage() {
+    let (directory, mut service, track, config) = fixture();
+    let before = service.memory_bytes();
+    service
+        .start_graph(
+            track,
+            config,
+            GraphRequest {
+                target: GraphPort { node: 2, port: 0 },
+                mode: GraphExecutionMode::Realtime,
+                export_path: None,
+                source_run: None,
+                cached_output: None,
+            },
         )
         .unwrap();
     loop {
@@ -956,25 +995,33 @@ fn native_decoder_streams_fit_one_output_budget_including_profile_passes() {
         writer.write_sample(sample).unwrap();
     }
     writer.finalize().unwrap();
-    for profile in [false, true] {
+    for selection in [
+        None,
+        Some(NoiseSelection {
+            start_seconds: 0.1,
+            end_seconds: 0.3,
+        }),
+        Some(NoiseSelection {
+            start_seconds: 0.1,
+            end_seconds: 2.5,
+        }),
+    ] {
         let mut service = Service::with_memory_limit(100_000);
         let mut config = Config::default();
-        let selection = if profile {
+        if selection.is_some() {
             config.denoise.mode = rivu_dsp::denoise::DenoiseMode::Profile;
             config.denoise.fft_size = 256;
-            Some(NoiseSelection {
-                start_seconds: 0.1,
-                end_seconds: 0.3,
-            })
         } else {
             config.denoise.hum.enabled = true;
-            None
-        };
-        let noise = selection.map(|_| {
+        }
+        let noise = selection.map(|selection| {
+            let start = (selection.start_seconds * 8000.0).floor() as usize;
+            let end = (selection.end_seconds * 8000.0).floor() as usize;
             let mut collector =
-                rivu_dsp::denoise::ProfileCollector::new(8_000, 1, 256, 1600).unwrap();
+                rivu_dsp::denoise::ProfileCollector::new(8_000, 1, 256, (end - start) as u64)
+                    .unwrap();
             collector
-                .push_block(&data[800..2400], &mut || false)
+                .push_block(&data[start..end], &mut || false)
                 .unwrap();
             collector.finish().unwrap()
         });
@@ -1066,82 +1113,138 @@ fn guarded_profile_selection_uses_source_frame_floor_in_both_execution_paths() {
         writer.write_sample(sample).unwrap();
     }
     writer.finalize().unwrap();
-    let selection = NoiseSelection {
-        start_seconds: 0.0005625,
-        end_seconds: 0.012,
-    };
-    let start = (selection.start_seconds * 48_000.0).floor() as usize;
-    let end = (selection.end_seconds * 48_000.0).floor() as usize;
-    let eq = EqualizerConfig {
-        enabled: true,
-        ..Default::default()
-    };
-    let denoise = DenoiseConfig {
-        mode: DenoiseMode::Profile,
-        fft_size: 256,
-        ..Default::default()
-    };
-    let mut fir = FirEqualizer::new(&eq, 48_000, 1, 65).unwrap();
-    let latency = fir.latency_frames();
-    // This range distinguishes flooring source time before adding guard frames
-    // from adding the guard in seconds and then flooring the rounded sum.
-    assert_ne!(
-        ((selection.start_seconds + latency as f64 / 48_000.0) * 48_000.0).floor() as usize,
-        start + latency
+    for selection in [
+        NoiseSelection {
+            start_seconds: 0.0005625,
+            end_seconds: 0.012,
+        },
+        NoiseSelection {
+            start_seconds: 0.018,
+            end_seconds: 1400.25 / 48_000.0,
+        },
+        NoiseSelection {
+            start_seconds: 1399.25 / 48_000.0,
+            end_seconds: 1400.25 / 48_000.0,
+        },
+    ] {
+        for profile_count in 1..=2 {
+            let start = (selection.start_seconds * 48_000.0).floor() as usize;
+            let end = (selection.end_seconds * 48_000.0).floor() as usize;
+            let eq = EqualizerConfig {
+                enabled: true,
+                ..Default::default()
+            };
+            let denoise = DenoiseConfig {
+                mode: DenoiseMode::Profile,
+                fft_size: 256,
+                ..Default::default()
+            };
+            let mut fir = FirEqualizer::new(&eq, 48_000, 1, 65).unwrap();
+            let mut latency = fir.latency_frames();
+            if selection.start_seconds == 0.0005625 {
+                // Floor source time before adding guards, not a rounded sum of seconds.
+                assert_ne!(
+                    ((selection.start_seconds + latency as f64 / 48_000.0) * 48_000.0).floor()
+                        as usize,
+                    start + latency
+                );
+            }
+            let mut upstream = data.clone();
+            upstream.resize(data.len() + fir.tail_frames(), 0.0);
+            fir.process_interleaved(&mut upstream).unwrap();
+            let mut kinds = vec![GraphNodeKind::Equalizer {
+                config: eq,
+                implementation: EqImplementation::LinearPhase { taps: 65 },
+            }];
+            for _ in 0..profile_count {
+                // Build the reference from the complete upstream output, including
+                // true EOF context. Prefix capture must produce the identical profile.
+                let mut collector =
+                    ProfileCollector::new(48_000, 1, 256, (end - start) as u64).unwrap();
+                collector
+                    .push_block(&upstream[start + latency..end + latency], &mut || false)
+                    .unwrap();
+                let mut denoiser = Denoiser::new(
+                    48_000,
+                    1,
+                    denoise.clone(),
+                    Some(collector.finish().unwrap()),
+                )
+                .unwrap();
+                let lookahead = denoiser.lookahead_frames();
+                let mut processed = Vec::new();
+                denoiser
+                    .process_block(&upstream, &mut processed, &mut || false)
+                    .unwrap();
+                denoiser.finish(&mut processed, &mut || false).unwrap();
+                upstream = vec![0.0; lookahead];
+                upstream.extend(processed);
+                latency += lookahead;
+                kinds.push(GraphNodeKind::Denoise {
+                    config: denoise.clone(),
+                    profile: Some(selection),
+                });
+            }
+            let expected = &upstream[latency..latency + data.len()];
+            let result = completed_graph(&mut service, &track, graph_config(kinds)).unwrap();
+            let output = &result.graph_outputs[&GraphPort { node: 2, port: 0 }];
+            let decoded = samples(&output.pcm);
+            assert_eq!(decoded.len(), expected.len());
+            for (&actual, &expected) in decoded.iter().zip(expected) {
+                assert!((actual - expected).abs() < 1e-5);
+            }
+            let mut builder = audio::PcmBuilder::new(
+                48_000,
+                Arc::from([audio::Channel::FrontCenter]),
+                Arc::clone(&service.budget),
+            )
+            .unwrap();
+            builder.push(&data).unwrap();
+            let input = builder.finish().unwrap();
+            let (tx, _rx) = async_channel::unbounded();
+            let mut progress = ProgressReporter::new(&tx, result.status.id);
+            let retained = graph::execute(
+                &input,
+                Arc::clone(&service.budget),
+                &mut result.status.clone(),
+                &AtomicBool::new(false),
+                &mut progress,
+            )
+            .unwrap();
+            let retained = samples(&retained[&GraphPort { node: 2, port: 0 }].pcm);
+            assert_eq!(retained.len(), expected.len());
+            for (actual, &expected) in retained.into_iter().zip(expected) {
+                assert!((actual - expected).abs() < 1e-5);
+            }
+        }
+    }
+    // FIR tail can supply output after the source ends; it must never make an
+    // out-of-source selection look valid merely because its profile was filled.
+    assert_graph_failure(
+        &mut service,
+        &track,
+        graph_config(vec![
+            GraphNodeKind::Equalizer {
+                config: EqualizerConfig {
+                    enabled: true,
+                    ..Default::default()
+                },
+                implementation: EqImplementation::LinearPhase { taps: 65 },
+            },
+            GraphNodeKind::Denoise {
+                config: DenoiseConfig {
+                    mode: DenoiseMode::Profile,
+                    fft_size: 256,
+                    ..Default::default()
+                },
+                profile: Some(NoiseSelection {
+                    start_seconds: 0.0,
+                    end_seconds: 1401.25 / 48_000.0,
+                }),
+            },
+        ]),
+        4,
+        "outside the source",
     );
-    let mut upstream = data.clone();
-    upstream.resize(data.len() + fir.tail_frames(), 0.0);
-    fir.process_interleaved(&mut upstream).unwrap();
-    let mut collector = ProfileCollector::new(48_000, 1, 256, (end - start) as u64).unwrap();
-    collector
-        .push_block(&upstream[start + latency..end + latency], &mut || false)
-        .unwrap();
-    let mut denoiser = Denoiser::new(
-        48_000,
-        1,
-        denoise.clone(),
-        Some(collector.finish().unwrap()),
-    )
-    .unwrap();
-    let mut expected = Vec::new();
-    denoiser
-        .process_block(&upstream, &mut expected, &mut || false)
-        .unwrap();
-    denoiser.finish(&mut expected, &mut || false).unwrap();
-    let expected = &expected[latency..latency + data.len()];
-    let config = graph_config(vec![
-        GraphNodeKind::Equalizer {
-            config: eq,
-            implementation: EqImplementation::LinearPhase { taps: 65 },
-        },
-        GraphNodeKind::Denoise {
-            config: denoise,
-            profile: Some(selection),
-        },
-    ]);
-    let result = completed_graph(&mut service, &track, config).unwrap();
-    let output = &result.graph_outputs[&GraphPort { node: 2, port: 0 }];
-    let decoded = samples(&output.pcm);
-    assert_eq!(decoded.len(), expected.len());
-    for (&actual, &expected) in decoded.iter().zip(expected) {
-        assert!((actual - expected).abs() < 1e-5);
-    }
-    let mut builder = audio::PcmBuilder::new(48_000, 1, Arc::clone(&service.budget)).unwrap();
-    builder.push(&data).unwrap();
-    let input = builder.finish().unwrap();
-    let (tx, _rx) = async_channel::unbounded();
-    let retained = graph::execute(
-        &input,
-        Arc::clone(&service.budget),
-        &mut result.status.clone(),
-        &AtomicBool::new(false),
-        &tx,
-    )
-    .unwrap();
-    let retained = samples(&retained[&GraphPort { node: 2, port: 0 }].pcm);
-    assert_eq!(retained.len(), expected.len());
-    for (actual, &expected) in retained.into_iter().zip(expected) {
-        assert!((actual - expected).abs() < 1e-5);
-    }
     assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
 }
