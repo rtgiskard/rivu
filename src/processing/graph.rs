@@ -179,6 +179,7 @@ struct Engine {
     nodes: Vec<Node>,
     indices: BTreeMap<GraphPort, usize>,
     channels: usize,
+    layout: Arc<[audio::Channel]>,
     rate: u32,
     source: Option<audio::PcmAudio>,
 }
@@ -188,15 +189,17 @@ impl Engine {
             nodes: Vec::new(),
             indices: BTreeMap::new(),
             channels: usize::from(source.channels()),
+            layout: Arc::clone(source.layout()),
             rate: source.sample_rate(),
             source: Some(source.clone()),
         }
     }
-    fn for_decoder(rate: u32, channels: u16) -> Self {
+    fn for_decoder(rate: u32, layout: Arc<[audio::Channel]>) -> Self {
         Self {
             nodes: Vec::new(),
             indices: BTreeMap::new(),
-            channels: usize::from(channels),
+            channels: layout.len(),
+            layout,
             rate,
             source: None,
         }
@@ -520,7 +523,7 @@ impl Engine {
         if let Some(pcm) = self.alias(target) {
             return Ok(GraphPcm { pcm, start_frame });
         }
-        let mut builder = audio::PcmBuilder::new(self.rate, self.channels as u16, budget)?;
+        let mut builder = audio::PcmBuilder::new(self.rate, Arc::clone(&self.layout), budget)?;
         self.stream(target, cancel, |_, block| builder.push(block))?;
         Ok(GraphPcm {
             pcm: builder.finish()?,
@@ -721,7 +724,7 @@ pub(super) fn execute(
                         validate_output(
                             &pcm,
                             input.sample_rate(),
-                            input.channels(),
+                            input.layout(),
                             upstream.pcm.frames(),
                             cancel,
                         )?;
@@ -877,7 +880,8 @@ pub(super) fn execute_native(
     let mut active_node = None;
     let outcome = (|| {
         let rate = renderer.format().sample_rate;
-        let channels = renderer.format().channels;
+        let layout = Arc::clone(&renderer.format().layout);
+        let channels = renderer.format().channels();
         let mut profiles = BTreeMap::new();
         for (index, &id) in order.iter().enumerate() {
             active_node = None;
@@ -902,7 +906,7 @@ pub(super) fn execute_native(
                     start < end,
                     "Noise profile selection contains no source frames"
                 );
-                let mut engine = Engine::for_decoder(rate, channels);
+                let mut engine = Engine::for_decoder(rate, Arc::clone(&layout));
                 let upstream = engine.compile(
                     &graph,
                     input_port(&graph, id)?,
@@ -945,11 +949,11 @@ pub(super) fn execute_native(
         // Compilation, decoding, and publication execute the requested output;
         // profile collection and validation instead belong to their own node.
         active_node = Some(target.node);
-        let mut engine = Engine::for_decoder(rate, channels);
+        let mut engine = Engine::for_decoder(rate, Arc::clone(&layout));
         let index = engine.compile(&graph, target, &BTreeMap::new(), &profiles, cancel)?;
         let start_frame = -i64::try_from(engine.nodes[index].latency)?;
         drop(profiles);
-        let mut builder = audio::PcmBuilder::new(rate, channels, budget)?;
+        let mut builder = audio::PcmBuilder::new(rate, layout, budget)?;
         let frames = engine.decode(index, renderer, cancel, |_, block| builder.push(block))?;
         for &id in &order {
             active_node = Some(id);
@@ -1055,7 +1059,12 @@ mod tests {
         graph
     }
     fn pcm(samples: &[f32], budget: &Arc<audio::PcmBudget>) -> audio::PcmAudio {
-        let mut builder = audio::PcmBuilder::new(48000, 1, Arc::clone(budget)).unwrap();
+        let mut builder = audio::PcmBuilder::new(
+            48000,
+            Arc::from([audio::Channel::FrontCenter]),
+            Arc::clone(budget),
+        )
+        .unwrap();
         builder.push(samples).unwrap();
         builder.finish().unwrap()
     }
@@ -1239,7 +1248,7 @@ mod tests {
             implementation: EqImplementation::Iir,
         }]);
         let cancel = AtomicBool::new(true);
-        let mut engine = Engine::for_decoder(48000, 1);
+        let mut engine = Engine::for_decoder(48000, Arc::clone(input.layout()));
         assert!(
             engine
                 .compile(
@@ -1269,7 +1278,8 @@ mod tests {
             .unwrap();
         let mut blocks = 0;
         let result: Result<audio::PcmAudio> = (|| {
-            let mut builder = audio::PcmBuilder::new(48000, 1, Arc::clone(&budget))?;
+            let mut builder =
+                audio::PcmBuilder::new(48000, Arc::clone(input.layout()), Arc::clone(&budget))?;
             engine.decode(target, renderer, &cancel, |_, block| {
                 builder.push(block)?;
                 blocks += 1;
@@ -1351,7 +1361,7 @@ mod tests {
         let metadata = std::fs::metadata(std::env::current_exe().unwrap()).unwrap();
         let identity = audio::SourceIdentity::from_metadata(&metadata);
         let renderer = audio::SourceRenderer::from_pcm(input.clone(), identity).unwrap();
-        let mut decoder = Engine::for_decoder(48000, 1);
+        let mut decoder = Engine::for_decoder(48000, Arc::clone(input.layout()));
         let target = decoder
             .compile(
                 &graph,

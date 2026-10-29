@@ -134,7 +134,7 @@ mod source;
 mod waveform;
 mod worker;
 
-use channels::Channel;
+pub use channels::Channel;
 pub use graph::GraphRunner;
 pub use output::devices;
 pub use render::{RenderFormat, SourceRenderer};

@@ -3,7 +3,7 @@
 use anyhow::{Result, bail};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Channel {
+pub enum Channel {
     FrontLeft,
     FrontRight,
     FrontCenter,
@@ -25,9 +25,32 @@ pub(super) enum Channel {
 }
 
 impl Channel {
-    // WAVE speaker-mask bits and FFmpeg's first 18 AVChannel identifiers share
-    // these positions. Keep the mapping explicit rather than transmuting FFI.
-    pub(super) fn from_standard_index(index: u32) -> Option<Self> {
+    /// WAVE speaker-mask bit index, also shared by FFmpeg's first 18 AVChannel IDs.
+    pub fn standard_index(self) -> u32 {
+        match self {
+            Self::FrontLeft => 0,
+            Self::FrontRight => 1,
+            Self::FrontCenter => 2,
+            Self::Lfe => 3,
+            Self::RearLeft => 4,
+            Self::RearRight => 5,
+            Self::FrontLeftCenter => 6,
+            Self::FrontRightCenter => 7,
+            Self::RearCenter => 8,
+            Self::SideLeft => 9,
+            Self::SideRight => 10,
+            Self::TopCenter => 11,
+            Self::TopFrontLeft => 12,
+            Self::TopFrontCenter => 13,
+            Self::TopFrontRight => 14,
+            Self::TopRearLeft => 15,
+            Self::TopRearCenter => 16,
+            Self::TopRearRight => 17,
+        }
+    }
+
+    /// Resolves a standard speaker bit without guessing from the channel count.
+    pub fn from_standard_index(index: u32) -> Option<Self> {
         Some(match index {
             0 => Self::FrontLeft,
             1 => Self::FrontRight,
@@ -113,6 +136,16 @@ pub(super) fn analysis_weights(layout: &[Channel]) -> Vec<[f32; 2]> {
 mod tests {
     use super::*;
     use Channel::*;
+
+    #[test]
+    fn standard_speaker_bits_round_trip_without_count_inference() {
+        for index in 0..18 {
+            let speaker = Channel::from_standard_index(index).unwrap();
+            assert_eq!(speaker.standard_index(), index);
+        }
+        assert_eq!(Channel::from_standard_index(18), None);
+        assert_eq!(Channel::from_standard_index(u32::MAX), None);
+    }
 
     #[test]
     fn analysis_downmix_is_normalized_and_independent_of_speaker_mapping() {

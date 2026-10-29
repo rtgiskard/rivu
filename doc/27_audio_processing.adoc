@@ -348,11 +348,12 @@ Speech controls include wet mix and attenuation limit; the optional post-filter
 is supported only by DeepFilterNet3. Enabling it for another speech model fails
 rather than silently ignoring it. Separation overlap controls model overlap,
 not a quality guarantee. Neural source rates are 8–192 kHz; speech accepts
-mono/stereo, separation requires stereo. Speech channels are inferred
-independently, so stereo image can change. Rate conversion to 48 kHz speech /
-44.1 kHz separation is explicit; output is trimmed back to the original rate,
-channel count and exact frame count. No implicit downmix or duplicated mono
-separation is offered.
+Front Center mono or Front Left/Front Right stereo in that order, while separation
+requires that stereo layout. Other speaker identities or permutations are rejected
+rather than guessed from channel count. Speech channels are inferred independently,
+so stereo image can change. Rate conversion to 48 kHz speech / 44.1 kHz separation
+is explicit; output is trimmed back to the original rate, layout and exact frame
+count. No implicit downmix or duplicated mono separation is offered.
 
 Speech Wet=0 copies dry PCM without loading/executing a model or resampling.
 Input, controls, manifest and artifact hashes are still validated. Streaming
@@ -409,6 +410,9 @@ budget covers active, retained and retiring PCM, charging shared backing storage
 once until its last owner releases it. Exhaustion fails explicitly without disk
 spill. Decoder/DSP state, model weights and Python workspace are additional costs;
 the budget is not a process-RSS limit.
+The actual ordered speaker layout travels with shared PCM storage and its slices,
+through graph intermediates, memory decoding and audition; channel count is derived
+from it, not used to reconstruct speaker identities.
 
 A new non-export run releases unselected PCM and prepared runners after successful
 admission, before worker allocation. Selected audition audio remains pinned.
@@ -429,10 +433,11 @@ frames, including unknown-duration streams, determine EOF and output coverage.
 
 Neural input must be nonempty and no longer than four hours; each Python source
 context window is bounded to 128 MiB. Model weights/workspace remain additional
-costs. Application export writes float WAV with an atomic no-clobber commit;
-evaluation exports independently choose RIFF/RF64 per stem. Shutdown joins
-processing/reclamation workers while existing live handles remain valid until
-released. Original media and explicit exports are never reclaimed as results.
+costs. Application export writes float WAV with the actual speaker mask and samples
+ordered by ascending WAVE speaker bit, using an atomic no-clobber commit; evaluation
+exports independently choose RIFF/RF64 per stem. Shutdown joins processing/reclamation
+workers while existing live handles remain valid until released. Original media
+and explicit exports are never reclaimed as results.
 
 [source,shell]
 ----

@@ -1,7 +1,7 @@
 //! Cancellable offline decoding. This path never constructs an output device.
 
 use super::{
-    PlaybackRange, SourceIdentity,
+    Channel, PlaybackRange, SourceIdentity,
     source::{DECODE_WORK_BUDGET, DecodeStep, Source, SourceSelection, check_cancelled},
 };
 use anyhow::{Context, Result, bail};
@@ -18,11 +18,15 @@ use std::{
 pub struct RenderFormat {
     pub source_identity: SourceIdentity,
     pub sample_rate: u32,
-    pub channels: u16,
+    pub layout: Arc<[Channel]>,
     pub duration: Option<f64>,
 }
 
 impl RenderFormat {
+    pub fn channels(&self) -> u16 {
+        self.layout.len() as u16
+    }
+
     /// Admission estimate only; decoding still enforces its actual byte limit.
     pub fn estimated_frames(&self) -> Option<u64> {
         self.duration
@@ -74,7 +78,7 @@ impl SourceRenderer {
         let format = RenderFormat {
             source_identity: source.identity(),
             sample_rate,
-            channels,
+            layout: source.shared_layout(),
             duration: source.info().duration,
         };
         check_cancelled(Some(cancelled)).context("Audio render cancelled")?;
@@ -94,7 +98,7 @@ impl SourceRenderer {
         let format = RenderFormat {
             source_identity,
             sample_rate: pcm.sample_rate(),
-            channels: pcm.channels(),
+            layout: Arc::clone(pcm.layout()),
             duration: Some(pcm.frames() as f64 / f64::from(pcm.sample_rate())),
         };
         Ok(Self {
@@ -120,7 +124,7 @@ impl SourceRenderer {
                     return Ok(false);
                 }
             }
-            if self.source.layout().len() != usize::from(self.format.channels)
+            if self.source.layout() != self.format.layout.as_ref()
                 || self.source.info().sample_rate != self.format.sample_rate
             {
                 bail!("Audio render source format changed within the track");
@@ -148,8 +152,11 @@ impl SourceRenderer {
         if let Some(pcm) = self.source.pcm() {
             return Ok(pcm.clone());
         }
-        let mut builder =
-            super::PcmBuilder::new(self.format.sample_rate, self.format.channels, budget)?;
+        let mut builder = super::PcmBuilder::new(
+            self.format.sample_rate,
+            Arc::clone(&self.format.layout),
+            budget,
+        )?;
         loop {
             let mut work = DECODE_WORK_BUDGET;
             match self
@@ -160,7 +167,7 @@ impl SourceRenderer {
                 DecodeStep::Yield => continue,
                 DecodeStep::Eof => break,
             }
-            if self.source.layout().len() != usize::from(self.format.channels)
+            if self.source.layout() != self.format.layout.as_ref()
                 || self.source.info().sample_rate != self.format.sample_rate
             {
                 bail!("Audio render source format changed within the track");
@@ -265,7 +272,7 @@ mod tests {
         let cancelled = AtomicBool::new(false);
         let renderer =
             SourceRenderer::open(&source, None, DecoderHint::Native, 1, false, &cancelled).unwrap();
-        assert_eq!(renderer.format().channels, 2);
+        assert_eq!(renderer.format().channels(), 2);
         assert_eq!(renderer.format().sample_rate, 8000);
         let budget = super::super::PcmBudget::new(256);
         assert!(

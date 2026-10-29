@@ -1,5 +1,6 @@
 //! Immutable, budgeted interleaved PCM. Slices retain their backing allocation.
 
+use super::Channel;
 use anyhow::{Context, Result, bail};
 use std::sync::{
     Arc,
@@ -64,6 +65,7 @@ struct Chunk {
 struct Storage {
     id: u64,
     chunks: Vec<Chunk>,
+    layout: Arc<[Channel]>,
     _directory: Reservation,
 }
 
@@ -72,7 +74,6 @@ struct Storage {
 pub struct PcmAudio {
     storage: Arc<Storage>,
     rate: u32,
-    channels: u16,
     start: u64,
     frames: u64,
 }
@@ -81,7 +82,7 @@ impl std::fmt::Debug for PcmAudio {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PcmAudio")
             .field("sample_rate", &self.rate)
-            .field("channels", &self.channels)
+            .field("layout", &self.storage.layout)
             .field("start", &self.start)
             .field("frames", &self.frames)
             .field("retained_bytes", &self.retained_bytes())
@@ -101,7 +102,11 @@ impl PcmAudio {
         self.rate
     }
     pub fn channels(&self) -> u16 {
-        self.channels
+        self.storage.layout.len() as u16
+    }
+    /// Speaker order of every interleaved frame, shared by clones and slices.
+    pub fn layout(&self) -> &Arc<[Channel]> {
+        &self.storage.layout
     }
     pub fn frames(&self) -> u64 {
         self.frames
@@ -119,7 +124,7 @@ impl PcmAudio {
 
     /// Copies complete frames into caller-owned storage, without allocating.
     pub fn read_frames(&self, start: u64, output: &mut [f32]) -> usize {
-        let channels = usize::from(self.channels);
+        let channels = self.storage.layout.len();
         let count = (output.len() / channels).min(self.frames.saturating_sub(start) as usize);
         if count == 0 {
             return 0;
@@ -149,7 +154,6 @@ impl PcmAudio {
         Ok(Self {
             storage: Arc::clone(&self.storage),
             rate: self.rate,
-            channels: self.channels,
             start: self.start + start,
             frames,
         })
@@ -161,25 +165,34 @@ pub struct PcmBuilder {
     chunks: Vec<Chunk>,
     directory: Reservation,
     rate: u32,
-    channels: u16,
+    layout: Arc<[Channel]>,
     frames: u64,
     filled: usize,
     failed: bool,
 }
 
 impl PcmBuilder {
-    pub fn new(rate: u32, channels: u16, budget: Arc<PcmBudget>) -> Result<Self> {
-        if rate == 0 || channels == 0 {
-            bail!("PCM requires a nonzero sample rate and channel count");
+    pub fn new(rate: u32, layout: Arc<[Channel]>, budget: Arc<PcmBudget>) -> Result<Self> {
+        if rate == 0 || layout.is_empty() {
+            bail!("PCM requires a nonzero sample rate and a nonempty speaker layout");
         }
-        let directory = budget
-            .reserve((std::mem::size_of::<Storage>() + 2 * std::mem::size_of::<usize>()) as u64)?;
+        for (index, channel) in layout.iter().enumerate() {
+            if layout[..index].contains(channel) {
+                bail!("PCM has a duplicate speaker: {channel:?}");
+            }
+        }
+        // Conservatively charge this small shared layout with each storage owner.
+        let directory = budget.reserve(
+            (std::mem::size_of::<Storage>()
+                + 2 * std::mem::size_of::<usize>()
+                + std::mem::size_of_val(layout.as_ref())) as u64,
+        )?;
         Ok(Self {
             budget,
             chunks: Vec::new(),
             directory,
             rate,
-            channels,
+            layout,
             frames: 0,
             filled: 0,
             failed: false,
@@ -190,7 +203,7 @@ impl PcmBuilder {
         if self.failed {
             bail!("PCM builder failed a previous admission");
         }
-        let channels = usize::from(self.channels);
+        let channels = self.layout.len();
         if !samples.len().is_multiple_of(channels) {
             bail!("PCM contains an incomplete interleaved frame");
         }
@@ -248,10 +261,10 @@ impl PcmBuilder {
                     .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
                     .map_err(|_| anyhow::anyhow!("PCM content identity exhausted"))?,
                 chunks: self.chunks,
+                layout: self.layout,
                 _directory: self.directory,
             }),
             rate: self.rate,
-            channels: self.channels,
             start: 0,
             frames: self.frames,
         })
@@ -262,10 +275,70 @@ impl PcmBuilder {
 mod tests {
     use super::*;
 
+    fn stereo() -> Arc<[Channel]> {
+        Arc::from([Channel::FrontLeft, Channel::FrontRight])
+    }
+
+    fn mono() -> Arc<[Channel]> {
+        Arc::from([Channel::FrontCenter])
+    }
+
+    #[test]
+    fn speaker_layout_survives_slicing_memory_decode_and_render_format() {
+        use Channel::*;
+        for speakers in [
+            vec![FrontLeft, FrontRight, FrontCenter, Lfe, SideLeft, SideRight],
+            vec![SideRight, FrontCenter, FrontLeft, Lfe, SideLeft, FrontRight],
+        ] {
+            let layout: Arc<[Channel]> = speakers.into();
+            let budget = PcmBudget::new(256 * 1024);
+            let mut builder =
+                PcmBuilder::new(48_000, Arc::clone(&layout), Arc::clone(&budget)).unwrap();
+            let samples: Vec<_> = (0..3)
+                .flat_map(|frame| {
+                    layout
+                        .iter()
+                        .map(move |channel| (frame * 100 + channel.standard_index()) as f32)
+                })
+                .collect();
+            builder.push(&samples).unwrap();
+            let pcm = builder.finish().unwrap();
+            let slice = pcm.slice_frames(1, 2).unwrap();
+            let alias = slice.clone();
+            assert!(Arc::ptr_eq(pcm.layout(), &layout));
+            assert!(Arc::ptr_eq(alias.layout(), pcm.layout()));
+            let retained = budget.used_bytes();
+            let source = crate::source::Source::from_pcm(alias.clone(), 0.0).unwrap();
+            assert_eq!(source.layout(), layout.as_ref());
+            assert_eq!(source.info().channels, 6);
+            let mut renderer =
+                crate::SourceRenderer::from_pcm(alias.clone(), alias.identity()).unwrap();
+            assert_eq!(renderer.format().channels(), 6);
+            assert!(Arc::ptr_eq(&renderer.format().layout, &layout));
+            let mut block = Vec::new();
+            let cancel = std::sync::atomic::AtomicBool::new(false);
+            assert!(renderer.read_block(&mut block, &cancel).unwrap());
+            assert_eq!(block, samples[6..]);
+            assert!(!renderer.read_block(&mut block, &cancel).unwrap());
+            let rendered = crate::SourceRenderer::from_pcm(alias, slice.identity())
+                .unwrap()
+                .render_pcm(PcmBudget::new(0), &cancel)
+                .unwrap();
+            assert!(Arc::ptr_eq(rendered.layout(), &layout));
+            assert_eq!(rendered.identity(), slice.identity());
+            assert_eq!(budget.used_bytes(), retained);
+            let device = [FrontLeft, FrontRight, FrontCenter, Lfe, SideLeft, SideRight];
+            let mapping = crate::channels::mapping(rendered.layout(), &device).unwrap();
+            for (speaker, index) in device.iter().zip(mapping) {
+                assert_eq!(layout[index.unwrap()], *speaker);
+            }
+        }
+    }
+
     #[test]
     fn aliases_and_cross_chunk_slices_retain_the_budget() {
         let budget = PcmBudget::new(128 * 1024);
-        let mut builder = PcmBuilder::new(48000, 2, Arc::clone(&budget)).unwrap();
+        let mut builder = PcmBuilder::new(48000, stereo(), Arc::clone(&budget)).unwrap();
         let samples: Vec<_> = (0..10000).map(|i| i as f32).collect();
         builder.push(&samples[..200]).unwrap();
         builder.push(&samples[200..]).unwrap();
@@ -297,10 +370,18 @@ mod tests {
     #[test]
     fn invalid_pcm_does_not_consume_capacity_or_poison_the_builder() {
         let budget = PcmBudget::new(128 * 1024);
-        assert!(PcmBuilder::new(0, 2, Arc::clone(&budget)).is_err());
-        assert!(PcmBuilder::new(8000, 0, Arc::clone(&budget)).is_err());
+        assert!(PcmBuilder::new(0, stereo(), Arc::clone(&budget)).is_err());
+        assert!(PcmBuilder::new(8000, Arc::from([]), Arc::clone(&budget)).is_err());
+        assert!(
+            PcmBuilder::new(
+                8000,
+                Arc::from([Channel::FrontLeft, Channel::FrontLeft]),
+                Arc::clone(&budget),
+            )
+            .is_err()
+        );
         assert_eq!(budget.used_bytes(), 0);
-        let mut builder = PcmBuilder::new(8000, 2, Arc::clone(&budget)).unwrap();
+        let mut builder = PcmBuilder::new(8000, stereo(), Arc::clone(&budget)).unwrap();
         let reserved = budget.used_bytes();
         assert!(builder.push(&[0.0]).is_err());
         assert!(builder.push(&[f32::NAN, 0.0]).is_err());
@@ -319,7 +400,7 @@ mod tests {
     fn memory_source_seek_is_frame_exact_and_keeps_storage_alive() {
         use crate::source::{DecodeStep, Source};
         let budget = PcmBudget::new(128 * 1024);
-        let mut builder = PcmBuilder::new(8000, 2, Arc::clone(&budget)).unwrap();
+        let mut builder = PcmBuilder::new(8000, stereo(), Arc::clone(&budget)).unwrap();
         let samples: Vec<_> = (0..10000).map(|i| i as f32).collect();
         builder.push(&samples).unwrap();
         let pcm = builder.finish().unwrap();
@@ -369,7 +450,7 @@ mod tests {
     fn waveform_reads_pcm_without_opening_the_metadata_path() {
         let directory = tempfile::tempdir().unwrap();
         let budget = PcmBudget::new(128 * 1024);
-        let mut builder = PcmBuilder::new(8000, 1, Arc::clone(&budget)).unwrap();
+        let mut builder = PcmBuilder::new(8000, mono(), Arc::clone(&budget)).unwrap();
         builder.push(&[0.25; 800]).unwrap();
         let mut snapshot = crate::WaveformScanSnapshot::original(
             directory.path().join("metadata-only.wav"),
@@ -414,7 +495,7 @@ mod tests {
     fn content_identity_distinguishes_slices_and_released_storage() {
         let budget = PcmBudget::new(128 * 1024);
         let old = {
-            let mut builder = PcmBuilder::new(8000, 1, Arc::clone(&budget)).unwrap();
+            let mut builder = PcmBuilder::new(8000, mono(), Arc::clone(&budget)).unwrap();
             builder.push(&[0.25, 0.75]).unwrap();
             let pcm = builder.finish().unwrap();
             assert_eq!(pcm.identity(), pcm.clone().identity());
@@ -426,7 +507,7 @@ mod tests {
             pcm.identity()
         };
         assert_eq!(budget.used_bytes(), 0);
-        let mut builder = PcmBuilder::new(8000, 1, budget).unwrap();
+        let mut builder = PcmBuilder::new(8000, mono(), budget).unwrap();
         builder.push(&[0.25, 0.75]).unwrap();
         assert_ne!(old, builder.finish().unwrap().identity());
     }
@@ -434,7 +515,7 @@ mod tests {
     #[test]
     fn failed_partial_push_cannot_publish_a_truncated_result() {
         let budget = PcmBudget::new(20 * 1024);
-        let mut builder = PcmBuilder::new(8000, 1, Arc::clone(&budget)).unwrap();
+        let mut builder = PcmBuilder::new(8000, mono(), Arc::clone(&budget)).unwrap();
         assert!(builder.push(&[1.0; 5000]).is_err());
         assert!(builder.push(&[]).is_err());
         assert!(builder.finish().is_err());

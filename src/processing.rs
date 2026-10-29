@@ -612,15 +612,18 @@ fn run(
     let native = renderer.format().clone();
     stamp.validate_rendered(native.source_identity)?;
     ensure!(
-        status.operation != ProcessingOperation::Separate || native.channels == 2,
+        status.operation != ProcessingOperation::Separate
+            || native.layout.as_ref() == [audio::Channel::FrontLeft, audio::Channel::FrontRight],
         "Vocal separation requires a stereo source; no implicit channel conversion is performed"
     );
     ensure!(
-        status.operation != ProcessingOperation::Speech || (1..=2).contains(&native.channels),
-        "Speech enhancement supports mono/stereo only"
+        status.operation != ProcessingOperation::Speech
+            || native.layout.as_ref() == [audio::Channel::FrontCenter]
+            || native.layout.as_ref() == [audio::Channel::FrontLeft, audio::Channel::FrontRight],
+        "Speech enhancement supports mono/stereo speaker layouts only"
     );
     status.sample_rate = Some(native.sample_rate);
-    status.channels = Some(native.channels);
+    status.channels = Some(native.channels());
     let mut runner = None;
     if let Some(mode) = status
         .settings
@@ -639,7 +642,7 @@ fn run(
                 .context("Missing graph target")?,
             mode,
             native.sample_rate,
-            usize::from(native.channels),
+            usize::from(native.channels()),
             cancel,
         )?;
         status.settings.graph_mode = Some(actual);
@@ -738,7 +741,7 @@ fn run(
         .into_iter()
         .flatten()
     {
-        validate_output(pcm, native.sample_rate, native.channels, frames, cancel)?;
+        validate_output(pcm, native.sample_rate, &native.layout, frames, cancel)?;
     }
     let pending_export = if let Some(destination) = &status.settings.graph_export_path {
         let target = status
@@ -805,6 +808,13 @@ fn prepare_export(
         bits_per_sample: 32,
         sample_format: hound::SampleFormat::Float,
     };
+    // WAVE masks describe samples in ascending speaker-bit order, unlike an
+    // in-memory custom layout, which may retain any decoder-provided ordering.
+    let mut order: Vec<_> = (0..source.layout().len()).collect();
+    order.sort_unstable_by_key(|&index| source.layout()[index].standard_index());
+    let mask = source.layout().iter().fold(0_u32, |mask, speaker| {
+        mask | (1 << speaker.standard_index())
+    });
     let mut writer = hound::WavWriter::new(std::io::BufWriter::new(temporary.as_file_mut()), spec)?;
     let mut block = vec![0.0; 8192 * usize::from(source.channels())];
     let mut position = 0;
@@ -813,28 +823,82 @@ fn prepare_export(
         check_cancel(cancel)?;
         let frames = source.read_frames(position, &mut block);
         ensure!(frames > 0, "Truncated export PCM");
-        for &sample in &block[..frames * usize::from(source.channels())] {
-            writer.write_sample(sample)?;
+        for frame in block[..frames * order.len()].chunks_exact(order.len()) {
+            for &index in &order {
+                writer.write_sample(frame[index])?;
+            }
         }
         position += frames as u64;
         progress(position, source.frames());
     }
     writer.finalize()?;
+    set_wav_channel_mask(temporary.as_file_mut(), spec, mask)?;
     temporary.as_file().sync_all()?;
     check_cancel(cancel)?;
     Ok((temporary, canonical))
 }
 
+/// Hound 3.5 writes float32 as WAVEFORMATEXTENSIBLE, but guesses its mask.
+/// Locate and validate the actual RIFF fmt chunk before replacing dwChannelMask
+/// on the same unpublished file; hound still owns all encoding and finalization.
+fn set_wav_channel_mask(file: &mut fs::File, spec: hound::WavSpec, mask: u32) -> Result<()> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    file.rewind()?;
+    let length = file.metadata()?.len();
+    let mut riff = [0_u8; 12];
+    file.read_exact(&mut riff)?;
+    ensure!(
+        &riff[..4] == b"RIFF"
+            && &riff[8..] == b"WAVE"
+            && u64::from(u32::from_le_bytes(riff[4..8].try_into()?)) + 8 == length,
+        "Export writer produced an invalid RIFF/WAVE container"
+    );
+    let mut position = 12_u64;
+    while position + 8 <= length {
+        file.seek(SeekFrom::Start(position))?;
+        let mut chunk = [0_u8; 8];
+        file.read_exact(&mut chunk)?;
+        let size = u64::from(u32::from_le_bytes(chunk[4..].try_into()?));
+        let payload = position + 8;
+        ensure!(size <= length - payload, "Truncated export WAV chunk");
+        if &chunk[..4] == b"fmt " {
+            ensure!(size >= 40, "Export WAV has no extensible speaker layout");
+            let mut format = [0_u8; 40];
+            file.read_exact(&mut format)?;
+            // WAVEFORMATEX (18 bytes), valid bits (2), mask (4), subtype GUID (16).
+            const MASK_OFFSET: u64 = 20;
+            const IEEE_FLOAT_GUID: [u8; 16] =
+                [3, 0, 0, 0, 0, 0, 16, 0, 128, 0, 0, 170, 0, 56, 155, 113];
+            ensure!(
+                u16::from_le_bytes(format[..2].try_into()?) == 0xfffe
+                    && u16::from_le_bytes(format[2..4].try_into()?) == spec.channels
+                    && u32::from_le_bytes(format[4..8].try_into()?) == spec.sample_rate
+                    && u16::from_le_bytes(format[14..16].try_into()?) == 32
+                    && u16::from_le_bytes(format[16..18].try_into()?) >= 22
+                    && u16::from_le_bytes(format[18..20].try_into()?) == 32
+                    && format[24..] == IEEE_FLOAT_GUID,
+                "Export WAV has an unexpected extensible float32 format"
+            );
+            file.seek(SeekFrom::Start(payload + MASK_OFFSET))?;
+            file.write_all(&mask.to_le_bytes())?;
+            return Ok(());
+        }
+        position = payload + size + (size & 1);
+    }
+    bail!("Export WAV has no fmt chunk")
+}
+
 fn validate_output(
     pcm: &audio::PcmAudio,
     rate: u32,
-    channels: u16,
+    layout: &[audio::Channel],
     frames: u64,
     cancel: &AtomicBool,
 ) -> Result<()> {
     check_cancel(cancel)?;
     ensure!(
-        pcm.sample_rate() == rate && pcm.channels() == channels && pcm.frames() == frames,
+        pcm.sample_rate() == rate && pcm.layout().as_ref() == layout && pcm.frames() == frames,
         "Processing output format or alignment differs from source"
     );
     Ok(())
@@ -851,7 +915,8 @@ fn classical_native(
 ) -> Result<audio::PcmAudio> {
     use rivu_dsp::denoise::{DenoiseMode, Denoiser, ProfileCollector};
     let rate = renderer.format().sample_rate;
-    let channels = renderer.format().channels;
+    let layout = Arc::clone(&renderer.format().layout);
+    let channels = renderer.format().channels();
     config.validate_for_format(rate, usize::from(channels))?;
     let profile = if config.mode == DenoiseMode::Profile {
         let selection =
@@ -865,7 +930,7 @@ fn classical_native(
         );
         let mut capture = reopen()?;
         ensure!(
-            capture.format().sample_rate == rate && capture.format().channels == channels,
+            capture.format().sample_rate == rate && capture.format().layout == layout,
             "Source format changed during profile capture"
         );
         let mut collector =
@@ -909,7 +974,7 @@ fn classical_native(
             profile,
         )?)
     };
-    let mut builder = audio::PcmBuilder::new(rate, channels, budget)?;
+    let mut builder = audio::PcmBuilder::new(rate, Arc::clone(&layout), budget)?;
     let mut block = Vec::new();
     let mut processed = Vec::new();
     let mut frames = 0_u64;
@@ -939,7 +1004,7 @@ fn classical_native(
     }
     renderer.finish(cancel)?;
     let pcm = builder.finish()?;
-    validate_output(&pcm, rate, channels, frames, cancel)?;
+    validate_output(&pcm, rate, &layout, frames, cancel)?;
     Ok(pcm)
 }
 
@@ -993,12 +1058,15 @@ pub(crate) fn mix(
                     validate_output(
                         &accompaniment,
                         vocals.sample_rate(),
-                        vocals.channels(),
+                        vocals.layout(),
                         vocals.frames(),
                         &cancel,
                     )?;
-                    let mut builder =
-                        audio::PcmBuilder::new(vocals.sample_rate(), vocals.channels(), budget)?;
+                    let mut builder = audio::PcmBuilder::new(
+                        vocals.sample_rate(),
+                        Arc::clone(vocals.layout()),
+                        budget,
+                    )?;
                     let mut v = vec![0.0; 8192 * usize::from(vocals.channels())];
                     let mut a = vec![0.0; v.len()];
                     let vg = 10.0_f32.powf(vocal_gain_db / 20.0);

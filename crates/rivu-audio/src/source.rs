@@ -16,7 +16,10 @@ use std::{
     io::Seek,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::{
@@ -463,7 +466,7 @@ pub(super) struct Source {
     native_pcm: Option<NativePcm>,
     ffmpeg_pending: Option<(Vec<f32>, f64)>,
     vorbis_timing: Option<VorbisTiming>,
-    layout: Vec<Channel>,
+    layout: Arc<[Channel]>,
     info: MediaInfo,
     probe_backend: ProbeBackend,
     range_start: f64,
@@ -485,15 +488,7 @@ impl Source {
         super::validate_seek_position(start)?;
         let rate = pcm.sample_rate();
         let channels = pcm.channels();
-        let layout = if channels == 1 {
-            vec![Channel::FrontCenter]
-        } else {
-            (0..u32::from(channels))
-                .map(|index| {
-                    Channel::from_standard_index(index).context("Unsupported PCM speaker layout")
-                })
-                .collect::<Result<Vec<_>>>()?
-        };
+        let layout = Arc::clone(pcm.layout());
         let identity = pcm.identity();
         let info = MediaInfo {
             duration: Some(pcm.frames() as f64 / f64::from(rate)),
@@ -701,7 +696,7 @@ impl Source {
 
     fn from_ffmpeg(decode: super::ffmpeg::Decoder) -> Result<Self> {
         let info = decode.info().clone();
-        let layout = decode.layout().to_vec();
+        let layout = Arc::from(decode.layout());
         let time_base = decode.time_base()?;
         let timestamp_tick = f64::from(time_base.numer.get()) / f64::from(time_base.denom.get());
         let vorbis_timing = decode
@@ -934,7 +929,7 @@ impl Source {
             native_pcm: None,
             ffmpeg_pending: None,
             vorbis_timing,
-            layout: Vec::new(),
+            layout: Arc::from([]),
             info,
             probe_backend: ProbeBackend::Native,
             range_start: 0.0,
@@ -1176,6 +1171,10 @@ impl Source {
 
     pub(super) fn layout(&self) -> &[Channel] {
         &self.layout
+    }
+
+    pub(super) fn shared_layout(&self) -> Arc<[Channel]> {
+        Arc::clone(&self.layout)
     }
 
     /// Returns normalized media alignment and explicit source continuity.
@@ -1639,7 +1638,7 @@ impl Source {
                 let Decode::Ffmpeg(decoder) = &self.decode else {
                     unreachable!()
                 };
-                self.layout.extend_from_slice(decoder.layout());
+                self.layout = Arc::from(decoder.layout());
                 self.info.channels = decoder.info().channels;
                 self.info.sample_rate = decoder.info().sample_rate;
             }
@@ -1900,9 +1899,9 @@ impl Source {
                     );
                     if self.layout.is_empty() {
                         self.layout = if opus.channels == 1 {
-                            vec![Channel::FrontCenter]
+                            Arc::from([Channel::FrontCenter])
                         } else {
-                            vec![Channel::FrontLeft, Channel::FrontRight]
+                            Arc::from([Channel::FrontLeft, Channel::FrontRight])
                         };
                     }
                     self.info.channels = opus.channels as u16;
@@ -1932,7 +1931,7 @@ impl Source {
     }
 }
 
-fn update_layout(channels: &Channels, layout: &mut Vec<Channel>) -> Result<()> {
+fn update_layout(channels: &Channels, layout: &mut Arc<[Channel]>) -> Result<()> {
     let count = channels.count();
     if count == 0 {
         bail!("Decoded audio has no channels");
@@ -1941,6 +1940,7 @@ fn update_layout(channels: &Channels, layout: &mut Vec<Channel>) -> Result<()> {
     if !initial && layout.len() != count {
         bail!("Channel layout changes within this track are unsupported");
     }
+    let mut initial_layout = initial.then(|| Vec::with_capacity(count));
     for index in 0..count {
         let position = match channels {
             Channels::Positioned(positions) => positions.iter().nth(index),
@@ -1961,10 +1961,13 @@ fn update_layout(channels: &Channels, layout: &mut Vec<Channel>) -> Result<()> {
             .and_then(|position| Channel::from_standard_index(position.bits().trailing_zeros()))
             .context("Audio has an unsupported or unspecified speaker position; refusing to guess its routing")?;
         if initial {
-            layout.push(channel);
+            initial_layout.as_mut().unwrap().push(channel);
         } else if layout[index] != channel {
             bail!("Channel layout changes within this track are unsupported");
         }
+    }
+    if let Some(initial_layout) = initial_layout {
+        *layout = initial_layout.into();
     }
     Ok(())
 }
@@ -4108,7 +4111,7 @@ pub(super) mod tests {
         let mut source =
             Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
         source.info.sample_rate = 48_000;
-        source.layout = vec![Channel::FrontLeft, Channel::FrontRight];
+        source.layout = Arc::from([Channel::FrontLeft, Channel::FrontRight]);
         source.timestamp_tick = 0.001;
         source.reset_traversal();
         for (index, (timestamp, expected, discontinuity)) in [

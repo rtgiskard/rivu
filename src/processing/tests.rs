@@ -806,6 +806,77 @@ fn realtime_preparation_never_creates_processing_storage() {
                 source_run: None,
                 cached_output: None,
             },
+#[test]
+fn wav_export_preserves_side_speakers_and_reorders_custom_frames() {
+    use audio::Channel::*;
+    let directory = tempfile::tempdir().unwrap();
+    let cancel = AtomicBool::new(false);
+    for (name, speakers) in [
+        (
+            "side",
+            vec![FrontLeft, FrontRight, FrontCenter, Lfe, SideLeft, SideRight],
+        ),
+        (
+            "custom",
+            vec![SideRight, FrontCenter, FrontLeft, Lfe, SideLeft, FrontRight],
+        ),
+        ("left-only", vec![FrontLeft]),
+    ] {
+        let layout: Arc<[audio::Channel]> = speakers.into();
+        let budget = audio::PcmBudget::new(256 * 1024);
+        let mut builder =
+            audio::PcmBuilder::new(48_000, Arc::clone(&layout), Arc::clone(&budget)).unwrap();
+        let input: Vec<_> = (0..3)
+            .flat_map(|frame| {
+                layout
+                    .iter()
+                    .map(move |speaker| frame as f32 - speaker.standard_index() as f32 / 8.0)
+            })
+            .collect();
+        builder.push(&input).unwrap();
+        let pcm = builder.finish().unwrap();
+        let destination = directory.path().join(format!("{name}.wav"));
+        let (temporary, canonical) =
+            prepare_export(&pcm, &destination, &cancel, |_, _| {}).unwrap();
+        temporary.persist_noclobber(canonical).unwrap();
+        assert_eq!(pcm.layout().as_ref(), layout.as_ref());
+        assert_eq!(samples(&pcm), input);
+
+        let mut canonical_layout = layout.to_vec();
+        canonical_layout.sort_unstable_by_key(|speaker| speaker.standard_index());
+        let mut expected = Vec::new();
+        for frame in input.chunks_exact(layout.len()) {
+            for speaker in &canonical_layout {
+                expected.push(frame[layout.iter().position(|input| input == speaker).unwrap()]);
+            }
+        }
+        let exported: Vec<f32> = hound::WavReader::open(&destination)
+            .unwrap()
+            .samples::<f32>()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(exported, expected);
+        let renderer = audio::SourceRenderer::open(
+            &destination,
+            None,
+            rivu_format::media::DecoderHint::Native,
+            1,
+            false,
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(renderer.format().sample_rate, 48_000);
+        assert_eq!(renderer.format().layout.as_ref(), canonical_layout);
+        assert_eq!(renderer.format().channels(), pcm.channels());
+        let identity = renderer.format().source_identity;
+        let decoded = renderer.render_pcm(Arc::clone(&budget), &cancel).unwrap();
+        assert_eq!(decoded.layout().as_ref(), canonical_layout);
+        assert_eq!(samples(&decoded), expected);
+        let restored = audio::SourceRenderer::from_pcm(decoded, identity).unwrap();
+        assert_eq!(restored.format().layout.as_ref(), canonical_layout);
+    }
+}
+
         )
         .unwrap();
     loop {

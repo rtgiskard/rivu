@@ -126,8 +126,9 @@ pub(super) fn run(
     check_cancel(cancel)?;
     let speech = status.operation == ProcessingOperation::Speech;
     ensure!(
-        input.channels() == 2 || (speech && input.channels() == 1),
-        "Neural input channels unsupported"
+        input.layout().as_ref() == [audio::Channel::FrontLeft, audio::Channel::FrontRight]
+            || (speech && input.layout().as_ref() == [audio::Channel::FrontCenter]),
+        "Neural input speaker layout unsupported"
     );
     let manifest = if speech {
         &config.speech_manifest
@@ -300,7 +301,7 @@ pub(super) fn run(
                             if builders[index].is_none() {
                                 builders[index] = Some(audio::PcmBuilder::new(
                                     input.sample_rate(),
-                                    input.channels(),
+                                    Arc::clone(input.layout()),
                                     Arc::clone(&budget),
                                 )?);
                             }
@@ -421,13 +422,19 @@ mod tests {
 
     #[test]
     fn subprocess_success_preserves_pcm_and_maps_stems() {
-        subprocess_fixture(ProcessingOperation::Speech, 1, 8201, "success");
-        subprocess_fixture(ProcessingOperation::Separate, 2, 8201, "success");
+        subprocess_fixture(ProcessingOperation::Speech, 1, 8201, "success", None);
+        subprocess_fixture(ProcessingOperation::Separate, 2, 8201, "success", None);
     }
 
     #[test]
     fn subprocess_failure_after_pcm_discards_unpublished_output() {
-        subprocess_fixture(ProcessingOperation::Speech, 1, 8201, "failure-after-pcm");
+        subprocess_fixture(
+            ProcessingOperation::Speech,
+            1,
+            8201,
+            "failure-after-pcm",
+            None,
+        );
     }
 
     #[test]
@@ -437,6 +444,7 @@ mod tests {
             1,
             8201,
             "complete-then-nonzero",
+            None,
         );
     }
 
@@ -444,7 +452,25 @@ mod tests {
     fn subprocess_multi_window_duplex_backpressure_preserves_pcm() {
         // More than the Linux maximum default pipe capacity in both directions;
         // the worker flushes each output window before reading the next input.
-        subprocess_fixture(ProcessingOperation::Speech, 1, 524_325, "success");
+        subprocess_fixture(ProcessingOperation::Speech, 1, 524_325, "success", None);
+    }
+
+    #[test]
+    fn neural_rejects_wrong_speakers_and_reversed_stereo_without_starting_worker() {
+        use audio::Channel::*;
+        for (operation, layout) in [
+            (ProcessingOperation::Speech, vec![FrontLeft]),
+            (ProcessingOperation::Speech, vec![RearLeft, RearRight]),
+            (ProcessingOperation::Separate, vec![FrontRight, FrontLeft]),
+        ] {
+            subprocess_fixture(
+                operation,
+                layout.len() as u16,
+                1,
+                "unsupported-layout",
+                Some(Arc::from(layout)),
+            );
+        }
     }
 
     fn subprocess_fixture(
@@ -452,6 +478,7 @@ mod tests {
         channels: u16,
         frames: usize,
         outcome: &str,
+        layout: Option<Arc<[audio::Channel]>>,
     ) {
         let directory = tempfile::tempdir().unwrap();
         let worker = directory.path().join("pcm_worker.py");
@@ -498,6 +525,8 @@ while True:
         data = struct.pack('<%df' % len(values), *(gain * x for x in values))
         for offset in range(0, len(data), 4096):
             send(kind, data[offset:offset + 4096])
+    send(0, json.dumps(dict(version=3, task_id=request['task_id'], type='progress',
+        completed=len(pcm) // (4 * channels), total=request['frames'])).encode())
     sys.stdout.buffer.flush()
 assert sys.stdin.buffer.read() == b''
 expected = [((i % 17) - 8) / 4 for i in range(request['frames'] * channels)]
@@ -525,13 +554,18 @@ if outcome == 'complete-then-nonzero':
             separation_manifest: Some(directory.path().join(outcome)),
             ..Default::default()
         };
-    send(0, json.dumps(dict(version=3, task_id=request['task_id'], type='progress',
-        completed=len(pcm) // (4 * channels), total=request['frames'])).encode())
         let budget = audio::PcmBudget::new(64 * 1024 * 1024);
         let expected: Vec<f32> = (0..frames * usize::from(channels))
             .map(|i| ((i % 17) as f32 - 8.0) / 4.0)
             .collect();
-        let mut builder = audio::PcmBuilder::new(48_000, channels, Arc::clone(&budget)).unwrap();
+        let layout = layout.unwrap_or_else(|| {
+            if channels == 1 {
+                Arc::from([audio::Channel::FrontCenter])
+            } else {
+                Arc::from([audio::Channel::FrontLeft, audio::Channel::FrontRight])
+            }
+        });
+        let mut builder = audio::PcmBuilder::new(48_000, layout, Arc::clone(&budget)).unwrap();
         builder.push(&expected).unwrap();
         let input = builder.finish().unwrap();
         let source_bytes = budget.used_bytes();
@@ -580,6 +614,27 @@ if outcome == 'complete-then-nonzero':
             &mut progress,
             &mut status,
         );
+        if outcome == "unsupported-layout" {
+            assert!(result.is_err(), "unsupported speakers must not publish PCM");
+            assert_eq!(rx.len(), 1);
+            assert_eq!(budget.used_bytes(), source_bytes);
+            return;
+        }
+        assert_eq!(rx.len(), 2);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            super::super::Event::Progress {
+                phase: ProcessingPhase::Rendering,
+                ..
+            }
+        ));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            super::super::Event::Progress {
+                phase: ProcessingPhase::Processing,
+                ..
+            }
+        ));
         if outcome != "success" {
             let error = match result {
                 Ok(_) => panic!("failed worker must not publish PCM"),
@@ -610,31 +665,11 @@ if outcome == 'complete-then-nonzero':
             if let Some(pcm) = pcm {
                 assert_eq!(pcm.sample_rate(), 48_000);
                 assert_eq!(pcm.channels(), channels);
+                assert_eq!(pcm.layout(), input.layout());
                 assert_eq!(pcm.frames(), frames as u64);
                 let mut actual = vec![0.0; expected.len()];
                 assert_eq!(pcm.read_frames(0, &mut actual), frames);
                 for (actual, expected) in actual.iter().zip(&expected) {
-        if outcome == "unsupported-layout" {
-            assert!(result.is_err(), "unsupported speakers must not publish PCM");
-            assert_eq!(rx.len(), 1);
-            assert_eq!(budget.used_bytes(), source_bytes);
-            return;
-        }
-        assert_eq!(rx.len(), 2);
-        assert!(matches!(
-            rx.try_recv().unwrap(),
-            super::super::Event::Progress {
-                phase: ProcessingPhase::Rendering,
-                ..
-            }
-        ));
-        assert!(matches!(
-            rx.try_recv().unwrap(),
-            super::super::Event::Progress {
-                phase: ProcessingPhase::Processing,
-                ..
-            }
-        ));
                     assert_eq!(actual.to_bits(), (expected * gain).to_bits());
                 }
             }

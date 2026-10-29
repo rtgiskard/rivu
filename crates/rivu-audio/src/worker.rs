@@ -925,8 +925,12 @@ mod tests {
         waveform.prepare_bins(8000);
         waveform.push(0.0, &[0.75; 8], 8000, 1);
         assert!(waveform.peaks.iter().any(Option::is_some));
-        let mut builder =
-            crate::PcmBuilder::new(8000, 1, crate::PcmBudget::new(128 * 1024)).unwrap();
+        let mut builder = crate::PcmBuilder::new(
+            8000,
+            Arc::from([crate::Channel::FrontCenter]),
+            crate::PcmBudget::new(128 * 1024),
+        )
+        .unwrap();
         builder.push(&[0.25; 800]).unwrap();
         let pcm = builder.finish().unwrap();
         let identity = pcm.identity();
@@ -991,7 +995,12 @@ mod tests {
     fn memory_audition_opening_never_opens_original_path_or_applies_range_twice() {
         let directory = tempfile::tempdir().unwrap();
         let budget = super::super::PcmBudget::new(128 * 1024);
-        let mut builder = super::super::PcmBuilder::new(8000, 1, Arc::clone(&budget)).unwrap();
+        let mut builder = super::super::PcmBuilder::new(
+            8000,
+            Arc::from([crate::Channel::FrontCenter]),
+            Arc::clone(&budget),
+        )
+        .unwrap();
         let samples: Vec<_> = (0..800).map(|frame| frame as f32).collect();
         builder.push(&samples).unwrap();
         let (mut worker, _commands, _events, _shutdown) = opening_worker();
