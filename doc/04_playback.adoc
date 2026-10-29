@@ -33,8 +33,10 @@ Selecting a missing source manually leaves the current track running and reports
 an error. If the next entry cannot be opened at natural end, playback stops.
 
 The desktop Playback panel shows title, artist, album, progress, transport, and
-volume. Its favorite button changes the current track's library favorite, not
-the browsing selection. Use the separate Album artwork panel for covers.
+volume. Blank artist or album metadata uses the same symbol placeholders and
+missing-field tooltips as playlist entries. Its favorite button changes the current
+track's library favorite, not the browsing selection. Use the separate Album
+artwork panel for covers.
 Hover the volume icon or slider to see its current percentage. The same value
 remains visible while dragging the slider or using it with keyboard focus.
 The crosshair beside its title (*Locate playing entry in Queue*) reveals the

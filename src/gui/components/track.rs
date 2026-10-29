@@ -113,13 +113,13 @@ impl<'a> From<&'a rivu_protocol::model::PlaylistEntryRow> for TrackText<'a> {
     }
 }
 
-fn metadata_text(
+pub(in crate::gui) fn metadata_text(
     theme: &'static rivu_ui::theme::Palette,
     id: ElementId,
     text: &str,
     symbol: &'static str,
     missing_label: &str,
-) -> gpui::AnyElement {
+) -> Stateful<Div> {
     if text.trim().is_empty() {
         // Caption text is 0.75rem: reserve exactly one em for the symbol.
         div()
@@ -132,12 +132,8 @@ fn metadata_text(
             .font_size_scale(1.)
             .tooltip(rivu_ui::text_tooltip(missing_label.to_owned()))
             .child(symbol)
-            .into_any_element()
     } else {
-        caption(theme, text.to_owned())
-            .min_w_0()
-            .truncate()
-            .into_any_element()
+        caption(theme, text.to_owned()).id(id).min_w_0().truncate()
     }
 }
 /// Numbered track row shared by album, playlist, and queue views.

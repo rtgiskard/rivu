@@ -185,8 +185,6 @@ impl Playback {
             .unwrap_or_else(|| self.context.i18n.text("gl-choose-track").into());
         let artist = track.map(|track| track.artist.clone()).unwrap_or_default();
         let album = track.map(|track| track.album.clone()).unwrap_or_default();
-        let has_artist = !artist.trim().is_empty();
-        let has_album = !album.trim().is_empty();
         let status = match self.state.playback.status {
             PlaybackStatus::Playing => self.context.tr("gl-playing"),
             PlaybackStatus::Paused => self.context.tr("gl-paused"),
@@ -421,8 +419,8 @@ impl Playback {
                         )
                         .enabled(self.state.queue.current_id.is_some())
                         .build_with(
-                            IconButtonStyle::Quiet,
-                            IconButtonDensity::Regular,
+                            IconButtonStyle::Bare,
+                            IconButtonDensity::Compact,
                             cx,
                             |this, _, cx| {
                                 if this.state.queue.current_id.is_some() {
@@ -430,18 +428,20 @@ impl Playback {
                                 }
                             },
                             |control| {
-                                control.text_color(rgb(theme.muted).alpha(0.4)).when(
-                                    self.state.queue.current_id.is_some(),
-                                    |control| {
+                                control
+                                    .p_0()
+                                    .min_w_0()
+                                    .min_h_0()
+                                    .text_color(rgb(theme.muted).alpha(0.4))
+                                    .when(self.state.queue.current_id.is_some(), |control| {
                                         control
                                             .group_hover("control", |style| {
                                                 style
-                                                    .bg(rgb(theme.highlight))
+                                                    .bg(gpui::transparent_black())
                                                     .text_color(rgb(theme.text))
                                             })
                                             .focus(|style| style.text_color(rgb(theme.text)))
-                                    },
-                                )
+                                    })
                             },
                         ),
                     )
@@ -449,53 +449,90 @@ impl Playback {
             ))
             .child(
                 row()
+                    .gap_1()
                     .w_full()
                     .min_w_0()
                     .flex_shrink_0()
                     .when_some(track, |view, track| {
                         let track_id = track.id;
                         let favorite = track.favorite;
-                        view.child(super::components::track::track_favorite_toggle(
-                            ("playback-favorite", panel_id),
-                            favorite,
-                            IconButtonDensity::Regular,
-                            |key| self.context.tr(key),
-                            cx,
-                            move |this, _, cx| {
-                                this.send(
-                                    Command::SetFavorite {
-                                        track_ids: vec![track_id],
-                                        favorite: !favorite,
-                                    },
-                                    cx,
-                                );
-                            },
-                        ))
+                        view.child(
+                            super::components::track::favorite_button(
+                                ("playback-favorite", panel_id),
+                                favorite,
+                                |key| self.context.tr(key),
+                            )
+                            .build_with(
+                                IconButtonStyle::Bare,
+                                IconButtonDensity::Compact,
+                                cx,
+                                move |this, _, cx| {
+                                    this.send(
+                                        Command::SetFavorite {
+                                            track_ids: vec![track_id],
+                                            favorite: !favorite,
+                                        },
+                                        cx,
+                                    );
+                                },
+                                |control| {
+                                    control
+                                        .p_0()
+                                        .min_w_0()
+                                        .min_h_0()
+                                        .focus(|style| {
+                                            style.text_color(rgb(if favorite {
+                                                theme.accent
+                                            } else {
+                                                theme.secondary
+                                            }))
+                                        })
+                                        .group_hover("control", |style| {
+                                            style.text_color(rgb(if favorite {
+                                                theme.accent
+                                            } else {
+                                                theme.secondary
+                                            }))
+                                        })
+                                },
+                            ),
+                        )
                     })
                     .child(
                         row()
                             .flex_1()
                             .min_w_0()
-                            .when(has_artist, |view| {
-                                view.child(
-                                    caption(theme, artist)
-                                        .text_sm()
-                                        .text_color(rgb(theme.text))
-                                        .min_w_0()
-                                        .truncate(),
+                            .child(
+                                super::components::track::metadata_text(
+                                    theme,
+                                    ("playback-artist", panel_id).into(),
+                                    &artist,
+                                    "󰠃",
+                                    self.context.i18n.text("gl-artist-missing"),
                                 )
-                            })
-                            .when(has_artist && has_album, |view| {
-                                view.child(caption(theme, "·").flex_shrink_0())
-                            })
-                            .when(has_album, |view| {
-                                view.child(
-                                    caption(theme, album)
-                                        .text_color(rgb(theme.secondary))
-                                        .min_w_0()
-                                        .truncate(),
+                                .when(!artist.trim().is_empty(), |view| {
+                                    view.text_sm().text_color(rgb(theme.text))
+                                })
+                                .when(artist.trim().is_empty(), |view| {
+                                    view.text_color(rgb(theme.muted).alpha(0.6))
+                                }),
+                            )
+                            .child(caption(theme, "·").flex_shrink_0())
+                            .child(
+                                super::components::track::metadata_text(
+                                    theme,
+                                    ("playback-album", panel_id).into(),
+                                    &album,
+                                    "󰀥",
+                                    self.context.i18n.text("gl-album-missing"),
                                 )
-                            }),
+                                .when(!album.trim().is_empty(), |view| {
+                                    view.text_color(rgb(theme.secondary))
+                                })
+                                .when(album.trim().is_empty(), |view| {
+                                    view.text_color(rgb(theme.muted).alpha(0.6))
+                                }),
+                            ),
                     )
                     .child(
                         caption(
