@@ -575,7 +575,7 @@ pub(super) fn execute(
     budget: Arc<audio::PcmBudget>,
     status: &mut ProcessingTaskStatus,
     cancel: &AtomicBool,
-    tx: &Sender<Event>,
+    progress: &mut ProgressReporter<'_>,
 ) -> Result<BTreeMap<GraphPort, GraphAudioOutput>> {
     let graph = status
         .settings
@@ -592,9 +592,7 @@ pub(super) fn execute(
     let mut profiles = BTreeMap::new();
     for (index, &id) in order.iter().enumerate() {
         check_cancel(cancel)?;
-        report(
-            tx,
-            status.id,
+        progress.report(
             ProcessingPhase::Processing,
             index as u64,
             Some(order.len() as u64),
@@ -607,6 +605,7 @@ pub(super) fn execute(
             } = &graph.node(id)?.kind
             {
                 selection.validate()?;
+    let tx = progress.sender;
                 ensure!(
                     (selection.end_seconds * f64::from(input.sample_rate())).floor()
                         <= input.frames() as f64,
@@ -695,7 +694,7 @@ pub(super) fn execute(
                         config,
                         Arc::clone(&budget),
                         cancel,
-                        tx,
+                        progress,
                         status,
                     );
                     status.operation = original_operation;
@@ -862,7 +861,7 @@ pub(super) fn execute_native(
     budget: Arc<audio::PcmBudget>,
     status: &mut ProcessingTaskStatus,
     cancel: &AtomicBool,
-    tx: &Sender<Event>,
+    progress: &mut ProgressReporter<'_>,
 ) -> Result<BTreeMap<GraphPort, GraphAudioOutput>> {
     let graph = status
         .settings
@@ -883,9 +882,7 @@ pub(super) fn execute_native(
         for (index, &id) in order.iter().enumerate() {
             active_node = None;
             check_cancel(cancel)?;
-            report(
-                tx,
-                status.id,
+            progress.report(
                 ProcessingPhase::Processing,
                 index as u64,
                 Some(order.len() as u64),
@@ -894,6 +891,7 @@ pub(super) fn execute_native(
             active_node = Some(id);
             if let GraphNodeKind::Denoise { config, profile } = &graph.node(id)?.kind
                 && config.mode == DenoiseMode::Profile
+    let tx = progress.sender;
             {
                 let selection = profile
                     .context("Profile mode requires an explicit selected noise-only range")?;
@@ -1017,11 +1015,8 @@ fn node_event(
         id: status.id,
         status: entry.clone(),
     };
-    if matches!(phase, ProcessingPhase::Failed | ProcessingPhase::Cancelled) {
-        let _ = tx.send_blocking(event);
-    } else {
-        let _ = tx.try_send(event);
-    }
+    // Node events are stage transitions, never per-block progress snapshots.
+    let _ = tx.send_blocking(event);
 }
 
 pub(super) fn plan_info(runner: &audio::GraphRunner) -> GraphPlanInfo {

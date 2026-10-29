@@ -380,6 +380,10 @@ playback track is different: it suppresses a pending automatic graph-audition
 handoff through the playback generation, but does not discard a valid completed
 result. Use task IDs for completion and the selected-audio line for playback.
 
+Numeric progress within a phase is coalesced at a 100 ms publication policy and
+does not accumulate behind a slow consumer. Phase changes, graph-node stages and
+terminal results remain reliable; a progress counter is a snapshot, not one
+notification per decoder or inference block.
 Preparation and backend validation run on a worker, so accepted starts can fail
 asynchronously. Queued can include waiting for retired audio to release its
 reservation. Failure or unwinding reaches a terminal task result; neural children

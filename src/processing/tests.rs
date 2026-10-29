@@ -88,6 +88,92 @@ fn fixture() -> (tempfile::TempDir, Service, Track, Arc<Config>) {
     (directory, service, track, config)
 }
 
+#[test]
+fn progress_backpressure_coalesces_blocks_but_preserves_stages_and_terminal() {
+    bounded(|| {
+        let (sender, receiver) = async_channel::bounded(1);
+        let (reported, burst) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            let mut progress = ProgressReporter::new(&sender, 7);
+            progress.report(ProcessingPhase::Rendering, 0, None);
+            for completed in 1..=10_000 {
+                progress.report(ProcessingPhase::Rendering, completed, None);
+            }
+            reported.send(()).unwrap();
+            progress.report(ProcessingPhase::Processing, 0, Some(10_000));
+            for completed in 1..=10_000 {
+                progress.report(ProcessingPhase::Processing, completed, Some(10_000));
+            }
+            sender
+                .send_blocking(Event::Finished {
+                    id: 7,
+                    result: Err(anyhow::anyhow!("consumer-visible failure")),
+                })
+                .unwrap();
+        });
+        burst.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(receiver.len(), 1);
+        assert!(matches!(
+            receiver.recv_blocking().unwrap(),
+            Event::Progress {
+                id: 7,
+                phase: ProcessingPhase::Rendering,
+                ..
+            }
+        ));
+        assert!(matches!(
+            receiver.recv_blocking().unwrap(),
+            Event::Progress {
+                id: 7,
+                phase: ProcessingPhase::Processing,
+                ..
+            }
+        ));
+        loop {
+            match receiver.recv_blocking().unwrap() {
+                Event::Progress {
+                    id: 7,
+                    phase: ProcessingPhase::Processing,
+                    ..
+                } => {}
+                Event::Finished { id: 7, result } => {
+                    assert_eq!(
+                        result.err().unwrap().to_string(),
+                        "consumer-visible failure"
+                    );
+                    break;
+                }
+                _ => panic!("unexpected processing event"),
+            }
+        }
+        worker.join().unwrap();
+    });
+}
+
+#[test]
+fn shutdown_releases_worker_with_a_full_progress_channel() {
+    bounded(|| {
+        let (_directory, mut service, track, config) = fixture();
+        for completed in 0..service.sender.capacity().unwrap() {
+            service
+                .sender
+                .try_send(Event::Progress {
+                    id: 0,
+                    phase: ProcessingPhase::Rendering,
+                    completed: completed as u64,
+                    total: None,
+                })
+                .unwrap();
+        }
+        service
+            .start(track, config, ProcessingOperation::Denoise, None)
+            .unwrap();
+        service.shutdown();
+        assert!(service.active.is_none());
+        assert!(service.receiver.is_closed());
+    });
+}
+
 fn graph_config(kinds: Vec<GraphNodeKind>) -> Arc<Config> {
     let mut config = Config::default();
     let graph = &mut config.processing_graph;

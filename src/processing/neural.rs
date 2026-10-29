@@ -1,9 +1,8 @@
 //! Bounded duplex PCM transport. Frames are kind:u8 + length:u32-le + payload.
 //! JSON (0), input PCM (1), input end (2), speech/vocals/accompaniment PCM (17/18/19).
 //! Payloads are at most 64 KiB; PCM is interleaved little-endian float32, not WAV.
-use super::{AudioOutputs, Event, check_cancel, report};
+use super::{AudioOutputs, ProgressReporter, check_cancel};
 use anyhow::{Context, Result, bail, ensure};
-use async_channel::Sender;
 use rivu_audio as audio;
 use rivu_protocol::model::{ProcessingOperation, ProcessingPhase, ProcessingTaskStatus};
 use std::{
@@ -121,7 +120,7 @@ pub(super) fn run(
     config: &rivu_format::config::NeuralConfig,
     budget: Arc<audio::PcmBudget>,
     cancel: &AtomicBool,
-    tx: &Sender<Event>,
+    progress: &mut ProgressReporter<'_>,
     status: &mut ProcessingTaskStatus,
 ) -> Result<AudioOutputs> {
     check_cancel(cancel)?;
@@ -262,9 +261,7 @@ pub(super) fn run(
                                     if super::PANIC_ON_NEURAL_PROGRESS.replace(false) {
                                         panic!("injected neural worker progress panic");
                                     }
-                                    report(
-                                        tx,
-                                        status.id,
+                                    progress.report(
                                         ProcessingPhase::Processing,
                                         event["completed"].as_u64().unwrap_or(0),
                                         event["total"].as_u64(),
@@ -528,6 +525,8 @@ if outcome == 'complete-then-nonzero':
             separation_manifest: Some(directory.path().join(outcome)),
             ..Default::default()
         };
+    send(0, json.dumps(dict(version=3, task_id=request['task_id'], type='progress',
+        completed=len(pcm) // (4 * channels), total=request['frames'])).encode())
         let budget = audio::PcmBudget::new(64 * 1024 * 1024);
         let expected: Vec<f32> = (0..frames * usize::from(channels))
             .map(|i| ((i % 17) as f32 - 8.0) / 4.0)
@@ -570,13 +569,15 @@ if outcome == 'complete-then-nonzero':
             graph_nodes: Vec::new(),
             graph_plan: None,
         };
-        let (tx, _rx) = async_channel::unbounded();
+        let (tx, rx) = async_channel::bounded(8);
+        let mut progress = ProgressReporter::new(&tx, status.id);
+        progress.report(ProcessingPhase::Rendering, 0, None);
         let result = run(
             &input,
             &config,
             Arc::clone(&budget),
             &AtomicBool::new(false),
-            &tx,
+            &mut progress,
             &mut status,
         );
         if outcome != "success" {
@@ -613,6 +614,27 @@ if outcome == 'complete-then-nonzero':
                 let mut actual = vec![0.0; expected.len()];
                 assert_eq!(pcm.read_frames(0, &mut actual), frames);
                 for (actual, expected) in actual.iter().zip(&expected) {
+        if outcome == "unsupported-layout" {
+            assert!(result.is_err(), "unsupported speakers must not publish PCM");
+            assert_eq!(rx.len(), 1);
+            assert_eq!(budget.used_bytes(), source_bytes);
+            return;
+        }
+        assert_eq!(rx.len(), 2);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            super::super::Event::Progress {
+                phase: ProcessingPhase::Rendering,
+                ..
+            }
+        ));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            super::super::Event::Progress {
+                phase: ProcessingPhase::Processing,
+                ..
+            }
+        ));
                     assert_eq!(actual.to_bits(), (expected * gain).to_bits());
                 }
             }

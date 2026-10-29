@@ -13,6 +13,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread::{self, JoinHandle},
+    time::{Duration, Instant},
 };
 
 pub(crate) mod graph;
@@ -501,13 +502,44 @@ fn check_cancel(cancel: &AtomicBool) -> Result<()> {
     ensure!(!cancel.load(Ordering::Acquire), "Processing cancelled");
     Ok(())
 }
-fn report(tx: &Sender<Event>, id: u64, phase: ProcessingPhase, completed: u64, total: Option<u64>) {
-    let _ = tx.try_send(Event::Progress {
-        id,
-        phase,
-        completed,
-        total,
-    });
+struct ProgressReporter<'a> {
+    sender: &'a Sender<Event>,
+    id: u64,
+    phase: Option<ProcessingPhase>,
+    last_emit: Instant,
+}
+
+impl<'a> ProgressReporter<'a> {
+    fn new(sender: &'a Sender<Event>, id: u64) -> Self {
+        Self {
+            sender,
+            id,
+            phase: None,
+            last_emit: Instant::now(),
+        }
+    }
+
+    fn report(&mut self, phase: ProcessingPhase, completed: u64, total: Option<u64>) {
+        let transition = self.phase != Some(phase);
+        if !transition && self.last_emit.elapsed() < Duration::from_millis(100) {
+            return;
+        }
+        self.last_emit = Instant::now();
+        let event = Event::Progress {
+            id: self.id,
+            phase,
+            completed,
+            total,
+        };
+        if transition {
+            // Stage changes share the reliable terminal channel; blocks within
+            // a stage are snapshots, not individual work that must be published.
+            self.phase = Some(phase);
+            let _ = self.sender.send_blocking(event);
+        } else if self.sender.is_empty() {
+            let _ = self.sender.try_send(event);
+        }
+    }
 }
 fn run_cached_export(
     track: Track,
@@ -519,19 +551,14 @@ fn run_cached_export(
     tx: &Sender<Event>,
 ) -> Result<ProcessingResult> {
     let pcm = cached.pcm;
+    let mut progress = ProgressReporter::new(tx, status.id);
     let destination = status
         .settings
         .graph_export_path
         .as_ref()
         .context("Missing export destination")?;
     let pending_export = Some(prepare_export(&pcm, destination, cancel, |done, total| {
-        report(
-            tx,
-            status.id,
-            ProcessingPhase::Processing,
-            done,
-            Some(total),
-        );
+        progress.report(ProcessingPhase::Processing, done, Some(total));
     })?);
     ensure!(
         SourceStamp::read(&track.path)? == stamp,
@@ -581,6 +608,7 @@ fn run(
         Ok(renderer)
     };
     let renderer = open_source()?;
+    let mut progress = ProgressReporter::new(tx, status.id);
     let native = renderer.format().clone();
     stamp.validate_rendered(native.source_identity)?;
     ensure!(
@@ -640,7 +668,7 @@ fn run(
             runner,
         });
     }
-    report(tx, status.id, ProcessingPhase::Rendering, 0, None);
+    progress.report(ProcessingPhase::Rendering, 0, None);
     let mut graph_outputs = BTreeMap::new();
     let outputs = if status.operation == ProcessingOperation::Denoise {
         let pcm = classical_native(
@@ -651,9 +679,7 @@ fn run(
             Arc::clone(&budget),
             cancel,
             |frames| {
-                report(
-                    tx,
-                    status.id,
+                progress.report(
                     ProcessingPhase::Processing,
                     frames,
                     native.estimated_frames(),
@@ -672,7 +698,7 @@ fn run(
             Arc::clone(&budget),
             &mut status,
             cancel,
-            tx,
+            &mut progress,
         )?;
         AudioOutputs::default()
     } else {
@@ -681,7 +707,13 @@ fn run(
         let input = renderer.render_pcm(Arc::clone(&budget), cancel)?;
         status.frames = Some(input.frames());
         if status.operation == ProcessingOperation::Graph {
-            graph_outputs = graph::execute(&input, Arc::clone(&budget), &mut status, cancel, tx)?;
+            graph_outputs = graph::execute(
+                &input,
+                Arc::clone(&budget),
+                &mut status,
+                cancel,
+                &mut progress,
+            )?;
             AudioOutputs::default()
         } else {
             neural::run(
@@ -689,7 +721,7 @@ fn run(
                 &config.neural,
                 Arc::clone(&budget),
                 cancel,
-                tx,
+                &mut progress,
                 &mut status,
             )?
         }
@@ -721,13 +753,7 @@ fn run(
             destination,
             cancel,
             |done, total| {
-                report(
-                    tx,
-                    status.id,
-                    ProcessingPhase::Processing,
-                    done,
-                    Some(total),
-                );
+                progress.report(ProcessingPhase::Processing, done, Some(total));
             },
         )?)
     } else {
