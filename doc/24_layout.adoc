@@ -280,9 +280,10 @@ cannot overwrite a newer completed write. There is no unbounded task or request 
 The worker compares persisted content with its last successful snapshot before
 encoding. Equal content still validates but needs no write; runtime IDs and edit
 locks do not affect equality. Success advances the baseline only to the captured
-request, not newer session memory. Failure preserves it. Missing or invalid
-startup files have no baseline and are written on sync or orderly exit; this
-comparison does not watch external file changes.
+request, not newer session memory. Failure preserves it. A missing startup file
+has no baseline and is initialized on sync or orderly exit. Existing input that
+failed to load is preserved through edits and exit until an explicit sync request
+authorizes replacement. This comparison does not watch external file changes.
 
 The worker validates before writing a unique sibling temporary file and renaming
 it over the destination. Failed validation, encoding, or I/O preserves the
@@ -295,12 +296,14 @@ is reported in the footer; manual sync retries the latest collection, while
 further layout modifications do not retry automatically. There is no automatic
 retry loop on a persistently failing destination.
 
-The session reads the file once at initialization. Closing a window neither
-writes layouts nor destroys their in-memory state. Reopening uses the latest
-in-memory snapshot and resets transient edit mode to locked. Normal Quit and
-other orderly shutdowns flush the latest dirty in-memory collection and wait
-for the writer after the GPUI event loop returns, outside its deadline-limited
-quit observer, and propagate a final save failure. This application-teardown
+The session reads the file once at initialization through ordinary-file admission;
+FIFOs, including symlink targets, are rejected without waiting for a writer.
+Closing a window neither writes layouts nor destroys their in-memory state.
+Reopening uses the latest in-memory snapshot and resets transient edit mode to
+locked. Normal Quit and other orderly shutdowns flush the latest dirty collection
+unless preserving failed startup input without an explicit sync. They wait for
+the writer after the GPUI event loop returns, outside its deadline-limited quit
+observer, and propagate a final save failure. This application-teardown
 boundary can wait for filesystem I/O; individual interactions, layout switches,
 window closes, and reopens do not. An abnormal exit loses unsynced changes.
 

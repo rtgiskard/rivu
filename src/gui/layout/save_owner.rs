@@ -66,16 +66,17 @@ impl LayoutSaveOwner {
     pub fn new(path: PathBuf) -> Self {
         // This is the session's only startup read, not an interactive save or a
         // window-reopen read. All runtime validation/encoding/writes are below.
-        let exists = path.exists();
-        let (layouts, error) = if exists {
-            match LayoutSet::load(&path) {
-                Ok(layouts) => (layouts, None),
-                Err(error) => (LayoutSet::default(), Some(format!("{error:#}"))),
+        let (layouts, error, saved) = match LayoutSet::load(&path) {
+            Ok(layouts) => (layouts, None, true),
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                (LayoutSet::default(), None, false)
             }
-        } else {
-            (LayoutSet::default(), None)
+            Err(error) => (LayoutSet::default(), Some(format!("{error:#}")), false),
         };
-        let saved = exists && error.is_none();
         Self::start(layouts, error, saved, move |snapshot| {
             snapshot.save(&path).map_err(|error| format!("{error:#}"))
         })
@@ -223,6 +224,11 @@ impl LayoutSaveHandle {
 
     fn flush(&self) -> SaveResult {
         let mut state = self.0.state.lock();
+        // A fallback is not consent to replace a damaged input. Only explicit
+        // sync may authorize replacement; ordinary edits and teardown preserve it.
+        if state.load_error.is_some() && state.request_id == 0 {
+            return Ok(());
+        }
         let mut attempted_revision = None;
         loop {
             let revision = state.revision;
@@ -354,18 +360,50 @@ mod tests {
     }
 
     #[test]
-    fn missing_or_invalid_file_is_written_even_without_edits() {
-        for invalid in [false, true] {
-            let directory = tempfile::tempdir().unwrap();
-            let path = directory.path().join("layout.json");
-            if invalid {
-                std::fs::write(&path, b"not JSON").unwrap();
-            }
-            let owner = LayoutSaveOwner::new(path.clone());
-            let expected = owner.handle().snapshot().0;
-            owner.flush().unwrap();
-            assert!(LayoutSet::load(&path).unwrap().persisted_eq(&expected));
-        }
+    fn missing_file_is_initialized_on_flush() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("layout.json");
+        let owner = LayoutSaveOwner::new(path.clone());
+        let expected = owner.handle().snapshot().0;
+        owner.flush().unwrap();
+        assert!(LayoutSet::load(&path).unwrap().persisted_eq(&expected));
+    }
+
+    #[test]
+    fn invalid_file_survives_edits_and_flush_until_explicit_sync() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("layout.json");
+        let invalid = b"{\"layouts\": damaged but recoverable";
+        std::fs::write(&path, invalid).unwrap();
+        let owner = LayoutSaveOwner::new(path.clone());
+        let handle = owner.handle();
+        assert!(handle.snapshot().1.is_some());
+        handle.submit(&named("replacement"));
+        owner.flush().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), invalid);
+        let request = handle.sync();
+        assert!(wait_for_completion(&handle, request).result.is_ok());
+        owner.flush().unwrap();
+        assert_eq!(LayoutSet::load(&path).unwrap().active_name(), "replacement");
+        assert!(handle.snapshot().1.is_none());
+    }
+
+    #[test]
+    fn nonregular_layout_is_rejected_and_preserved_on_flush() {
+        use std::{ffi::CString, os::unix::fs::symlink};
+
+        let directory = tempfile::tempdir().unwrap();
+        let fifo = directory.path().join("fifo");
+        let name = CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: name is NUL terminated and mkfifo retains no pointer.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let path = directory.path().join("layout.json");
+        symlink(&fifo, &path).unwrap();
+        let owner = LayoutSaveOwner::new(path.clone());
+        assert!(owner.handle().snapshot().1.is_some());
+        owner.flush().unwrap();
+        assert!(std::fs::symlink_metadata(path).unwrap().is_symlink());
+        assert!(!std::fs::metadata(fifo).unwrap().is_file());
     }
 
     #[test]

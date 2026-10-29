@@ -547,8 +547,10 @@ An abnormal exit loses changes made since the last successful write. Panel
 settings Apply takes effect immediately for this session only; it does not write
 the layout file.
 
-Sync and orderly exit skip unchanged valid content. A missing or invalid file is
-written at the next sync or orderly exit, even without layout edits.
+Sync and orderly exit skip unchanged valid content. A missing file is initialized
+at the next sync or orderly exit, even without layout edits. An existing file
+that cannot be loaded is preserved until explicit manual sync authorizes replacement;
+ordinary layout edits and orderly exit do not overwrite that recovery material.
 
 Without a saved collection, Rivu provides `Default`, `Album`, and `Visual` layouts.
 Default combines Library and Queue with alternative browsing tabs, Track details,
@@ -615,11 +617,13 @@ not add to this depth. Docking that would exceed this limit leaves the layout
 unchanged. This is not a limit on the number of sibling regions or tabs.
 
 If `layout.json` cannot be read or validated at startup, Rivu reports the error
-and opens the default collection. Invalid names or operations leave the UI
-unchanged. Sync captures the current layouts; later edits are not included in
-that request. A failed write preserves the old file and session edits. Retry
-with manual sync, not another layout edit or instance-settings Apply. Orderly
-application exit writes the latest layouts and reports any remaining failure.
+and opens the default collection. Only regular files are admitted; a FIFO or a
+link to one is rejected without waiting for a writer. Invalid names or operations
+leave the UI unchanged. Sync captures the current layouts; later edits are not
+included in that request. A failed write preserves the old file and session edits.
+Retry with manual sync, not another layout edit or instance-settings Apply.
+Orderly exit writes the latest layouts, except when preserving an input that
+failed to load and has not been explicitly replaced through Sync.
 Application errors appear in the footer; accepted media tasks show progress and
 results in their owning Library, Queue, or Playlists panel. See
 link:02_library.adoc#_cancellation[Library cancellation] and

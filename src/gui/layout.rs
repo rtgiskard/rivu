@@ -20,7 +20,7 @@ mod view;
 
 use std::{
     collections::{BTreeMap, HashSet},
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::{BufReader, BufWriter, Write},
     path::Path,
     sync::{
@@ -1695,8 +1695,8 @@ impl LayoutSet {
     }
 
     pub fn load(path: &Path) -> Result<Self> {
-        let file =
-            File::open(path).with_context(|| format!("opening layout {}", path.display()))?;
+        let file = rivu_format::input::open_regular_file(path)
+            .with_context(|| format!("opening layout {}", path.display()))?;
         let input: persistence::Input = serde_json::from_reader(BufReader::new(file))
             .with_context(|| format!("decoding layout {}", path.display()))?;
         input
