@@ -419,6 +419,9 @@ the budget is not a process-RSS limit.
 The actual ordered speaker layout travels with shared PCM storage and its slices,
 through graph intermediates, memory decoding and audition; channel count is derived
 from it, not used to reconstruct speaker identities.
+Export and stem mixing rely on these immutable frame counts when reading blocks.
+Mixing validates both stems' rate, layout and total length before reading; block
+length consistency is an internal invariant, not a recoverable file-read error.
 
 A new non-export run releases unselected PCM and prepared runners after successful
 admission, before worker allocation. Selected audition audio remains pinned.

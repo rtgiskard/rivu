@@ -717,7 +717,6 @@ fn run(
     let renderer = open_source()?;
     let mut progress = ProgressReporter::new(tx, status.id);
     let native = renderer.format().clone();
-    stamp.validate_rendered(native.source_identity)?;
     ensure!(
         status.operation != ProcessingOperation::Separate
             || native.layout.as_ref() == [audio::Channel::FrontLeft, audio::Channel::FrontRight],
@@ -929,7 +928,7 @@ fn prepare_export(
     while position < source.frames() {
         check_cancel(cancel)?;
         let frames = source.read_frames(position, &mut block);
-        ensure!(frames > 0, "Truncated export PCM");
+        debug_assert!(frames > 0);
         for frame in block[..frames * order.len()].chunks_exact(order.len()) {
             for &index in &order {
                 writer.write_sample(frame[index])?;
@@ -1184,10 +1183,8 @@ impl Service {
                         while position < vocals.frames() {
                             check_cancel(&cancel)?;
                             let frames = vocals.read_frames(position, &mut v);
-                            ensure!(
-                                accompaniment.read_frames(position, &mut a) == frames,
-                                "Stem alignment mismatch"
-                            );
+                            let accompaniment_frames = accompaniment.read_frames(position, &mut a);
+                            debug_assert_eq!(accompaniment_frames, frames);
                             let count = frames * usize::from(vocals.channels());
                             for i in 0..count {
                                 v[i] = v[i] * vg + a[i] * ag;
