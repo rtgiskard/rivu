@@ -125,6 +125,10 @@ are unsupported. See link:doc/02_library.adoc#_sqlite_maintenance[SQLite mainten
 for supported formats and offline inspection, and
 link:doc/26_migration.adoc[the independent migration tool] for its ownership contract.
 Client access and wire schemas are described in link:doc/21_ipc.adoc[IPC].
+Visualization defaults are grouped under `[visualizations.general]`, radial effects
+under `[visualizations.radial]`, and the independent reactive dB override under
+`[visualizations.reactive]`. See link:doc/01_config.adoc[the configuration reference]
+for view-specific groups and per-panel `grid` and `label` options.
 
 
 == Documentation

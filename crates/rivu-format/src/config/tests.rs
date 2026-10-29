@@ -1,18 +1,97 @@
 use super::*;
 
 #[test]
+fn visualization_groups_round_trip_and_preserve_independent_ranges() {
+    let original = "[visualizations.general]\nstill_mode = true\nsignal = 'before'\nanalysis_fps = 30\nfps = 120\nbackground = '#123456'\npalette = 'tokyo_night'\nanalysis_fft_size = 4096\nanalysis_window = 'hann'\ndb_range = 85.0\nstyle = 'oscilloscope'\ngrid = true\nlabel = true\nprimary_color = '#112233'\nsecondary_color = '#445566'\nsensitivity = 2.0\nbloom_intensity = 1.0\n[visualizations.radial]\nrotation_speed = 2.0\nbar_width = 1.0\nbar_glow_layers = 3\nring_opacity = 0.5\ninner_diameter = 1.0\nfade_when_idle = true\n[visualizations.reactive]\ndb_range = 85.0\n[visualizations.spectrum]\ndb_range = 65.0\n[visualizations.spectrogram]\ndb_range = 105.0\n";
+    let mut config = from_toml(original).unwrap();
+    assert!(config.still_mode);
+    assert!(config.audio_visualizer_grid);
+    assert!(config.audio_visualizer_labels);
+    assert_eq!(config.audio_visualizer_rotation_speed, 2.0);
+    assert_eq!(config.audio_visualizer_db_range, Some(85.0));
+    assert_eq!(from_toml(&to_toml(&config).unwrap()).unwrap(), config);
+    let baseline = config.clone();
+    config.visualization_db_range = 95.0;
+    assert_eq!(config.spectrum_db_range(), 65.0);
+    assert_eq!(config.spectrogram_db_range(), 105.0);
+    assert_eq!(config.audio_visualizer_db_range(), 85.0);
+    let saved = update_toml(original, Some(&baseline), &config).unwrap();
+    assert_eq!(from_toml(&saved).unwrap(), config);
+    let baseline = config.clone();
+    config.audio_visualizer_db_range = None;
+    let saved = update_toml(&saved, Some(&baseline), &config).unwrap();
+    assert_eq!(from_toml(&saved).unwrap(), config);
+    assert_eq!(config.audio_visualizer_db_range(), 95.0);
+    let table: toml::Value = toml::from_str(&saved).unwrap();
+    assert!(table["visualizations"].get("audio_visualizer").is_none());
+    assert!(
+        table["visualizations"]["reactive"]
+            .get("db_range")
+            .is_none()
+    );
+}
+
+#[test]
+fn visualization_groups_reject_old_and_misplaced_keys() {
+    for original in [
+        "[visualizations.audio_visualizer]",
+        "visualizations.still_mode = true",
+        "visualizations.db_range = 85.0",
+        "visualizations.general.labels = true",
+        "visualizations.general.rotation_speed = 1.0",
+        "visualizations.radial.sensitivity = 1.0",
+        "visualizations.reactive.style = 'oscilloscope'",
+        "visualizations.general.unknown = true",
+        "visualizations.radial.unknown = true",
+        "visualizations.reactive.unknown = true",
+    ] {
+        assert!(from_toml(original).is_err(), "accepted {original}");
+    }
+}
+
+#[test]
 fn oscilloscope_style_roundtrips_global_defaults_and_incremental_edits() {
-    let original = "[visualizations.audio_visualizer]\nstyle = 'oscilloscope'\n";
+    let original = "[visualizations.general]\nstyle = 'oscilloscope'\n[visualizations.oscilloscope]\ntime_span_ms = 25.0\ngain = 2.5\n";
     let config = from_toml(original).unwrap();
     assert_eq!(
         config.audio_visualizer_style,
         AudioVisualizerStyle::Oscilloscope
     );
+    assert_eq!(config.oscilloscope_time_span_ms, 25.0);
+    assert_eq!(config.oscilloscope_gain, 2.5);
     config.validate().unwrap();
     assert_eq!(from_toml(&to_toml(&config).unwrap()).unwrap(), config);
     let baseline = Config::default();
     let saved = update_toml("", Some(&baseline), &config).unwrap();
     assert_eq!(from_toml(&saved).unwrap(), config);
+}
+
+#[test]
+fn oscilloscope_configuration_rejects_nonfinite_and_out_of_range_values() {
+    for (name, valid, invalid) in [
+        (
+            "time_span_ms",
+            ["1.0", "50.0"],
+            ["0.99", "50.01", "nan", "inf"],
+        ),
+        ("gain", ["0.1", "10.0"], ["0.09", "10.01", "nan", "inf"]),
+    ] {
+        for value in valid {
+            let config = from_toml(&format!(
+                "[visualizations.oscilloscope]\n{name} = {value}\n"
+            ))
+            .unwrap();
+            assert_eq!(from_toml(&to_toml(&config).unwrap()).unwrap(), config);
+        }
+        for value in invalid {
+            assert!(
+                from_toml(&format!(
+                    "[visualizations.oscilloscope]\n{name} = {value}\n"
+                ))
+                .is_err()
+            );
+        }
+    }
 }
 
 #[test]
@@ -222,7 +301,7 @@ fn grouped_round_trip_uses_shared_defaults_validation_and_normalization() {
 #[test]
 fn visualization_animation_fps_validates_and_persists_boundaries() {
     for fps in [0, 1, 60, 240] {
-        let config = from_toml(&format!("[visualizations]\nfps = {fps}\n")).unwrap();
+        let config = from_toml(&format!("[visualizations.general]\nfps = {fps}\n")).unwrap();
         assert_eq!(config.visualization_fps, fps);
         let saved = to_toml(&config).unwrap();
         assert_eq!(from_toml(&saved).unwrap(), config);
@@ -238,7 +317,7 @@ fn visualization_animation_fps_validates_and_persists_boundaries() {
         assert!(to_toml(&config).is_err());
     }
     for value in ["-1", "241", "65536", "1.5", "'60'"] {
-        assert!(from_toml(&format!("[visualizations]\nfps = {value}\n")).is_err());
+        assert!(from_toml(&format!("[visualizations.general]\nfps = {value}\n")).is_err());
     }
 }
 
@@ -420,13 +499,13 @@ fn incremental_edits_preserve_inline_and_dotted_tables() {
         assert_eq!(saved, original.replace("1.0", "1.25"));
         assert_eq!(from_toml(&saved).unwrap(), config);
     }
-    let original = "visualizations = { spectrum = { labels = true }, still_mode = true }\n";
+    let original =
+        "visualizations = { spectrum = { interpolate = true }, general = { still_mode = true } }\n";
     let baseline = from_toml(original).unwrap();
     let mut config = baseline.clone();
-    config.spectrum_labels = false;
-    config.waveform_labels = !baseline.waveform_labels;
+    config.spectrum_interpolate = false;
+    config.waveform_seek_enabled = !baseline.waveform_seek_enabled;
     let saved = update_toml(original, Some(&baseline), &config).unwrap();
-    assert!(saved.contains("spectrum = { labels = false }"));
     assert_eq!(from_toml(&saved).unwrap(), config);
 }
 

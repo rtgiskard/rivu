@@ -2,7 +2,8 @@
 //!
 //! The file has library, playback, interface, logging, visualizations, and audio
 //! processing tables; `processing_graph` persists the node-local audio DAG and layout.
-//! Interface contains theme and album_artwork; visualizations contains the four audio-data views.
+//! Interface contains theme and album_artwork; visualizations groups general defaults,
+//! radial effects, reactive range overrides, and view-specific settings.
 //! Missing fields use [`Config::default`]; unknown or misplaced fields and invalid
 //! values are errors. `playback.repeat` accepts "off", "all", or "one". Omit
 //! `playback.output_device` to use the system default. Paths are literal filesystem
@@ -167,6 +168,9 @@ pub enum VisualizationPalette {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AudioVisualizerStyle {
+    Waveform,
+    Spectrum,
+    Spectrogram,
     Bars,
     Rings,
     BarsRings,
@@ -180,16 +184,16 @@ pub enum AudioVisualizerStyle {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AudioVisualizerOptions {
     pub style: AudioVisualizerStyle,
-    pub reference_lines: bool,
-    pub labels: bool,
+    pub grid: bool,
+    pub label: bool,
 }
 
 impl From<&Config> for AudioVisualizerOptions {
     fn from(config: &Config) -> Self {
         Self {
             style: config.audio_visualizer_style,
-            reference_lines: config.audio_visualizer_grid,
-            labels: config.audio_visualizer_labels,
+            grid: config.audio_visualizer_grid,
+            label: config.audio_visualizer_labels,
         }
     }
 }
@@ -428,8 +432,6 @@ macro_rules! config_fields {
         /// Falling acceleration in dB/s²; zero snaps to the current level after hold.
         pub spectrum_bar_gravity: f32,
         pub spectrum_smoothing_ms: u32,
-        pub spectrum_grid: bool,
-        pub spectrum_labels: bool,
         pub audio_visualizer_style: AudioVisualizerStyle,
         pub audio_visualizer_grid: bool,
         pub audio_visualizer_labels: bool,
@@ -444,13 +446,11 @@ macro_rules! config_fields {
         pub audio_visualizer_primary_color: RgbColor,
         pub audio_visualizer_secondary_color: RgbColor,
 
-        pub spectrogram_labels: bool,
         pub spectrogram_interpolate: bool,
         /// Scale applied to the visible panel height when choosing source rows.
         pub spectrogram_sampling_points_scale: f32,
         /// Maximum logarithmic frequency rows generated for each cached column.
         pub spectrogram_interpolation_points: u32,
-        pub waveform_labels: bool,
         pub waveform_seek_enabled: bool,
         /// Default display span inherited by visualizations without an override.
         pub visualization_db_range: f32,
@@ -471,6 +471,8 @@ macro_rules! config_fields {
         pub waveform_rms_gain: f32,
         pub waveform_peak_gain: f32,
         pub waveform_peak_gamma: f32,
+        pub oscilloscope_time_span_ms: f32,
+        pub oscilloscope_gain: f32,
         pub album_artwork_style: AlbumArtworkStyle,
         pub album_artwork_mode: AlbumArtworkMode,
         /// Positive finite seconds per full rotation, used for new artwork panels.
@@ -550,8 +552,6 @@ impl Default for Config {
             spectrum_bar_hold_ms: 0,
             spectrum_bar_gravity: 200.0,
             spectrum_smoothing_ms: 80,
-            spectrum_grid: false,
-            spectrum_labels: false,
             audio_visualizer_style: AudioVisualizerStyle::BarsRings,
             audio_visualizer_grid: false,
             audio_visualizer_labels: false,
@@ -566,11 +566,9 @@ impl Default for Config {
             audio_visualizer_primary_color: RgbColor(0x7aa2f7),
             audio_visualizer_secondary_color: RgbColor(0xbb9af7),
 
-            spectrogram_labels: false,
             spectrogram_interpolate: true,
             spectrogram_sampling_points_scale: 0.5,
             spectrogram_interpolation_points: 1024,
-            waveform_labels: false,
             waveform_seek_enabled: true,
             visualization_db_range: 70.0,
             spectrum_db_range: None,
@@ -584,6 +582,8 @@ impl Default for Config {
             waveform_rms_gain: 0.94,
             waveform_peak_gain: 1.0,
             waveform_peak_gamma: 2.0,
+            oscilloscope_time_span_ms: 10.0,
+            oscilloscope_gain: 1.0,
             album_artwork_style: AlbumArtworkStyle::Halo,
             album_artwork_mode: AlbumArtworkMode::Rotating,
             album_artwork_period_seconds: 20.0,
@@ -731,22 +731,25 @@ impl Config {
         );
         ensure!(
             (5..=60).contains(&self.analysis_fps),
-            "visualizations.analysis_fps must be between 5 and 60 (inclusive); got {}",
+            "visualizations.general.analysis_fps must be between 5 and 60 (inclusive); got {}",
             self.analysis_fps
         );
         ensure!(
             self.visualization_fps <= 240,
-            "visualizations.fps must be between 0 and 240"
+            "visualizations.general.fps must be between 0 and 240"
         );
         for (name, range) in [
-            ("visualizations.db_range", Some(self.visualization_db_range)),
+            (
+                "visualizations.general.db_range",
+                Some(self.visualization_db_range),
+            ),
             ("visualizations.spectrum.db_range", self.spectrum_db_range),
             (
                 "visualizations.spectrogram.db_range",
                 self.spectrogram_db_range,
             ),
             (
-                "visualizations.audio_visualizer.db_range",
+                "visualizations.reactive.db_range",
                 self.audio_visualizer_db_range,
             ),
         ] {
@@ -762,7 +765,7 @@ impl Config {
                 self.analysis_fft_size,
                 512 | 1024 | 2048 | 4096 | 8192 | 16384 | 32768
             ),
-            "visualizations.analysis_fft_size must be a power of two from 512 to 32768"
+            "visualizations.general.analysis_fft_size must be a power of two from 512 to 32768"
         );
         ensure!(
             self.spectrum_bar_width.is_finite() && (1.0..=20.0).contains(&self.spectrum_bar_width),
@@ -778,36 +781,36 @@ impl Config {
         );
         ensure!(
             self.audio_visualizer_bar_glow_layers <= 4,
-            "visualizations.audio_visualizer.bar_glow_layers must be between 0 and 4"
+            "visualizations.radial.bar_glow_layers must be between 0 and 4"
         );
         for (name, value, range) in [
             (
-                "visualizations.audio_visualizer.sensitivity",
+                "visualizations.general.sensitivity",
                 self.audio_visualizer_sensitivity,
                 0.0..=5.0,
             ),
             (
-                "visualizations.audio_visualizer.rotation_speed",
+                "visualizations.radial.rotation_speed",
                 self.audio_visualizer_rotation_speed,
                 0.0..=10.0,
             ),
             (
-                "visualizations.audio_visualizer.bar_width",
+                "visualizations.radial.bar_width",
                 self.audio_visualizer_bar_width,
                 0.0..=2.0,
             ),
             (
-                "visualizations.audio_visualizer.ring_opacity",
+                "visualizations.radial.ring_opacity",
                 self.audio_visualizer_ring_opacity,
                 0.0..=1.0,
             ),
             (
-                "visualizations.audio_visualizer.bloom_intensity",
+                "visualizations.general.bloom_intensity",
                 self.audio_visualizer_bloom_intensity,
                 0.0..=2.0,
             ),
             (
-                "visualizations.audio_visualizer.inner_diameter",
+                "visualizations.radial.inner_diameter",
                 self.audio_visualizer_inner_diameter,
                 0.0..=2.0,
             ),
@@ -889,6 +892,16 @@ impl Config {
                 "visualizations.waveform.peak_gamma",
                 self.waveform_peak_gamma,
                 0.25..=3.0,
+            ),
+            (
+                "visualizations.oscilloscope.time_span_ms",
+                self.oscilloscope_time_span_ms,
+                1.0..=50.0,
+            ),
+            (
+                "visualizations.oscilloscope.gain",
+                self.oscilloscope_gain,
+                0.1..=10.0,
             ),
         ] {
             ensure!(
@@ -998,7 +1011,7 @@ fn check_config_size(bytes: u64) -> io::Result<()> {
 /// descriptor metadata and up to limit + 1 bytes: a growing file cannot bypass
 /// admission or cause an unbounded read. Parsing is left to [`from_toml`].
 pub fn read_toml(path: &Path) -> io::Result<String> {
-    let file = crate::input::open_regular_file(path)?;
+    let file = crate::regular_file::open_regular_file(path)?;
     check_config_size(file.metadata()?.len())?;
     let mut bytes = Vec::new();
     file.take((MAX_CONFIG_BYTES + 1) as u64)

@@ -454,12 +454,12 @@ fn grouped_file_defaults_partial_tables_and_font_normalization() {
     for contents in [
         "",
         "[library]\n[playback]\n[interface]\n[logging]\n[visualizations]\n",
-        "[visualizations.spectrum]\n[visualizations.spectrogram]\n[visualizations.audio_visualizer]\n[visualizations.waveform]\n",
+        "[visualizations.spectrum]\n[visualizations.spectrogram]\n[visualizations.general]\n[visualizations.waveform]\n",
     ] {
         write_current_config(&path, contents).unwrap();
         assert_eq!(Config::load(&path).unwrap(), Config::default());
     }
-    write_current_config(&path, "[playback]\nshuffle = true\nrepeat = 'one'\n[interface]\nfont = ''\n[visualizations]\ndb_range = 95\n[visualizations.spectrum]\nbars = 42\n[visualizations.waveform]\nseek_enabled = false\n").unwrap();
+    write_current_config(&path, "[playback]\nshuffle = true\nrepeat = 'one'\n[interface]\nfont = ''\n[visualizations.general]\ndb_range = 95\n[visualizations.spectrum]\nbars = 42\n[visualizations.waveform]\nseek_enabled = false\n").unwrap();
     let config = Config::load(&path).unwrap();
     assert_eq!(
         config,
@@ -679,7 +679,12 @@ fn unknown_and_misplaced_file_keys_are_rejected() {
         "[visualizations]\nbars = 42",
         "[visualizations.spectrum]\nunknown = true",
         "[visualizations.spectrogram]\nunknown = true",
-        "[visualizations.audio_visualizer]\nunknown = true",
+        "[visualizations.general]\nunknown = true",
+        "[visualizations.audio_visualizer]",
+        "[visualizations.radial]\nunknown = true",
+        "[visualizations.reactive]\nunknown = true",
+        "visualizations.general.labels = true",
+        "visualizations.db_range = 85",
         "[visualizations.waveform]\nunknown = true",
         "[visualizations.unknown]",
         "[visualizations.spectrum]\nvolume_percent = 50",
@@ -829,8 +834,6 @@ fn save_reload_replaces_file_and_leaves_no_temporary_files() {
         spectrum_bar_hold_ms: 100,
         spectrum_bar_gravity: 25.0,
         spectrum_smoothing_ms: 120,
-        spectrum_grid: false,
-        spectrum_labels: false,
         audio_visualizer_style: AudioVisualizerStyle::Rings,
         audio_visualizer_grid: true,
         audio_visualizer_labels: true,
@@ -844,7 +847,6 @@ fn save_reload_replaces_file_and_leaves_no_temporary_files() {
         audio_visualizer_fade_when_idle: true,
         audio_visualizer_primary_color: "#123456".parse().unwrap(),
         audio_visualizer_secondary_color: "#654321".parse().unwrap(),
-        spectrogram_labels: false,
         spectrogram_interpolate: false,
         spectrogram_interpolation_points: 2048,
         spectrogram_sampling_points_scale: 1.0,
@@ -852,13 +854,14 @@ fn save_reload_replaces_file_and_leaves_no_temporary_files() {
         spectrogram_history_seconds: 30,
         spectrogram_flow_speed: 1.25,
         spectrogram_accumulation: 85,
-        waveform_labels: false,
         waveform_seek_enabled: false,
         waveform_cursor_color: "#eeaa66".parse().unwrap(),
         waveform_glow: 0.0,
         waveform_rms_gain: 2.0,
         waveform_peak_gain: 0.5,
         waveform_peak_gamma: 1.25,
+        oscilloscope_time_span_ms: 25.0,
+        oscilloscope_gain: 2.0,
         album_artwork_style: AlbumArtworkStyle::Glass,
         album_artwork_mode: AlbumArtworkMode::Rotating,
         album_artwork_period_seconds: 12.5,
@@ -1065,24 +1068,24 @@ fn malformed_unknown_and_invalid_values_are_rejected() {
         "interface.scale = 2.01",
         "interface.scale = nan",
         "interface.scale = inf",
-        "visualizations.analysis_fps = 4",
-        "visualizations.analysis_fps = 61",
-        "visualizations.analysis_fps = -1",
-        "visualizations.analysis_fps = 5.5",
-        "visualizations.fps = -1",
-        "visualizations.fps = 241",
-        "visualizations.fps = 65536",
-        "visualizations.fps = 1.5",
-        "visualizations.fps = '60'",
+        "visualizations.general.analysis_fps = 4",
+        "visualizations.general.analysis_fps = 61",
+        "visualizations.general.analysis_fps = -1",
+        "visualizations.general.analysis_fps = 5.5",
+        "visualizations.general.fps = -1",
+        "visualizations.general.fps = 241",
+        "visualizations.general.fps = 65536",
+        "visualizations.general.fps = 1.5",
+        "visualizations.general.fps = '60'",
         "visualizations.spectrum.db_range = 0",
         "visualizations.spectrum.db_range = 161",
         "visualizations.spectrogram.db_range = inf",
-        "visualizations.analysis_fft_size = 256",
-        "visualizations.analysis_fft_size = 65536",
-        "visualizations.analysis_fft_size = 1000",
-        "visualizations.analysis_window = 'hamming'",
-        "visualizations.signal = 'After'",
-        "visualizations.signal = 'unknown'",
+        "visualizations.general.analysis_fft_size = 256",
+        "visualizations.general.analysis_fft_size = 65536",
+        "visualizations.general.analysis_fft_size = 1000",
+        "visualizations.general.analysis_window = 'hamming'",
+        "visualizations.general.signal = 'After'",
+        "visualizations.general.signal = 'unknown'",
         "visualization_signal = 'before'",
         "visualizations.spectrum.signal = 'before'",
         "visualizations.spectrum.bar_width = 0.9",
@@ -1092,10 +1095,10 @@ fn malformed_unknown_and_invalid_values_are_rejected() {
         "visualizations.spectrum.gap = -1",
         "visualizations.spectrum.gap = 9",
         "visualizations.spectrum.gap = nan",
-        "visualizations.audio_visualizer.sensitivity = -1",
-        "visualizations.audio_visualizer.sensitivity = 6",
-        "visualizations.audio_visualizer.bar_glow_layers = 5",
-        "visualizations.audio_visualizer.ring_opacity = 2",
+        "visualizations.general.sensitivity = -1",
+        "visualizations.general.sensitivity = 6",
+        "visualizations.radial.bar_glow_layers = 5",
+        "visualizations.radial.ring_opacity = 2",
         "visualizations.spectrum.peak_hold_ms = 2001",
         "visualizations.spectrum.peak_gravity = -1",
         "visualizations.spectrum.peak_gravity = 501",
@@ -1114,9 +1117,9 @@ fn malformed_unknown_and_invalid_values_are_rejected() {
         "visualizations.waveform.peak_gain = 3",
         "visualizations.waveform.peak_gamma = 0.1",
         "visualizations.waveform.peak_gamma = 3.1",
-        "visualizations.background = '#12345'",
-        "visualizations.background = '#gg0000'",
-        "visualizations.background = '#00000000'",
+        "visualizations.general.background = '#12345'",
+        "visualizations.general.background = '#gg0000'",
+        "visualizations.general.background = '#00000000'",
         "visualizations.waveform.cursor_color = 123456",
         "visualizations.spectrum.style = 'diagonal'",
         "playback.repeat = 'forever'",
@@ -1171,12 +1174,19 @@ fn visualization_signal_defaults_and_round_trips_in_shared_group() {
         (VisualizationSignal::Before, "before"),
         (VisualizationSignal::After, "after"),
     ] {
-        write_current_config(&path, format!("[visualizations]\nsignal = '{name}'\n")).unwrap();
+        write_current_config(
+            &path,
+            format!("[visualizations.general]\nsignal = '{name}'\n"),
+        )
+        .unwrap();
         let config = Config::load(&path).unwrap();
         assert_eq!(config.visualization_signal, visualization_signal);
         config.save(&path).unwrap();
         let saved: toml::Table = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(saved["visualizations"]["signal"].as_str(), Some(name));
+        assert_eq!(
+            saved["visualizations"]["general"]["signal"].as_str(),
+            Some(name)
+        );
         assert_eq!(Config::load(&path).unwrap(), config);
     }
 }
@@ -1213,7 +1223,7 @@ fn visualization_ranges_inherit_and_preserve_explicit_overrides() {
     assert_eq!(config.audio_visualizer_db_range(), 85.0);
     config.save(&path).unwrap();
     let saved: toml::Table = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-    for view in ["spectrum", "spectrogram", "audio_visualizer"] {
+    for view in ["spectrum", "spectrogram", "reactive"] {
         assert!(
             saved["visualizations"]
                 .get(view)
@@ -1224,7 +1234,7 @@ fn visualization_ranges_inherit_and_preserve_explicit_overrides() {
     assert!(saved.get("playback").is_none());
     assert_eq!(Config::load(&path).unwrap(), config);
 
-    write_current_config(&path, "visualizations.db_range = 85\nvisualizations.spectrum.db_range = 70\nvisualizations.spectrogram.db_range = 110\nvisualizations.audio_visualizer.db_range = 85\n")
+    write_current_config(&path, "visualizations.general.db_range = 85\nvisualizations.spectrum.db_range = 70\nvisualizations.spectrogram.db_range = 110\nvisualizations.reactive.db_range = 85\n")
     .unwrap();
     config = Config::load(&path).unwrap();
     assert_eq!(config.spectrum_db_range, Some(70.0));
@@ -1258,10 +1268,10 @@ fn visualization_ranges_reject_nonfinite_and_out_of_range_values() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
     for key in [
-        "visualizations.db_range",
+        "visualizations.general.db_range",
         "visualizations.spectrum.db_range",
         "visualizations.spectrogram.db_range",
-        "visualizations.audio_visualizer.db_range",
+        "visualizations.reactive.db_range",
     ] {
         for value in ["nan", "inf", "-inf", "0", "0.99", "160.01", "161"] {
             write_current_config(&path, format!("{key} = {value}\n")).unwrap();

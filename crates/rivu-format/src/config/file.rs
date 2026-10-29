@@ -141,14 +141,11 @@ file_group!(Spectrum, SpectrumView {
     bar_hold_ms => spectrum_bar_hold_ms: u32,
     bar_gravity => spectrum_bar_gravity: f32,
     smoothing_ms => spectrum_smoothing_ms: u32,
-    grid => spectrum_grid: bool,
-    labels => spectrum_labels: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     db_range => spectrum_db_range: Option<f32>,
 });
 
 file_group!(Spectrogram, SpectrogramView {
-    labels => spectrogram_labels: bool,
     interpolate => spectrogram_interpolate: bool,
     sampling_points_scale => spectrogram_sampling_points_scale: f32,
     interpolation_points => spectrogram_interpolation_points: u32,
@@ -159,32 +156,32 @@ file_group!(Spectrogram, SpectrogramView {
     accumulation => spectrogram_accumulation: u32,
 });
 
-file_group!(AudioVisualizer, AudioVisualizerView {
-    style => audio_visualizer_style: AudioVisualizerStyle,
-    grid => audio_visualizer_grid: bool,
-    labels => audio_visualizer_labels: bool,
-    sensitivity => audio_visualizer_sensitivity: f32,
+file_group!(Radial, RadialView {
     rotation_speed => audio_visualizer_rotation_speed: f32,
     bar_width => audio_visualizer_bar_width: f32,
     bar_glow_layers => audio_visualizer_bar_glow_layers: u32,
     ring_opacity => audio_visualizer_ring_opacity: f32,
-    bloom_intensity => audio_visualizer_bloom_intensity: f32,
     inner_diameter => audio_visualizer_inner_diameter: f32,
     fade_when_idle => audio_visualizer_fade_when_idle: bool,
-    primary_color => audio_visualizer_primary_color: RgbColor,
-    secondary_color => audio_visualizer_secondary_color: RgbColor,
+});
+
+file_group!(Reactive, ReactiveView {
     #[serde(skip_serializing_if = "Option::is_none")]
     db_range => audio_visualizer_db_range: Option<f32>,
 });
 
 file_group!(Waveform, WaveformView {
-    labels => waveform_labels: bool,
     seek_enabled => waveform_seek_enabled: bool,
     cursor_color => waveform_cursor_color: RgbColor,
     glow => waveform_glow: f32,
     rms_gain => waveform_rms_gain: f32,
     peak_gain => waveform_peak_gain: f32,
     peak_gamma => waveform_peak_gamma: f32,
+});
+
+file_group!(Oscilloscope, OscilloscopeView {
+    time_span_ms => oscilloscope_time_span_ms: f32,
+    gain => oscilloscope_gain: f32,
 });
 
 file_group!(AlbumArtwork, AlbumArtworkView {
@@ -195,7 +192,7 @@ file_group!(AlbumArtwork, AlbumArtworkView {
     fps => album_artwork_fps: u16,
 });
 
-file_group!(Visualizations, VisualizationsView {
+file_group!(General, GeneralView {
     still_mode => still_mode: bool,
     signal => visualization_signal: VisualizationSignal,
     analysis_fps => analysis_fps: u32,
@@ -205,10 +202,23 @@ file_group!(Visualizations, VisualizationsView {
     analysis_fft_size => analysis_fft_size: u32,
     analysis_window => analysis_window: AnalysisWindow,
     db_range => visualization_db_range: f32,
-}; spectrum: Spectrum, SpectrumView
+    style => audio_visualizer_style: AudioVisualizerStyle,
+    grid => audio_visualizer_grid: bool,
+    label => audio_visualizer_labels: bool,
+    primary_color => audio_visualizer_primary_color: RgbColor,
+    secondary_color => audio_visualizer_secondary_color: RgbColor,
+    sensitivity => audio_visualizer_sensitivity: f32,
+    bloom_intensity => audio_visualizer_bloom_intensity: f32,
+});
+
+file_group!(Visualizations, VisualizationsView {
+}; general: General, GeneralView
+; radial: Radial, RadialView
+; reactive: Reactive, ReactiveView
+; spectrum: Spectrum, SpectrumView
 ; spectrogram: Spectrogram, SpectrogramView
-; audio_visualizer: AudioVisualizer, AudioVisualizerView
-; waveform: Waveform, WaveformView);
+; waveform: Waveform, WaveformView
+; oscilloscope: Oscilloscope, OscilloscopeView);
 
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
