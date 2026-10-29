@@ -265,11 +265,23 @@ per-upload admission pressure; existing uploaded tiles remain drawable.
 
 The GPU cache retains only weak CPU ownership. Clearing a dynamic slot releases
 its CPU content once existing snapshots finish; fixed scene records deliberately
-remain replayable until invalidated. No cleanup frame or background polling is
-introduced. Completed storage omitted from a later scene is reclaimed on draw,
-including an empty scene; window/device destruction drops the renderer's ownership.
-Ordinary scenes with no extension resources do not perform extension-specific
-device polling. Native Metal remains explicitly unsupported.
+remain replayable until invalidated. Completed storage omitted from a later scene
+is reclaimed during preparation, including an empty scene.
+
+The window also maintains submitted material work without requesting or presenting
+another frame. One coalesced foreground task polls completion at 16 ms intervals
+only while submissions remain outstanding; it stops after collection, device loss
+or renderer destruction. Registration precedes surface acquisition, so occluded or
+failed presentation cannot strand earlier submissions. Generation-specific handles
+hold only weak references and cannot pin or revive a replaced renderer/device.
+
+Visible-idle maintenance retires completed placement slabs while preserving useful
+uploads. Hide immediately discards material residency demand, but in-flight storage
+stays charged until completion; restoration uploads the retained CPU drawing again.
+Forced hidden presentations detach regenerated GPU scene references as well. There
+is no cleanup frame or permanent polling loop. Ordinary scenes with no extension
+resources do not perform extension-specific device polling. Native Metal remains
+explicitly unsupported.
 
 === Surface reattachment
 

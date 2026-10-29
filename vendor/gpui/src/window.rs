@@ -1345,6 +1345,8 @@ pub struct Window {
     pub(crate) rendered_frame: Frame,
     pub(crate) next_frame: Frame,
     gpu_scenes_detached: bool,
+    gpu_maintenance_task: Option<Task<()>>,
+    gpu_maintenance: Option<Rc<dyn Fn(bool) -> bool>>,
     next_hitbox_id: HitboxId,
     pub(crate) next_tooltip_id: TooltipId,
     pub(crate) tooltip_bounds: Option<TooltipBounds>,
@@ -1992,14 +1994,14 @@ impl Window {
                                     window.refresh();
                                 }
                                 let arena_clear_needed = window.draw(cx);
-                                window.present();
+                                window.present(cx);
                                 arena_clear_needed.clear(cx);
                             })
                             .log_err();
                     })
                 } else if needs_present {
                     handle
-                        .update(&mut cx, |_, window, _| window.present())
+                        .update(&mut cx, |_, window, cx| window.present(cx))
                         .log_err();
                 }
 
@@ -2246,6 +2248,8 @@ impl Window {
             rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             gpu_scenes_detached: false,
+            gpu_maintenance_task: None,
+            gpu_maintenance: None,
             next_frame_callbacks,
             next_hitbox_id: HitboxId(0),
             next_tooltip_id: TooltipId::default(),
@@ -2366,6 +2370,7 @@ impl Window {
             self.visibility = visibility;
             if !visibility.is_visible() {
                 self.detach_gpu_scenes();
+                self.maintain_gpu_resources(cx);
             } else if mem::take(&mut self.gpu_scenes_detached) {
                 // Detached publications cannot be replayed from cached views.
                 self.refreshing = true;
@@ -2396,6 +2401,39 @@ impl Window {
         // Invalidate cached element paint ranges even if the platform requests
         // a forced hidden frame before the next visibility transition.
         self.refreshing = true;
+    }
+
+    fn maintain_gpu_resources(&mut self, cx: &App) {
+        let pending = self
+            .gpu_maintenance
+            .as_ref()
+            .is_some_and(|maintain| maintain(!self.visibility.is_visible()));
+        if !pending {
+            self.gpu_maintenance_task.take();
+        } else if self.gpu_maintenance_task.is_none() {
+            self.gpu_maintenance_task = Some(self.spawn(cx, async move |cx| {
+                loop {
+                    cx.background_executor
+                        .timer(Duration::from_millis(16))
+                        .await;
+                    let pending = cx
+                        .update(|window, _| {
+                            let pending = window
+                                .gpu_maintenance
+                                .as_ref()
+                                .is_some_and(|maintain| maintain(!window.visibility.is_visible()));
+                            if !pending {
+                                window.gpu_maintenance_task.take();
+                            }
+                            pending
+                        })
+                        .unwrap_or(false);
+                    if !pending {
+                        break;
+                    }
+                }
+            }));
+        }
     }
 
     /// Whether the platform is presenting this window's frames (see
@@ -3721,12 +3759,23 @@ impl Window {
     }
 
     #[profiling::function]
-    fn present(&mut self) {
+    fn present(&mut self, cx: &App) {
         #[cfg(feature = "profiler")]
         let _foreground_turn = profiler::journal::foreground_turn();
         #[cfg(feature = "profiler")]
         let present_start = Instant::now();
         self.platform_window.draw(&self.rendered_frame.scene);
+        if !self.visibility.is_visible() {
+            // Forced hidden paints can recreate publications after the
+            // visibility-transition detach. Do not retain those CPU scenes.
+            self.detach_gpu_scenes();
+        }
+        // The handle itself owns no GPU resources. Keep the last presented
+        // generation across scene swaps and even a later failed acquisition.
+        if let Some(maintenance) = self.rendered_frame.scene.gpu_maintenance.borrow().clone() {
+            self.gpu_maintenance = Some(maintenance);
+        }
+        self.maintain_gpu_resources(cx);
         #[cfg(feature = "profiler")]
         self.window_profiler.record_present(
             present_start,
@@ -3740,9 +3789,9 @@ impl Window {
 
     /// Presents the most recently drawn frame if it hasn't been presented yet.
     #[cfg(all(test, feature = "profiler"))]
-    pub fn present_if_needed(&mut self) {
+    pub fn present_if_needed(&mut self, cx: &App) {
         if self.needs_present.get() {
-            self.present();
+            self.present(cx);
         }
     }
 
@@ -8072,6 +8121,7 @@ mod tests {
         cell::{Cell, RefCell},
         path::PathBuf,
         rc::Rc,
+        sync::Arc,
         time::Duration,
     };
 
@@ -8083,7 +8133,7 @@ mod tests {
         Pixels, PlatformInput, Point, Render, RequestFrameOptions, ScaledPixels,
         StatefulInteractiveElement as _, Styled, TestAppContext, TouchDragEvent, TouchEvent,
         TouchId, TouchPhase, Underline, UnderlineStyle, Window, WindowAppearance, WindowOptions,
-        canvas, div, hsla, point, px, size,
+        WindowVisibility, canvas, div, hsla, point, px, size,
     };
 
     #[test]
@@ -8579,6 +8629,101 @@ mod tests {
         // subsequent draws of both windows work against a fresh arena.
         cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
             .unwrap();
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    #[gpui::test]
+    fn gpu_maintenance_drains_hidden_submission_without_requesting_another_frame(
+        cx: &mut TestAppContext,
+    ) {
+        let window = cx.add_window(|_, _| EmptyView);
+        let pending = Rc::new(Cell::new(true));
+        let polls = Rc::new(Cell::new(0));
+        let discarded = Rc::new(Cell::new(false));
+        window
+            .update(cx, |_, window, cx| {
+                let pending = pending.clone();
+                let polls = polls.clone();
+                let discarded = discarded.clone();
+                window
+                    .rendered_frame
+                    .scene
+                    .set_gpu_maintenance(Rc::new(move |discard| {
+                        polls.set(polls.get() + 1);
+                        discarded.set(discard);
+                        pending.get()
+                    }));
+                window.present(cx);
+                window.present(cx);
+                assert!(window.gpu_maintenance_task.is_some());
+            })
+            .unwrap();
+        cx.executor().run_until_parked();
+        let platform = cx.test_window(window.into());
+        let wakes = platform.frame_wake_count();
+        platform.simulate_visibility_change(WindowVisibility::Hidden);
+        assert!(discarded.get(), "hide must discard residency immediately");
+        window
+            .update(cx, |_, window, cx| {
+                let limits = crate::GpuLimits {
+                    max_rectangles: 1,
+                    max_palette_colors: 1,
+                    ..Default::default()
+                };
+                let publication = crate::GpuFrame::rectangles(
+                    &[crate::GpuRectangle {
+                        bounds: [0.0, 0.0, 1.0, 1.0],
+                        palette_range: [0.0, 1.0],
+                    }],
+                    crate::GpuPalette::new(&[[1.0; 4]], 1).unwrap(),
+                    crate::GpuRectangleParams::default(),
+                    limits,
+                )
+                .unwrap();
+                let weak = Arc::downgrade(&publication);
+                let bounds = Bounds {
+                    origin: Point::default(),
+                    size: size(ScaledPixels(8.0), ScaledPixels(8.0)),
+                };
+                for scene in [
+                    &mut window.rendered_frame.scene,
+                    &mut window.next_frame.scene,
+                ] {
+                    scene.insert_primitive(crate::GpuDraw {
+                        order: 0,
+                        bounds,
+                        content_mask: ContentMask { bounds },
+                        opacity: 1.0,
+                        scale_factor: 1.0,
+                        source: crate::GpuSource::Fixed(publication.clone()),
+                    });
+                }
+                drop(publication);
+                window.present(cx);
+                assert!(
+                    weak.upgrade().is_none(),
+                    "forced hidden paint must detach both CPU scenes"
+                );
+            })
+            .unwrap();
+        pending.set(false);
+        let before = polls.get();
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.executor().run_until_parked();
+        assert_eq!(polls.get(), before + 1);
+        window
+            .update(cx, |_, window, _| {
+                assert!(window.gpu_maintenance_task.is_none());
+            })
+            .unwrap();
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.executor().run_until_parked();
+        assert_eq!(
+            polls.get(),
+            before + 1,
+            "completed work must stop the timer"
+        );
+        assert_eq!(platform.frame_wake_count(), wakes);
     }
 
     #[test]

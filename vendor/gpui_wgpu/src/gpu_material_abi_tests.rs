@@ -319,6 +319,11 @@ fn rectangle_retirement_charges_unsubmitted_and_inflight_allocations() -> anyhow
         renderer.bytes, charged,
         "dropping CPU owners cannot free pending storage"
     );
+    assert!(renderer.maintain(&context.device, true));
+    assert_eq!(
+        renderer.bytes, charged,
+        "maintenance cannot release unfinished work"
+    );
     // Flush real mapped initialization before simulating completion delivery.
     let submission = context.queue.submit(std::iter::empty());
     context.device.poll(wgpu::PollType::Wait {
@@ -328,7 +333,7 @@ fn rectangle_retirement_charges_unsubmitted_and_inflight_allocations() -> anyhow
     renderer
         .completed
         .store(MAX_PENDING_SUBMISSIONS, Ordering::Release);
-    renderer.prepare(&context.device, &[], size, None);
+    assert!(!renderer.maintain(&context.device, true));
     assert_eq!(renderer.bytes, 0);
     assert!(renderer.uploads.is_empty());
     assert!(renderer.placements.is_empty());
@@ -747,7 +752,7 @@ fn waveform_uploads_are_lazy_budgeted_weak_and_completion_retired() -> anyhow::R
         submission_index: Some(submission),
         timeout: Some(std::time::Duration::from_secs(30)),
     })?;
-    renderer.prepare(&context.device, &[], size, None);
+    assert!(!renderer.maintain(&context.device, true));
     assert_eq!(renderer.bytes, 0);
     assert!(renderer.uploads.is_empty());
     assert!(renderer.palettes.is_empty());

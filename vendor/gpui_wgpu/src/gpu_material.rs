@@ -247,8 +247,11 @@ pub(crate) struct MaterialRenderer {
     uploads: FxHashMap<u64, Upload>,
     palettes: FxHashMap<u64, PaletteUpload>,
     placements: Vec<PlacementAllocation>,
+    wanted: FxHashSet<u64>,
+    wanted_palettes: FxHashSet<u64>,
     completed: Arc<AtomicU64>,
     submitted: u64,
+    collected: u64,
     preparing: bool,
     bytes: u64,
     byte_limit: u64,
@@ -424,8 +427,11 @@ impl MaterialRenderer {
             uploads: FxHashMap::default(),
             palettes: FxHashMap::default(),
             placements: Vec::new(),
+            wanted: FxHashSet::default(),
+            wanted_palettes: FxHashSet::default(),
             completed: Arc::new(AtomicU64::new(0)),
             submitted: 0,
+            collected: 0,
             preparing: false,
             bytes: 0,
             byte_limit: MAX_BYTES,
@@ -514,8 +520,44 @@ impl MaterialRenderer {
             self.last_failure_kinds = 0;
             return PreparedMaterials::default();
         }
-        let _ = device.poll(wgpu::PollType::Poll);
+        if self.submitted > self.completed.load(Ordering::Acquire) {
+            let _ = device.poll(wgpu::PollType::Poll);
+        }
+        let resolved = self.resolve(batches);
+        self.wanted.clear();
+        self.wanted
+            .extend(resolved.iter().flatten().map(|frame| frame.id()));
+        self.wanted_palettes.clear();
+        self.wanted_palettes
+            .extend(resolved.iter().flatten().map(|frame| frame.palette().id()));
+        self.collect_completed();
+        self.prepare_resolved(device, batches, size, msaa_ranges, &resolved)
+    }
+
+    /// No presentation, uploads or waits. Hidden scenes discard their wanted
+    /// set, but in-flight storage stays charged until its completion callback.
+    pub(crate) fn maintain(&mut self, device: &wgpu::Device, discard: bool) -> bool {
+        debug_assert!(!self.preparing);
+        let changed = discard && (!self.wanted.is_empty() || !self.wanted_palettes.is_empty());
+        if discard {
+            self.wanted.clear();
+            self.wanted_palettes.clear();
+        }
+        if self.submitted > self.completed.load(Ordering::Acquire) {
+            let _ = device.poll(wgpu::PollType::Poll);
+        }
+        if changed || self.completed.load(Ordering::Acquire) > self.collected {
+            self.collect_completed();
+        }
+        // Another thread may deliver completion just after collection. Stop
+        // only at the watermark whose resources we actually reclaimed, never
+        // at a newer atomic value that would strand the final allocations.
+        self.submitted > self.collected
+    }
+
+    fn collect_completed(&mut self) {
         let completed = self.completed.load(Ordering::Acquire);
+        self.collected = completed;
         self.placements.retain(|allocation| {
             if allocation.last_submission <= completed {
                 self.bytes -= allocation.bytes;
@@ -524,11 +566,9 @@ impl MaterialRenderer {
                 true
             }
         });
-        let resolved = self.resolve(batches);
-        let wanted: FxHashSet<_> = resolved.iter().flatten().map(|frame| frame.id()).collect();
         self.uploads.retain(|key, upload| {
             if upload.last_submission <= completed
-                && (!wanted.contains(key) || upload.owner.strong_count() == 0)
+                && (!self.wanted.contains(key) || upload.owner.strong_count() == 0)
             {
                 self.bytes -= upload.bytes;
                 false
@@ -536,15 +576,15 @@ impl MaterialRenderer {
                 true
             }
         });
-        let wanted_palettes: FxHashSet<_> = resolved
+        let live_palettes: FxHashSet<_> = self
+            .wanted_palettes
             .iter()
-            .flatten()
-            .map(|frame| frame.palette().id())
+            .copied()
             .chain(self.uploads.values().map(|upload| upload.palette_id))
             .collect();
         self.palettes.retain(|key, upload| {
             if upload.last_submission <= completed
-                && (!wanted_palettes.contains(key) || upload.owner.strong_count() == 0)
+                && (!live_palettes.contains(key) || upload.owner.strong_count() == 0)
             {
                 self.bytes -= upload.bytes;
                 false
@@ -552,6 +592,17 @@ impl MaterialRenderer {
                 true
             }
         });
+    }
+
+    fn prepare_resolved(
+        &mut self,
+        device: &wgpu::Device,
+        batches: &[GpuDraw],
+        size: Size<DevicePixels>,
+        msaa_ranges: Option<&[std::ops::Range<usize>]>,
+        resolved: &[Option<Arc<GpuFrame>>],
+    ) -> PreparedMaterials {
+        let completed = self.completed.load(Ordering::Acquire);
         let mut prepared = PreparedMaterials::default();
         let mut skipped = [batches.len().saturating_sub(MAX_DRAWS), 0, 0, 0, 0];
         let mut first_upload_error = None;
@@ -584,7 +635,7 @@ impl MaterialRenderer {
         let limits = device.limits();
         let placement_stride =
             PLACEMENT_SIZE.next_multiple_of(u64::from(limits.min_uniform_buffer_offset_alignment));
-        for (index, (batch, frame)) in batches.iter().zip(&resolved).enumerate() {
+        for (index, (batch, frame)) in batches.iter().zip(resolved).enumerate() {
             let Some(frame) = frame else {
                 continue;
             };

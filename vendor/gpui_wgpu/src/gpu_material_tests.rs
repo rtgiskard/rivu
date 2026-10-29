@@ -97,6 +97,99 @@ fn pixel(image: &image::RgbaImage, x: u32, y: u32, expected: [u8; 4]) {
     );
 }
 
+fn drain_material_maintenance(scene: &Scene, discard: bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while scene.maintain_gpu_resources(discard) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "material submission did not complete"
+        );
+        std::thread::yield_now();
+    }
+}
+
+#[test]
+fn gpu_material_maintenance_drains_idle_work_preserves_visible_uploads_and_restores()
+-> anyhow::Result<()> {
+    let mut renderer = WgpuHeadlessRenderer::new()?;
+    let publication = frame([1.0, 0.0, 0.0, 1.0]);
+    let mut scene = Scene::default();
+    scene.insert_primitive(draw(
+        GpuSource::Fixed(publication.clone()),
+        bounds(0.0, 0.0, 8.0, 8.0),
+    ));
+    scene.finish();
+    let cpu_owners = Arc::strong_count(&publication);
+    renderer.render_scene(&scene, size(8, 8))?;
+    assert_eq!(renderer.core.resources.materials.borrow().stats().1, 1);
+    // No second frame, queue submission, readback or blocking GPU wait is
+    // needed to retire the final placement slab.
+    drain_material_maintenance(&scene, false);
+    let stats = renderer.core.resources.materials.borrow().stats();
+    assert_eq!((stats.0, stats.1, stats.3), (1, 0, 1));
+    assert_eq!(
+        renderer.core.resources.materials.borrow().palette_stats(),
+        (1, 1)
+    );
+    pixel(
+        &renderer.render_scene_to_image(&scene, size(8, 8))?,
+        4,
+        4,
+        RED,
+    );
+    assert_eq!(renderer.core.resources.materials.borrow().stats().3, 1);
+
+    // Hidden residency is discarded even while a non-scene CPU owner remains.
+    // Completion, not CPU ownership, still controls in-flight storage release.
+    drain_material_maintenance(&scene, true);
+    let stats = renderer.core.resources.materials.borrow().stats();
+    assert_eq!((stats.0, stats.1, stats.2), (0, 0, 0));
+    assert_eq!(Arc::strong_count(&publication), cpu_owners);
+    pixel(
+        &renderer.render_scene_to_image(&scene, size(8, 8))?,
+        4,
+        4,
+        RED,
+    );
+    assert_eq!(renderer.core.resources.materials.borrow().stats().3, 2);
+    Ok(())
+}
+
+#[test]
+fn gpu_material_maintenance_handles_do_not_pin_recovered_or_closed_renderer() -> anyhow::Result<()>
+{
+    let mut renderer = WgpuHeadlessRenderer::new()?;
+    let mut scene = Scene::default();
+    scene.insert_primitive(draw(
+        GpuSource::Fixed(frame([1.0, 0.0, 0.0, 1.0])),
+        bounds(0.0, 0.0, 8.0, 8.0),
+    ));
+    scene.finish();
+    renderer.render_scene(&scene, size(8, 8))?;
+    let old = Rc::downgrade(&renderer.core.resources.materials);
+    renderer.core = WgpuRendererCore::new(
+        &renderer.context,
+        Arc::new(WgpuAtlas::from_context(&renderer.context)),
+        renderer.core.target_format,
+        wgpu::CompositeAlphaMode::Opaque,
+    );
+    assert!(old.upgrade().is_none());
+    assert!(!scene.maintain_gpu_resources(true));
+    assert_eq!(renderer.core.resources.materials.borrow().stats().2, 0);
+    pixel(
+        &renderer.render_scene_to_image(&scene, size(8, 8))?,
+        4,
+        4,
+        RED,
+    );
+    assert_eq!(renderer.core.resources.materials.borrow().stats().3, 1);
+    let current = Rc::downgrade(&renderer.core.resources.materials);
+    drop(renderer);
+    assert!(current.upgrade().is_none());
+    assert!(!scene.maintain_gpu_resources(true));
+    Ok(())
+}
+
 #[test]
 fn logarithmic_columns_keep_floor_distinct_from_palette_sample_zero() -> anyhow::Result<()> {
     let mut renderer = WgpuHeadlessRenderer::new()?;
@@ -351,9 +444,9 @@ fn numerical_history_high_rows_fit_shared_budget_and_reuse_between_panels() -> a
             pixel(&image, x, y, RED);
         }
     }
-    assert_eq!(renderer.core.resources.materials.stats().0, 113);
+    assert_eq!(renderer.core.resources.materials.borrow().stats().0, 113);
     renderer.render_scene_to_image(&scene, size(3600, 8))?;
-    assert_eq!(renderer.core.resources.materials.stats().3, 113);
+    assert_eq!(renderer.core.resources.materials.borrow().stats().3, 113);
     // Keep every old upload wanted while admitting a completely new history.
     // Holding CPU Arcs alone would not prevent retirement of completed uploads.
     scene.clear();
@@ -399,7 +492,7 @@ fn numerical_history_high_rows_fit_shared_budget_and_reuse_between_panels() -> a
         pixel(&image, x, 1, RED);
         pixel(&image, x, 5, BLUE);
     }
-    assert_eq!(renderer.core.resources.materials.stats().0, 226);
+    assert_eq!(renderer.core.resources.materials.borrow().stats().0, 226);
     Ok(())
 }
 
@@ -656,7 +749,7 @@ fn gpu_rectangles_order_mask_opacity_and_shared_upload() -> anyhow::Result<()> {
     pixel(&image, 8, 8, [128, 0, 128, 255]);
     pixel(&image, 20, 8, RED);
     pixel(&image, 28, 8, BLUE);
-    assert_eq!(renderer.core.resources.materials.stats().3, 1);
+    assert_eq!(renderer.core.resources.materials.borrow().stats().3, 1);
     assert_eq!(
         Arc::strong_count(&red),
         cpu_owners,
@@ -664,7 +757,7 @@ fn gpu_rectangles_order_mask_opacity_and_shared_upload() -> anyhow::Result<()> {
     );
     renderer.render_scene_to_image(&scene, size(32, 16))?;
     assert_eq!(
-        renderer.core.resources.materials.stats().3,
+        renderer.core.resources.materials.borrow().stats().3,
         1,
         "static replay must not upload again"
     );
@@ -672,7 +765,7 @@ fn gpu_rectangles_order_mask_opacity_and_shared_upload() -> anyhow::Result<()> {
     pixel(&image, 20, 8, RED);
     pixel(&image, 40, 20, BLACK);
     assert_eq!(
-        renderer.core.resources.materials.stats().3,
+        renderer.core.resources.materials.borrow().stats().3,
         1,
         "resize changes placement, not immutable content"
     );
@@ -788,8 +881,8 @@ fn gpu_rectangles_fixed_dynamic_coherence_clear_and_retirement() -> anyhow::Resu
     }
     scene.finish();
     renderer.render_scene_to_image(&scene, size(24, 8))?;
-    assert_eq!(renderer.core.resources.materials.stats().3, 1);
-    assert_eq!(renderer.core.resources.materials.stats().4, 1);
+    assert_eq!(renderer.core.resources.materials.borrow().stats().3, 1);
+    assert_eq!(renderer.core.resources.materials.borrow().stats().4, 1);
     // Change both instance count and palette; the draw count must come from the
     // same snapshot as the uploaded data, not the old recorded scene.
     let half = GpuRectangle {
@@ -820,7 +913,7 @@ fn gpu_rectangles_fixed_dynamic_coherence_clear_and_retirement() -> anyhow::Resu
     pixel(&image, 21, 4, BLACK);
     pixel(&image, 13, 1, BLUE);
     pixel(&image, 21, 1, BLUE);
-    assert_eq!(renderer.core.resources.materials.stats().4, 2);
+    assert_eq!(renderer.core.resources.materials.borrow().stats().4, 2);
     state.publish(rectangle_frame(
         &[],
         &[[0.0, 1.0, 0.0, 1.0]],
@@ -830,7 +923,7 @@ fn gpu_rectangles_fixed_dynamic_coherence_clear_and_retirement() -> anyhow::Resu
     let image = renderer.render_scene_to_image(&scene, size(24, 8))?;
     pixel(&image, 9, 4, BLACK);
     assert_eq!(
-        renderer.core.resources.materials.stats().3,
+        renderer.core.resources.materials.borrow().stats().3,
         2,
         "empty content does not allocate"
     );
@@ -839,7 +932,7 @@ fn gpu_rectangles_fixed_dynamic_coherence_clear_and_retirement() -> anyhow::Resu
     pixel(&image, 4, 4, RED);
     pixel(&image, 17, 4, BLACK);
     assert_eq!(
-        renderer.core.resources.materials.stats().4,
+        renderer.core.resources.materials.borrow().stats().4,
         4,
         "revoked slots also resolve once"
     );
@@ -854,7 +947,7 @@ fn gpu_rectangles_fixed_dynamic_coherence_clear_and_retirement() -> anyhow::Resu
     drop(scene);
     let empty = Scene::default();
     renderer.render_scene_to_image(&empty, size(24, 8))?;
-    let stats = renderer.core.resources.materials.stats();
+    let stats = renderer.core.resources.materials.borrow().stats();
     assert_eq!(
         (stats.0, stats.1, stats.2),
         (0, 0, 0),
@@ -875,7 +968,12 @@ fn gpu_rectangles_budget_and_capability_failures_leave_other_draws_intact() -> a
         GpuRectangleParams::default(),
         limits(),
     )?;
-    renderer.core.resources.materials.set_byte_limit(1024);
+    renderer
+        .core
+        .resources
+        .materials
+        .borrow_mut()
+        .set_byte_limit(1024);
     let mut scene = Scene::default();
     scene.insert_primitive(quad(bounds(0.0, 0.0, 24.0, 8.0), gpui::blue()));
     scene.insert_primitive(draw(GpuSource::Fixed(large), bounds(0.0, 0.0, 8.0, 8.0)));
@@ -891,12 +989,17 @@ fn gpu_rectangles_budget_and_capability_failures_leave_other_draws_intact() -> a
     pixel(&image, 4, 4, BLUE);
     pixel(&image, 12, 4, RED);
     pixel(&image, 20, 4, BLUE);
-    let stats = renderer.core.resources.materials.stats();
+    let stats = renderer.core.resources.materials.borrow().stats();
     assert_eq!(stats.0, 1);
     assert!(stats.2 <= 1024);
-    renderer.core.resources.materials.set_downlevel_flags(
-        wgpu::DownlevelFlags::all() - wgpu::DownlevelFlags::MULTISAMPLED_SHADING,
-    );
+    renderer
+        .core
+        .resources
+        .materials
+        .borrow_mut()
+        .set_downlevel_flags(
+            wgpu::DownlevelFlags::all() - wgpu::DownlevelFlags::MULTISAMPLED_SHADING,
+        );
     let image = renderer.render_scene_to_image(&scene, size(24, 8))?;
     pixel(&image, 12, 4, BLUE);
     pixel(&image, 4, 4, BLUE);
@@ -920,10 +1023,10 @@ fn gpu_rectangles_device_generation_rebuilds_from_owned_content() -> anyhow::Res
         renderer.core.target_format,
         wgpu::CompositeAlphaMode::Opaque,
     );
-    assert_eq!(renderer.core.resources.materials.stats().0, 0);
+    assert_eq!(renderer.core.resources.materials.borrow().stats().0, 0);
     let image = renderer.render_scene_to_image(&scene, size(8, 8))?;
     pixel(&image, 4, 4, RED);
-    assert_eq!(renderer.core.resources.materials.stats().3, 1);
+    assert_eq!(renderer.core.resources.materials.borrow().stats().3, 1);
     Ok(())
 }
 
@@ -965,10 +1068,15 @@ fn gpu_rectangles_recording_error_retires_prepared_storage_and_recovers() -> any
         "unexpected error: {error:#}"
     );
     assert_eq!(
-        renderer.core.resources.materials.stats().3,
+        renderer.core.resources.materials.borrow().stats().3,
         1,
         "failure must occur after preparation"
     );
+    // The error-path empty submission must be enough: do not rely on a later
+    // successful frame to collect these initialized buffers.
+    drain_material_maintenance(&scene, true);
+    let retired = renderer.core.resources.materials.borrow().stats();
+    assert_eq!((retired.0, retired.1, retired.2), (0, 0, 0));
     renderer.core.instance_data_capacity = capacity;
     renderer.core.max_instance_data_size = maximum;
     let mut valid = Scene::default();
@@ -977,7 +1085,7 @@ fn gpu_rectangles_recording_error_retires_prepared_storage_and_recovers() -> any
     let image = renderer.render_scene_to_image(&valid, size(8, 8))?;
     pixel(&image, 4, 4, RED);
     renderer.render_scene_to_image(&Scene::default(), size(8, 8))?;
-    let stats = renderer.core.resources.materials.stats();
+    let stats = renderer.core.resources.materials.borrow().stats();
     assert_eq!((stats.0, stats.1, stats.2), (0, 0, 0));
     Ok(())
 }
@@ -1103,11 +1211,17 @@ fn fields_clamp_edges_and_map_before_color_interpolation() -> anyhow::Result<()>
     pixel(&image, 0, 15, BLUE);
     pixel(&image, 7, 15, RED);
     pixel(&image, 3, 11, [135, 0, 120, 255]);
-    assert_eq!(renderer.core.resources.materials.palette_stats(), (1, 1));
-    assert_eq!(renderer.core.resources.materials.stats().3, 3);
+    assert_eq!(
+        renderer.core.resources.materials.borrow().palette_stats(),
+        (1, 1)
+    );
+    assert_eq!(renderer.core.resources.materials.borrow().stats().3, 3);
     renderer.render_scene_to_image(&scene, size(16, 16))?;
-    assert_eq!(renderer.core.resources.materials.stats().3, 3);
-    assert_eq!(renderer.core.resources.materials.palette_stats(), (1, 1));
+    assert_eq!(renderer.core.resources.materials.borrow().stats().3, 3);
+    assert_eq!(
+        renderer.core.resources.materials.borrow().palette_stats(),
+        (1, 1)
+    );
     Ok(())
 }
 
@@ -1242,24 +1356,35 @@ fn field_dynamic_dimensions_clear_failed_publication_and_budget() -> anyhow::Res
     pixel(&image, 5, 0, BLUE);
     pixel(&image, 9, 0, BLUE);
     pixel(&image, 5, 3, RED);
-    assert_eq!(renderer.core.resources.materials.stats().4, 2);
-    assert_eq!(renderer.core.resources.materials.palette_stats(), (1, 1));
+    assert_eq!(renderer.core.resources.materials.borrow().stats().4, 2);
+    assert_eq!(
+        renderer.core.resources.materials.borrow().palette_stats(),
+        (1, 1)
+    );
     state.publish(field_frame(0, 2, &[], palette.clone(), mapping)?)?;
     let image = renderer.render_scene_to_image(&scene, size(12, 4))?;
     pixel(&image, 5, 0, BLACK);
     state.clear();
     renderer.render_scene_to_image(&scene, size(12, 4))?;
-    assert_eq!(renderer.core.resources.materials.stats().4, 4);
-    let before = renderer.core.resources.materials.stats().3;
+    assert_eq!(renderer.core.resources.materials.borrow().stats().4, 4);
+    let before = renderer.core.resources.materials.borrow().stats().3;
     state.publish(field_frame(1024, 1, &vec![1.0; 1024], palette, mapping)?)?;
-    renderer.core.resources.materials.set_byte_limit(2048);
+    renderer
+        .core
+        .resources
+        .materials
+        .borrow_mut()
+        .set_byte_limit(2048);
     let image = renderer.render_scene_to_image(&scene, size(12, 4))?;
     pixel(&image, 1, 0, RED);
     pixel(&image, 5, 0, BLACK);
-    assert_eq!(renderer.core.resources.materials.stats().3, before);
+    assert_eq!(renderer.core.resources.materials.borrow().stats().3, before);
     renderer.render_scene_to_image(&Scene::default(), size(12, 4))?;
-    assert_eq!(renderer.core.resources.materials.stats().2, 0);
-    assert_eq!(renderer.core.resources.materials.palette_stats().0, 0);
+    assert_eq!(renderer.core.resources.materials.borrow().stats().2, 0);
+    assert_eq!(
+        renderer.core.resources.materials.borrow().palette_stats().0,
+        0
+    );
     Ok(())
 }
 
@@ -1370,10 +1495,13 @@ fn palette_paths_keep_full_mapping_clip_order_opacity_and_shared_palette() -> an
     pixel(&image, 12, 1, BLUE);
     pixel(&image, 12, 8, [120, 0, 135, 255]);
     pixel(&image, 20, 8, [120, 0, 135, 255]);
-    assert_eq!(renderer.core.resources.materials.palette_stats(), (1, 1));
+    assert_eq!(
+        renderer.core.resources.materials.borrow().palette_stats(),
+        (1, 1)
+    );
     renderer.render_scene_to_image(&Scene::default(), size(24, 16))?;
     assert!(renderer.core.resources.msaa_scratch.is_none());
-    assert_eq!(renderer.core.resources.materials.stats().2, 0);
+    assert_eq!(renderer.core.resources.materials.borrow().stats().2, 0);
     Ok(())
 }
 
@@ -2142,7 +2270,7 @@ fn waveform_peaks_keep_one_logical_pixel_after_resize_and_scale() -> anyhow::Res
         }
     }
     assert_eq!(
-        renderer.core.resources.materials.stats().3,
+        renderer.core.resources.materials.borrow().stats().3,
         1,
         "resize/scale must reuse numerical upload"
     );
@@ -2195,8 +2323,7 @@ fn waveform_cached_scene_resolves_latest_snapshot_and_clear_without_repaint() ->
 #[test]
 fn msaa_groups_trade_sparse_area_for_passes_without_changing_pixels() -> anyhow::Result<()> {
     let mut renderer = WgpuHeadlessRenderer::new()?;
-    for (second_x, expected_passes) in [(24.0, 1), (216.0, 2)]
-    {
+    for (second_x, expected_passes) in [(24.0, 1), (216.0, 2)] {
         let viewport = bounds(0.0, 0.0, 256.0, 128.0);
         let mut scene = Scene::default();
         scene.push_layer(viewport);
@@ -2388,14 +2515,21 @@ fn alpha_transitions_preserve_mixed_pixels_uploads_and_scratch_recovery() -> any
             wgpu::Color::TRANSPARENT,
         )?;
         let actual = renderer.read_image()?;
-        assert!(actual.pixels().any(|pixel| pixel.0[3] > 0 && pixel.0[3] < 255));
+        assert!(
+            actual
+                .pixels()
+                .any(|pixel| pixel.0[3] > 0 && pixel.0[3] < 255)
+        );
         let resources = (
             renderer.msaa_attachment_stats(),
-            renderer.core.resources.materials.stats().3,
-            renderer.core.resources.materials.palette_stats().1,
+            renderer.core.resources.materials.borrow().stats().3,
+            renderer.core.resources.materials.borrow().palette_stats().1,
         );
         if let Some(retained) = retained {
-            assert_eq!(resources, retained, "alpha changes must retain scratch and uploads");
+            assert_eq!(
+                resources, retained,
+                "alpha changes must retain scratch and uploads"
+            );
         }
         retained = Some(resources);
 
@@ -2426,10 +2560,18 @@ fn alpha_transitions_preserve_mixed_pixels_uploads_and_scratch_recovery() -> any
     let (attachments, uploads, palettes) = retained.unwrap();
     renderer.core.resources.invalidate_intermediate_textures();
     assert_eq!(renderer.msaa_attachment_stats(), (None, attachments.1));
-    renderer.core.render_frame(&scene, &view, target, false, wgpu::Color::TRANSPARENT)?;
+    renderer
+        .core
+        .render_frame(&scene, &view, target, false, wgpu::Color::TRANSPARENT)?;
     assert_eq!(renderer.read_image()?, before_release);
     assert_eq!(renderer.msaa_attachment_stats().1, attachments.1 + 1);
-    assert_eq!(renderer.core.resources.materials.stats().3, uploads);
-    assert_eq!(renderer.core.resources.materials.palette_stats().1, palettes);
+    assert_eq!(
+        renderer.core.resources.materials.borrow().stats().3,
+        uploads
+    );
+    assert_eq!(
+        renderer.core.resources.materials.borrow().palette_stats().1,
+        palettes
+    );
     Ok(())
 }

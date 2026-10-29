@@ -9,9 +9,11 @@ use crate::{
     Pixels, Point, Radians, ScaledPixels, Size, bounds_tree::BoundsTree, point,
 };
 use std::{
+    cell::RefCell,
     fmt::Debug,
     iter::Peekable,
     ops::{Add, Range, Sub},
+    rc::Rc,
     slice,
     sync::Arc,
 };
@@ -51,6 +53,7 @@ pub struct Scene {
     /// Shared charged material-buffer budget; None preserves the renderer setting.
     /// Preserved when scene contents are cleared or replayed.
     pub gpu_material_budget: Option<u64>,
+    pub(crate) gpu_maintenance: RefCell<Option<Rc<dyn Fn(bool) -> bool>>>,
     pub underlines: Vec<Underline>,
     pub monochrome_sprites: Vec<MonochromeSprite>,
     pub subpixel_sprites: Vec<SubpixelSprite>,
@@ -60,6 +63,31 @@ pub struct Scene {
 
 #[expect(missing_docs)]
 impl Scene {
+    /// Installs a renderer-generation maintenance handle. It must not own the
+    /// renderer or its device; stale handles become inert after recovery/close.
+    /// Called before surface acquisition, including frames that cannot present.
+    #[doc(hidden)]
+    pub fn set_gpu_maintenance(&self, maintenance: Rc<dyn Fn(bool) -> bool>) {
+        let mut current = self.gpu_maintenance.borrow_mut();
+        if !current
+            .as_ref()
+            .is_some_and(|handle| Rc::ptr_eq(handle, &maintenance))
+        {
+            *current = Some(maintenance);
+        }
+    }
+
+    /// Polls and retires material work without presenting. `discard` releases
+    /// hidden-scene residency, never storage still used by a submission.
+    /// Returns true only while actual GPU work remains outstanding.
+    #[doc(hidden)]
+    pub fn maintain_gpu_resources(&self, discard: bool) -> bool {
+        self.gpu_maintenance
+            .borrow()
+            .as_ref()
+            .is_some_and(|maintain| maintain(discard))
+    }
+
     pub fn clear(&mut self) {
         // Each of the window's two scenes must see 120 small uses before
         // releasing its high water. Never touch the scene being replayed.

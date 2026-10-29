@@ -282,7 +282,8 @@ struct WgpuResources {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     pipelines: WgpuPipelines,
-    materials: MaterialRenderer,
+    materials: Rc<RefCell<MaterialRenderer>>,
+    material_maintenance: Rc<dyn Fn(bool) -> bool>,
     bind_group_layouts: WgpuBindGroupLayouts,
     atlas_sampler: wgpu::Sampler,
     atlas_texture_bind_groups: FxHashMap<AtlasTextureId, CachedTextureBindGroup>,
@@ -1198,6 +1199,11 @@ impl WgpuRenderer {
     }
 
     pub fn draw(&mut self, scene: &Scene) -> bool {
+        // Surface acquisition can fail or be deliberately skipped. Maintenance
+        // still belongs to the real scene/window lifecycle in all those cases.
+        if let Some(core) = self.core() {
+            core.register_material_maintenance(scene);
+        }
         #[cfg(target_family = "wasm")]
         if self.device_lost() {
             if matches!(self.state, RendererState::Ready { .. }) {
@@ -1413,16 +1419,35 @@ impl WgpuRendererCore {
             ],
         });
         let max_texture_size = device.limits().max_texture_dimension_2d;
+        let materials = Rc::new(RefCell::new(MaterialRenderer::new(
+            &device,
+            target_format,
+            alpha_mode,
+            rendering_params.path_sample_count,
+            context.adapter.get_downlevel_capabilities().flags,
+        )));
+        let material_maintenance: Rc<dyn Fn(bool) -> bool> = {
+            let materials = Rc::downgrade(&materials);
+            let device = Arc::downgrade(&device);
+            let errors = Arc::downgrade(context.errors());
+            Rc::new(move |discard| {
+                let (Some(materials), Some(device), Some(errors)) =
+                    (materials.upgrade(), device.upgrade(), errors.upgrade())
+                else {
+                    return false;
+                };
+                if errors.device_lost() {
+                    return false;
+                }
+                let pending = materials.borrow_mut().maintain(&device, discard);
+                pending && !errors.device_lost()
+            })
+        };
 
         Self {
             resources: WgpuResources {
-                materials: MaterialRenderer::new(
-                    &device,
-                    target_format,
-                    alpha_mode,
-                    rendering_params.path_sample_count,
-                    context.adapter.get_downlevel_capabilities().flags,
-                ),
+                materials,
+                material_maintenance,
                 device,
                 queue,
                 pipelines,
@@ -1614,8 +1639,13 @@ impl WgpuRendererCore {
             }
             self.resources
                 .materials
+                .borrow()
                 .draw(materials, &materials.draws[&index], &mut pass);
         }
+    }
+
+    fn register_material_maintenance(&self, scene: &Scene) {
+        scene.set_gpu_maintenance(self.resources.material_maintenance.clone());
     }
 
     fn render_frame(
@@ -1626,6 +1656,7 @@ impl WgpuRendererCore {
         premultiplied_alpha: bool,
         clear_color: wgpu::Color,
     ) -> Result<wgpu::SubmissionIndex> {
+        self.register_material_maintenance(scene);
         anyhow::ensure!(
             size.width.0 > 0 && size.height.0 > 0,
             "invalid render target size: {size:?}"
@@ -1693,7 +1724,10 @@ impl WgpuRendererCore {
                 self.resources.invalidate_intermediate_textures();
                 self.release_frame_plan();
                 self.resources.queue.submit(std::iter::empty());
-                self.resources.materials.submitted(&self.resources.queue);
+                self.resources
+                    .materials
+                    .borrow_mut()
+                    .submitted(&self.resources.queue);
             })
     }
 
@@ -1733,6 +1767,7 @@ impl WgpuRendererCore {
         self.prepare_texture_bind_groups(scene);
         self.resources
             .materials
+            .borrow_mut()
             .configure_budget(scene.gpu_material_budget);
         self.material_ranges.clear();
         self.native_rasters.clear();
@@ -1777,7 +1812,7 @@ impl WgpuRendererCore {
                 _ => {}
             }
         }
-        let materials = self.resources.materials.prepare(
+        let materials = self.resources.materials.borrow_mut().prepare(
             &self.resources.device,
             &scene.gpu_draws,
             size,
@@ -1849,7 +1884,10 @@ impl WgpuRendererCore {
                                 continue;
                             }
                             if !draw.multisampled() {
-                                self.resources.materials.draw(&materials, draw, &mut pass);
+                                self.resources
+                                    .materials
+                                    .borrow()
+                                    .draw(&materials, draw, &mut pass);
                             }
                         }
                     }
@@ -1958,7 +1996,10 @@ impl WgpuRendererCore {
             .resources()
             .queue
             .submit(std::iter::once(encoder.finish()));
-        self.resources.materials.submitted(&self.resources.queue);
+        self.resources
+            .materials
+            .borrow_mut()
+            .submitted(&self.resources.queue);
         self.maintain_instance_data_capacity(instance_offset, frame_start_capacity);
         Self::maintain_path_scratch_capacity(
             &mut self.path_vertices,
@@ -3301,7 +3342,11 @@ mod tests {
         let mut capacity = MsaaScratchCapacity::new((800, 800), limit);
         let initial = capacity.extent;
         for frame in 1..MSAA_SCRATCH_SHRINK_DELAY_FRAMES {
-            let demand = if frame % 2 == 0 { (600, 500) } else { (500, 600) };
+            let demand = if frame % 2 == 0 {
+                (600, 500)
+            } else {
+                (500, 600)
+            };
             assert!(!capacity.update(demand, limit));
         }
         assert!(capacity.update((500, 600), limit));
@@ -3807,7 +3852,10 @@ mod tests {
         assert_eq!(pair._msaa.is_some(), multisampled);
         if let Some(texture) = &pair._msaa {
             assert_ne!(Some(texture), first_msaa.as_ref());
-            assert_eq!((texture.width(), texture.height()), (restored.width(), restored.height()));
+            assert_eq!(
+                (texture.width(), texture.height()),
+                (restored.width(), restored.height())
+            );
         }
         assert_pixel(&image, 4, 8, RED);
         assert_pixel(&image, 10, 8, BLUE);
@@ -4289,7 +4337,11 @@ mod tests {
             let mut rejected = Scene::default();
             rejected.insert_primitive(path);
             rejected.finish();
-            assert!(renderer.render_scene_no_readback(&rejected, target).is_err());
+            assert!(
+                renderer
+                    .render_scene_no_readback(&rejected, target)
+                    .is_err()
+            );
             let previous_allocations = u64::from(warmed);
             assert_eq!(
                 renderer.msaa_attachment_stats(),

@@ -356,8 +356,11 @@ segment publication rather than their simulation, and Oscilloscope retains at mo
 inactive fractal tabs instead retain the existing bounded scene per style without
 running it; layout removal and semantic invalidation release it. There is no
 general screenshot cache. Destroying the window releases all these publications.
-GPU uploads may remain charged until completion and a later renderer preparation,
-or renderer destruction; hiding does not promise immediate VRAM release.
+GPU uploads remain charged through completion. Hidden material residency is then
+retired without requiring another frame; visible-idle drawings retain useful
+uploads. This is not a promise of immediate VRAM release. Completion maintenance
+and its bounded task lifetime are defined in
+link:25_gpu_rendering.adoc#_admission_and_retirement[GPU rendering].
 
 The GUI staging frame releases optional Density, Spatial Spectrum, metrics, and
 band-energy payloads when their last display demand disappears; losing all
