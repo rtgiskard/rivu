@@ -422,6 +422,10 @@ as zero. Spatial Spectrum maps individual FFT bins by frequency and channel
 power balance into a fixed 256 by 128 field. Cells retain the strongest power
 rather than summing crowded logarithmic rows, which would make color depend on
 bin density instead of signal level.
+The frequency-row mapping retains one axis keyed by the accepted frame's sample
+rate and bin count. The analyzer emits every non-DC bin of its fixed FFT axis;
+requested settings may change before a new frame arrives, so they do not identify
+the retained axis. Repeated frames reuse the mapping without comparing frequencies.
 The analyzer publishes calibrated linear bin power, including the single-sided
 DC/Nyquist endpoint normalization. The field consumes it without a CPU dB-to-power
 round trip, retaining the squared amplitude floor and full-scale saturation.
