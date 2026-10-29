@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::HashMap;
 
 impl Core {
     pub(in crate::core) fn invalidate_collection_impacts(&mut self, queue: bool, albums: bool) {
@@ -216,11 +217,7 @@ impl Core {
             self.state
                 .library
                 .change_metadata(impact.tracks.as_deref(), impact.playlists.as_deref());
-            for entry in Arc::make_mut(&mut self.state.library.history) {
-                if track_ids.contains(&entry.track_id) {
-                    entry.favorite = favorite;
-                }
-            }
+            self.update_history_favorites(track_ids, Some(favorite));
             self.refresh_affected_queue_tracks(track_ids)
                 .context("Favorite edit committed, but refreshing views failed; some projections may be stale")?;
         }
@@ -234,15 +231,38 @@ impl Core {
             self.state
                 .library
                 .change_metadata(impact.tracks.as_deref(), impact.playlists.as_deref());
-            for entry in Arc::make_mut(&mut self.state.library.history) {
-                if track_ids.contains(&entry.track_id) {
-                    entry.favorite = !entry.favorite;
-                }
-            }
+            self.update_history_favorites(track_ids, None);
             self.refresh_affected_queue_tracks(track_ids)
                 .context("Favorite edit committed, but refreshing views failed; some projections may be stale")?;
         }
         Ok(())
+    }
+
+    fn update_history_favorites(&mut self, track_ids: &[i64], favorite: Option<bool>) {
+        // History is bounded; index it rather than copying a potentially large
+        // selection or repeatedly scanning that selection for every history row.
+        let mut positions: HashMap<_, _> = self
+            .state
+            .library
+            .history
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| favorite != Some(entry.favorite))
+            .map(|(index, entry)| (entry.track_id, index))
+            .collect();
+        if positions.is_empty() {
+            return;
+        }
+        for track_id in track_ids {
+            // Removing a hit also makes duplicate toggle IDs idempotent.
+            if let Some(index) = positions.remove(track_id) {
+                let entry = &mut Arc::make_mut(&mut self.state.library.history)[index];
+                entry.favorite = favorite.unwrap_or(!entry.favorite);
+                if positions.is_empty() {
+                    break;
+                }
+            }
+        }
     }
 
     pub(in crate::core) fn remove_missing_tracks(&mut self) -> Result<()> {

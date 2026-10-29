@@ -715,6 +715,56 @@ fn cue_rescan_preserves_loaded_source_and_seek_range_until_explicit_restart() {
 }
 
 #[test]
+fn favorite_edits_reuse_unaffected_history_and_keep_published_snapshots_immutable() {
+    let (_directory, mut core) = fixture();
+    core.store.mark_played(1, 7).unwrap();
+    core.store.mark_played(4, 8).unwrap();
+    core.replace_history(core.store.history(MAX_QUERY_ROWS).unwrap());
+    core.publish();
+    let before = core.shared.read().library.history.clone();
+    for command in [
+        Command::SetFavorite {
+            track_ids: vec![2, 2, 3],
+            favorite: true,
+        },
+        Command::ToggleFavorite {
+            track_ids: vec![2, 2, 3],
+        },
+        Command::SetFavorite {
+            track_ids: vec![2],
+            favorite: true,
+        },
+        // The selected history row already has the requested value, while the
+        // other selected row changes in the catalog.
+        Command::SetFavorite {
+            track_ids: vec![1, 2],
+            favorite: false,
+        },
+    ] {
+        core.command(command).unwrap();
+        core.publish();
+        assert!(Arc::ptr_eq(&core.shared.read().library.history, &before));
+    }
+    core.command(Command::ToggleFavorite {
+        track_ids: vec![1, 4, 1, 4],
+    })
+    .unwrap();
+    core.publish();
+    let after = core.shared.read().library.history.clone();
+    assert!(after.iter().all(|entry| entry.favorite));
+    assert!(before.iter().all(|entry| !entry.favorite));
+    let history_facts = |history: &[rivu_protocol::model::HistoryEntry]| {
+        history
+            .iter()
+            .map(|entry| (entry.track_id, entry.played_at, entry.play_count))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(history_facts(&after), history_facts(&before));
+    assert!(core.track(1).unwrap().favorite);
+    assert!(core.track(4).unwrap().favorite);
+}
+
+#[test]
 fn favorite_updates_preserve_counts_and_recent_history() {
     let (_directory, mut core) = fixture();
     playing(&mut core, 1);
