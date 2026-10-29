@@ -160,18 +160,37 @@ fn identical_shuffle_setter_preserves_previous_occurrence_history() {
     assert_eq!(core.played_cursor, 1);
 }
 
+fn start_cue_navigation(core: &mut Core) -> u64 {
+    let path = core.state.current_track().unwrap().path.clone();
+    let track_id = register_cue(
+        core,
+        &path,
+        CueSegment {
+            sheet: path.with_extension("cue"),
+            number: 1,
+            start_frame: 75,
+            end_frame: Some(300),
+        },
+        "Cue segment",
+    );
+    core.enqueue(&[track_id]).unwrap();
+    let id = core
+        .store
+        .queue_id_at(core.state.queue.total - 1)
+        .unwrap()
+        .unwrap();
+    core.start_with_status(id, false, PlaybackStatus::Paused)
+        .unwrap();
+    id
+}
+
 #[test]
 fn seek_uses_explicit_cue_end_not_estimated_whole_track_duration() {
     let (_directory, mut core) = navigation_fixture(PlaybackStatus::Paused);
     let _commands = recording_audio(&mut core);
     core.seek(25.0).unwrap();
     assert_eq!(core.state.playback.position, 25.0);
-    Arc::make_mut(core.state.current_track.as_mut().unwrap()).cue = Some(CueSegment {
-        sheet: "album.cue".into(),
-        number: 1,
-        start_frame: 75,
-        end_frame: Some(300),
-    });
+    start_cue_navigation(&mut core);
     core.seek(25.0).unwrap();
     assert_eq!(core.state.playback.position, 3.0);
 }
@@ -701,12 +720,7 @@ fn relative_intents_clamp_owner_values_and_reject_nonfinite_deltas() {
     .unwrap();
     // Metadata duration is not a hard seek boundary for ordinary audio.
     assert_eq!(core.state.playback.position, 25.0);
-    Arc::make_mut(core.state.current_track.as_mut().unwrap()).cue = Some(CueSegment {
-        sheet: "album.cue".into(),
-        number: 1,
-        start_frame: 75,
-        end_frame: Some(300),
-    });
+    let queue_id = start_cue_navigation(&mut core);
     core.command(Command::SeekRelative {
         queue_id,
         delta: 5.0,

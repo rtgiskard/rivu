@@ -181,12 +181,7 @@ impl Core {
         if self
             .playback
             .as_ref()
-            .is_some_and(|playback| playback.started)
-            && self
-                .state
-                .current_track
-                .as_ref()
-                .is_some_and(|track| track.cue.is_none())
+            .is_some_and(|playback| playback.started && playback.loaded_track.cue.is_none())
             && let Some(bitrate) = bitrate.filter(|bitrate| *bitrate > 0)
         {
             self.persist_playback_bitrate(bitrate, true);
@@ -217,7 +212,7 @@ impl Core {
         self.stop()?;
         // Retiring Started/Ended bookkeeping can enrich this same track in the store.
         // Keep the missing-file preflight above, but load the authoritative snapshot now.
-        let track = self.track(track.id)?;
+        let track = Arc::new(self.track(track.id)?);
         if status != PlaybackStatus::Stopped {
             let source = self.playback_source(&track).unwrap_or_else(|error| {
                 tracing::warn!(error = ?error, "playback_bitrate_identity_unavailable");
@@ -237,6 +232,7 @@ impl Core {
             })?;
             self.playback = Some(PlaybackStats {
                 track_id: track.id,
+                loaded_track: Arc::clone(&track),
                 source,
                 heard: 0.0,
                 position: None,
@@ -253,7 +249,7 @@ impl Core {
         // revisions through final accounting, but cannot move this occurrence.
         self.state.queue.current_position = Some(position);
         self.state.playback.duration = track.duration;
-        self.state.current_track = Some(Arc::new(track));
+        self.state.current_track = Some(track);
         self.state.playback.status = status;
         self.state.system.last_error = None;
         if record_history {
@@ -608,9 +604,9 @@ impl Core {
             bail!("Nothing is playing");
         }
         let end = self
-            .state
-            .current_track()
-            .and_then(|track| track.cue.as_ref())
+            .playback
+            .as_ref()
+            .and_then(|playback| playback.loaded_track.cue.as_ref())
             .and_then(|cue| cue.end_seconds().map(|end| end - cue.start_seconds()));
         let seconds = end.map_or(seconds, |end| seconds.min(end));
         let revision = self.state.playback.seek_revision.wrapping_add(1);

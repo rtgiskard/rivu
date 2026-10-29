@@ -57,6 +57,10 @@ Positions and seeks are relative to the subtrack; pregap directives do not
 synthesize silence absent from the source.
 Ordinary audio plays to actual decoder EOF; an estimated metadata duration is
 not a playback cutoff. An explicit CUE subtrack end remains a hard playback bound.
+A rescan can update the catalog's CUE source and boundaries without replacing
+the source already loaded for playback. The active track retains its loaded
+path, range and duration while editable metadata continues to refresh. Seeking
+uses that active range; the next explicit playback start adopts the new catalog source.
 
 Seek targets must be finite, non-negative, and representable on the source
 timeline. Invalid targets report an error without stopping playback, including

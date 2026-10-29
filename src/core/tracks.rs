@@ -32,7 +32,43 @@ impl Core {
     /// Queue admission precedes replacing the cache: a committed producer that
     /// cannot synchronize audio reports a refresh error and retains the old
     /// snapshot, so a later refresh still observes the outstanding difference.
-    pub(in crate::core) fn replace_current_track(&mut self, track: Option<Track>) -> Result<()> {
+    pub(in crate::core) fn replace_current_track(
+        &mut self,
+        mut track: Option<Track>,
+    ) -> Result<()> {
+        if let Some(track) = track.as_mut()
+            && let Some(playback) = self.playback.as_ref().filter(|p| p.track_id == track.id)
+        {
+            // A rescan can change the CUE FILE, range, and duration without loading
+            // a new decoder. Publish the source actually owned by this session;
+            // the next explicit start reads the new library facts.
+            if track.path != playback.loaded_track.path
+                || track.cue != playback.loaded_track.cue
+                || track.fingerprint != playback.loaded_track.fingerprint
+            {
+                let source = self
+                    .state
+                    .current_track
+                    .as_deref()
+                    .filter(|current| current.id == track.id)
+                    .unwrap_or(&playback.loaded_track);
+                track.codec.clone_from(&source.codec);
+                track.channels = source.channels;
+                track.sample_rate = source.sample_rate;
+                track.bits_per_sample = source.bits_per_sample;
+                track.bitrate_bps = source.bitrate_bps;
+                track.bitrate_exact = source.bitrate_exact;
+                track.path.clone_from(&playback.loaded_track.path);
+                track.cue.clone_from(&playback.loaded_track.cue);
+                track
+                    .fingerprint
+                    .clone_from(&playback.loaded_track.fingerprint);
+            }
+            track.duration = self.state.playback.duration;
+        }
+        if track.as_ref() == self.state.current_track.as_deref() {
+            return Ok(());
+        }
         if let Some(track) = track.as_ref()
             && self
                 .playback

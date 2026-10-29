@@ -826,6 +826,9 @@ struct PlaybackStats {
     paused_at: Option<i64>,
 }
 impl PlaybackStats {
+    // The source admitted by Load, shared with the initial current-track projection.
+    // Library refreshes may update metadata but cannot replace this session's source.
+    loaded_track: Arc<Track>,
     fn record_heard(&mut self, heard: f64, heard_at: i64) -> bool {
         if !heard.is_finite() || heard <= self.heard {
             return false;

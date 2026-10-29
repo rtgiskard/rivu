@@ -373,6 +373,54 @@ fn repair_queue_projection(connection: &rusqlite::Connection) {
         .unwrap();
 }
 
+fn register_cue(core: &mut Core, path: &Path, segment: CueSegment, title: &str) -> i64 {
+    let source = core
+        .store
+        .stored_scan_files(&[path.to_path_buf()])
+        .unwrap()
+        .into_iter()
+        .find(|source| source.path == path)
+        .unwrap();
+    let media = source.media.unwrap();
+    let duration = segment
+        .end_seconds()
+        .or(media.duration)
+        .map(|end| end - segment.start_seconds());
+    let sheet = segment.sheet.clone();
+    let number = segment.number;
+    let record = library::CueRecord::registered(
+        Arc::new(ScanRecord {
+            path: source.path,
+            size: source.size,
+            modified_ns: source.modified_ns,
+            fingerprint: source.fingerprint,
+            media: media.clone(),
+        }),
+        segment,
+        library::RegisteredCueMetadata {
+            title: title.into(),
+            artist: media.artist,
+            album: media.album,
+            track_number: Some(number),
+            disc_number: media.disc_number,
+            release_date: media.release_date,
+        },
+        duration,
+    );
+    let impact = core
+        .store
+        .apply_scan(&ScanResult {
+            segments: vec![record],
+            ..ScanResult::default()
+        })
+        .unwrap();
+    core.apply_scan_impacts(impact).unwrap();
+    core.store
+        .track_id_for_identity(crate::store::TrackIdentity::Cue(&sheet, number))
+        .unwrap()
+        .unwrap()
+}
+
 fn pending(core: &mut Core, queue_id: u64) {
     core.state.queue.current_id = Some(queue_id);
     core.save_queue().unwrap();
@@ -386,6 +434,7 @@ fn pending(core: &mut Core, queue_id: u64) {
     core.state.playback.duration = duration;
     core.playback = Some(PlaybackStats {
         track_id,
+        loaded_track: Arc::clone(core.state.current_track.as_ref().unwrap()),
         source: core
             .playback_source(core.state.current_track().unwrap())
             .unwrap(),

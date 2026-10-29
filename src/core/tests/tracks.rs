@@ -572,6 +572,149 @@ fn targeted_metadata_preserves_unrelated_track_and_playlist_reads() {
 }
 
 #[test]
+fn cue_rescan_preserves_loaded_source_and_seek_range_until_explicit_restart() {
+    for status in [PlaybackStatus::Playing, PlaybackStatus::Paused] {
+        for end_frame in [225, 750] {
+            let (directory, mut core) = fixture();
+            let source = directory.path().join("1.wav");
+            let replacement = directory.path().join("2.wav");
+            std::fs::write(&source, []).unwrap();
+            std::fs::write(&replacement, []).unwrap();
+            let known = core
+                .store
+                .stored_scan_files(std::slice::from_ref(&replacement))
+                .unwrap()
+                .pop()
+                .unwrap();
+            let mut media = known.media.unwrap();
+            media.codec = "replacement-codec".into();
+            media.sample_rate = 96_000;
+            media.channels = 1;
+            media.bits_per_sample = Some(24);
+            media.bitrate_bps = Some(2_304_000);
+            media.bitrate_exact = true;
+            let impact = core
+                .store
+                .apply_scan(&ScanResult {
+                    records: vec![Arc::new(ScanRecord {
+                        path: known.path,
+                        size: known.size,
+                        modified_ns: known.modified_ns,
+                        fingerprint: known.fingerprint,
+                        media,
+                    })],
+                    ..ScanResult::default()
+                })
+                .unwrap();
+            core.apply_scan_impacts(impact).unwrap();
+            let original = CueSegment {
+                sheet: directory.path().join("album.cue"),
+                number: 1,
+                start_frame: 75,
+                end_frame: Some(450),
+            };
+            let track_id = register_cue(&mut core, &source, original.clone(), "Original segment");
+            core.enqueue(&[track_id]).unwrap();
+            let queue_id = core
+                .store
+                .queue_id_at(core.state.queue.total - 1)
+                .unwrap()
+                .unwrap();
+            let commands = recording_audio(&mut core);
+            core.start_with_status(queue_id, false, status).unwrap();
+            assert!(matches!(
+                commands.recv_timeout(Duration::from_secs(2)).unwrap(),
+                AudioCommand::StopAndSnapshot(_)
+            ));
+            assert!(matches!(
+                commands.recv_timeout(Duration::from_secs(2)).unwrap(),
+                AudioCommand::Load { .. }
+            ));
+            started(&mut core, Some(5.0)).unwrap();
+            core.publish();
+            let before = core.shared.read().clone();
+            let generation = core.generation;
+            let changed = CueSegment {
+                start_frame: 150,
+                end_frame: Some(end_frame),
+                ..original.clone()
+            };
+            assert_eq!(
+                register_cue(
+                    &mut core,
+                    &replacement,
+                    changed.clone(),
+                    "Rescanned segment"
+                ),
+                track_id
+            );
+            core.publish();
+            let published = core.shared.read().clone();
+            let current = published.current_track().unwrap();
+            assert_eq!(current.path, source);
+            assert_eq!(current.cue.as_ref(), Some(&original));
+            assert_eq!(current.duration, Some(5.0));
+            assert_eq!(current.title, "Rescanned segment");
+            let original_metadata = before.current_track().unwrap();
+            assert_eq!(current.codec, original_metadata.codec);
+            assert_eq!(current.sample_rate, original_metadata.sample_rate);
+            assert_eq!(current.channels, original_metadata.channels);
+            assert_eq!(current.bits_per_sample, original_metadata.bits_per_sample);
+            assert_eq!(current.bitrate_bps, original_metadata.bitrate_bps);
+            assert_eq!(current.bitrate_exact, original_metadata.bitrate_exact);
+            assert_eq!(published.playback, before.playback);
+            assert_eq!(published.queue.current_id, Some(queue_id));
+            assert_eq!(core.generation, generation);
+            let stored = core.track(track_id).unwrap();
+            assert_eq!(stored.path, replacement);
+            assert_eq!(stored.cue.as_ref(), Some(&changed));
+            assert_eq!(stored.duration, Some((end_frame - 150) as f64 / 75.0));
+            assert_eq!(stored.codec, "replacement-codec");
+            assert_eq!(stored.sample_rate, 96_000);
+            assert_eq!(stored.channels, 1);
+            assert!(matches!(
+                commands.recv_timeout(Duration::from_secs(2)).unwrap(),
+                AudioCommand::Metadata { generation: value, metadata }
+                    if value == generation && metadata.title == "Rescanned segment"
+            ));
+            core.seek(99.0).unwrap();
+            assert_eq!(core.state.playback.position, 5.0);
+            assert_eq!(core.state.playback.status, status);
+            assert!(matches!(
+                commands.recv_timeout(Duration::from_secs(2)).unwrap(),
+                AudioCommand::Seek { seconds: 5.0, .. }
+            ));
+            assert!(commands.is_empty());
+
+            core.start_with_status(queue_id, false, status).unwrap();
+            assert!(matches!(
+                commands.recv_timeout(Duration::from_secs(2)).unwrap(),
+                AudioCommand::StopAndSnapshot(_)
+            ));
+            match commands.recv_timeout(Duration::from_secs(2)).unwrap() {
+                AudioCommand::Load {
+                    path,
+                    range: Some(range),
+                    paused,
+                    ..
+                } => {
+                    assert_eq!(path, replacement);
+                    assert_eq!(range.start_seconds, 2.0);
+                    assert_eq!(range.end_seconds, Some(end_frame as f64 / 75.0));
+                    assert_eq!(paused, status == PlaybackStatus::Paused);
+                }
+                _ => panic!("explicit restart must load the rescanned CUE source"),
+            }
+            assert_eq!(
+                core.state.current_track().unwrap().cue.as_ref(),
+                Some(&changed)
+            );
+            assert_eq!(before.current_track().unwrap().title, "Original segment");
+        }
+    }
+}
+
+#[test]
 fn favorite_updates_preserve_counts_and_recent_history() {
     let (_directory, mut core) = fixture();
     playing(&mut core, 1);
