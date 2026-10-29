@@ -960,20 +960,13 @@ impl Visuals {
                 .borrow_mut()
                 .prepaint_panel(panel_id, mode, available)
             {
-                let message: SharedString = i18n.text("visual-too-small").to_owned().into();
-                let tooltip = message.clone();
                 return div()
                     .id((kind, panel_id))
                     .size_full()
                     .min_w_0()
                     .min_h_0()
-                    .overflow_y_scroll()
-                    .bg(rgb(theme.panel))
-                    .text_color(rgb(theme.secondary))
-                    .text_size(px(10.0))
-                    .line_height(px(12.0))
-                    .tooltip(rivu_ui::text_tooltip(tooltip))
-                    .child(message)
+                    .overflow_hidden()
+                    .bg(rgb(visual_background))
                     .into_any_element();
             }
             div()
@@ -3103,7 +3096,7 @@ mod tests {
     }
 
     #[test]
-    fn small_canvases_explain_missing_space_instead_of_painting_unreadable_plots() {
+    fn small_canvases_skip_plots_and_cramped_spectra_omit_labels() {
         for (width, height) in [(64.0, 100.0), (100.0, 40.0), (300.0, 25.0)] {
             assert!(!visual_canvas_has_room(size(px(width), px(height))));
         }

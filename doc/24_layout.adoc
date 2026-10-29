@@ -188,14 +188,18 @@ solver is stored.
 == Geometry and constrained viewports
 
 Visualization sizing uses the actual content canvas, after any visible
-tab row, panel borders, and 0.5rem content insets. Spectrum and Spectrogram show an
-`Enlarge panel` hint when that canvas is at most 64px wide or 40px high; the hint
-remains accessible through its tooltip and scrolling. Audio Visualizer and
-Waveform do not yet share this hint; their smaller drawing cutoffs can leave a
-blank background. See
-link:90_open_issues.adoc#_small_visualization_canvas_feedback[Small visualization canvas feedback].
-Spectrum omits axis labels below 78px canvas height rather than overlapping its
-four dB labels, without changing the saved label preference.
+tab row, panel borders, and 0.5rem content insets. Small canvases shrink their
+plots or retain only the visual background, without size warnings or tooltips.
+Spectrum and Spectrogram omit their plots when the canvas is at most 64px wide
+or 40px high. Spectrum omits axis labels below 78px canvas height rather than
+overlapping its four dB labels, without changing the saved label preference.
+Audio Visualizer styles retain their own drawing cutoffs.
+
+Waveform hides its configured time labels at canvas heights of 32px or less,
+preserving wide, shallow plots. At widths or heights of 16px or less, it retains
+only the background and any existing load/error status, retires the panel's
+pointer capture and cancels its seek preview. Growing the panel restores drawing
+and configured labels; seeking requires a fresh press after capture cancellation.
 
 At the supported minimum window size (760 by 480), especially at interface scale
 2, not every list and plot can be useful simultaneously. Playback keeps vertical

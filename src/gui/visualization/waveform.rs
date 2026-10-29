@@ -842,6 +842,9 @@ impl WaveformInteraction {
     fn seek_seconds(&self, position: Point<Pixels>, panel_id: Option<u64>) -> Option<f64> {
         let panel_id = panel_id.or(self.active_panel)?;
         let (bounds, _) = self.panels.get(&panel_id)?;
+        if bounds.size.width <= px(0.0) || bounds.size.height <= px(0.0) {
+            return None;
+        }
         Some(seek_seconds(
             position.x,
             bounds.left(),
@@ -1459,229 +1462,258 @@ impl Waveform {
             cx.emit(WaveformEvent::Cancelled { generation });
         }
         let prepaint_interaction = Rc::clone(&interaction);
-        panel
-            .child(
-                div()
-                    .size_full()
-                    .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
-                    .on_mouse_move(cx.listener(Self::mouse_move))
-                    .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
-                    .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
-                    .child(
-                        canvas(
-                            move |bounds, _, _| {
-                                let plot = (bounds.size.width > px(16.0)
-                                    && bounds.size.height > px(if labels { 32.0 } else { 16.0 }))
-                                .then(|| {
-                                    Bounds::new(
+        let owner = cx.entity().downgrade();
+        let mouse_down = cx.listener(Self::mouse_down);
+        let mouse_move = cx.listener(Self::mouse_move);
+        let mouse_up = cx.listener(Self::mouse_up);
+        let mouse_up_out = cx.listener(Self::mouse_up);
+        gpui::container_query(move |available, _, cx| {
+            let labels = labels && available.height > px(32.0);
+            if available.width <= px(16.0) || available.height <= px(16.0) {
+                waveform.borrow_mut().columns.remove(&panel_id);
+                let _ = owner.update(cx, |waveform, cx| {
+                    if let Some(generation) = waveform.remove_interaction_panel(panel_id) {
+                        cx.emit(WaveformEvent::Cancelled { generation });
+                    }
+                });
+                return panel
+                    .children(status.map(super::visualization_status))
+                    .into_any_element();
+            }
+            panel
+                .child(
+                    div()
+                        .size_full()
+                        .on_mouse_down(MouseButton::Left, mouse_down)
+                        .on_mouse_move(mouse_move)
+                        .on_mouse_up(MouseButton::Left, mouse_up)
+                        .on_mouse_up_out(MouseButton::Left, mouse_up_out)
+                        .child(
+                            canvas(
+                                move |bounds, _, _| {
+                                    let plot = (bounds.size.width > px(16.0)
+                                        && bounds.size.height
+                                            > px(if labels { 32.0 } else { 16.0 }))
+                                    .then(|| {
+                                        Bounds::new(
+                                            bounds.origin + point(px(8.0), px(8.0)),
+                                            size(
+                                                bounds.size.width - px(16.0),
+                                                bounds.size.height
+                                                    - px(if labels { 32.0 } else { 16.0 }),
+                                            ),
+                                        )
+                                    });
+                                    if let Some(entry) =
+                                        prepaint_interaction.borrow_mut().panels.get_mut(&panel_id)
+                                    {
+                                        entry.0 = plot.unwrap_or_default();
+                                    }
+                                },
+                                move |bounds, _, window, cx| {
+                                    window.paint_quad(fill(bounds, background));
+                                    if bounds.size.width <= px(16.0)
+                                        || bounds.size.height
+                                            <= px(if labels { 32.0 } else { 16.0 })
+                                    {
+                                        waveform.borrow_mut().columns.remove(&panel_id);
+                                        return;
+                                    }
+                                    let plot = Bounds::new(
                                         bounds.origin + point(px(8.0), px(8.0)),
                                         size(
                                             bounds.size.width - px(16.0),
                                             bounds.size.height
                                                 - px(if labels { 32.0 } else { 16.0 }),
                                         ),
-                                    )
-                                });
-                                if let Some(entry) =
-                                    prepaint_interaction.borrow_mut().panels.get_mut(&panel_id)
-                                {
-                                    entry.0 = plot.unwrap_or_default();
-                                }
-                            },
-                            move |bounds, _, window, cx| {
-                                window.paint_quad(fill(bounds, background));
-                                if bounds.size.width <= px(16.0)
-                                    || bounds.size.height <= px(if labels { 32.0 } else { 16.0 })
-                                {
-                                    waveform.borrow_mut().columns.remove(&panel_id);
-                                    return;
-                                }
-                                let plot = Bounds::new(
-                                    bounds.origin + point(px(8.0), px(8.0)),
-                                    size(
-                                        bounds.size.width - px(16.0),
-                                        bounds.size.height - px(if labels { 32.0 } else { 16.0 }),
-                                    ),
-                                );
-                                let mut waveform = waveform.borrow_mut();
-                                let progress = {
-                                    let selected = paint_frame(&shared, full.as_ref());
-                                    let (frame, identity) = match &selected {
-                                        PaintFrame::Full(full) => {
-                                            (&full.frame, DisplayIdentity::Full(full.generation))
+                                    );
+                                    let mut waveform = waveform.borrow_mut();
+                                    let progress = {
+                                        let selected = paint_frame(&shared, full.as_ref());
+                                        let (frame, identity) = match &selected {
+                                            PaintFrame::Full(full) => (
+                                                &full.frame,
+                                                DisplayIdentity::Full(full.generation),
+                                            ),
+                                            PaintFrame::Progressive(frame) => (
+                                                &**frame,
+                                                DisplayIdentity::Progressive {
+                                                    source: Rc::clone(&source),
+                                                    decoder_hint: frame.decoder_hint,
+                                                    suspension_generation: frame
+                                                        .suspension_generation(),
+                                                },
+                                            ),
+                                        };
+                                        if !source.matches_target(frame) {
+                                            waveform.columns.remove(&panel_id);
+                                            return;
                                         }
-                                        PaintFrame::Progressive(frame) => (
-                                            &**frame,
-                                            DisplayIdentity::Progressive {
-                                                source: Rc::clone(&source),
-                                                decoder_hint: frame.decoder_hint,
-                                                suspension_generation: frame
-                                                    .suspension_generation(),
+                                        waveform.columns_for_frame(
+                                            panel_id,
+                                            (plot.size.width / px(1.0)) as usize,
+                                            frame,
+                                            identity,
+                                            cache_enabled,
+                                            WaveformMapping {
+                                                rms_gain,
+                                                peak_gain,
+                                                peak_gamma,
                                             },
-                                        ),
+                                        );
+                                        progress(position, timeline(frame, duration))
                                     };
-                                    if !source.matches_target(frame) {
-                                        waveform.columns.remove(&panel_id);
+                                    let width_px = (plot.size.width / px(1.0)).ceil().max(1.0);
+                                    let result = (|| {
+                                        if let Some(frame) = waveform.publication(
+                                            panel_id,
+                                            config_palette,
+                                            cache_enabled,
+                                            &palette,
+                                        )? {
+                                            window
+                                                .paint_gpu(
+                                                    Bounds::new(
+                                                        plot.origin,
+                                                        size(px(width_px), plot.size.height),
+                                                    ),
+                                                    GpuSource::Fixed(frame),
+                                                )
+                                                .map_err(|error| error.to_string())?;
+                                        }
+                                        Ok::<(), String>(())
+                                    })();
+                                    if let Err(error) = result {
+                                        window.paint_quad(fill(
+                                            Bounds::new(
+                                                plot.origin,
+                                                size(plot.size.width, px(22.0)),
+                                            ),
+                                            rgb(error_theme.error_bg),
+                                        ));
+                                        super::visuals::paint_label(
+                                            error_i18n
+                                                .format(
+                                                    "visual-error",
+                                                    &[("error", error.as_str().into())],
+                                                )
+                                                .into(),
+                                            plot.origin + point(px(6.0), px(3.0)),
+                                            error_theme.error,
+                                            window,
+                                            cx,
+                                        );
                                         return;
                                     }
-                                    waveform.columns_for_frame(
-                                        panel_id,
-                                        (plot.size.width / px(1.0)) as usize,
-                                        frame,
-                                        identity,
-                                        cache_enabled,
-                                        WaveformMapping {
-                                            rms_gain,
-                                            peak_gain,
-                                            peak_gamma,
-                                        },
-                                    );
-                                    progress(position, timeline(frame, duration))
-                                };
-                                let width_px = (plot.size.width / px(1.0)).ceil().max(1.0);
-                                let result = (|| {
-                                    if let Some(frame) = waveform.publication(
-                                        panel_id,
-                                        config_palette,
-                                        cache_enabled,
-                                        &palette,
-                                    )? {
-                                        window
-                                            .paint_gpu(
-                                                Bounds::new(
-                                                    plot.origin,
-                                                    size(px(width_px), plot.size.height),
-                                                ),
-                                                GpuSource::Fixed(frame),
-                                            )
-                                            .map_err(|error| error.to_string())?;
-                                    }
-                                    Ok::<(), String>(())
-                                })();
-                                if let Err(error) = result {
-                                    window.paint_quad(fill(
-                                        Bounds::new(plot.origin, size(plot.size.width, px(22.0))),
-                                        rgb(error_theme.error_bg),
-                                    ));
-                                    super::visuals::paint_label(
-                                        error_i18n
-                                            .format(
-                                                "visual-error",
-                                                &[("error", error.as_str().into())],
-                                            )
-                                            .into(),
-                                        plot.origin + point(px(6.0), px(3.0)),
-                                        error_theme.error,
-                                        window,
-                                        cx,
-                                    );
-                                    return;
-                                }
-                                if let Some(fraction) = progress {
-                                    // Slow periodic easing gives the droplet a deliberate rhythm;
-                                    // it never snaps at a cycle boundary.
-                                    let jitter = cursor_wobble(position) * 0.8;
-                                    let cursor_center = plot.center().y + px(jitter);
-                                    let scale = window.scale_factor();
-                                    let line_width = px((1.5 * scale).round().max(1.0) / scale);
-                                    let line_left = px((f32::from(
-                                        plot.left() + plot.size.width * fraction - line_width * 0.5,
-                                    ) * scale)
-                                        .round()
-                                        / scale);
-                                    let x = line_left + line_width * 0.5;
-                                    let cursor_top = (cursor_center - px(22.0)).max(plot.top());
-                                    let cursor_bottom =
-                                        (cursor_center + px(22.0)).min(plot.bottom());
-                                    if glow > 0.0 {
-                                        window.paint_quad(fill(
-                                            Bounds::new(
-                                                point(x - px(2.0), cursor_top),
-                                                size(px(4.0), cursor_bottom - cursor_top),
-                                            ),
-                                            water.alpha(0.06 * glow),
-                                        ));
-                                    }
-                                    // Keep the short line close to the droplet, without
-                                    // cutting through its body. Small panels use only the line.
-                                    let line_gap = if plot.size.height >= px(24.0) {
-                                        px(5.0)
-                                    } else {
-                                        px(0.0)
-                                    };
-                                    for (top, bottom) in [
-                                        (cursor_top, cursor_center - line_gap),
-                                        (cursor_center + line_gap, cursor_bottom),
-                                    ] {
-                                        if bottom > top {
+                                    if let Some(fraction) = progress {
+                                        // Slow periodic easing gives the droplet a deliberate rhythm;
+                                        // it never snaps at a cycle boundary.
+                                        let jitter = cursor_wobble(position) * 0.8;
+                                        let cursor_center = plot.center().y + px(jitter);
+                                        let scale = window.scale_factor();
+                                        let line_width = px((1.5 * scale).round().max(1.0) / scale);
+                                        let line_left = px((f32::from(
+                                            plot.left() + plot.size.width * fraction
+                                                - line_width * 0.5,
+                                        ) * scale)
+                                            .round()
+                                            / scale);
+                                        let x = line_left + line_width * 0.5;
+                                        let cursor_top = (cursor_center - px(22.0)).max(plot.top());
+                                        let cursor_bottom =
+                                            (cursor_center + px(22.0)).min(plot.bottom());
+                                        if glow > 0.0 {
                                             window.paint_quad(fill(
                                                 Bounds::new(
-                                                    point(line_left, top),
-                                                    size(line_width, bottom - top),
+                                                    point(x - px(2.0), cursor_top),
+                                                    size(px(4.0), cursor_bottom - cursor_top),
                                                 ),
-                                                water.alpha(0.7),
+                                                water.alpha(0.06 * glow),
                                             ));
                                         }
-                                    }
-                                    if plot.size.height >= px(24.0) {
-                                        if glow > 0.0 {
-                                            let mut halo = fill(
-                                                Bounds::new(
-                                                    point(x - px(5.5), cursor_center - px(6.0)),
-                                                    size(px(11.0), px(12.0)),
-                                                ),
-                                                water.alpha(0.08 * glow),
-                                            );
-                                            halo.corner_radii = px(5.5).into();
-                                            window.paint_quad(halo);
+                                        // Keep the short line close to the droplet, without
+                                        // cutting through its body. Small panels use only the line.
+                                        let line_gap = if plot.size.height >= px(24.0) {
+                                            px(5.0)
+                                        } else {
+                                            px(0.0)
+                                        };
+                                        for (top, bottom) in [
+                                            (cursor_top, cursor_center - line_gap),
+                                            (cursor_center + line_gap, cursor_bottom),
+                                        ] {
+                                            if bottom > top {
+                                                window.paint_quad(fill(
+                                                    Bounds::new(
+                                                        point(line_left, top),
+                                                        size(line_width, bottom - top),
+                                                    ),
+                                                    water.alpha(0.7),
+                                                ));
+                                            }
                                         }
-                                        window.paint_quad(fill(
-                                            Bounds::new(
-                                                point(x - px(1.0), cursor_center - px(5.0)),
-                                                size(px(2.0), px(2.0)),
-                                            ),
-                                            water,
-                                        ));
-                                        let mut droplet = fill(
-                                            Bounds::new(
-                                                point(x - px(3.5), cursor_center - px(4.0)),
-                                                size(px(7.0), px(8.0)),
-                                            ),
-                                            water,
-                                        );
-                                        droplet.corner_radii = px(3.5).into();
-                                        window.paint_quad(droplet);
+                                        if plot.size.height >= px(24.0) {
+                                            if glow > 0.0 {
+                                                let mut halo = fill(
+                                                    Bounds::new(
+                                                        point(x - px(5.5), cursor_center - px(6.0)),
+                                                        size(px(11.0), px(12.0)),
+                                                    ),
+                                                    water.alpha(0.08 * glow),
+                                                );
+                                                halo.corner_radii = px(5.5).into();
+                                                window.paint_quad(halo);
+                                            }
+                                            window.paint_quad(fill(
+                                                Bounds::new(
+                                                    point(x - px(1.0), cursor_center - px(5.0)),
+                                                    size(px(2.0), px(2.0)),
+                                                ),
+                                                water,
+                                            ));
+                                            let mut droplet = fill(
+                                                Bounds::new(
+                                                    point(x - px(3.5), cursor_center - px(4.0)),
+                                                    size(px(7.0), px(8.0)),
+                                                ),
+                                                water,
+                                            );
+                                            droplet.corner_radii = px(3.5).into();
+                                            window.paint_quad(droplet);
+                                        }
                                     }
-                                }
-                            },
-                        )
-                        .size_full(),
-                    ),
-            )
-            .when(labels, |panel| {
-                panel.child(
-                    rivu_ui::row()
-                        .absolute()
-                        .bottom_0()
-                        .left_0()
-                        .w_full()
-                        .px_2()
-                        .justify_between()
-                        .text_xs()
-                        .text_color(rgb(0xb1bbc5))
-                        .child("0:00")
-                        .child(
-                            label_duration.map_or_else(|| "—".into(), super::super::format_time),
+                                },
+                            )
+                            .size_full(),
                         ),
                 )
-            })
-            .children(status.map(|message| {
-                super::visualization_status(message)
-                    .absolute()
-                    .top_0()
-                    .left_0()
-            }))
-            .into_any_element()
+                .when(labels, |panel| {
+                    panel.child(
+                        rivu_ui::row()
+                            .absolute()
+                            .bottom_0()
+                            .left_0()
+                            .w_full()
+                            .px_2()
+                            .justify_between()
+                            .text_xs()
+                            .text_color(rgb(0xb1bbc5))
+                            .child("0:00")
+                            .child(
+                                label_duration
+                                    .map_or_else(|| "—".into(), super::super::format_time),
+                            ),
+                    )
+                })
+                .children(status.map(|message| {
+                    super::visualization_status(message)
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                }))
+                .into_any_element()
+        })
+        .into_any_element()
     }
 }
 
@@ -2477,6 +2509,54 @@ mod tests {
         let mut owner = LayoutInteraction::default();
         owner.waveform_preview(10., Some(11), 7);
         (waveform, owner)
+    }
+
+    #[test]
+    fn collapsed_waveform_geometry_cannot_produce_a_seek() {
+        let (mut waveform, mut owner) = captured_seek();
+        let position = point(px(60.0), px(5.0));
+        let bounds = Bounds::new(point(px(10.0), px(0.0)), size(px(100.0), px(20.0)));
+        waveform
+            .interaction
+            .borrow_mut()
+            .panels
+            .insert(1, (bounds, Some(20.0)));
+        assert_eq!(
+            waveform.interaction.borrow().seek_seconds(position, None),
+            Some(10.0)
+        );
+        for size in [size(px(0.0), px(20.0)), size(px(100.0), px(0.0))] {
+            waveform
+                .interaction
+                .borrow_mut()
+                .panels
+                .insert(1, (Bounds::new(bounds.origin, size), Some(20.0)));
+            assert_eq!(
+                waveform.interaction.borrow().seek_seconds(position, None),
+                None
+            );
+        }
+        let cancelled = waveform.remove_interaction_panel(1).unwrap();
+        assert!(!waveform.accepts_seek_event(7));
+        assert!(owner.cancel_waveform(cancelled));
+        assert_eq!(owner.finish_waveform(20.0, 7), None);
+        waveform
+            .interaction
+            .borrow_mut()
+            .panels
+            .insert(1, (bounds, Some(20.0)));
+        assert_eq!(
+            waveform.interaction.borrow().seek_seconds(position, None),
+            None
+        );
+        waveform.interaction.borrow_mut().seek_duration = Some(20.0);
+        assert_eq!(
+            waveform
+                .interaction
+                .borrow()
+                .seek_seconds(position, Some(1)),
+            Some(10.0)
+        );
     }
 
     #[test]
