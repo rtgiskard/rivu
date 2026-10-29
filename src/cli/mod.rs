@@ -1,39 +1,36 @@
 mod args;
+mod library;
 mod output;
 mod processing;
 mod tasks;
 
 use self::{
     args::{
-        Action, Args, LibraryAction, OtherTracksAction, PlaybackAction, PlaylistAction,
-        QueueAction, Repeat, Switch, localize_help, terminal_cli_error,
+        Action, Args, PlaybackAction, PlaylistAction, QueueAction, Repeat, Switch, localize_help,
+        terminal_cli_error,
     },
-    output::{
-        TerminalEscaped, list_library, list_playlists, list_queue, show_ack, show_state,
-        terminal_text,
-    },
+    output::{TerminalEscaped, list_playlists, list_queue, show_ack, show_state},
 };
 use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, FromArgMatches};
-use rivu::config::ConfigPersistence;
 use rivu::{app::App, config, i18n::Localizer, terminal};
 use rivu_audio as audio;
 use rivu_protocol::{
-    model::{Command, Query, RepeatMode},
-    response::{StateSections, ViewResponse},
+    model::{Command, RepeatMode},
+    response::StateSections,
 };
 use std::path::PathBuf;
 
-pub(super) struct RuntimeError {
+pub(super) struct CliError {
     error: anyhow::Error,
     json: bool,
 }
 
-pub(super) fn print_error(error: &RuntimeError) {
+pub(super) fn print_error(error: &CliError) {
     let _ = output::write_error(&mut std::io::stderr().lock(), &error.error, error.json);
 }
 
-pub(super) fn run() -> std::result::Result<(), RuntimeError> {
+pub(super) fn run() -> std::result::Result<(), CliError> {
     // Command-line surfaces use the process locale, independently of GUI settings.
     let language = "auto";
     let i18n = Localizer::new(language);
@@ -48,7 +45,7 @@ pub(super) fn run() -> std::result::Result<(), RuntimeError> {
     args.validate(&matches)
         .unwrap_or_else(|error| terminal_cli_error(error).exit());
     let json = args.json;
-    execute(args, i18n).map_err(|error| RuntimeError { error, json })
+    execute(args, i18n).map_err(|error| CliError { error, json })
 }
 
 fn execute(args: Args, i18n: Localizer) -> Result<()> {
@@ -72,95 +69,7 @@ fn execute(args: Args, i18n: Localizer) -> Result<()> {
         )?
         .run(),
         Action::Tui => terminal::run(&data_dir, "auto"),
-        Action::Library(LibraryAction::Probe { path, enhanced }) => {
-            let probe_config = config::Config::load(&config_path)?;
-            let ffmpeg_enabled = probe_config.ffmpeg_enabled || enhanced;
-            let result = audio::probe_details(&path, ffmpeg_enabled, enhanced)?;
-            let info = result.info;
-            let decoder_status = if ffmpeg_enabled {
-                audio::ffmpeg_status().unwrap_or_else(|error| format!("unavailable: {error:#}"))
-            } else {
-                "disabled".to_owned()
-            };
-            if args.json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "path": path, "title": info.title, "artist": info.artist, "album": info.album,
-                        "codec": info.codec, "channels": info.channels, "sample_rate": info.sample_rate,
-                        "duration": info.duration, "ffmpeg_enabled": ffmpeg_enabled,
-                        "bitrate_bps": info.bitrate_bps, "bits_per_sample": info.bits_per_sample,
-                        "bitrate_exact": info.bitrate_exact,
-                        "track_number": info.track_number, "disc_number": info.disc_number,
-                        "release_date": info.release_date,
-                        "ffmpeg_status": decoder_status,
-                        "probe_backend": result.probe_backend,
-                        "decoder_backend": result.decoder_backend,
-                    }))?
-                );
-                return Ok(());
-            }
-            println!(
-                "{}",
-                i18n.format(
-                    "core-probe",
-                    &[
-                        ("path", TerminalEscaped(path.display()).to_string().into()),
-                        ("title", terminal_text(&info.title).into()),
-                        ("artist", terminal_text(&info.artist).into()),
-                        ("album", terminal_text(&info.album).into()),
-                        ("codec", terminal_text(&info.codec).into()),
-                        ("channels", info.channels.to_string().into()),
-                        ("sample-rate", info.sample_rate.to_string().into()),
-                        (
-                            "duration",
-                            info.duration
-                                .map_or_else(
-                                    || i18n.text("core-unknown").to_owned(),
-                                    |value| format!("{value:.3} s")
-                                )
-                                .into()
-                        ),
-                        (
-                            "bitrate",
-                            info.bitrate_bps
-                                .map_or("—".into(), |value| format!(
-                                    "{}{:.1} kbps",
-                                    if info.bitrate_exact { "" } else { "≈" },
-                                    value as f64 / 1000.0
-                                ))
-                                .into()
-                        ),
-                        (
-                            "bits",
-                            info.bits_per_sample
-                                .map_or("—".into(), |v| v.to_string())
-                                .into()
-                        ),
-                        (
-                            "track",
-                            info.track_number
-                                .map_or("—".into(), |v| v.to_string())
-                                .into()
-                        ),
-                        (
-                            "disc",
-                            info.disc_number
-                                .map_or("—".into(), |v| v.to_string())
-                                .into()
-                        ),
-                        (
-                            "date",
-                            terminal_text(info.release_date.as_deref().unwrap_or("—")).into()
-                        ),
-                        ("probe", result.probe_backend.to_string().into()),
-                        ("decoder", result.decoder_backend.to_string().into()),
-                        ("ffmpeg", terminal_text(&decoder_status).into()),
-                    ]
-                )
-            );
-            Ok(())
-        }
+        Action::Library(action) => library::run(&i18n, &data_dir, &config_path, action, args.json),
         Action::Playback(PlaybackAction::Devices) => {
             let devices = audio::devices()?;
             if args.json {
@@ -176,254 +85,11 @@ fn execute(args: Args, i18n: Localizer) -> Result<()> {
             let response = rivu_client::get_state(&data_dir, StateSections::ALL)?;
             show_state(&i18n, &response, args.json)
         }
-        Action::Library(LibraryAction::List {
-            query,
-            favorite,
-            missing,
-        }) => list_library(&i18n, &data_dir, args.json, query, favorite, missing),
-        Action::Library(LibraryAction::Other(
-            action @ (OtherTracksAction::List { .. }
-            | OtherTracksAction::Count
-            | OtherTracksAction::Locate { .. }),
-        )) => {
-            let query = other_tracks_query(action)?;
-            let view = rivu_client::query(&data_dir, query)?
-                .result
-                .map_err(anyhow::Error::from)?;
-            output::show_other_tracks(&i18n, view, args.json)
-        }
         Action::Task(action) => tasks::run(&i18n, &data_dir, action, args.json),
-        Action::Library(LibraryAction::Stats) => {
-            let response = rivu_client::query(&data_dir, Query::LibraryStats)?;
-            let ViewResponse::LibraryStats(stats) = response.result.map_err(anyhow::Error::from)?
-            else {
-                bail!("Statistics query returned an unexpected response");
-            };
-            if args.json {
-                println!("{}", serde_json::to_string_pretty(&stats)?);
-            } else {
-                println!(
-                    "{}",
-                    i18n.format(
-                        "core-stats",
-                        &[
-                            ("tracks", stats.total.to_string().into()),
-                            ("plays", stats.play_count.to_string().into())
-                        ]
-                    )
-                );
-            }
-            Ok(())
-        }
-        Action::Library(LibraryAction::History { limit }) => {
-            let response = rivu_client::get_state(
-                &data_dir,
-                StateSections {
-                    library: true,
-                    ..StateSections::default()
-                },
-            )?;
-            let state = response
-                .library
-                .as_ref()
-                .context("State omitted library section")?;
-            if args.json {
-                return output::show_history(&mut std::io::stdout().lock(), &state.history, limit);
-            }
-            for entry in state.history.iter().take(limit) {
-                println!(
-                    "{}\t{}\t{}",
-                    entry.played_at,
-                    entry.track_id,
-                    TerminalEscaped(&entry.title)
-                );
-            }
-            Ok(())
-        }
         Action::Queue(QueueAction::List) => list_queue(&i18n, &data_dir, args.json),
         Action::Playlist(PlaylistAction::List) => list_playlists(&i18n, &data_dir, args.json),
         Action::Playlist(PlaylistAction::Show { playlist_id }) => {
             output::show_playlist(&i18n, &data_dir, playlist_id, args.json)
-        }
-        Action::Library(LibraryAction::Edit {
-            track_id,
-            title,
-            artist,
-            album,
-        }) => {
-            let command = Command::EditTrack {
-                track_id,
-                title,
-                artist,
-                album,
-                decoder_hint: None,
-            };
-            let ack = rivu_client::request_ack(&data_dir, command)?;
-            show_ack(&i18n, &ack, args.json)
-        }
-        Action::Library(LibraryAction::Duplicates {
-            fingerprint,
-            offset,
-            limit,
-        }) => {
-            let query = match fingerprint {
-                Some(fingerprint) => Query::DuplicateMembers {
-                    fingerprint,
-                    offset,
-                    limit,
-                },
-                None => Query::DuplicateGroups { offset, limit },
-            };
-            let view = rivu_client::query(&data_dir, query)?
-                .result
-                .map_err(anyhow::Error::from)?;
-            if args.json {
-                output::show_duplicates(&mut std::io::stdout().lock(), &view)?;
-            } else {
-                match view {
-                    ViewResponse::DuplicateGroups(page) => {
-                        println!(
-                            "{}",
-                            i18n.format(
-                                "core-duplicate-groups",
-                                &[("count", page.total.to_string().into())]
-                            )
-                        );
-                        for group in page.rows {
-                            println!(
-                                "{}",
-                                i18n.format(
-                                    "core-duplicate-group",
-                                    &[
-                                        ("fingerprint", terminal_text(&group.fingerprint).into()),
-                                        ("total", group.total_members.to_string().into()),
-                                        ("missing", group.missing_members.to_string().into()),
-                                        ("present", group.present_members.to_string().into()),
-                                    ]
-                                )
-                            );
-                        }
-                    }
-                    ViewResponse::DuplicateMembers(page) => {
-                        println!(
-                            "{}",
-                            i18n.format(
-                                "core-duplicate-members",
-                                &[("count", page.total.to_string().into())]
-                            )
-                        );
-                        for member in page.rows {
-                            println!(
-                                "{}",
-                                i18n.format(
-                                    "core-duplicate-member",
-                                    &[
-                                        ("id", member.track.id.to_string().into()),
-                                        (
-                                            "path",
-                                            TerminalEscaped(member.track.path.display())
-                                                .to_string()
-                                                .into()
-                                        ),
-                                        (
-                                            "status",
-                                            i18n.text(if member.track.missing {
-                                                "core-last-scan-missing"
-                                            } else {
-                                                "core-last-scan-present"
-                                            })
-                                            .into()
-                                        ),
-                                        (
-                                            "favorite",
-                                            i18n.text(if member.track.favorite {
-                                                "core-yes"
-                                            } else {
-                                                "core-no"
-                                            })
-                                            .into()
-                                        ),
-                                        (
-                                            "overrides",
-                                            i18n.text(if member.has_overrides {
-                                                "core-yes"
-                                            } else {
-                                                "core-no"
-                                            })
-                                            .into()
-                                        ),
-                                        ("plays", member.track.play_count.to_string().into()),
-                                        (
-                                            "playlists",
-                                            member.playlist_references.to_string().into()
-                                        ),
-                                        ("queue", member.queue_references.to_string().into()),
-                                        (
-                                            "independent",
-                                            i18n.text(if member.independent {
-                                                "core-yes"
-                                            } else {
-                                                "core-no"
-                                            })
-                                            .into()
-                                        ),
-                                    ]
-                                )
-                            );
-                        }
-                    }
-                    _ => bail!("Duplicate query returned an unexpected response"),
-                }
-            }
-            Ok(())
-        }
-        Action::Library(LibraryAction::Relocate {
-            source_id,
-            target_id,
-            wait,
-        }) => {
-            let mut session = rivu_client::client_session(&data_dir)?;
-            let ack = session.request_ack(Command::RelocateTrack {
-                source_id,
-                target_id,
-            })?;
-            if !ack.is_success() || !wait {
-                return output::show_task_ack(&i18n, &session, &ack, args.json);
-            }
-            let id = ack
-                .relocation_id
-                .context("Relocation startup omitted task ID")?;
-            tasks::wait_relocation(&i18n, &mut session, id, args.json)
-        }
-        Action::Library(LibraryAction::Optimize) => {
-            let ack = rivu_client::request_ack(&data_dir, Command::OptimizeDatabase)?;
-            if args.json || !ack.is_success() {
-                return show_ack(&i18n, &ack, args.json);
-            }
-            let report = ack
-                .database_optimization
-                .as_ref()
-                .context("Database optimization returned no size report")?;
-            let before = report
-                .database_bytes_before
-                .saturating_add(report.wal_bytes_before);
-            let after = report
-                .database_bytes_after
-                .saturating_add(report.wal_bytes_after);
-            println!(
-                "{}",
-                i18n.format(
-                    "core-optimization",
-                    &[
-                        ("before", report.database_bytes_before.to_string().into()),
-                        ("after", report.database_bytes_after.to_string().into()),
-                        ("wal-before", report.wal_bytes_before.to_string().into()),
-                        ("wal-after", report.wal_bytes_after.to_string().into()),
-                        ("reclaimed", before.saturating_sub(after).to_string().into()),
-                    ]
-                )
-            );
-            Ok(())
         }
         Action::Quit => {
             let ack = rivu_client::request_ack(&data_dir, rivu_protocol::AppCommand::Shutdown)?;
@@ -431,18 +97,28 @@ fn execute(args: Args, i18n: Localizer) -> Result<()> {
         }
         action => {
             let (command, wait_scan) = translate(action)?;
-            let mut session = rivu_client::client_session(&data_dir)?;
-            let ack = session.request_ack(command)?;
-            if !ack.is_success() {
-                return output::show_task_ack(&i18n, &session, &ack, args.json);
-            }
-            if wait_scan {
-                let id = ack.scan_id.context("Scan startup omitted task ID")?;
-                return tasks::wait_scan(&i18n, &mut session, id, args.json);
-            }
-            output::show_task_ack(&i18n, &session, &ack, args.json)
+            submit_command(&i18n, &data_dir, command, wait_scan, args.json)
         }
     }
+}
+
+fn submit_command(
+    i18n: &Localizer,
+    data_dir: &std::path::Path,
+    command: Command,
+    wait_scan: bool,
+    json: bool,
+) -> Result<()> {
+    let mut session = rivu_client::client_session(data_dir)?;
+    let ack = session.request_ack(command)?;
+    if !ack.is_success() {
+        return output::show_task_ack(i18n, &session, &ack, json);
+    }
+    if wait_scan {
+        let id = ack.scan_id.context("Scan startup omitted task ID")?;
+        return tasks::wait_scan(i18n, &mut session, id, json);
+    }
+    output::show_task_ack(i18n, &session, &ack, json)
 }
 
 // Resolve against the caller's cwd, without expanding or canonicalizing input.
@@ -457,54 +133,10 @@ fn client_path(path: PathBuf) -> Result<PathBuf> {
     }
 }
 
-fn other_tracks_query(action: OtherTracksAction) -> Result<Query> {
-    Ok(match action {
-        OtherTracksAction::List {
-            filter,
-            offset,
-            limit,
-        } => Query::OtherTracksPage {
-            query: filter.query,
-            favorite: filter.favorite,
-            missing: filter.missing,
-            sort: filter.sort.into(),
-            offset,
-            limit,
-        },
-        OtherTracksAction::Count => Query::OtherTracksCount,
-        OtherTracksAction::Locate { track_id, filter } => Query::OtherTracksLocate {
-            track_id,
-            query: filter.query,
-            favorite: filter.favorite,
-            missing: filter.missing,
-            sort: filter.sort.into(),
-        },
-        OtherTracksAction::Check { .. } => bail!("File checks are commands, not queries"),
-    })
-}
-
 fn translate(action: Action) -> Result<(Command, bool)> {
     let mut wait = false;
     let command = match action {
-        Action::Library(LibraryAction::Optimize) => Command::OptimizeDatabase,
-        Action::Library(LibraryAction::Scan {
-            paths,
-            wait: should_wait,
-            force,
-        }) => {
-            wait = should_wait;
-            Command::Scan {
-                paths: paths.into_iter().map(client_path).collect::<Result<_>>()?,
-                force,
-            }
-        }
-        Action::Library(LibraryAction::Other(OtherTracksAction::Check {
-            wait: should_wait,
-            force,
-        })) => {
-            wait = should_wait;
-            Command::CheckOtherTracks { force }
-        }
+        Action::Library(action) => return library::translate(action),
         Action::Playback(PlaybackAction::Play { track_id }) => {
             track_id.map_or(Command::Resume, |track_id| Command::Play { track_id })
         }
@@ -588,15 +220,6 @@ fn translate(action: Action) -> Result<(Command, bool)> {
             },
             PlaylistAction::List | PlaylistAction::Show { .. } => unreachable!(),
         },
-        Action::Library(LibraryAction::Remove { track_ids }) => Command::RemoveTracks { track_ids },
-        Action::Library(LibraryAction::Favorite { track_ids, mode }) => Command::SetFavorite {
-            track_ids,
-            favorite: matches!(mode, Switch::On),
-        },
-        Action::Library(LibraryAction::CleanMissing) => Command::RemoveMissingTracks,
-        Action::Library(LibraryAction::KeepIndependent { track_id }) => {
-            Command::KeepTrackIndependent { track_id }
-        }
         Action::Playback(PlaybackAction::Device { name }) => Command::Device { name },
         Action::Gui { .. }
         | Action::Serve { .. }
@@ -605,24 +228,15 @@ fn translate(action: Action) -> Result<(Command, bool)> {
         | Action::Status
         | Action::Task(_)
         | Action::Playback(PlaybackAction::Devices)
-        | Action::Processing(_)
-        | Action::Library(
-            LibraryAction::List { .. }
-            | LibraryAction::Other(_)
-            | LibraryAction::Edit { .. }
-            | LibraryAction::Stats
-            | LibraryAction::History { .. }
-            | LibraryAction::Probe { .. }
-            | LibraryAction::Duplicates { .. }
-            | LibraryAction::Relocate { .. },
-        ) => bail!("This action is not a playback command"),
+        | Action::Processing(_) => bail!("This action is not a playback command"),
     };
     Ok((command, wait))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, Command, LibraryAction, PlaylistAction, translate};
+    use super::args::LibraryAction;
+    use super::{Action, Command, PlaylistAction, translate};
     use anyhow::Result;
 
     #[test]
@@ -687,10 +301,12 @@ mod tests {
 
 #[cfg(test)]
 mod other_tracks_tests {
-    use super::{Action, Args, Command, LibraryAction, Query, other_tracks_query, translate};
+    use super::{Action, Args, Command, translate};
+    use super::{args::LibraryAction, library::other_tracks_query};
     use anyhow::Result;
     use clap::Parser;
     use rivu_protocol::model::LibrarySort;
+    use rivu_protocol::model::Query;
 
     fn action(arguments: &[&str]) -> Action {
         Args::try_parse_from(std::iter::once("rivu").chain(arguments.iter().copied()))
