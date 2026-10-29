@@ -205,7 +205,6 @@ file_group!(Visualizations, VisualizationsView {
     analysis_fft_size => analysis_fft_size: u32,
     analysis_window => analysis_window: AnalysisWindow,
     db_range => visualization_db_range: f32,
-    cache => visualization_cache: bool,
 }; spectrum: Spectrum, SpectrumView
 ; spectrogram: Spectrogram, SpectrogramView
 ; audio_visualizer: AudioVisualizer, AudioVisualizerView

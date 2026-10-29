@@ -6,7 +6,7 @@
 
 Rendering preserves the meaning of the signal: RMS is a continuous energy
 area, Peak is a discrete transient marker, and Spectrogram is chronological
-frequency history. Palette choices and cache policy must not alter the
+frequency history. Palette choices and rendering reuse must not alter the
 underlying audio data.
 
 This document explains rendering choices and their tradeoffs. User controls,
@@ -175,9 +175,8 @@ must not redraw the prior source under the new identity.
 Only affected visual panel entities are invalidated by analysis or waveform
 updates. Cached scenes retain their measured panel dimensions until geometry or
 visibility changes. Shared Spectrogram geometry changes invalidate sibling
-scenes so every panel uses the current history dimensions. Disabling visualization
-caching also disables scene caching for these panels. Playback, commands, and
-shutdown remain independent of presentation.
+scenes so every panel uses the current history dimensions. Scene caching is always
+enabled. Playback, commands, and shutdown remain independent of presentation.
 
 A reliable Hidden notification cancels both clocks and disables analysis.
 The last drawable presentation survives temporary hide and tab changes until a
@@ -337,13 +336,13 @@ Spectrogram continues to use the complete palette,
 including DeaDBeeF's black floor. These color mappings do not alter signal levels
 or amplitude geometry.
 
-Peak markers are discrete, solid-colored markers drawn separately from the
-body. They are not connected into a curve, and the body cache does not own their
-geometry. This preserves their transient-marker meaning while keeping body
-reuse separate from Peak rendering.
+Peak markers are discrete, solid-colored markers drawn separately from the body.
+They are not connected into a curve, preserving their transient-marker meaning.
+Spectrum rebuilds body geometry on each panel render while reusing compatible
+frequency mappings; retained scenes can replay without another panel render.
 
 Spectrum shares one 1024-entry palette across panels and repaints, independently
-of geometry caching. Its cubic colors use 8-bit channel quantization, unlike
+of body generation. Its cubic colors use 8-bit channel quantization, unlike
 Waveform's floating-point endpoints. Range, size and style change geometry or
 mapping, not palette identity.
 

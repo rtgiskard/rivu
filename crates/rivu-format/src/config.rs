@@ -478,8 +478,6 @@ macro_rules! config_fields {
         pub album_artwork_direction: AlbumArtworkDirection,
         /// Animation request cap (0 follows display callbacks), at most 240 FPS.
         pub album_artwork_fps: u16,
-        /// Enable reusable caches owned by visualization controls.
-        pub visualization_cache: bool,
         pub media_read_buffer_mb: u32,
         pub ffmpeg_enabled: bool,
         pub pipewire_auto_mix: bool,
@@ -591,7 +589,6 @@ impl Default for Config {
             album_artwork_period_seconds: 20.0,
             album_artwork_direction: AlbumArtworkDirection::Clockwise,
             album_artwork_fps: 0,
-            visualization_cache: true,
             media_read_buffer_mb: 2,
             ffmpeg_enabled: false,
             pipewire_auto_mix: true,

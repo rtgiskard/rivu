@@ -1089,7 +1089,7 @@ impl Settings {
                     ))
                     .child(settings_card(
                         palette(cx),
-                        settings.tr("settings-processing-cache"),
+                        settings.tr("settings-processing"),
                         column()
                             .gap_2()
                             .child(
@@ -1109,30 +1109,15 @@ impl Settings {
                                     )),
                                 ),
                             )
-                            .child(
-                                row()
-                                    .flex_wrap()
-                                    .child(visual_switch(
-                                        &self.i18n,
-                                        "settings-still-mode",
-                                        "",
-                                        settings.tr("settings-still-mode"),
-                                        draft.still_mode,
-                                        cx,
-                                        |draft| draft.still_mode = !draft.still_mode,
-                                    ))
-                                    .child(visual_switch(
-                                        &self.i18n,
-                                        "visual-cache",
-                                        "󰃨",
-                                        settings.tr("settings-rendering-cache"),
-                                        draft.visualization_cache,
-                                        cx,
-                                        |draft| {
-                                            draft.visualization_cache = !draft.visualization_cache
-                                        },
-                                    )),
-                            )
+                            .child(row().flex_wrap().child(visual_switch(
+                                &self.i18n,
+                                "settings-still-mode",
+                                "",
+                                settings.tr("settings-still-mode"),
+                                draft.still_mode,
+                                cx,
+                                |draft| draft.still_mode = !draft.still_mode,
+                            )))
                             .child(settings.single(Field::GpuMaterialBudget, cx)),
                     ))
             }

@@ -420,7 +420,7 @@ fn incremental_edits_preserve_inline_and_dotted_tables() {
         assert_eq!(saved, original.replace("1.0", "1.25"));
         assert_eq!(from_toml(&saved).unwrap(), config);
     }
-    let original = "visualizations = { spectrum = { labels = true }, cache = true }\n";
+    let original = "visualizations = { spectrum = { labels = true }, still_mode = true }\n";
     let baseline = from_toml(original).unwrap();
     let mut config = baseline.clone();
     config.spectrum_labels = false;

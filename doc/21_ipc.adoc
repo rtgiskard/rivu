@@ -124,9 +124,10 @@ body
 The frame header is six bytes. `body_length` excludes the four-byte length field
 and includes the version, message type, and serialized body.
 
-Bodies use Postcard serialization without COBS framing. Both peers must use
-matching protocol versions and positional wire schemas. The four-byte frame
-length remains little-endian; body integers follow Postcard's encoding.
+Bodies use Postcard serialization without COBS framing. The current protocol
+version is `9`. Both peers must use matching protocol versions and positional
+wire schemas. The four-byte frame length remains little-endian; body integers
+follow Postcard's encoding.
 Version mismatches are rejected before decoding the body. There is no schema
 negotiation. See <<_wire_schemas,Wire schemas>> for positional fields and adapters.
 
@@ -247,6 +248,8 @@ no configuration payload. Both section schemas are versioned positional contract
 collection lengths and optional fields are encoded in the message body.
 Library information-column selection is encoded in WireConfig as five booleans
 in Artist, Album, Duration, Codec, and Bitrate order; all false means no columns.
+Protocol version `9` removes the visualization-cache field from `WireConfig`;
+there is no compatibility schema for its former positional layout.
 
 Library, Queue, album-member, and playlist-entry rows carry source paths, CUE
 track numbers, and cached audio specifications, including bitrate certainty.

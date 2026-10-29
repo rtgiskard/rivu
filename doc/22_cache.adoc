@@ -38,8 +38,8 @@ the allocator; a lower post-restart RSS alone does not establish a live-object l
 
 == Query projection retention
 
-List/tree retention is independent of `visualizations.cache`. A projection key
-combines normalized query identity and its query-owned stamp, not page offsets,
+List/tree retention is always enabled. A projection key combines normalized query
+identity and its query-owned stamp, not page offsets,
 limits, cursors, or expected revisions. A matching stamp authorizes query reuse;
 bitrate-bearing payload stamps include the committed bitrate revision. A consumer
 generation decides whether the result still serves current intent. Neither check
@@ -202,8 +202,7 @@ per source, resolved font, and text size. Search, scrolling, and playback reuse
 static measurements; only the replacement time label is remeasured. Source or
 typography changes rebuild them, and source replacement releases obsolete
 measurements even while hidden. Tree pages similarly retain selection indexes
-rather than rescanning all expansions on viewport demand. Neither depends on
-visualization caching.
+rather than rescanning all expansions on viewport demand.
 
 == Processing output retention
 
@@ -234,23 +233,19 @@ link:27_audio_processing.adoc#_tasks_retention_and_audition[Audio processing].
 
 === Scope and contract
 
-`visualizations.cache` trades retained graphics memory for less repeated rendering
-work. It does not change audio analysis, waveform samples, spectrum levels,
-palette mapping, or playback state. Settings and display controls are documented
-in link:01_config.adoc[Configuration and layout]; signal continuity and rendering
+Reusable visualization data is always cached within its owners' resource bounds.
+Reuse does not change audio analysis, waveform samples, spectrum levels, palette
+mapping, or playback state. Settings and display controls are documented in
+link:01_config.adoc[Configuration and layout]; signal continuity and rendering
 rationale are explained in link:23_visuals.adoc[Visualization Rendering Design].
 
-The policy covers Waveform display columns and numerical publications, Spectrum body
-geometry, and Spectrogram numerical column publications. Audio Visualizer styles are independent:
-radial styles do not retain reusable graphics, stereo analysis styles retain
-numerical publications in revocable GPU slots, and generative styles retain
-simulation state. The setting does not control those resources, album artwork,
-or font caches.
-
-Disabling the cache bypasses reusable graphics, not the underlying audio data
-or Spectrogram history. Peak hold, smoothing, and display calculations retain
-the same meaning. Re-enabling it requires an initial rebuild before reuse
-resumes. Submitted publications remain alive while their scenes reference them.
+Waveform retains display columns and numerical publications, and Spectrogram
+retains numerical column publications. Spectrum reuses frequency mappings but
+rebuilds its body on each panel render. Radial Audio Visualizer styles do not
+retain reusable graphics, stereo analysis styles retain numerical publications
+in revocable GPU slots, and generative styles retain simulation state. Album
+artwork and font caches have their own owners and lifetimes. Submitted
+publications remain alive while their scenes reference them.
 
 Still Mode is a destructive suspension, not another cache policy: it stops
 visualization demand and discards results as well as derived graphics. Its
@@ -271,27 +266,26 @@ Raw-width changes preserving that count, height, and cursor movement reuse it.
 
 A scan generation remains its display identity across rolling PCM updates;
 replacement scans stay distinct. Keys do not pin preview snapshots. All-unknown
-data produces no publication, while known silence remains drawable. Cache-off
-recomputes without retaining derived publications or discarding samples. The
-renderer owns upload reuse and completion-aware retirement. Signal semantics are
-in link:23_visuals.adoc#_waveform[Waveform].
+data produces no publication, while known silence remains drawable. The renderer
+owns upload reuse and completion-aware retirement. Signal semantics are in
+link:23_visuals.adoc#_waveform[Waveform].
 
 ==== Spectrum
 
-Spectrum retains body geometry and frequency mappings per panel, so differently
-sized panels do not replace each other's state. New levels reuse mappings;
-unchanged effective body levels also reuse geometry. Envelope reinitialization,
-panel geometry, frequency grouping, or display mapping invalidates that reuse.
-Background/grid/label repaint and separately drawn Peak markers do not discard
-the body. Bars/Outline/LED retain rectangle publications, Line/Solid retain Path
-publications; LED segments do not require individual CPU contours.
+Spectrum retains frequency mappings per panel, so differently sized panels do
+not replace each other's state. New levels reuse compatible mappings; panel
+geometry, frequency grouping, or display mapping changes rebuild them. Each panel
+render rebuilds the body from current display levels, including on background,
+grid, or label repaints. Bars/Outline/LED publish rectangles and Line/Solid publish
+Paths; LED segments do not require individual CPU contours. Peak markers remain
+separate from the body.
 
-Cache-off releases the reusable body, not signal envelopes or the shared palette.
 Suspension retains the final immutable body, normalized peak markers, and display
-labels for each current layout panel, independently of rebuilding caches. Envelopes,
-frequency mappings, and scratch are released. Restoration draws that presentation
-until a current drawable result replaces it; semantic invalidation discards it.
-Envelope and palette semantics are in link:23_visuals.adoc#_spectrum[Spectrum rendering].
+labels for each current layout panel. Envelopes, frequency mappings, and scratch
+are released. Restoration draws that presentation until a current drawable result
+replaces it; semantic invalidation discards it. This frozen presentation is not a
+body-reuse cache. Envelope and palette semantics are in
+link:23_visuals.adoc#_spectrum[Spectrum rendering].
 
 ==== Spectrogram
 
@@ -325,7 +319,7 @@ Each current layout panel may retain only the immutable tiles and normalized
 placements in its last actual drawing, not the full historical column store.
 Other analysis views can continue updating without accumulating hidden history.
 Restoration shows that frozen drawing until fresh analysis produces a replacement;
-it does not replay frames received while hidden. This is independent of the cache setting.
+it does not replay frames received while hidden.
 
 === Resource boundaries
 
@@ -376,8 +370,8 @@ link:23_visuals.adoc[Visualization Rendering Design].
 
 The audio worker's processed Before tap owns a separate stereo FIFO for
 source-aligned input awaiting output admission. Its frame count is bounded by
-the graph's retained latency plus one converted PCM fragment, not by panel dimensions
-or `visualizations.cache`. Capture-identity changes and inactive analysis discard
+the graph's retained latency plus one converted PCM fragment, not by panel dimensions.
+Capture-identity changes and inactive analysis discard
 both its samples and allocation; refill checks retire it even when output admits
 no new PCM. Exhausting the output span also releases it. This is distinct from
 the bounded analysis ring and waveform preview retention. Admission, continuity,
@@ -402,13 +396,12 @@ not total memory or physical VRAM limits.
 
 === Design tradeoffs
 
-Caching avoids repeated aggregation, geometry construction, and publication,
-not scene submission or rendering. Changed Line/Solid bodies still need curves
-and tessellation; changed rectangle/field bodies still need bounded payloads.
-Cache-off trades less retained graphics state for rebuilding that work without
-altering analysis or playback. Bounded shared immutable publications avoid a
-second geometry representation; further consolidation needs workload evidence,
-not assumed hit rates or submission counts.
+Caching avoids repeated aggregation and publication for reusable Waveform and
+Spectrogram data, not scene submission or rendering. Spectrum reuses frequency
+mappings but rebuilds body geometry: Line/Solid need curves and tessellation,
+while rectangle styles need bounded payloads. Bounded shared immutable
+publications avoid a second geometry representation; further consolidation needs
+workload evidence, not assumed hit rates or submission counts.
 
 == Native metadata admission
 
@@ -736,9 +729,8 @@ Settings owns its draft, inputs, navigation, and save feedback in a separate
 GPUI entity. Playback and analysis updates do not invalidate that entity's
 cached element tree. Settings interactions and relevant runtime changes do;
 GPUI also invalidates reuse when bounds or inherited text style change.
-This cache is independent of `visualizations.cache`, retains no settings
-bitmap, and does not freeze background visualizations or eliminate window
-composition.
+This cache retains no settings bitmap and does not freeze background
+visualizations or eliminate window composition.
 
 === Renderer buffers, atlases, and display lifecycle
 

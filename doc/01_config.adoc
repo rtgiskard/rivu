@@ -742,9 +742,9 @@ preview when hidden but discards it in Still Mode. Retention details are in
 link:22_cache.adoc#_visualization_caching[Visualization caching].
 
 `visualizations.palette` accepts `tokyo_night` or `deadbeef` (default `deadbeef`).
-`visualizations.cache` defaults to `true`; disabling it preserves the displayed
-results but rebuilds derived graphics on repaint. It does not affect Radial
-Spectrum. Rendering reuse and resource budgets are described in
+Visualization caches are always enabled within their resource bounds. Spectrum
+reuses frequency mappings but rebuilds its body on each panel render. Rendering
+reuse and resource budgets are described in
 link:22_cache.adoc#_visualization_caching[Visualization caching]; signal and
 rendering design in link:23_visuals.adoc[Visualization Rendering Design].
 
@@ -800,7 +800,7 @@ full-waveform request is cancelled, and new requests are unavailable.
 
 Playback, seeking through the playback slider, ordinary interface effects,
 library operations, covers and their animation, IPC, MPRIS, and the tray are unchanged.
-Layout and visualization settings are preserved, including `visualizations.cache`.
+Layout and visualization settings are preserved.
 
 Disabling Still Mode starts the visible views fresh, without reopening audio
 output or the decoder. Views rebuild from new audio; leaving the mode while

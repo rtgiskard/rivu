@@ -11,7 +11,7 @@ use rivu_format::media::DecoderHint;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub const PROTOCOL_VERSION: u8 = 8;
+pub const PROTOCOL_VERSION: u8 = 9;
 pub const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub const MAX_CLIENTS: usize = 16;
@@ -1717,7 +1717,6 @@ pub struct WireConfig {
     waveform_rms_gain: f32,
     waveform_peak_gain: f32,
     waveform_peak_gamma: f32,
-    visualization_cache: bool,
     media_read_buffer_mb: u32,
     ffmpeg_enabled: bool,
     pipewire_auto_mix: bool,
@@ -1821,7 +1820,6 @@ impl From<&rivu_format::config::Config> for WireConfig {
             waveform_rms_gain: value.waveform_rms_gain,
             waveform_peak_gain: value.waveform_peak_gain,
             waveform_peak_gamma: value.waveform_peak_gamma,
-            visualization_cache: value.visualization_cache,
             media_read_buffer_mb: value.media_read_buffer_mb,
             ffmpeg_enabled: value.ffmpeg_enabled,
             pipewire_auto_mix: value.pipewire_auto_mix,
@@ -1927,7 +1925,6 @@ impl From<WireConfig> for rivu_format::config::Config {
             waveform_rms_gain: value.waveform_rms_gain,
             waveform_peak_gain: value.waveform_peak_gain,
             waveform_peak_gamma: value.waveform_peak_gamma,
-            visualization_cache: value.visualization_cache,
             media_read_buffer_mb: value.media_read_buffer_mb,
             ffmpeg_enabled: value.ffmpeg_enabled,
             pipewire_auto_mix: value.pipewire_auto_mix,

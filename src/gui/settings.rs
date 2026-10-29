@@ -370,7 +370,6 @@ fn visual_switch(
     let hint = match id {
         "settings-tray" => i18n.text("settings-restart-hint"),
         "settings-still-mode" => i18n.text("settings-still-mode-hint"),
-        "visual-cache" => i18n.text("settings-rendering-cache-hint"),
         "audio-visualizer-fade-idle" => i18n.text("settings-visualizer-fade-hint"),
         "audio-visualizer-grid" => i18n.text("settings-visualizer-guides-hint"),
         _ => "",

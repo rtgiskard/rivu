@@ -867,7 +867,6 @@ fn save_reload_replaces_file_and_leaves_no_temporary_files() {
         artwork_decode_budget_mb: 128,
         artwork_file_limit_mb: 32,
         gpu_material_budget_mb: 64,
-        visualization_cache: false,
         page_size: 32,
         equalizer: Default::default(),
         denoise: Default::default(),
