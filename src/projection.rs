@@ -111,7 +111,7 @@ impl GuiSnapshot {
                 devices: Arc::clone(&state.system.devices),
                 selected_device: state.system.selected_device.clone(),
                 revision: state.system.revision,
-                config: Arc::clone(&state.system.config),
+                config: Arc::clone(&state.configuration.config),
                 mpris_status: state.system.mpris_status.clone(),
                 ffmpeg_status: state.system.ffmpeg_status.clone(),
                 database_optimization: state.system.database_optimization.clone(),
@@ -135,6 +135,7 @@ pub struct TuiSnapshot {
     pub current_track: Option<Arc<Track>>,
     pub playback: PlaybackState,
     pub system: TuiSystemSnapshot,
+    pub(crate) configuration: Arc<crate::config::Config>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -184,6 +185,7 @@ impl Default for TuiSystemSnapshot {
 impl TuiSnapshot {
     pub(crate) fn from_client(state: &ClientSnapshot, previous: Option<&Self>) -> Self {
         Self {
+            configuration: Arc::clone(&state.configuration.config),
             library: TuiLibrarySnapshot {
                 revision: state.library.revision,
                 structure_revision: state.library.structure_revision,
@@ -208,12 +210,14 @@ impl TuiSnapshot {
                 shutting_down: state.system.shutting_down,
                 library_roots: previous
                     .filter(|previous| {
-                        previous.system.library_roots.as_ref() == &state.system.config.library_roots
+                        Arc::ptr_eq(&previous.configuration, &state.configuration.config)
+                            || previous.system.library_roots.as_ref()
+                                == &state.configuration.config.library_roots
                     })
                     .map(|previous| Arc::clone(&previous.system.library_roots))
-                    .unwrap_or_else(|| Arc::new(state.system.config.library_roots.clone())),
-                page_size: state.system.config.page_size,
-                ui_theme: state.system.config.ui_theme,
+                    .unwrap_or_else(|| Arc::new(state.configuration.config.library_roots.clone())),
+                page_size: state.configuration.config.page_size,
+                ui_theme: state.configuration.config.ui_theme,
             },
         }
     }

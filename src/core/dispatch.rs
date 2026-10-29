@@ -198,25 +198,25 @@ impl Core {
                 "initial_load_completed"
             );
         }
-        let _ = self
-            .engine
-            .send(AudioCommand::StillMode(self.state.system.config.still_mode));
+        let _ = self.engine.send(AudioCommand::StillMode(
+            self.state.configuration.config.still_mode,
+        ));
         let _ = self
             .engine
             .send(AudioCommand::Volume(self.state.playback.volume));
         let _ = self.engine.send(AudioCommand::FfmpegEnabled(
-            self.state.system.config.ffmpeg_enabled,
+            self.state.configuration.config.ffmpeg_enabled,
         ));
         let _ = self.engine.send(AudioCommand::OutputSettings {
             request: self.output_settings_request,
             device: self.state.system.selected_device.clone(),
-            auto_mix: self.state.system.config.pipewire_auto_mix,
+            auto_mix: self.state.configuration.config.pipewire_auto_mix,
         });
         let _ = self.engine.send(AudioCommand::Equalizer(Arc::new(
-            self.state.system.config.equalizer.clone(),
+            self.state.configuration.config.equalizer.clone(),
         )));
         let _ = self.engine.send(AudioCommand::AnalysisSettings(
-            self.state.system.config.as_ref().into(),
+            self.state.configuration.config.as_ref().into(),
         ));
     }
 
@@ -443,6 +443,9 @@ impl Core {
             if changed.system {
                 revisions.system = revisions.system.wrapping_add(1);
             }
+            if changed.configuration {
+                revisions.configuration = revisions.configuration.wrapping_add(1);
+            }
             if changed.playback {
                 shared.playback = self.state.playback.clone();
                 shared.source_generation = self.state.source_generation;
@@ -461,6 +464,9 @@ impl Core {
             } else {
                 // The in-process wakeup sequence advances even without a System change.
                 shared.system.revision = self.state.system.revision;
+            }
+            if changed.configuration {
+                shared.configuration = self.state.configuration.clone();
             }
             let revisions_changed = shared.revisions != *revisions;
             shared.revisions = *revisions;

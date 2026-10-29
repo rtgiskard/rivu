@@ -502,6 +502,7 @@ mod tests {
                     queue: None,
                     library: None,
                     system: None,
+                    configuration: None,
                 }),
             }),
         );
@@ -946,6 +947,159 @@ mod tests {
             assert_eq!(client.instance_id(), Some(1));
             server.join().unwrap();
         }
+    }
+
+    #[test]
+    fn selective_configuration_reads_survive_reconnect_and_reject_new_instance() {
+        use rivu_protocol::model::{ClientSnapshot, ConfigurationState, SystemState};
+        use std::os::unix::net::UnixListener;
+
+        fn response(
+            revisions: StateRevisions,
+            page_size: Option<u32>,
+            runtime: bool,
+        ) -> StateResponse {
+            StateResponse {
+                revisions,
+                configuration: page_size.map(|page_size| {
+                    let mut state = ConfigurationState::default();
+                    Arc::make_mut(&mut state.config).page_size = page_size;
+                    state.config_path = "/server/config.toml".into();
+                    state
+                }),
+                system: runtime.then(|| SystemState {
+                    last_error: Some(format!("runtime {}", revisions.system)),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+        }
+
+        let directory = socket_test_directory();
+        let listener =
+            UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
+                .unwrap();
+        let initial = StateRevisions {
+            system: 1,
+            configuration: 1,
+            ..Default::default()
+        };
+        let current = StateRevisions {
+            system: 2,
+            configuration: 2,
+            ..Default::default()
+        };
+        let latest = StateRevisions {
+            system: 3,
+            ..current
+        };
+        let runtime = StateSections {
+            system: true,
+            ..Default::default()
+        };
+        let configuration = StateSections {
+            configuration: true,
+            ..Default::default()
+        };
+        let server = std::thread::spawn(move || {
+            let mut stream = listener.accept().unwrap().0;
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            assert!(
+                matches!(read_test_request(&mut stream), WireRequest::Hello(sections) if sections == StateSections::ALL)
+            );
+            write_test_response(
+                &mut stream,
+                WireResponse::Hello(HelloResponse {
+                    instance_id: 1u32.to_le_bytes(),
+                    state: wire_state(response(initial, Some(37), true)),
+                }),
+            );
+            assert!(
+                matches!(read_test_request(&mut stream), WireRequest::State(sections) if sections == runtime)
+            );
+            write_test_response(
+                &mut stream,
+                WireResponse::State(wire_state(response(current, None, true))),
+            );
+            assert!(
+                matches!(read_test_request(&mut stream), WireRequest::Watch(revisions)
+                if revisions == (StateRevisions { system: 2, ..initial }))
+            );
+            write_test_response(&mut stream, WireResponse::Watch(current));
+            assert!(
+                matches!(read_test_request(&mut stream), WireRequest::State(sections) if sections == configuration)
+            );
+            // The failed selective read is not replayed. The caller explicitly retries later.
+            drop(stream);
+
+            for instance_id in [1u32, 2] {
+                let mut stream = listener.accept().unwrap().0;
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                assert!(
+                    matches!(read_test_request(&mut stream), WireRequest::Hello(sections) if sections == configuration)
+                );
+                write_test_response(
+                    &mut stream,
+                    WireResponse::Hello(HelloResponse {
+                        instance_id: instance_id.to_le_bytes(),
+                        state: wire_state(response(
+                            latest,
+                            Some(if instance_id == 1 { 91 } else { 99 }),
+                            false,
+                        )),
+                    }),
+                );
+                let mut byte = [0];
+                assert_eq!(std::io::Read::read(&mut stream, &mut byte).unwrap(), 0);
+            }
+        });
+        let mut client = client_session(directory.path()).unwrap();
+        let first = client.get_state(StateSections::ALL).unwrap();
+        client.bind_instance(1).unwrap();
+        let mut snapshot = ClientSnapshot::default();
+        let mut applied = StateRevisions::default();
+        applied.apply_sections(first.revisions, first.sections());
+        first.apply_to(&mut snapshot);
+        let retained = Arc::clone(&snapshot.configuration.config);
+        let update = client.get_state(runtime).unwrap();
+        assert!(update.configuration.is_none());
+        applied.apply_sections(update.revisions, update.sections());
+        update.apply_to(&mut snapshot);
+        assert!(Arc::ptr_eq(&retained, &snapshot.configuration.config));
+        assert_eq!(
+            client.watch(applied).unwrap().changed_since(applied),
+            configuration
+        );
+        assert!(client.get_state(configuration).is_err());
+        assert_eq!(client.instance_id(), None);
+        assert_eq!(snapshot.configuration.config.page_size, 37);
+        assert_eq!(applied.configuration, 1);
+
+        let update = client.get_state(configuration).unwrap();
+        assert_eq!(client.instance_id(), Some(1));
+        assert_eq!(update.sections(), configuration);
+        applied.apply_sections(update.revisions, update.sections());
+        update.apply_to(&mut snapshot);
+        assert_eq!(snapshot.configuration.config.page_size, 91);
+        assert_eq!(snapshot.system.last_error.as_deref(), Some("runtime 2"));
+        assert_eq!(latest.changed_since(applied), runtime);
+        client.disconnect();
+        let error = client.get_state(configuration).unwrap_err();
+        assert!(error.downcast_ref::<InstanceChanged>().is_some());
+        assert_eq!(snapshot.configuration.config.page_size, 91);
+        assert_eq!(applied.configuration, 2);
+        assert_eq!(client.instance_id(), None);
+        server.join().unwrap();
     }
 
     #[test]

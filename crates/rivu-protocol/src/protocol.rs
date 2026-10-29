@@ -3,7 +3,7 @@ pub use endpoint::{address, connect, verify_peer};
 
 use crate::{
     AppCommand,
-    model::{Command, DatabaseOptimization, Query, ScanProgress, SystemState},
+    model::{Command, ConfigurationState, Query, SystemState},
     response::{Ack, QueryResponse, StateResponse, StateRevisions, StateSections},
 };
 use anyhow::{Context, Result, bail};
@@ -1623,7 +1623,8 @@ pub struct WireStateResponse {
     playback: Option<crate::response::PlaybackSnapshot>,
     queue: Option<crate::model::QueueState>,
     library: Option<crate::model::LibrarySnapshot>,
-    system: Option<WireSystemState>,
+    system: Option<SystemState>,
+    configuration: Option<WireConfigurationState>,
 }
 
 /// Complete positional IPC schema for `Config`.
@@ -1941,67 +1942,25 @@ impl From<WireConfig> for rivu_format::config::Config {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct WireSystemState {
-    scanning: bool,
-    scan_message: String,
-    scan_progress: Option<ScanProgress>,
-    scan_task_id: Option<u64>,
-    last_error: Option<String>,
-    devices: Arc<Vec<String>>,
-    selected_device: Option<String>,
-    revision: u64,
+pub struct WireConfigurationState {
     config: WireConfig,
     config_path: PathBuf,
-    mpris_status: String,
-    ffmpeg_status: String,
-    database_optimization: Option<DatabaseOptimization>,
-    shutting_down: bool,
-    relocation_task: Option<crate::model::RelocationTaskStatus>,
-    processing: Option<crate::model::ProcessingTaskStatus>,
 }
 
-impl From<SystemState> for WireSystemState {
-    fn from(value: SystemState) -> Self {
+impl From<ConfigurationState> for WireConfigurationState {
+    fn from(value: ConfigurationState) -> Self {
         Self {
-            scanning: value.scanning,
-            scan_message: value.scan_message,
-            scan_progress: value.scan_progress,
-            scan_task_id: value.scan_task_id,
-            last_error: value.last_error,
-            devices: value.devices,
-            selected_device: value.selected_device,
-            revision: value.revision,
             config: WireConfig::from(value.config.as_ref()),
             config_path: value.config_path,
-            mpris_status: value.mpris_status,
-            ffmpeg_status: value.ffmpeg_status,
-            database_optimization: value.database_optimization,
-            shutting_down: value.shutting_down,
-            relocation_task: value.relocation_task,
-            processing: value.processing,
         }
     }
 }
 
-impl From<WireSystemState> for SystemState {
-    fn from(value: WireSystemState) -> Self {
+impl From<WireConfigurationState> for ConfigurationState {
+    fn from(value: WireConfigurationState) -> Self {
         Self {
-            scanning: value.scanning,
-            scan_message: value.scan_message,
-            scan_progress: value.scan_progress,
-            scan_task_id: value.scan_task_id,
-            last_error: value.last_error,
-            devices: value.devices,
-            selected_device: value.selected_device,
-            revision: value.revision,
             config: Arc::new(value.config.into()),
             config_path: value.config_path,
-            mpris_status: value.mpris_status,
-            ffmpeg_status: value.ffmpeg_status,
-            database_optimization: value.database_optimization,
-            shutting_down: value.shutting_down,
-            relocation_task: value.relocation_task,
-            processing: value.processing,
         }
     }
 }
@@ -2012,7 +1971,8 @@ pub fn wire_state(response: StateResponse) -> WireStateResponse {
         playback: response.playback,
         queue: response.queue,
         library: response.library,
-        system: response.system.map(WireSystemState::from),
+        system: response.system,
+        configuration: response.configuration.map(WireConfigurationState::from),
     }
 }
 
@@ -2022,6 +1982,7 @@ pub fn state_response(response: WireStateResponse) -> StateResponse {
         playback: response.playback,
         queue: response.queue,
         library: response.library,
-        system: response.system.map(SystemState::from),
+        system: response.system,
+        configuration: response.configuration.map(ConfigurationState::from),
     }
 }

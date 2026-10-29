@@ -10,7 +10,7 @@ struct ReadState {
 impl ReadState {
     fn capture(state: &CoreState, query: &Query) -> Self {
         Self {
-            config: Arc::clone(&state.system.config),
+            config: Arc::clone(&state.configuration.config),
             revisions: state.query_revisions_for(query),
             playlist_entry_revisions: Arc::clone(&state.library.playlist_entry_revisions),
         }

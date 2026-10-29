@@ -67,18 +67,6 @@ The album-cover completion path is optimized independently; it does not resolve
 this broader demand ownership. Revisit with a transport-heavy, multi-panel
 workload and verify hide/reopen, tab changes and seek invalidation together.
 
-=== Stable configuration in high-frequency System IPC state
-
-Status: deferred, 2026-10-29; redundant materialization and transfer established
-by code inspection, with no measured latency or memory claim.
-
-System updates include the complete configuration even when only task progress
-changes. Connected TUI clients encode, transfer and decode unchanged roots,
-presets and processing graphs. A separate configuration section or lightweight
-projection requires a coordinated protocol/client cutover and revision semantics;
-discarding fields in the client would not remove producer work. Revisit with
-large configurations and multiple clients, preserving section-scoped revisions.
-
 === Different data directories sharing one database file
 
 Status: deferred, 2026-10-29; conditional ownership risk, not observed corruption.
@@ -93,6 +81,25 @@ Revisit before enabling such transformations or supporting shared-file aliases;
 see link:26_migration.adoc[Migration ownership and backups].
 
 == Resolved investigations
+
+=== Stable configuration in high-frequency System IPC state
+
+Status: resolved in implementation, 2026-10-29.
+
+Runtime System and Configuration have independent IPC sections and revisions.
+Only explicit Configuration reads convert and transfer the effective Config;
+omitted sections preserve retained client values and do not acknowledge unread
+tokens. Configuration-only publications wake Watch, and a new instance requires
+a fresh Hello. See link:21_ipc.adoc#_revisions_and_watching[Revisions and watching].
+
+The recorded comparison used 256 long-path roots and three retained clients,
+each reading System 100 times, repeated three times. Response bytes per client
+fell from 3,444,600 to 20,900; configuration-bearing runtime frames fell from 100
+to zero. Temporary probes at both Config wire conversions observed zero calls
+during runtime reads, then one encode/decode per explicit configuration read.
+Real configuration-only Watch, selective reads and restart recovery were also
+exercised. These are transfer/work-count results, not latency or RSS claims.
+
 
 === Query timeout and physical worker retirement
 

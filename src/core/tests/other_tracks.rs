@@ -30,7 +30,7 @@ fn current_roots_change_other_projection_and_stamps_but_not_persistent_tracks() 
         .library_page(None, None, None, 0, MAX_QUERY_ROWS)
         .unwrap();
     let queue = core.store.queue_page(None, 0, MAX_QUERY_ROWS).unwrap();
-    let roots = core.state.system.config.library_roots.clone();
+    let roots = core.state.configuration.config.library_roots.clone();
     let initial = core.state.query_revisions_for(&page_query());
     let initial_stamp = page_query().stamp(initial);
     core.update_gui_config(GuiConfigChange::AddLibraryRoot(
@@ -61,7 +61,7 @@ fn current_roots_change_other_projection_and_stamps_but_not_persistent_tracks() 
         directory.path().to_path_buf(),
     ))
     .unwrap();
-    assert_eq!(core.state.system.config.library_roots, roots);
+    assert_eq!(core.state.configuration.config.library_roots, roots);
     assert_eq!(page(&core).total, 4);
     assert_eq!(
         core.store

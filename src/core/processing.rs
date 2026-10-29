@@ -6,7 +6,7 @@ impl Core {
     pub(in crate::core) fn processing_bypass(&mut self) -> Result<()> {
         // Reserve the complete cutover before changing desired configuration.
         self.engine.ensure_command_capacity(3)?;
-        if self.state.system.config.equalizer.enabled {
+        if self.state.configuration.config.equalizer.enabled {
             self.equalizer_edit(EqualizerEdit::Enabled(false))?;
         }
         // Revoking audition intent does not cancel the rendering/export owner.
@@ -44,9 +44,9 @@ impl Core {
             source_run: None,
             cached_output: None,
         };
-        let status = self
-            .processing
-            .start_graph(track, self.state.system.config.clone(), request);
+        let status =
+            self.processing
+                .start_graph(track, self.state.configuration.config.clone(), request);
         self.sync_processing_audio_availability();
         let status = status?;
         let id = status.id;
@@ -281,16 +281,16 @@ impl Core {
     }
     fn commit_processing_config(&mut self, config: Config) -> Result<()> {
         config.validate()?;
-        let equalizer_changed = config.equalizer != self.state.system.config.equalizer;
+        let equalizer_changed = config.equalizer != self.state.configuration.config.equalizer;
         if equalizer_changed {
             self.engine.ensure_command_capacity(1)?;
         }
         self.write_config(&config)?;
-        self.state.system.config = Arc::new(config);
+        self.state.configuration.config = Arc::new(config);
         if equalizer_changed {
             self.engine
                 .send(AudioCommand::Equalizer(Arc::new(
-                    self.state.system.config.equalizer.clone(),
+                    self.state.configuration.config.equalizer.clone(),
                 )))
                 .context("Configuration saved, but equalizer delivery failed")?;
         }
@@ -453,9 +453,12 @@ impl Core {
         profile: Option<NoiseSelection>,
     ) -> Result<u64> {
         let track = self.track(track_id)?;
-        let status =
-            self.processing
-                .start(track, self.state.system.config.clone(), operation, profile);
+        let status = self.processing.start(
+            track,
+            self.state.configuration.config.clone(),
+            operation,
+            profile,
+        );
         self.sync_processing_audio_availability();
         let status = status?;
         let id = status.id;

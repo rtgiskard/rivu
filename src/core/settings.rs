@@ -3,7 +3,7 @@ use super::*;
 impl Core {
     // Compose on the Core thread; live playback controls override the saved snapshot.
     pub(in crate::core) fn effective_config(&self) -> Config {
-        let mut config = self.state.system.config.as_ref().clone();
+        let mut config = self.state.configuration.config.as_ref().clone();
         config.volume = self.state.playback.volume;
         config.shuffle = self.state.playback.shuffle;
         config.repeat = self.state.playback.repeat;
@@ -58,27 +58,29 @@ impl Core {
             self.engine.ensure_command_capacity(1)?;
         }
         // Quick controls change desired memory state; Apply or shutdown persists it.
-        self.state.system.config = Arc::new(config);
+        self.state.configuration.config = Arc::new(config);
         if roots_changed {
             self.state.library.structure_revision =
                 self.state.library.structure_revision.wrapping_add(1);
         }
         if still_mode {
             self.engine
-                .send(AudioCommand::StillMode(self.state.system.config.still_mode))
+                .send(AudioCommand::StillMode(
+                    self.state.configuration.config.still_mode,
+                ))
                 .context("Configuration applied, but audio application failed")?;
         }
         Ok(())
     }
     pub(in crate::core) fn configure(&mut self, mut config: Arc<Config>) -> Result<()> {
         anyhow::ensure!(
-            config.processing_graph == self.state.system.config.processing_graph,
+            config.processing_graph == self.state.configuration.config.processing_graph,
             "Processing graph changes require revision-checked ProcessingGraphEdit commands"
         );
         config.validate()?;
         let roots = library::normalize_roots(&config.library_roots)?;
         Arc::make_mut(&mut config).library_roots = roots;
-        let roots_changed = config.library_roots != self.state.system.config.library_roots;
+        let roots_changed = config.library_roots != self.state.configuration.config.library_roots;
         // No other producer can consume these slots while Core persists.
         // Reject a busy batch before committing any desired settings.
         self.engine.ensure_command_capacity(7)?;
@@ -100,14 +102,14 @@ impl Core {
         self.set_shuffle(config.shuffle);
         self.state.playback.repeat = config.repeat;
         self.state.system.ffmpeg_status = ffmpeg_status;
-        self.state.system.config = config;
+        self.state.configuration.config = config;
         if roots_changed {
             self.state.library.structure_revision =
                 self.state.library.structure_revision.wrapping_add(1);
         }
         tracing::info!("configuration_updated");
         let request = self.output_settings_request.wrapping_add(1);
-        let config = &self.state.system.config;
+        let config = &self.state.configuration.config;
         (|| -> Result<()> {
             self.engine
                 .send(AudioCommand::StillMode(config.still_mode))?;
@@ -135,7 +137,10 @@ impl Core {
             return Ok(());
         }
         let result = config
-            .save_with_baseline(&self.state.system.config_path, self.saved_config.as_ref())
+            .save_with_baseline(
+                &self.state.configuration.config_path,
+                self.saved_config.as_ref(),
+            )
             .context("Saving configuration");
         match &result {
             Ok(()) => {
@@ -166,7 +171,7 @@ impl Core {
             return Ok(false);
         }
         self.write_config(&config)?;
-        self.state.system.config = Arc::new(config);
+        self.state.configuration.config = Arc::new(config);
         Ok(true)
     }
 }

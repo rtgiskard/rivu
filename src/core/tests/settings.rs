@@ -1,6 +1,110 @@
 use super::*;
 
 #[test]
+fn configuration_only_publication_wakes_watchers_without_invalidating_runtime() {
+    let (_directory, mut core) = fixture();
+    core.publish();
+    let (handle, _requests) = super::task_wait::wait_handle(&core);
+    let updates = handle.subscribe_revisions();
+    let initial = handle.state(StateSections::ALL);
+    let mut snapshot = ClientSnapshot::default();
+    initial.clone().apply_to(&mut snapshot);
+    let before = initial.revisions;
+    core.update_gui_config(GuiConfigChange::ToggleWaveformSeek)
+        .unwrap();
+    // Desired state does not leak before the owner's publication boundary.
+    assert_eq!(handle.state_revisions(), before);
+    assert!(updates.try_recv().is_err());
+    core.publish();
+    assert_eq!(updates.try_recv(), Ok(()));
+    let changed = handle.state_revisions().changed_since(before);
+    assert_eq!(
+        changed,
+        StateSections {
+            configuration: true,
+            ..StateSections::default()
+        }
+    );
+    let response = handle.state(changed);
+    assert_eq!(response.sections(), changed);
+    assert!(response.system.is_none());
+    response.apply_to(&mut snapshot);
+    assert_ne!(
+        snapshot.configuration.config.waveform_seek_enabled,
+        initial.configuration.unwrap().config.waveform_seek_enabled
+    );
+    assert_eq!(snapshot.system.revision, initial.system.unwrap().revision);
+    let projected = handle.gui_snapshot();
+    assert!(Arc::ptr_eq(
+        &projected.system.config,
+        &snapshot.configuration.config
+    ));
+    core.publish();
+    assert!(updates.try_recv().is_err());
+
+    let before = handle.state_revisions();
+    core.state.configuration.config_path = "/relocated/config.toml".into();
+    core.publish();
+    assert_eq!(updates.try_recv(), Ok(()));
+    assert_eq!(handle.state_revisions().changed_since(before), changed);
+    assert_eq!(
+        handle.state(changed).configuration.unwrap().config_path,
+        std::path::Path::new("/relocated/config.toml")
+    );
+}
+
+#[test]
+fn runtime_and_configuration_responses_derive_from_one_publication() {
+    let (_directory, mut core) = fixture();
+    core.publish();
+    let (handle, _requests) = super::task_wait::wait_handle(&core);
+    let initial = handle.state(StateSections::ALL);
+    Arc::make_mut(&mut core.state.configuration.config).page_size = 91;
+    Arc::make_mut(&mut core.state.configuration.config).ui_theme = crate::theme::Theme::TokyoNight;
+    core.state.system.last_error = Some("new runtime".into());
+    let unpublished = handle.state(StateSections::ALL);
+    assert_eq!(unpublished.revisions, initial.revisions);
+    assert_eq!(
+        unpublished.configuration.unwrap().config.page_size,
+        initial.configuration.as_ref().unwrap().config.page_size
+    );
+    assert_eq!(
+        unpublished.system.unwrap().last_error,
+        initial.system.unwrap().last_error
+    );
+
+    core.publish();
+    let response = handle.state(StateSections {
+        system: true,
+        configuration: true,
+        ..Default::default()
+    });
+    assert_eq!(response.revisions, handle.state_revisions());
+    assert_eq!(
+        response.revisions.changed_since(initial.revisions),
+        StateSections {
+            system: true,
+            configuration: true,
+            ..StateSections::default()
+        }
+    );
+    assert_eq!(
+        response.system.as_ref().unwrap().last_error.as_deref(),
+        Some("new runtime")
+    );
+    assert_eq!(
+        response.configuration.as_ref().unwrap().config.page_size,
+        91
+    );
+    let mut snapshot = ClientSnapshot::default();
+    response.apply_to(&mut snapshot);
+    let tui = crate::projection::TuiSnapshot::from_client(&snapshot, None);
+    assert_eq!(tui.system.page_size, 91);
+    assert_eq!(tui.system.ui_theme, crate::theme::Theme::TokyoNight);
+    assert_eq!(tui.system.last_error.as_deref(), Some("new runtime"));
+}
+
+#[test]
 fn runtime_rejects_non_utf8_config_paths_before_creating_storage() {
     use std::{ffi::OsString, os::unix::ffi::OsStringExt};
 
@@ -87,7 +191,7 @@ fn missing_config_is_created_only_at_apply_or_orderly_exit() {
     for apply in [false, true] {
         let (_directory, mut core) = fixture();
         let _audio = recording_audio(&mut core);
-        let path = core.state.system.config_path.clone();
+        let path = core.state.configuration.config_path.clone();
         assert!(!path.exists());
         core.command(Command::Volume { value: 0.25 }).unwrap();
         core.update_gui_config(GuiConfigChange::ToggleWaveformSeek)
@@ -95,7 +199,7 @@ fn missing_config_is_created_only_at_apply_or_orderly_exit() {
         core.publish();
         assert!(!path.exists());
         if apply {
-            let baseline = core.state.system.config.clone();
+            let baseline = core.state.configuration.config.clone();
             core.update_gui_config(GuiConfigChange::Settings(Box::new(ConfigPatch::between(
                 &baseline, &baseline,
             ))))
@@ -109,7 +213,7 @@ fn missing_config_is_created_only_at_apply_or_orderly_exit() {
         assert_eq!(saved.volume, 0.25);
         assert_eq!(
             saved.waveform_seek_enabled,
-            core.state.system.config.waveform_seek_enabled
+            core.state.configuration.config.waveform_seek_enabled
         );
     }
 }
@@ -119,7 +223,7 @@ fn changed_apply_and_exit_preserve_comments_and_untouched_normalized_settings() 
     for apply in [false, true] {
         let (directory, mut core) = fixture();
         let _audio = recording_audio(&mut core);
-        let path = core.state.system.config_path.clone();
+        let path = core.state.configuration.config_path.clone();
         let original = format!(
             "# Hand-edited configuration\n[playback]\nvolume_percent = 75 # chosen volume\n[interface]\nlanguage = 'ZH_cn' # preserve spelling\npage_size=42\n[library]\nroots = ['{}/unused/..'] # preserve logical spelling\n",
             directory.path().display(),
@@ -132,11 +236,11 @@ fn changed_apply_and_exit_preserve_comments_and_untouched_normalized_settings() 
         core.state.playback.repeat = config.repeat;
         core.state.system.selected_device = config.output_device.clone();
         core.saved_config = Some(config.clone());
-        core.state.system.config = Arc::new(config);
+        core.state.configuration.config = Arc::new(config);
 
         core.command(Command::Volume { value: 0.25 }).unwrap();
         if apply {
-            let baseline = core.state.system.config.clone();
+            let baseline = core.state.configuration.config.clone();
             core.update_gui_config(GuiConfigChange::Settings(Box::new(ConfigPatch::between(
                 &baseline, &baseline,
             ))))
@@ -176,7 +280,7 @@ fn changed_save_recreates_missing_file_from_defaults_not_saved_snapshot() {
         config: Arc::new(config),
     })
     .unwrap();
-    let path = core.state.system.config_path.clone();
+    let path = core.state.configuration.config_path.clone();
     std::fs::remove_file(&path).unwrap();
     core.command(Command::Volume { value: 0.25 }).unwrap();
     assert!(core.flush_config().unwrap());
@@ -200,10 +304,10 @@ fn apply_clears_optional_device_without_rewriting_unrelated_settings() {
         config: Arc::new(config),
     })
     .unwrap();
-    let path = core.state.system.config_path.clone();
+    let path = core.state.configuration.config_path.clone();
     let original = "# Keep these comments\n[playback]\noutput_device = 'USB DAC'\n[interface]\npage_size = 64 # explicit default\n";
     std::fs::write(&path, original).unwrap();
-    let baseline = core.state.system.config.clone();
+    let baseline = core.state.configuration.config.clone();
     let mut draft = baseline.as_ref().clone();
     draft.output_device = None;
     core.update_gui_config(GuiConfigChange::Settings(Box::new(ConfigPatch::between(
@@ -226,7 +330,7 @@ fn changed_apply_and_exit_reject_invalid_existing_input_without_overwriting_it()
         let _audio = recording_audio(&mut core);
         core.flush_config().unwrap();
         let saved_config = core.saved_config.clone();
-        let path = core.state.system.config_path.clone();
+        let path = core.state.configuration.config_path.clone();
         let original = "# Preserve invalid user input\n[playback]\nvolume_percent = 101\n";
         std::fs::write(&path, original).unwrap();
         core.command(Command::Volume { value: 0.25 }).unwrap();
@@ -264,12 +368,12 @@ fn no_op_apply_and_change_back_exit_do_not_replace_saved_config() {
     let (_directory, mut core) = fixture();
     let audio = recording_audio(&mut core);
     core.flush_config().unwrap();
-    let path = core.state.system.config_path.clone();
+    let path = core.state.configuration.config_path.clone();
     let mut original = std::fs::read(&path).unwrap();
     original.extend_from_slice(b"\n# Preserve this comment on no-op saves\n");
     std::fs::write(&path, &original).unwrap();
     let inode = std::fs::metadata(&path).unwrap().ino();
-    let baseline = core.state.system.config.clone();
+    let baseline = core.state.configuration.config.clone();
     core.command(Command::Configure {
         config: baseline.clone(),
     })
@@ -342,11 +446,11 @@ fn queue_save_failure_does_not_prevent_final_config_save() {
             .unwrap()
             .contains("queue save blocked")
     );
-    let saved = Config::load(&core.state.system.config_path).unwrap();
+    let saved = Config::load(&core.state.configuration.config_path).unwrap();
     assert_eq!(saved.volume, 0.25);
     assert_eq!(
         saved.waveform_seek_enabled,
-        core.state.system.config.waveform_seek_enabled
+        core.state.configuration.config.waveform_seek_enabled
     );
 }
 
@@ -355,12 +459,12 @@ fn busy_audio_configuration_rejects_the_whole_batch_before_persistence() {
     for available in [0, 1, 5, 6, 7] {
         let (_directory, mut core) = fixture();
         core.state
-            .system
+            .configuration
             .config
-            .save(&core.state.system.config_path)
+            .save(&core.state.configuration.config_path)
             .unwrap();
         let baseline = core.state.clone();
-        let saved = std::fs::read(&core.state.system.config_path).unwrap();
+        let saved = std::fs::read(&core.state.configuration.config_path).unwrap();
         let (commands, receive) = async_channel::bounded(64);
         for index in 0..64 - available {
             commands
@@ -368,7 +472,7 @@ fn busy_audio_configuration_rejects_the_whole_batch_before_persistence() {
                 .unwrap();
         }
         core.engine.replace_commands(commands);
-        let mut config = core.state.system.config.as_ref().clone();
+        let mut config = core.state.configuration.config.as_ref().clone();
         config.volume = 0.25;
         config.shuffle = true;
         config.still_mode = true;
@@ -379,7 +483,10 @@ fn busy_audio_configuration_rejects_the_whole_batch_before_persistence() {
         });
         if available < 7 {
             assert!(result.unwrap_err().to_string().contains("not queued"));
-            assert_eq!(*core.state.system.config, *baseline.system.config);
+            assert_eq!(
+                *core.state.configuration.config,
+                *baseline.configuration.config
+            );
             assert_eq!(core.state.playback.volume, baseline.playback.volume);
             assert_eq!(core.state.playback.shuffle, baseline.playback.shuffle);
             assert_eq!(
@@ -388,7 +495,7 @@ fn busy_audio_configuration_rejects_the_whole_batch_before_persistence() {
             );
             assert_eq!(core.output_settings_request, 0);
             assert_eq!(
-                std::fs::read(&core.state.system.config_path).unwrap(),
+                std::fs::read(&core.state.configuration.config_path).unwrap(),
                 saved
             );
             assert_eq!(receive.len(), 64 - available);
@@ -397,18 +504,21 @@ fn busy_audio_configuration_rejects_the_whole_batch_before_persistence() {
                     core.update_gui_config(GuiConfigChange::ToggleStillMode)
                         .is_err()
                 );
-                assert_eq!(*core.state.system.config, *baseline.system.config);
                 assert_eq!(
-                    std::fs::read(&core.state.system.config_path).unwrap(),
+                    *core.state.configuration.config,
+                    *baseline.configuration.config
+                );
+                assert_eq!(
+                    std::fs::read(&core.state.configuration.config_path).unwrap(),
                     saved
                 );
                 assert_eq!(receive.len(), 64);
             }
         } else {
             result.unwrap();
-            assert_eq!(*core.state.system.config, config);
+            assert_eq!(*core.state.configuration.config, config);
             assert_eq!(
-                Config::load(&core.state.system.config_path).unwrap(),
+                Config::load(&core.state.configuration.config_path).unwrap(),
                 config
             );
             assert_eq!(core.output_settings_request, 1);
@@ -438,7 +548,7 @@ fn busy_audio_configuration_rejects_the_whole_batch_before_persistence() {
                 AudioCommand::AnalysisSettings(_)
             ));
             assert!(
-                matches!(receive.try_recv().unwrap(), AudioCommand::Equalizer(config) if *config == core.state.system.config.equalizer)
+                matches!(receive.try_recv().unwrap(), AudioCommand::Equalizer(config) if *config == core.state.configuration.config.equalizer)
             );
             assert!(matches!(
                 receive.try_recv().unwrap(),
@@ -458,7 +568,7 @@ fn busy_audio_configuration_rejects_the_whole_batch_before_persistence() {
 fn config_failure_retains_values_and_recovers_without_clearing_other_errors() {
     for unrelated in [false, true] {
         let (directory, mut core) = fixture();
-        let path = core.state.system.config_path.clone();
+        let path = core.state.configuration.config_path.clone();
         core.flush_config().unwrap();
         let backup = directory.path().join("config.good");
         std::fs::rename(&path, &backup).unwrap();
@@ -468,7 +578,7 @@ fn config_failure_retains_values_and_recovers_without_clearing_other_errors() {
         core.publish();
         assert!(core.shared.read().system.last_error.is_some());
         assert_eq!(core.state.playback.volume, 0.25);
-        assert_ne!(core.state.system.config.volume, 0.25);
+        assert_ne!(core.state.configuration.config.volume, 0.25);
         assert_ne!(Config::load(&backup).unwrap().volume, 0.25);
         if unrelated {
             core.state.system.last_error = Some("Unrelated failure".into());
@@ -491,7 +601,7 @@ fn config_failure_retains_values_and_recovers_without_clearing_other_errors() {
 #[test]
 fn successful_config_retry_clears_only_its_own_failure() {
     let (_directory, mut core) = fixture();
-    let path = core.state.system.config_path.clone();
+    let path = core.state.configuration.config_path.clone();
     std::fs::create_dir(&path).unwrap();
     core.command(Command::Shuffle { enabled: true }).unwrap();
     assert!(core.flush_config().is_err());
@@ -505,7 +615,7 @@ fn successful_config_retry_clears_only_its_own_failure() {
 #[test]
 fn shutdown_flush_reports_failure_and_retains_live_settings() {
     let (_directory, mut core) = fixture();
-    let path = core.state.system.config_path.clone();
+    let path = core.state.configuration.config_path.clone();
     std::fs::create_dir(&path).unwrap();
     core.command(Command::Repeat {
         mode: RepeatMode::All,
@@ -518,7 +628,7 @@ fn shutdown_flush_reports_failure_and_retains_live_settings() {
     assert!(state.system.shutting_down);
     assert!(state.system.last_error.is_some());
     assert_eq!(state.playback.repeat, RepeatMode::All);
-    assert_eq!(state.system.config.repeat, RepeatMode::Off);
+    assert_eq!(state.configuration.config.repeat, RepeatMode::Off);
 }
 
 #[test]
@@ -535,7 +645,7 @@ fn still_mode_toggle_preserves_unsaved_playback_and_device_settings() {
     for enabled in [true, false] {
         core.update_gui_config(GuiConfigChange::ToggleStillMode)
             .unwrap();
-        assert_eq!(core.state.system.config.still_mode, enabled);
+        assert_eq!(core.state.configuration.config.still_mode, enabled);
         assert_eq!(core.state.playback.volume, 0.25);
         assert!(core.state.playback.shuffle);
         assert_eq!(core.state.playback.repeat, RepeatMode::All);
@@ -543,7 +653,7 @@ fn still_mode_toggle_preserves_unsaved_playback_and_device_settings() {
             core.state.system.selected_device.as_deref(),
             Some("pending-output")
         );
-        assert!(!core.state.system.config_path.exists());
+        assert!(!core.state.configuration.config_path.exists());
     }
 }
 
@@ -557,7 +667,7 @@ fn library_column_toggles_merge_latest_config_without_audio_side_effects() {
     })
     .unwrap();
     core.state.system.selected_device = Some("pending-output".into());
-    let config = Arc::make_mut(&mut core.state.system.config);
+    let config = Arc::make_mut(&mut core.state.configuration.config);
     config.ui_scale = 1.25;
     config.waveform_seek_enabled = false;
     config.library_columns = crate::config::LibraryColumns {
@@ -569,7 +679,7 @@ fn library_column_toggles_merge_latest_config_without_audio_side_effects() {
     };
     let (commands, audio) = async_channel::bounded(1);
     core.engine.replace_commands(commands);
-    let mut expected = core.state.system.config.as_ref().clone();
+    let mut expected = core.state.configuration.config.as_ref().clone();
     expected.volume = 0.25;
     expected.shuffle = true;
     expected.repeat = RepeatMode::All;
@@ -639,14 +749,14 @@ fn library_column_toggles_merge_latest_config_without_audio_side_effects() {
         core.update_gui_config(GuiConfigChange::ToggleLibraryColumn(column))
             .unwrap();
         expected.library_columns = columns;
-        assert_eq!(*core.state.system.config, expected);
-        assert!(!core.state.system.config_path.exists());
+        assert_eq!(*core.state.configuration.config, expected);
+        assert!(!core.state.configuration.config_path.exists());
         assert_eq!(core.state.playback.volume, expected.volume);
         assert_eq!(core.state.playback.shuffle, expected.shuffle);
         assert_eq!(core.state.playback.repeat, expected.repeat);
         assert_eq!(core.state.system.selected_device, expected.output_device);
         core.publish();
-        assert_eq!(*core.shared.read().system.config, expected);
+        assert_eq!(*core.shared.read().configuration.config, expected);
         assert!(matches!(
             audio.try_recv(),
             Err(async_channel::TryRecvError::Empty)
@@ -659,34 +769,42 @@ fn library_column_toggle_commits_without_accessing_unwritable_config_path() {
     let (_directory, mut core) = fixture();
     let (commands, audio) = async_channel::bounded(1);
     core.engine.replace_commands(commands);
-    Arc::make_mut(&mut core.state.system.config)
+    Arc::make_mut(&mut core.state.configuration.config)
         .library_columns
         .duration = true;
-    std::fs::create_dir(&core.state.system.config_path).unwrap();
+    std::fs::create_dir(&core.state.configuration.config_path).unwrap();
     core.update_gui_config(GuiConfigChange::ToggleLibraryColumn(
         LibraryColumn::Duration,
     ))
     .unwrap();
     core.publish();
-    assert!(!core.shared.read().system.config.library_columns.duration);
+    assert!(
+        !core
+            .shared
+            .read()
+            .configuration
+            .config
+            .library_columns
+            .duration
+    );
     assert!(core.state.system.last_error.is_none());
     assert!(matches!(
         audio.try_recv(),
         Err(async_channel::TryRecvError::Empty)
     ));
-    assert!(core.state.system.config_path.is_dir());
+    assert!(core.state.configuration.config_path.is_dir());
 }
 
 #[test]
 fn overlapping_root_changes_leave_published_and_saved_configuration_unchanged() {
     let (directory, mut core) = fixture();
     core.state
-        .system
+        .configuration
         .config
-        .save(&core.state.system.config_path)
+        .save(&core.state.configuration.config_path)
         .unwrap();
-    let before = core.state.system.config.clone();
-    let saved = std::fs::read(&core.state.system.config_path).unwrap();
+    let before = core.state.configuration.config.clone();
+    let saved = std::fs::read(&core.state.configuration.config_path).unwrap();
     for root in [directory.path().join("child"), directory.path().join("..")] {
         assert!(
             core.update_gui_config(GuiConfigChange::AddLibraryRoot(root.clone()))
@@ -700,9 +818,9 @@ fn overlapping_root_changes_leave_published_and_saved_configuration_unchanged() 
             })
             .is_err()
         );
-        assert_eq!(*core.state.system.config, *before);
+        assert_eq!(*core.state.configuration.config, *before);
         assert_eq!(
-            std::fs::read(&core.state.system.config_path).unwrap(),
+            std::fs::read(&core.state.configuration.config_path).unwrap(),
             saved
         );
     }
@@ -711,7 +829,7 @@ fn overlapping_root_changes_leave_published_and_saved_configuration_unchanged() 
 #[test]
 fn desktop_config_edits_preserve_live_playback_and_merge_roots() {
     let (directory, mut core) = fixture();
-    Arc::make_mut(&mut core.state.system.config).library_roots[0] =
+    Arc::make_mut(&mut core.state.configuration.config).library_roots[0] =
         directory.path().join("existing");
     core.command(Command::Volume { value: 0.25 }).unwrap();
     core.command(Command::Shuffle { enabled: true }).unwrap();
@@ -721,15 +839,15 @@ fn desktop_config_edits_preserve_live_playback_and_merge_roots() {
     .unwrap();
     core.state.system.selected_device = Some("pending-output".into());
     let root = directory.path().join("added");
-    let seek = core.state.system.config.waveform_seek_enabled;
+    let seek = core.state.configuration.config.waveform_seek_enabled;
     core.update_gui_config(GuiConfigChange::ToggleWaveformSeek)
         .unwrap();
     core.update_gui_config(GuiConfigChange::AddLibraryRoot(root.clone()))
         .unwrap();
     core.update_gui_config(GuiConfigChange::AddLibraryRoot(root))
         .unwrap();
-    assert_eq!(core.state.system.config.library_roots.len(), 2);
-    assert_eq!(core.state.system.config.waveform_seek_enabled, !seek);
+    assert_eq!(core.state.configuration.config.library_roots.len(), 2);
+    assert_eq!(core.state.configuration.config.waveform_seek_enabled, !seek);
     assert_eq!(core.state.playback.volume, 0.25);
     assert!(core.state.playback.shuffle);
     assert_eq!(core.state.playback.repeat, RepeatMode::All);
@@ -737,9 +855,9 @@ fn desktop_config_edits_preserve_live_playback_and_merge_roots() {
         core.state.system.selected_device.as_deref(),
         Some("pending-output")
     );
-    assert!(!core.state.system.config_path.exists());
+    assert!(!core.state.configuration.config_path.exists());
     assert!(core.flush_config().unwrap());
-    let saved = Config::load(&core.state.system.config_path).unwrap();
+    let saved = Config::load(&core.state.configuration.config_path).unwrap();
     assert_eq!(saved.volume, 0.25);
     assert!(saved.shuffle);
     assert_eq!(saved.repeat, RepeatMode::All);
@@ -750,10 +868,10 @@ fn desktop_config_edits_preserve_live_playback_and_merge_roots() {
 #[test]
 fn settings_apply_merges_every_unedited_field_at_execution() {
     let (directory, mut core) = fixture();
-    Arc::make_mut(&mut core.state.system.config).library_roots[0] =
+    Arc::make_mut(&mut core.state.configuration.config).library_roots[0] =
         directory.path().join("existing");
     let _audio = recording_audio(&mut core);
-    let baseline = core.state.system.config.clone();
+    let baseline = core.state.configuration.config.clone();
     let mut draft = baseline.as_ref().clone();
     draft.scan_max_depth = 7;
     let patch = ConfigPatch::between(&baseline, &draft);
@@ -778,7 +896,7 @@ fn settings_apply_merges_every_unedited_field_at_execution() {
         core.update_gui_config(GuiConfigChange::ToggleLibraryColumn(column))
             .unwrap();
     }
-    let mut expected = core.state.system.config.as_ref().clone();
+    let mut expected = core.state.configuration.config.as_ref().clone();
     expected.scan_max_depth = 7;
     // These playback changes are still newer than the in-memory config snapshot.
     core.command(Command::Volume { value: 0.3 }).unwrap();
@@ -788,7 +906,7 @@ fn settings_apply_merges_every_unedited_field_at_execution() {
     .unwrap();
     expected.volume = 0.3;
     expected.output_device = Some("pending-output".into());
-    assert!(!core.state.system.config_path.exists());
+    assert!(!core.state.configuration.config_path.exists());
     core.update_gui_config(GuiConfigChange::Settings(Box::new(patch)))
         .unwrap();
     core.publish();
@@ -799,7 +917,7 @@ fn settings_apply_merges_every_unedited_field_at_execution() {
     assert_eq!(visible.playback.repeat, RepeatMode::One);
     assert!(visible.system.config.library_roots.contains(&added));
     assert_eq!(
-        Config::load(&core.state.system.config_path).unwrap(),
+        Config::load(&core.state.configuration.config_path).unwrap(),
         expected
     );
 }
@@ -807,7 +925,7 @@ fn settings_apply_merges_every_unedited_field_at_execution() {
 #[test]
 fn settings_apply_explicit_fields_override_newer_conflicting_values() {
     let (directory, mut core) = fixture();
-    Arc::make_mut(&mut core.state.system.config).library_roots[0] =
+    Arc::make_mut(&mut core.state.configuration.config).library_roots[0] =
         directory.path().join("existing");
     let _audio = recording_audio(&mut core);
     core.command(Command::Device {
@@ -815,7 +933,7 @@ fn settings_apply_explicit_fields_override_newer_conflicting_values() {
     })
     .unwrap();
     core.flush_config().unwrap();
-    let baseline = core.state.system.config.clone();
+    let baseline = core.state.configuration.config.clone();
     let mut draft = baseline.as_ref().clone();
     draft.volume = 0.4;
     draft.output_device = None;
@@ -840,7 +958,7 @@ fn settings_apply_explicit_fields_override_newer_conflicting_values() {
     assert!(visible.system.config.library_roots.is_empty());
     assert!(visible.system.config.still_mode);
     assert_eq!(
-        Config::load(&core.state.system.config_path).unwrap(),
+        Config::load(&core.state.configuration.config_path).unwrap(),
         *visible.system.config
     );
 }
@@ -850,21 +968,21 @@ fn settings_failed_save_retry_merges_against_latest_runtime() {
     let (_directory, mut core) = fixture();
     let (commands, audio) = async_channel::bounded(8);
     core.engine.replace_commands(commands);
-    let baseline = core.state.system.config.clone();
+    let baseline = core.state.configuration.config.clone();
     let mut draft = baseline.as_ref().clone();
     draft.scan_max_depth = 7;
     let patch = ConfigPatch::between(&baseline, &draft);
-    std::fs::create_dir(&core.state.system.config_path).unwrap();
+    std::fs::create_dir(&core.state.configuration.config_path).unwrap();
     assert!(
         core.update_gui_config(GuiConfigChange::Settings(Box::new(patch.clone())))
             .is_err()
     );
-    assert_eq!(*core.state.system.config, *baseline);
+    assert_eq!(*core.state.configuration.config, *baseline);
     assert!(matches!(
         audio.try_recv(),
         Err(async_channel::TryRecvError::Empty)
     ));
-    std::fs::remove_dir(&core.state.system.config_path).unwrap();
+    std::fs::remove_dir(&core.state.configuration.config_path).unwrap();
     core.command(Command::Volume { value: 0.2 }).unwrap();
     core.update_gui_config(GuiConfigChange::Settings(Box::new(patch)))
         .unwrap();
@@ -873,7 +991,7 @@ fn settings_failed_save_retry_merges_against_latest_runtime() {
     assert_eq!(visible.playback.volume, 0.2);
     assert_eq!(visible.system.config.scan_max_depth, 7);
     assert_eq!(
-        Config::load(&core.state.system.config_path).unwrap(),
+        Config::load(&core.state.configuration.config_path).unwrap(),
         *visible.system.config
     );
 }
@@ -884,7 +1002,7 @@ fn settings_saved_audio_failure_keeps_committed_desired_configuration() {
     let (commands, receiver) = async_channel::bounded(64);
     drop(receiver);
     core.engine.replace_commands(commands);
-    let baseline = core.state.system.config.clone();
+    let baseline = core.state.configuration.config.clone();
     let mut draft = baseline.as_ref().clone();
     draft.scan_max_depth = 7;
     let error = core
@@ -897,7 +1015,7 @@ fn settings_saved_audio_failure_keeps_committed_desired_configuration() {
     let visible = GuiSnapshot::from_core(&core.shared.read());
     assert_eq!(visible.system.config.scan_max_depth, 7);
     assert_eq!(
-        Config::load(&core.state.system.config_path).unwrap(),
+        Config::load(&core.state.configuration.config_path).unwrap(),
         *visible.system.config
     );
 }
@@ -907,8 +1025,8 @@ fn configure_failed_save_keeps_desired_settings_and_does_not_deliver_audio() {
     let (_directory, mut core) = fixture();
     let (commands, audio) = async_channel::bounded(64);
     let _idle_commands = core.engine.replace_commands(commands);
-    let previous = core.state.system.config.clone();
-    std::fs::create_dir(&core.state.system.config_path).unwrap();
+    let previous = core.state.configuration.config.clone();
+    std::fs::create_dir(&core.state.configuration.config_path).unwrap();
     let mut config = previous.as_ref().clone();
     config.volume = 0.25;
     config.shuffle = true;
@@ -929,7 +1047,7 @@ fn configure_failed_save_keeps_desired_settings_and_does_not_deliver_audio() {
     })
     .unwrap_err();
 
-    assert_eq!(*core.state.system.config, *previous);
+    assert_eq!(*core.state.configuration.config, *previous);
     assert_eq!(core.state.playback.volume, playback.volume);
     assert_eq!(core.state.playback.shuffle, playback.shuffle);
     assert_eq!(core.state.playback.repeat, playback.repeat);
@@ -948,8 +1066,10 @@ fn configure_rejected_preparation_keeps_saved_and_desired_settings() {
     let (_directory, mut core) = fixture();
     let (commands, audio) = async_channel::bounded(64);
     let _idle_commands = core.engine.replace_commands(commands);
-    let previous = core.state.system.config.clone();
-    previous.save(&core.state.system.config_path).unwrap();
+    let previous = core.state.configuration.config.clone();
+    previous
+        .save(&core.state.configuration.config_path)
+        .unwrap();
     let mut config = previous.as_ref().clone();
     config.volume = 0.25;
     config.still_mode = true;
@@ -960,10 +1080,10 @@ fn configure_rejected_preparation_keeps_saved_and_desired_settings() {
     })
     .unwrap_err();
 
-    assert_eq!(*core.state.system.config, *previous);
+    assert_eq!(*core.state.configuration.config, *previous);
     assert_eq!(core.state.playback.volume, previous.volume);
     assert_eq!(
-        Config::load(&core.state.system.config_path).unwrap(),
+        Config::load(&core.state.configuration.config_path).unwrap(),
         *previous
     );
     assert!(matches!(
@@ -981,7 +1101,7 @@ fn output_settings_errors_follow_current_request_after_stop() {
         name: Some("PipeWire: desired".into()),
     })
     .unwrap();
-    let auto_mix = core.state.system.config.pipewire_auto_mix;
+    let auto_mix = core.state.configuration.config.pipewire_auto_mix;
     let request = core.output_settings_request;
     core.command(Command::Device {
         name: Some("PipeWire: other".into()),
@@ -1054,7 +1174,7 @@ fn unavailable_output_targets_remain_desired_and_persist_across_entry_points() {
     let (_directory, mut core) = fixture();
     let _audio = recording_audio(&mut core);
     Arc::make_mut(&mut core.state.system.devices).clear();
-    let mut config = core.state.system.config.as_ref().clone();
+    let mut config = core.state.configuration.config.as_ref().clone();
     config.ffmpeg_enabled = false;
     config.output_device = Some("PipeWire: unavailable-configured-sink".into());
     core.command(Command::Configure {
@@ -1062,7 +1182,7 @@ fn unavailable_output_targets_remain_desired_and_persist_across_entry_points() {
     })
     .unwrap();
     assert_eq!(
-        Config::load(&core.state.system.config_path)
+        Config::load(&core.state.configuration.config_path)
             .unwrap()
             .output_device,
         core.state.system.selected_device
@@ -1077,7 +1197,7 @@ fn unavailable_output_targets_remain_desired_and_persist_across_entry_points() {
     .unwrap();
     core.flush_config().unwrap();
     assert_eq!(
-        Config::load(&core.state.system.config_path)
+        Config::load(&core.state.configuration.config_path)
             .unwrap()
             .output_device
             .as_deref(),
@@ -1091,7 +1211,7 @@ fn configure_saved_but_disconnected_audio_retains_desired_settings() {
     let (commands, receiver) = async_channel::bounded(64);
     drop(receiver);
     core.engine.replace_commands(commands);
-    let mut config = core.state.system.config.as_ref().clone();
+    let mut config = core.state.configuration.config.as_ref().clone();
     config.volume = 0.25;
     config.shuffle = true;
     config.repeat = RepeatMode::All;
@@ -1109,7 +1229,7 @@ fn configure_saved_but_disconnected_audio_retains_desired_settings() {
     })
     .unwrap_err();
 
-    assert_eq!(*core.state.system.config, expected);
+    assert_eq!(*core.state.configuration.config, expected);
     assert_eq!(core.state.playback.volume, expected.volume);
     assert_eq!(core.state.playback.shuffle, expected.shuffle);
     assert_eq!(core.state.playback.repeat, expected.repeat);
@@ -1118,24 +1238,24 @@ fn configure_saved_but_disconnected_audio_retains_desired_settings() {
     assert!(core.played.is_empty());
     assert_eq!(core.played_cursor, 0);
     assert_eq!(
-        Config::load(&core.state.system.config_path).unwrap(),
+        Config::load(&core.state.configuration.config_path).unwrap(),
         expected
     );
     assert!(!core.flush_config().unwrap());
     core.publish();
-    assert_eq!(*core.shared.read().system.config, expected);
+    assert_eq!(*core.shared.read().configuration.config, expected);
 }
 
 #[test]
 fn still_mode_toggle_commits_without_accessing_unwritable_config_path() {
     let (_directory, mut core) = fixture();
     let _audio = recording_audio(&mut core);
-    let previous = core.state.system.config.still_mode;
-    std::fs::create_dir(&core.state.system.config_path).unwrap();
+    let previous = core.state.configuration.config.still_mode;
+    std::fs::create_dir(&core.state.configuration.config_path).unwrap();
     core.update_gui_config(GuiConfigChange::ToggleStillMode)
         .unwrap();
-    assert_eq!(core.state.system.config.still_mode, !previous);
-    assert!(core.state.system.config_path.is_dir());
+    assert_eq!(core.state.configuration.config.still_mode, !previous);
+    assert!(core.state.configuration.config_path.is_dir());
 }
 
 #[test]
@@ -1149,7 +1269,7 @@ fn still_mode_applied_but_disconnected_audio_retains_unsaved_settings() {
     core.state.playback.shuffle = true;
     core.state.playback.repeat = RepeatMode::All;
     core.state.system.selected_device = Some("pending-output".into());
-    let mut expected = core.state.system.config.as_ref().clone();
+    let mut expected = core.state.configuration.config.as_ref().clone();
     expected.volume = 0.25;
     expected.shuffle = true;
     expected.repeat = RepeatMode::All;
@@ -1160,14 +1280,14 @@ fn still_mode_applied_but_disconnected_audio_retains_unsaved_settings() {
         core.update_gui_config(GuiConfigChange::ToggleStillMode)
             .unwrap_err();
 
-        assert_eq!(*core.state.system.config, expected);
+        assert_eq!(*core.state.configuration.config, expected);
         assert_eq!(core.state.playback.volume, expected.volume);
         assert_eq!(core.state.playback.shuffle, expected.shuffle);
         assert_eq!(core.state.playback.repeat, expected.repeat);
         assert_eq!(core.state.system.selected_device, expected.output_device);
-        assert!(!core.state.system.config_path.exists());
+        assert!(!core.state.configuration.config_path.exists());
         core.publish();
-        assert_eq!(*core.shared.read().system.config, expected);
+        assert_eq!(*core.shared.read().configuration.config, expected);
     }
 }
 
@@ -1175,7 +1295,7 @@ fn still_mode_applied_but_disconnected_audio_retains_unsaved_settings() {
 fn ffmpeg_external_load_result_survives_runtime_disable_and_reenable() {
     let (directory, mut core) = fixture();
     let _audio = recording_audio(&mut core);
-    Arc::make_mut(&mut core.state.system.config).ffmpeg_enabled = false;
+    Arc::make_mut(&mut core.state.configuration.config).ffmpeg_enabled = false;
     core.state.system.ffmpeg_status = "disabled".into();
     let (handle, control, worker, _publications) = navigation_runtime(core);
     let changes = handle.subscribe_revisions();
@@ -1227,7 +1347,7 @@ fn configure_shuffle_keeps_current_occurrence_as_history_start() {
     let next = core.store.queue_id_at(4).unwrap().unwrap();
     core.start(first, true).unwrap();
     core.command(Command::Pause).unwrap();
-    let mut config = core.state.system.config.as_ref().clone();
+    let mut config = core.state.configuration.config.as_ref().clone();
     config.shuffle = true;
     let config = Arc::new(config);
     core.command(Command::Configure {

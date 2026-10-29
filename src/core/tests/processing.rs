@@ -297,7 +297,7 @@ fn offline_job_preserves_native_float_frames_and_does_not_add_library_entries() 
     assert_eq!(core.store.track_count().unwrap(), before);
     assert_eq!(
         core.processing.results[0].status.settings.denoise,
-        core.state.system.config.denoise
+        core.state.configuration.config.denoise
     );
 }
 #[test]
@@ -423,14 +423,14 @@ fn equalizer_preset_import_bounds_bytes_and_rejects_non_regular_inputs() {
     .unwrap();
     let imported = core
         .state
-        .system
+        .configuration
         .config
         .equalizer_presets
         .iter()
         .find(|preset| preset.name == "bounded")
         .unwrap();
     assert_eq!(imported.config, preset);
-    let accepted = core.state.system.config.clone();
+    let accepted = core.state.configuration.config.clone();
     bytes.push(b' ');
     std::fs::write(&path, bytes).unwrap();
     let error = core
@@ -440,7 +440,7 @@ fn equalizer_preset_import_bounds_bytes_and_rejects_non_regular_inputs() {
         })
         .unwrap_err();
     assert!(error.to_string().contains("Preset exceeds 64 KiB"));
-    assert_eq!(core.state.system.config, accepted);
+    assert_eq!(core.state.configuration.config, accepted);
 
     std::fs::remove_file(&path).unwrap();
     let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
@@ -453,7 +453,7 @@ fn equalizer_preset_import_bounds_bytes_and_rejects_non_regular_inputs() {
             name: "pipe".into(),
         });
         completed
-            .send((core.state.system.config.clone(), result))
+            .send((core.state.configuration.config.clone(), result))
             .unwrap();
     });
     // Do not join on timeout: a regression must fail rather than hang the suite.
@@ -481,7 +481,10 @@ fn equalizer_and_denoise_edits_merge_on_the_core_owner() {
         field: EqBandEdit::FrequencyHz(2500.0),
     })
     .unwrap();
-    assert_eq!(core.state.system.config.equalizer.bands[0].gain_db, 3.0);
+    assert_eq!(
+        core.state.configuration.config.equalizer.bands[0].gain_db,
+        3.0
+    );
     core.denoise_edit(DenoisePatch {
         strength: Some(2.0),
         ..Default::default()
@@ -492,8 +495,8 @@ fn equalizer_and_denoise_edits_merge_on_the_core_owner() {
         ..Default::default()
     })
     .unwrap();
-    assert_eq!(core.state.system.config.denoise.strength, 2.0);
-    assert_eq!(core.state.system.config.denoise.wet, 0.25);
+    assert_eq!(core.state.configuration.config.denoise.strength, 2.0);
+    assert_eq!(core.state.configuration.config.denoise.wet, 0.25);
 }
 #[test]
 fn empty_equalizer_batches_use_log_uniform_neutral_cell_centers() {
@@ -505,7 +508,7 @@ fn empty_equalizer_batches_use_log_uniform_neutral_cell_centers() {
         assert!(core.state.current_track.is_none());
         core.equalizer_edit(EqualizerEdit::AddBands { count })
             .unwrap();
-        let equalizer = &core.state.system.config.equalizer;
+        let equalizer = &core.state.configuration.config.equalizer;
         assert!(!equalizer.enabled);
         assert_eq!(equalizer.preamp_db, 0.0);
         assert_eq!(equalizer.output_gain_db, 0.0);
@@ -527,8 +530,8 @@ fn empty_equalizer_batches_use_log_uniform_neutral_cell_centers() {
         }
         assert!(receive.try_recv().is_err());
         assert_eq!(
-            Config::load(&core.state.system.config_path).unwrap(),
-            *core.state.system.config
+            Config::load(&core.state.configuration.config_path).unwrap(),
+            *core.state.configuration.config
         );
     }
 }
@@ -570,7 +573,7 @@ fn equalizer_batches_fill_largest_log_gaps_without_rewriting_edited_bands() {
     .unwrap();
     core.equalizer_edit(EqualizerEdit::AddBands { count: 2 })
         .unwrap();
-    let equalizer = &core.state.system.config.equalizer;
+    let equalizer = &core.state.configuration.config.equalizer;
     assert_eq!(&equalizer.bands[..2], original.bands.as_slice());
     assert_eq!(equalizer.enabled, original.enabled);
     assert_eq!(equalizer.preamp_db, original.preamp_db);
@@ -610,7 +613,7 @@ fn resizing_equalizer_preserves_prefix_and_rejects_invalid_counts_atomically() {
     for count in [3, 1, MAX_BANDS, 0] {
         core.equalizer_edit(EqualizerEdit::ResizeBands { count })
             .unwrap();
-        let eq = &core.state.system.config.equalizer;
+        let eq = &core.state.configuration.config.equalizer;
         assert_eq!(eq.bands.len(), count);
         if count > 0 {
             assert_eq!(eq.bands[0], first);
@@ -620,21 +623,22 @@ fn resizing_equalizer_preserves_prefix_and_rejects_invalid_counts_atomically() {
             AudioCommand::Equalizer(_)
         ));
         assert!(receive.try_recv().is_err());
-        let saved: toml::Value =
-            toml::from_str(&std::fs::read_to_string(&core.state.system.config_path).unwrap())
-                .unwrap();
+        let saved: toml::Value = toml::from_str(
+            &std::fs::read_to_string(&core.state.configuration.config_path).unwrap(),
+        )
+        .unwrap();
         assert_eq!(saved["equalizer"]["bands"].as_array().unwrap().len(), count);
     }
-    let baseline = core.state.system.config.clone();
-    let saved = std::fs::read(&core.state.system.config_path).unwrap();
+    let baseline = core.state.configuration.config.clone();
+    let saved = std::fs::read(&core.state.configuration.config_path).unwrap();
     for count in [MAX_BANDS + 1, usize::MAX] {
         assert!(
             core.equalizer_edit(EqualizerEdit::ResizeBands { count })
                 .is_err()
         );
-        assert_eq!(core.state.system.config, baseline);
+        assert_eq!(core.state.configuration.config, baseline);
         assert_eq!(
-            std::fs::read(&core.state.system.config_path).unwrap(),
+            std::fs::read(&core.state.configuration.config_path).unwrap(),
             saved
         );
         assert!(receive.try_recv().is_err());
@@ -655,16 +659,16 @@ fn invalid_equalizer_batch_counts_preserve_memory_disk_and_audio_atomically() {
         receive.try_recv().unwrap(),
         AudioCommand::Equalizer(_)
     ));
-    let baseline = core.state.system.config.clone();
-    let saved = std::fs::read(&core.state.system.config_path).unwrap();
+    let baseline = core.state.configuration.config.clone();
+    let saved = std::fs::read(&core.state.configuration.config_path).unwrap();
     for count in [0, MAX_BANDS, MAX_BANDS + 1, usize::MAX] {
         assert!(
             core.equalizer_edit(EqualizerEdit::AddBands { count })
                 .is_err()
         );
-        assert_eq!(core.state.system.config, baseline);
+        assert_eq!(core.state.configuration.config, baseline);
         assert_eq!(
-            std::fs::read(&core.state.system.config_path).unwrap(),
+            std::fs::read(&core.state.configuration.config_path).unwrap(),
             saved
         );
         assert!(receive.try_recv().is_err());
@@ -673,20 +677,23 @@ fn invalid_equalizer_batch_counts_preserve_memory_disk_and_audio_atomically() {
         count: MAX_BANDS - 1,
     })
     .unwrap();
-    assert_eq!(core.state.system.config.equalizer.bands.len(), MAX_BANDS);
+    assert_eq!(
+        core.state.configuration.config.equalizer.bands.len(),
+        MAX_BANDS
+    );
     assert!(matches!(
         receive.try_recv().unwrap(),
         AudioCommand::Equalizer(_)
     ));
-    let baseline = core.state.system.config.clone();
-    let saved = std::fs::read(&core.state.system.config_path).unwrap();
+    let baseline = core.state.configuration.config.clone();
+    let saved = std::fs::read(&core.state.configuration.config_path).unwrap();
     assert!(
         core.equalizer_edit(EqualizerEdit::AddBands { count: 1 })
             .is_err()
     );
-    assert_eq!(core.state.system.config, baseline);
+    assert_eq!(core.state.configuration.config, baseline);
     assert_eq!(
-        std::fs::read(&core.state.system.config_path).unwrap(),
+        std::fs::read(&core.state.configuration.config_path).unwrap(),
         saved
     );
     assert!(receive.try_recv().is_err());
@@ -708,7 +715,15 @@ fn equalizer_batch_generation_uses_current_track_rate_or_unknown_rate_fallback()
         };
         core.equalizer_edit(EqualizerEdit::AddBands { count: MAX_BANDS })
             .unwrap();
-        for (index, band) in core.state.system.config.equalizer.bands.iter().enumerate() {
+        for (index, band) in core
+            .state
+            .configuration
+            .config
+            .equalizer
+            .bands
+            .iter()
+            .enumerate()
+        {
             let expected_hz =
                 20.0 * (maximum_hz / 20.0).powf((index as f64 + 0.5) / MAX_BANDS as f64);
             assert!((band.frequency_hz - expected_hz).abs() < 1e-8);
@@ -736,7 +751,7 @@ fn rate_bounded_gap_filling_preserves_existing_out_of_range_bands() {
     .unwrap();
     core.equalizer_edit(EqualizerEdit::AddBands { count: 3 })
         .unwrap();
-    let bands = &core.state.system.config.equalizer.bands;
+    let bands = &core.state.configuration.config.equalizer.bands;
     assert_eq!(bands[0], original);
     let maximum_hz = 8000.0 * MAX_FREQUENCY_RATE_RATIO;
     assert!((bands[1].frequency_hz - (20.0 * maximum_hz).sqrt()).abs() < 1e-8);
@@ -755,15 +770,15 @@ fn unusable_equalizer_batch_frequency_range_is_rejected_atomically() {
     let mut track = core.track(1).unwrap();
     track.sample_rate = 40;
     core.state.current_track = Some(Arc::new(track));
-    let baseline = core.state.system.config.clone();
+    let baseline = core.state.configuration.config.clone();
     assert!(
         core.equalizer_edit(EqualizerEdit::AddBands { count: 3 })
             .unwrap_err()
             .to_string()
             .contains("no usable equalizer frequency range")
     );
-    assert_eq!(core.state.system.config, baseline);
-    assert!(!core.state.system.config_path.exists());
+    assert_eq!(core.state.configuration.config, baseline);
+    assert!(!core.state.configuration.config_path.exists());
     assert!(receive.try_recv().is_err());
 }
 
@@ -1012,8 +1027,9 @@ fn rejected_invalid_profile_preserves_retained_pcm_and_availability() {
 fn profile_mode_requires_an_explicit_noise_selection_and_preserves_frame_count() {
     let (directory, mut core) = fixture();
     source(directory.path());
-    Arc::make_mut(&mut core.state.system.config).denoise.mode =
-        rivu_dsp::denoise::DenoiseMode::Profile;
+    Arc::make_mut(&mut core.state.configuration.config)
+        .denoise
+        .mode = rivu_dsp::denoise::DenoiseMode::Profile;
     core.start_processing(1, ProcessingOperation::Denoise, None)
         .unwrap();
     complete(&mut core);
@@ -1140,7 +1156,7 @@ fn neural_cancellation_reaps_interpreter_that_closed_stdout_without_exiting() {
     .unwrap();
     let manifest = directory.path().join("manifest.json");
     std::fs::write(&manifest, "{}").unwrap();
-    let config = Arc::make_mut(&mut core.state.system.config);
+    let config = Arc::make_mut(&mut core.state.configuration.config);
     config.neural.worker = worker;
     config.neural.speech_interpreter = "/bin/sh".into();
     config.neural.speech_manifest = Some(manifest);
@@ -1223,7 +1239,7 @@ fn neural_unwind_reaps_live_interpreter_before_failure_event_and_owner_retiremen
     .unwrap();
     let manifest = directory.path().join("manifest.json");
     std::fs::write(&manifest, "{}").unwrap();
-    let config = Arc::make_mut(&mut core.state.system.config);
+    let config = Arc::make_mut(&mut core.state.configuration.config);
     config.neural.worker = worker;
     config.neural.speech_interpreter = "/bin/sh".into();
     config.neural.speech_manifest = Some(manifest);
@@ -1342,7 +1358,7 @@ fn relative_band_edits_merge_repeated_steps_without_restoring_the_other_axis() {
         })
         .unwrap();
     }
-    let band = &core.state.system.config.equalizer.bands[0];
+    let band = &core.state.configuration.config.equalizer.bands[0];
     assert_eq!(band.gain_db, 1.0);
     assert!((band.frequency_hz - 1000.0 * 2.0_f64.powf(2.0 / 12.0)).abs() < 1e-9);
     core.equalizer_edit(EqualizerEdit::BandField {
@@ -1358,7 +1374,7 @@ fn relative_band_edits_merge_repeated_steps_without_restoring_the_other_axis() {
         field: EqBandEdit::GainSteps(100),
     })
     .unwrap();
-    let band = &core.state.system.config.equalizer.bands[0];
+    let band = &core.state.configuration.config.equalizer.bands[0];
     assert_eq!(band.frequency_hz, 2000.0);
     assert_eq!(band.gain_db, 24.0);
 }
@@ -1480,7 +1496,7 @@ fn graph_cascaded_nonflat_fir_preserves_source_edge_context() {
         for (&actual, &expected) in live.iter().zip(expected) {
             assert!((actual - expected).abs() < 2e-6);
         }
-        Arc::make_mut(&mut core.state.system.config).processing_graph = graph;
+        Arc::make_mut(&mut core.state.configuration.config).processing_graph = graph;
         core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Offline)
             .unwrap();
         complete(&mut core);
@@ -1541,7 +1557,7 @@ fn graph_cached_fir_boundary_matches_uncut_causal_graph() {
         pcm.clone(),
         pcm.len() / 2,
     );
-    Arc::make_mut(&mut core.state.system.config).processing_graph = graph.clone();
+    Arc::make_mut(&mut core.state.configuration.config).processing_graph = graph.clone();
     core.processing_graph_run(1, graph_port(3, 0), GraphExecutionMode::Offline)
         .unwrap();
     complete(&mut core);
@@ -1629,7 +1645,7 @@ fn graph_hybrid_profile_boundary_preserves_fir_guards_and_source_identity() {
             to: graph_port(to, 0),
         })
         .collect();
-    Arc::make_mut(&mut core.state.system.config).processing_graph = graph;
+    Arc::make_mut(&mut core.state.configuration.config).processing_graph = graph;
     core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Offline)
         .unwrap();
     complete(&mut core);
@@ -1750,7 +1766,7 @@ fn graph_executes_shuffled_ancestors_once_with_independent_eq_and_unclipped_mix(
         to: graph_port(b, bp),
     })
     .collect();
-    Arc::make_mut(&mut core.state.system.config).processing_graph = graph.clone();
+    Arc::make_mut(&mut core.state.configuration.config).processing_graph = graph.clone();
     core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Offline)
         .unwrap();
     // The edit changes the draft while the admitted snapshot is immutable.
@@ -1762,7 +1778,7 @@ fn graph_executes_shuffled_ancestors_once_with_independent_eq_and_unclipped_mix(
         },
     )
     .unwrap();
-    assert!(graph.audio_eq(&core.state.system.config.processing_graph));
+    assert!(graph.audio_eq(&core.state.configuration.config.processing_graph));
     complete(&mut core);
     let status = core.processing_status(1).unwrap();
     assert_eq!(
@@ -2205,10 +2221,10 @@ fn generic_configure_cannot_overwrite_graph_from_a_stale_settings_snapshot() {
         })
         .is_err()
     );
-    assert_eq!(core.state.system.config.processing_graph.revision, 1);
+    assert_eq!(core.state.configuration.config.processing_graph.revision, 1);
     assert_eq!(
         core.state
-            .system
+            .configuration
             .config
             .processing_graph
             .node(1)
@@ -2263,7 +2279,7 @@ fn shutdown_closes_processing_delivery_and_retires_unpublished_outputs() {
             .processing
             .start(
                 track,
-                core.state.system.config.clone(),
+                core.state.configuration.config.clone(),
                 ProcessingOperation::Denoise,
                 None,
             )
@@ -2381,12 +2397,12 @@ fn playback_bypass_preserves_parameters_queue_and_final_heard_snapshot() {
     );
     let queue = core.state.queue.clone();
     let track = core.state.current_track.clone();
-    let denoise = core.state.system.config.denoise.clone();
+    let denoise = core.state.configuration.config.denoise.clone();
     core.command(Command::ProcessingBypass).unwrap();
     let mut expected = equalizer;
     expected.enabled = false;
-    assert_eq!(core.state.system.config.equalizer, expected);
-    assert_eq!(core.state.system.config.denoise, denoise);
+    assert_eq!(core.state.configuration.config.equalizer, expected);
+    assert_eq!(core.state.configuration.config.denoise, denoise);
     assert_eq!(core.state.queue, queue);
     assert_eq!(core.state.current_track, track);
     assert_eq!(core.state.playback.status, PlaybackStatus::Paused);

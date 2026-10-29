@@ -128,6 +128,7 @@ pub(crate) struct CoreState {
     pub(crate) source_generation: u64,
     pub(crate) processing_audition: Option<crate::projection::ProcessingAudition>,
     pub(crate) system: SystemState,
+    pub(crate) configuration: ConfigurationState,
     pub(crate) scan_owner: Option<crate::projection::MediaTaskOwner>,
     pub(crate) revisions: StateRevisions,
 }
@@ -192,12 +193,12 @@ impl CoreState {
                 || system.last_error != old.last_error
                 || !Arc::ptr_eq(&system.devices, &old.devices)
                 || system.selected_device != old.selected_device
-                || !Arc::ptr_eq(&system.config, &old.config)
-                || system.config_path != old.config_path
                 || system.mpris_status != old.mpris_status
                 || system.ffmpeg_status != old.ffmpeg_status
                 || system.database_optimization != old.database_optimization
                 || system.shutting_down != old.shutting_down,
+            configuration: !Arc::ptr_eq(&self.configuration.config, &previous.configuration.config)
+                || self.configuration.config_path != previous.configuration.config_path,
         }
     }
 }
@@ -286,7 +287,7 @@ impl CoreHandle {
         self.state.read().system.shutting_down
     }
     pub fn config_snapshot(&self) -> Arc<Config> {
-        Arc::clone(&self.state.read().system.config)
+        Arc::clone(&self.state.read().configuration.config)
     }
     pub(crate) fn library_revision(&self) -> u64 {
         self.state.read().library.revision
@@ -294,7 +295,7 @@ impl CoreHandle {
     pub(crate) fn mpris_service_state(&self) -> MprisServiceState {
         let state = self.state.read();
         MprisServiceState {
-            enabled: state.system.config.mpris_enabled,
+            enabled: state.configuration.config.mpris_enabled,
             shutting_down: state.system.shutting_down,
         }
     }
@@ -455,6 +456,7 @@ impl CoreHandle {
             queue: sections.queue.then(|| state.queue.clone()),
             library: sections.library.then(|| state.library.clone()),
             system: sections.system.then(|| state.system.clone()),
+            configuration: sections.configuration.then(|| state.configuration.clone()),
         }
     }
 
@@ -703,8 +705,8 @@ impl Runtime {
             state.playback.shuffle = config.shuffle;
             state.playback.repeat = config.repeat;
             state.system.selected_device = config.output_device.clone();
-            state.system.config = Arc::new(config);
-            state.system.config_path = config_path.to_path_buf();
+            state.configuration.config = Arc::new(config);
+            state.configuration.config_path = config_path.to_path_buf();
             state
         };
         *shared.write() = initial.clone();
@@ -995,7 +997,7 @@ impl Core {
         }
         self.replace_history(self.store.history(MAX_QUERY_ROWS)?);
         self.state.system.devices = Arc::new(audio::devices().unwrap_or_default());
-        self.state.system.ffmpeg_status = if self.state.system.config.ffmpeg_enabled {
+        self.state.system.ffmpeg_status = if self.state.configuration.config.ffmpeg_enabled {
             audio::ffmpeg_status().unwrap_or_else(|error| format!("unavailable: {error:#}"))
         } else {
             "disabled".to_owned()

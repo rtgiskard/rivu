@@ -1,8 +1,8 @@
 use crate::model::{
-    Batch, BatchContinuation, ClientSnapshot, DatabaseOptimization, DirectoryRow, LibraryRootCount,
-    LibraryRow, LibrarySnapshot, LibraryStats, Page, PlaybackState, PlaylistEntryCursor,
-    PlaylistEntryLocation, PlaylistEntryRow, PlaylistSummary, QueueCursor, QueueRow, QueueState,
-    SystemState, Track,
+    Batch, BatchContinuation, ClientSnapshot, ConfigurationState, DatabaseOptimization,
+    DirectoryRow, LibraryRootCount, LibraryRow, LibrarySnapshot, LibraryStats, Page, PlaybackState,
+    PlaylistEntryCursor, PlaylistEntryLocation, PlaylistEntryRow, PlaylistSummary, QueueCursor,
+    QueueRow, QueueState, SystemState, Track,
 };
 use serde::{Deserialize, Serialize};
 use std::{fmt, sync::Arc};
@@ -15,6 +15,7 @@ pub struct StateRevisions {
     pub library: u64,
     /// System-section revision; distinct from `SystemState::revision`, which is a publication sequence.
     pub system: u64,
+    pub configuration: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -23,6 +24,7 @@ pub struct StateSections {
     pub queue: bool,
     pub library: bool,
     pub system: bool,
+    pub configuration: bool,
 }
 
 impl StateSections {
@@ -31,9 +33,10 @@ impl StateSections {
         queue: true,
         library: true,
         system: true,
+        configuration: true,
     };
     pub fn is_empty(self) -> bool {
-        !self.playback && !self.queue && !self.library && !self.system
+        !self.playback && !self.queue && !self.library && !self.system && !self.configuration
     }
 }
 
@@ -44,6 +47,7 @@ impl StateRevisions {
             queue: self.queue != previous.queue,
             library: self.library != previous.library,
             system: self.system != previous.system,
+            configuration: self.configuration != previous.configuration,
         }
     }
 
@@ -60,6 +64,9 @@ impl StateRevisions {
         }
         if sections.system {
             self.system = current.system;
+        }
+        if sections.configuration {
+            self.configuration = current.configuration;
         }
     }
 }
@@ -262,6 +269,7 @@ pub struct StateResponse {
     pub queue: Option<QueueState>,
     pub library: Option<LibrarySnapshot>,
     pub system: Option<SystemState>,
+    pub configuration: Option<ConfigurationState>,
 }
 
 impl StateResponse {
@@ -271,6 +279,7 @@ impl StateResponse {
             queue: self.queue.is_some(),
             library: self.library.is_some(),
             system: self.system.is_some(),
+            configuration: self.configuration.is_some(),
         }
     }
 
@@ -287,6 +296,9 @@ impl StateResponse {
         }
         if let Some(section) = self.system {
             state.system = section;
+        }
+        if let Some(section) = self.configuration {
+            state.configuration = section;
         }
     }
 }
@@ -353,6 +365,7 @@ mod tests {
             queue: 1,
             library: 1,
             system: 1,
+            configuration: 1,
         };
         let notified = StateRevisions {
             playback: 2,
@@ -384,6 +397,75 @@ mod tests {
             next.changed_since(applied),
             StateSections {
                 queue: true,
+                ..StateSections::default()
+            }
+        );
+    }
+
+    #[test]
+    fn runtime_and_configuration_reads_preserve_omitted_state_and_unread_tokens() {
+        let mut snapshot = ClientSnapshot::default();
+        snapshot.configuration.config_path = "/existing/config.toml".into();
+        Arc::make_mut(&mut snapshot.configuration.config).page_size = 37;
+        let retained_config = Arc::clone(&snapshot.configuration.config);
+        let mut applied = StateRevisions::default();
+        let current = StateRevisions {
+            system: 2,
+            configuration: 3,
+            ..StateRevisions::default()
+        };
+        let runtime = StateResponse {
+            revisions: current,
+            system: Some(SystemState {
+                selected_device: Some("runtime output".into()),
+                ..SystemState::default()
+            }),
+            ..StateResponse::default()
+        };
+        applied.apply_sections(runtime.revisions, runtime.sections());
+        runtime.apply_to(&mut snapshot);
+        assert!(Arc::ptr_eq(
+            &snapshot.configuration.config,
+            &retained_config
+        ));
+        assert_eq!(
+            snapshot.configuration.config_path,
+            std::path::Path::new("/existing/config.toml")
+        );
+        assert_eq!(
+            current.changed_since(applied),
+            StateSections {
+                configuration: true,
+                ..StateSections::default()
+            }
+        );
+
+        let configuration = StateResponse {
+            revisions: StateRevisions {
+                system: 4,
+                ..current
+            },
+            configuration: Some(ConfigurationState {
+                config: Arc::new(rivu_format::config::Config {
+                    page_size: 91,
+                    ..Default::default()
+                }),
+                config_path: "/new/config.toml".into(),
+            }),
+            ..StateResponse::default()
+        };
+        let next = configuration.revisions;
+        applied.apply_sections(next, configuration.sections());
+        configuration.apply_to(&mut snapshot);
+        assert_eq!(snapshot.configuration.config.page_size, 91);
+        assert_eq!(
+            snapshot.system.selected_device.as_deref(),
+            Some("runtime output")
+        );
+        assert_eq!(
+            next.changed_since(applied),
+            StateSections {
+                system: true,
                 ..StateSections::default()
             }
         );

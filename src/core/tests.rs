@@ -90,8 +90,8 @@ pub(super) fn fixture_with_database(duration: Option<f64>) -> (tempfile::TempDir
         .unwrap();
     let mut state = CoreState::default();
     state.library.track_total = store.track_count().unwrap();
-    state.system.config_path = directory.path().join("config.toml");
-    Arc::make_mut(&mut state.system.config)
+    state.configuration.config_path = directory.path().join("config.toml");
+    Arc::make_mut(&mut state.configuration.config)
         .library_roots
         .push(directory.path().to_path_buf());
     let (scan_tx, scan_rx) = async_channel::bounded(3);

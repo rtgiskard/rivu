@@ -23,6 +23,7 @@ pub struct ClientSnapshot {
     pub current_track: Option<Arc<Track>>,
     pub playback: PlaybackState,
     pub system: SystemState,
+    pub configuration: ConfigurationState,
 }
 
 impl ClientSnapshot {
@@ -453,6 +454,13 @@ pub struct RelocationTaskStatus {
     pub error: Option<String>,
 }
 
+/// Cold configuration state, independently requested and invalidated from runtime status.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ConfigurationState {
+    pub config: Arc<rivu_format::config::Config>,
+    pub config_path: PathBuf,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SystemState {
     pub scanning: bool,
@@ -464,8 +472,6 @@ pub struct SystemState {
     pub selected_device: Option<String>,
     /// In-process publication/wakeup sequence; not a query-domain invalidation token.
     pub revision: u64,
-    pub config: Arc<rivu_format::config::Config>,
-    pub config_path: PathBuf,
     pub mpris_status: String,
     pub ffmpeg_status: String,
     pub database_optimization: Option<DatabaseOptimization>,
@@ -484,8 +490,6 @@ impl Default for SystemState {
             devices: Arc::new(Vec::new()),
             selected_device: None,
             revision: 0,
-            config: Arc::new(rivu_format::config::Config::default()),
-            config_path: PathBuf::new(),
             mpris_status: String::new(),
             ffmpeg_status: "disabled".into(),
             database_optimization: None,

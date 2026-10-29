@@ -450,13 +450,13 @@ fn saturated_audio_admission_preserves_state_requests_events_and_command_order()
             .try_send(AudioEvent::OutputSettingsFailed {
                 request: core.output_settings_request,
                 device: core.state.system.selected_device.clone(),
-                auto_mix: core.state.system.config.pipewire_auto_mix,
+                auto_mix: core.state.configuration.config.pipewire_auto_mix,
                 message: format!("accepted failure {index}"),
             })
             .unwrap();
     }
     core.engine.events = Some(event_receive);
-    let saved = std::fs::read(&core.state.system.config_path).unwrap();
+    let saved = std::fs::read(&core.state.configuration.config_path).unwrap();
     let generation = core.generation;
     let (finished, completion) = bounded(1);
     let worker = thread::spawn(move || {
@@ -486,7 +486,7 @@ fn saturated_audio_admission_preserves_state_requests_events_and_command_order()
         Some("accepted-output")
     );
     assert_eq!(
-        std::fs::read(&core.state.system.config_path).unwrap(),
+        std::fs::read(&core.state.configuration.config_path).unwrap(),
         saved
     );
 
@@ -935,7 +935,7 @@ fn unchanged_bitrate_enrichment_does_not_publish_an_update() {
 #[test]
 fn successful_start_records_recent_once_and_twenty_percent_is_strict() {
     let (_directory, mut core) = fixture();
-    Arc::make_mut(&mut core.state.system.config).play_count_threshold_percent = 20.0;
+    Arc::make_mut(&mut core.state.configuration.config).play_count_threshold_percent = 20.0;
     pending(&mut core, 1);
     assert!(core.store.history(200).unwrap().is_empty());
     started(&mut core, Some(10.0)).unwrap();
@@ -975,7 +975,7 @@ fn successful_start_records_recent_once_and_twenty_percent_is_strict() {
 fn configured_threshold_controls_counting_including_zero_percent() {
     for percent in [0.0, 50.0, 99.0] {
         let (_directory, mut core) = fixture();
-        Arc::make_mut(&mut core.state.system.config).play_count_threshold_percent = percent;
+        Arc::make_mut(&mut core.state.configuration.config).play_count_threshold_percent = percent;
         playing(&mut core, 1);
         let boundary = 10.0 * percent / 100.0;
         progress(&mut core, 10.0, boundary);

@@ -255,7 +255,7 @@ impl Core {
         let total = paths.len();
         let cancellation = library::ScanCancellation::default();
         let worker_cancellation = cancellation.clone();
-        let ffmpeg_enabled = self.state.system.config.ffmpeg_enabled;
+        let ffmpeg_enabled = self.state.configuration.config.ffmpeg_enabled;
         let (sender, events) = async_channel::bounded(3);
         let (finished_tx, finished) = oneshot::channel();
         let workers = self.workers.clone();

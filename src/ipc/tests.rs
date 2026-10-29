@@ -113,6 +113,73 @@ fn pending_query_preserves_pipelined_responses_and_disconnected_clients_release_
 }
 
 #[test]
+fn configuration_only_change_wakes_ipc_watch_and_selective_read_omits_runtime() {
+    let directory = socket_test_directory();
+    let config_path = directory.path().join("config.toml");
+    crate::config::Config {
+        media_read_buffer_mb: 1,
+        ffmpeg_enabled: false,
+        ..Default::default()
+    }
+    .save(&config_path)
+    .unwrap();
+    let owner = SocketOwner::acquire(directory.path()).unwrap();
+    let mut runtime = crate::core::Runtime::start(directory.path(), &config_path).unwrap();
+    let app = AppHandle::new(&runtime, false);
+    let server = Server::start(&owner, runtime.handle.clone(), app).unwrap();
+    let mut control = client_session(directory.path()).unwrap();
+    control.query(Query::ScanTask { id: 0 }).unwrap();
+    let initial = control.get_state(StateSections::ALL).unwrap();
+    let before = initial.revisions;
+    assert_eq!(initial.sections(), StateSections::ALL);
+    assert_eq!(
+        initial.configuration.as_ref().unwrap().config_path,
+        config_path
+    );
+    let previous = initial.configuration.unwrap().config.waveform_seek_enabled;
+    let mut watcher = client_session(directory.path()).unwrap();
+    watcher
+        .bind_instance(control.instance_id().unwrap())
+        .unwrap();
+    let stop = watcher.cancellation();
+    let (completed, completion) = std::sync::mpsc::sync_channel(1);
+    let watched = std::thread::spawn(move || {
+        let changed = watcher.watch(before).unwrap().changed_since(before);
+        assert_eq!(
+            changed,
+            StateSections {
+                configuration: true,
+                ..Default::default()
+            }
+        );
+        completed.send(watcher.get_state(changed).unwrap()).unwrap();
+    });
+    runtime
+        .handle
+        .update_gui_config(crate::core::GuiConfigChange::ToggleWaveformSeek)
+        .unwrap();
+    // Bound the failure path without depending on scheduling a particular watch/read order.
+    let response = completion.recv_timeout(std::time::Duration::from_secs(5));
+    stop.cancel();
+    watched.join().unwrap();
+    let response = response.expect("configuration-only publication did not wake IPC Watch");
+    assert_eq!(
+        response.sections(),
+        StateSections {
+            configuration: true,
+            ..Default::default()
+        }
+    );
+    assert_ne!(
+        response.configuration.unwrap().config.waveform_seek_enabled,
+        previous
+    );
+    drop(server);
+    runtime.control.request_shutdown().unwrap();
+    runtime.join().unwrap();
+}
+
+#[test]
 fn app_commands_route_over_ipc_without_changing_business_state() {
     let directory = socket_test_directory();
     let config_path = directory.path().join("config.toml");
@@ -1544,11 +1611,13 @@ fn partial_state_wire_round_trip_omits_unrequested_sections() {
             queue: 2,
             library: 3,
             system: 4,
+            configuration: 5,
         },
         playback: None,
         queue: None,
         library: Some(rivu_protocol::model::LibrarySnapshot::default()),
         system: None,
+        configuration: None,
     };
     let mut encoded = Vec::new();
     encode_response_frame_into(&WireResponse::State(wire_state(response)), &mut encoded).unwrap();
@@ -1562,6 +1631,72 @@ fn partial_state_wire_round_trip_omits_unrequested_sections() {
     assert!(state.playback.is_none());
     assert!(state.queue.is_none());
     assert!(state.system.is_none());
+    assert!(state.configuration.is_none());
+}
+
+#[test]
+fn runtime_wire_round_trip_preserves_large_client_configuration_without_transferring_it() {
+    let mut snapshot = rivu_protocol::model::ClientSnapshot::default();
+    let config = Arc::make_mut(&mut snapshot.configuration.config);
+    config.library_roots = (0..256)
+        .map(|index| {
+            PathBuf::from(format!(
+                "/configuration-only-marker/{index}/{}",
+                "long-root-".repeat(20)
+            ))
+        })
+        .collect();
+    config.page_size = 91;
+    snapshot.configuration.config_path = "/configuration-only-marker/config.toml".into();
+    let retained = Arc::clone(&snapshot.configuration.config);
+    let full = StateResponse {
+        system: Some(snapshot.system.clone()),
+        configuration: Some(snapshot.configuration.clone()),
+        ..Default::default()
+    };
+    let mut encoded_full = Vec::new();
+    encode_response_frame_into(&WireResponse::State(wire_state(full)), &mut encoded_full).unwrap();
+    assert!(
+        encoded_full
+            .windows(b"configuration-only-marker".len())
+            .any(|bytes| bytes == b"configuration-only-marker")
+    );
+
+    let runtime = StateResponse {
+        system: Some(rivu_protocol::model::SystemState {
+            scan_message: "runtime progress".into(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut encoded = Vec::new();
+    encode_response_frame_into(&WireResponse::State(wire_state(runtime)), &mut encoded).unwrap();
+    assert!(encoded.len() < 256);
+    assert!(encoded_full.len() > encoded.len() * 100);
+    assert!(
+        !encoded
+            .windows(b"configuration-only-marker".len())
+            .any(|bytes| bytes == b"configuration-only-marker")
+    );
+    let WireResponse::State(decoded) = decode_response_frame(&encoded[4..]).unwrap() else {
+        panic!("expected state")
+    };
+    let response = state_response(decoded);
+    assert_eq!(
+        response.sections(),
+        StateSections {
+            system: true,
+            ..Default::default()
+        }
+    );
+    response.apply_to(&mut snapshot);
+    assert_eq!(snapshot.system.scan_message, "runtime progress");
+    assert!(Arc::ptr_eq(&retained, &snapshot.configuration.config));
+    assert_eq!(snapshot.configuration.config.page_size, 91);
+    assert_eq!(
+        snapshot.configuration.config_path,
+        std::path::Path::new("/configuration-only-marker/config.toml")
+    );
 }
 
 #[test]
@@ -1580,6 +1715,7 @@ fn system_scan_task_identity_wire_round_trip_preserves_boundaries() {
                 queue: None,
                 library: None,
                 system: Some(system),
+                configuration: None,
             })),
             &mut encoded,
         )
@@ -1594,7 +1730,7 @@ fn system_scan_task_identity_wire_round_trip_preserves_boundaries() {
 }
 
 #[test]
-fn system_config_wire_adapter_preserves_optional_fields_and_library_columns() {
+fn configuration_wire_adapter_preserves_optional_fields_and_library_columns() {
     for (output_device, library_columns) in [
         (
             None,
@@ -1629,10 +1765,9 @@ fn system_config_wire_adapter_preserves_optional_fields_and_library_columns() {
             visualization_fps: 240,
             ..Default::default()
         });
-        let system = rivu_protocol::model::SystemState {
+        let configuration = rivu_protocol::model::ConfigurationState {
             config: config.clone(),
-            revision: 42,
-            ..rivu_protocol::model::SystemState::default()
+            config_path: "/test/config.toml".into(),
         };
         let mut encoded = Vec::new();
         encode_response_frame_into(
@@ -1641,7 +1776,8 @@ fn system_config_wire_adapter_preserves_optional_fields_and_library_columns() {
                 playback: None,
                 queue: None,
                 library: None,
-                system: Some(system),
+                system: None,
+                configuration: Some(configuration),
             })),
             &mut encoded,
         )
@@ -1651,7 +1787,7 @@ fn system_config_wire_adapter_preserves_optional_fields_and_library_columns() {
             panic!("expected state")
         };
         assert_eq!(
-            state_response(state).system.unwrap().config.as_ref(),
+            state_response(state).configuration.unwrap().config.as_ref(),
             config.as_ref()
         );
     }
@@ -1679,6 +1815,7 @@ fn request_round_trip_uses_explicit_message_types() {
             queue: 2,
             library: 3,
             system: 4,
+            configuration: 5,
         }),
         WireRequest::WaitTask(rivu_protocol::model::TaskTarget::Scan { id: 42 }),
     ];
@@ -1711,7 +1848,11 @@ fn request_round_trip_uses_explicit_message_types() {
                 queue,
                 library,
                 system,
-            }) => assert_eq!((playback, queue, library, system), (1, 2, 3, 4)),
+                configuration,
+            }) => assert_eq!(
+                (playback, queue, library, system, configuration),
+                (1, 2, 3, 4, 5)
+            ),
             _ => panic!("unexpected request variant"),
         }
     }
@@ -1865,7 +2006,7 @@ fn request_encoding_rejects_oversized_body_before_completion() {
 fn postcard_frame_headers_and_bodies_preserve_wire_contract() {
     let mut encoded = Vec::new();
     encode_request_frame_into(&WireRequest::Hello(StateSections::ALL), &mut encoded).unwrap();
-    assert_eq!(encoded, [6, 0, 0, 0, PROTOCOL_VERSION, 0, 1, 1, 1, 1]);
+    assert_eq!(encoded, [7, 0, 0, 0, PROTOCOL_VERSION, 0, 1, 1, 1, 1, 1]);
     encode_response_frame_into(&WireResponse::Error("x".into()), &mut encoded).unwrap();
     assert_eq!(encoded, [4, 0, 0, 0, PROTOCOL_VERSION, 255, 1, b'x']);
 }
@@ -2246,6 +2387,7 @@ pub(crate) fn complete_test_handshake_for_instance(
                 queue: None,
                 library: None,
                 system: None,
+                configuration: None,
             }),
         }),
     );

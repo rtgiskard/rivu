@@ -243,7 +243,7 @@ fn query_startup_failure_retains_its_cause_after_final_persistence() {
         let (_directory, mut core) = fixture();
         let _audio = recording_audio(&mut core);
         core.flush_config().unwrap();
-        let path = core.state.system.config_path.clone();
+        let path = core.state.configuration.config_path.clone();
         core.command(Command::Volume { value: 0.25 }).unwrap();
         if invalid_config {
             std::fs::write(&path, "[playback]\nvolume_percent = 101\n").unwrap();
@@ -276,7 +276,7 @@ fn final_queue_failure_still_attempts_config_and_retains_all_failures() {
         let (_directory, mut core) = fixture();
         let _audio = recording_audio(&mut core);
         core.flush_config().unwrap();
-        let path = core.state.system.config_path.clone();
+        let path = core.state.configuration.config_path.clone();
         if invalid_config {
             std::fs::write(&path, "[playback]\nvolume_percent = 101\n").unwrap();
         }

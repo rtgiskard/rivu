@@ -259,7 +259,7 @@ impl Core {
         if self.active_scan.is_some() || self.active_external_admission.is_some() {
             bail!("A library scan is already running");
         }
-        let config = Arc::clone(&self.state.system.config);
+        let config = Arc::clone(&self.state.configuration.config);
         let other_tracks_check = matches!(input, ScanInput::OtherTracks { .. });
         let owner = if matches!(input, ScanInput::Import { .. }) {
             crate::projection::MediaTaskOwner::Playlist
@@ -724,7 +724,7 @@ impl Core {
         // Re-resolve membership only at the Saving boundary, after any wait for
         // relocation. Settings edits are rejected while this accepted save runs.
         let other_roots = if scan.other_tracks_check {
-            match library::normalize_roots(&self.state.system.config.library_roots) {
+            match library::normalize_roots(&self.state.configuration.config.library_roots) {
                 Ok(roots) => Some(roots),
                 Err(error) => {
                     self.complete_unsaved_scan(task, Err(error), false);

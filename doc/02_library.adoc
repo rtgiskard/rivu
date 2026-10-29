@@ -847,8 +847,9 @@ Result shapes follow the queried resource:
   occurrence rows. `playlist list` returns summaries with `id`, `name`, and
   `entry_count`; `playlist show PLAYLIST_ID` returns that playlist's entry array.
 * `status` returns the instance state with `revisions`, `playback`, `queue`,
-  `library`, and `system`. `library history` returns a history array, limited by
-  `--limit` in the same retained order as text output.
+  `library`, `system`, and `configuration`. Effective `config` and `config_path`
+  belong to `configuration`; `system` contains runtime status. `library history`
+  returns a history array, limited by `--limit` in the same retained order as text output.
 * Ordinary command acknowledgements, including `library optimize`, contain
   `status`, `error`, `revision`,
   `scan_id`, `relocation_id`, `processing_id`, and `database_optimization`. Status is `Succeeded`, `Failed`,

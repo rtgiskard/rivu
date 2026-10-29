@@ -272,8 +272,8 @@ impl Core {
                 track_ids,
             } => {
                 self.ensure_queue_control_ready()?;
-                let roots =
-                    other_tracks.then_some(self.state.system.config.library_roots.as_slice());
+                let roots = other_tracks
+                    .then_some(self.state.configuration.config.library_roots.as_slice());
                 if self
                     .store
                     .enqueue_sources(&directories, &track_ids, roots)?
@@ -306,7 +306,8 @@ impl Core {
                 let count = self.store.insert_queue_sources(
                     &directories,
                     &track_ids,
-                    other_tracks.then_some(self.state.system.config.library_roots.as_slice()),
+                    other_tracks
+                        .then_some(self.state.configuration.config.library_roots.as_slice()),
                     index,
                 )?;
                 if count != 0 {
@@ -384,7 +385,8 @@ impl Core {
                     playlist_id,
                     &directories,
                     &track_ids,
-                    other_tracks.then_some(self.state.system.config.library_roots.as_slice()),
+                    other_tracks
+                        .then_some(self.state.configuration.config.library_roots.as_slice()),
                 )? {
                     self.invalidate_playlist_members(&[playlist_id])?;
                 }
@@ -416,7 +418,8 @@ impl Core {
                     playlist_id,
                     &directories,
                     &track_ids,
-                    other_tracks.then_some(self.state.system.config.library_roots.as_slice()),
+                    other_tracks
+                        .then_some(self.state.configuration.config.library_roots.as_slice()),
                     index,
                 )? {
                     self.invalidate_playlist_members(&[playlist_id])?;
@@ -483,7 +486,7 @@ impl Core {
                 self.engine.send(AudioCommand::OutputSettings {
                     request,
                     device: name.clone(),
-                    auto_mix: self.state.system.config.pipewire_auto_mix,
+                    auto_mix: self.state.configuration.config.pipewire_auto_mix,
                 })?;
                 self.output_settings_request = request;
                 self.state.system.selected_device = name;

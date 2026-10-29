@@ -207,13 +207,16 @@ pub(super) fn run(
     );
     if graph_show || matches!(&action, ProcessingAction::Show) {
         let mut session = rivu_client::client_session(data_dir)?;
-        let state = session
-            .get_state(StateSections {
-                system: true,
-                ..Default::default()
-            })?
-            .system
-            .context("Missing system state")?;
+        let response = session.get_state(StateSections {
+            system: true,
+            configuration: true,
+            ..Default::default()
+        })?;
+        let state = response.system.context("Missing system state")?;
+        let config = response
+            .configuration
+            .context("Missing configuration state")?
+            .config;
         let instance_id = super::tasks::instance_id(&session)?;
         if json {
             let processing = state
@@ -222,15 +225,15 @@ pub(super) fn run(
                 .map(|task| super::tasks::task_json(instance_id, task.id, task))
                 .transpose()?;
             let value = if graph_show {
-                serde_json::json!({"graph":state.config.processing_graph,"latest_task":processing})
+                serde_json::json!({"graph":config.processing_graph,"latest_task":processing})
             } else {
-                serde_json::json!({"equalizer":state.config.equalizer,"presets":state.config.equalizer_presets,"equalizer_ab":state.config.equalizer_ab,"denoise":state.config.denoise,"neural":state.config.neural,"processing_graph":state.config.processing_graph,"processing":processing})
+                serde_json::json!({"equalizer":config.equalizer,"presets":config.equalizer_presets,"equalizer_ab":config.equalizer_ab,"denoise":config.denoise,"neural":config.neural,"processing_graph":config.processing_graph,"processing":processing})
             };
             println!("{}", serde_json::to_string_pretty(&value)?);
         } else {
             show_settings(
                 i18n,
-                &state.config,
+                &config,
                 state.processing.as_ref(),
                 instance_id,
                 graph_show,

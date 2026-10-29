@@ -92,8 +92,9 @@ executor: cancelling a waiter is neither worker retirement nor rollback.
 
 === Projection and view costs
 
-State reads contain summaries, compact queue state, playback, and system state;
-library rows are queried separately. In-process consumers can share immutable
+State reads contain summaries, compact queue state, playback, runtime System state,
+and independently requested Configuration state; library rows are queried separately.
+In-process consumers can share immutable
 projections, whereas socket responses serialize them. Queue displays resolve
 metadata from bounded queue queries and their content revision, not unrelated
 library pages. TUI rendering visits visible queue rows while retaining global
@@ -123,8 +124,8 @@ body
 The frame header is six bytes. `body_length` excludes the four-byte length field
 and includes the version, message type, and serialized body.
 
-Bodies use Postcard serialization without COBS framing. The protocol version is
-`8`; both peers must use the same positional wire schemas. The four-byte frame
+Bodies use Postcard serialization without COBS framing. Both peers must use
+matching protocol versions and positional wire schemas. The four-byte frame
 length remains little-endian; body integers follow Postcard's encoding.
 Version mismatches are rejected before decoding the body. There is no schema
 negotiation. See <<_wire_schemas,Wire schemas>> for positional fields and adapters.
@@ -240,10 +241,10 @@ inside a body. Wire enum variant and field order are part of the binary schema.
 
 === Wire schemas
 
-Runtime `Config` and `SystemState` use explicit positional Wire schemas. They are
-not serialized directly because their in-process serde representation is not a
-stable binary contract. Collection lengths and optional fields are encoded in
-the message body.
+Configuration state carries the effective `Config` and `config_path`; its Config
+uses the explicit positional `WireConfig` adapter. Runtime `SystemState` contains
+no configuration payload. Both section schemas are versioned positional contracts;
+collection lengths and optional fields are encoded in the message body.
 Library information-column selection is encoded in WireConfig as five booleans
 in Artist, Album, Duration, Codec, and Bitrate order; all false means no columns.
 
@@ -342,10 +343,11 @@ does not cancel accepted work; replacing a query only revokes its result.
 
 === Revisions and watching
 
-State revisions are tracked independently for Playback, Queue, Library, and
-System sections. They are equality tokens, not ordered clocks. A Watch request
-waits until the current revisions differ from the expected revisions. The
-response contains the latest revisions rather than an event log.
+State revisions are tracked independently for Playback, Queue, Library, System,
+and Configuration sections, in that positional order. Section selection uses the
+same order. Tokens are compared for equality, not ordered as clocks. A Watch
+request waits until the current revisions differ from the expected revisions;
+its response contains the latest revisions rather than an event log.
 
 The `system` token in `StateRevisions` invalidates the System section. It is
 distinct from `SystemState.revision` and acknowledgement `revision`, which are
@@ -358,6 +360,13 @@ tokens under one shared-state lock. Omitted sections preserve the client's
 previous values; the client advances tokens only for sections actually read,
 otherwise it could acknowledge an unseen change. Notifications coalesce to the
 latest state. A server restart requires a fresh Hello and state read.
+
+Configuration changes advance their own token and wake Watch even when runtime
+System fields are unchanged. Runtime progress does not materialize or transmit
+the unchanged configuration. Request Configuration on initial/full state reads
+and after its token changes; a runtime-only response cannot clear a retained
+configuration or acknowledge an unread configuration revision. Selected sections,
+including simultaneous runtime/configuration changes, come from one publication.
 
 Each in-flight Watch owns its revision subscription. Reply, disconnection or
 cancellation releases that registration without waiting for another publication.
@@ -986,11 +995,10 @@ drains lifecycle facts while waiting under one deadline, without a second receiv
 or automatic replay. Shutdown acknowledges acceptance before final stop/persistence;
 later failures remain published errors, not rejection of the accepted exit.
 
-Core polls enabled-but-not-loaded FFmpeg status every 100 ms to observe the
-nonblocking one-time result, including loads initiated by waveform work. Polling
-never starts or waits for a load; unrelated requests retain the pending timer.
-Disabling FFmpeg or resolving success/failure drops it. Disabled, resolved, and
-native-only builds have no FFmpeg polling wakeups.
+Core awaits the process-wide completion of the first explicit FFmpeg load,
+including loads initiated by waveform work. Success or failure publishes runtime
+availability without starting a load or periodically polling. Disabled and
+native-only builds have no FFmpeg status polling wakeups.
 
 === Application services
 

@@ -91,7 +91,7 @@ impl Core {
                 message,
             } if request == self.output_settings_request
                 && device == self.state.system.selected_device
-                && auto_mix == self.state.system.config.pipewire_auto_mix =>
+                && auto_mix == self.state.configuration.config.pipewire_auto_mix =>
             {
                 self.state.system.last_error = Some(message);
             }
@@ -100,7 +100,7 @@ impl Core {
                 config,
                 message,
             } if generation.is_none_or(|value| value == self.generation)
-                && *config == self.state.system.config.equalizer =>
+                && *config == self.state.configuration.config.equalizer =>
             {
                 self.state.system.last_error = Some(message);
             }
@@ -274,7 +274,8 @@ impl Core {
             (playback.started
                 && !playback.counted
                 && playback.heard
-                    > duration * self.state.system.config.play_count_threshold_percent / 100.0)
+                    > duration * self.state.configuration.config.play_count_threshold_percent
+                        / 100.0)
                 .then_some(playback.track_id)
         }) else {
             return Ok(());

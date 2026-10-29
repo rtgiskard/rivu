@@ -32,11 +32,11 @@ fn external_admission_appends_valid_subset_without_roots_autoplay_or_playlist_ch
     let second = directory.path().join("external-second.wav");
     write_pcm_frames(&first, 1);
     write_pcm_frames(&second, 1);
-    Arc::make_mut(&mut core.state.system.config)
+    Arc::make_mut(&mut core.state.configuration.config)
         .library_roots
         .clear();
-    Arc::make_mut(&mut core.state.system.config).scan_min_duration_secs = 60;
-    let config = Arc::clone(&core.state.system.config);
+    Arc::make_mut(&mut core.state.configuration.config).scan_min_duration_secs = 60;
+    let config = Arc::clone(&core.state.configuration.config);
     let before_queue = core.store.queue_ids().unwrap();
     let before_playback = core.state.playback.clone();
     let before_playlists = core.state.library.playlist_total;
@@ -116,7 +116,7 @@ fn external_admission_appends_valid_subset_without_roots_autoplay_or_playlist_ch
         before_playlist_revision
     );
     assert_eq!(core.state.library.track_total, before_total + 2);
-    assert!(Arc::ptr_eq(&core.state.system.config, &config));
+    assert!(Arc::ptr_eq(&core.state.configuration.config, &config));
     let ViewResponse::ScanTask(status) = core.view(&Query::ScanTask { id }).unwrap() else {
         panic!("expected retained media task")
     };
