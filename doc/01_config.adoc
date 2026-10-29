@@ -781,6 +781,8 @@ Shared visualization settings apply as follows:
   `visualizations.fps` and compositor-throttled display callbacks.
 * Still Mode stops processing and discards results; see <<_still_mode,Still Mode>>.
   This is independent of rendering reuse and media read buffering.
+  In Settings → Visualizations → General → Processing / cache, its switch sits
+  below the shared material-cache budget.
 
 Each frequency view has a range override; leave it empty to inherit General,
 or clear an explicit value to restore inheritance. See

@@ -1109,6 +1109,7 @@ impl Settings {
                                     )),
                                 ),
                             )
+                            .child(settings.single(Field::GpuMaterialBudget, cx))
                             .child(row().flex_wrap().child(visual_switch(
                                 &self.i18n,
                                 "settings-still-mode",
@@ -1117,8 +1118,7 @@ impl Settings {
                                 draft.still_mode,
                                 cx,
                                 |draft| draft.still_mode = !draft.still_mode,
-                            )))
-                            .child(settings.single(Field::GpuMaterialBudget, cx)),
+                            ))),
                     ))
             }
             VisualPage::Spectrum => {

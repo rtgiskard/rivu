@@ -991,7 +991,7 @@ impl Metadata {
                 .chain(&cue_fields)
                 .chain(&tags)
                 .map(|fields| &fields[index].0)
-                .chain((index == 1).then_some(&disc.0))
+                .chain((index == 0).then_some(&disc.0))
                 .chain((index == 0).then_some(&track_kind.0))
                 .map(|label| {
                     let run = gpui::TextRun {
@@ -1243,17 +1243,23 @@ impl Metadata {
                                 self.panel_field(theme, Field::Title, self.tr("gl-title")),
                                 self.panel_field(theme, Field::Artist, self.tr("gl-artist")),
                             ))
-                            .child(metadata_row(
-                                self.panel_field(theme, Field::Album, self.tr("gl-album")),
-                                label_value_row(
-                                    theme,
-                                    disc.0.clone(),
-                                    disc.1.clone(),
-                                    label_widths[1],
-                                    metadata_copy(disc.0, disc.1, copy_hint.clone(), cx),
-                                ),
-                            ))
-                            .child(metadata_rows(theme, tags, label_widths, copy_hint, cx).gap_2())
+                            .child(self.panel_field(theme, Field::Album, self.tr("gl-album")))
+                            .child(
+                                column()
+                                    .gap_2()
+                                    .mt_2()
+                                    .child(label_value_row(
+                                        theme,
+                                        disc.0.clone(),
+                                        disc.1.clone(),
+                                        label_widths[0],
+                                        metadata_copy(disc.0, disc.1, copy_hint.clone(), cx),
+                                    ))
+                                    .child(
+                                        metadata_rows(theme, tags, label_widths, copy_hint, cx)
+                                            .gap_2(),
+                                    ),
+                            )
                             .when(track.is_some(), |tags| {
                                 tags.child(match self.artwork_view.measured_image(panel_id, cx) {
                                     Some(image) => artwork_preview(
