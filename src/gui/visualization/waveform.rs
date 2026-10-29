@@ -3334,6 +3334,7 @@ mod tests {
                     runtime.handle.clone(),
                     Arc::new(Localizer::new("en-US")),
                     waveform.clone(),
+                    cx.new(|_| crate::gui::animation_frames::AnimationFrames::default()),
                     cx,
                 )
             })

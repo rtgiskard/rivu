@@ -2,7 +2,7 @@
 //! Business state arrives through `sync`; the animation clock never reads or
 //! refreshes the application root. Panel entities are the only redraw targets.
 
-use super::{layout, visualization};
+use super::{animation_frames::AnimationFrames, layout, visualization};
 #[cfg(test)]
 use crate::config::ConfigPersistence;
 use crate::{
@@ -134,8 +134,7 @@ pub(super) struct Presentation {
     frame_requested: bool,
     frame_pending: bool,
     frame_generation: u64,
-    frame_timer: Option<Task<()>>,
-    last_frame_request: Option<Instant>,
+    frames: Entity<AnimationFrames>,
     analysis_timer: Option<Task<()>>,
     animation_clock: AnimationClock,
     _waveform_subscription: Subscription,
@@ -146,6 +145,7 @@ impl Presentation {
         handle: CoreHandle,
         i18n: Arc<Localizer>,
         waveform: Entity<visualization::Waveform>,
+        frames: Entity<AnimationFrames>,
         cx: &mut Context<Self>,
     ) -> Self {
         let config = handle.config_snapshot();
@@ -179,8 +179,7 @@ impl Presentation {
             frame_requested: false,
             frame_pending: false,
             frame_generation: 0,
-            frame_timer: None,
-            last_frame_request: None,
+            frames,
             analysis_timer: None,
             animation_clock: AnimationClock::default(),
             _waveform_subscription: subscription,
@@ -345,7 +344,7 @@ impl Presentation {
             retain_analysis_staging(&mut self.staging, demand);
             self.handle.set_display_demand(demand);
             if self.demand.enabled != demand.enabled {
-                self.cancel_clock();
+                self.cancel_clock(cx);
             }
             self.demand = demand;
         }
@@ -370,7 +369,7 @@ impl Presentation {
             || still_changed
             || fps_changed
         {
-            self.cancel_clock();
+            self.cancel_clock(cx);
         }
         let waveform_enabled = !self.config.still_mode && !self.shutting_down;
         let waveform_visible = self.active();
@@ -404,15 +403,15 @@ impl Presentation {
             .then(|| Duration::from_secs_f64(1.0 / self.config.analysis_fps as f64))
     }
 
-    fn cancel_clock(&mut self) {
+    fn cancel_clock(&mut self, cx: &mut gpui::App) {
+        self.frames.update(cx, |frames, _| {
+            frames.cancel_presentation(self.frame_generation)
+        });
         self.frame_generation = self.frame_generation.wrapping_add(1);
         self.analysis_timer.take();
-        self.frame_timer = None;
-        self.last_frame_request = None;
+        self.frame_pending = false;
         self.animation_clock.suspend();
         self.frame_requested = false;
-        // Native callbacks cannot be removed. Keep their pending slot occupied
-        // until delivery; the generation check retires them without consumption.
     }
 
     fn start_analysis_clock(&mut self, cx: &mut Context<Self>) {
@@ -461,71 +460,52 @@ impl Presentation {
                 && self.analysis_interval().is_none()
                 && !self.audio_visualizer.idle_fading(Instant::now()))
             || self.frame_pending
-            || self.frame_timer.is_some()
         {
             return;
         }
         self.start_analysis_clock(cx);
-        let now = Instant::now();
-        let delay = self.last_frame_request.map_or(Duration::ZERO, |last| {
-            if self.config.visualization_fps == 0 {
-                Duration::ZERO
-            } else {
-                Duration::from_nanos(
-                    1_000_000_000_u64.div_ceil(u64::from(self.config.visualization_fps)),
-                )
-                .saturating_sub(now.saturating_duration_since(last))
-            }
+        self.frame_pending = true;
+        let owner = cx.weak_entity();
+        self.frames.update(cx, |frames, cx| {
+            frames.request_presentation(
+                owner,
+                self.frame_generation,
+                self.config.visualization_fps,
+                window,
+                cx,
+            );
         });
-        if !delay.is_zero() {
-            let generation = self.frame_generation;
-            let timer = cx.background_executor().timer(delay);
-            self.frame_timer = Some(cx.spawn_in(window, async move |this, cx| {
-                timer.await;
-                let _ = this.update_in(cx, |this, window, cx| {
-                    if generation == this.frame_generation {
-                        this.frame_timer = None;
-                        this.request_frame(window, cx);
-                    }
-                });
-            }));
+    }
+
+    pub(super) fn animation_frame(
+        &mut self,
+        generation: u64,
+        now: Instant,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if generation != self.frame_generation {
             return;
         }
-        self.last_frame_request = Some(now);
-        self.frame_pending = true;
-        let generation = self.frame_generation;
-        let entity = cx.weak_entity();
-        window.on_next_frame(move |window, cx| {
-            let _ = entity.update(cx, |this, cx| {
-                this.frame_pending = false;
-                if generation != this.frame_generation {
-                    this.request_frame(window, cx);
-                    return;
-                }
-                if !this.active() || !this.demand.enabled {
-                    return;
-                }
-                this.frame_requested = false;
-                let now = Instant::now();
-                if this.analysis_interval().is_some() {
-                    this.consume_analysis(now, cx);
-                    if !this.awaiting_replacement {
-                        let time = this.animation_clock.advance(now);
-                        let visuals_changed = this.visuals.animate(time);
-                        let audio_changed = this.audio_visualizer.animate(time);
-                        this.notify_animation(visuals_changed, audio_changed, cx);
-                    }
-                    this.request_frame(window, cx);
-                } else {
-                    this.animation_clock.suspend();
-                    this.audio_visualizer.advance_idle_fade(now);
-                    this.notify_animation(false, true, cx);
-                    this.request_frame(window, cx);
-                }
-            });
-        });
-        // on_next_frame wakes the native frame source without forcing a repaint.
-        // Accepted input or changed animation dirties only the affected panels.
+        self.frame_pending = false;
+        if !self.active() || !self.demand.enabled {
+            return;
+        }
+        self.frame_requested = false;
+        if self.analysis_interval().is_some() {
+            self.consume_analysis(now, cx);
+            if !self.awaiting_replacement {
+                let time = self.animation_clock.advance(now);
+                let visuals_changed = self.visuals.animate(time);
+                let audio_changed = self.audio_visualizer.animate(time);
+                self.notify_animation(visuals_changed, audio_changed, cx);
+            }
+        } else {
+            self.animation_clock.suspend();
+            self.audio_visualizer.advance_idle_fade(now);
+            self.notify_animation(false, true, cx);
+        }
+        self.request_frame(window, cx);
     }
 
     fn consume_analysis(&mut self, now: Instant, cx: &mut Context<Self>) {
@@ -656,7 +636,7 @@ impl Presentation {
     /// Destroy the window-local presentation; temporary hide goes through sync.
     pub(super) fn release_display_resources(&mut self, cx: &mut Context<Self>) {
         self.visible = false;
-        self.cancel_clock();
+        self.cancel_clock(cx);
         self.demand = DisplayDemand::default();
         self.handle.set_display_demand(self.demand);
         self.staging = AnalysisFrame::default();
@@ -937,6 +917,7 @@ mod tests {
                 runtime.handle.clone(),
                 Arc::new(Localizer::new("en-US")),
                 waveform,
+                cx.new(|_| crate::gui::animation_frames::AnimationFrames::default()),
                 cx,
             )
         });
@@ -1133,6 +1114,7 @@ mod tests {
                 runtime.handle.clone(),
                 Arc::new(Localizer::new("en-US")),
                 waveform,
+                cx.new(|_| crate::gui::animation_frames::AnimationFrames::default()),
                 cx,
             )
         });
@@ -1230,6 +1212,7 @@ mod tests {
                 runtime.handle.clone(),
                 Arc::new(Localizer::new("en-US")),
                 waveform,
+                cx.new(|_| crate::gui::animation_frames::AnimationFrames::default()),
                 cx,
             )
         });
@@ -1327,6 +1310,7 @@ mod tests {
                     runtime.handle.clone(),
                     Arc::new(Localizer::new("en-US")),
                     waveform,
+                    cx.new(|_| crate::gui::animation_frames::AnimationFrames::default()),
                     cx,
                 )
             })
@@ -1388,8 +1372,8 @@ mod tests {
                 assert_eq!(owner.demand, DisplayDemand::default());
                 assert!(owner.analysis_timer.is_none());
                 assert!(
-                    owner.frame_pending,
-                    "native callback keeps its slot until delivery"
+                    !owner.frame_pending,
+                    "cancellation removes only this client's slot"
                 );
                 assert_ne!(owner.frame_generation, generation);
             });
@@ -1466,16 +1450,13 @@ mod tests {
                     },
                     cx,
                 );
+                owner.request_frame(window, cx);
             });
-            // Retire the pre-configuration native callback before pacing again.
-            window.simulate_next_frame(cx);
-            owner.update(cx, |owner, _| {
-                owner.last_frame_request = Some(Instant::now() + Duration::from_secs(60));
-            });
+            // The existing native gate accepts the replacement configuration,
+            // then arms one shared deadline instead of another native callback.
             window.simulate_next_frame(cx);
             owner.update(cx, |owner, cx| {
-                assert!(!owner.frame_pending);
-                assert!(owner.frame_timer.is_some());
+                assert!(owner.frame_pending);
                 assert!(owner.analysis_timer.is_some());
                 assert_eq!(
                     owner.analysis_interval(),
@@ -1483,7 +1464,7 @@ mod tests {
                 );
                 // Repeated wakeups must coalesce behind the one delayed request.
                 owner.request_frame(window, cx);
-                assert!(!owner.frame_pending);
+                assert!(owner.frame_pending);
                 let mut still = config.as_ref().clone();
                 still.still_mode = true;
                 owner.sync(
@@ -1504,8 +1485,7 @@ mod tests {
                 );
                 assert_eq!(owner.demand, DisplayDemand::default());
                 assert!(owner.analysis_timer.is_none());
-                assert!(owner.frame_timer.is_none());
-                assert!(owner.last_frame_request.is_none());
+                assert!(!owner.frame_pending);
                 assert!(owner.analysis_interval().is_none());
                 assert_eq!(owner.staging.settings, None);
                 owner.sync(
@@ -1663,6 +1643,7 @@ mod tests {
                 runtime.handle.clone(),
                 Arc::new(Localizer::new("en-US")),
                 waveform,
+                cx.new(|_| crate::gui::animation_frames::AnimationFrames::default()),
                 cx,
             )
         });
@@ -1743,7 +1724,6 @@ mod tests {
             owner.update(cx, |owner, cx| {
                 owner.request_frame(window, cx);
                 assert!(!owner.frame_pending);
-                assert!(owner.frame_timer.is_none());
                 assert!(owner.analysis_timer.is_none());
             });
         });
@@ -1784,6 +1764,7 @@ mod tests {
                     runtime.handle.clone(),
                     Arc::new(Localizer::new("en-US")),
                     waveform,
+                    cx.new(|_| crate::gui::animation_frames::AnimationFrames::default()),
                     cx,
                 )
             });
@@ -1946,6 +1927,7 @@ mod tests {
                     runtime.handle.clone(),
                     Arc::new(Localizer::new("en-US")),
                     waveform,
+                    cx.new(|_| crate::gui::animation_frames::AnimationFrames::default()),
                     cx,
                 )
             });

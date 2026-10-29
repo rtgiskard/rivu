@@ -1,5 +1,6 @@
 mod album_artwork;
 mod album_browser;
+mod animation_frames;
 mod appearance;
 mod artwork;
 mod audio_processing;
@@ -820,8 +821,15 @@ impl GuiApp {
             },
         ));
         let waveform = cx.new(|_| visualization::Waveform::new(Arc::clone(&handle.waveform)));
+        let animation_frames = cx.new(|_| animation_frames::AnimationFrames::default());
         let presentation = cx.new(|cx| {
-            presentation::Presentation::new(handle.clone(), Arc::clone(&i18n), waveform.clone(), cx)
+            presentation::Presentation::new(
+                handle.clone(),
+                Arc::clone(&i18n),
+                waveform.clone(),
+                animation_frames.clone(),
+                cx,
+            )
         });
         subscriptions.push(
             cx.subscribe(&waveform, |this, waveform, event, cx| match event {
@@ -1005,6 +1013,7 @@ impl GuiApp {
                     Arc::clone(&artwork_manager),
                     default_album,
                     artwork_images.clone(),
+                    animation_frames.clone(),
                 )
             }),
             artwork_panels: HashMap::new(),

@@ -126,10 +126,14 @@ Its analysis timer requests frames at `analysis_fps`; native window callbacks
 consume the latest publication and advance animation independently.
 `visualizations.fps` caps Spectrum, Spectrogram and Audio Visualizer animation:
 `0` follows window frames, and `1`–`240` limits requests per second. It does not
-throttle analysis, Waveform or artwork. Capped requests share one cancellable
-timer; late deadlines coalesce without catch-up. Configuration-only refreshes
-reuse unchanged staging data rather than treating it as new audio, and neither
-clock refreshes the business root.
+throttle analysis, Waveform or artwork. Artwork and audio visualization share one
+window-local native-frame gate and one cancellable deadline timer, while retaining
+their own FPS limits. Positive limits use a shared time origin so equal-rate
+updates are delivered together rather than creating interleaved window redraws.
+Late deadlines coalesce without catch-up. Scheduling a callback does not dirty
+the window; accepted input or animation changes notify the affected panels.
+Configuration-only refreshes reuse unchanged staging data rather than treating
+it as new audio, and neither animation clock refreshes the business root.
 
 The display clock advances at wall-clock speed but never beyond the latest
 accepted audio timestamp. Spectrum hold/release and smoothing, radial rotation
@@ -543,9 +547,13 @@ link:01_config.adoc#_album_artwork[Album artwork].
 
 Zero frame-rate cap follows display callbacks without a timer throttle; positive
 values cap animation requests per second independently of the analysis rate.
-Rotation and animated source covers share one frame/timer gate across artwork
-panels; individual images do not create a second animation loop. Lower caps drop
-displayed source frames rather than slowing the source timeline. Cursor catch-up
+Rotation and animated source covers share one artwork demand across panels;
+individual images do not create a second animation loop. The window gate batches
+due artwork and audio-visualization updates before drawing, without making one
+effect inherit the other's FPS limit. Playback position, input and other business
+updates can still cause additional window submissions, so these limits are not
+an overall window FPS cap. Lower caps drop displayed source frames rather than
+slowing the source timeline. Cursor catch-up
 is bounded by frame count even after a long delay; all-zero-delay sources advance
 one frame per redraw. Each element retains its own cursor over shared decoded data.
 Pausing or static mode stops rotation, but a visible animated source can continue.

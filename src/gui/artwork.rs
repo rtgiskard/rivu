@@ -2379,7 +2379,14 @@ mod tests {
         let images = ArtworkImages::default();
         let owner = cx.update(|cx| {
             let default = cx.new(|cx| Artwork::new(&crate::i18n::Localizer::new("en"), cx));
-            cx.new(|_| AlbumArtwork::new(manager, default, images.clone()))
+            cx.new(|cx| {
+                AlbumArtwork::new(
+                    manager,
+                    default,
+                    images.clone(),
+                    cx.new(|_| crate::gui::animation_frames::AnimationFrames::default()),
+                )
+            })
         });
         let mut panels = crate::gui::workspace::WorkspacePanels::default();
         let mut sync = |mode, status, fps, visible, cx: &mut gpui::TestAppContext| {
@@ -2438,6 +2445,10 @@ mod tests {
                 |_, _| div().children(panels.iter().cloned()).into_any_element(),
             );
         };
+        let notifications = std::rc::Rc::new(std::cell::Cell::new(0));
+        let observed = notifications.clone();
+        let _subscription =
+            window.update(|_, cx| cx.observe(&owner, move |_, _| observed.set(observed.get() + 1)));
 
         // Loading a static/paused panel must not invent a clock. The existing
         // decode-completion redraw then starts source animation without playback.
@@ -2447,7 +2458,14 @@ mod tests {
             0
         );
         window.run_until_parked();
+        let before_request = notifications.get();
         draw(window);
+        window.run_until_parked();
+        assert_eq!(
+            notifications.get(),
+            before_request,
+            "requesting an animation frame must not invalidate its consumers"
+        );
         assert_eq!(
             window.update(|window, cx| window.simulate_next_frame(cx)),
             1
@@ -2473,26 +2491,52 @@ mod tests {
             }
         }
 
+        let angles = |window: &mut gpui::VisualTestContext| {
+            window.update(|_, cx| [1, 2].map(|id| owner.read(cx).rotation_angle(id)))
+        };
+        notifications.set(0);
+        let before_reduced_motion = angles(window);
         window.update(|_, cx| cx.set_reduce_motion(true));
-        draw(window);
+        for _ in 0..3 {
+            draw(window);
+            // A native callback already registered before suspension may retire.
+            // Its count is not evidence that either consumer advanced.
+            window.update(|window, cx| window.simulate_next_frame(cx));
+            assert_eq!(angles(window), before_reduced_motion);
+        }
         assert_eq!(
-            window.update(|window, cx| window.simulate_next_frame(cx)),
-            0
+            notifications.get(),
+            0,
+            "reduced motion accepts no animation updates"
         );
         window.update(|_, cx| cx.set_reduce_motion(false));
-        draw(window);
-        assert_eq!(
-            window.update(|window, cx| window.simulate_next_frame(cx)),
-            1
+        for _ in 0..2 {
+            draw(window);
+            window.update(|window, cx| window.simulate_next_frame(cx));
+        }
+        assert!(
+            angles(window)
+                .into_iter()
+                .zip(before_reduced_motion)
+                .all(|(after, before)| after > before),
+            "both visible rotations resume after reduced motion"
+        );
+        assert!(
+            notifications.get() > 0,
+            "resumed animation invalidates its consumers"
         );
 
         window.deactivate_window();
+        let before_unfocused_rotation = angles(window);
         draw(window);
-        assert_eq!(
-            window.update(|window, cx| window.simulate_next_frame(cx)),
-            1
+        window.update(|window, cx| window.simulate_next_frame(cx));
+        assert!(
+            angles(window)
+                .into_iter()
+                .zip(before_unfocused_rotation)
+                .all(|(after, before)| after > before),
+            "focus loss alone does not stop an actively playing rotation"
         );
-        draw(window);
         sync(
             AlbumArtworkMode::Static,
             PlaybackStatus::Paused,
@@ -2501,20 +2545,28 @@ mod tests {
             &mut window.cx,
         );
         draw(window);
-        window.update(|window, cx| window.simulate_next_frame(cx));
-        draw(window);
+        let unfocused_static = angles(window);
+        let before_unfocused_notifications = notifications.get();
+        for _ in 0..3 {
+            window.update(|window, cx| window.simulate_next_frame(cx));
+            draw(window);
+            assert_eq!(angles(window), unfocused_static);
+        }
         assert_eq!(
-            window.update(|window, cx| window.simulate_next_frame(cx)),
-            0,
-            "source animation alone stays suspended while unfocused",
+            notifications.get(),
+            before_unfocused_notifications,
+            "source animation alone stays suspended while unfocused"
         );
         window.update(|window, _| window.activate_window());
         window.run_until_parked();
+        let before_reactivation = notifications.get();
         draw(window);
-        assert_eq!(
-            window.update(|window, cx| window.simulate_next_frame(cx)),
-            1
+        window.update(|window, cx| window.simulate_next_frame(cx));
+        assert!(
+            notifications.get() > before_reactivation,
+            "a focused animated source resumes consumer updates even while rotation is static"
         );
+        assert_eq!(angles(window), unfocused_static);
 
         // Hide with a native callback outstanding. It may drain once, but cannot
         // restart the old generation while the panels are hidden.
@@ -2556,6 +2608,40 @@ mod tests {
             window.update(|window, cx| window.simulate_next_frame(cx)),
             1
         );
+
+        sync(
+            AlbumArtworkMode::Rotating,
+            PlaybackStatus::Playing,
+            0,
+            true,
+            &mut window.cx,
+        );
+        draw(window);
+        window.update(|window, cx| window.simulate_next_frame(cx));
+        sync(
+            AlbumArtworkMode::Rotating,
+            PlaybackStatus::Playing,
+            0,
+            false,
+            &mut window.cx,
+        );
+        let hidden_angles = angles(window);
+        window.update(|window, cx| window.simulate_next_frame(cx));
+        assert_eq!(angles(window), hidden_angles);
+        sync(
+            AlbumArtworkMode::Rotating,
+            PlaybackStatus::Playing,
+            0,
+            true,
+            &mut window.cx,
+        );
+        draw(window);
+        window.update(|window, cx| window.simulate_next_frame(cx));
+        assert_eq!(
+            angles(window),
+            hidden_angles,
+            "the first resumed frame must not catch up hidden rotation time"
+        );
         window.update(|window, cx| {
             owner.update(cx, |owner, cx| owner.release_all_images(window, cx));
             images.release_all_retired(window, cx);
@@ -2583,7 +2669,14 @@ mod tests {
         let config = Config::default();
         let artwork = cx.update(|cx| {
             let default = cx.new(|cx| Artwork::new(&crate::i18n::Localizer::new("en"), cx));
-            cx.new(|_| AlbumArtwork::new(manager, default, images.clone()))
+            cx.new(|cx| {
+                AlbumArtwork::new(
+                    manager,
+                    default,
+                    images.clone(),
+                    cx.new(|_| crate::gui::animation_frames::AnimationFrames::default()),
+                )
+            })
         });
         let root = |panels: &[(u64, AlbumArtworkStyle, bool)]| Node::Split {
             id: 90,

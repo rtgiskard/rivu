@@ -1,12 +1,8 @@
-use std::{
-    collections::HashMap,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use gpui::{
-    App, Bounds, BoxShadow, Context, Entity, ObjectFit, Pixels, Render, Task, Transformation,
-    Window, canvas, div, point, prelude::*, px, radians, rgb, size,
+    App, Bounds, BoxShadow, Context, Entity, ObjectFit, Pixels, Render, Transformation, Window,
+    canvas, div, point, prelude::*, px, radians, rgb, size,
 };
 
 use crate::{
@@ -18,6 +14,7 @@ use crate::{
 };
 use rivu_protocol::model::{PlaybackStatus, Track};
 
+use super::animation_frames::AnimationFrames;
 use super::artwork::{Artwork, ArtworkDecoration, ArtworkImages, ArtworkLoader, ArtworkView};
 
 pub(super) const ALBUM_ARTWORK_STYLES: [AlbumArtworkStyle; 7] = [
@@ -44,55 +41,6 @@ pub(super) fn album_artwork_style_id(style: AlbumArtworkStyle) -> &'static str {
 
 pub(super) fn album_artwork_style_label(i18n: &Localizer, style: AlbumArtworkStyle) -> &str {
     i18n.text(album_artwork_style_id(style))
-}
-
-/// Pacing is measured between native frame requests, not after frame delivery.
-/// A late wake schedules only one frame and establishes a fresh deadline.
-struct FramePacing {
-    fps: u16,
-    interval: Duration,
-    last_request: Option<Instant>,
-}
-
-impl FramePacing {
-    fn new() -> Self {
-        Self {
-            fps: 0,
-            interval: Duration::ZERO,
-            last_request: None,
-        }
-    }
-
-    fn set_fps(&mut self, fps: u16) -> bool {
-        if self.fps == fps {
-            return false;
-        }
-        self.fps = fps;
-        self.interval = if fps == 0 {
-            Duration::ZERO
-        } else {
-            Duration::from_nanos(1_000_000_000_u64.div_ceil(u64::from(fps)))
-        };
-        true
-    }
-
-    fn delay(&self, now: Instant) -> Duration {
-        if self.interval.is_zero() {
-            return Duration::ZERO;
-        }
-        self.last_request.map_or(Duration::ZERO, |last| {
-            self.interval
-                .saturating_sub(now.saturating_duration_since(last))
-        })
-    }
-
-    fn requested(&mut self, now: Instant) {
-        self.last_request = Some(now);
-    }
-
-    fn reset(&mut self) {
-        self.last_request = None;
-    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -217,10 +165,10 @@ pub(super) struct AlbumArtwork {
     panel_revision: u64,
     images: ArtworkImages,
     decorations: [Option<ArtworkDecoration>; 6],
-    pacing: FramePacing,
+    fps: u16,
+    frames: Entity<AnimationFrames>,
     frame_pending: bool,
     frame_generation: u64,
-    frame_timer: Option<Task<()>>,
     activation_subscription: Option<gpui::Subscription>,
 }
 
@@ -229,6 +177,7 @@ impl AlbumArtwork {
         manager: Arc<ArtworkManager>,
         default_album: Entity<Artwork>,
         images: ArtworkImages,
+        frames: Entity<AnimationFrames>,
     ) -> Self {
         Self {
             manager,
@@ -243,10 +192,10 @@ impl AlbumArtwork {
             panel_revision: 0,
             images,
             decorations: std::array::from_fn(|_| None),
-            pacing: FramePacing::new(),
+            fps: 0,
+            frames,
             frame_pending: false,
             frame_generation: 0,
-            frame_timer: None,
             activation_subscription: None,
         }
     }
@@ -337,7 +286,7 @@ impl AlbumArtwork {
                 }
             }
         }
-        changed |= self.visible != visible || self.pacing.fps != config.album_artwork_fps;
+        changed |= self.visible != visible || self.fps != config.album_artwork_fps;
         if source_changed {
             self.track = track.cloned();
         }
@@ -349,21 +298,20 @@ impl AlbumArtwork {
         self.status = status;
         self.visible = visible;
         self.window_visible = window_visible;
-        if self.pacing.set_fps(config.album_artwork_fps) || changed {
-            self.cancel_frame();
+        if changed {
+            self.cancel_frame(cx);
         }
+        self.fps = config.album_artwork_fps;
         self.prepare_artwork(cx);
         if changed {
             cx.notify();
         }
     }
 
-    fn cancel_frame(&mut self) {
-        self.frame_timer = None;
-        self.pacing.reset();
+    fn cancel_frame(&mut self, cx: &mut App) {
+        self.frames
+            .update(cx, |frames, _| frames.cancel_artwork(self.frame_generation));
         self.frame_pending = false;
-        // Native next-frame callbacks cannot be removed, so obsolete callbacks
-        // are inert even if hiding and reopening happen before they are drained.
         self.frame_generation = self.frame_generation.wrapping_add(1);
     }
 
@@ -428,66 +376,59 @@ impl AlbumArtwork {
                 }));
         }
         if !self.running(window, cx) || cx.reduce_motion() {
-            if self.frame_pending || self.frame_timer.is_some() {
-                self.cancel_frame();
+            if self.frame_pending {
+                self.cancel_frame(cx);
             }
             for instance in self.instances.values_mut() {
                 instance.rotation.last_tick = None;
             }
             return;
         }
-        if self.frame_pending || self.frame_timer.is_some() {
+        if self.frame_pending {
             return;
         }
-        let now = Instant::now();
-        let generation = self.frame_generation;
-        let delay = self.pacing.delay(now);
-        if !delay.is_zero() {
-            let timer = cx.background_executor().timer(delay);
-            self.frame_timer = Some(cx.spawn_in(window, async move |this, cx| {
-                timer.await;
-                let _ = this.update_in(cx, |this, window, cx| {
-                    if generation == this.frame_generation {
-                        this.frame_timer = None;
-                        this.request_frame(window, cx);
-                    }
-                });
-            }));
-            return;
-        }
-        self.pacing.requested(now);
         self.frame_pending = true;
-        let view = cx.weak_entity();
-        window.on_next_frame(move |window, cx| {
-            let _ = view.update(cx, |this, cx| {
-                if generation != this.frame_generation {
-                    return;
-                }
-                if !this.running(window, cx) || cx.reduce_motion() {
-                    this.cancel_frame();
-                    for instance in this.instances.values_mut() {
-                        instance.rotation.last_tick = None;
-                    }
-                    return;
-                }
-                this.frame_pending = false;
-                let now = Instant::now();
-                for instance in this.instances.values_mut() {
-                    instance.rotation.advance(now);
-                }
-                // Rendering requests the next callback (or one capped timer).
-                // fps=0 therefore follows display callbacks without a timer.
-                cx.notify();
-            });
+        let owner = cx.weak_entity();
+        self.frames.update(cx, |frames, cx| {
+            frames.request_artwork(owner, self.frame_generation, self.fps, window, cx);
         });
+    }
+
+    pub(super) fn animation_frame(
+        &mut self,
+        generation: u64,
+        now: Instant,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if generation != self.frame_generation {
+            return;
+        }
+        self.frame_pending = false;
+        if !self.running(window, cx) || cx.reduce_motion() {
+            self.cancel_frame(cx);
+            for instance in self.instances.values_mut() {
+                instance.rotation.last_tick = None;
+            }
+            return;
+        }
+        for instance in self.instances.values_mut() {
+            instance.rotation.advance(now);
+        }
         cx.notify();
+        self.request_frame(window, cx);
+    }
+
+    #[cfg(test)]
+    pub(super) fn rotation_angle(&self, panel_id: u64) -> f64 {
+        self.instances[&panel_id].rotation.angle
     }
 
     pub(super) fn release_all_images(&mut self, window: &mut Window, cx: &mut App) {
         self.visible = false;
         self.track = None;
         self.instances.clear();
-        self.cancel_frame();
+        self.cancel_frame(cx);
         self.view.release_all_images(window, cx);
         for decoration in &mut self.decorations {
             if let Some(decoration) = decoration.take() {
@@ -704,6 +645,7 @@ impl Render for AlbumArtworkPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
     #[gpui::test]
     fn relocation_replaces_display_without_resetting_rotation(cx: &mut gpui::TestAppContext) {
         use super::super::layout::{Node, Panel};
@@ -746,7 +688,14 @@ mod tests {
         });
         let owner = cx.update(|cx| {
             let default = cx.new(|cx| Artwork::new(&Localizer::new("en"), cx));
-            cx.new(|_| AlbumArtwork::new(manager, default, ArtworkImages::default()))
+            cx.new(|cx| {
+                AlbumArtwork::new(
+                    manager,
+                    default,
+                    ArtworkImages::default(),
+                    cx.new(|_| crate::gui::animation_frames::AnimationFrames::default()),
+                )
+            })
         });
         owner.update(cx, |owner, cx| {
             owner.sync(
@@ -898,68 +847,6 @@ mod tests {
             artwork_decode_side(px(512.), AlbumArtworkStyle::Plain, None),
             px(512.)
         );
-    }
-
-    #[test]
-    fn uncapped_pacing_never_adds_a_timer_delay() {
-        let start = Instant::now();
-        let mut pacing = FramePacing::new();
-        assert_eq!(pacing.delay(start), Duration::ZERO);
-        pacing.requested(start);
-        for elapsed in [
-            Duration::ZERO,
-            Duration::from_nanos(1),
-            Duration::from_secs(10),
-        ] {
-            assert_eq!(pacing.delay(start + elapsed), Duration::ZERO);
-        }
-    }
-
-    #[test]
-    fn capped_pacing_counts_from_request_without_additive_frame_latency() {
-        let start = Instant::now();
-        for fps in [1, 30, 60, 144, 240] {
-            let interval = Duration::from_nanos(1_000_000_000_u64.div_ceil(u64::from(fps)));
-            let mut pacing = FramePacing::new();
-            assert!(pacing.set_fps(fps));
-            assert_eq!(pacing.delay(start), Duration::ZERO);
-            pacing.requested(start);
-            assert_eq!(pacing.delay(start), interval);
-            let elapsed = interval / 2;
-            assert_eq!(pacing.delay(start + elapsed), interval - elapsed);
-            assert_eq!(pacing.delay(start + interval), Duration::ZERO);
-        }
-    }
-
-    #[test]
-    fn late_frames_do_not_accumulate_catchup_requests() {
-        let start = Instant::now();
-        let mut pacing = FramePacing::new();
-        pacing.set_fps(60);
-        pacing.requested(start);
-        let late = start + Duration::from_secs(10);
-        assert_eq!(pacing.delay(late), Duration::ZERO);
-        pacing.requested(late);
-        assert_eq!(pacing.delay(late), Duration::from_nanos(16_666_667));
-    }
-
-    #[test]
-    fn cancellation_and_fps_changes_restart_only_pacing_not_rotation() {
-        let start = Instant::now();
-        let mut pacing = FramePacing::new();
-        let mut rotation = Rotation::new();
-        rotation.sync(start, rotating(), true, true);
-        rotation.advance(start);
-        let now = start + Duration::from_secs(5);
-        rotation.advance(now);
-        for fps in [1, 240, 0, 60] {
-            assert!(pacing.set_fps(fps));
-            pacing.requested(now);
-            pacing.reset();
-            assert_eq!(pacing.delay(now), Duration::ZERO);
-            assert!(!rotation.sync(now, rotating(), true, false));
-            assert_angle(&rotation, std::f64::consts::FRAC_PI_2);
-        }
     }
 
     #[test]
