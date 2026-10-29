@@ -208,6 +208,10 @@ impl ProcessingGraph {
             .context("Unknown graph node")
     }
     pub fn validate(&self) -> Result<()> {
+        self.validated_order().map(|_| ())
+    }
+
+    fn validated_order(&self) -> Result<Vec<u64>> {
         ensure!(
             !self.nodes.is_empty() && self.nodes.len() <= MAX_GRAPH_NODES,
             "Graph requires 1..64 nodes"
@@ -251,8 +255,7 @@ impl ProcessingGraph {
                 "Input already connected; use an explicit mix node"
             );
         }
-        self.topological()?;
-        Ok(())
+        self.topological()
     }
     fn topological(&self) -> Result<Vec<u64>> {
         let mut indegree: BTreeMap<u64, usize> = self.nodes.iter().map(|n| (n.id, 0)).collect();
@@ -283,13 +286,12 @@ impl ProcessingGraph {
     }
     /// Source-first closure only. Disconnected required inputs fail at execution admission.
     pub fn ancestors(&self, target: GraphPort) -> Result<Vec<u64>> {
-        self.validate()?;
+        let order = self.validated_order()?;
         ensure!(
             (target.port as usize) < self.node(target.node)?.kind.outputs(),
             "Invalid target output port"
         );
         let mut needed = BTreeSet::from([target.node]);
-        let order = self.topological()?;
         for &id in order.iter().rev() {
             if needed.contains(&id) {
                 let node = self.node(id)?;
