@@ -374,6 +374,53 @@ fn saving_rejects_cancel_and_shutdown_joins_then_applies_committed_queue_facts()
 }
 
 #[test]
+fn dispatched_mpris_seek_stays_local_during_external_saving() {
+    let (directory, mut core) = admission_fixture();
+    let _audio = recording_audio(&mut core);
+    playing(&mut core, 1);
+    core.command(Command::Pause).unwrap();
+    let path = directory.path().join("external.wav");
+    write_pcm_frames(&path, 1);
+    let lock = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    core.start_external_admission(vec![path], None, None)
+        .unwrap();
+    while !core.active_external_admission.as_ref().unwrap().is_saving() {
+        let event = next_admission_event(&mut core);
+        core.external_admission_event(event);
+    }
+    core.queue_current_pending = true;
+    assert!(
+        operation_ack(
+            &mut core,
+            Operation::MprisSeek {
+                queue_id: 1,
+                offset: 1_000_000,
+            },
+        )
+        .is_success()
+    );
+    assert_eq!(core.state.playback.position, 1.0);
+    assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
+    assert!(
+        !operation_ack(
+            &mut core,
+            Operation::MprisSeek {
+                queue_id: 1,
+                offset: i64::MAX,
+            },
+        )
+        .is_success()
+    );
+    assert!(core.queue_current_pending);
+    assert_eq!(core.state.queue.current_id, Some(1));
+    assert_eq!(core.pending_navigation, None);
+    lock.execute_batch("ROLLBACK").unwrap();
+    core.shutdown_external_admission();
+    assert!(core.scan_results.back().unwrap().library_committed);
+}
+
+#[test]
 fn committed_queue_and_task_facts_survive_current_track_projection_failure() {
     let (directory, mut core) = admission_fixture();
     let path = directory.path().join("1.wav");

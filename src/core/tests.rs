@@ -208,6 +208,20 @@ fn recording_audio(core: &mut Core) -> Receiver<AudioCommand> {
     recorded
 }
 
+fn operation_ack(core: &mut Core, operation: Operation) -> Ack {
+    let (reply, response) = oneshot::channel();
+    assert!(
+        core.business_event(dispatch::BusinessEvent::Request(Request {
+            operation,
+            reply: Some(reply),
+        }))
+    );
+    let CoreResponse::Ack(ack) = futures::executor::block_on(response).unwrap() else {
+        panic!("expected operation acknowledgment");
+    };
+    ack
+}
+
 fn navigation_runtime(
     mut core: Core,
 ) -> (

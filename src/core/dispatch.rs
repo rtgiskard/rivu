@@ -318,19 +318,14 @@ impl Core {
             operation @ (Operation::GuiConfig(_)
             | Operation::Navigate(_)
             | Operation::MprisSeek { .. }) => {
-                let result = if self.database_maintenance_active() {
-                    Err(anyhow::anyhow!(
+                let result = match operation {
+                    Operation::MprisSeek { queue_id, offset } => self.mpris_seek(queue_id, offset),
+                    _ if self.database_maintenance_active() => Err(anyhow::anyhow!(
                         "Database maintenance is in progress; this operation was not executed"
-                    ))
-                } else {
-                    match operation {
-                        Operation::GuiConfig(change) => self.update_gui_config(change),
-                        Operation::Navigate(direction) => self.navigate(direction),
-                        Operation::MprisSeek { queue_id, offset } => {
-                            self.mpris_seek(queue_id, offset)
-                        }
-                        _ => unreachable!("operation matched above"),
-                    }
+                    )),
+                    Operation::GuiConfig(change) => self.update_gui_config(change),
+                    Operation::Navigate(direction) => self.navigate(direction),
+                    _ => unreachable!("operation matched above"),
                 };
                 if let Err(error) = &result {
                     self.state.system.last_error = Some(format!("{error:#}"));

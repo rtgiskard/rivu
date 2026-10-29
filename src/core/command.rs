@@ -3,7 +3,8 @@ use anyhow::{bail, ensure};
 
 impl Core {
     pub(in crate::core) fn mpris_seek(&mut self, queue_id: u64, offset: i64) -> Result<()> {
-        self.ensure_queue_control_ready()?;
+        // In-occurrence seeking uses only the playback owner. Queue recovery and
+        // database admission belong to Next, if the resolved target needs it.
         if self.state.queue.current_id != Some(queue_id)
             || self.state.playback.status == PlaybackStatus::Stopped
         {

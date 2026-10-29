@@ -104,6 +104,115 @@ fn scan_saving_keeps_controls_responsive_and_preserves_retired_statistics() {
 }
 
 #[test]
+fn dispatched_mpris_seek_during_saving_only_gates_navigation() {
+    let (_directory, mut core, lock) = saving_with_write_lock();
+    let _audio = recording_audio(&mut core);
+    started(&mut core, Some(10.0)).unwrap();
+    core.command(Command::Pause).unwrap();
+    core.command(Command::Seek { seconds: 2.0 }).unwrap();
+    let queue_id = core.state.queue.current_id.unwrap();
+    let seek = |core: &mut Core, queue_id, offset| {
+        operation_ack(core, Operation::MprisSeek { queue_id, offset })
+    };
+    // Seeking must not run queue recovery, which can write on Core's connection.
+    core.queue_current_pending = true;
+    core.queue_projection_stale = true;
+    for expected in [3.25, 4.5] {
+        assert!(seek(&mut core, queue_id, 1_250_000).is_success());
+        assert_eq!(core.state.playback.position, expected);
+        assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
+        assert!(core.queue_current_pending);
+        assert!(core.queue_projection_stale);
+    }
+    assert!(seek(&mut core, queue_id, -10_000_000).is_success());
+    assert_eq!(core.state.playback.position, 0.0);
+    assert!(seek(&mut core, queue_id, 10_000_000).is_success());
+    assert_eq!(core.state.playback.position, 10.0);
+    let revision = core.state.playback.seek_revision;
+    assert!(seek(&mut core, queue_id + 1, i64::MAX).is_success());
+    let rejected = seek(&mut core, queue_id, 1);
+    assert!(rejected.error.unwrap().contains("maintenance"));
+    assert_eq!(core.state.queue.current_id, Some(queue_id));
+    assert_eq!(core.state.playback.position, 10.0);
+    assert_eq!(core.state.playback.seek_revision, revision);
+    assert_eq!(core.pending_navigation, None);
+    assert!(core.queue_current_pending);
+    assert!(core.queue_projection_stale);
+
+    // A known tail is a no-op, but shuffle and repeat-all still require Next.
+    core.state.queue.current_position = Some(core.state.queue.total - 1);
+    assert!(seek(&mut core, queue_id, i64::MAX).is_success());
+    core.state.playback.shuffle = true;
+    assert!(!seek(&mut core, queue_id, i64::MAX).is_success());
+    core.state.playback.shuffle = false;
+    core.state.playback.repeat = RepeatMode::All;
+    assert!(!seek(&mut core, queue_id, i64::MAX).is_success());
+    core.state.playback.repeat = RepeatMode::Off;
+    assert_eq!(core.state.playback.seek_revision, revision);
+    assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
+    core.command(Command::Stop).unwrap();
+    let revision = core.state.playback.seek_revision;
+    assert!(seek(&mut core, queue_id, i64::MAX).is_success());
+    assert_eq!(core.state.playback.seek_revision, revision);
+    finish_saving(&mut core, lock);
+}
+
+#[test]
+fn dispatched_mpris_seek_respects_uncertain_database_and_optimization_boundaries() {
+    let (_directory, mut core) = fixture();
+    let _audio = recording_audio(&mut core);
+    playing(&mut core, 1);
+    core.database_outcome_uncertain();
+    core.queue_current_pending = true;
+    core.queue_projection_stale = true;
+    assert!(
+        operation_ack(
+            &mut core,
+            Operation::MprisSeek {
+                queue_id: 1,
+                offset: 1_000_000,
+            },
+        )
+        .is_success()
+    );
+    assert_eq!(core.state.playback.position, 1.0);
+    assert!(
+        !operation_ack(
+            &mut core,
+            Operation::MprisSeek {
+                queue_id: 1,
+                offset: i64::MAX,
+            },
+        )
+        .is_success()
+    );
+    assert!(core.queue_current_pending);
+    assert!(core.queue_projection_stale);
+    assert_eq!(core.pending_navigation, None);
+    assert_eq!(core.state.queue.current_id, Some(1));
+
+    // Optimization only starts while stopped: Seek remains a no-op, while
+    // explicit navigation must not open a decoder or access the queue database.
+    let (_directory, mut core) = fixture();
+    core.command(Command::OptimizeDatabase).unwrap();
+    let revision = core.state.playback.seek_revision;
+    assert!(
+        operation_ack(
+            &mut core,
+            Operation::MprisSeek {
+                queue_id: 1,
+                offset: i64::MAX,
+            },
+        )
+        .is_success()
+    );
+    assert!(!operation_ack(&mut core, Operation::Navigate(Navigation::Next)).is_success());
+    assert_eq!(core.state.playback.seek_revision, revision);
+    assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+    core.shutdown_optimization().unwrap().1.unwrap();
+}
+
+#[test]
 fn eof_during_scan_saving_preserves_later_pause_intent() {
     let (_directory, mut core, lock) = saving_with_write_lock();
     let _audio = recording_audio(&mut core);
@@ -116,6 +225,19 @@ fn eof_during_scan_saving_preserves_later_pause_intent() {
     })
     .unwrap();
     core.command(Command::Pause).unwrap();
+    assert_eq!(core.pending_navigation, Some(PlaybackStatus::Paused));
+    let revision = core.state.playback.seek_revision;
+    assert!(
+        operation_ack(
+            &mut core,
+            Operation::MprisSeek {
+                queue_id: 1,
+                offset: i64::MAX,
+            },
+        )
+        .is_success()
+    );
+    assert_eq!(core.state.playback.seek_revision, revision);
     assert_eq!(core.pending_navigation, Some(PlaybackStatus::Paused));
     finish_saving(&mut core, lock);
     assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
