@@ -10,13 +10,13 @@ use futures::{
     stream::FuturesUnordered,
 };
 use rand::RngExt;
-use rivu_protocol::protocol::{
-    HELLO_TIMEOUT, HelloResponse, MAX_CLIENTS, MAX_REQUEST, SessionState, UNKNOWN_INSTANCE,
-    WireRequest, WireResponse, wire_state,
-};
 use rivu_protocol::transport::{
     bridge_timeout, read_request_frame, timeout, timeout_at, write_error_frame,
     write_frame_buffered,
+};
+use rivu_protocol::wire::{
+    HELLO_TIMEOUT, HelloResponse, MAX_CLIENTS, MAX_REQUEST, SessionState, UNKNOWN_INSTANCE,
+    WireRequest, WireResponse, wire_state,
 };
 use rivu_protocol::{AppCommand, query_wait_timeout};
 use rivu_protocol::{
@@ -40,7 +40,7 @@ pub struct SocketOwner {
 impl SocketOwner {
     pub fn acquire(data_dir: &Path) -> Result<Self> {
         fs::create_dir_all(data_dir)?;
-        let address = rivu_protocol::protocol::address(data_dir)?;
+        let address = rivu_protocol::wire::address(data_dir)?;
         let listener = std::os::unix::net::UnixListener::bind_addr(&address)
             .context("Cannot acquire Rivu IPC address; another Rivu may own this data directory")?;
         listener.set_nonblocking(true)?;
@@ -514,7 +514,7 @@ async fn run_server(
                         continue;
                     }
                 };
-                if let Err(error) = rivu_protocol::protocol::verify_peer(&stream) {
+                if let Err(error) = rivu_protocol::wire::verify_peer(&stream) {
                     tracing::warn!(error = %error, "ipc_peer_rejected");
                     continue;
                 }

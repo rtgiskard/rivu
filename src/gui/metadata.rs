@@ -30,7 +30,7 @@ use gpui::{
     div, prelude::*, px, rgb,
 };
 use read::{MetadataReadCoordinator, MetadataReadTask, ReadCompletion, ReadEnvironment};
-use rivu_format::media::DecoderHint;
+use rivu_format::decoder_hint::DecoderHint;
 use rivu_protocol::model::{Command, PlaybackStatus, Query, Track};
 use rivu_ui::{
     FormField, IconButton, IconButtonDensity, IconButtonStyle, active_control, button, caption,

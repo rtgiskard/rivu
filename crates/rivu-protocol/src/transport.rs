@@ -1,4 +1,4 @@
-use super::protocol::{
+use super::wire::{
     HelloResponse, MAX_REQUEST, MAX_RESPONSE, PROTOCOL_VERSION, RequestType, ResponseType,
     UNKNOWN_INSTANCE, WireRequest, WireResponse,
 };
@@ -617,10 +617,9 @@ mod tests {
     fn stalled_request_write_is_unknown_and_releases_bulk_buffer() {
         async_io::block_on(async {
             let mut stream = LimitedWriter::default();
-            let request =
-                WireRequest::Command(super::super::protocol::WireCommand::CreatePlaylist {
-                    name: "X".repeat(1024 * 1024),
-                });
+            let request = WireRequest::Command(super::super::wire::WireCommand::CreatePlaylist {
+                name: "X".repeat(1024 * 1024),
+            });
             let mut buffer = Vec::new();
             let mut write_started = false;
             let error = write_request_frame_buffered(
@@ -660,7 +659,7 @@ mod tests {
     }
 
     fn payload_request(payload: String) -> WireRequest {
-        WireRequest::Query(super::super::protocol::WireQuery::PlaylistSummaries {
+        WireRequest::Query(super::super::wire::WireQuery::PlaylistSummaries {
             query: Some(payload),
             offset: 0,
             limit: 1,
@@ -668,7 +667,7 @@ mod tests {
     }
 
     fn request_payload(request: WireRequest) -> String {
-        let WireRequest::Query(super::super::protocol::WireQuery::PlaylistSummaries {
+        let WireRequest::Query(super::super::wire::WireQuery::PlaylistSummaries {
             query: Some(payload),
             ..
         }) = request

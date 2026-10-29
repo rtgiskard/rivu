@@ -22,8 +22,7 @@ fn shutdown_snapshot_exits_loading_before_input_or_worker_dispatch() {
 
     let directory = tempfile::tempdir().unwrap();
     let listener =
-        UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
-            .unwrap();
+        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
     listener.set_nonblocking(true).unwrap();
     let mut state = ClientSnapshot::default();
     state.system.shutting_down = true;
@@ -55,8 +54,7 @@ fn shutdown_snapshot_exits_existing_projection_and_cancels_pending_query() {
 
     let directory = tempfile::tempdir().unwrap();
     let listener =
-        UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
-            .unwrap();
+        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
     let (started, active) = bounded(1);
     let server = std::thread::spawn(move || {
         let mut stream = listener.accept().unwrap().0;
@@ -154,8 +152,7 @@ fn watcher_shutdown_closes_stalled_initial_handshake() {
 
     let directory = tempfile::tempdir().unwrap();
     let listener =
-        UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
-            .unwrap();
+        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
     let watcher = spawn_watcher(directory.path());
     let mut stream = listener.accept().unwrap().0;
     stream
@@ -195,8 +192,7 @@ fn replacing_queries_keeps_one_stalled_socket_until_worker_shutdown() {
 
     let directory = tempfile::tempdir().unwrap();
     let listener =
-        UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
-            .unwrap();
+        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
     let (connected, accepted) = bounded(1);
     let server = std::thread::spawn(move || {
         connected.send(listener.accept().unwrap().0).unwrap();
@@ -254,8 +250,7 @@ fn replaced_bitrate_queries_drain_then_send_only_latest_on_the_same_session() {
 
     let directory = tempfile::tempdir().unwrap();
     let listener =
-        UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
-            .unwrap();
+        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
     let (started, active) = bounded(1);
     let (release, resume) = bounded(1);
     let server = std::thread::spawn(move || {
@@ -332,8 +327,7 @@ fn query_worker_shutdown_cancels_active_exchange_and_discards_pending_job() {
 
     let directory = tempfile::tempdir().unwrap();
     let listener =
-        UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
-            .unwrap();
+        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
     let (started, active) = bounded(1);
     let server = std::thread::spawn(move || {
         let mut stream = listener.accept().unwrap().0;
@@ -379,8 +373,7 @@ fn command_worker_reports_ambiguous_failure_without_replaying_the_mutation() {
 
     let directory = tempfile::tempdir().unwrap();
     let listener =
-        UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
-            .unwrap();
+        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
     let server = std::thread::spawn(move || {
         let mut stream = listener.accept().unwrap().0;
         complete_test_handshake(&mut stream);
@@ -449,8 +442,7 @@ fn command_worker_shutdown_closes_pending_exchange_and_drops_queued_commands() {
 
     let directory = tempfile::tempdir().unwrap();
     let listener =
-        UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
-            .unwrap();
+        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
     let (started, active) = bounded(1);
     let server = std::thread::spawn(move || {
         let mut stream = listener.accept().unwrap().0;
@@ -490,8 +482,7 @@ fn watcher_identity_binds_delayed_command_and_query_workers() {
 
     let directory = tempfile::tempdir().unwrap();
     let listener =
-        UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
-            .unwrap();
+        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
     let server = std::thread::spawn(move || {
         let mut watch = listener.accept().unwrap().0;
         complete_test_handshake(&mut watch);
@@ -564,8 +555,7 @@ fn command_worker_reconnection_rejects_replacement_instance() {
 
     let directory = tempfile::tempdir().unwrap();
     let listener =
-        UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
-            .unwrap();
+        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
     let server = std::thread::spawn(move || {
         let mut stream = listener.accept().unwrap().0;
         complete_test_handshake(&mut stream);
@@ -601,8 +591,7 @@ fn superseded_query_still_reports_replacement_instance_as_fatal() {
 
     let directory = tempfile::tempdir().unwrap();
     let listener =
-        UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
-            .unwrap();
+        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
     let (accepted, connected) = bounded(1);
     let (release, resume) = bounded(1);
     let server = std::thread::spawn(move || {
@@ -646,8 +635,7 @@ fn query_worker_reconnection_rejects_replacement_before_accepting_results() {
 
     let directory = tempfile::tempdir().unwrap();
     let listener =
-        UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
-            .unwrap();
+        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
     let (started, active) = bounded(1);
     let (release, resume) = bounded(1);
     let server = std::thread::spawn(move || {

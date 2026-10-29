@@ -458,7 +458,7 @@ mod tests {
                 start_seconds: 100.0,
                 end_seconds: Some(101.0),
             }),
-            rivu_format::media::DecoderHint::Native,
+            rivu_format::decoder_hint::DecoderHint::Native,
             rivu_format::config::VisualizationSignal::Before,
             Arc::new(rivu_dsp::equalizer::config::EqualizerConfig::default()),
         );

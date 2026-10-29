@@ -935,7 +935,7 @@ fn wav_export_preserves_side_speakers_and_reorders_custom_frames() {
         let renderer = audio::SourceRenderer::open(
             &destination,
             None,
-            rivu_format::media::DecoderHint::Native,
+            rivu_format::decoder_hint::DecoderHint::Native,
             1,
             false,
             &cancel,

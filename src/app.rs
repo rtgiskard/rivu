@@ -899,7 +899,7 @@ mod tests {
         );
         assert!(
             std::os::unix::net::UnixStream::connect_addr(
-                &rivu_protocol::protocol::address(directory.path()).unwrap()
+                &rivu_protocol::wire::address(directory.path()).unwrap()
             )
             .is_ok()
         );

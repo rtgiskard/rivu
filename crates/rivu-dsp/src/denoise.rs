@@ -280,10 +280,10 @@ impl NoiseProfile {
 }
 
 #[cfg(feature = "execution")]
-mod runtime;
+mod processor;
 
 #[cfg(feature = "execution")]
-pub use runtime::{Denoiser, ProfileCollector};
+pub use processor::{Denoiser, ProfileCollector};
 
 #[cfg(test)]
 mod tests {

@@ -1,6 +1,6 @@
 use super::Store;
 use rivu_audio::MediaInfo;
-use rivu_format::media::DecoderHint;
+use rivu_format::decoder_hint::DecoderHint;
 use rivu_protocol::model::{AlbumSort, CueSegment, PlaylistEntryRow, QueryStamp, Track};
 use rusqlite::{Connection, params};
 use std::collections::HashSet;

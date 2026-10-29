@@ -33,7 +33,7 @@ use parking_lot::RwLock;
 
 use crate::VisualParameters;
 use rivu_audio::{PlaybackRange, WaveformFrame};
-use rivu_format::media::DecoderHint;
+use rivu_format::decoder_hint::DecoderHint;
 use rivu_protocol::model::Track;
 
 #[cfg(feature = "test-support")]

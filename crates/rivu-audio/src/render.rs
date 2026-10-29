@@ -5,8 +5,8 @@ use super::{
     source::{DECODE_WORK_BUDGET, DecodeStep, Source, SourceSelection, check_cancelled},
 };
 use anyhow::{Context, Result, bail};
-use rivu_format::input::open_regular_file;
-use rivu_format::media::DecoderHint;
+use rivu_format::decoder_hint::DecoderHint;
+use rivu_format::regular_file::open_regular_file;
 use std::{
     fs::File,
     path::Path,

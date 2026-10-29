@@ -5,7 +5,7 @@ use super::rows::{
 };
 use super::{Store, batch_limit};
 use anyhow::{Context, Result, bail};
-use rivu_format::media::DecoderHint;
+use rivu_format::decoder_hint::DecoderHint;
 use rivu_protocol::model::{Batch, HistoryEntry, Page, Track};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::collections::HashMap;

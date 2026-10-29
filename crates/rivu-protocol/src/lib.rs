@@ -1,9 +1,9 @@
 //! Shared IPC contracts and transport, independent of the application owner.
 
 pub mod model;
-pub mod protocol;
 pub mod response;
 pub mod transport;
+pub mod wire;
 
 use model::Command;
 use std::time::Duration;

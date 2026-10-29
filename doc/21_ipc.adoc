@@ -275,7 +275,7 @@ merges these field intents into the current track rather than replacing it
 with a client snapshot.
 
 Exact positional schemas and adapters are defined in
-link:../crates/rivu-protocol/src/protocol.rs[protocol.rs];
+link:../crates/rivu-protocol/src/wire.rs[wire.rs];
 link:../crates/rivu-protocol/src/transport.rs[transport.rs] owns framing and deadlines.
 
 === Request failures and completion

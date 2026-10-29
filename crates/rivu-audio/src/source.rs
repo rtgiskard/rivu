@@ -9,8 +9,8 @@ use super::{
     bitrate::{self, PacketStats},
 };
 use anyhow::{Context, Result, anyhow, bail};
-use rivu_format::input::open_regular_file;
-use rivu_format::media::DecoderHint;
+use rivu_format::decoder_hint::DecoderHint;
+use rivu_format::regular_file::open_regular_file;
 use std::{
     fs::File,
     io::Seek,

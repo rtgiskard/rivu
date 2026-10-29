@@ -47,4 +47,4 @@ pub use slider::{ProgressBar, Slider, SliderInput, SliderKey};
 pub use surface::{Dialog, Popover, checked_menu_item};
 
 #[cfg(test)]
-mod keyboard_tests;
+mod component_tests;

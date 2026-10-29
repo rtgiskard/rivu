@@ -5,7 +5,7 @@
 //! erase unavailability or cancel a newer read. Identity epochs invalidate callbacks
 //! after leaving and reopening the same track or discarding it.
 
-use rivu_format::media::DecoderHint;
+use rivu_format::decoder_hint::DecoderHint;
 use rivu_protocol::model::{Command, Track};
 use std::sync::Arc;
 

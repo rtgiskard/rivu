@@ -2,7 +2,7 @@ use super::*;
 use crate::app::AppHandle;
 use crate::config::ConfigPersistence;
 use rivu_client::{CommandFailure, InstanceChanged, client_session};
-use rivu_protocol::{AppCommand, protocol::*, transport::*};
+use rivu_protocol::{AppCommand, transport::*, wire::*};
 use rivu_protocol::{
     model::{Command, Query},
     response::{Ack, QueryResponse, StateResponse, StateRevisions, StateSections},
@@ -38,7 +38,7 @@ fn pending_query_preserves_pipelined_responses_and_disconnected_clients_release_
     let owner = SocketOwner::acquire(directory.path()).unwrap();
     let app = AppHandle::new(&runtime, false);
     let server = Server::start(&owner, handle.clone(), app).unwrap();
-    let address = rivu_protocol::protocol::address(directory.path()).unwrap();
+    let address = rivu_protocol::wire::address(directory.path()).unwrap();
     let connect = || {
         let mut stream = std::os::unix::net::UnixStream::connect_addr(&address).unwrap();
         stream
@@ -267,7 +267,7 @@ fn malformed_request_during_watch_receives_invalid_request_response() {
     let server = Server::start(&owner, runtime.handle.clone(), app).unwrap();
     let mut control = client_session(directory.path()).unwrap();
     control.query(Query::ScanTask { id: 0 }).unwrap();
-    let address = rivu_protocol::protocol::address(directory.path()).unwrap();
+    let address = rivu_protocol::wire::address(directory.path()).unwrap();
     let mut stream = std::os::unix::net::UnixStream::connect_addr(&address).unwrap();
     let timeout = Some(std::time::Duration::from_secs(5));
     stream.set_read_timeout(timeout).unwrap();
@@ -2436,8 +2436,7 @@ fn client_session_reuses_connection_after_command_and_request_rejections() {
 
     let directory = socket_test_directory();
     let listener =
-        UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
-            .unwrap();
+        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
     let server = std::thread::spawn(move || {
         let mut stream = listener.accept().unwrap().0;
         complete_test_handshake(&mut stream);
@@ -2511,8 +2510,7 @@ fn client_session_discards_partial_failed_response_before_next_explicit_request(
 
     let directory = socket_test_directory();
     let listener =
-        UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
-            .unwrap();
+        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
     let server = std::thread::spawn(move || {
         let mut stream = listener.accept().unwrap().0;
         complete_test_handshake(&mut stream);
@@ -2585,8 +2583,7 @@ fn cancelling_client_session_closes_pending_watch_with_partial_response() {
 
     let directory = socket_test_directory();
     let listener =
-        UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
-            .unwrap();
+        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
     let mut session = client_session(directory.path()).unwrap();
     let stop = session.cancellation();
     let client = std::thread::spawn(move || {
@@ -2616,7 +2613,7 @@ fn cancelling_client_session_closes_pending_watch_with_partial_response() {
 #[test]
 fn peer_verification_checks_kernel_credentials_on_both_ends() {
     let directory = socket_test_directory();
-    let address = rivu_protocol::protocol::address(directory.path()).unwrap();
+    let address = rivu_protocol::wire::address(directory.path()).unwrap();
     let listener = std::os::unix::net::UnixListener::bind_addr(&address).unwrap();
     let client = std::os::unix::net::UnixStream::connect_addr(&address).unwrap();
     let accepted = listener.accept().unwrap().0;
@@ -2642,7 +2639,7 @@ fn peer_verification_checks_kernel_credentials_on_both_ends() {
         let credentials = unsafe { credentials.assume_init() };
         assert_eq!(credentials.uid, uid);
         assert_eq!(credentials.gid, gid);
-        assert!(rivu_protocol::protocol::verify_peer(&stream).is_ok());
+        assert!(rivu_protocol::wire::verify_peer(&stream).is_ok());
     }
 }
 
@@ -2651,8 +2648,7 @@ fn pinned_session_rejects_initial_replacement_before_commands_queries_or_state()
     use std::{io::Read, os::unix::net::UnixListener};
     let directory = socket_test_directory();
     let listener =
-        UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
-            .unwrap();
+        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
     let server = std::thread::spawn(move || {
         for _ in 0..3 {
             let mut stream = listener.accept().unwrap().0;
@@ -2698,8 +2694,7 @@ fn pinned_session_rejects_reconnected_instance_without_replaying_failed_mutation
     };
     let directory = socket_test_directory();
     let listener =
-        UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
-            .unwrap();
+        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
     let server = std::thread::spawn(move || {
         let mut stream = listener.accept().unwrap().0;
         complete_test_handshake(&mut stream);
@@ -2735,8 +2730,7 @@ fn independent_cli_session_can_explicitly_reconnect_to_a_new_instance() {
     use std::os::unix::net::UnixListener;
     let directory = socket_test_directory();
     let listener =
-        UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
-            .unwrap();
+        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
     let server = std::thread::spawn(move || {
         let mut stream = listener.accept().unwrap().0;
         complete_test_handshake(&mut stream);
@@ -2789,7 +2783,7 @@ fn instance_acquisition_creates_directory_without_socket_or_lock_files() {
     assert!(data_dir.is_dir());
     assert_eq!(std::fs::read_dir(&data_dir).unwrap().count(), 0);
     assert!(SocketOwner::acquire(&data_dir).is_err());
-    let address = rivu_protocol::protocol::address(&data_dir).unwrap();
+    let address = rivu_protocol::wire::address(&data_dir).unwrap();
     assert!(std::os::unix::net::UnixStream::connect_addr(&address).is_ok());
     drop(owner);
     assert_eq!(std::fs::read_dir(&data_dir).unwrap().count(), 0);
@@ -2808,7 +2802,7 @@ fn directory_aliases_share_instance_ownership_and_transport() {
     let relative = data_dir.strip_prefix(&current_dir).unwrap();
     for alias in [symlink.as_path(), relative] {
         assert!(SocketOwner::acquire(alias).is_err());
-        let address = rivu_protocol::protocol::address(alias).unwrap();
+        let address = rivu_protocol::wire::address(alias).unwrap();
         assert!(std::os::unix::net::UnixStream::connect_addr(&address).is_ok());
     }
     drop(owner);
@@ -2827,7 +2821,7 @@ fn distinct_data_directories_acquire_independent_instances() {
     let second_owner = SocketOwner::acquire(&second).unwrap();
     for data_dir in [&first, &second] {
         assert!(SocketOwner::acquire(data_dir).is_err());
-        let address = rivu_protocol::protocol::address(data_dir).unwrap();
+        let address = rivu_protocol::wire::address(data_dir).unwrap();
         assert!(std::os::unix::net::UnixStream::connect_addr(&address).is_ok());
     }
     drop(first_owner);
@@ -2856,7 +2850,7 @@ fn simultaneous_starters_acquire_one_real_listener() {
             .filter_map(|thread| thread.join().unwrap().ok())
             .collect();
         assert_eq!(owners.len(), 1);
-        let address = rivu_protocol::protocol::address(directory.path()).unwrap();
+        let address = rivu_protocol::wire::address(directory.path()).unwrap();
         assert!(std::os::unix::net::UnixStream::connect_addr(&address).is_ok());
     });
     assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);

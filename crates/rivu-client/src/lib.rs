@@ -2,11 +2,11 @@ use anyhow::{Context, Result, bail};
 use async_io::Async;
 use bytes::BytesMut;
 use futures_lite::future;
-use rivu_protocol::protocol::{
-    SessionState, WireCommand, WireQuery, WireRequest, WireResponse, state_response,
-};
 use rivu_protocol::transport::{
     read_response_frame, timeout, unpack_error, unpack_hello, write_request_frame_buffered,
+};
+use rivu_protocol::wire::{
+    SessionState, WireCommand, WireQuery, WireRequest, WireResponse, state_response,
 };
 use rivu_protocol::{
     AppCommand,
@@ -193,7 +193,7 @@ impl ClientSession {
                 },
                 async {
                     if self.stream.is_none() {
-                        self.stream = Some(rivu_protocol::protocol::connect(&self.data_dir).await.with_context(|| {
+                        self.stream = Some(rivu_protocol::wire::connect(&self.data_dir).await.with_context(|| {
                             format!(
                                 "Cannot connect to Rivu at {}. Start `rivu` or `rivu serve` first.",
                                 self.data_dir.display()
@@ -393,8 +393,8 @@ mod tests {
     use super::*;
     use rivu_protocol::{
         model::Command,
-        protocol::{HelloResponse, MAX_REQUEST, wire_state},
         transport::{decode_request_frame, encode_response_frame_into},
+        wire::{HelloResponse, MAX_REQUEST, wire_state},
     };
     use std::sync::{Condvar, Mutex};
 
@@ -525,7 +525,7 @@ mod tests {
 
         let directory = socket_test_directory();
         let listener =
-            UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
+            UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap())
                 .unwrap();
         let mut client = client_session(directory.path()).unwrap();
         let clock = Arc::new(ResponseClock::default());
@@ -556,7 +556,7 @@ mod tests {
 
         let directory = socket_test_directory();
         let listener =
-            UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
+            UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap())
                 .unwrap();
         let clock = Arc::new(ResponseClock::default());
         let command_clock = clock.clone();
@@ -608,7 +608,7 @@ mod tests {
 
         let directory = socket_test_directory();
         let listener =
-            UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
+            UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap())
                 .unwrap();
         let server = std::thread::spawn(move || {
             // First connection closes before Hello completes, so nothing was sent.
@@ -626,9 +626,7 @@ mod tests {
         );
         let error = client
             .request_ack(Command::Scan {
-                paths: vec![PathBuf::from(
-                    "x".repeat(rivu_protocol::protocol::MAX_REQUEST),
-                )],
+                paths: vec![PathBuf::from("x".repeat(rivu_protocol::wire::MAX_REQUEST))],
                 force: false,
             })
             .unwrap_err();
@@ -681,10 +679,9 @@ mod tests {
 
         for cancel in [false, true] {
             let directory = socket_test_directory();
-            let listener = UnixListener::bind_addr(
-                &rivu_protocol::protocol::address(directory.path()).unwrap(),
-            )
-            .unwrap();
+            let listener =
+                UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap())
+                    .unwrap();
             let server = std::thread::spawn(move || {
                 let mut stream = listener.accept().unwrap().0;
                 complete_test_handshake_for_instance(&mut stream, 22);
@@ -712,7 +709,7 @@ mod tests {
 
         let directory = socket_test_directory();
         let listener =
-            UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
+            UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap())
                 .unwrap();
         let mut client = client_session(directory.path()).unwrap();
         let stop = client.cancellation();
@@ -744,7 +741,7 @@ mod tests {
 
         let directory = socket_test_directory();
         let listener =
-            UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
+            UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap())
                 .unwrap();
         let mut client = client_session(directory.path()).unwrap();
         let stop = client.cancellation();
@@ -791,7 +788,7 @@ mod tests {
 
         let directory = socket_test_directory();
         let listener =
-            UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
+            UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap())
                 .unwrap();
         let (watch_started, wait_for_watch) = mpsc::sync_channel(0);
         let server = std::thread::spawn(move || {
@@ -820,7 +817,7 @@ mod tests {
         use std::{io::Read, os::unix::net::UnixListener, sync::mpsc};
         let directory = socket_test_directory();
         let listener =
-            UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
+            UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap())
                 .unwrap();
         let (started, waiting) = mpsc::sync_channel(0);
         let server = std::thread::spawn(move || {
@@ -854,7 +851,7 @@ mod tests {
         use std::{io::Read, os::unix::net::UnixListener};
         let directory = socket_test_directory();
         let listener =
-            UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
+            UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap())
                 .unwrap();
         let server = std::thread::spawn(move || {
             let mut stream = listener.accept().unwrap().0;
@@ -896,10 +893,9 @@ mod tests {
 
         for kind in 0..3 {
             let directory = socket_test_directory();
-            let listener = UnixListener::bind_addr(
-                &rivu_protocol::protocol::address(directory.path()).unwrap(),
-            )
-            .unwrap();
+            let listener =
+                UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap())
+                    .unwrap();
             let server = std::thread::spawn(move || {
                 let mut stream = listener.accept().unwrap().0;
                 complete_test_handshake(&mut stream);
@@ -977,7 +973,7 @@ mod tests {
 
         let directory = socket_test_directory();
         let listener =
-            UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
+            UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap())
                 .unwrap();
         let initial = StateRevisions {
             system: 1,
@@ -1111,10 +1107,9 @@ mod tests {
         use std::{io::Read, os::unix::net::UnixListener};
         for (id, phase) in [(8, ScanPhase::Completed), (7, ScanPhase::Saving)] {
             let directory = socket_test_directory();
-            let listener = UnixListener::bind_addr(
-                &rivu_protocol::protocol::address(directory.path()).unwrap(),
-            )
-            .unwrap();
+            let listener =
+                UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap())
+                    .unwrap();
             let server = std::thread::spawn(move || {
                 let mut stream = listener.accept().unwrap().0;
                 complete_test_handshake(&mut stream);

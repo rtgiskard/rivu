@@ -1,4 +1,4 @@
-use rivu_format::media::DecoderHint;
+use rivu_format::decoder_hint::DecoderHint;
 use rivu_protocol::model::{CueSegment, Track};
 use std::path::PathBuf;
 

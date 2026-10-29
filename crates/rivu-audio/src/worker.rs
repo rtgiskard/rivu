@@ -15,7 +15,7 @@ use crossbeam_channel::{Receiver, select};
 use futures::FutureExt;
 use parking_lot::RwLock;
 use rivu_dsp::equalizer::config::EqualizerConfig;
-use rivu_format::media::DecoderHint;
+use rivu_format::decoder_hint::DecoderHint;
 use std::{
     path::PathBuf,
     sync::Arc,

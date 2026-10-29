@@ -325,7 +325,7 @@ impl Core {
                 }
                 ImportPreset { path, name } => {
                     use std::io::Read;
-                    let file = rivu_format::input::open_regular_file(&path)?;
+                    let file = rivu_format::regular_file::open_regular_file(&path)?;
                     ensure!(file.metadata()?.len() <= 65536, "Preset exceeds 64 KiB");
                     let mut bytes = Vec::new();
                     file.take(65537).read_to_end(&mut bytes)?;

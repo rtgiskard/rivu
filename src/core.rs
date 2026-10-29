@@ -20,7 +20,7 @@ use parking_lot::{Mutex, RwLock};
 use rand::seq::SliceRandom;
 use rivu_audio::analysis::{AnalysisControl, AnalysisFrame, DisplayDemand};
 use rivu_audio::{self as audio, AudioCommand, AudioEngine, AudioEvent, MediaInfo};
-use rivu_format::media::DecoderHint;
+use rivu_format::decoder_hint::DecoderHint;
 use rivu_protocol::{
     model::*,
     response::{

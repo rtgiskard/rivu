@@ -425,9 +425,9 @@ fn draw_details(
                 lines.push(Line::default());
             }
             let decoder = match track.decoder_hint {
-                rivu_format::media::DecoderHint::Auto => i18n.text("gl-auto"),
-                rivu_format::media::DecoderHint::Native => i18n.text("gl-native"),
-                rivu_format::media::DecoderHint::Ffmpeg => "FFmpeg",
+                rivu_format::decoder_hint::DecoderHint::Auto => i18n.text("gl-auto"),
+                rivu_format::decoder_hint::DecoderHint::Native => i18n.text("gl-native"),
+                rivu_format::decoder_hint::DecoderHint::Ffmpeg => "FFmpeg",
             };
             lines.extend(detail_field(
                 i18n.text("gl-decoder-hint"),

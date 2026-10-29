@@ -1188,7 +1188,7 @@ unsafe fn copy_samples<T: Copy>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rivu_format::input::open_regular_file;
+    use rivu_format::regular_file::open_regular_file;
 
     #[test]
     fn encoded_duration_restores_skip_discard_and_rejects_manual_or_malformed_trim() {

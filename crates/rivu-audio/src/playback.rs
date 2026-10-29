@@ -13,7 +13,7 @@ use crossbeam_channel::Receiver;
 use parking_lot::RwLock;
 use rivu_dsp::equalizer::{config::EqualizerConfig, iir::Equalizer};
 use rivu_format::config::VisualizationSignal;
-use rivu_format::media::DecoderHint;
+use rivu_format::decoder_hint::DecoderHint;
 use std::{collections::VecDeque, path::PathBuf, sync::Arc};
 
 const PENDING_BUFFER_CAPACITY: usize = 16_384;

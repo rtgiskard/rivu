@@ -83,7 +83,7 @@ async fn verify_target(
     let mut verified = workers
         .execute(move || -> Result<VerifiedTarget> {
             require_source_absent(&admitted.source.path)?;
-            let file = rivu_format::input::open_regular_file(&admitted.target.path)
+            let file = rivu_format::regular_file::open_regular_file(&admitted.target.path)
                 .context("Opening relocation target")?;
             let metadata = file
                 .metadata()

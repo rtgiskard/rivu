@@ -7,7 +7,7 @@ use crate::{
     response::{Ack, QueryResponse, StateResponse, StateRevisions, StateSections},
 };
 use anyhow::{Context, Result, bail};
-use rivu_format::media::DecoderHint;
+use rivu_format::decoder_hint::DecoderHint;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 

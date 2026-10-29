@@ -244,7 +244,7 @@ pub(super) fn full_track(id: i64) -> rivu_protocol::model::Track {
         bits_per_sample: Some(24),
         release_date: Some("2026-10".into()),
         favorite: true,
-        decoder_hint: rivu_format::media::DecoderHint::Native,
+        decoder_hint: rivu_format::decoder_hint::DecoderHint::Native,
         missing: true,
         play_count: 0,
         last_played: None,

@@ -3,7 +3,7 @@ use crate::config::{Config, ConfigPersistence};
 use crate::gui::layout::interaction::{DragCommit, LayoutInteraction, SeekCommit};
 use gpui::{AppContext, Bounds, Context, point, px, size};
 use rivu_audio::WaveformFrame;
-use rivu_format::media::DecoderHint;
+use rivu_format::decoder_hint::DecoderHint;
 use rivu_protocol::model::Track;
 use std::{path::PathBuf, sync::atomic::Ordering};
 

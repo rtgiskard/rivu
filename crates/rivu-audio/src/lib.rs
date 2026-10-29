@@ -119,7 +119,7 @@ mod ffmpeg {
 pub mod analysis;
 mod media;
 pub use media::MediaInfo;
-use rivu_format::media::DecoderHint;
+use rivu_format::decoder_hint::DecoderHint;
 mod volume;
 
 mod bitrate;

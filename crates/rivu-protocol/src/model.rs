@@ -6,7 +6,7 @@ pub use duplicates::{DuplicateGroup, DuplicateMember};
 mod query;
 pub use query::{Query, QueryIdentity, QueryStamp};
 
-use rivu_format::media::DecoderHint;
+use rivu_format::decoder_hint::DecoderHint;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap},

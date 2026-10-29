@@ -333,7 +333,7 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rivu_format::media::DecoderHint;
+    use rivu_format::decoder_hint::DecoderHint;
     use std::path::Path;
 
     fn fixture() -> Result<Store> {

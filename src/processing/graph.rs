@@ -1595,7 +1595,7 @@ mod tests {
         let renderer = audio::SourceRenderer::open(
             &path,
             None,
-            rivu_format::media::DecoderHint::Native,
+            rivu_format::decoder_hint::DecoderHint::Native,
             1,
             false,
             &cancel,
