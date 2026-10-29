@@ -713,6 +713,15 @@ may leave earlier font data resident. Raster-bounds memoization is capped at
 32768 entries and clears on a successful distinct miss at that budget; bounds
 are recomputed without changing font identity.
 
+The cosmic backend keeps only the latest nonempty bounds-to-rasterize bitmap,
+with at most 256 KiB of pixel-buffer capacity (a 256-by-256 RGBA bitmap). This is
+an opportunistic handoff, not atlas residency: an atlas hit may never consume it.
+The next bounds request releases it, including empty or failed requests. Matching
+rasterization takes the bitmap; interleaved requests recompute evicted content
+without changing pixels. Larger glyphs remain supported but are not retained,
+so their bounds-to-rasterize path renders twice. The limit excludes scaler scratch,
+caller-owned output pixels, atlas uploads and textures, and total process memory.
+
 Glyph atlas reclamation starts above 8192 glyph entries after 120 frames with
 sprite demand at no more than one-quarter of that count. Once the old frame is
 discarded, every texture page referenced by the current replayable Scene is

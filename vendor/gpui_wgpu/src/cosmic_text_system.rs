@@ -29,6 +29,10 @@ use swash::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
+// One immediate bounds-to-rasterize handoff, not a glyph residency cache.
+// Larger bitmaps remain renderable without retaining more than 256 KiB here.
+const MAX_PENDING_GLYPH_BYTES: usize = 256 * 1024;
+
 pub struct CosmicTextSystem(RwLock<CosmicTextSystemState>);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -44,7 +48,7 @@ struct CosmicTextSystemState {
     font_system: FontSystem,
     scratch: ShapeBuffer,
     swash_scale_context: ScaleContext,
-    pending_glyph_images: HashMap<RenderGlyphParams, swash::scale::image::Image>,
+    pending_glyph_image: Option<(RenderGlyphParams, swash::scale::image::Image)>,
     /// Contains selected faces and native shaping fallbacks. Indexed by `FontId`.
     loaded_fonts: Vec<LoadedFont>,
     loaded_font_ids_by_key: HashMap<LoadedFontKey, FontId>,
@@ -133,7 +137,7 @@ impl CosmicTextSystem {
             font_system,
             scratch: ShapeBuffer::default(),
             swash_scale_context: ScaleContext::new(),
-            pending_glyph_images: HashMap::default(),
+            pending_glyph_image: None,
             loaded_fonts: Vec::new(),
             loaded_font_ids_by_key: HashMap::default(),
             font_ids_by_request: HashMap::default(),
@@ -156,7 +160,7 @@ impl CosmicTextSystem {
             font_system,
             scratch: ShapeBuffer::default(),
             swash_scale_context: ScaleContext::new(),
-            pending_glyph_images: HashMap::default(),
+            pending_glyph_image: None,
             loaded_fonts: Vec::new(),
             loaded_font_ids_by_key: HashMap::default(),
             font_ids_by_request: HashMap::default(),
@@ -667,13 +671,16 @@ impl CosmicTextSystemState {
     }
 
     fn raster_bounds(&mut self, params: &RenderGlyphParams) -> Result<Bounds<DevicePixels>> {
+        // Atlas hits may never consume this handoff. Release it before rendering
+        // another request, including empty glyphs and failed renders.
+        self.pending_glyph_image = None;
         let image = self.render_glyph_image(params)?;
         let bounds = Bounds {
             origin: point(image.placement.left.into(), (-image.placement.top).into()),
             size: size(image.placement.width.into(), image.placement.height.into()),
         };
-        if !bounds.is_zero() {
-            self.pending_glyph_images.insert(params.clone(), image);
+        if !bounds.is_zero() && image.data.capacity() <= MAX_PENDING_GLYPH_BYTES {
+            self.pending_glyph_image = Some((params.clone(), image));
         }
         Ok(bounds)
     }
@@ -688,8 +695,11 @@ impl CosmicTextSystemState {
             anyhow::bail!("glyph bounds are empty");
         }
 
-        let mut image = match self.pending_glyph_images.remove(params) {
-            Some(image) => image,
+        let mut image = match self
+            .pending_glyph_image
+            .take_if(|(cached, _)| cached == params)
+        {
+            Some((_, image)) => image,
             None => self.render_glyph_image(params)?,
         };
         let bitmap_size = glyph_bounds.size;
@@ -1507,6 +1517,108 @@ mod tests {
         let text_system = CosmicTextSystem::new_without_system_fonts("IBM Plex Sans");
         text_system.add_fonts(vec![Cow::Borrowed(IBM_PLEX)])?;
         Ok(text_system)
+    }
+
+    fn glyph_params(system: &CosmicTextSystem, ch: char) -> Result<RenderGlyphParams> {
+        let font_id = system.font_id(&gpui::font("IBM Plex Sans"))?;
+        Ok(RenderGlyphParams {
+            font_id,
+            glyph_id: system.glyph_for_char(font_id, ch).unwrap(),
+            font_size: gpui::px(32.0),
+            subpixel_variant: point(0, 0),
+            scale_factor: 1.0,
+            is_emoji: false,
+            subpixel_rendering: false,
+            dilation: 0,
+        })
+    }
+
+    #[test]
+    fn glyph_handoff_eviction_preserves_interleaved_rasterization() -> Result<()> {
+        let system = text_system()?;
+        let first = glyph_params(&system, 'A')?;
+        let mut second = first.clone();
+        second.font_size = gpui::px(48.0);
+        second.subpixel_variant = point(1, 1);
+        second.scale_factor = 1.5;
+        second.subpixel_rendering = true;
+        let mut expected = Vec::new();
+        for params in [&first, &second] {
+            let bounds = system.glyph_raster_bounds(params)?;
+            expected.push((bounds, system.rasterize_glyph(params, bounds)?));
+        }
+        assert_eq!(system.glyph_raster_bounds(&first)?, expected[0].0);
+        // A second window can ask for bounds before the first consumes its image.
+        assert_eq!(system.glyph_raster_bounds(&second)?, expected[1].0);
+        assert_eq!(
+            system.rasterize_glyph(&first, expected[0].0)?,
+            expected[0].1
+        );
+        assert_eq!(
+            system.rasterize_glyph(&second, expected[1].0)?,
+            expected[1].1
+        );
+        // A different glyph must not consume another request's bitmap either.
+        let third = glyph_params(&system, 'B')?;
+        system.glyph_raster_bounds(&third)?;
+        assert_eq!(
+            system.rasterize_glyph(&first, expected[0].0)?,
+            expected[0].1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn glyph_handoff_bounds_only_demand_keeps_retention_bounded() -> Result<()> {
+        let system = text_system()?;
+        let mut params = glyph_params(&system, 'W')?;
+        params.subpixel_rendering = true;
+        for i in 0..1024 {
+            params.font_size = gpui::px(20.0 + i as f32 / 16.0);
+            system.glyph_raster_bounds(&params)?;
+            let state = system.0.read();
+            let bytes = state
+                .pending_glyph_image
+                .as_ref()
+                .map_or(0, |(_, image)| image.data.capacity());
+            assert!(bytes <= MAX_PENDING_GLYPH_BYTES);
+        }
+        // Large glyphs remain supported, but cannot leave a large pending bitmap.
+        params.font_size = gpui::px(1024.0);
+        let bounds = system.glyph_raster_bounds(&params)?;
+        assert!(system.0.read().pending_glyph_image.is_none());
+        let (size, pixels) = system.rasterize_glyph(&params, bounds)?;
+        assert_eq!(size, bounds.size);
+        assert_eq!(
+            pixels.len(),
+            size.width.0 as usize * size.height.0 as usize * 4
+        );
+        assert!(pixels.len() > MAX_PENDING_GLYPH_BYTES);
+        assert!(pixels.iter().any(|&value| value != 0));
+        Ok(())
+    }
+
+    #[test]
+    fn glyph_handoff_empty_and_failed_bounds_release_previous_bitmap() -> Result<()> {
+        let system = text_system()?;
+        let normal = glyph_params(&system, 'A')?;
+        let space = glyph_params(&system, ' ')?;
+        let expected_bounds = system.glyph_raster_bounds(&normal)?;
+        let expected = system.rasterize_glyph(&normal, expected_bounds)?;
+        system.glyph_raster_bounds(&normal)?;
+        assert!(system.glyph_raster_bounds(&space)?.is_zero());
+        assert!(system.0.read().pending_glyph_image.is_none());
+        system.glyph_raster_bounds(&normal)?;
+        let invalid = RenderGlyphParams {
+            glyph_id: GlyphId(u32::MAX),
+            ..normal.clone()
+        };
+        assert!(system.glyph_raster_bounds(&invalid).is_err());
+        assert!(system.0.read().pending_glyph_image.is_none());
+        let bounds = system.glyph_raster_bounds(&normal)?;
+        assert_eq!(bounds, expected_bounds);
+        assert_eq!(system.rasterize_glyph(&normal, bounds)?, expected);
+        Ok(())
     }
 
     #[test]
