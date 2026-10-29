@@ -1,7 +1,8 @@
 //! Bounded duplex PCM transport. Frames are kind:u8 + length:u32-le + payload.
 //! JSON (0), input PCM (1), input end (2), speech/vocals/accompaniment PCM (17/18/19).
 //! Payloads are at most 64 KiB; PCM is interleaved little-endian float32, not WAV.
-use super::{AudioOutputs, ProgressReporter, check_cancel};
+use super::AudioOutputs;
+use super::render::{ProgressReporter, check_cancel};
 use anyhow::{Context, Result, bail, ensure};
 use rivu_audio as audio;
 use rivu_protocol::model::{ProcessingOperation, ProcessingPhase, ProcessingTaskStatus};

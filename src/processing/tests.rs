@@ -1,3 +1,5 @@
+use super::export::prepare_export;
+use super::render::ProgressReporter;
 use super::*;
 use std::time::Duration;
 
@@ -220,7 +222,7 @@ fn shutdown_closes_processing_delivery_and_retires_unpublished_outputs() {
         sent.send(rejected).unwrap();
         released.recv().unwrap();
     });
-    service.active = Some(Active {
+    service.active = Some(ActiveTask {
         id: 4,
         cancelled,
         worker,

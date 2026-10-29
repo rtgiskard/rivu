@@ -1,5 +1,7 @@
 //! Block-streamed DAG evaluation. Only model boundaries and the selected output retain PCM.
+use super::render::{ProgressReporter, check_cancel, validate_output};
 use super::*;
+use anyhow::bail;
 use rivu_dsp::{
     denoise::{DenoiseMode, Denoiser, NoiseProfile, ProfileCollector},
     equalizer::{fir::FirEqualizer, iir::Equalizer},

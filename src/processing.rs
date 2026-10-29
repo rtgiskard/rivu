@@ -1,6 +1,6 @@
 //! Offline processing runs outside Core and never publishes directly into player state.
 use crate::config::Config;
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use async_channel::{Receiver, Sender, bounded};
 use rivu_audio as audio;
 use rivu_protocol::model::*;
@@ -13,12 +13,13 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread::{self, JoinHandle},
-    time::{Duration, Instant},
 };
 
+mod export;
 pub(crate) mod graph;
 mod neural;
 mod reclaim;
+mod render;
 #[cfg(test)]
 mod tests;
 
@@ -82,31 +83,6 @@ pub(crate) struct GraphAudioOutput {
     pub context: Option<GraphAudioContext>,
 }
 
-fn export_destination(destination: &Path) -> Result<PathBuf> {
-    ensure!(
-        destination.is_absolute(),
-        "Export destination must be an absolute path"
-    );
-    ensure!(
-        !destination.try_exists()?,
-        "Export destination already exists; choose a new file"
-    );
-    let parent = fs::canonicalize(
-        destination
-            .parent()
-            .context("Export destination has no parent")?,
-    )?;
-    ensure!(
-        parent.is_dir(),
-        "Export destination parent must be a directory"
-    );
-    Ok(parent.join(
-        destination
-            .file_name()
-            .context("Export destination has no file name")?,
-    ))
-}
-
 pub(crate) struct ProcessingResult {
     pub track: Track,
     pub stamp: SourceStamp,
@@ -145,7 +121,7 @@ pub(crate) enum Event {
         result: Result<audio::PcmAudio>,
     },
 }
-struct Active {
+struct ActiveTask {
     id: u64,
     cancelled: Arc<AtomicBool>,
     worker: JoinHandle<()>,
@@ -153,7 +129,7 @@ struct Active {
 pub(crate) struct Service {
     pub sender: Sender<Event>,
     pub receiver: Receiver<Event>,
-    active: Option<Active>,
+    active: Option<ActiveTask>,
     results: std::collections::VecDeque<ProcessingResult>,
     next_id: u64,
     audition: Option<(u64, u64)>,
@@ -450,7 +426,7 @@ impl Service {
                     PANIC_ON_NEURAL_PROGRESS.set(panic_on_neural_progress);
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         retired?;
-                        check_cancel(&flag)?;
+                        render::check_cancel(&flag)?;
                         if matches!(
                             operation,
                             ProcessingOperation::Speech | ProcessingOperation::Separate
@@ -472,9 +448,9 @@ impl Service {
                                 config.neural.worker.display()
                             );
                         }
-                        check_cancel(&flag)?;
+                        render::check_cancel(&flag)?;
                         let result = if let Some(cached_output) = cached_output {
-                            run_cached_export(
+                            render::run_cached_export(
                                 track,
                                 stamp,
                                 budget,
@@ -484,7 +460,7 @@ impl Service {
                                 &tx,
                             )
                         } else {
-                            run(track, stamp, config, budget, initial, &flag, &tx)
+                            render::run(track, stamp, config, budget, initial, &flag, &tx)
                         }?;
                         #[cfg(test)]
                         if panic_after_processing {
@@ -505,7 +481,7 @@ impl Service {
             .as_ref()
             .unwrap()
             .resume_after_release(release);
-        self.active = Some(Active {
+        self.active = Some(ActiveTask {
             id,
             cancelled,
             worker,
@@ -549,7 +525,7 @@ impl Service {
         }
     }
     pub(crate) fn export_destination(&self, destination: &Path) -> Result<PathBuf> {
-        export_destination(destination)
+        export::export_destination(destination)
     }
 
     #[cfg(test)]
@@ -605,516 +581,6 @@ impl Drop for Service {
         }
     }
 }
-fn check_cancel(cancel: &AtomicBool) -> Result<()> {
-    ensure!(!cancel.load(Ordering::Acquire), "Processing cancelled");
-    Ok(())
-}
-struct ProgressReporter<'a> {
-    sender: &'a Sender<Event>,
-    id: u64,
-    phase: Option<ProcessingPhase>,
-    last_emit: Instant,
-}
-
-impl<'a> ProgressReporter<'a> {
-    fn new(sender: &'a Sender<Event>, id: u64) -> Self {
-        Self {
-            sender,
-            id,
-            phase: None,
-            last_emit: Instant::now(),
-        }
-    }
-
-    fn report(&mut self, phase: ProcessingPhase, completed: u64, total: Option<u64>) {
-        let transition = self.phase != Some(phase);
-        if !transition && self.last_emit.elapsed() < Duration::from_millis(100) {
-            return;
-        }
-        self.last_emit = Instant::now();
-        let event = Event::Progress {
-            id: self.id,
-            phase,
-            completed,
-            total,
-        };
-        if transition {
-            // Stage changes share the reliable terminal channel; blocks within
-            // a stage are snapshots, not individual work that must be published.
-            self.phase = Some(phase);
-            let _ = self.sender.send_blocking(event);
-        } else if self.sender.is_empty() {
-            let _ = self.sender.try_send(event);
-        }
-    }
-}
-fn run_cached_export(
-    track: Track,
-    stamp: SourceStamp,
-    _budget: Arc<audio::PcmBudget>,
-    mut status: ProcessingTaskStatus,
-    cached: CachedGraphOutput,
-    cancel: &AtomicBool,
-    tx: &Sender<Event>,
-) -> Result<ProcessingResult> {
-    let pcm = cached.pcm;
-    let mut progress = ProgressReporter::new(tx, status.id);
-    let destination = status
-        .settings
-        .graph_export_path
-        .as_ref()
-        .context("Missing export destination")?;
-    let pending_export = Some(prepare_export(&pcm, destination, cancel, |done, total| {
-        progress.report(ProcessingPhase::Processing, done, Some(total));
-    })?);
-    ensure!(
-        SourceStamp::read(&track.path)? == stamp,
-        "Source changed while exporting; output discarded"
-    );
-    status.phase = ProcessingPhase::Complete;
-    status.graph_nodes.clear();
-    status.sample_rate = Some(pcm.sample_rate());
-    status.channels = Some(pcm.channels());
-    status.frames = Some(pcm.frames());
-    status.completed = pcm.frames();
-    status.total = Some(pcm.frames());
-    Ok(ProcessingResult {
-        track,
-        stamp,
-        status,
-        outputs: AudioOutputs::default(),
-        graph_outputs: BTreeMap::new(),
-        mix: None,
-        pending_export,
-        runner: None,
-    })
-}
-
-fn run(
-    track: Track,
-    stamp: SourceStamp,
-    config: Arc<Config>,
-    budget: Arc<audio::PcmBudget>,
-    mut status: ProcessingTaskStatus,
-    cancel: &AtomicBool,
-    tx: &Sender<Event>,
-) -> Result<ProcessingResult> {
-    let open_source = || -> Result<audio::SourceRenderer> {
-        let renderer = audio::SourceRenderer::open(
-            &track.path,
-            track.cue.as_ref().map(|cue| audio::PlaybackRange {
-                start_seconds: cue.start_seconds(),
-                end_seconds: cue.end_seconds(),
-            }),
-            track.decoder_hint,
-            config.media_read_buffer_mb,
-            config.ffmpeg_enabled,
-            cancel,
-        )?;
-        stamp.validate_rendered(renderer.format().source_identity)?;
-        Ok(renderer)
-    };
-    let renderer = open_source()?;
-    let mut progress = ProgressReporter::new(tx, status.id);
-    let native = renderer.format().clone();
-    ensure!(
-        status.operation != ProcessingOperation::Separate
-            || native.layout.as_ref() == [audio::Channel::FrontLeft, audio::Channel::FrontRight],
-        "Vocal separation requires a stereo source; no implicit channel conversion is performed"
-    );
-    ensure!(
-        status.operation != ProcessingOperation::Speech
-            || native.layout.as_ref() == [audio::Channel::FrontCenter]
-            || native.layout.as_ref() == [audio::Channel::FrontLeft, audio::Channel::FrontRight],
-        "Speech enhancement supports mono/stereo speaker layouts only"
-    );
-    status.sample_rate = Some(native.sample_rate);
-    status.channels = Some(native.channels());
-    let mut runner = None;
-    if let Some(mode) = status
-        .settings
-        .graph_mode
-        .filter(|mode| *mode != GraphExecutionMode::Offline)
-    {
-        let (actual, boundary, prepared) = graph::prepare(
-            status
-                .settings
-                .graph
-                .as_ref()
-                .context("Missing graph snapshot")?,
-            status
-                .settings
-                .graph_target
-                .context("Missing graph target")?,
-            mode,
-            native.sample_rate,
-            usize::from(native.channels()),
-            cancel,
-        )?;
-        status.settings.graph_mode = Some(actual);
-        status.settings.graph_boundary = boundary;
-        status.graph_plan = prepared.as_ref().map(graph::plan_info);
-        runner = prepared;
-    }
-    if status.settings.graph_mode == Some(GraphExecutionMode::Realtime) {
-        check_cancel(cancel)?;
-        ensure!(
-            SourceStamp::read(&track.path)? == stamp,
-            "Source changed while preparing graph"
-        );
-        for node in &mut status.graph_nodes {
-            node.phase = ProcessingPhase::Processing;
-        }
-        status.phase = ProcessingPhase::Complete;
-        return Ok(ProcessingResult {
-            track,
-            stamp,
-            status,
-            outputs: AudioOutputs::default(),
-            graph_outputs: BTreeMap::new(),
-            mix: None,
-            pending_export: None,
-            runner,
-        });
-    }
-    progress.report(ProcessingPhase::Rendering, 0, None);
-    let mut graph_outputs = BTreeMap::new();
-    let outputs = if status.operation == ProcessingOperation::Denoise {
-        let pcm = classical_native(
-            renderer,
-            open_source,
-            &config.denoise,
-            status.settings.profile,
-            Arc::clone(&budget),
-            cancel,
-            |frames| {
-                progress.report(
-                    ProcessingPhase::Processing,
-                    frames,
-                    native.estimated_frames(),
-                );
-            },
-        )?;
-        status.frames = Some(pcm.frames());
-        AudioOutputs {
-            denoised: Some(pcm),
-            ..Default::default()
-        }
-    } else if status.operation == ProcessingOperation::Graph && graph::native_only(&status)? {
-        graph_outputs = graph::execute_native(
-            renderer,
-            &open_source,
-            Arc::clone(&budget),
-            &mut status,
-            cancel,
-            &mut progress,
-        )?;
-        AudioOutputs::default()
-    } else {
-        // Whole-signal model boundaries require seekable input. Native-only
-        // paths above never allocate a complete decoded source alongside output.
-        let input = renderer.render_pcm(Arc::clone(&budget), cancel)?;
-        status.frames = Some(input.frames());
-        if status.operation == ProcessingOperation::Graph {
-            graph_outputs = graph::execute(
-                &input,
-                Arc::clone(&budget),
-                &mut status,
-                cancel,
-                &mut progress,
-            )?;
-            AudioOutputs::default()
-        } else {
-            neural::run(
-                &input,
-                &config.neural,
-                Arc::clone(&budget),
-                cancel,
-                &mut progress,
-                &mut status,
-            )?
-        }
-    };
-    let frames = status
-        .frames
-        .context("Missing decoded source frame count")?;
-    check_cancel(cancel)?;
-    ensure!(
-        SourceStamp::read(&track.path)? == stamp,
-        "Source changed while processing; output discarded"
-    );
-    for pcm in [&outputs.denoised, &outputs.vocals, &outputs.accompaniment]
-        .into_iter()
-        .flatten()
-    {
-        validate_output(pcm, native.sample_rate, &native.layout, frames, cancel)?;
-    }
-    let pending_export = if let Some(destination) = &status.settings.graph_export_path {
-        let target = status
-            .settings
-            .graph_target
-            .context("Missing export target")?;
-        Some(prepare_export(
-            &graph_outputs
-                .get(&target)
-                .context("Missing export output")?
-                .pcm,
-            destination,
-            cancel,
-            |done, total| {
-                progress.report(ProcessingPhase::Processing, done, Some(total));
-            },
-        )?)
-    } else {
-        None
-    };
-    status.phase = ProcessingPhase::Complete;
-    status.completed = frames;
-    status.total = Some(frames);
-    if status.operation != ProcessingOperation::Graph {
-        status.outputs = Some(ProcessingOutputs {
-            denoised: outputs.denoised.is_some(),
-            vocals: outputs.vocals.is_some(),
-            accompaniment: outputs.accompaniment.is_some(),
-        });
-    }
-    check_cancel(cancel)?;
-    Ok(ProcessingResult {
-        track,
-        stamp,
-        status,
-        outputs,
-        graph_outputs,
-        mix: None,
-        pending_export,
-        runner,
-    })
-}
-
-fn prepare_export(
-    source: &audio::PcmAudio,
-    destination: &Path,
-    cancel: &AtomicBool,
-    mut progress: impl FnMut(u64, u64),
-) -> Result<(tempfile::NamedTempFile, PathBuf)> {
-    let canonical = export_destination(destination)?;
-    ensure!(
-        canonical == destination,
-        "Export destination parent changed after admission"
-    );
-    check_cancel(cancel)?;
-    let mut temporary = tempfile::NamedTempFile::new_in(
-        canonical
-            .parent()
-            .context("Export destination has no parent")?,
-    )?;
-    let spec = hound::WavSpec {
-        channels: source.channels(),
-        sample_rate: source.sample_rate(),
-        bits_per_sample: 32,
-        sample_format: hound::SampleFormat::Float,
-    };
-    // WAVE masks describe samples in ascending speaker-bit order, unlike an
-    // in-memory custom layout, which may retain any decoder-provided ordering.
-    let mut order: Vec<_> = (0..source.layout().len()).collect();
-    order.sort_unstable_by_key(|&index| source.layout()[index].standard_index());
-    let mask = source.layout().iter().fold(0_u32, |mask, speaker| {
-        mask | (1 << speaker.standard_index())
-    });
-    let mut writer = hound::WavWriter::new(std::io::BufWriter::new(temporary.as_file_mut()), spec)?;
-    let mut block = vec![0.0; 8192 * usize::from(source.channels())];
-    let mut position = 0;
-    progress(0, source.frames());
-    while position < source.frames() {
-        check_cancel(cancel)?;
-        let frames = source.read_frames(position, &mut block);
-        debug_assert!(frames > 0);
-        for frame in block[..frames * order.len()].chunks_exact(order.len()) {
-            for &index in &order {
-                writer.write_sample(frame[index])?;
-            }
-        }
-        position += frames as u64;
-        progress(position, source.frames());
-    }
-    writer.finalize()?;
-    set_wav_channel_mask(temporary.as_file_mut(), spec, mask)?;
-    temporary.as_file().sync_all()?;
-    check_cancel(cancel)?;
-    Ok((temporary, canonical))
-}
-
-/// Hound 3.5 writes float32 as WAVEFORMATEXTENSIBLE, but guesses its mask.
-/// Locate and validate the actual RIFF fmt chunk before replacing dwChannelMask
-/// on the same unpublished file; hound still owns all encoding and finalization.
-fn set_wav_channel_mask(file: &mut fs::File, spec: hound::WavSpec, mask: u32) -> Result<()> {
-    use std::io::{Read, Seek, SeekFrom, Write};
-
-    file.rewind()?;
-    let length = file.metadata()?.len();
-    let mut riff = [0_u8; 12];
-    file.read_exact(&mut riff)?;
-    ensure!(
-        &riff[..4] == b"RIFF"
-            && &riff[8..] == b"WAVE"
-            && u64::from(u32::from_le_bytes(riff[4..8].try_into()?)) + 8 == length,
-        "Export writer produced an invalid RIFF/WAVE container"
-    );
-    let mut position = 12_u64;
-    while position + 8 <= length {
-        file.seek(SeekFrom::Start(position))?;
-        let mut chunk = [0_u8; 8];
-        file.read_exact(&mut chunk)?;
-        let size = u64::from(u32::from_le_bytes(chunk[4..].try_into()?));
-        let payload = position + 8;
-        ensure!(size <= length - payload, "Truncated export WAV chunk");
-        if &chunk[..4] == b"fmt " {
-            ensure!(size >= 40, "Export WAV has no extensible speaker layout");
-            let mut format = [0_u8; 40];
-            file.read_exact(&mut format)?;
-            // WAVEFORMATEX (18 bytes), valid bits (2), mask (4), subtype GUID (16).
-            const MASK_OFFSET: u64 = 20;
-            const IEEE_FLOAT_GUID: [u8; 16] =
-                [3, 0, 0, 0, 0, 0, 16, 0, 128, 0, 0, 170, 0, 56, 155, 113];
-            ensure!(
-                u16::from_le_bytes(format[..2].try_into()?) == 0xfffe
-                    && u16::from_le_bytes(format[2..4].try_into()?) == spec.channels
-                    && u32::from_le_bytes(format[4..8].try_into()?) == spec.sample_rate
-                    && u16::from_le_bytes(format[14..16].try_into()?) == 32
-                    && u16::from_le_bytes(format[16..18].try_into()?) >= 22
-                    && u16::from_le_bytes(format[18..20].try_into()?) == 32
-                    && format[24..] == IEEE_FLOAT_GUID,
-                "Export WAV has an unexpected extensible float32 format"
-            );
-            file.seek(SeekFrom::Start(payload + MASK_OFFSET))?;
-            file.write_all(&mask.to_le_bytes())?;
-            return Ok(());
-        }
-        position = payload + size + (size & 1);
-    }
-    bail!("Export WAV has no fmt chunk")
-}
-
-fn validate_output(
-    pcm: &audio::PcmAudio,
-    rate: u32,
-    layout: &[audio::Channel],
-    frames: u64,
-    cancel: &AtomicBool,
-) -> Result<()> {
-    check_cancel(cancel)?;
-    ensure!(
-        pcm.sample_rate() == rate && pcm.layout().as_ref() == layout && pcm.frames() == frames,
-        "Processing output format or alignment differs from source"
-    );
-    Ok(())
-}
-
-fn classical_native(
-    mut renderer: audio::SourceRenderer,
-    reopen: impl FnOnce() -> Result<audio::SourceRenderer>,
-    config: &rivu_dsp::denoise::DenoiseConfig,
-    selection: Option<NoiseSelection>,
-    budget: Arc<audio::PcmBudget>,
-    cancel: &AtomicBool,
-    mut progress: impl FnMut(u64),
-) -> Result<audio::PcmAudio> {
-    use rivu_dsp::denoise::{DenoiseMode, Denoiser, ProfileCollector};
-    let rate = renderer.format().sample_rate;
-    let layout = Arc::clone(&renderer.format().layout);
-    let channels = renderer.format().channels();
-    config.validate_for_format(rate, usize::from(channels))?;
-    let profile = if config.mode == DenoiseMode::Profile {
-        let selection =
-            selection.context("Profile mode requires an explicit selected noise-only range")?;
-        selection.validate()?;
-        let start = (selection.start_seconds * f64::from(rate)).floor() as u64;
-        let end = (selection.end_seconds * f64::from(rate)).floor() as u64;
-        ensure!(
-            start < end,
-            "Noise profile selection contains no source frames"
-        );
-        let mut capture = reopen()?;
-        ensure!(
-            capture.format().sample_rate == rate && capture.format().layout == layout,
-            "Source format changed during profile capture"
-        );
-        let mut collector =
-            ProfileCollector::new(rate, usize::from(channels), config.fft_size, end - start)?;
-        let mut block = Vec::new();
-        let mut position = 0_u64;
-        while position < end && capture.read_block(&mut block, cancel)? {
-            ensure!(
-                block.len().is_multiple_of(usize::from(channels)),
-                "Incomplete profile source frame"
-            );
-            let next = position
-                .checked_add((block.len() / usize::from(channels)) as u64)
-                .context("Profile source length overflow")?;
-            let from = position.max(start);
-            let to = next.min(end);
-            if from < to {
-                collector.push_block(
-                    &block[(from - position) as usize * usize::from(channels)
-                        ..(to - position) as usize * usize::from(channels)],
-                    &mut || cancel.load(Ordering::Acquire),
-                )?;
-            }
-            position = next;
-        }
-        ensure!(
-            end <= position,
-            "Noise profile selection lies outside the source"
-        );
-        capture.finish(cancel)?;
-        Some(collector.finish()?)
-    } else {
-        None
-    };
-    let mut denoiser = if graph::denoise_bypassed(config) {
-        None
-    } else {
-        Some(Denoiser::new(
-            rate,
-            usize::from(channels),
-            config.clone(),
-            profile,
-        )?)
-    };
-    let mut builder = audio::PcmBuilder::new(rate, Arc::clone(&layout), budget)?;
-    let mut block = Vec::new();
-    let mut processed = Vec::new();
-    let mut frames = 0_u64;
-    while renderer.read_block(&mut block, cancel)? {
-        ensure!(
-            block.len().is_multiple_of(usize::from(channels)),
-            "Incomplete denoise source frame"
-        );
-        frames = frames
-            .checked_add((block.len() / usize::from(channels)) as u64)
-            .context("Denoise source length overflow")?;
-        if let Some(denoiser) = &mut denoiser {
-            processed.clear();
-            denoiser.process_block(&block, &mut processed, &mut || {
-                cancel.load(Ordering::Acquire)
-            })?;
-            builder.push(&processed)?;
-        } else {
-            builder.push(&block)?;
-        }
-        progress(frames);
-    }
-    if let Some(denoiser) = &mut denoiser {
-        processed.clear();
-        denoiser.finish(&mut processed, &mut || cancel.load(Ordering::Acquire))?;
-        builder.push(&processed)?;
-    }
-    renderer.finish(cancel)?;
-    let pcm = builder.finish()?;
-    validate_output(&pcm, rate, &layout, frames, cancel)?;
-    Ok(pcm)
-}
-
 impl Service {
     pub(crate) fn start_mix(
         &mut self,
@@ -1163,7 +629,7 @@ impl Service {
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
                     || -> Result<audio::PcmAudio> {
                         retired?;
-                        validate_output(
+                        render::validate_output(
                             &accompaniment,
                             vocals.sample_rate(),
                             vocals.layout(),
@@ -1181,7 +647,7 @@ impl Service {
                         let ag = 10.0_f32.powf(accompaniment_gain_db / 20.0);
                         let mut position = 0;
                         while position < vocals.frames() {
-                            check_cancel(&cancel)?;
+                            render::check_cancel(&cancel)?;
                             let frames = vocals.read_frames(position, &mut v);
                             let accompaniment_frames = accompaniment.read_frames(position, &mut a);
                             debug_assert_eq!(accompaniment_frames, frames);
@@ -1192,7 +658,7 @@ impl Service {
                             builder.push(&v[..count])?;
                             position += frames as u64;
                         }
-                        check_cancel(&cancel)?;
+                        render::check_cancel(&cancel)?;
                         #[cfg(test)]
                         if panic_after_mix {
                             panic!("injected stem mix worker panic");
@@ -1207,7 +673,7 @@ impl Service {
                     result: outcome,
                 });
             })?;
-        self.active = Some(Active {
+        self.active = Some(ActiveTask {
             id,
             cancelled,
             worker,
