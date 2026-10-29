@@ -17,7 +17,10 @@ LICENSE_CARD = "https://www.modelscope.cn/models/iic/ClearerVoice-Studio.md"
 SOURCE_FILES = ("__init__.py", "conv_module.py", "fsmn.py", "layer_norm.py", "mossformer2.py", "mossformer2_block.py", "mossformer2_se_wrapper.py")
 
 def prepare(args, target, download):
-    from worker import digest
+    if __package__:
+        from .worker import digest
+    else:
+        from worker import digest
     download(LICENSE_CARD, target / "weight-license.txt", 65536)
     if 'license: "Apache License 2.0"' not in (target / "weight-license.txt").read_text():
         raise ValueError("primary model publisher card does not grant Apache2.0")

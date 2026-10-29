@@ -12,7 +12,7 @@ WEIGHT_SHA256 = "49c52edc8947ae1f9bf50d81530beaf3a2c3245aeaf34b6f31ff535cd22284d
 
 
 def prepare(args, target, download):
-    from worker import digest
+    from runtime.worker import digest
     archive_path = target / "upstream-model.zip"
     if args.download:
         download(WEIGHT_URL, archive_path, WEIGHT_SIZE)

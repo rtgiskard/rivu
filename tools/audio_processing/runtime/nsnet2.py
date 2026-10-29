@@ -52,7 +52,10 @@ def _log_power(spectrum):
 def _synthesize(spectrum, window, window_power, hop, count):
     """Overlap-add masked frames with bounded inverse-transform scratch storage."""
     import numpy as np
-    from worker import require
+    if __package__:
+        from .worker import require
+    else:
+        from worker import require
     window_size = len(window)
     fft_size = (spectrum.shape[-1] - 1) * 2
     padded_length = count + 2 * hop + (-count) % hop
@@ -82,7 +85,10 @@ def load_engine(manifest, base, device, controls):
     import os
     import numpy as np
     import onnxruntime as ort
-    from worker import require
+    if __package__:
+        from .worker import require
+    else:
+        from worker import require
     require(device == "cpu", "device_unavailable", "pinned NSNet2 environment supports CPU only; no device fallback")
     options = ort.SessionOptions()
     options.intra_op_num_threads = int(os.environ["OMP_NUM_THREADS"])

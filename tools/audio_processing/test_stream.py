@@ -12,7 +12,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import worker
+from runtime import worker
 from test_worker import bundle_fixture
 
 ROOT = Path(__file__).resolve().parents[2]

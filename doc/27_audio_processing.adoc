@@ -289,6 +289,12 @@ resolving it to base Python. The application does not bundle Python, workers or
 models. In GUI path controls, an empty manifest clears model selection; interpreter
 and worker paths are required. Placeholders are examples, not installed resources.
 
+In a source checkout, inference code and schemas live in
+`tools/audio_processing/runtime/`; preparation, provisioning, export and evaluation
+entry points remain in `tools/audio_processing/`. A checkout-based worker path is
+`tools/audio_processing/runtime/worker.py`. Existing provisioned bundles keep
+their own `runtime/worker.py` snapshot and do not need a path change.
+
 Keep the complete provisioned bundle together: hashed runtime sidecars/schema,
 model assets and license/dependency records. Its manifest binds bundle paths,
 interpreter hash and dependency pins. To copy verified assets and provision a

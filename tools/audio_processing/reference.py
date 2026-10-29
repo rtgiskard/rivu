@@ -20,14 +20,14 @@ from pathlib import Path
 import sys
 from types import SimpleNamespace
 
-from worker import validate_manifest, check_packages, deny_network, digest
+from runtime.worker import validate_manifest, check_packages, deny_network, digest
 
 
 def upstream_moss(base, audio, device):
     import numpy as np
     import torch
     import torchaudio
-    from mossformer import load_model
+    from runtime.mossformer import load_model
     namespace = {"np":np,"torch":torch,"torchaudio":torchaudio,"MAX_WAV_VALUE":32768.0}
     helpers = ast.parse((base/"reference_misc.py").read_text())
     decoder = ast.parse((base/"reference_decode.py").read_text())

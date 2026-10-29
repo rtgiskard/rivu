@@ -181,7 +181,10 @@ def resample_exact(audio, source_rate, target_rate):
 def build_engine(manifest, base, device, controls=None):
     controls = controls or {}
     if manifest["id"] == "nsnet2":
-        from nsnet2 import load_engine
+        if __package__:
+            from .nsnet2 import load_engine
+        else:
+            from nsnet2 import load_engine
         return load_engine(manifest, base, device, controls)
     import numpy as np
     import torch
@@ -192,7 +195,10 @@ def build_engine(manifest, base, device, controls=None):
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     if manifest["id"] == "MossFormer2_SE_48K":
-        from mossformer import load_engine
+        if __package__:
+            from .mossformer import load_engine
+        else:
+            from mossformer import load_engine
         return load_engine(manifest, base, device, controls)
     if manifest["id"] in ("melband_roformer_kim", "htdemucs"):
         from unblend import Separator

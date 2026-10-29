@@ -12,10 +12,10 @@ import subprocess
 import sys
 import time
 if __package__:
-    from .worker import digest, read_json
+    from .runtime.worker import digest, read_json
     from ..audio_quality.metric_core import db_ratio, projection_metrics, score_difference
 else:
-    from worker import digest, read_json
+    from runtime.worker import digest, read_json
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from audio_quality.metric_core import db_ratio, projection_metrics, score_difference
 

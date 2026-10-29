@@ -10,7 +10,7 @@ from pathlib import Path
 import tempfile
 from unittest.mock import patch
 import unittest
-from worker import RUNTIME_FILES, WorkerError, canonical_digest, deny_network, digest, resample_exact, validate_artifacts, validate_manifest, validate_request
+from runtime.worker import RUNTIME_FILES, WorkerError, canonical_digest, deny_network, digest, resample_exact, validate_artifacts, validate_manifest, validate_request
 from export import process_export
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -62,7 +62,7 @@ class ProvisionTests(unittest.TestCase):
                 "packages":{"fixture":"1"}, "license_evidence":"weight-license.txt",
                 "files":{"weight-license.txt":digest(evidence)}}))
             with patch("provision.importlib.metadata.distributions", return_value=[distribution]), \
-                 patch("worker.importlib.metadata.version", return_value="1"), redirect_stdout(io.StringIO()):
+                 patch("runtime.worker.importlib.metadata.version", return_value="1"), redirect_stdout(io.StringIO()):
                 construction = manifest_path.read_bytes()
                 bundled = root / "bundled"
                 with patch.object(sys, "argv", ["provision.py", "--manifest", str(manifest_path),
@@ -207,7 +207,7 @@ class ExplicitExportTests(unittest.TestCase):
         import jsonschema
         import numpy as np
         import soundfile as sf
-        schema = json.loads((Path(__file__).parent / "event.schema.json").read_text())
+        schema = json.loads((Path(__file__).parent / "runtime/event.schema.json").read_text())
         validator = jsonschema.Draft202012Validator(schema)
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory).resolve()
@@ -245,9 +245,9 @@ class ExplicitExportTests(unittest.TestCase):
             def infer(samples):
                 calls.append(samples.shape)
                 return samples * -0.5 + np.float32(0.125)
-            with patch("worker.build_engine", return_value=(8000, infer)), \
-                 patch("worker.importlib.metadata.version", return_value="1"), \
-                 patch("worker.deny_network"), patch("worker.CORE_SECONDS", 1), patch.dict(os.environ):
+            with patch("runtime.worker.build_engine", return_value=(8000, infer)), \
+                 patch("runtime.worker.importlib.metadata.version", return_value="1"), \
+                 patch("runtime.worker.deny_network"), patch("runtime.worker.CORE_SECONDS", 1), patch.dict(os.environ):
                 process_export(request, lambda *args, **kwargs: None)
             output, rate = sf.read(base / "result/speech.wav", dtype="float32", always_2d=True)
             np.testing.assert_array_equal(output, audio * 0.75 + (audio * -0.5 + np.float32(0.125)) * 0.25)
@@ -273,11 +273,11 @@ class ExplicitExportTests(unittest.TestCase):
                            "output_dir":str(destination), "model_manifest":str(base / "manifest.json"),
                            "device":"cuda", "parameters":{"wet_mix":0}}
                 events = []
-                with patch("worker.check_packages", side_effect=AssertionError("packages loaded")), \
-                     patch("worker.build_engine", side_effect=AssertionError("model loaded")), \
-                     patch("worker.resample_exact", side_effect=AssertionError("resampled")), \
-                     patch("worker.importlib.metadata.version", side_effect=AssertionError("dependency queried")), \
-                     patch("worker.deny_network"), patch("worker.CORE_SECONDS", 1), patch.dict(os.environ), \
+                with patch("runtime.worker.check_packages", side_effect=AssertionError("packages loaded")), \
+                     patch("runtime.worker.build_engine", side_effect=AssertionError("model loaded")), \
+                     patch("runtime.worker.resample_exact", side_effect=AssertionError("resampled")), \
+                     patch("runtime.worker.importlib.metadata.version", side_effect=AssertionError("dependency queried")), \
+                     patch("runtime.worker.deny_network"), patch("runtime.worker.CORE_SECONDS", 1), patch.dict(os.environ), \
                      patch.object(sf.SoundFile, "read", autospec=True, side_effect=sf.SoundFile.read) as reads:
                     process_export(request, lambda kind, **fields: events.append((kind, fields)))
                 output, output_rate = sf.read(destination / "speech.wav", dtype="float32", always_2d=True)
@@ -302,7 +302,7 @@ class ExplicitExportTests(unittest.TestCase):
                     self.assertEqual(report["metrics"][metric], 0)
                 preserved = {path.name: path.read_bytes() for path in destination.iterdir()}
                 rejected_events = []
-                with patch("worker.deny_network"), patch.dict(os.environ):
+                with patch("runtime.worker.deny_network"), patch.dict(os.environ):
                     with self.assertRaisesRegex(WorkerError, "already exist"):
                         process_export(request, lambda kind, **fields: rejected_events.append((kind, fields)))
                 self.assertEqual(rejected_events, [])
@@ -323,9 +323,9 @@ class ExplicitExportTests(unittest.TestCase):
                     request = {**export_request(), "input_path":str(source),
                                "output_dir":str(destination), "model_manifest":str(base / "manifest.json"),
                                "parameters":parameters}
-                    with patch("worker.check_packages"), \
-                         patch("worker.build_engine", side_effect=AssertionError("model loaded")), \
-                         patch("worker.deny_network"), patch.dict(os.environ):
+                    with patch("runtime.worker.check_packages"), \
+                         patch("runtime.worker.build_engine", side_effect=AssertionError("model loaded")), \
+                         patch("runtime.worker.deny_network"), patch.dict(os.environ):
                         with self.assertRaisesRegex(WorkerError, "multichannel downmix"):
                             process_export(request, lambda *args, **kwargs: None)
                     self.assertFalse(destination.exists())
@@ -344,7 +344,7 @@ class ExplicitExportTests(unittest.TestCase):
                        "output_dir":str(destination), "model_manifest":str(base / "manifest.json"),
                        "parameters":{"wet_mix":0}}
             events = []
-            with patch("worker.MAX_REPORT_BYTES", 1), patch("worker.deny_network"), patch.dict(os.environ):
+            with patch("runtime.worker.MAX_REPORT_BYTES", 1), patch("runtime.worker.deny_network"), patch.dict(os.environ):
                 with self.assertRaises(WorkerError) as error:
                     process_export(request, lambda kind, **fields: events.append((kind, fields)))
             self.assertEqual(error.exception.code, "report_capacity")
@@ -367,7 +367,7 @@ class ExplicitExportTests(unittest.TestCase):
                 process_export(request, lambda *args, **kwargs: None)
             request["parameters"] = {"wet_mix":0}
             sf.write(source, np.full((8, 1), np.nan, dtype="float32"), 8000, subtype="FLOAT")
-            with patch("worker.deny_network"), patch.dict(os.environ):
+            with patch("runtime.worker.deny_network"), patch.dict(os.environ):
                 with self.assertRaisesRegex(WorkerError, "nonfinite"):
                     process_export(request, lambda *args, **kwargs: None)
             self.assertFalse(destination.exists())
@@ -407,9 +407,9 @@ class ExplicitExportTests(unittest.TestCase):
             # source only at admission, avoiding multi-GiB fixtures/model loads.
             info = SimpleNamespace(format="WAV", subtype="FLOAT", samplerate=48000, channels=2,
                                    frames=2**28 + 1)
-            with patch("worker.build_engine", return_value=(48000, inspect_outputs)), \
-                 patch("worker.deny_network"), patch.dict(os.environ), \
-                 patch("worker.importlib.metadata.version", return_value="1"), \
+            with patch("runtime.worker.build_engine", return_value=(48000, inspect_outputs)), \
+                 patch("runtime.worker.deny_network"), patch.dict(os.environ), \
+                 patch("runtime.worker.importlib.metadata.version", return_value="1"), \
                  patch.object(sf, "info", return_value=info), \
                  patch("export.shutil.disk_usage", return_value=SimpleNamespace(free=16 * 1024**3)):
                 with self.assertRaises(InspectedOutputs):
@@ -421,7 +421,7 @@ class ExplicitExportTests(unittest.TestCase):
         import sys
         import numpy as np
         import soundfile as sf
-        import worker
+        from runtime import worker
         import export
         from contextlib import redirect_stdout
         from unittest.mock import patch
@@ -445,7 +445,7 @@ class ExplicitExportTests(unittest.TestCase):
             # reporting and the export adapter's JSONL serializer are real.
             with patch.object(worker, "build_engine", return_value=(8000, lambda samples: samples * 0.5)), \
                  patch.object(worker, "deny_network"), patch.object(worker, "CORE_SECONDS", 1), \
-                 patch("worker.importlib.metadata.version", return_value="1"), \
+                 patch("runtime.worker.importlib.metadata.version", return_value="1"), \
                  patch.dict(os.environ), patch.object(sys, "argv", ["export.py", "--request", str(request_path)]), \
                  redirect_stdout(stdout):
                 self.assertEqual(export.main(), 0)

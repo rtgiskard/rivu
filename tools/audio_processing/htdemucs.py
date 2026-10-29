@@ -16,7 +16,7 @@ WEIGHT_SIZE = 84023856
 
 
 def prepare(args, target, download):
-    from worker import digest
+    from runtime.worker import digest
     checkpoint = target / "model.safetensors"
     if args.download:
         download(WEIGHT_URL.replace("huggingface.co", args.hf_host) + "?download=true", checkpoint, WEIGHT_SIZE)

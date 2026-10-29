@@ -8,7 +8,7 @@ import unittest
 
 import numpy as np
 
-from nsnet2 import _log_power, _synthesize
+from runtime.nsnet2 import _log_power, _synthesize
 
 
 class NSNetSpectralTests(unittest.TestCase):
@@ -68,7 +68,7 @@ class NSNetSpectralTests(unittest.TestCase):
 class MossFormerNumericalTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        import mossformer
+        from runtime import mossformer
         import torch
         import torchaudio
         cls.backend, cls.torch, cls.torchaudio = mossformer, torch, torchaudio
@@ -150,7 +150,7 @@ class RealSpeechBackendTests(unittest.TestCase):
 import os
 from pathlib import Path
 import numpy as np
-from worker import build_engine, check_packages, deny_network, validate_manifest
+from runtime.worker import build_engine, check_packages, deny_network, validate_manifest
 path = Path(os.environ["RIVU_SPEECH_MANIFEST"]).resolve()
 manifest = validate_manifest(path, "speech")
 check_packages(manifest)

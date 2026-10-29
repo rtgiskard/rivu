@@ -20,13 +20,16 @@ import os
 from pathlib import Path
 import shutil
 import sys
-from worker import RUNTIME_FILES, check_packages, digest, read_json, validate_artifacts, validate_manifest
+if __package__:
+    from .runtime.worker import RUNTIME_FILES, check_packages, digest, read_json, validate_artifacts, validate_manifest
+else:
+    from runtime.worker import RUNTIME_FILES, check_packages, digest, read_json, validate_artifacts, validate_manifest
 
 
 def populate(base, manifest):
     runtime=base/"runtime"
     runtime.mkdir()
-    source=Path(__file__).resolve().parent
+    source=Path(__file__).resolve().parent / "runtime"
     for name in RUNTIME_FILES:
         shutil.copyfile(source/name,runtime/name)
     notices=base/"resources/licenses/dependencies"

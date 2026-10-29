@@ -28,12 +28,12 @@ import sys
 import time
 if __package__:
     from .benchmark import metrics, TIMING_BOUNDARIES, timing_summary
-    from .worker import digest, read_json
+    from .runtime.worker import digest, read_json
     from ..audio_quality.metric_core import score_difference, score_summary
     from ..audio_quality.music_manifest import music_records
 else:
     from benchmark import metrics, TIMING_BOUNDARIES, timing_summary
-    from worker import digest, read_json
+    from runtime.worker import digest, read_json
     from audio_quality.metric_core import score_difference, score_summary
     from audio_quality.music_manifest import music_records
 

@@ -14,9 +14,9 @@ import sys
 
 sys.dont_write_bytecode = True
 if __package__:
-    from . import worker
+    from .runtime import worker
 else:
-    import worker
+    from runtime import worker
 
 
 class FileInput:

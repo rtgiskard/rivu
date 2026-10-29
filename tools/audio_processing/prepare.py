@@ -48,7 +48,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import urllib.request
-from worker import digest
+from runtime.worker import digest
 
 KIM_SHA = "03bfc70b43df1f3e92ed1e582e8b18983f8d4adcd1a7d2133ada3b2f371b3095"
 KIM_URL = "https://huggingface.co/Ryan5453/unblend/resolve/9ba75778acf1b64fc40a9ea05137a2c6af9cd1d5/melband_roformer_kim.safetensors"
@@ -142,10 +142,10 @@ def main():
             from df3 import prepare
             manifest = prepare(args, target, fetch)
         elif args.model == "moss":
-            from mossformer import prepare
+            from runtime.mossformer import prepare
             manifest = prepare(args, target, fetch)
         else:
-            from nsnet2 import prepare
+            from runtime.nsnet2 import prepare
             manifest = prepare(args, target, fetch)
         manifest["license_evidence"] = "weight-license.txt"
         manifest["files"] = {str(path.relative_to(target)):digest(path) for path in sorted(target.rglob("*")) if path.is_file()}

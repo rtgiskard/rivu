@@ -55,7 +55,7 @@ impl Default for NeuralConfig {
         Self {
             speech_interpreter: PathBuf::from("python3.11"),
             separation_interpreter: PathBuf::from("python3.12"),
-            worker: PathBuf::from("tools/audio_processing/worker.py"),
+            worker: PathBuf::from("tools/audio_processing/runtime/worker.py"),
             speech_manifest: None,
             separation_manifest: None,
             device: NeuralDevice::Cpu,
