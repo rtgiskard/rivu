@@ -126,6 +126,7 @@ pub(super) fn fixture_with_database(duration: Option<f64>) -> (tempfile::TempDir
         active_external_admission: None,
         active_optimization: None,
         processing: crate::processing::Service::new(),
+        pending_processing_audition: None,
         processing_results: VecDeque::new(),
         scan_tx,
         scan_rx,

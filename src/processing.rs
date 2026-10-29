@@ -145,20 +145,18 @@ pub(crate) enum Event {
         result: Result<audio::PcmAudio>,
     },
 }
-pub(crate) struct Active {
-    pub id: u64,
-    pub cancelled: Arc<AtomicBool>,
-    pub worker: JoinHandle<()>,
+struct Active {
+    id: u64,
+    cancelled: Arc<AtomicBool>,
+    worker: JoinHandle<()>,
 }
 pub(crate) struct Service {
     pub sender: Sender<Event>,
     pub receiver: Receiver<Event>,
-    pub active: Option<Active>,
-    pub results: std::collections::VecDeque<ProcessingResult>,
-    pub next_id: u64,
-    pub audition: Option<u64>,
-    pub audition_generation: Option<u64>,
-    pub pending_audition: Option<(u64, u64)>,
+    active: Option<Active>,
+    results: std::collections::VecDeque<ProcessingResult>,
+    next_id: u64,
+    audition: Option<(u64, u64)>,
     reclaimer: Option<reclaim::Reclaimer>,
     budget: Arc<audio::PcmBudget>,
     #[cfg(test)]
@@ -180,8 +178,6 @@ impl Service {
             reclaimer: None,
             budget: audio::PcmBudget::new(MEMORY_LIMIT),
             audition: None,
-            audition_generation: None,
-            pending_audition: None,
             #[cfg(test)]
             panic_after_processing: false,
             #[cfg(test)]
@@ -195,6 +191,117 @@ impl Service {
         let mut service = Self::new();
         service.budget = audio::PcmBudget::new(limit);
         service
+    }
+    pub(crate) fn active_id(&self) -> Option<u64> {
+        self.active.as_ref().map(|task| task.id)
+    }
+
+    pub(crate) fn cancellation_requested(&self, id: u64) -> Option<bool> {
+        self.active
+            .as_ref()
+            .filter(|task| task.id == id)
+            .map(|task| task.cancelled.load(Ordering::Acquire))
+    }
+
+    /// Retire the worker only after its reliable terminal event has been received.
+    pub(crate) fn finish_task(&mut self, id: u64) -> Option<bool> {
+        if self.active_id() != Some(id) {
+            return None;
+        }
+        let task = self.active.take().unwrap();
+        let cancelled = task.cancelled.load(Ordering::Acquire);
+        let _ = task.worker.join();
+        Some(cancelled)
+    }
+
+    pub(crate) fn results(&self) -> &std::collections::VecDeque<ProcessingResult> {
+        &self.results
+    }
+
+    /// Keep the selected audio pinned until Core commits another audio source.
+    pub(crate) fn select_audition(&mut self, selection: Option<(u64, u64)>) {
+        self.audition = selection;
+    }
+
+    pub(crate) fn audition_id(&self) -> Option<u64> {
+        self.audition.map(|(id, _)| id)
+    }
+
+    pub(crate) fn audition_selected(&self, id: u64, generation: u64) -> bool {
+        self.audition == Some((id, generation))
+    }
+
+    /// Retention and retirement are one operation; Core publishes eviction effects.
+    pub(crate) fn retain_result(&mut self, result: Box<ProcessingResult>) -> Option<u64> {
+        debug_assert!(result.retains_audio());
+        let evicted = if self.results.len() >= 4 {
+            let index = self
+                .results
+                .iter()
+                .position(|result| Some(result.status.id) != self.audition_id())
+                .expect("only one retained result can be pinned");
+            let result = self.results.remove(index).unwrap();
+            let id = result.status.id;
+            self.retire(Box::new(result));
+            Some(id)
+        } else {
+            None
+        };
+        self.results.push_back(*result);
+        evicted
+    }
+
+    pub(crate) fn take_graph_runner(&mut self, id: u64) -> Option<audio::GraphRunner> {
+        self.results
+            .iter_mut()
+            .find(|result| result.status.id == id)?
+            .runner
+            .take()
+    }
+
+    pub(crate) fn retain_mix(&mut self, id: u64, pcm: audio::PcmAudio) {
+        let retired = if let Some(result) = self.results.iter_mut().find(|r| r.status.id == id) {
+            result.mix.replace(pcm)
+        } else {
+            Some(pcm)
+        };
+        if let Some(pcm) = retired {
+            self.retire_pcm(pcm);
+        }
+    }
+
+    pub(crate) fn stop_live_audition(&mut self, id: u64) -> Option<&ProcessingTaskStatus> {
+        let result = self
+            .results
+            .iter_mut()
+            .find(|result| result.status.id == id)?;
+        let status = &mut result.status;
+        if !matches!(
+            status.settings.graph_mode,
+            Some(GraphExecutionMode::Realtime | GraphExecutionMode::Hybrid)
+        ) {
+            return None;
+        }
+        status.phase = ProcessingPhase::Cancelled;
+        status.error = Some("Live audition stopped".into());
+        for node in &mut status.graph_nodes {
+            if node.phase == ProcessingPhase::Processing {
+                node.phase = ProcessingPhase::Cancelled;
+            }
+        }
+        Some(status)
+    }
+
+    /// Update the outcome without replacing the frozen recipe or retained audio.
+    pub(crate) fn record_outcome(&mut self, status: &ProcessingTaskStatus) {
+        if let Some(result) = self
+            .results
+            .iter_mut()
+            .find(|result| result.status.id == status.id)
+        {
+            result.status.phase = status.phase;
+            result.status.error.clone_from(&status.error);
+        }
     }
     pub fn start(
         &mut self,
@@ -454,7 +561,7 @@ impl Service {
             return;
         };
         for result in &mut self.results {
-            if Some(result.status.id) == self.audition {
+            if Some(result.status.id) == self.audition.map(|(id, _)| id) {
                 continue;
             }
             let outputs = std::mem::take(&mut result.outputs);
@@ -1009,103 +1116,105 @@ fn classical_native(
     Ok(pcm)
 }
 
-pub(crate) fn mix(
-    service: &mut Service,
-    id: u64,
-    generation: u64,
-    vocal_gain_db: f32,
-    accompaniment_gain_db: f32,
-) -> Result<()> {
-    ensure!(
-        service.active.is_none(),
-        "An audio processing task is already active"
-    );
-    ensure!(
-        !service.sender.is_closed(),
-        "Processing service is shutting down"
-    );
-    ensure!(
-        vocal_gain_db.is_finite()
-            && accompaniment_gain_db.is_finite()
-            && (-96.0..=24.0).contains(&vocal_gain_db)
-            && (-96.0..=24.0).contains(&accompaniment_gain_db),
-        "Stem gains must be finite and within -96..24 dB"
-    );
-    let result = service
-        .results
-        .iter()
-        .find(|r| r.status.id == id)
-        .context("Processing result is no longer retained")?;
-    let vocals = result.outputs.vocals.clone().context("No vocal stem")?;
-    let accompaniment = result
-        .outputs
-        .accompaniment
-        .clone()
-        .context("No accompaniment stem")?;
-    let budget = Arc::clone(&service.budget);
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let cancel = Arc::clone(&cancelled);
-    let tx = service.sender.clone();
-    #[cfg(test)]
-    let panic_after_mix = std::mem::take(&mut service.panic_after_mix);
-    let worker = service
-        .reclaimer
-        .as_ref()
-        .unwrap()
-        .spawn("rivu-stem-mix", move |retired| {
-            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                || -> Result<audio::PcmAudio> {
-                    retired?;
-                    validate_output(
-                        &accompaniment,
-                        vocals.sample_rate(),
-                        vocals.layout(),
-                        vocals.frames(),
-                        &cancel,
-                    )?;
-                    let mut builder = audio::PcmBuilder::new(
-                        vocals.sample_rate(),
-                        Arc::clone(vocals.layout()),
-                        budget,
-                    )?;
-                    let mut v = vec![0.0; 8192 * usize::from(vocals.channels())];
-                    let mut a = vec![0.0; v.len()];
-                    let vg = 10.0_f32.powf(vocal_gain_db / 20.0);
-                    let ag = 10.0_f32.powf(accompaniment_gain_db / 20.0);
-                    let mut position = 0;
-                    while position < vocals.frames() {
-                        check_cancel(&cancel)?;
-                        let frames = vocals.read_frames(position, &mut v);
-                        ensure!(
-                            accompaniment.read_frames(position, &mut a) == frames,
-                            "Stem alignment mismatch"
-                        );
-                        let count = frames * usize::from(vocals.channels());
-                        for i in 0..count {
-                            v[i] = v[i] * vg + a[i] * ag;
+impl Service {
+    pub(crate) fn start_mix(
+        &mut self,
+        id: u64,
+        generation: u64,
+        vocal_gain_db: f32,
+        accompaniment_gain_db: f32,
+    ) -> Result<()> {
+        ensure!(
+            self.active.is_none(),
+            "An audio processing task is already active"
+        );
+        ensure!(
+            !self.sender.is_closed(),
+            "Processing service is shutting down"
+        );
+        ensure!(
+            vocal_gain_db.is_finite()
+                && accompaniment_gain_db.is_finite()
+                && (-96.0..=24.0).contains(&vocal_gain_db)
+                && (-96.0..=24.0).contains(&accompaniment_gain_db),
+            "Stem gains must be finite and within -96..24 dB"
+        );
+        let result = self
+            .results
+            .iter()
+            .find(|r| r.status.id == id)
+            .context("Processing result is no longer retained")?;
+        let vocals = result.outputs.vocals.clone().context("No vocal stem")?;
+        let accompaniment = result
+            .outputs
+            .accompaniment
+            .clone()
+            .context("No accompaniment stem")?;
+        let budget = Arc::clone(&self.budget);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancel = Arc::clone(&cancelled);
+        let tx = self.sender.clone();
+        #[cfg(test)]
+        let panic_after_mix = std::mem::take(&mut self.panic_after_mix);
+        let worker = self
+            .reclaimer
+            .as_ref()
+            .unwrap()
+            .spawn("rivu-stem-mix", move |retired| {
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                    || -> Result<audio::PcmAudio> {
+                        retired?;
+                        validate_output(
+                            &accompaniment,
+                            vocals.sample_rate(),
+                            vocals.layout(),
+                            vocals.frames(),
+                            &cancel,
+                        )?;
+                        let mut builder = audio::PcmBuilder::new(
+                            vocals.sample_rate(),
+                            Arc::clone(vocals.layout()),
+                            budget,
+                        )?;
+                        let mut v = vec![0.0; 8192 * usize::from(vocals.channels())];
+                        let mut a = vec![0.0; v.len()];
+                        let vg = 10.0_f32.powf(vocal_gain_db / 20.0);
+                        let ag = 10.0_f32.powf(accompaniment_gain_db / 20.0);
+                        let mut position = 0;
+                        while position < vocals.frames() {
+                            check_cancel(&cancel)?;
+                            let frames = vocals.read_frames(position, &mut v);
+                            ensure!(
+                                accompaniment.read_frames(position, &mut a) == frames,
+                                "Stem alignment mismatch"
+                            );
+                            let count = frames * usize::from(vocals.channels());
+                            for i in 0..count {
+                                v[i] = v[i] * vg + a[i] * ag;
+                            }
+                            builder.push(&v[..count])?;
+                            position += frames as u64;
                         }
-                        builder.push(&v[..count])?;
-                        position += frames as u64;
-                    }
-                    check_cancel(&cancel)?;
-                    #[cfg(test)]
-                    if panic_after_mix {
-                        panic!("injected stem mix worker panic");
-                    }
-                    builder.finish()
-                },
-            ))
-            .unwrap_or_else(|_| Err(anyhow::anyhow!("Stem mix worker panicked")));
-            let _ = tx.send_blocking(Event::MixFinished {
-                id,
-                generation,
-                result: outcome,
-            });
-        })?;
-    service.active = Some(Active {
-        id,
-        cancelled,
-        worker,
-    });
-    Ok(())
+                        check_cancel(&cancel)?;
+                        #[cfg(test)]
+                        if panic_after_mix {
+                            panic!("injected stem mix worker panic");
+                        }
+                        builder.finish()
+                    },
+                ))
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("Stem mix worker panicked")));
+                let _ = tx.send_blocking(Event::MixFinished {
+                    id,
+                    generation,
+                    result: outcome,
+                });
+            })?;
+        self.active = Some(Active {
+            id,
+            cancelled,
+            worker,
+        });
+        Ok(())
+    }
 }

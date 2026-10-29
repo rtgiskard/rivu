@@ -44,7 +44,7 @@ fn complete(core: &mut Core) {
     loop {
         let event = next_processing_event(core, Duration::from_secs(10)).unwrap();
         core.processing_event(event);
-        if core.processing.active.is_none() {
+        if core.processing.active_id().is_none() {
             break;
         }
     }
@@ -95,7 +95,9 @@ fn prepare_mix(core: &mut Core) {
 
 fn begin_mix(core: &mut Core, id: u64) {
     let mut status = core.processing_status(id).unwrap();
-    crate::processing::mix(&mut core.processing, id, core.generation, 0.0, 0.0).unwrap();
+    core.processing
+        .start_mix(id, core.generation, 0.0, 0.0)
+        .unwrap();
     status.phase = ProcessingPhase::Processing;
     status.error = None;
     core.state.system.processing = Some(status);
@@ -143,7 +145,7 @@ fn mix_terminal_replaces_history_and_survives_current_and_history_eviction() {
     core.processing.cancel(1).unwrap();
     core.processing_event(event);
     let latest = core.processing_status(1).unwrap();
-    core.processing.audition = Some(1);
+    core.processing.select_audition(Some((1, core.generation)));
     core.start_processing(1, ProcessingOperation::Speech, None)
         .unwrap();
     assert_eq!(core.processing_status(1).unwrap(), latest);
@@ -156,7 +158,7 @@ fn mix_terminal_replaces_history_and_survives_current_and_history_eviction() {
         complete(&mut core);
     }
     assert!(!core.processing_results.iter().any(|status| status.id == 1));
-    assert_eq!(core.processing.results.len(), 1);
+    assert_eq!(core.processing.results().len(), 1);
     assert_eq!(core.processing_status(1).unwrap(), latest);
     assert_eq!(terminal_wait(&mut core, 1), latest);
 }
@@ -195,13 +197,13 @@ fn native_and_mix_worker_panics_commit_failure_finish_waits_and_release_admissio
         };
         assert_eq!(status.phase, ProcessingPhase::Failed);
         assert!(status.error.as_deref().unwrap().contains("worker panicked"));
-        assert!(core.processing.active.is_none());
+        assert!(core.processing.active_id().is_none());
         assert_eq!(terminal_wait(&mut core, 1), *status);
         if mixing {
-            let result = &core.processing.results[0];
+            let result = &core.processing.results()[0];
             assert!(result.mix.is_none());
         } else {
-            assert!(core.processing.results.is_empty());
+            assert!(core.processing.results().is_empty());
         }
         core.start_processing(1, ProcessingOperation::Denoise, None)
             .unwrap();
@@ -287,7 +289,7 @@ fn offline_job_preserves_native_float_frames_and_does_not_add_library_entries() 
     assert_eq!(status.frames, Some(4096));
     assert!(status.outputs.unwrap().denoised);
     let actual = pcm_samples(
-        core.processing.results[0]
+        core.processing.results()[0]
             .outputs
             .denoised
             .as_ref()
@@ -296,7 +298,7 @@ fn offline_job_preserves_native_float_frames_and_does_not_add_library_entries() 
     assert_eq!(actual, expected);
     assert_eq!(core.store.track_count().unwrap(), before);
     assert_eq!(
-        core.processing.results[0].status.settings.denoise,
+        core.processing.results()[0].status.settings.denoise,
         core.state.configuration.config.denoise
     );
 }
@@ -313,7 +315,7 @@ fn cancellation_after_physical_completion_still_prevents_publication() {
         core.processing_status(1).unwrap().phase,
         ProcessingPhase::Cancelled
     );
-    assert!(core.processing.results.is_empty());
+    assert!(core.processing.results().is_empty());
 }
 
 #[test]
@@ -349,8 +351,8 @@ fn uncertain_database_rejects_held_processing_completion_before_source_read_or_e
             .unwrap()
             .contains("Database outcome is uncertain")
     );
-    assert!(core.processing.active.is_none());
-    assert!(core.processing.results.is_empty());
+    assert!(core.processing.active_id().is_none());
+    assert!(core.processing.results().is_empty());
     assert!(!destination.exists());
 }
 
@@ -367,7 +369,7 @@ fn changed_source_between_completion_and_commit_is_rejected() {
         core.processing_status(1).unwrap().phase,
         ProcessingPhase::Failed
     );
-    assert!(core.processing.results.is_empty());
+    assert!(core.processing.results().is_empty());
 }
 #[test]
 fn retained_pcm_and_statuses_are_bounded() {
@@ -378,7 +380,7 @@ fn retained_pcm_and_statuses_are_bounded() {
             .unwrap();
         complete(&mut core);
     }
-    assert_eq!(core.processing.results.len(), 4);
+    assert_eq!(core.processing.results().len(), 4);
     assert_eq!(core.processing_results.len(), 32);
     assert!(core.processing_status(1).is_none());
     assert!(core.processing_status(3).unwrap().outputs.is_none());
@@ -390,7 +392,7 @@ fn retained_pcm_and_statuses_are_bounded() {
     core.processing.shutdown();
     let retained_bytes: u64 = core
         .processing
-        .results
+        .results()
         .iter()
         .filter_map(|result| result.outputs.denoised.as_ref())
         .map(audio::PcmAudio::retained_bytes)
@@ -398,7 +400,7 @@ fn retained_pcm_and_statuses_are_bounded() {
     assert_eq!(core.processing.memory_bytes(), retained_bytes);
     assert_eq!(
         core.processing
-            .results
+            .results()
             .iter()
             .filter(|result| result.outputs.denoised.is_some())
             .count(),
@@ -907,7 +909,7 @@ fn decoder_hint_change_rejects_retained_auditions_before_starting_playback() {
         assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
         assert_eq!(core.state.queue.current_id, current);
         assert_eq!(core.generation, generation);
-        assert!(core.processing.active.is_none());
+        assert!(core.processing.active_id().is_none());
     }
 }
 
@@ -917,11 +919,7 @@ fn decoder_hint_change_before_mix_handoff_discards_the_rendered_mix() {
     source(directory.path());
     core.edit_track(1, None, None, None, Some(DecoderHint::Auto))
         .unwrap();
-    core.start_processing(1, ProcessingOperation::Denoise, None)
-        .unwrap();
-    complete(&mut core);
-    let result = &mut core.processing.results[0];
-    populate_stems(result);
+    prepare_mix(&mut core);
     let retained_bytes = core.processing.memory_bytes();
     let _commands = recording_audio(&mut core);
     core.audition_processing(1, AuditionMode::Mix, 0.0, 0.0)
@@ -945,8 +943,8 @@ fn decoder_hint_change_before_mix_handoff_discards_the_rendered_mix() {
         core.processing_status(1).unwrap().phase,
         ProcessingPhase::Failed
     );
-    assert!(core.processing.results[0].mix.is_none());
-    assert!(core.processing.audition.is_none());
+    assert!(core.processing.results()[0].mix.is_none());
+    assert!(core.processing.audition_id().is_none());
     assert_eq!(core.generation, generation);
     core.processing.shutdown();
     assert_eq!(core.processing.memory_bytes(), retained_bytes);
@@ -956,11 +954,7 @@ fn decoder_hint_change_before_mix_handoff_discards_the_rendered_mix() {
 fn background_mix_applies_actual_gains_without_clipping_or_new_track_identity() {
     let (directory, mut core) = fixture();
     let original = source(directory.path());
-    core.start_processing(1, ProcessingOperation::Denoise, None)
-        .unwrap();
-    complete(&mut core);
-    let result = &mut core.processing.results[0];
-    populate_stems(result);
+    prepare_mix(&mut core);
     let _commands = recording_audio(&mut core);
     core.audition_processing(1, AuditionMode::Mix, -6.0, 0.0)
         .unwrap();
@@ -970,7 +964,7 @@ fn background_mix_applies_actual_gains_without_clipping_or_new_track_identity() 
         crate::processing::Event::MixFinished { .. }
     ));
     core.processing_event(event);
-    let mixed = core.processing.results[0].mix.as_ref().unwrap();
+    let mixed = core.processing.results()[0].mix.as_ref().unwrap();
     let actual = pcm_samples(mixed);
     assert_eq!(actual.len(), original.len());
     let gain = 1.0 + 10.0_f32.powf(-6.0 / 20.0);
@@ -1001,13 +995,13 @@ fn rejected_invalid_profile_preserves_retained_pcm_and_availability() {
         )
         .is_err()
     );
-    assert!(core.processing.active.is_none());
+    assert!(core.processing.active_id().is_none());
     assert_eq!(core.processing.memory_bytes(), bytes);
     assert_eq!(core.processing_status(1).unwrap(), retained);
     assert_eq!(core.processing_results.back().unwrap(), &retained);
     assert_eq!(
         pcm_samples(
-            core.processing.results[0]
+            core.processing.results()[0]
                 .outputs
                 .denoised
                 .as_ref()
@@ -1111,7 +1105,7 @@ fn retained_audition_remains_queryable_after_terminal_history_eviction() {
     core.audition_processing(1, AuditionMode::Denoised, 0.0, 0.0)
         .unwrap();
     let retained = pcm_samples(
-        core.processing.results[0]
+        core.processing.results()[0]
             .outputs
             .denoised
             .as_ref()
@@ -1132,7 +1126,7 @@ fn retained_audition_remains_queryable_after_terminal_history_eviction() {
     assert!(task.outputs.unwrap().denoised);
     let result = core
         .processing
-        .results
+        .results()
         .iter()
         .find(|result| result.status.id == 1)
         .unwrap();
@@ -1282,7 +1276,7 @@ fn neural_unwind_reaps_live_interpreter_before_failure_event_and_owner_retiremen
         "interpreter remained live or unreaped at failure delivery"
     );
     assert_eq!(error.raw_os_error(), Some(libc::ECHILD));
-    assert!(core.processing.active.is_some());
+    assert!(core.processing.active_id().is_some());
     assert!(wait.as_mut().now_or_never().is_none());
     core.processing_event(event);
     let TaskOutcome::Processing(status) = wait.as_mut().now_or_never().unwrap().unwrap() else {
@@ -1290,8 +1284,8 @@ fn neural_unwind_reaps_live_interpreter_before_failure_event_and_owner_retiremen
     };
     assert_eq!(status.phase, ProcessingPhase::Failed);
     assert!(status.error.as_deref().unwrap().contains("worker panicked"));
-    assert!(core.processing.active.is_none());
-    assert!(core.processing.results.is_empty());
+    assert!(core.processing.active_id().is_none());
+    assert!(core.processing.results().is_empty());
     core.start_processing(1, ProcessingOperation::Denoise, None)
         .unwrap();
     complete(&mut core);
@@ -1508,7 +1502,8 @@ fn graph_cascaded_nonflat_fir_preserves_source_edge_context() {
             status.error
         );
         assert_eq!(status.frames, Some(513));
-        let actual = pcm_samples(&core.processing.results[0].graph_outputs[&graph_port(2, 0)].pcm);
+        let actual =
+            pcm_samples(&core.processing.results()[0].graph_outputs[&graph_port(2, 0)].pcm);
         assert_eq!(actual.len(), pcm.len());
         for (index, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
             assert!(
@@ -1568,7 +1563,7 @@ fn graph_cached_fir_boundary_matches_uncut_causal_graph() {
         "{:?}",
         status.error
     );
-    let boundary = &core.processing.results[0].graph_outputs[&graph_port(3, 0)];
+    let boundary = &core.processing.results()[0].graph_outputs[&graph_port(3, 0)];
     let context = boundary
         .context
         .as_ref()
@@ -1656,7 +1651,7 @@ fn graph_hybrid_profile_boundary_preserves_fir_guards_and_source_identity() {
         "{:?}",
         offline.error
     );
-    let expected = pcm_samples(&core.processing.results[0].graph_outputs[&graph_port(2, 0)].pcm);
+    let expected = pcm_samples(&core.processing.results()[0].graph_outputs[&graph_port(2, 0)].pcm);
     assert_eq!(expected.len(), pcm.len());
     core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Hybrid)
         .unwrap();
@@ -1670,7 +1665,7 @@ fn graph_hybrid_profile_boundary_preserves_fir_guards_and_source_identity() {
     );
     assert_eq!(hybrid.settings.graph_mode, Some(GraphExecutionMode::Hybrid));
     assert_eq!(hybrid.settings.graph_boundary, Some(graph_port(5, 0)));
-    let context = core.processing.results[1].graph_outputs[&graph_port(5, 0)]
+    let context = core.processing.results()[1].graph_outputs[&graph_port(5, 0)]
         .context
         .as_ref()
         .expect("Hybrid prefix must retain FIR/denoise causal context");
@@ -1804,7 +1799,7 @@ fn graph_executes_shuffled_ancestors_once_with_independent_eq_and_unclipped_mix(
     );
     assert_eq!(status.graph_outputs.len(), 1);
     assert_eq!(status.graph_outputs[0].port, graph_port(2, 0));
-    let actual = pcm_samples(&core.processing.results[0].graph_outputs[&graph_port(2, 0)].pcm);
+    let actual = pcm_samples(&core.processing.results()[0].graph_outputs[&graph_port(2, 0)].pcm);
     assert_eq!(actual.len(), expected.len());
     for (actual, source) in actual.iter().zip(expected) {
         assert!((*actual - source * 2.5).abs() < 2e-5);
@@ -1868,7 +1863,7 @@ fn graph_exports_preserve_all_retained_runs_and_never_retain_export_scratch() {
             )
             .unwrap();
             complete(&mut core);
-            core.processing.audition = Some(1);
+            core.processing.select_audition(Some((1, core.generation)));
         }
         let outputs = core.processing_status(1).unwrap().graph_outputs;
         let mut action_run = core.processing_status(1).unwrap().graph_run_id.unwrap();
@@ -1890,7 +1885,7 @@ fn graph_exports_preserve_all_retained_runs_and_never_retain_export_scratch() {
             assert_eq!(actual, expected);
             assert_eq!(
                 core.processing
-                    .results
+                    .results()
                     .iter()
                     .map(|r| r.status.id)
                     .collect::<Vec<_>>(),
@@ -1902,7 +1897,7 @@ fn graph_exports_preserve_all_retained_runs_and_never_retain_export_scratch() {
                 for output in retained.graph_outputs {
                     let result = core
                         .processing
-                        .results
+                        .results()
                         .iter()
                         .find(|result| result.status.id == id)
                         .unwrap();
@@ -1933,7 +1928,7 @@ fn graph_exports_preserve_all_retained_runs_and_never_retain_export_scratch() {
         );
         assert_eq!(std::fs::read(destination).unwrap(), b"existing destination");
         assert_eq!(core.processing_status(1).unwrap().graph_outputs, outputs);
-        assert_eq!(core.processing.results.len(), 4);
+        assert_eq!(core.processing.results().len(), 4);
     }
 }
 
@@ -2061,11 +2056,11 @@ fn auto_graph_prepares_off_thread_and_opens_stopped_source_paused() {
         core.processing_status(1).unwrap().phase,
         ProcessingPhase::Cancelled
     );
-    assert!(core.processing.audition.is_none());
+    assert!(core.processing.audition_id().is_none());
     assert!(core.state.processing_audition.is_none());
     let cancelled = core.processing_status(1).unwrap();
     assert_eq!(core.processing_results[0], cancelled);
-    assert_eq!(core.processing.results[0].status, cancelled);
+    assert_eq!(core.processing.results()[0].status, cancelled);
     core.start_processing(1, ProcessingOperation::Denoise, None)
         .unwrap();
     assert_eq!(core.processing_status(1).unwrap(), cancelled);
@@ -2073,6 +2068,30 @@ fn auto_graph_prepares_off_thread_and_opens_stopped_source_paused() {
     complete(&mut core);
     core.processing_results.retain(|status| status.id != 1);
     assert_eq!(core.processing_status(1).unwrap(), cancelled);
+    assert_eq!(terminal_wait(&mut core, 1), cancelled);
+}
+
+#[test]
+fn selected_live_audition_can_be_cancelled_after_its_receipt_ages_out() {
+    let (directory, mut core) = fixture();
+    source(directory.path());
+    let _commands = recording_audio(&mut core);
+    core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Auto)
+        .unwrap();
+    complete(&mut core);
+    let frozen = core.processing_status(1).unwrap().settings;
+    for _ in 0..MAX_RETAINED_SCAN_RESULTS {
+        core.start_processing(1, ProcessingOperation::Speech, None)
+            .unwrap();
+        complete(&mut core);
+    }
+    assert!(!core.processing_results.iter().any(|status| status.id == 1));
+    assert_eq!(core.state.processing_audition.unwrap().id, 1);
+    core.cancel_processing(1).unwrap();
+    assert!(core.state.processing_audition.is_none());
+    let cancelled = core.processing_status(1).unwrap();
+    assert_eq!(cancelled.phase, ProcessingPhase::Cancelled);
+    assert_eq!(cancelled.settings, frozen);
     assert_eq!(terminal_wait(&mut core, 1), cancelled);
 }
 
@@ -2088,7 +2107,7 @@ fn new_runs_release_unselected_pcm_but_preserve_frozen_graph_actions() {
     core.start_processing(1, ProcessingOperation::Denoise, None)
         .unwrap();
     assert!(core.processing_status(1).unwrap().graph_outputs.is_empty());
-    assert!(core.processing.results[0].graph_outputs.is_empty());
+    assert!(core.processing.results()[0].graph_outputs.is_empty());
     assert_eq!(core.processing_status(1).unwrap().settings, frozen);
     complete(&mut core);
     assert_eq!(
@@ -2194,7 +2213,7 @@ fn newer_playback_generation_does_not_get_replaced_by_late_graph_preparation() {
     core.generation = core.generation.wrapping_add(1);
     core.processing_event(event);
     assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
-    assert!(core.processing.audition.is_none());
+    assert!(core.processing.audition_id().is_none());
     assert!(
         !commands
             .try_iter()
@@ -2246,7 +2265,7 @@ fn selected_pcm_budget_rejects_new_result_without_revoking_retained_audio() {
         core.processing_status(1).unwrap().phase,
         ProcessingPhase::Complete
     );
-    core.processing.audition = Some(1);
+    core.processing.select_audition(Some((1, core.generation)));
     core.start_processing(1, ProcessingOperation::Denoise, None)
         .unwrap();
     complete(&mut core);
@@ -2254,10 +2273,10 @@ fn selected_pcm_budget_rejects_new_result_without_revoking_retained_audio() {
     assert_eq!(rejected.phase, ProcessingPhase::Failed);
     assert!(rejected.error.unwrap().contains("memory budget"));
     assert!(rejected.outputs.is_none());
-    assert_eq!(core.processing.results.len(), 1);
+    assert_eq!(core.processing.results().len(), 1);
     assert_eq!(
         pcm_samples(
-            core.processing.results[0]
+            core.processing.results()[0]
                 .outputs
                 .denoised
                 .as_ref()
@@ -2266,100 +2285,6 @@ fn selected_pcm_budget_rejects_new_result_without_revoking_retained_audio() {
         expected
     );
     assert!(core.processing.memory_bytes() <= 48 * 1024);
-}
-
-#[test]
-fn shutdown_closes_processing_delivery_and_retires_unpublished_outputs() {
-    let (directory, mut core) = fixture();
-    source(directory.path());
-    let mut held_results = std::collections::VecDeque::new();
-    for _ in 0..3 {
-        let track = core.track(1).unwrap();
-        let status = core
-            .processing
-            .start(
-                track,
-                core.state.configuration.config.clone(),
-                ProcessingOperation::Denoise,
-                None,
-            )
-            .unwrap();
-        core.state.system.processing = Some(status);
-        complete(&mut core);
-        held_results.push_back(core.processing.results.pop_back().unwrap());
-    }
-    core.processing.results = held_results;
-    let buffered = core.processing.results.pop_front().unwrap();
-    let blocked = core.processing.results.pop_front().unwrap();
-    let retained_bytes = core.processing.results[0]
-        .outputs
-        .denoised
-        .as_ref()
-        .unwrap()
-        .retained_bytes();
-    core.processing
-        .sender
-        .try_send(crate::processing::Event::Finished {
-            id: buffered.status.id,
-            result: Ok(Box::new(buffered)),
-        })
-        .ok()
-        .unwrap();
-    while core.processing.sender.len() < core.processing.sender.capacity().unwrap() {
-        core.processing
-            .sender
-            .try_send(crate::processing::Event::Progress {
-                id: 4,
-                completed: 0,
-                total: None,
-                phase: ProcessingPhase::Processing,
-            })
-            .ok()
-            .unwrap();
-    }
-    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let observed = cancelled.clone();
-    let sender = core.processing.sender.clone();
-    let (sent, delivery) = bounded(1);
-    let (release, released) = bounded(1);
-    let worker = thread::spawn(move || {
-        let rejected = sender
-            .send_blocking(crate::processing::Event::Finished {
-                id: blocked.status.id,
-                result: Ok(Box::new(blocked)),
-            })
-            .is_err();
-        sent.send(rejected).unwrap();
-        released.recv().unwrap();
-    });
-    core.processing.active = Some(crate::processing::Active {
-        id: 4,
-        cancelled,
-        worker,
-    });
-    let (finished, completion) = bounded(1);
-    let shutdown = thread::spawn(move || {
-        core.processing.shutdown();
-        assert!(core.processing.sender.is_closed());
-        assert!(core.processing.receiver.try_recv().is_err());
-        assert_eq!(core.processing.memory_bytes(), retained_bytes);
-        finished.send(()).unwrap();
-        core
-    });
-    let rejected = delivery.recv_timeout(Duration::from_secs(5)).unwrap();
-    let waiting_for_retirement = completion.try_recv().is_err();
-    let cancelled = observed.load(Ordering::Acquire);
-    release.send(()).unwrap();
-    let core = shutdown.join().unwrap();
-    completion.recv_timeout(Duration::from_secs(5)).unwrap();
-    assert!(rejected, "shutdown accepted a new terminal delivery");
-    assert!(cancelled);
-    assert!(
-        waiting_for_retirement,
-        "shutdown returned before worker retirement"
-    );
-    assert_eq!(core.processing.memory_bytes(), retained_bytes);
-    assert!(core.processing.active.is_none());
 }
 
 #[test]
@@ -2410,12 +2335,12 @@ fn playback_bypass_preserves_parameters_queue_and_final_heard_snapshot() {
     assert_eq!(core.playback.as_ref().unwrap().heard, 2.52);
     assert!(core.playback.as_ref().unwrap().counted);
     assert!(core.state.processing_audition.is_none());
-    assert!(core.processing.audition.is_none());
+    assert!(core.processing.audition_id().is_none());
     assert_eq!(
         core.processing_status(1).unwrap().phase,
         ProcessingPhase::Complete
     );
-    assert!(core.processing.results[0].outputs.denoised.is_some());
+    assert!(core.processing.results()[0].outputs.denoised.is_some());
 }
 
 #[test]
@@ -2429,15 +2354,7 @@ fn playback_bypass_revokes_prepared_graph_selection_without_cancelling_job() {
         let event = completion(&mut core);
         let generation = core.generation;
         core.command(Command::ProcessingBypass).unwrap();
-        assert!(
-            !core
-                .processing
-                .active
-                .as_ref()
-                .unwrap()
-                .cancelled
-                .load(Ordering::Acquire)
-        );
+        assert_eq!(core.processing.cancellation_requested(1), Some(false));
         core.processing_event(event);
         assert_eq!(
             core.processing_status(1).unwrap().phase,
@@ -2447,9 +2364,10 @@ fn playback_bypass_revokes_prepared_graph_selection_without_cancelling_job() {
         assert_eq!(core.generation, generation);
         assert!(core.state.current_track.is_none());
         assert!(core.state.processing_audition.is_none());
-        assert!(core.processing.pending_audition.is_none());
+        assert!(core.pending_processing_audition.is_none());
         if mode == GraphExecutionMode::Offline {
-            let pcm = pcm_samples(&core.processing.results[0].graph_outputs[&graph_port(2, 0)].pcm);
+            let pcm =
+                pcm_samples(&core.processing.results()[0].graph_outputs[&graph_port(2, 0)].pcm);
             assert_eq!(pcm, expected);
         }
     }
@@ -2459,11 +2377,7 @@ fn playback_bypass_revokes_prepared_graph_selection_without_cancelling_job() {
 fn playback_bypass_revokes_late_mix_selection_but_keeps_completed_audio() {
     let (directory, mut core) = fixture();
     let original = source(directory.path());
-    core.start_processing(1, ProcessingOperation::Denoise, None)
-        .unwrap();
-    complete(&mut core);
-    let result = &mut core.processing.results[0];
-    populate_stems(result);
+    prepare_mix(&mut core);
     let _commands = recording_audio(&mut core);
     core.audition_processing(1, AuditionMode::Mix, 0.0, 0.0)
         .unwrap();
@@ -2476,13 +2390,13 @@ fn playback_bypass_revokes_late_mix_selection_but_keeps_completed_audio() {
     core.command(Command::ProcessingBypass).unwrap();
     core.processing_event(event);
     assert_eq!(core.generation, generation);
-    assert!(core.processing.audition.is_none());
+    assert!(core.processing.audition_id().is_none());
     assert!(core.state.processing_audition.is_none());
     assert_eq!(
         core.processing_status(1).unwrap().phase,
         ProcessingPhase::Complete
     );
-    let pcm = pcm_samples(core.processing.results[0].mix.as_ref().unwrap());
+    let pcm = pcm_samples(core.processing.results()[0].mix.as_ref().unwrap());
     assert_eq!(
         pcm,
         original
@@ -2557,7 +2471,7 @@ fn processing_and_audition_create_no_implicit_files() {
         complete(&mut core);
         if mode == GraphExecutionMode::Offline {
             assert_eq!(
-                pcm_samples(&core.processing.results[0].graph_outputs[&graph_port(2, 0)].pcm),
+                pcm_samples(&core.processing.results()[0].graph_outputs[&graph_port(2, 0)].pcm),
                 expected
             );
             core.processing_graph_audition(1, graph_port(2, 0)).unwrap();
@@ -2577,7 +2491,7 @@ fn processing_and_audition_create_no_implicit_files() {
         .unwrap();
     let event = mix_completion(&mut core);
     core.processing_event(event);
-    assert!(core.processing.results.back().unwrap().mix.is_some());
+    assert!(core.processing.results().back().unwrap().mix.is_some());
     assert_eq!(tree(), before);
     assert_eq!(
         std::fs::read(directory.path().join("1.wav")).unwrap(),
@@ -2730,7 +2644,7 @@ fn processing_acks_identify_only_the_task_admitted_by_that_command() {
         },
     );
     assert_eq!(cached.processing_id, None);
-    assert_eq!(core.processing.active.as_ref().unwrap().id, 2);
+    assert_eq!(core.processing.active_id().unwrap(), 2);
     core.processing_event(event);
     let uncached = processing_command_ack(
         &mut core,
@@ -2797,10 +2711,10 @@ fn playback_bypass_does_not_relax_mix_source_admission() {
             ProcessingPhase::Failed,
             "{change}"
         );
-        assert!(core.processing.results[0].mix.is_none());
+        assert!(core.processing.results()[0].mix.is_none());
         core.processing.shutdown();
         assert_eq!(core.processing.memory_bytes(), retained_bytes);
-        assert!(core.processing.audition.is_none());
+        assert!(core.processing.audition_id().is_none());
         assert_eq!(core.generation, generation);
     }
 }
@@ -2843,8 +2757,8 @@ fn quarantined_mix_completion_does_not_persist_pending_queue_selection() {
     assert!(core.queue_current_pending);
     assert_eq!(core.generation, generation);
     assert!(commands.try_recv().is_err());
-    assert!(core.processing.audition.is_none());
-    assert!(core.processing.results[0].mix.is_none());
+    assert!(core.processing.audition_id().is_none());
+    assert!(core.processing.results()[0].mix.is_none());
     core.processing.shutdown();
     assert_eq!(core.processing.memory_bytes(), retained_bytes);
     let status = core.processing_status(1).unwrap();
@@ -2930,7 +2844,7 @@ fn scan_saving_settles_pending_selection_before_mix_handoff() {
         core.processing_status(1).unwrap().phase,
         ProcessingPhase::Complete
     );
-    assert_eq!(core.processing.audition, Some(1));
+    assert_eq!(core.processing.audition_id(), Some(1));
     lock.execute_batch("ROLLBACK").unwrap();
     while core.active_scan.is_some() {
         let event = core.scan_rx.recv_timeout(Duration::from_secs(10)).unwrap();
@@ -2993,7 +2907,7 @@ fn scan_queue_recovery_failure_preserves_playback_and_pending_mix() {
     assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
     assert_eq!(core.state.queue.current_id, Some(1));
     assert_eq!(core.generation, generation);
-    assert!(core.processing.active.is_some());
+    assert!(core.processing.active_id().is_some());
     connection
         .execute_batch("DROP TRIGGER reject_queue_selection")
         .unwrap();
@@ -3002,7 +2916,7 @@ fn scan_queue_recovery_failure_preserves_playback_and_pending_mix() {
         core.processing_status(1).unwrap().phase,
         ProcessingPhase::Complete
     );
-    assert_eq!(core.processing.audition, Some(1));
+    assert_eq!(core.processing.audition_id(), Some(1));
 }
 
 #[test]
@@ -3043,7 +2957,7 @@ fn optimization_settles_pending_selection_before_stopped_graph_handoff() {
     );
     assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
     assert_eq!(core.generation, generation);
-    assert!(core.processing.audition.is_none());
+    assert!(core.processing.audition_id().is_none());
     let _ = core.shutdown_optimization();
 
     let audition = core.processing_graph_audition(id, target).unwrap();
@@ -3086,7 +3000,7 @@ fn optimization_queue_recovery_failure_preserves_stopped_graph() {
     assert_eq!(core.store.queue_state().unwrap().current_id, saved_current);
     assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
     assert_eq!(core.generation, generation);
-    assert_eq!(core.processing.active.as_ref().unwrap().id, id);
+    assert_eq!(core.processing.active_id().unwrap(), id);
     connection
         .execute_batch("DROP TRIGGER reject_queue_selection")
         .unwrap();

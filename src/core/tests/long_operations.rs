@@ -71,7 +71,7 @@ fn processing_cancellation_remains_available_while_scan_holds_saving_phase() {
         core.processing_status(1).unwrap().phase,
         ProcessingPhase::Cancelled
     );
-    assert!(core.processing.results.is_empty());
+    assert!(core.processing.results().is_empty());
     finish_saving(&mut core, lock);
 }
 

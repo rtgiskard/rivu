@@ -427,8 +427,7 @@ impl Core {
         };
         // Fence queued events even when stopping or saving the count fails.
         self.generation = self.generation.wrapping_add(1);
-        self.processing.audition = None;
-        self.processing.audition_generation = None;
+        self.processing.select_audition(None);
         self.state.processing_audition = None;
         self.state.playback.status = PlaybackStatus::Stopped;
         self.state.playback.position = 0.0;

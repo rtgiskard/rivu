@@ -183,15 +183,7 @@ fn dropping_an_active_wait_does_not_cancel_processing() {
     assert!(wait.as_mut().now_or_never().is_none());
     dispatch_wait(&mut core, &requests);
     drop(wait);
-    assert!(
-        !core
-            .processing
-            .active
-            .as_ref()
-            .unwrap()
-            .cancelled
-            .load(Ordering::Acquire)
-    );
+    assert_eq!(core.processing.cancellation_requested(id), Some(false));
     let event = processing_completion(&mut core);
     core.processing_event(event);
     assert_eq!(

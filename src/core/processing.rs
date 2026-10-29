@@ -1,6 +1,5 @@
 use super::*;
 use anyhow::ensure;
-use std::sync::atomic::Ordering;
 
 impl Core {
     pub(in crate::core) fn processing_bypass(&mut self) -> Result<()> {
@@ -10,8 +9,8 @@ impl Core {
             self.equalizer_edit(EqualizerEdit::Enabled(false))?;
         }
         // Revoking audition intent does not cancel the rendering/export owner.
-        self.processing.pending_audition = None;
-        if let Some(id) = self.processing.audition
+        self.pending_processing_audition = None;
+        if let Some(id) = self.processing.audition_id()
             && let Err(error) = self.audition_pcm(id, None)
         {
             self.stop()?;
@@ -52,7 +51,7 @@ impl Core {
         let id = status.id;
         self.state.system.processing = Some(status);
         if mode != GraphExecutionMode::Offline {
-            self.processing.pending_audition = Some((id, self.generation));
+            self.pending_processing_audition = Some((id, self.generation));
         }
         Ok(id)
     }
@@ -64,7 +63,7 @@ impl Core {
     ) -> Result<Option<u64>> {
         let result = self
             .processing
-            .results
+            .results()
             .iter()
             .find(|r| r.status.id == id)
             .context("Graph run is no longer retained")?;
@@ -103,7 +102,7 @@ impl Core {
         self.sync_processing_audio_availability();
         let status = status?;
         let task_id = status.id;
-        self.processing.pending_audition = Some((status.id, self.generation));
+        self.pending_processing_audition = Some((status.id, self.generation));
         self.state.system.processing = Some(status);
         Ok(Some(task_id))
     }
@@ -121,7 +120,7 @@ impl Core {
             .map(|boundary| {
                 let output = self
                     .processing
-                    .results
+                    .results()
                     .iter()
                     .find(|result| result.status.id == id)
                     .and_then(|result| result.graph_outputs.get(&boundary))
@@ -182,7 +181,7 @@ impl Core {
     ) -> Result<u64> {
         let result = self
             .processing
-            .results
+            .results()
             .iter()
             .find(|r| r.status.id == id)
             .context("Graph run is no longer retained")?;
@@ -219,13 +218,8 @@ impl Core {
     }
 
     pub(in crate::core) fn cancel_processing(&mut self, id: u64) -> Result<()> {
-        let active = self
-            .processing
-            .active
-            .as_ref()
-            .is_some_and(|task| task.id == id);
-        let selected = self.processing.audition == Some(id)
-            && self.processing.audition_generation == Some(self.generation);
+        let active = self.processing.active_id() == Some(id);
+        let selected = self.processing.audition_selected(id, self.generation);
         ensure!(
             active || selected,
             "No matching active processing task or live audition"
@@ -234,44 +228,33 @@ impl Core {
             self.processing.cancel(id)?;
         }
         if self
-            .processing
-            .pending_audition
+            .pending_processing_audition
             .is_some_and(|(task, _)| task == id)
         {
-            self.processing.pending_audition = None;
+            self.pending_processing_audition = None;
         }
         if selected {
             if let Err(error) = self.audition_pcm(id, None) {
                 self.stop()?;
                 return Err(error);
             }
-            let stop_status = |status: &mut ProcessingTaskStatus| {
-                if status.id == id
-                    && matches!(
-                        status.settings.graph_mode,
-                        Some(GraphExecutionMode::Realtime | GraphExecutionMode::Hybrid)
-                    )
+            if let Some(retained) = self.processing.stop_live_audition(id) {
+                for status in self
+                    .state
+                    .system
+                    .processing
+                    .iter_mut()
+                    .chain(self.processing_results.iter_mut())
+                    .filter(|status| status.id == id)
                 {
-                    status.phase = ProcessingPhase::Cancelled;
-                    status.error = Some("Live audition stopped".into());
-                    for node in &mut status.graph_nodes {
-                        if node.phase == ProcessingPhase::Processing {
-                            node.phase = ProcessingPhase::Cancelled;
-                        }
+                    status.phase = retained.phase;
+                    status.error.clone_from(&retained.error);
+                    for (node, retained_node) in
+                        status.graph_nodes.iter_mut().zip(&retained.graph_nodes)
+                    {
+                        node.phase = retained_node.phase;
                     }
                 }
-            };
-            for status in self
-                .state
-                .system
-                .processing
-                .iter_mut()
-                .chain(self.processing_results.iter_mut())
-            {
-                stop_status(status);
-            }
-            for result in &mut self.processing.results {
-                stop_status(&mut result.status);
             }
             if !active {
                 self.task_completed(TaskTarget::Processing { id });
@@ -466,7 +449,7 @@ impl Core {
         Ok(id)
     }
     fn sync_processing_audio_availability(&mut self) {
-        for result in &self.processing.results {
+        for result in self.processing.results() {
             for status in self
                 .state
                 .system
@@ -500,7 +483,7 @@ impl Core {
             })
             .or_else(|| {
                 self.processing
-                    .results
+                    .results()
                     .iter()
                     .find(|result| result.status.id == id)
                     .map(|result| &result.status)
@@ -511,17 +494,8 @@ impl Core {
         let Some(status) = self.state.system.processing.as_ref().filter(|s| s.id == id) else {
             return;
         };
-        if let Some(result) = self
-            .processing
-            .results
-            .iter_mut()
-            .find(|r| r.status.id == id)
-        {
-            // Mix changes the task outcome, not the frozen processing recipe or
-            // the identity of the retained source/stem/graph outputs.
-            result.status.phase = status.phase;
-            result.status.error.clone_from(&status.error);
-        }
+        // Mix changes the outcome, not the frozen processing recipe or audio.
+        self.processing.record_outcome(status);
         if let Some(retained) = self.processing_results.iter_mut().find(|s| s.id == id) {
             retained.clone_from(status);
         } else {
@@ -533,10 +507,10 @@ impl Core {
     }
 
     pub(in crate::core) fn shutdown_processing(&mut self) {
-        let active = self.processing.active.as_ref().map(|task| task.id);
+        let active = self.processing.active_id();
         self.processing.shutdown();
         if let Some(id) = active {
-            let retains_audio = self.processing.results.iter().any(|r| r.status.id == id);
+            let retains_audio = self.processing.results().iter().any(|r| r.status.id == id);
             if let Some(status) = self.state.system.processing.as_mut().filter(|s| s.id == id) {
                 status.phase = ProcessingPhase::Cancelled;
                 status.error = Some("Processing cancelled during shutdown".into());
@@ -580,27 +554,18 @@ impl Core {
         Ok(())
     }
 
-    fn retire_processing_result(&mut self, result: crate::processing::ProcessingResult) {
-        for status in self
-            .processing_results
-            .iter_mut()
-            .filter(|s| s.id == result.status.id)
-        {
+    fn processing_cache_evicted(&mut self, id: u64) {
+        for status in self.processing_results.iter_mut().filter(|s| s.id == id) {
             status.outputs = None;
             status.graph_outputs.clear();
             status.error = Some("Output cache evicted; run processing again to audition".into());
         }
-        self.processing.retire(Box::new(result));
     }
     pub(in crate::core) fn processing_event(&mut self, event: crate::processing::Event) {
         use crate::processing::Event;
         match event {
             Event::GraphNode { id, status: node } => {
-                if self
-                    .processing
-                    .active
-                    .as_ref()
-                    .is_some_and(|task| task.id == id)
+                if self.processing.active_id() == Some(id)
                     && let Some(status) =
                         self.state.system.processing.as_mut().filter(|s| s.id == id)
                 {
@@ -621,11 +586,7 @@ impl Core {
                 total,
                 phase,
             } => {
-                if self
-                    .processing
-                    .active
-                    .as_ref()
-                    .is_some_and(|task| task.id == id)
+                if self.processing.active_id() == Some(id)
                     && let Some(status) =
                         self.state.system.processing.as_mut().filter(|s| s.id == id)
                 {
@@ -635,43 +596,21 @@ impl Core {
                 }
             }
             Event::Finished { id, result } => {
-                if !self
-                    .processing
-                    .active
-                    .as_ref()
-                    .is_some_and(|task| task.id == id)
-                {
+                if self.processing.active_id() != Some(id) {
                     if let Ok(result) = result {
                         self.processing.retire(result);
                     }
                     return;
                 }
-                let cancelled = self
-                    .processing
-                    .active
-                    .as_ref()
-                    .unwrap()
-                    .cancelled
-                    .load(Ordering::Acquire);
+                let cancelled = self.processing.cancellation_requested(id).unwrap();
                 let result = result.and_then(|result| {
                     if let Err(error) = self.admit_processing_result(&result, cancelled) {
                         self.processing.retire(result);
                         return Err(error);
                     }
-                    while result.retains_audio() && self.processing.results.len() >= 4 {
-                        let index = self
-                            .processing
-                            .results
-                            .iter()
-                            .position(|r| Some(r.status.id) != self.processing.audition)
-                            .unwrap();
-                        let evicted = self.processing.results.remove(index).unwrap();
-                        self.retire_processing_result(evicted);
-                    }
                     Ok(result)
                 });
-                let task = self.processing.active.take().unwrap();
-                let _ = task.worker.join();
+                self.processing.finish_task(id).unwrap();
                 let result = result.and_then(|mut result| {
                     if let Some((temporary, destination)) = result.pending_export.take() {
                         if let Err(error) = self
@@ -706,17 +645,17 @@ impl Core {
                             self.processing.retire(result);
                         } else {
                             self.state.system.processing = Some(result.status.clone());
-                            self.processing.results.push_back(*result);
+                            if let Some(evicted) = self.processing.retain_result(result) {
+                                self.processing_cache_evicted(evicted);
+                            }
                         }
-                        if let Some((pending_id, generation)) = self.processing.pending_audition
+                        if let Some((pending_id, generation)) = self.pending_processing_audition
                             && pending_id == id
                         {
-                            self.processing.pending_audition = None;
+                            self.pending_processing_audition = None;
                             let outcome = if generation != self.generation {
                                 Ok(())
-                            } else if let Some(runner) =
-                                self.processing.results.back_mut().unwrap().runner.take()
-                            {
+                            } else if let Some(runner) = self.processing.take_graph_runner(id) {
                                 self.processing_graph_audition_prepared(id, runner)
                             } else {
                                 let target = self
@@ -743,11 +682,10 @@ impl Core {
                     }
                     Err(error) => {
                         if self
-                            .processing
-                            .pending_audition
+                            .pending_processing_audition
                             .is_some_and(|(task, _)| task == id)
                         {
-                            self.processing.pending_audition = None;
+                            self.pending_processing_audition = None;
                         }
                         if let Some(status) =
                             self.state.system.processing.as_mut().filter(|s| s.id == id)
@@ -771,34 +709,26 @@ impl Core {
                 generation,
                 result,
             } => {
-                if !self
-                    .processing
-                    .active
-                    .as_ref()
-                    .is_some_and(|task| task.id == id)
-                {
+                if self.processing.active_id() != Some(id) {
                     if let Ok(pcm) = result {
                         self.processing.retire_pcm(pcm);
                     }
                     return;
                 }
-                let task = self.processing.active.take().unwrap();
-                let cancelled = task.cancelled.load(Ordering::Acquire);
-                let _ = task.worker.join();
-                let requested = self.processing.pending_audition == Some((id, generation));
+                let cancelled = self.processing.finish_task(id).unwrap();
+                let requested = self.pending_processing_audition == Some((id, generation));
                 if self
-                    .processing
-                    .pending_audition
+                    .pending_processing_audition
                     .is_some_and(|(task, _)| task == id)
                 {
-                    self.processing.pending_audition = None;
+                    self.pending_processing_audition = None;
                 }
                 let outcome = match result {
                     Ok(pcm) if !cancelled && (!requested || generation == self.generation) => {
                         let outcome = (|| -> Result<()> {
                             let source = self
                                 .processing
-                                .results
+                                .results()
                                 .iter()
                                 .find(|r| r.status.id == id)
                                 .context("Processing result is no longer retained")?;
@@ -809,18 +739,7 @@ impl Core {
                             Ok(())
                         })();
                         if outcome.is_ok() {
-                            if let Some(result) = self
-                                .processing
-                                .results
-                                .iter_mut()
-                                .find(|r| r.status.id == id)
-                            {
-                                if let Some(old) = result.mix.replace(pcm) {
-                                    self.processing.retire_pcm(old);
-                                }
-                            } else {
-                                self.processing.retire_pcm(pcm);
-                            }
+                            self.processing.retain_mix(id, pcm);
                         } else {
                             self.processing.retire_pcm(pcm);
                         }
@@ -864,7 +783,7 @@ impl Core {
     ) -> Result<Option<u64>> {
         let result = self
             .processing
-            .results
+            .results()
             .iter()
             .find(|r| r.status.id == id)
             .context("Processing result is no longer retained")?;
@@ -882,7 +801,7 @@ impl Core {
                     "No separated stems"
                 );
                 ensure!(
-                    self.processing.active.is_none(),
+                    self.processing.active_id().is_none(),
                     "An audio processing task is already active"
                 );
                 ensure!(
@@ -913,19 +832,14 @@ impl Core {
         if mode == AuditionMode::Mix {
             let result = self
                 .processing
-                .results
+                .results()
                 .iter()
                 .find(|r| r.status.id == id)
                 .context("Processing result is no longer retained")?;
             let mut status = result.status.clone();
-            crate::processing::mix(
-                &mut self.processing,
-                id,
-                self.generation,
-                vocal_gain_db,
-                accompaniment_gain_db,
-            )?;
-            self.processing.pending_audition = Some((id, self.generation));
+            self.processing
+                .start_mix(id, self.generation, vocal_gain_db, accompaniment_gain_db)?;
+            self.pending_processing_audition = Some((id, self.generation));
             status.phase = ProcessingPhase::Processing;
             status.error = None;
             self.state.system.processing = Some(status);
@@ -933,7 +847,7 @@ impl Core {
         }
         let result = self
             .processing
-            .results
+            .results()
             .iter()
             .find(|r| r.status.id == id)
             .context("Processing result is no longer retained")?;
@@ -979,7 +893,7 @@ impl Core {
             .as_ref()
             .clone();
         let admitted_source =
-            if let Some(result) = self.processing.results.iter().find(|r| r.status.id == id) {
+            if let Some(result) = self.processing.results().iter().find(|r| r.status.id == id) {
                 self.processing_source(result)?;
                 result.stamp
             } else {
@@ -990,7 +904,7 @@ impl Core {
                 && track.cue == status.source_cue
                 && self
                     .processing
-                    .results
+                    .results()
                     .iter()
                     .find(|result| result.status.id == id)
                     .is_none_or(|result| track.decoder_hint == result.track.decoder_hint)
@@ -998,9 +912,9 @@ impl Core {
             "Processing result is stale"
         );
         ensure!(
-            self.processing.results.iter().any(|r| r.status.id == id)
-                || ((graph.is_some() || self.processing.audition == Some(id))
-                    && self.processing.active.as_ref().is_some_and(|a| a.id == id)),
+            self.processing.results().iter().any(|r| r.status.id == id)
+                || ((graph.is_some() || self.processing.audition_id() == Some(id))
+                    && self.processing.active_id() == Some(id)),
             "Processing result is no longer retained"
         );
         ensure!(
@@ -1010,7 +924,7 @@ impl Core {
         // PCM is immutable; graph admission still validates the original source.
         let expected_identity = graph.as_ref().map(|_| admitted_source.identity());
         self.engine.ensure_command_capacity(2)?;
-        self.processing.pending_audition = None;
+        self.pending_processing_audition = None;
         let generation = self.generation;
         let mut bookkeeping = Ok(());
         let mut stop = self.engine.stop_request();
@@ -1100,16 +1014,13 @@ impl Core {
         if let Err(error) = self.engine.send(command) {
             return self.finish_playback(Ok(None), false, Err(error));
         }
-        self.processing.audition = (!original || is_graph).then_some(id);
-        self.processing.audition_generation = self.processing.audition.map(|_| self.generation);
-        self.state.processing_audition =
-            self.processing
-                .audition
-                .map(|id| crate::core::state::ProcessingAudition {
-                    id,
-                    output: is_graph.then_some(status.settings.graph_target).flatten(),
-                    mode: is_graph.then_some(status.settings.graph_mode).flatten(),
-                });
+        let selected = (!original || is_graph).then_some((id, self.generation));
+        self.processing.select_audition(selected);
+        self.state.processing_audition = selected.map(|(id, _)| state::ProcessingAudition {
+            id,
+            output: is_graph.then_some(status.settings.graph_target).flatten(),
+            mode: is_graph.then_some(status.settings.graph_mode).flatten(),
+        });
         Ok(())
     }
 }

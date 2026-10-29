@@ -160,11 +160,7 @@ impl Core {
                 let status = self.processing_status_ref(id).ok_or_else(|| {
                     QueryError::Message("Unknown or expired processing task".into())
                 })?;
-                if self
-                    .processing
-                    .active
-                    .as_ref()
-                    .is_some_and(|task| task.id == id)
+                if self.processing.active_id() == Some(id)
                     || !matches!(
                         status.phase,
                         ProcessingPhase::Complete

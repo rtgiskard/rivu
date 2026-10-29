@@ -45,7 +45,7 @@ fn completed(service: &mut Service, track: &Track, config: &Arc<Config>) -> Proc
             Event::Progress { .. } => {}
             Event::Finished { id, result } => {
                 assert_eq!(id, status.id);
-                service.active.take().unwrap().worker.join().unwrap();
+                service.finish_task(service.active_id().unwrap()).unwrap();
                 return *result.unwrap();
             }
             _ => panic!("unexpected processing event"),
@@ -83,8 +83,8 @@ fn fixture() -> (tempfile::TempDir, Service, Track, Arc<Config>) {
         accompaniment: true,
         ..Default::default()
     });
-    service.results.push_back(result);
-    service.audition = Some(1);
+    let _ = service.retain_result(Box::new(result));
+    service.select_audition(Some((1, 0)));
     (directory, service, track, config)
 }
 
@@ -169,9 +169,85 @@ fn shutdown_releases_worker_with_a_full_progress_channel() {
             .start(track, config, ProcessingOperation::Denoise, None)
             .unwrap();
         service.shutdown();
-        assert!(service.active.is_none());
+        assert!(service.active_id().is_none());
         assert!(service.receiver.is_closed());
     });
+}
+
+#[test]
+fn shutdown_closes_processing_delivery_and_retires_unpublished_outputs() {
+    let (_directory, mut service, track, config) = fixture();
+    let buffered = completed(&mut service, &track, &config);
+    let blocked = completed(&mut service, &track, &config);
+    let retained_bytes = service.results()[0]
+        .outputs
+        .vocals
+        .as_ref()
+        .unwrap()
+        .retained_bytes();
+    service
+        .sender
+        .try_send(Event::Finished {
+            id: buffered.status.id,
+            result: Ok(Box::new(buffered)),
+        })
+        .ok()
+        .unwrap();
+    while service.sender.len() < service.sender.capacity().unwrap() {
+        service
+            .sender
+            .try_send(Event::Progress {
+                id: 4,
+                completed: 0,
+                total: None,
+                phase: ProcessingPhase::Processing,
+            })
+            .ok()
+            .unwrap();
+    }
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let observed = Arc::clone(&cancelled);
+    let sender = service.sender.clone();
+    let (sent, delivery) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let worker = thread::spawn(move || {
+        let rejected = sender
+            .send_blocking(Event::Finished {
+                id: blocked.status.id,
+                result: Ok(Box::new(blocked)),
+            })
+            .is_err();
+        sent.send(rejected).unwrap();
+        released.recv().unwrap();
+    });
+    service.active = Some(Active {
+        id: 4,
+        cancelled,
+        worker,
+    });
+    let (finished, completion) = std::sync::mpsc::channel();
+    let shutdown = thread::spawn(move || {
+        service.shutdown();
+        assert!(service.sender.is_closed());
+        assert!(service.receiver.try_recv().is_err());
+        assert_eq!(service.memory_bytes(), retained_bytes);
+        finished.send(()).unwrap();
+        service
+    });
+    let rejected = delivery.recv_timeout(Duration::from_secs(5)).unwrap();
+    let waiting_for_retirement = completion.try_recv().is_err();
+    let cancelled = observed.load(Ordering::Acquire);
+    release.send(()).unwrap();
+    let service = shutdown.join().unwrap();
+    completion.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(rejected, "shutdown accepted a new terminal delivery");
+    assert!(cancelled);
+    assert!(
+        waiting_for_retirement,
+        "shutdown returned before worker retirement"
+    );
+    assert_eq!(service.memory_bytes(), retained_bytes);
+    assert!(service.active_id().is_none());
 }
 
 #[test]
@@ -205,7 +281,7 @@ fn standalone_profile_rejects_empty_frame_and_out_of_source_selections() {
             .unwrap();
         loop {
             if let Event::Finished { result, .. } = next_event(&mut service) {
-                service.active.take().unwrap().worker.join().unwrap();
+                service.finish_task(service.active_id().unwrap()).unwrap();
                 assert!(result.is_err(), "invalid selection must not publish PCM");
                 break;
             }
@@ -257,7 +333,7 @@ fn completed_graph(
         match next_event(service) {
             Event::Progress { .. } | Event::GraphNode { .. } => {}
             Event::Finished { result, .. } => {
-                service.active.take().unwrap().worker.join().unwrap();
+                service.finish_task(service.active_id().unwrap()).unwrap();
                 return result.map(|result| *result);
             }
             _ => panic!("unexpected graph event"),
@@ -306,7 +382,7 @@ fn assert_graph_failure(
             }
             Event::Finished { id, result } => {
                 assert_eq!(id, task.id);
-                service.active.take().unwrap().worker.join().unwrap();
+                service.finish_task(service.active_id().unwrap()).unwrap();
                 break format!(
                     "{:#}",
                     result.err().expect("graph task unexpectedly succeeded")
@@ -512,7 +588,7 @@ fn neural_channel_rejection_uses_actual_decoder_not_stale_track_fields() {
             .unwrap();
         loop {
             if let Event::Finished { result, .. } = next_event(&mut service) {
-                service.active.take().unwrap().worker.join().unwrap();
+                service.finish_task(service.active_id().unwrap()).unwrap();
                 let error = format!("{:#}", result.err().unwrap());
                 assert!(error.contains("mono/stereo") || error.contains("stereo source"));
                 break;
@@ -579,7 +655,7 @@ fn failed_processing_spawns_do_not_consume_retirement_capacity() {
                     .to_string()
                     .contains("injected processing worker spawn failure")
             );
-            assert!(service.active.is_none());
+            assert!(service.active_id().is_none());
         }
         assert_eq!(service.sender.len(), service.sender.capacity().unwrap());
         service.reclaimer.as_mut().unwrap().fail_spawns = false;
@@ -601,7 +677,7 @@ fn failed_processing_spawns_do_not_consume_retirement_capacity() {
             }
         }
         service.shutdown();
-        assert!(service.active.is_none());
+        assert!(service.active_id().is_none());
         assert!(budget.used_bytes() > 0);
         drop(service);
         assert_eq!(budget.used_bytes(), 0);
@@ -616,17 +692,17 @@ fn failed_mix_spawns_do_not_consume_retirement_capacity() {
         let release = block_reclamation(&mut service);
         service.reclaimer.as_mut().unwrap().fail_spawns = true;
         for _ in 0..64 {
-            let error = mix(&mut service, 1, 7, 0.0, 0.0).unwrap_err();
+            let error = service.start_mix(1, 7, 0.0, 0.0).unwrap_err();
             assert!(
                 error
                     .to_string()
                     .contains("injected processing worker spawn failure")
             );
-            assert!(service.active.is_none());
+            assert!(service.active_id().is_none());
         }
         assert_eq!(service.sender.len(), service.sender.capacity().unwrap());
         service.reclaimer.as_mut().unwrap().fail_spawns = false;
-        mix(&mut service, 1, 7, 0.0, 0.0).unwrap();
+        service.start_mix(1, 7, 0.0, 0.0).unwrap();
         unblock_reclamation(&mut service, release);
         let path = match next_event(&mut service) {
             Event::MixFinished {
@@ -665,7 +741,7 @@ fn shutdown_releases_worker_waiting_behind_reclamation_backpressure() {
             )
             .unwrap();
         service.shutdown();
-        assert!(service.active.is_none());
+        assert!(service.active_id().is_none());
         assert!(service.receiver.is_closed());
         assert!(budget.used_bytes() > 0);
         assert!(track.path.is_file());
@@ -673,7 +749,7 @@ fn shutdown_releases_worker_waiting_behind_reclamation_backpressure() {
             .start(track, config, ProcessingOperation::Denoise, None)
             .unwrap_err();
         assert!(error.to_string().contains("shutting down"));
-        assert!(mix(&mut service, 1, 7, 0.0, 0.0).is_err());
+        assert!(service.start_mix(1, 7, 0.0, 0.0).is_err());
         drop(service);
         assert_eq!(budget.used_bytes(), 0);
     });
@@ -718,7 +794,7 @@ fn cancelled_admitted_worker_releases_its_barrier_and_allows_retry() {
                 Event::Finished { id, result } => {
                     assert_eq!(id, status.id);
                     assert!(format!("{:#}", result.err().unwrap()).contains("cancelled"));
-                    service.active.take().unwrap().worker.join().unwrap();
+                    service.finish_task(service.active_id().unwrap()).unwrap();
                     break;
                 }
                 _ => panic!("unexpected event from cancelled processing"),
@@ -750,7 +826,7 @@ fn pcm_budget_rejects_inflight_allocation_without_creating_processing_directory(
         if let Event::Finished { result, .. } = next_event(&mut service) {
             let error = result.err().unwrap();
             assert!(format!("{error:#}").contains("PCM memory budget exceeded"));
-            service.active.take().unwrap().worker.join().unwrap();
+            service.finish_task(service.active_id().unwrap()).unwrap();
             break;
         }
     }
@@ -761,7 +837,7 @@ fn pcm_budget_rejects_inflight_allocation_without_creating_processing_directory(
 #[test]
 fn explicit_wav_export_is_atomic_and_no_clobber() {
     let (directory, service, _, _) = fixture();
-    let pcm = service.results[0].outputs.vocals.as_ref().unwrap();
+    let pcm = service.results()[0].outputs.vocals.as_ref().unwrap();
     let destination = directory.path().join("export.wav");
     let (temporary, canonical) =
         prepare_export(pcm, &destination, &AtomicBool::new(false), |_, _| {}).unwrap();
@@ -881,18 +957,18 @@ fn wav_export_preserves_side_speakers_and_reorders_custom_frames() {
 fn unpinned_audio_release_preserves_frozen_history_and_selected_audition() {
     let (_directory, mut service, track, config) = fixture();
     let result = completed(&mut service, &track, &config);
-    service.results.push_back(result);
-    service.audition = Some(1);
+    let _ = service.retain_result(Box::new(result));
+    service.select_audition(Some((1, 0)));
     service.release_unpinned_audio();
-    assert!(service.results[0].outputs.vocals.is_some());
-    assert!(service.results[1].outputs.denoised.is_none());
-    assert!(service.results[1].status.outputs.is_none());
-    assert_eq!(service.results[1].track.path, track.path);
-    assert_eq!(service.results[1].status.settings.denoise, config.denoise);
+    assert!(service.results()[0].outputs.vocals.is_some());
+    assert!(service.results()[1].outputs.denoised.is_none());
+    assert!(service.results()[1].status.outputs.is_none());
+    assert_eq!(service.results()[1].track.path, track.path);
+    assert_eq!(service.results()[1].status.settings.denoise, config.denoise);
     service.shutdown();
     assert_eq!(
         service.memory_bytes(),
-        service.results[0]
+        service.results()[0]
             .outputs
             .vocals
             .as_ref()
@@ -920,7 +996,7 @@ fn realtime_preparation_never_creates_processing_storage() {
         .unwrap();
     loop {
         if let Event::Finished { result, .. } = next_event(&mut service) {
-            service.active.take().unwrap().worker.join().unwrap();
+            service.finish_task(service.active_id().unwrap()).unwrap();
             let result = result.unwrap();
             assert!(result.runner.is_some());
             assert!(result.graph_outputs.is_empty());
@@ -934,7 +1010,7 @@ fn realtime_preparation_never_creates_processing_storage() {
 #[test]
 fn rejected_admission_preserves_unselected_pcm_until_successful_spawn() {
     let (_directory, mut service, track, config) = fixture();
-    service.audition = None;
+    service.select_audition(None);
     let before = service.memory_bytes();
     assert!(
         service
@@ -949,7 +1025,7 @@ fn rejected_admission_preserves_unselected_pcm_until_successful_spawn() {
             )
             .is_err()
     );
-    assert!(service.results[0].outputs.vocals.is_some());
+    assert!(service.results()[0].outputs.vocals.is_some());
     assert_eq!(service.memory_bytes(), before);
     service.reclaimer.as_mut().unwrap().fail_spawns = true;
     assert!(
@@ -962,12 +1038,12 @@ fn rejected_admission_preserves_unselected_pcm_until_successful_spawn() {
             )
             .is_err()
     );
-    assert!(service.results[0].outputs.vocals.is_some());
+    assert!(service.results()[0].outputs.vocals.is_some());
     assert_eq!(service.memory_bytes(), before);
     service.reclaimer.as_mut().unwrap().fail_spawns = false;
     let result = completed(&mut service, &track, &config);
-    assert!(service.results[0].outputs.vocals.is_none());
-    assert!(service.results[0].status.outputs.is_none());
+    assert!(service.results()[0].outputs.vocals.is_none());
+    assert!(service.results()[0].status.outputs.is_none());
     assert_eq!(
         service.memory_bytes(),
         result.outputs.denoised.as_ref().unwrap().retained_bytes()
@@ -1042,7 +1118,7 @@ fn native_decoder_streams_fit_one_output_budget_including_profile_passes() {
             .unwrap();
         loop {
             if let Event::Finished { result, .. } = next_event(&mut service) {
-                service.active.take().unwrap().worker.join().unwrap();
+                service.finish_task(service.active_id().unwrap()).unwrap();
                 let result = result.unwrap();
                 let pcm = result.outputs.denoised.as_ref().unwrap();
                 assert_eq!(pcm.frames(), 20000);
