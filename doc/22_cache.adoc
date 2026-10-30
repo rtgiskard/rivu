@@ -787,6 +787,10 @@ after 120 small uses of each buffer (normally 240 draws for double buffering).
 The live frame and replay ranges remain untouched. These policies use existing
 draws, not timers, and do not promise reclamation while drawing is inactive.
 
+Cached dispatch replay maps source parents into the destination ancestry stack,
+without allocating a second traversal stack. Replay preserves node ancestry,
+focus and listeners, then restores the enclosing dispatch and context stacks.
+
 Atlas admission rejects invalid or over-device-limit dimensions before allocation.
 Failed first-tile reservation leaves no empty page or consumed page slot.
 

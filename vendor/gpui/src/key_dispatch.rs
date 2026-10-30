@@ -292,33 +292,30 @@ impl DispatchTree {
         let new_range = self.nodes.len()..self.nodes.len() + old_range.len();
 
         let mut contains_focus = false;
-        let mut source_stack = vec![];
-        for (source_node_id, source_node) in source
+        let stack_base = self.node_stack.len();
+        for source_node in source
             .nodes
             .iter_mut()
-            .enumerate()
             .skip(old_range.start)
             .take(old_range.len())
         {
-            let source_node_id = DispatchNodeId(source_node_id);
-            while let Some(source_ancestor) = source_stack.last() {
-                if source_node.parent == Some(*source_ancestor) {
-                    break;
-                } else {
-                    source_stack.pop();
-                    self.pop_node();
-                }
+            // The destination stack already records the replayed ancestry. Map the
+            // source parent into it instead of maintaining a second traversal stack.
+            let parent = source_node
+                .parent
+                .filter(|parent| old_range.contains(&parent.0))
+                .map(|parent| DispatchNodeId(new_range.start + parent.0 - old_range.start));
+            while self.node_stack.len() > stack_base && self.active_node_id() != parent {
+                self.pop_node();
             }
 
-            source_stack.push(source_node_id);
             if source_node.focus_id.is_some() && source_node.focus_id == focus {
                 contains_focus = true;
             }
             self.move_node(source_node);
         }
 
-        while !source_stack.is_empty() {
-            source_stack.pop();
+        while self.node_stack.len() > stack_base {
             self.pop_node();
         }
 
@@ -671,6 +668,104 @@ mod tests {
             Rc::new(RefCell::new(Keymap::new(bindings))),
             Rc::new(registry),
         )
+    }
+
+    #[test]
+    fn test_reuse_subtree_preserves_ancestry_and_restores_enclosing_stack() {
+        let focus_map = std::sync::Arc::new(crate::FocusMap::default());
+        let focus = FocusHandle::new(&focus_map);
+        let mut source = test_dispatch_tree(vec![]);
+        source.push_node();
+        source.set_key_context(KeyContext::parse("Outside").unwrap());
+        let start = source.len();
+        source.push_node();
+        source.set_key_context(KeyContext::parse("First").unwrap());
+        for _ in 0..40 {
+            source.push_node();
+        }
+        let focused_node = source.active_node_id().unwrap();
+        source.set_focus_id(focus.id);
+        source.set_key_context(KeyContext::parse("Focused").unwrap());
+        let key_listener: super::KeyListener = Rc::new(|_, _, _, _| {});
+        let modifiers_listener: super::ModifiersChangedListener = Rc::new(|_, _, _| {});
+        source.on_key_event(key_listener.clone());
+        source.on_modifiers_changed(modifiers_listener.clone());
+        source.on_action(
+            std::any::TypeId::of::<TestAction>(),
+            Rc::new(|_, _, _, _| {}),
+        );
+        let action_listener = source.node(focused_node).action_listeners[0]
+            .listener
+            .clone();
+        for _ in 0..40 {
+            source.pop_node();
+        }
+        source.push_node();
+        source.set_key_context(KeyContext::parse("Sibling").unwrap());
+        source.pop_node();
+        source.pop_node();
+        source.push_node();
+        source.set_key_context(KeyContext::parse("SecondRoot").unwrap());
+        source.push_node();
+        source.pop_node();
+        source.pop_node();
+        source.pop_node();
+
+        let mut target = test_dispatch_tree(vec![]);
+        target.push_node();
+        target.set_key_context(KeyContext::parse("Outer").unwrap());
+        let enclosing = target.push_node();
+        target.set_key_context(KeyContext::parse("Enclosing").unwrap());
+        let contexts = target.context_stack.clone();
+        let stack = target.node_stack.clone();
+        let end = source.len();
+        let reused = target.reuse_subtree(start..end, &mut source, Some(focus.id));
+        assert!(reused.contains_focus());
+        assert_eq!(target.node_stack, stack);
+        assert_eq!(target.context_stack, contexts);
+        for old_index in start..end {
+            let old_id = super::DispatchNodeId(old_index);
+            let old_node = source.node(old_id);
+            let new_node = target.node(reused.refresh_node_id(old_id));
+            let parent = old_node
+                .parent
+                .filter(|parent| (start..end).contains(&parent.0))
+                .map(|parent| reused.refresh_node_id(parent))
+                .unwrap_or(enclosing);
+            assert_eq!(new_node.parent, Some(parent));
+            assert_eq!(new_node.context, old_node.context);
+        }
+        let moved_focus = reused.refresh_node_id(focused_node);
+        assert_eq!(target.focusable_node_id(focus.id), Some(moved_focus));
+        let moved = target.node(moved_focus);
+        assert!(Rc::ptr_eq(&moved.key_listeners[0], &key_listener));
+        assert!(Rc::ptr_eq(
+            &moved.modifiers_changed_listeners[0],
+            &modifiers_listener
+        ));
+        assert!(Rc::ptr_eq(
+            &moved.action_listeners[0].listener,
+            &action_listener
+        ));
+        assert!(source.node(focused_node).key_listeners.is_empty());
+        assert!(
+            source
+                .node(focused_node)
+                .modifiers_changed_listeners
+                .is_empty()
+        );
+        assert!(source.node(focused_node).action_listeners.is_empty());
+
+        let len = target.len();
+        let empty = target.reuse_subtree(start..start, &mut source, Some(focus.id));
+        assert!(!empty.contains_focus());
+        assert_eq!(target.len(), len);
+        assert_eq!(target.node_stack, stack);
+        assert_eq!(target.context_stack, contexts);
+        target.clear();
+        assert!(target.focusable_node_id(focus.id).is_none());
+        assert!(target.node_stack.is_empty());
+        assert!(target.context_stack.is_empty());
     }
 
     struct PendingInputTestView {
