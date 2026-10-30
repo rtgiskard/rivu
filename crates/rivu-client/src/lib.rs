@@ -401,6 +401,8 @@ mod tests {
     };
     use std::sync::{Condvar, Mutex};
 
+    mod session;
+
     #[derive(Default)]
     struct ClockState {
         now: Duration,

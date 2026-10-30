@@ -35,6 +35,12 @@ The client drives I/O on its calling thread, so async callers must move it off
 their executor thread. Retained sessions reuse sockets and bounded framing storage.
 The GUI calls Core directly and owns only its view and audition state.
 
+Protocol codec and transport contracts are tested in `rivu-protocol`; client
+session, cancellation, and task-wait contracts are tested in `rivu-client`.
+Run these independently with `cargo test --locked -p rivu-protocol -p rivu-client`.
+Socket interactions involving App and Core remain in the root application's IPC
+integration tests rather than making the standalone crates depend on the host.
+
 === Consumer and application lifetimes
 
 The GUI, tray, and MPRIS service use `CoreHandle` for business commands and

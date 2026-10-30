@@ -5,6 +5,9 @@ pub mod response;
 pub mod transport;
 pub mod wire;
 
+#[cfg(test)]
+mod tests;
+
 use model::Command;
 use std::time::Duration;
 
