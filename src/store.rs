@@ -8,8 +8,6 @@ mod albums;
 mod cache;
 mod collections;
 mod duplicates;
-#[cfg(test)]
-mod other_tracks_tests;
 mod playlists;
 mod positions;
 mod queue;
