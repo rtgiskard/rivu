@@ -416,6 +416,10 @@ macro_rules! config_fields {
         pub artwork_decode_budget_mib: u32,
         /// Shared GPU material-buffer admission budget, applied at GUI startup.
         pub gpu_material_budget_mib: u32,
+        /// Per-window scene-filter texture budget in MiB, applied at runtime.
+        pub gpu_filter_budget_mib: u32,
+        /// Maximum nested scene-filter layers, applied at runtime.
+        pub gpu_filter_max_depth: u32,
         pub library_columns: LibraryColumns,
         /// Startup presentation language: auto, en-US, or zh-CN.
         pub ui_language: String,
@@ -536,6 +540,8 @@ impl Default for Config {
             artwork_file_limit_mib: 16,
             artwork_decode_budget_mib: 64,
             gpu_material_budget_mib: 64,
+            gpu_filter_budget_mib: 128,
+            gpu_filter_max_depth: 4,
             library_columns: LibraryColumns::default(),
             ui_language: "auto".to_owned(),
             ui_theme: Theme::default(),
@@ -721,6 +727,14 @@ impl Config {
             (1..=64).contains(&self.artwork_file_limit_mib),
             "interface.artwork_file_limit_mib must be between 1 and 64 MiB; got {}",
             self.artwork_file_limit_mib
+        );
+        ensure!(
+            (16..=1024).contains(&self.gpu_filter_budget_mib),
+            "interface.gpu_filter_budget_mib must be between 16 and 1024 MiB"
+        );
+        ensure!(
+            (1..=4).contains(&self.gpu_filter_max_depth),
+            "interface.gpu_filter_max_depth must be between 1 and 4"
         );
         ensure!(
             (1..=1024).contains(&self.artwork_decode_budget_mib),
