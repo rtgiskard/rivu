@@ -657,18 +657,17 @@ layout. Keep throwaway profiling/prototype artifacts separate from product code.
 
 == Recorded measurements
 
-All results in this section describe historical source and binary identities
-recorded in link:25_gpu_rendering_benchmark.json[the benchmark record]. Current
-resource limits and record sizes are described above; later fixes and extensions
-do not inherit earlier timing, memory or image-comparison results automatically.
-No GUI or benchmark rerun is implied by maintaining this document.
+Results below summarize historical experiments, not current performance guarantees.
+Current resource limits and record sizes are described above; later fixes and
+extensions do not inherit earlier timing, memory or image-comparison results
+automatically. No GUI or benchmark rerun is implied by maintaining this document.
 
-Paths inside the historical JSON retain their run-time spelling. In a checkout
-with the local experiment archive, use
-link:../.cache/experiments/README.adoc[the archive index] and its relocation manifest
-to locate moved bundles; do not rewrite measurement provenance or treat archived
-scripts as current build commands. Some recorded binaries or source trees were
-already unavailable or deliberately retired, as the archive index explains.
+=== Capacity-neutral regrouping comparison (2026-10-30)
+
+Rejected; candidate code and candidate-specific tests removed. The area-sensitive
+implementation remains active. On Radeon 780M, capacity-neutral regrouping benefited
+specific sparse layouts but added a small measured cost to the ordinary mixed
+layout; the gains did not justify the additional planning and composite bookkeeping.
 
 === Shared local MSAA comparison (2026-10-23)
 
@@ -676,9 +675,6 @@ Compared separate release binaries against commit `9b49886b60ce8955c243440b5ca09
 on Radeon 780M / RADV, Mesa 26.2.5. The baseline already has local Waveform
 attachments; this comparison measures unifying the other multisampled materials
 and ordinary GPUI Paths, not the earlier full-window-to-local Waveform change.
-The `shared_local_msaa_20261023` record in
-link:25_gpu_rendering_benchmark.json[the benchmark data] retains source and binary
-hashes, raw timing samples, native process samples and interpretation limits.
 
 At the measured revision, successful 192x128, 4x-MSAA synthetic frames retained
 the following nominal attachment bytes. These describe renderer-owned capacity
@@ -764,8 +760,6 @@ optimized release build with thin LTO. The baseline was the then-current LED
 drawing kernel: append each cell to a NonZero `PathBuilder`, tessellate, then render
 the textured path. Both paths ran in the same executable with identical input and
 palette samples. This was not an end-to-end player benchmark or a consumer cutover.
-link:25_gpu_rendering_benchmark.json[Raw samples, workload, hashes and limitations]
-record the complete comparison.
 
 The workload uses 96 columns, a 1,024-sample Tokyo Night cubic palette and
 3-pixel filled / 2-pixel empty segments. Single panels are 768 by 320 pixels;
@@ -872,10 +866,8 @@ bit-identical to BGRA texture sampling, so the vendor-only comparison did not
 establish acceptance for subsequently migrated application palettes. No
 application visualizer changed in this historical vendor slice.
 
-The `unified_material_slice` entry in
-link:25_gpu_rendering_benchmark.json[the raw benchmark record] contains samples,
-workload definitions, source hashes and limits. Its in-process first-use phase
-observations do not reset device or driver caches and are not cold-start results.
+In-process first-use observations do not reset device or driver caches and are
+not cold-start results.
 
 
 === Demand-specific preparation and path batching
@@ -898,8 +890,7 @@ first-render samples or per-process replay medians:
 |===
 
 These render/readback values exclude device/renderer construction and initial CPU
-preparation, which are recorded separately in `review_corrections` in the raw
-benchmark record. Timing ranges overlap for individual first draws; removing an
+preparation. Timing ranges overlap for individual first draws; removing an
 unused pipeline does not establish a universal complete-startup speedup. The
 multi-path replay improvement applies to the stated integer-aligned, disjoint
 workload. Conservative union checks may split additional batches; fractional and
@@ -935,9 +926,7 @@ candidate samples total one 10-ms CPU tick per six-second run, insufficient to
 infer recurring redraw. Process measurements neither isolate GPU cost nor prove
 internal resource release. Cross-binary screenshots were not audio-frame
 synchronized, so they do not establish exact pixel equivalence. Broader whole-app
-performance and physical VRAM claims require separate evidence. Raw samples,
-binary/source identities and limitations are retained under `density_spatial_consumers`
-in link:25_gpu_rendering_benchmark.json[the benchmark record].
+performance and physical VRAM claims require separate evidence.
 
 === Spectrum Bars/LED consumer measurements
 
@@ -959,9 +948,7 @@ CPU was lower in this bounded workload; RSS/PSS ranges overlap. These observatio
 do not isolate GPU time or demonstrate physical VRAM savings. The final candidate
 uses MSAA coverage: rejected direct/alpha-edge variants and their measurements
 are not mixed into these results. Real-app frames were not synchronized, so
-cross-binary screenshots do not establish pixel equality. Source/binary identities,
-the exact configuration and raw samples are retained under `spectrum_bars_led_consumers`
-in link:25_gpu_rendering_benchmark.json[the benchmark record].
+cross-binary screenshots do not establish pixel equality.
 
 == References and rationale
 
