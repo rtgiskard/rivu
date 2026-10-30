@@ -27,9 +27,9 @@ mod visualization;
 mod window;
 mod workspace;
 
-use list_interaction::{ContentDrag, ContentMenuRequest, TrackSource};
+use list_interaction::{ContentDrag, ContentMenuRequest, DragDestination, TrackSource};
 pub(crate) use window::WindowView;
-use window::{BrowserFocus, DragDestination, ListFocus};
+use window::{BrowserFocus, ListFocus};
 
 use anyhow::Result;
 use ashpd::desktop::file_chooser::SelectedFiles;

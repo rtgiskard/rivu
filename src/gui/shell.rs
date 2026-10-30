@@ -17,7 +17,7 @@ pub(super) enum KeyboardSurface {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum MenuSurface {
     Playlist,
-    Content(list_interaction::ContentMenuPage),
+    Content(coordination::content_menu::ContentMenuPage),
     Panel(PanelMenuPage),
     App,
     PanelCatalog,

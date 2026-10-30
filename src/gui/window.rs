@@ -1,4 +1,5 @@
 //! Window composition and cross-feature coordination.
+use super::list_interaction::ContentMenuRequest;
 pub(super) use super::session::UiSession;
 use super::visualization::full_waveform::FullWaveformRequest;
 pub(super) use super::{
@@ -18,15 +19,12 @@ pub(super) use interaction::{
 pub(super) use layout::panel_menu::{PanelMenu, PanelMenuPage};
 pub(super) use layout::persistence::LayoutPersistenceHandle;
 pub(super) use layout::{Axis, Edge, Node};
-pub(super) use library::LibraryNode;
-pub(super) use list_interaction::ContentMenuRequest;
 pub(super) use rivu_protocol::model::{Command, Query};
 pub(super) use rivu_ui::drag_preview;
 pub(super) use rivu_ui::input::{Input, InputEvent};
 pub(super) use std::{
     cell::RefCell,
-    collections::{HashMap, HashSet},
-    path::PathBuf,
+    collections::HashMap,
     rc::{Rc, Weak},
     sync::Arc,
 };
@@ -143,45 +141,6 @@ pub(super) fn panel_list_focus(kind: &str, preferred: Option<BrowserFocus>) -> O
     }
 }
 
-#[derive(Clone, Copy)]
-pub(super) enum DragDestination {
-    Queue,
-    Playlist(i64),
-    QueueAt {
-        index: usize,
-        revision: u64,
-    },
-    PlaylistAt {
-        playlist_id: i64,
-        index: usize,
-        revision: u64,
-    },
-}
-
-impl DragDestination {
-    pub(super) fn playlist_id(self) -> Option<i64> {
-        match self {
-            Self::Playlist(id)
-            | Self::PlaylistAt {
-                playlist_id: id, ..
-            } => Some(id),
-            Self::Queue | Self::QueueAt { .. } => None,
-        }
-    }
-
-    pub(super) fn current(self, state: &crate::projection::GuiSnapshot) -> bool {
-        match self {
-            Self::Queue => true,
-            Self::QueueAt { revision, .. } => state.queue.revision == revision,
-            Self::Playlist(id) => state.library.playlist_entry_revisions.contains_key(&id),
-            Self::PlaylistAt {
-                playlist_id,
-                revision,
-                ..
-            } => state.library.playlist_entry_revisions.get(&playlist_id) == Some(&revision),
-        }
-    }
-}
 pub(crate) struct WindowView {
     pub(super) i18n: Arc<Localizer>,
     pub(super) localized_text: Rc<HashMap<String, SharedString>>,
@@ -218,8 +177,8 @@ pub(crate) struct WindowView {
     pub(super) presentation: Entity<visualization::runtime::VisualizerRuntime>,
     pub(super) layout_action: Option<layout::layout_dialog::Action>,
     pub(super) panel_menu: Option<PanelMenu>,
-    pub(super) content_menu: Option<list_interaction::ContentMenu>,
-    pub(super) content_resolution: list_interaction::CollectionResolution,
+    pub(super) content_menu: Option<coordination::content_menu::ContentMenu>,
+    pub(super) content_resolution: coordination::collection::CollectionResolution,
     pub(super) waveform: Entity<visualization::Waveform>,
     pub(super) full_waveform_request: FullWaveformRequest,
     pub(super) window_visible: bool,
@@ -870,7 +829,7 @@ impl WindowView {
             layout_action: None,
             panel_menu: None,
             content_menu: None,
-            content_resolution: list_interaction::CollectionResolution::default(),
+            content_resolution: coordination::collection::CollectionResolution::default(),
             waveform,
             full_waveform_request: FullWaveformRequest::default(),
             window_visible: window.is_visible(),
