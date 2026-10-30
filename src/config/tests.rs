@@ -707,6 +707,8 @@ fn save_reload_replaces_file_and_leaves_no_temporary_files() {
         artwork_decode_budget_mib: 128,
         artwork_file_limit_mib: 32,
         gpu_material_budget_mib: 64,
+        gpu_filter_budget_mib: 256,
+        gpu_filter_max_depth: 2,
         query_batch_size: 32,
         equalizer: Default::default(),
         denoise: Default::default(),

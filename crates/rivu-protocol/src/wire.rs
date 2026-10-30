@@ -13,7 +13,7 @@ use rivu_format::decoder_hint::DecoderHint;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub const PROTOCOL_VERSION: u8 = 17;
+pub const PROTOCOL_VERSION: u8 = 18;
 pub const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub const MAX_CLIENTS: usize = 16;
@@ -1862,6 +1862,8 @@ pub struct WireConfig {
     artwork_file_limit_mib: u32,
     artwork_decode_budget_mib: u32,
     gpu_material_budget_mib: u32,
+    gpu_filter_budget_mib: u32,
+    gpu_filter_max_depth: u32,
     spectrogram_interpolate: bool,
     waveform_seek_enabled: bool,
     visualization_db_range: f32,
@@ -1958,6 +1960,8 @@ impl From<&rivu_format::config::Config> for WireConfig {
             artwork_file_limit_mib: value.artwork_file_limit_mib,
             artwork_decode_budget_mib: value.artwork_decode_budget_mib,
             gpu_material_budget_mib: value.gpu_material_budget_mib,
+            gpu_filter_budget_mib: value.gpu_filter_budget_mib,
+            gpu_filter_max_depth: value.gpu_filter_max_depth,
             spectrogram_interpolate: value.spectrogram_interpolate,
             waveform_seek_enabled: value.waveform_seek_enabled,
             visualization_db_range: value.visualization_db_range,
@@ -2056,6 +2060,8 @@ impl From<WireConfig> for rivu_format::config::Config {
             artwork_file_limit_mib: value.artwork_file_limit_mib,
             artwork_decode_budget_mib: value.artwork_decode_budget_mib,
             gpu_material_budget_mib: value.gpu_material_budget_mib,
+            gpu_filter_budget_mib: value.gpu_filter_budget_mib,
+            gpu_filter_max_depth: value.gpu_filter_max_depth,
             spectrogram_interpolate: value.spectrogram_interpolate,
             waveform_seek_enabled: value.waveform_seek_enabled,
             visualization_db_range: value.visualization_db_range,

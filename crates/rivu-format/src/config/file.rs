@@ -124,6 +124,8 @@ file_group!(Interface, InterfaceView {
     artwork_file_limit_mib => artwork_file_limit_mib: u32,
     artwork_decode_budget_mib => artwork_decode_budget_mib: u32,
     gpu_material_budget_mib => gpu_material_budget_mib: u32,
+    gpu_filter_budget_mib => gpu_filter_budget_mib: u32,
+    gpu_filter_max_depth => gpu_filter_max_depth: u32,
     library_columns => library_columns: LibraryColumns,
     font => ui_font: String,
     font_size_pt => ui_font_size_pt: u32,

@@ -371,6 +371,25 @@ are configuration errors; other applications' theme files are not imported.
 Themes do not change visualization backgrounds, signal palettes, canvas labels,
 cursor colors, or artwork.
 
+Scene filters have separate per-window limits under Settings → Visualizations →
+General → Appearance, after the shared GPU buffer budget:
+
+[cols="2,2,1",options="header"]
+|===
+|`[interface]` key |Accepted range |Default
+|`gpu_filter_budget_mib` |`16`–`1024` MiB of filter textures |`128`
+|`gpu_filter_max_depth` |`1`–`4` nested filter layers |`4`
+|===
+
+Apply updates these limits in open windows for subsequent frames; no restart is
+needed. Discard leaves the active limits unchanged. When a frame exceeds either
+limit, all scene filters are skipped for that frame while the base interface
+remains visible. This does not change the selected material; filters can resume
+when the frame fits the limits. Water-surface count limits are independent and
+skip water effects separately. The texture budget is not a total GPU-memory cap
+and is separate from the startup-only shared GPU buffer budget described under
+<<_spectrum_and_spectrogram,Spectrum and Spectrogram>>.
+
 Search or browse installed fonts in Settings, including `monospace`, `sans-serif`,
 and `serif`. Enter or click to select; custom family names are accepted.
 The empty field identifies the `monospace` fallback; hover for font-search guidance.
@@ -747,6 +766,8 @@ Shared visualization settings apply as follows:
   transients; increasing animation FPS cannot recover unobserved audio.
 * `visualizations.general.enabled` controls processing independently of media read
   buffering and rendering reuse; see <<visualization-enablement,Visualization enablement>>.
+  In Settings → Visualizations → General → Appearance, its switch sits
+  below the shared material-buffer and scene-filter limits.
 
 Each frequency view has a range override; leave it empty to inherit General,
 or clear an explicit value to restore inheritance. See

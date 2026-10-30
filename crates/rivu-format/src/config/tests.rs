@@ -232,6 +232,10 @@ fn current_toml_contract_rejects_explicit_noncurrent_versions_and_invalid_values
         "schema_version = -1\n",
         "schema_version = {}\n",
         "schema_version = 2\nunknown = true\n",
+        "schema_version = 2\n[interface]\ngpu_filter_budget_mib = 15\n",
+        "schema_version = 2\n[interface]\ngpu_filter_budget_mib = 1025\n",
+        "schema_version = 2\n[interface]\ngpu_filter_max_depth = 0\n",
+        "schema_version = 2\n[interface]\ngpu_filter_max_depth = 5\n",
         "schema_version = 2\n[playback]\nvolume_percent = 101\n",
         "schema_version = 2\n[library]\nroots = ['/Music', '/Music/Live']\n",
     ] {
@@ -524,14 +528,19 @@ fn graph_neural_validation_is_node_local_and_shared_with_global_settings() {
 
 #[test]
 fn changed_fields_preserve_unrelated_toml_and_explicit_defaults() {
-    let original = "# Hand maintained\n[playback]\nvolume_percent=70 # chosen volume\nshuffle = false # explicit default\n[interface]\nlanguage = 'ZH_cn'\ntheme = 'rivu_dark' # pinned\n";
+    let original = "# Hand maintained\n[playback]\nvolume_percent=70 # chosen volume\nshuffle = false # explicit default\n[interface]\nlanguage = 'ZH_cn'\ntheme = 'rivu_dark' # pinned\ngpu_filter_budget_mib=128 # texture budget\ngpu_filter_max_depth=4 # nesting\n";
     let baseline = from_toml(original).unwrap();
     let mut config = baseline.clone();
     config.volume = 0.25;
+    config.gpu_filter_budget_mib = 256;
+    config.gpu_filter_max_depth = 2;
     let saved = update_toml(original, Some(&baseline), &config).unwrap();
     assert_eq!(
         saved,
-        original.replace("volume_percent=70", "volume_percent=25.0")
+        original
+            .replace("volume_percent=70", "volume_percent=25.0")
+            .replace("gpu_filter_budget_mib=128", "gpu_filter_budget_mib=256")
+            .replace("gpu_filter_max_depth=4", "gpu_filter_max_depth=2")
     );
     assert_eq!(from_toml(&saved).unwrap(), config);
     assert_eq!(update_toml(&saved, None, &config).unwrap(), saved);
@@ -564,9 +573,13 @@ fn new_configuration_only_materializes_changed_nested_fields() {
     let mut config = baseline.clone();
     config.neural.threads = 2;
     config.ui_scale = 1.25;
+    config.gpu_filter_budget_mib = 256;
+    config.gpu_filter_max_depth = 2;
     let saved = update_toml("", None, &config).unwrap();
-    let expected: toml::Value =
-        toml::from_str("[interface]\nscale = 1.25\n[neural]\nthreads = 2\n").unwrap();
+    let expected: toml::Value = toml::from_str(
+        "[interface]\nscale = 1.25\ngpu_filter_budget_mib = 256\ngpu_filter_max_depth = 2\n[neural]\nthreads = 2\n",
+    )
+    .unwrap();
     let actual: toml::Value = toml::from_str(&saved).unwrap();
     assert_eq!(actual, expected);
     assert_eq!(from_toml(&saved).unwrap(), config);

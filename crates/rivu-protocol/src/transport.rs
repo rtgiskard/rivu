@@ -403,6 +403,25 @@ mod tests {
     };
 
     #[test]
+    fn previous_protocol_version_is_rejected_before_decoding_either_body() {
+        let previous = PROTOCOL_VERSION.checked_sub(1).unwrap();
+        assert!(
+            decode_request_frame(&[previous, RequestTag::Hello as u8])
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("Unsupported IPC protocol version")
+        );
+        assert!(
+            decode_response_frame(&[previous, ResponseTag::Hello as u8])
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("Unsupported IPC protocol version")
+        );
+    }
+
+    #[test]
     fn bulk_response_releases_buffers_before_idle_and_accepts_next_frame() {
         async_io::block_on(async {
             let payload = "X".repeat(6 * 1024 * 1024);
