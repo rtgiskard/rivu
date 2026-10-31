@@ -495,14 +495,20 @@ impl WindowView {
                     .iter()
                     .find(|panel| panel.id == active)
                     .map(|panel| {
-                        if self.state.system.config.still_mode && panel.kind == "audio_visualizer" {
+                        if !self.state.system.config.visualization_enabled
+                            && panel.kind == "audio_visualizer"
+                        {
                             return div()
                                 .size_full()
                                 .flex()
                                 .items_center()
                                 .justify_center()
                                 .text_color(rgb(theme.muted))
-                                .child(self.tr("shell-visualizations-paused"))
+                                .child(
+                                    rivu_ui::icon("", cx)
+                                        .text_size(gpui::rems(4.))
+                                        .line_height(gpui::relative(1.)),
+                                )
                                 .into_any_element();
                         }
                         panel_spec(&panel.kind)

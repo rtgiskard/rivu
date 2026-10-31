@@ -171,6 +171,10 @@ impl DenoiseField {
     }
     pub(super) fn patch(self, text: &str) -> Result<DenoisePatch, String> {
         let mut patch = DenoisePatch::default();
+        self.patch_into(&mut patch, text)?;
+        Ok(patch)
+    }
+    fn patch_into(self, patch: &mut DenoisePatch, text: &str) -> Result<(), String> {
         match self {
             Self::Mode => {
                 patch.mode = Some(match text {
@@ -230,7 +234,7 @@ impl DenoiseField {
                 patch.impulse_transient_protection = Some(parse_processing_number(text)?)
             }
         }
-        Ok(patch)
+        Ok(())
     }
 }
 
@@ -327,6 +331,10 @@ impl NeuralField {
     }
     pub(super) fn patch(self, text: &str) -> Result<NeuralPatch, String> {
         let mut patch = NeuralPatch::default();
+        self.patch_into(&mut patch, text)?;
+        Ok(patch)
+    }
+    fn patch_into(self, patch: &mut NeuralPatch, text: &str) -> Result<(), String> {
         match self {
             Self::SpeechInterpreter => patch.speech_interpreter = Some(PathBuf::from(text)),
             Self::SeparationInterpreter => patch.separation_interpreter = Some(PathBuf::from(text)),
@@ -359,7 +367,7 @@ impl NeuralField {
                 patch.separation_overlap = Some(parse_processing_number(text)?)
             }
         }
-        Ok(patch)
+        Ok(())
     }
 }
 
@@ -398,6 +406,38 @@ impl FieldKey {
     }
 }
 
+fn page_parameter_command<'a>(
+    page: Page,
+    fields: impl Iterator<Item = (FieldKey, &'a str)>,
+) -> Result<Option<Command>, String> {
+    let mut denoise = DenoisePatch::default();
+    let mut neural = NeuralPatch::default();
+    let mut any = false;
+    for (key, value) in fields {
+        match (page, key) {
+            (Page::Restoration, FieldKey::Denoise(field)) => {
+                field.patch_into(&mut denoise, value)?
+            }
+            (Page::Speech | Page::Separation, FieldKey::Neural(field)) => {
+                field.patch_into(&mut neural, value)?
+            }
+            _ => continue,
+        }
+        any = true;
+    }
+    Ok(if !any {
+        None
+    } else if page == Page::Restoration {
+        Some(Command::DenoiseEdit {
+            patch: Box::new(denoise),
+        })
+    } else {
+        Some(Command::NeuralEdit {
+            patch: Box::new(neural),
+        })
+    })
+}
+
 pub(super) fn path_snapshot_current(
     requested: (u64, u64, &str),
     current: (u64, u64, Option<&str>),
@@ -417,10 +457,67 @@ struct PanelInput {
     _subscriptions: [Subscription; 2],
 }
 
+struct SubmittedFields {
+    first: Option<(Entity<Input>, String)>,
+    rest: Vec<(Entity<Input>, String)>,
+}
+
 struct Submission {
     command: Command,
-    field: Option<(Entity<Input>, String)>,
+    field: Option<SubmittedFields>,
     equalizer_field: Option<equalizer_editor::SubmittedField>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PresetAction {
+    Save { overwrite: bool },
+    Import { path: PathBuf, overwrite: bool },
+    Delete,
+}
+
+impl PresetAction {
+    fn edit(self, name: String) -> EqualizerEdit {
+        match self {
+            Self::Save { overwrite } => EqualizerEdit::SavePreset { name, overwrite },
+            Self::Import { path, overwrite } => EqualizerEdit::ImportPreset {
+                path,
+                name,
+                overwrite,
+            },
+            Self::Delete => EqualizerEdit::DeletePreset { name },
+        }
+    }
+
+    fn matches_fields(&self, name: &str, path: &str, expected_name: &str) -> bool {
+        name == expected_name
+            && match self {
+                Self::Import { path: expected, .. } => {
+                    expected.as_path() == std::path::Path::new(path)
+                }
+                _ => true,
+            }
+    }
+}
+
+struct PresetConfirmation {
+    id: u64,
+    name: String,
+    action: PresetAction,
+    target: rivu_dsp::equalizer::config::EqualizerConfig,
+}
+
+impl PresetConfirmation {
+    fn is_current(
+        &self,
+        id: u64,
+        name: &str,
+        path: &str,
+        target: Option<&rivu_dsp::equalizer::config::EqualizerConfig>,
+    ) -> bool {
+        self.id == id
+            && self.action.matches_fields(name, path, &self.name)
+            && target == Some(&self.target)
+    }
 }
 
 type MeasuredGraph = Rc<Cell<Option<(Bounds<Pixels>, WindowGeometry)>>>;
@@ -432,6 +529,7 @@ struct PresetPopup {
     manage: bool,
     scope: rivu_ui::FocusScope,
     restore: Option<FocusHandle>,
+    confirmation: Option<PresetConfirmation>,
 }
 
 pub(super) struct AudioProcessing {
@@ -452,6 +550,7 @@ pub(super) struct AudioProcessing {
     speech_advanced: bool,
     separation_advanced: bool,
     preset_popup: Option<PresetPopup>,
+    preset_intent_generation: u64,
     preset_bounds: HashMap<u64, Rc<Cell<Option<Bounds<Pixels>>>>>,
     results: ResultsState,
 }
@@ -536,6 +635,7 @@ impl AudioProcessing {
             speech_advanced: false,
             separation_advanced: false,
             preset_popup: None,
+            preset_intent_generation: 0,
             preset_bounds: HashMap::new(),
             results: ResultsState::default(),
         };
@@ -581,6 +681,23 @@ impl AudioProcessing {
             self.results.task_details = false;
         }
         self.state = state;
+        if let Some(popup) = &mut self.preset_popup
+            && popup.confirmation.as_ref().is_some_and(|confirmation| {
+                !self
+                    .state
+                    .system
+                    .config
+                    .equalizer_presets
+                    .iter()
+                    .any(|preset| {
+                        preset.name == confirmation.name && preset.config == confirmation.target
+                    })
+            })
+        {
+            let panel = popup.panel;
+            popup.confirmation = None;
+            self.notify_preset_panel(panel, cx);
+        }
         if !self.state.system.config.equalizer.enabled {
             let _ = self.set_preset_popup(None, cx);
         }
@@ -685,7 +802,10 @@ impl AudioProcessing {
         self.enqueue_submission(
             Submission {
                 command,
-                field: submitted,
+                field: submitted.map(|field| SubmittedFields {
+                    first: Some(field),
+                    rest: Vec::new(),
+                }),
                 equalizer_field: None,
             },
             cx,
@@ -745,19 +865,21 @@ impl AudioProcessing {
                 if graph_command {
                     this.graph_ack(success, cx);
                 }
-                if success
-                    && let Some((input, value)) = submitted
-                    && let Some(field) = this
-                        .fields
-                        .values_mut()
-                        .find(|field| field.input.entity_id() == input.entity_id())
-                    && field.input.read(cx).text().trim() == value
-                {
-                    field.dirty = false;
-                    let committed = field.committed.clone();
-                    field
-                        .input
-                        .update(cx, |input, cx| input.set_text(committed, cx));
+                if success && let Some(submitted) = submitted {
+                    for (input, value) in submitted.first.into_iter().chain(submitted.rest) {
+                        if let Some(field) = this
+                            .fields
+                            .values_mut()
+                            .find(|field| field.input.entity_id() == input.entity_id())
+                            && field.input.read(cx).text().trim() == value
+                        {
+                            field.dirty = false;
+                            let committed = field.committed.clone();
+                            field
+                                .input
+                                .update(cx, |input, cx| input.set_text(committed, cx));
+                        }
+                    }
                 }
                 if let Some(field) = equalizer_field {
                     this.finish_equalizer_field(field, success, cx);
@@ -839,21 +961,31 @@ impl AudioProcessing {
         name: FieldKey,
         cx: &mut Context<Self>,
     ) -> Subscription {
-        cx.subscribe(input, move |this, _, event, cx| match event {
-            InputEvent::Changed { user: true, .. } => {
-                if let Some(field) = this.fields.get_mut(&name) {
-                    field.dirty = true;
+        cx.subscribe(input, move |this, _, event, cx| {
+            if matches!(event, InputEvent::Changed { .. })
+                && matches!(name, FieldKey::PresetName | FieldKey::PresetPath)
+                && let Some(popup) = &mut this.preset_popup
+            {
+                let panel = popup.panel;
+                popup.confirmation = None;
+                this.notify_preset_panel(panel, cx);
+            }
+            match event {
+                InputEvent::Changed { user: true, .. } => {
+                    if let Some(field) = this.fields.get_mut(&name) {
+                        field.dirty = true;
+                    }
+                    if name == FieldKey::PresetName {
+                        this.notify_preset_labels(cx);
+                    }
+                    cx.notify();
                 }
-                if name == FieldKey::PresetName {
+                InputEvent::Changed { user: false, .. } if name == FieldKey::PresetName => {
                     this.notify_preset_labels(cx);
                 }
-                cx.notify();
+                InputEvent::Submit => this.apply_field(name, cx),
+                _ => {}
             }
-            InputEvent::Changed { user: false, .. } if name == FieldKey::PresetName => {
-                this.notify_preset_labels(cx);
-            }
-            InputEvent::Submit => this.apply_field(name, cx),
-            _ => {}
         })
     }
 
@@ -1119,10 +1251,152 @@ impl AudioProcessing {
                 manage,
                 scope,
                 restore,
+                confirmation: None,
             }),
             cx,
         );
         cx.notify();
+    }
+
+    fn request_preset_action(&mut self, panel: u64, action: PresetAction, cx: &mut Context<Self>) {
+        if !self.state.system.config.equalizer.enabled
+            || !self
+                .preset_popup
+                .as_ref()
+                .is_some_and(|popup| popup.panel == panel && popup.manage)
+        {
+            return;
+        }
+        let name = self.text(FieldKey::PresetName, cx);
+        if name.is_empty() {
+            self.error = Some(self.tr("processing-preset-name-required").to_string());
+            cx.notify();
+            return;
+        }
+        let target = self
+            .state
+            .system
+            .config
+            .equalizer_presets
+            .iter()
+            .find(|preset| preset.name == name);
+        let destructive = matches!(
+            action,
+            PresetAction::Save { overwrite: true }
+                | PresetAction::Import {
+                    overwrite: true,
+                    ..
+                }
+                | PresetAction::Delete
+        );
+        if destructive {
+            let Some(target) = target else {
+                return;
+            };
+            self.preset_intent_generation = self.preset_intent_generation.wrapping_add(1);
+            self.preset_popup.as_mut().unwrap().confirmation = Some(PresetConfirmation {
+                id: self.preset_intent_generation,
+                name,
+                action,
+                target: target.config.clone(),
+            });
+            self.notify_preset_panel(panel, cx);
+            cx.notify();
+        } else {
+            self.eq(action.edit(name), cx);
+        }
+    }
+
+    fn confirm_preset_action(&mut self, panel: u64, id: u64, cx: &mut Context<Self>) {
+        let name = self.text(FieldKey::PresetName, cx);
+        let path = self.text(FieldKey::PresetPath, cx);
+        let Some(popup) = self
+            .preset_popup
+            .as_mut()
+            .filter(|popup| popup.panel == panel && popup.manage)
+        else {
+            return;
+        };
+        if !popup
+            .confirmation
+            .as_ref()
+            .is_some_and(|confirmation| confirmation.id == id)
+        {
+            return;
+        }
+        let confirmation = popup.confirmation.take().unwrap();
+        let current = self
+            .state
+            .system
+            .config
+            .equalizer_presets
+            .iter()
+            .find(|preset| preset.name == confirmation.name);
+        if self.state.system.config.equalizer.enabled
+            && confirmation.is_current(id, &name, &path, current.map(|preset| &preset.config))
+        {
+            self.eq(confirmation.action.edit(confirmation.name), cx);
+        }
+        self.notify_preset_panel(panel, cx);
+        cx.notify();
+    }
+
+    fn preset_confirmation_view(
+        &self,
+        panel: u64,
+        confirmation: &PresetConfirmation,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let theme = rivu_ui::theme::palette(cx);
+        let id = confirmation.id;
+        let deleting = confirmation.action == PresetAction::Delete;
+        let mut content = column()
+            .gap_2()
+            .child(caption(
+                theme,
+                self.tr(match confirmation.action {
+                    PresetAction::Delete => "processing-preset-confirm-delete",
+                    PresetAction::Import { .. } => "processing-preset-confirm-import-overwrite",
+                    PresetAction::Save { .. } => "processing-preset-confirm-overwrite",
+                }),
+            ))
+            .child(caption(theme, confirmation.name.clone()));
+        if let PresetAction::Import { path, .. } = &confirmation.action {
+            content = content
+                .child(caption(theme, self.tr("processing-preset-import-source")))
+                .child(caption(theme, path.display().to_string()));
+        }
+        content
+            .child(menu_item(
+                ("confirm-preset", panel),
+                self.tr(if deleting {
+                    "processing-delete"
+                } else {
+                    "processing-preset-overwrite"
+                }),
+                cx,
+                move |this, _, cx| this.confirm_preset_action(panel, id, cx),
+            ))
+            .child(menu_item(
+                ("cancel-preset", panel),
+                self.tr("shell-cancel"),
+                cx,
+                move |this, _, cx| {
+                    if let Some(popup) = this
+                        .preset_popup
+                        .as_mut()
+                        .filter(|popup| popup.panel == panel)
+                        && popup
+                            .confirmation
+                            .as_ref()
+                            .is_some_and(|confirmation| confirmation.id == id)
+                    {
+                        popup.confirmation = None;
+                        this.notify_preset_panel(panel, cx);
+                        cx.notify();
+                    }
+                },
+            ))
     }
 
     fn preset_view(&mut self, panel: u64, cx: &mut Context<Self>) -> Div {
@@ -1142,6 +1416,14 @@ impl AudioProcessing {
             .clone();
         let measure = bounds.clone();
         let name = self.text(FieldKey::PresetName, cx);
+        let preset_exists = self
+            .state
+            .system
+            .config
+            .equalizer_presets
+            .iter()
+            .any(|preset| preset.name == name);
+        let name_empty = name.is_empty();
         let label = if name.is_empty() {
             self.tr("processing-presets")
         } else {
@@ -1311,105 +1593,144 @@ impl AudioProcessing {
                                         }
                                     },
                                 ))
-                                .child(self.field_view(
-                                    FieldKey::PresetName,
-                                    self.tr("processing-preset-name"),
-                                    true,
-                                    cx,
-                                ))
-                                .child(menu_item(
-                                    ("save-preset", panel),
-                                    self.tr("processing-save-copy"),
-                                    cx,
-                                    |this, _, cx| {
-                                        this.eq(
-                                            EqualizerEdit::SavePreset {
-                                                name: this.text(FieldKey::PresetName, cx),
-                                            },
+                                .child(if let Some(confirmation) = &popup.confirmation {
+                                    self.preset_confirmation_view(panel, confirmation, cx)
+                                } else {
+                                    column()
+                                        .gap_1()
+                                        .child(self.field_view(
+                                            FieldKey::PresetName,
+                                            self.tr("processing-preset-name"),
+                                            true,
                                             cx,
-                                        );
-                                    },
-                                ))
-                                .child(menu_item(
-                                    ("load-preset", panel),
-                                    self.tr("processing-load"),
-                                    cx,
-                                    |this, _, cx| {
-                                        this.eq(
-                                            EqualizerEdit::LoadPreset {
-                                                name: this.text(FieldKey::PresetName, cx),
-                                            },
+                                        ))
+                                        .child(disabled_control(
+                                            theme,
+                                            menu_item(
+                                                ("save-preset", panel),
+                                                self.tr("processing-preset-save-new"),
+                                                cx,
+                                                move |this, _, cx| {
+                                                    this.request_preset_action(
+                                                        panel,
+                                                        PresetAction::Save { overwrite: false },
+                                                        cx,
+                                                    )
+                                                },
+                                            ),
+                                            preset_exists || name_empty,
+                                        ))
+                                        .child(disabled_control(
+                                            theme,
+                                            menu_item(
+                                                ("overwrite-preset", panel),
+                                                self.tr("processing-preset-overwrite"),
+                                                cx,
+                                                move |this, _, cx| {
+                                                    this.request_preset_action(
+                                                        panel,
+                                                        PresetAction::Save { overwrite: true },
+                                                        cx,
+                                                    )
+                                                },
+                                            ),
+                                            !preset_exists,
+                                        ))
+                                        .child(menu_item(
+                                            ("load-preset", panel),
+                                            self.tr("processing-load"),
                                             cx,
-                                        );
-                                    },
-                                ))
-                                .child(menu_item(
-                                    ("delete-preset", panel),
-                                    self.tr("processing-delete"),
-                                    cx,
-                                    |this, _, cx| {
-                                        this.eq(
-                                            EqualizerEdit::DeletePreset {
-                                                name: this.text(FieldKey::PresetName, cx),
+                                            |this, _, cx| {
+                                                this.eq(
+                                                    EqualizerEdit::LoadPreset {
+                                                        name: this.text(FieldKey::PresetName, cx),
+                                                    },
+                                                    cx,
+                                                );
                                             },
+                                        ))
+                                        .child(disabled_control(
+                                            theme,
+                                            menu_item(
+                                                ("delete-preset", panel),
+                                                self.tr("processing-delete"),
+                                                cx,
+                                                move |this, _, cx| {
+                                                    this.request_preset_action(
+                                                        panel,
+                                                        PresetAction::Delete,
+                                                        cx,
+                                                    )
+                                                },
+                                            ),
+                                            !preset_exists,
+                                        ))
+                                        .child(menu_item(
+                                            ("copy-eq", panel),
+                                            self.tr("processing-copy"),
                                             cx,
-                                        );
-                                    },
-                                ))
-                                .child(menu_item(
-                                    ("copy-eq", panel),
-                                    self.tr("processing-copy"),
-                                    cx,
-                                    |this, _, cx| match serde_json::to_string_pretty(
-                                        &this.state.system.config.equalizer,
-                                    ) {
-                                        Ok(text) => {
-                                            cx.write_to_clipboard(ClipboardItem::new_string(text))
-                                        }
-                                        Err(error) => {
-                                            this.error = Some(error.to_string());
-                                            cx.notify();
-                                        }
-                                    },
-                                ))
-                                .child(self.field_view(
-                                    FieldKey::PresetPath,
-                                    self.tr("processing-preset-path"),
-                                    true,
-                                    cx,
-                                ))
-                                .child(menu_item(
-                                    ("import-preset", panel),
-                                    self.tr("processing-import"),
-                                    cx,
-                                    |this, _, cx| {
-                                        this.eq(
-                                            EqualizerEdit::ImportPreset {
-                                                name: this.text(FieldKey::PresetName, cx),
-                                                path: PathBuf::from(
-                                                    this.text(FieldKey::PresetPath, cx),
+                                            |this, _, cx| match serde_json::to_string_pretty(
+                                                &this.state.system.config.equalizer,
+                                            ) {
+                                                Ok(text) => cx.write_to_clipboard(
+                                                    ClipboardItem::new_string(text),
                                                 ),
+                                                Err(error) => {
+                                                    this.error = Some(error.to_string());
+                                                    cx.notify();
+                                                }
                                             },
+                                        ))
+                                        .child(self.field_view(
+                                            FieldKey::PresetPath,
+                                            self.tr("processing-preset-path"),
+                                            true,
                                             cx,
-                                        );
-                                    },
-                                ))
-                                .child(menu_item(
-                                    ("export-preset", panel),
-                                    self.tr("processing-export"),
-                                    cx,
-                                    |this, _, cx| {
-                                        this.eq(
-                                            EqualizerEdit::ExportPreset {
-                                                name: this.text(FieldKey::PresetName, cx),
-                                                path: PathBuf::from(
+                                        ))
+                                        .child(menu_item(
+                                            ("import-preset", panel),
+                                            self.tr(if preset_exists {
+                                                "processing-preset-import-overwrite"
+                                            } else {
+                                                "processing-import"
+                                            }),
+                                            cx,
+                                            move |this, _, cx| {
+                                                let name = this.text(FieldKey::PresetName, cx);
+                                                let overwrite = this
+                                                    .state
+                                                    .system
+                                                    .config
+                                                    .equalizer_presets
+                                                    .iter()
+                                                    .any(|preset| preset.name == name);
+                                                let path = PathBuf::from(
                                                     this.text(FieldKey::PresetPath, cx),
-                                                ),
+                                                );
+                                                this.request_preset_action(
+                                                    panel,
+                                                    PresetAction::Import { path, overwrite },
+                                                    cx,
+                                                );
                                             },
+                                        ))
+                                        .child(menu_item(
+                                            ("export-preset", panel),
+                                            self.tr("processing-export"),
                                             cx,
-                                        );
-                                    },
-                                )),
+                                            |this, _, cx| {
+                                                this.eq(
+                                                    EqualizerEdit::ExportPreset {
+                                                        name: this.text(FieldKey::PresetName, cx),
+                                                        path: PathBuf::from(
+                                                            this.text(FieldKey::PresetPath, cx),
+                                                        ),
+                                                    },
+                                                    cx,
+                                                );
+                                            },
+                                        ))
+                                }),
                         ),
                 )
                 .with_priority(2),
@@ -1767,30 +2088,41 @@ impl AudioProcessing {
     }
 
     fn apply_page_parameters(&mut self, cx: &mut Context<Self>) {
-        let mut submissions = Vec::new();
-        for (key, field) in &self.fields {
-            if !field.dirty || !self.page_parameter_key(*key) {
-                continue;
+        let fields: Vec<_> = self
+            .fields
+            .iter()
+            .filter(|(key, field)| field.dirty && self.page_parameter_key(**key))
+            .map(|(key, field)| {
+                (
+                    *key,
+                    field.input.clone(),
+                    field.input.read(cx).text().trim().to_owned(),
+                )
+            })
+            .collect();
+        match page_parameter_command(
+            self.page,
+            fields.iter().map(|(key, _, value)| (*key, value.as_str())),
+        ) {
+            Ok(Some(command)) => self.enqueue_submission(
+                Submission {
+                    command,
+                    field: Some(SubmittedFields {
+                        first: None,
+                        rest: fields
+                            .into_iter()
+                            .map(|(_, input, value)| (input, value))
+                            .collect(),
+                    }),
+                    equalizer_field: None,
+                },
+                cx,
+            ),
+            Ok(None) => {}
+            Err(error) => {
+                self.error = Some(error);
+                cx.notify();
             }
-            let value = field.input.read(cx).text().trim().to_owned();
-            match self.field_command(*key, &value) {
-                Ok(Some(command)) => submissions.push((*key, command, field.input.clone(), value)),
-                Ok(None) => {}
-                Err(error) => {
-                    self.error = Some(error);
-                    cx.notify();
-                    return;
-                }
-            }
-        }
-        if self.pending + submissions.len() > 64 {
-            self.error = Some(self.tr("processing-command-queue-full").to_string());
-            cx.notify();
-            return;
-        }
-        submissions.sort_unstable_by_key(|submission| submission.0);
-        for (_, command, input, value) in submissions {
-            self.send_field(command, Some((input, value)), cx);
         }
     }
 
@@ -2291,5 +2623,27 @@ mod field_tests {
         assert_eq!(NeuralField::SpeechWetMix.text(&config), "0.6");
         assert!(NeuralField::SpeechWetMix.patch("NaN").is_err());
         assert!(NeuralField::Threads.patch("256").is_err());
+    }
+
+    #[test]
+    fn preset_confirmation_is_bound_to_intent_name_import_path_and_target() {
+        let target = rivu_dsp::equalizer::config::EqualizerConfig::default();
+        let confirmation = PresetConfirmation {
+            id: 7,
+            name: "Reference".to_owned(),
+            action: PresetAction::Import {
+                path: "first.json".into(),
+                overwrite: true,
+            },
+            target: target.clone(),
+        };
+        assert!(confirmation.is_current(7, "Reference", "first.json", Some(&target)));
+        assert!(!confirmation.is_current(8, "Reference", "first.json", Some(&target)));
+        assert!(!confirmation.is_current(7, "Other", "first.json", Some(&target)));
+        assert!(!confirmation.is_current(7, "Reference", "second.json", Some(&target)));
+        assert!(!confirmation.is_current(7, "Reference", "first.json", None));
+        let mut replaced = target.clone();
+        replaced.preamp_db = -3.0;
+        assert!(!confirmation.is_current(7, "Reference", "first.json", Some(&replaced)));
     }
 }

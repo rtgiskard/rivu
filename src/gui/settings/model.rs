@@ -1,19 +1,13 @@
-use crate::config::{AlbumArtworkOptions, AudioVisualizerOptions, Config, ConfigPatch};
+use crate::config::{AlbumArtworkOptions, Config, ConfigPatch};
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Target {
     Global,
-    Visualizer(u64),
     Artwork(u64),
 }
 
 pub(super) enum PanelApply {
-    Visualizer {
-        panel_id: u64,
-        options: AudioVisualizerOptions,
-        session: u64,
-    },
     Artwork {
         panel_id: u64,
         options: AlbumArtworkOptions,
@@ -87,21 +81,6 @@ impl SettingsModel {
         self.feedback = None;
     }
 
-    // The draft reuses the canonical option fields for controls, but the target
-    // routes Apply exclusively to the layout instance, never global persistence.
-    pub(super) fn reset_visualizer(
-        &mut self,
-        config: &Arc<Config>,
-        panel_id: u64,
-        options: AudioVisualizerOptions,
-    ) {
-        self.reset(config);
-        self.target = Target::Visualizer(panel_id);
-        self.draft.audio_visualizer_style = options.style;
-        self.draft.audio_visualizer_grid = options.grid;
-        self.draft.audio_visualizer_labels = options.label;
-    }
-
     pub(super) fn reset_artwork(
         &mut self,
         config: &Arc<Config>,
@@ -140,18 +119,13 @@ impl SettingsModel {
         ))
     }
 
-    /// The view parses artwork's text; visualizer settings have no text payload.
+    /// The view parses artwork's text before submitting instance options.
     pub(super) fn begin_panel_apply(&mut self, artwork_period: Option<f32>) -> Option<PanelApply> {
         if self.applying {
             return None;
         }
         let request = match self.target {
             Target::Global => return None,
-            Target::Visualizer(panel_id) => PanelApply::Visualizer {
-                panel_id,
-                options: AudioVisualizerOptions::from(&self.draft),
-                session: self.session,
-            },
             Target::Artwork(panel_id) => {
                 let period_seconds = artwork_period?;
                 if !period_seconds.is_finite() || period_seconds <= 0.0 {
@@ -214,7 +188,7 @@ impl SettingsModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AlbumArtworkMode, AudioVisualizerStyle};
+    use crate::config::AlbumArtworkMode;
 
     #[test]
     fn switching_targets_rejects_old_completions_and_routes_panel_options() {
@@ -224,32 +198,6 @@ mod tests {
         assert!(model.begin_apply(model.draft.clone()).is_none());
         assert!(!model.complete_panel_apply(model.session(), Ok(())));
 
-        let visualizer = AudioVisualizerOptions {
-            style: AudioVisualizerStyle::Rings,
-            grid: false,
-            label: true,
-        };
-        model.reset_visualizer(&config, 11, visualizer);
-        assert_eq!(model.target(), Target::Visualizer(11));
-        assert_eq!(AudioVisualizerOptions::from(&model.draft), visualizer);
-        assert!(model.begin_apply(model.draft.clone()).is_none());
-        let Some(PanelApply::Visualizer {
-            panel_id,
-            options,
-            session,
-        }) = model.begin_panel_apply(None)
-        else {
-            panic!("expected visualizer apply");
-        };
-        assert_eq!(panel_id, 11);
-        assert_eq!(options, visualizer);
-        assert_eq!(
-            model.complete_apply(global, Arc::clone(&config), Ok(())),
-            Completion::Stale,
-        );
-        assert!(model.applying());
-        assert!(model.feedback().is_none());
-
         let artwork = AlbumArtworkOptions {
             mode: AlbumArtworkMode::Rotating,
             period_seconds: 13.0,
@@ -258,10 +206,8 @@ mod tests {
         model.reset_artwork(&config, 22, artwork);
         assert_eq!(model.target(), Target::Artwork(22));
         assert_eq!(AlbumArtworkOptions::from(&model.draft), artwork);
-        assert_eq!(
-            AudioVisualizerOptions::from(&model.draft),
-            AudioVisualizerOptions::from(config.as_ref())
-        );
+        assert_eq!(model.baseline(), config.as_ref());
+        assert!(model.begin_apply(model.draft.clone()).is_none());
         let Some(PanelApply::Artwork {
             panel_id,
             options,
@@ -278,12 +224,24 @@ mod tests {
                 ..artwork
             }
         );
-        assert!(!model.complete_panel_apply(session, Err("old failure".into())));
+        assert_eq!(
+            model.complete_apply(global, Arc::clone(&config), Ok(())),
+            Completion::Stale,
+        );
         assert!(model.applying());
         assert!(model.feedback().is_none());
         assert!(model.complete_panel_apply(artwork_session, Ok(())));
         assert_eq!(model.feedback(), &Some(Ok(())));
         assert!(!model.complete_panel_apply(artwork_session, Err("duplicate".into())));
+
+        model.reset_artwork(&config, 33, artwork);
+        let Some(PanelApply::Artwork { session, .. }) = model.begin_panel_apply(Some(19.0)) else {
+            panic!("expected new artwork apply");
+        };
+        assert!(!model.complete_panel_apply(artwork_session, Err("old failure".into())));
+        assert!(model.applying());
+        assert!(model.feedback().is_none());
+        assert!(model.complete_panel_apply(session, Ok(())));
 
         model.reset(&config);
         assert_eq!(model.target(), Target::Global);
@@ -291,44 +249,6 @@ mod tests {
         assert!(!model.applying());
         assert!(model.feedback().is_none());
         assert!(model.begin_panel_apply(Some(17.0)).is_none());
-    }
-
-    #[test]
-    fn every_visualizer_style_keeps_instance_options_out_of_global_defaults() {
-        use crate::gui::visualization::AUDIO_VISUALIZER_STYLES;
-
-        let config = Arc::new(Config::default());
-        let defaults = AudioVisualizerOptions::from(config.as_ref());
-        let mut model = SettingsModel::new(&config);
-        for style in AUDIO_VISUALIZER_STYLES {
-            let options = AudioVisualizerOptions {
-                style,
-                grid: !defaults.grid,
-                label: !defaults.label,
-            };
-            model.reset_visualizer(&config, 7, options);
-            assert_eq!(AudioVisualizerOptions::from(model.baseline()), defaults);
-            assert!(model.begin_apply(model.draft.clone()).is_none());
-            let Some(PanelApply::Visualizer {
-                panel_id,
-                options: applied,
-                session,
-            }) = model.begin_panel_apply(None)
-            else {
-                panic!("expected local visualizer options");
-            };
-            assert_eq!(panel_id, 7);
-            assert_eq!(applied, options);
-            assert!(model.complete_panel_apply(session, Ok(())));
-            assert_eq!(AudioVisualizerOptions::from(model.baseline()), defaults);
-
-            // Reopening global settings (also the discard boundary) restores
-            // new-instance defaults rather than retaining the instance's style.
-            model.reset(&config);
-            assert_eq!(model.target(), Target::Global);
-            assert_eq!(AudioVisualizerOptions::from(&model.draft), defaults);
-            assert_eq!(model.draft, *config);
-        }
     }
 
     #[test]

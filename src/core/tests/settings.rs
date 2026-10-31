@@ -475,7 +475,7 @@ fn busy_audio_configuration_rejects_the_whole_batch_before_persistence() {
         let mut config = core.state.configuration.config.as_ref().clone();
         config.volume = 0.25;
         config.shuffle = true;
-        config.still_mode = true;
+        config.visualization_enabled = false;
         config.ffmpeg_enabled = false;
         config.output_device = Some("configured-output".into());
         let result = core.command(Command::Configure {
@@ -501,7 +501,7 @@ fn busy_audio_configuration_rejects_the_whole_batch_before_persistence() {
             assert_eq!(receive.len(), 64 - available);
             if available == 0 {
                 assert!(
-                    core.update_gui_config(GuiConfigChange::ToggleStillMode)
+                    core.update_gui_config(GuiConfigChange::ToggleVisualization)
                         .is_err()
                 );
                 assert_eq!(
@@ -533,7 +533,7 @@ fn busy_audio_configuration_rejects_the_whole_batch_before_persistence() {
         if available == 7 {
             assert!(matches!(
                 receive.try_recv().unwrap(),
-                AudioCommand::StillMode(true)
+                AudioCommand::VisualizationEnabled(false)
             ));
             assert!(matches!(
                 receive.try_recv().unwrap(),
@@ -632,7 +632,7 @@ fn shutdown_flush_reports_failure_and_retains_live_settings() {
 }
 
 #[test]
-fn still_mode_toggle_preserves_unsaved_playback_and_device_settings() {
+fn visualization_enabled_toggle_preserves_unsaved_playback_and_device_settings() {
     let (_directory, mut core) = fixture();
     core.command(Command::Volume { value: 0.25 }).unwrap();
     core.command(Command::Shuffle { enabled: true }).unwrap();
@@ -642,10 +642,13 @@ fn still_mode_toggle_preserves_unsaved_playback_and_device_settings() {
     .unwrap();
     // A live output selection must survive unrelated quick changes.
     core.state.system.selected_device = Some("pending-output".into());
-    for enabled in [true, false] {
-        core.update_gui_config(GuiConfigChange::ToggleStillMode)
+    for enabled in [false, true] {
+        core.update_gui_config(GuiConfigChange::ToggleVisualization)
             .unwrap();
-        assert_eq!(core.state.configuration.config.still_mode, enabled);
+        assert_eq!(
+            core.state.configuration.config.visualization_enabled,
+            enabled
+        );
         assert_eq!(core.state.playback.volume, 0.25);
         assert!(core.state.playback.shuffle);
         assert_eq!(core.state.playback.repeat, RepeatMode::All);
@@ -888,7 +891,7 @@ fn settings_apply_merges_every_unedited_field_at_execution() {
     let added = directory.path().join("added");
     core.update_gui_config(GuiConfigChange::AddLibraryRoot(added.clone()))
         .unwrap();
-    core.update_gui_config(GuiConfigChange::ToggleStillMode)
+    core.update_gui_config(GuiConfigChange::ToggleVisualization)
         .unwrap();
     core.update_gui_config(GuiConfigChange::ToggleWaveformSeek)
         .unwrap();
@@ -938,7 +941,7 @@ fn settings_apply_explicit_fields_override_newer_conflicting_values() {
     draft.volume = 0.4;
     draft.output_device = None;
     draft.library_roots.clear();
-    draft.still_mode = true;
+    draft.visualization_enabled = false;
     let patch = ConfigPatch::between(&baseline, &draft);
     core.command(Command::Volume { value: 0.2 }).unwrap();
     core.command(Command::Device {
@@ -956,7 +959,7 @@ fn settings_apply_explicit_fields_override_newer_conflicting_values() {
     assert_eq!(visible.playback.volume, 0.4);
     assert_eq!(visible.system.selected_device, None);
     assert!(visible.system.config.library_roots.is_empty());
-    assert!(visible.system.config.still_mode);
+    assert!(!visible.system.config.visualization_enabled);
     assert_eq!(
         Config::load(&core.state.configuration.config_path).unwrap(),
         *visible.system.config
@@ -1031,7 +1034,7 @@ fn configure_failed_save_keeps_desired_settings_and_does_not_deliver_audio() {
     config.volume = 0.25;
     config.shuffle = true;
     config.repeat = RepeatMode::All;
-    config.still_mode = true;
+    config.visualization_enabled = false;
     config.ffmpeg_enabled = false;
     config.page_size = 32;
     config.output_device = Some("configured-output".into());
@@ -1072,7 +1075,7 @@ fn configure_rejected_preparation_keeps_saved_and_desired_settings() {
         .unwrap();
     let mut config = previous.as_ref().clone();
     config.volume = 0.25;
-    config.still_mode = true;
+    config.visualization_enabled = false;
     config.page_size = 0;
 
     core.command(Command::Configure {
@@ -1215,7 +1218,7 @@ fn configure_saved_but_disconnected_audio_retains_desired_settings() {
     config.volume = 0.25;
     config.shuffle = true;
     config.repeat = RepeatMode::All;
-    config.still_mode = true;
+    config.visualization_enabled = false;
     config.ffmpeg_enabled = false;
     config.page_size = 32;
     config.output_device = Some("configured-output".into());
@@ -1247,19 +1250,22 @@ fn configure_saved_but_disconnected_audio_retains_desired_settings() {
 }
 
 #[test]
-fn still_mode_toggle_commits_without_accessing_unwritable_config_path() {
+fn visualization_enabled_toggle_commits_without_accessing_unwritable_config_path() {
     let (_directory, mut core) = fixture();
     let _audio = recording_audio(&mut core);
-    let previous = core.state.configuration.config.still_mode;
+    let previous = core.state.configuration.config.visualization_enabled;
     std::fs::create_dir(&core.state.configuration.config_path).unwrap();
-    core.update_gui_config(GuiConfigChange::ToggleStillMode)
+    core.update_gui_config(GuiConfigChange::ToggleVisualization)
         .unwrap();
-    assert_eq!(core.state.configuration.config.still_mode, !previous);
+    assert_eq!(
+        core.state.configuration.config.visualization_enabled,
+        !previous
+    );
     assert!(core.state.configuration.config_path.is_dir());
 }
 
 #[test]
-fn still_mode_applied_but_disconnected_audio_retains_unsaved_settings() {
+fn visualization_enabled_applied_but_disconnected_audio_retains_unsaved_settings() {
     let (_directory, mut core) = fixture();
     let (commands, receiver) = async_channel::bounded(1);
     drop(receiver);
@@ -1275,9 +1281,9 @@ fn still_mode_applied_but_disconnected_audio_retains_unsaved_settings() {
     expected.repeat = RepeatMode::All;
     expected.output_device = Some("pending-output".into());
 
-    for enabled in [true, false] {
-        expected.still_mode = enabled;
-        core.update_gui_config(GuiConfigChange::ToggleStillMode)
+    for enabled in [false, true] {
+        expected.visualization_enabled = enabled;
+        core.update_gui_config(GuiConfigChange::ToggleVisualization)
             .unwrap_err();
 
         assert_eq!(*core.state.configuration.config, expected);

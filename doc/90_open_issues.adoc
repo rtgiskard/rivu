@@ -79,7 +79,7 @@ progressive waveform state remain dynamic. See link:24_layout.adoc[GUI layout].
 
 Recorded acceptance used a real nested Wayland window with visualization tabs,
 Waveform and multiple album panels. Temporary probes observed no workspace-tree
-discovery during playback, Seek, Stop, Still Mode, resize or lock changes; active
+discovery during playback, Seek, Stop, visualization toggles, resize or lock changes; active
 tab/style edits and window recreation each discovered once. The exact Stop fence
 advanced source and seek identities once. The final uninstrumented build was
 also exercised through GUI and TUI input. These are traversal counts, not
@@ -135,10 +135,8 @@ link:01_config.adoc#_layout[Configuration and layout].
 
 Status: resolved in implementation, 2026-10-29.
 
-Small plots now degrade without size warnings or tooltips. The earlier proposal
-to extend `Enlarge panel` feedback to every visualizer was replaced by quiet
-sizing behavior: Spectrum and Spectrogram retain their drawing cutoffs but no
-size message; Audio Visualizer styles keep their existing small-geometry rules.
+Small plots degrade without size warnings or tooltips. Spectrum and Spectrogram
+retain their drawing cutoffs; Audio Visualizer styles retain their small-geometry rules.
 Waveform omits time labels before losing its narrow plot, and an undrawable
 surface retires its capture and seek preview rather than retaining an invisible
 seek target. A fresh press works after the surface regains room.

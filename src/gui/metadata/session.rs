@@ -643,7 +643,7 @@ mod tests {
         let mut committed = original.clone();
         committed.decoder_hint = DecoderHint::Ffmpeg;
         committed.title = "updated tags".into();
-        request.retain_target(Some(&original), false);
+        request.retain_target(Some(&original), true);
         assert!(!request.accepts(first, Some(&committed)));
         assert!(request.accepts(latest, Some(&committed)));
         assert!(!request.accepts(latest, Some(&track(2, "other"))));
@@ -672,18 +672,16 @@ mod tests {
     }
 
     #[test]
-    fn explicit_waveform_queries_do_not_revive_after_target_or_still_mode_changes() {
+    fn explicit_waveform_queries_do_not_revive_after_target_or_visualization_enabled_changes() {
         let original = track(1, "original");
         let other = track(2, "other");
         let mut request = FullWaveformRequest::default();
-        for (target, still_mode) in [
-            (Some(&other), false),
-            (None, false),
-            (Some(&original), true),
-        ] {
+        for (target, visualization_enabled) in
+            [(Some(&other), true), (None, true), (Some(&original), false)]
+        {
             let generation = request.begin(&original);
-            request.retain_target(target, still_mode);
-            request.retain_target(Some(&original), false);
+            request.retain_target(target, visualization_enabled);
+            request.retain_target(Some(&original), true);
             assert!(!request.accepts(generation, Some(&original)));
         }
     }

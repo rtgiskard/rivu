@@ -502,6 +502,9 @@ impl Playback {
                     })
                     .child(
                         row()
+                            .items_baseline()
+                            .text_sm()
+                            .line_height(gpui::relative(1.25))
                             .flex_1()
                             .min_w_0()
                             .child(
@@ -512,14 +515,15 @@ impl Playback {
                                     "󰠃",
                                     self.context.i18n.text("gl-artist-missing"),
                                 )
+                                .text_sm()
                                 .when(!artist.trim().is_empty(), |view| {
-                                    view.text_sm().text_color(rgb(theme.text))
+                                    view.text_color(rgb(theme.text))
                                 })
                                 .when(artist.trim().is_empty(), |view| {
                                     view.text_color(rgb(theme.muted).alpha(0.6))
                                 }),
                             )
-                            .child(caption(theme, "·").flex_shrink_0())
+                            .child(caption(theme, "·").text_sm().flex_shrink_0())
                             .child(
                                 super::components::track::metadata_text(
                                     theme,
@@ -528,6 +532,7 @@ impl Playback {
                                     "󰀥",
                                     self.context.i18n.text("gl-album-missing"),
                                 )
+                                .text_sm()
                                 .when(!album.trim().is_empty(), |view| {
                                     view.text_color(rgb(theme.secondary))
                                 })

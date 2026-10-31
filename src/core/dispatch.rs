@@ -198,8 +198,8 @@ impl Core {
                 "initial_load_completed"
             );
         }
-        let _ = self.engine.send(AudioCommand::StillMode(
-            self.state.configuration.config.still_mode,
+        let _ = self.engine.send(AudioCommand::VisualizationEnabled(
+            self.state.configuration.config.visualization_enabled,
         ));
         let _ = self
             .engine

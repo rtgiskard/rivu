@@ -421,6 +421,7 @@ fn equalizer_preset_import_bounds_bytes_and_rejects_non_regular_inputs() {
     core.equalizer_edit(EqualizerEdit::ImportPreset {
         path: path.clone(),
         name: "bounded".into(),
+        overwrite: false,
     })
     .unwrap();
     let imported = core
@@ -439,6 +440,7 @@ fn equalizer_preset_import_bounds_bytes_and_rejects_non_regular_inputs() {
         .equalizer_edit(EqualizerEdit::ImportPreset {
             path: path.clone(),
             name: "oversized".into(),
+            overwrite: false,
         })
         .unwrap_err();
     assert!(error.to_string().contains("Preset exceeds 64 KiB"));
@@ -453,6 +455,7 @@ fn equalizer_preset_import_bounds_bytes_and_rejects_non_regular_inputs() {
         let result = core.equalizer_edit(EqualizerEdit::ImportPreset {
             path,
             name: "pipe".into(),
+            overwrite: false,
         });
         completed
             .send((core.state.configuration.config.clone(), result))
@@ -509,6 +512,134 @@ fn equalizer_and_denoise_edits_merge_on_the_core_owner() {
         -18.5
     );
 }
+#[test]
+fn page_parameter_patches_reject_all_fields_without_writing_partial_values() {
+    use rivu_protocol::model::NeuralPatch;
+    let (_directory, mut core) = fixture();
+    let _commands = recording_audio(&mut core);
+    core.denoise_edit(DenoisePatch {
+        strength: Some(2.0),
+        wet: Some(0.25),
+        ..Default::default()
+    })
+    .unwrap();
+    let baseline = core.state.configuration.config.clone();
+    let saved = std::fs::read(&core.state.configuration.config_path).unwrap();
+    assert!(
+        core.denoise_edit(DenoisePatch {
+            strength: Some(3.0),
+            wet: Some(2.0),
+            ..Default::default()
+        })
+        .is_err()
+    );
+    assert_eq!(core.state.configuration.config, baseline);
+    assert_eq!(
+        std::fs::read(&core.state.configuration.config_path).unwrap(),
+        saved
+    );
+    assert!(
+        core.neural_edit(NeuralPatch {
+            threads: Some(2),
+            speech_wet_mix: Some(2.0),
+            ..Default::default()
+        })
+        .is_err()
+    );
+    assert_eq!(core.state.configuration.config, baseline);
+    assert_eq!(
+        std::fs::read(&core.state.configuration.config_path).unwrap(),
+        saved
+    );
+    core.neural_edit(NeuralPatch {
+        threads: Some(2),
+        speech_wet_mix: Some(0.5),
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(core.state.configuration.config.neural.threads, 2);
+    assert_eq!(core.state.configuration.config.neural.speech_wet_mix, 0.5);
+    assert_eq!(core.state.configuration.config.denoise, baseline.denoise);
+}
+
+#[test]
+fn preset_creation_and_replacement_have_explicit_non_upsert_preconditions() {
+    let (directory, mut core) = fixture();
+    let _commands = recording_audio(&mut core);
+    let name = "Reference".to_owned();
+    assert!(
+        core.equalizer_edit(EqualizerEdit::SavePreset {
+            name: name.clone(),
+            overwrite: true
+        })
+        .is_err()
+    );
+    core.equalizer_edit(EqualizerEdit::SavePreset {
+        name: name.clone(),
+        overwrite: false,
+    })
+    .unwrap();
+    core.equalizer_edit(EqualizerEdit::PreampDb(-6.0)).unwrap();
+    let baseline = core.state.configuration.config.clone();
+    let saved = std::fs::read(&core.state.configuration.config_path).unwrap();
+    assert!(
+        core.equalizer_edit(EqualizerEdit::SavePreset {
+            name: name.clone(),
+            overwrite: false
+        })
+        .is_err()
+    );
+    assert_eq!(core.state.configuration.config, baseline);
+    assert_eq!(
+        std::fs::read(&core.state.configuration.config_path).unwrap(),
+        saved
+    );
+    core.equalizer_edit(EqualizerEdit::SavePreset {
+        name: name.clone(),
+        overwrite: true,
+    })
+    .unwrap();
+    assert_eq!(
+        core.state.configuration.config.equalizer_presets[0]
+            .config
+            .preamp_db,
+        -6.0
+    );
+    let path = directory.path().join("preset.json");
+    let mut imported = core.state.configuration.config.equalizer.clone();
+    imported.preamp_db = -9.0;
+    std::fs::write(&path, serde_json::to_vec(&imported).unwrap()).unwrap();
+    let baseline = core.state.configuration.config.clone();
+    assert!(
+        core.equalizer_edit(EqualizerEdit::ImportPreset {
+            path: path.clone(),
+            name: name.clone(),
+            overwrite: false
+        })
+        .is_err()
+    );
+    assert!(
+        core.equalizer_edit(EqualizerEdit::ImportPreset {
+            path: path.clone(),
+            name: "Missing".to_owned(),
+            overwrite: true
+        })
+        .is_err()
+    );
+    assert_eq!(core.state.configuration.config, baseline);
+    core.equalizer_edit(EqualizerEdit::ImportPreset {
+        path,
+        name,
+        overwrite: true,
+    })
+    .unwrap();
+    assert_eq!(core.state.configuration.config.equalizer_presets.len(), 1);
+    assert_eq!(
+        core.state.configuration.config.equalizer_presets[0].config,
+        imported
+    );
+}
+
 #[test]
 fn empty_equalizer_batches_use_log_uniform_neutral_cell_centers() {
     use rivu_dsp::equalizer::config::{EqBand, MAX_BANDS};

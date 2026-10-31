@@ -2,7 +2,7 @@
 //!
 //! Explicit scans provide a baseline for one rolling display. New playback PCM
 //! replaces visited intervals; untouched bins retain their previous statistics.
-//! Source/hint changes and Still Mode retire results; signal and EQ edits do not.
+//! Source/hint changes and disabling visualizations retire results; signal and EQ edits do not.
 //! Equivalent visible panels share immutable numerical columns and publications;
 //! placement-only changes reuse them. RMS pooling weights decoded sample counts,
 //! preserving missing bins. Rational sample geometry excludes merely adjacent
@@ -1731,7 +1731,7 @@ impl Drop for Waveform {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn full_paint_releases_playback_lock_but_observes_still_generation() {
+    fn full_paint_releases_playback_lock_but_observes_visualization_generation() {
         let mut waveform = preview(frame(vec![Some(0.25); 2]));
         let source = Rc::clone(waveform.source.as_ref().unwrap());
         let (generation, _) = waveform.start_full(DecoderHint::Auto);
@@ -1745,8 +1745,8 @@ mod tests {
         drop(selected);
         {
             let mut frame = waveform.shared.write();
-            frame.set_still_mode(true);
-            frame.set_still_mode(false);
+            frame.set_visualization_enabled(false);
+            frame.set_visualization_enabled(true);
         }
         assert!(waveform.paint_frame(&source, Some(generation)).is_none());
         let selected = waveform.paint_frame(&source, None).unwrap();
@@ -2417,16 +2417,16 @@ mod tests {
     }
 
     #[test]
-    fn backend_still_transition_rejects_manual_results_before_gui_cancellation() {
+    fn backend_visualization_disable_rejects_manual_results_before_gui_cancellation() {
         for (resume_before_completion, decoder_cancelled) in
             [(false, false), (false, true), (true, false), (true, true)]
         {
             let mut waveform = preview(frame(vec![Some(0.25), None]));
             let (request, cancelled) = waveform.start_full(DecoderHint::Auto);
-            waveform.shared.write().set_still_mode(true);
+            waveform.shared.write().set_visualization_enabled(false);
             assert!(cancelled.load(Ordering::Relaxed));
             if resume_before_completion {
-                waveform.shared.write().set_still_mode(false);
+                waveform.shared.write().set_visualization_enabled(true);
             }
             let revision = waveform.shared.read().revision;
             let result = if decoder_cancelled {
@@ -2443,7 +2443,7 @@ mod tests {
     }
 
     #[test]
-    fn backend_still_on_off_retires_completed_full_preview_without_rescanning() {
+    fn backend_visualization_off_on_retires_completed_full_preview_without_rescanning() {
         let mut waveform = preview(frame(vec![Some(0.25), None]));
         let track = track("track.flac", DecoderHint::Auto);
         assert!(waveform.sync_state(Some(&track)));
@@ -2472,12 +2472,12 @@ mod tests {
         };
         {
             let mut shared = waveform.shared.write();
-            shared.set_still_mode(true);
-            shared.set_still_mode(false);
+            shared.set_visualization_enabled(false);
+            shared.set_visualization_enabled(true);
         }
         assert!(
             waveform.enabled,
-            "GUI did not observe the intermediate Still Mode"
+            "GUI did not observe the intermediate disable"
         );
         {
             let shared = waveform.shared.read();
@@ -2502,10 +2502,10 @@ mod tests {
     fn scan_registered_while_suspended_stays_cancelled_after_resume() {
         for decoder_cancelled in [false, true] {
             let mut waveform = preview(frame(vec![Some(0.25), None]));
-            waveform.shared.write().set_still_mode(true);
+            waveform.shared.write().set_visualization_enabled(false);
             let (request, cancelled) = waveform.start_full(DecoderHint::Auto);
             assert!(cancelled.load(Ordering::Relaxed));
-            waveform.shared.write().set_still_mode(false);
+            waveform.shared.write().set_visualization_enabled(true);
             let revision = waveform.shared.read().revision;
             let result = if decoder_cancelled {
                 Err(anyhow::anyhow!("Waveform loading cancelled"))

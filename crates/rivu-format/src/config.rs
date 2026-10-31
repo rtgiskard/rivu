@@ -186,6 +186,8 @@ pub struct AudioVisualizerOptions {
     pub style: AudioVisualizerStyle,
     pub grid: bool,
     pub label: bool,
+    #[serde(default)]
+    pub oscilloscope_shared_grid: bool,
 }
 
 impl From<&Config> for AudioVisualizerOptions {
@@ -194,6 +196,7 @@ impl From<&Config> for AudioVisualizerOptions {
             style: config.audio_visualizer_style,
             grid: config.audio_visualizer_grid,
             label: config.audio_visualizer_labels,
+            oscilloscope_shared_grid: config.oscilloscope_shared_grid,
         }
     }
 }
@@ -409,8 +412,8 @@ macro_rules! config_fields {
         pub layout_snap_enabled: bool,
         /// Layout snap grid spacing in logical pixels before interface scaling.
         pub layout_snap_grid_px: u32,
-        /// Stop audio visualizations and their analysis without changing playback.
-        pub still_mode: bool,
+        /// Enable audio visualizations and their analysis without changing playback.
+        pub visualization_enabled: bool,
         pub visualization_signal: VisualizationSignal,
         pub analysis_fps: u32,
         /// Animation request cap (0 follows display callbacks), at most 240 FPS.
@@ -473,6 +476,7 @@ macro_rules! config_fields {
         pub waveform_peak_gamma: f32,
         pub oscilloscope_time_span_ms: f32,
         pub oscilloscope_gain: f32,
+        pub oscilloscope_shared_grid: bool,
         pub album_artwork_style: AlbumArtworkStyle,
         pub album_artwork_mode: AlbumArtworkMode,
         /// Positive finite seconds per full rotation, used for new artwork panels.
@@ -533,7 +537,7 @@ impl Default for Config {
             ui_scale: 1.0,
             layout_snap_enabled: true,
             layout_snap_grid_px: 16,
-            still_mode: false,
+            visualization_enabled: true,
             visualization_signal: VisualizationSignal::After,
             analysis_fps: 20,
             visualization_fps: 0,
@@ -582,8 +586,9 @@ impl Default for Config {
             waveform_rms_gain: 0.94,
             waveform_peak_gain: 1.0,
             waveform_peak_gamma: 2.0,
-            oscilloscope_time_span_ms: 10.0,
+            oscilloscope_time_span_ms: 20.0,
             oscilloscope_gain: 1.0,
+            oscilloscope_shared_grid: false,
             album_artwork_style: AlbumArtworkStyle::Halo,
             album_artwork_mode: AlbumArtworkMode::Rotating,
             album_artwork_period_seconds: 20.0,

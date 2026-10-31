@@ -319,8 +319,8 @@ pub struct AnalysisControl {
     // Overflow invalidates the queued prefix before a later gap-marked tap arrives.
     pub(crate) tap_overflow: AtomicBool,
     worker_thread: OnceLock<thread::Thread>,
-    // Low bit is Still Mode; upper bits preserve quick destructive transitions.
-    still_mode: AtomicU64,
+    // Low bit enables visualization; upper bits preserve quick destructive transitions.
+    visualization_enabled: AtomicU64,
 }
 
 impl AnalysisControl {
@@ -364,7 +364,7 @@ impl AnalysisControl {
             frame_requested: AtomicBool::new(false),
             tap_overflow: AtomicBool::new(false),
             worker_thread: OnceLock::new(),
-            still_mode: AtomicU64::new(0),
+            visualization_enabled: AtomicU64::new(1),
         }
     }
 
@@ -394,7 +394,7 @@ impl AnalysisControl {
     pub(crate) fn accepts_audio_for(&self, demand_token: u64) -> bool {
         self.playback_active.load(Ordering::Acquire)
             && DisplayDemand::from_bits(demand_token).enabled
-            && self.still_mode.load(Ordering::Acquire) & 1 == 0
+            && self.visualization_enabled.load(Ordering::Acquire) & 1 != 0
     }
 
     pub fn set_display_demand(&self, demand: DisplayDemand) {
@@ -609,8 +609,8 @@ impl AnalysisWorker {
         }
     }
 
-    pub fn set_still_mode(&self, enabled: bool) {
-        let current = self.control.still_mode.load(Ordering::Acquire);
+    pub fn set_visualization_enabled(&self, enabled: bool) {
+        let current = self.control.visualization_enabled.load(Ordering::Acquire);
         if (current & 1 != 0) == enabled {
             return;
         }
@@ -619,7 +619,7 @@ impl AnalysisWorker {
         self.control.epoch.fetch_add(1, Ordering::AcqRel);
         self.control.continuity.fetch_add(1, Ordering::AcqRel);
         self.control.frame_requested.store(false, Ordering::Release);
-        self.control.still_mode.store(
+        self.control.visualization_enabled.store(
             (current & !1).wrapping_add(2) | u64::from(enabled),
             Ordering::Release,
         );
@@ -1164,11 +1164,11 @@ fn analyze(
             break;
         }
         let previous_generation = runtime.generation;
-        let current_still_token = control.still_mode.load(Ordering::Acquire);
-        let still = current_still_token & 1 != 0;
+        let current_visualization_token = control.visualization_enabled.load(Ordering::Acquire);
+        let visualization_enabled = current_visualization_token & 1 != 0;
         let current_demand_token = control.display_token();
         let display = DisplayDemand::from_bits(current_demand_token);
-        let demand = if display.enabled && !still {
+        let demand = if display.enabled && visualization_enabled {
             display.visualizer
         } else {
             VisualizerDemand::default()
@@ -1214,7 +1214,7 @@ fn analyze(
         if active && let Some(analyzer) = &mut runtime.analyzer {
             analyzer.set_visualizer_demand(demand);
         }
-        if still {
+        if !visualization_enabled {
             consumer.clear();
         }
         if !active {
@@ -1263,7 +1263,8 @@ fn analyze(
                     && control.accepts_audio()
                     && *control.settings.read() == settings
                     && control.display_token() == current_demand_token
-                    && control.still_mode.load(Ordering::Acquire) == current_still_token
+                    && control.visualization_enabled.load(Ordering::Acquire)
+                        == current_visualization_token
                     && !control.tap_overflow.load(Ordering::Acquire)
                     && !control.shutdown.load(Ordering::Acquire);
                 if current {
@@ -1389,10 +1390,10 @@ mod tests {
         let recovered = captured.try_pop().unwrap();
         assert_eq!(recovered.samples, [1.5, 2.0]);
         assert!(recovered.gap);
-        worker.set_still_mode(true);
+        worker.set_visualization_enabled(false);
         producer.push(&[99.0; 3], &weights);
         assert!(captured.try_pop().is_none());
-        worker.set_still_mode(false);
+        worker.set_visualization_enabled(true);
         producer.push(&[0.5, 1.0, 2.0], &weights);
         assert!(!captured.try_pop().unwrap().gap);
         worker.control.set_display_enabled(false);
@@ -1621,7 +1622,13 @@ mod tests {
 
     #[test]
     fn worker_pcm_control_transitions_invalidate_and_require_a_current_complete_window() {
-        for transition in ["hide", "pause", "still", "reset", "settings"] {
+        for transition in [
+            "hide",
+            "pause",
+            "visualization_disabled",
+            "reset",
+            "settings",
+        ] {
             let shared = Arc::new(RwLock::new(AnalysisFrame::default()));
             let worker = AnalysisWorker::new(shared.clone()).unwrap();
             let settings = AnalysisSettings {
@@ -1656,11 +1663,11 @@ mod tests {
                     assert!(shared.read().visualizer.pcm.is_empty());
                     worker.set_playback_active(true);
                 }
-                "still" => {
-                    worker.set_still_mode(true);
+                "visualization_disabled" => {
+                    worker.set_visualization_enabled(false);
                     wait_for_frame(&shared, |frame| frame.settings.is_none());
                     assert!(shared.read().visualizer.pcm.is_empty());
-                    worker.set_still_mode(false);
+                    worker.set_visualization_enabled(true);
                 }
                 "reset" => worker.reset(96_000),
                 "settings" => worker.configure(AnalysisSettings {
@@ -2664,7 +2671,7 @@ mod tests {
     #[test]
     fn unprepared_runtime_requires_audio_and_every_admission_gate() {
         let control = AnalysisControl::new();
-        assert_eq!(control.still_mode.load(Ordering::Acquire), 0);
+        assert_eq!(control.visualization_enabled.load(Ordering::Acquire), 1);
         let mut runtime = AnalysisRuntime::new(visualizer_settings(), 5120);
         runtime.demand = ALL_DEMAND;
         let ring = Arc::new(HeapRb::new(16));
@@ -2672,14 +2679,14 @@ mod tests {
         let mut consumer = HeapCons::new(ring);
         for playback in [false, true] {
             for enabled in [false, true] {
-                for still in [false, true] {
-                    if playback && enabled && !still {
+                for visualization_enabled in [false, true] {
+                    if playback && enabled && visualization_enabled {
                         continue;
                     }
                     control.playback_active.store(playback, Ordering::Release);
                     control
-                        .still_mode
-                        .store(u64::from(still), Ordering::Release);
+                        .visualization_enabled
+                        .store(u64::from(visualization_enabled), Ordering::Release);
                     control.set_display_demand(DisplayDemand {
                         enabled,
                         visualizer: ALL_DEMAND,
@@ -2709,7 +2716,7 @@ mod tests {
             }
         }
         control.playback_active.store(true, Ordering::Release);
-        control.still_mode.store(0, Ordering::Release);
+        control.visualization_enabled.store(1, Ordering::Release);
         control.set_display_enabled(true);
         let token = control.display_token();
         control.request_frame();
@@ -2791,7 +2798,7 @@ mod tests {
         });
         assert_eq!(shared.read().settings, None);
         generation = shared.read().generation;
-        worker.set_still_mode(true);
+        worker.set_visualization_enabled(false);
         wait_for_frame(&shared, |frame| frame.generation > generation);
         generation = shared.read().generation;
         worker.configure(AnalysisSettings {
@@ -2822,7 +2829,7 @@ mod tests {
     }
 
     #[test]
-    fn prepared_runtime_retains_fft_and_plot_storage_across_hide_and_still_mode() {
+    fn prepared_runtime_retains_fft_and_plot_storage_across_hide_and_visualization_disabled() {
         let control = AnalysisControl::new();
         control.playback_active.store(true, Ordering::Release);
         control.set_display_demand(DisplayDemand {
@@ -2864,14 +2871,14 @@ mod tests {
             )
         };
         let prepared_storage = storage(analyzer);
-        for still in [false, true, false, true] {
-            if still {
-                control.still_mode.fetch_add(3, Ordering::AcqRel);
+        for disable_visualization in [false, true, false, true] {
+            if disable_visualization {
+                control.visualization_enabled.fetch_add(1, Ordering::AcqRel);
             } else {
                 control.set_display_enabled(false);
             }
             control.epoch.fetch_add(2, Ordering::AcqRel);
-            if still {
+            if disable_visualization {
                 runtime.reset();
             } else {
                 runtime.clear_window();
@@ -2916,8 +2923,8 @@ mod tests {
             runtime.settings = visualizer_settings();
             runtime.sample_rate = 5120;
             runtime.demand = ALL_DEMAND;
-            if still {
-                control.still_mode.fetch_add(1, Ordering::AcqRel);
+            if disable_visualization {
+                control.visualization_enabled.fetch_add(3, Ordering::AcqRel);
             } else {
                 control.set_display_enabled(true);
             }
@@ -3459,7 +3466,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_still_mode_drops_results_and_resumes_only_current_epoch_audio() {
+    fn explicitly_disabling_visualization_drops_results_and_resumes_only_current_epoch_audio() {
         let shared = Arc::new(RwLock::new(AnalysisFrame::default()));
         let worker = AnalysisWorker::new(shared.clone()).unwrap();
         let settings = AnalysisSettings {
@@ -3485,12 +3492,12 @@ mod tests {
         worker.control.request_frame();
         wait_for_frame(&shared, |frame| frame.settings.is_some());
         let previous = shared.read().clone();
-        worker.set_still_mode(true);
+        worker.set_visualization_enabled(false);
         wait_for_frame(&shared, |frame| frame.sequence > previous.sequence);
         let suspended_sequence = shared.read().sequence;
         // Repeated commands and configuration changes must not republish old data.
         for fft_size in [32768, 8192, 1024, 512] {
-            worker.set_still_mode(true);
+            worker.set_visualization_enabled(false);
             worker.configure(AnalysisSettings {
                 fft_size,
                 ..settings
@@ -3511,7 +3518,7 @@ mod tests {
                 visualizer: ALL_DEMAND,
             });
         }
-        worker.set_still_mode(false);
+        worker.set_visualization_enabled(true);
         wait_for_frame(&shared, |frame| {
             frame.audio_epoch == worker.control.epoch.load(Ordering::Acquire)
                 && frame.sequence > suspended_sequence
@@ -3567,8 +3574,8 @@ mod tests {
         assert_eq!(frame.visualizer.band_rms, [0.0; 3]);
         let published = frame.sequence;
         drop(frame);
-        worker.set_still_mode(true);
-        worker.set_still_mode(false);
+        worker.set_visualization_enabled(false);
+        worker.set_visualization_enabled(true);
         wait_for_frame(&shared, |frame| {
             frame.sequence > published && frame.settings.is_none()
         });

@@ -10,12 +10,14 @@ use rivu_ui::{
 pub(super) enum WorkbenchMenu {
     Add,
     Mode,
+    Fft,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum WorkbenchChoice {
     Add(usize),
     Mode(GraphExecutionMode),
+    Fft(NodeField, &'static str),
 }
 
 pub(super) struct WorkbenchPanel {
@@ -27,7 +29,7 @@ pub(super) struct WorkbenchPanel {
     zoom_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     zoom_drag: Option<WindowGeometry>,
     connections: bool,
-    menu_bounds: Rc<Cell<[Option<Bounds<Pixels>>; 2]>>,
+    menu_bounds: Rc<Cell<[Option<Bounds<Pixels>>; 3]>>,
     pub(super) canvas_focus: Option<FocusHandle>,
 }
 
@@ -42,7 +44,7 @@ impl Default for WorkbenchPanel {
             connections: false,
             zoom_bounds: Rc::new(Cell::new(None)),
             zoom_drag: None,
-            menu_bounds: Rc::new(Cell::new([None; 2])),
+            menu_bounds: Rc::new(Cell::new([None; 3])),
             canvas_focus: None,
         }
     }
@@ -652,7 +654,7 @@ impl AudioProcessing {
         }
     }
 
-    fn workbench_dropdown(
+    pub(super) fn workbench_dropdown(
         &mut self,
         panel: u64,
         menu: WorkbenchMenu,
@@ -664,6 +666,7 @@ impl AudioProcessing {
         let hint = self.tr(match menu {
             WorkbenchMenu::Add => "processing-workspace-add-node",
             WorkbenchMenu::Mode => "processing-workspace-mode",
+            WorkbenchMenu::Fft => "processing-fft",
         });
         let measured = Rc::clone(
             &self
@@ -740,49 +743,77 @@ impl AudioProcessing {
                     return;
                 };
                 this.graph_editor.workbench_anchor.set(Some(anchor));
-                let (items, selected) = match menu {
-                    WorkbenchMenu::Add => (
-                        [
-                            "processing-equalizer",
-                            "processing-restoration",
-                            "processing-speech",
-                            "processing-separation",
-                            "processing-mix",
-                            "processing-graph-output",
-                        ]
-                        .into_iter()
-                        .enumerate()
-                        .map(|(index, label)| {
-                            ChoiceItem::new(WorkbenchChoice::Add(index), this.tr(label))
-                        })
-                        .collect::<Vec<_>>(),
-                        0,
-                    ),
-                    WorkbenchMenu::Mode => {
-                        let modes = [
-                            GraphExecutionMode::Auto,
-                            GraphExecutionMode::Realtime,
-                            GraphExecutionMode::Hybrid,
-                            GraphExecutionMode::Offline,
-                        ];
-                        let selected = modes
-                            .iter()
-                            .position(|mode| *mode == this.graph_editor.mode)
-                            .unwrap_or(0);
-                        (
-                            modes
-                                .into_iter()
-                                .map(|mode| {
-                                    ChoiceItem::new(
-                                        WorkbenchChoice::Mode(mode),
-                                        this.tr(mode_label(mode)),
-                                    )
-                                })
-                                .collect(),
-                            selected,
-                        )
-                    }
-                };
+                let (items, selected) =
+                    match menu {
+                        WorkbenchMenu::Add => (
+                            [
+                                "processing-equalizer",
+                                "processing-restoration",
+                                "processing-speech",
+                                "processing-separation",
+                                "processing-mix",
+                                "processing-graph-output",
+                            ]
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, label)| {
+                                ChoiceItem::new(WorkbenchChoice::Add(index), this.tr(label))
+                            })
+                            .collect::<Vec<_>>(),
+                            0,
+                        ),
+                        WorkbenchMenu::Fft => {
+                            let Some(node) = this.graph_editor.selected.and_then(|id| {
+                                this.state.system.config.processing_graph.node(id).ok()
+                            }) else {
+                                return;
+                            };
+                            if !matches!(node.kind, GraphNodeKind::Denoise { .. }) {
+                                return;
+                            }
+                            let field = GraphField::Denoise(DenoiseField::FftSize);
+                            let binding = NodeField::new(node, field);
+                            let text = this.text(FieldKey::Graph(binding), cx);
+                            let choices = field.choices();
+                            let selected = choices
+                                .iter()
+                                .position(|(value, _)| *value == text)
+                                .unwrap_or(0);
+                            (
+                                choices
+                                    .iter()
+                                    .map(|&(value, _)| {
+                                        ChoiceItem::new(WorkbenchChoice::Fft(binding, value), value)
+                                    })
+                                    .collect(),
+                                selected,
+                            )
+                        }
+                        WorkbenchMenu::Mode => {
+                            let modes = [
+                                GraphExecutionMode::Auto,
+                                GraphExecutionMode::Realtime,
+                                GraphExecutionMode::Hybrid,
+                                GraphExecutionMode::Offline,
+                            ];
+                            let selected = modes
+                                .iter()
+                                .position(|mode| *mode == this.graph_editor.mode)
+                                .unwrap_or(0);
+                            (
+                                modes
+                                    .into_iter()
+                                    .map(|mode| {
+                                        ChoiceItem::new(
+                                            WorkbenchChoice::Mode(mode),
+                                            this.tr(mode_label(mode)),
+                                        )
+                                    })
+                                    .collect(),
+                                selected,
+                            )
+                        }
+                    };
                 this.graph_editor.workbench_menu = Some((panel, menu));
                 this.graph_editor.workbench_choices.open(items, selected);
             }
@@ -836,6 +867,19 @@ impl AudioProcessing {
                 self.graph_add(panel, kind, cx);
             }
             WorkbenchChoice::Mode(mode) => self.graph_editor.mode = mode,
+            WorkbenchChoice::Fft(binding, value) => {
+                if self.graph_editor.selected == Some(binding.node)
+                    && self
+                        .state
+                        .system
+                        .config
+                        .processing_graph
+                        .node(binding.node)
+                        .is_ok_and(|node| binding.matches(node))
+                {
+                    self.stage_graph_text(FieldKey::Graph(binding), value.to_owned(), cx);
+                }
+            }
         }
         cx.notify();
     }

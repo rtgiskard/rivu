@@ -1442,6 +1442,7 @@ mod tests {
                 style,
                 grid: false,
                 label: false,
+                oscilloscope_shared_grid: false,
             }]);
             let data = coordinator.radial.data.borrow();
             assert!(!data.visible);
@@ -1456,6 +1457,7 @@ mod tests {
             style: AudioVisualizerStyle::BarsRings,
             grid: false,
             label: false,
+            oscilloscope_shared_grid: false,
         }]);
         assert_eq!(coordinator.radial.data.borrow().targets, targets);
         assert_eq!(

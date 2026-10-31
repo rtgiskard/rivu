@@ -196,6 +196,7 @@ fn presentation_hiding_retains_pending_and_completed_full_previews(cx: &mut gpui
             style: crate::config::AudioVisualizerStyle::Waveform,
             grid: true,
             label: true,
+            oscilloscope_shared_grid: false,
         },
     );
     let mut panels = crate::gui::workspace::WorkspacePanels::default();
@@ -262,9 +263,11 @@ fn presentation_hiding_retains_pending_and_completed_full_previews(cx: &mut gpui
                 });
             }
         }
-        let mut still = config.as_ref().clone();
-        still.still_mode = true;
-        owner.update(cx, |owner, cx| sync(owner, Arc::new(still), true, true, cx));
+        let mut disabled = config.as_ref().clone();
+        disabled.visualization_enabled = false;
+        owner.update(cx, |owner, cx| {
+            sync(owner, Arc::new(disabled), true, true, cx)
+        });
         assert!(waveform.read(cx).test_full_peaks().is_none());
         assert!(!waveform.read(cx).test_pending_full());
     });
@@ -284,7 +287,7 @@ fn full_query_identity_distinguishes_content_but_preserves_metadata_edits() {
         let mut replaced = original.clone();
         replaced.fingerprint = after.map(str::to_owned);
         assert!(!query.accepts(generation, Some(&replaced)));
-        query.retain_target(Some(&replaced), false);
+        query.retain_target(Some(&replaced), true);
         assert!(!query.accepts(generation, Some(&original)));
     }
     let mut original = track("track.flac", DecoderHint::Auto);
@@ -296,7 +299,7 @@ fn full_query_identity_distinguishes_content_but_preserves_metadata_edits() {
     edited.favorite = true;
     edited.play_count += 1;
     edited.decoder_hint = DecoderHint::Ffmpeg;
-    query.retain_target(Some(&edited), false);
+    query.retain_target(Some(&edited), true);
     assert!(query.accepts(generation, Some(&edited)));
     query.saved_hint_changed(&edited);
     assert!(!query.accepts(generation, Some(&original)));

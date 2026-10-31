@@ -160,21 +160,57 @@ impl OscilloscopeRenderer {
                         }
                         window.paint_quad(gpui::fill(bounds, rgb(data.background)));
                         if options.grid {
-                            for y in [0.05, 0.25, 0.45, 0.55, 0.75, 0.95] {
-                                window.paint_quad(gpui::fill(
-                                    gpui::Bounds::new(
-                                        point(bounds.left(), bounds.top() + bounds.size.height * y),
-                                        gpui::size(bounds.size.width, px(1.0)),
-                                    ),
-                                    rgb(0x414956).alpha(0.5),
-                                ));
+                            for channel in 0..if options.oscilloscope_shared_grid {
+                                1
+                            } else {
+                                2
+                            } {
+                                let (center, amplitude) =
+                                    channel_axis(options.oscilloscope_shared_grid, channel);
+                                for division in 1..10 {
+                                    let mut guide = gpui::outline(
+                                        gpui::Bounds::new(
+                                            point(
+                                                bounds.left()
+                                                    + bounds.size.width * (division as f32 / 10.0),
+                                                bounds.top()
+                                                    + bounds.size.height * (center - amplitude),
+                                            ),
+                                            gpui::size(
+                                                px(2.0),
+                                                bounds.size.height * (2.0 * amplitude),
+                                            ),
+                                        ),
+                                        rgb(0x414956).alpha(0.5),
+                                        gpui::BorderStyle::Dashed,
+                                    );
+                                    guide.border_widths = gpui::Edges {
+                                        left: px(1.0),
+                                        ..Default::default()
+                                    };
+                                    window.paint_quad(guide);
+                                }
+                                for level in [-1.0, 0.0, 1.0] {
+                                    let y = center + level * amplitude;
+                                    window.paint_quad(gpui::fill(
+                                        gpui::Bounds::new(
+                                            point(
+                                                bounds.left(),
+                                                bounds.top() + bounds.size.height * y,
+                                            ),
+                                            gpui::size(bounds.size.width, px(1.0)),
+                                        ),
+                                        rgb(0x414956).alpha(0.5),
+                                    ));
+                                }
                             }
                         }
                         // Every sample belongs to one physical-pixel bucket. Extrema
                         // survive even in a one-pixel panel; geometry never follows
                         // the FFT size when the panel is narrower than the sweep.
                         for channel in 0..2 {
-                            let center = if channel == 0 { 0.25 } else { 0.75 };
+                            let (center, amplitude) =
+                                channel_axis(options.oscilloscope_shared_grid, channel);
                             let mut path = PathBuilder::stroke(px(1.2));
                             let mut connected = false;
                             let mut has_points = false;
@@ -190,7 +226,8 @@ impl OscilloscopeRenderer {
                                     let value = display_amplitude(value, data.gain);
                                     let p = point(
                                         x,
-                                        bounds.top() + bounds.size.height * (center - value * 0.2),
+                                        bounds.top()
+                                            + bounds.size.height * (center - value * amplitude),
                                     );
                                     if connected {
                                         path.line_to(p);
@@ -234,6 +271,14 @@ impl OscilloscopeRenderer {
                 .size_full(),
             )
             .into_any_element()
+    }
+}
+
+fn channel_axis(overlay: bool, channel: usize) -> (f32, f32) {
+    if overlay {
+        (0.5, 0.4)
+    } else {
+        (if channel == 0 { 0.25 } else { 0.75 }, 0.2)
     }
 }
 

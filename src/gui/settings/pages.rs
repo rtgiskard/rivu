@@ -22,7 +22,7 @@ use rivu_ui::{
 };
 
 impl Settings {
-    pub(super) fn artwork_cache_label(
+    pub(super) fn info_label(
         &self,
         colors: &'static rivu_ui::theme::Palette,
         label: SharedString,
@@ -49,7 +49,7 @@ impl Settings {
                 .w_full()
                 .flex_shrink_0()
                 .gap_1()
-                .child(self.artwork_cache_label(
+                .child(self.info_label(
                     colors,
                     self.tr("settings-expire-files-older-than-days"),
                     "settings-artwork-disk-help",
@@ -103,8 +103,7 @@ impl Settings {
         );
         content = column()
             .gap_2()
-            .child(self.single(Field::ArtworkFileLimit, cx))
-            .child(self.single(Field::ArtworkDecodeBudget, cx))
+            .child(self.pair(Field::ArtworkFileLimit, Field::ArtworkDecodeBudget, cx))
             .child(content);
         if let Some((days, clean)) = self.artwork_cache_busy {
             content = content.child(status_message(
@@ -885,7 +884,6 @@ impl Settings {
 
     fn visualizer_display_settings(&self, cx: &mut Context<Self>) -> Div {
         let draft = &self.model.draft;
-        let instance = matches!(self.model.target(), Target::Visualizer(_));
         let style = dropdown_button(
             "audio-visualizer-style",
             self.tr("settings-style"),
@@ -914,14 +912,22 @@ impl Settings {
         .child(self.measurement(Measured::AudioVisualizerStyle, cx));
         settings_card(
             palette(cx),
-            self.tr(if instance {
-                "settings-this-instance"
-            } else {
-                "settings-new-instance-defaults"
-            }),
+            self.info_label(
+                palette(cx),
+                self.tr("settings-new-instance-defaults"),
+                "settings-visualizer-defaults-help",
+            ),
             column()
                 .gap_2()
-                .child(FormField::new(palette(cx), self.tr("settings-style"), style).into_div())
+                .child(
+                    row().child(
+                        FormField::new(palette(cx), self.tr("settings-style"), style)
+                            .into_div()
+                            .w(gpui::relative(0.5))
+                            .min_w(rems(180. / 16.))
+                            .pr_2(),
+                    ),
+                )
                 .child(
                     row()
                         .flex_wrap()
@@ -954,12 +960,7 @@ impl Settings {
                             cx,
                             |draft| draft.audio_visualizer_labels = !draft.audio_visualizer_labels,
                         )),
-                )
-                .child(div().text_sm().child(self.tr(if instance {
-                    "settings-visualizer-instance-help"
-                } else {
-                    "settings-visualizer-defaults-help"
-                }))),
+                ),
         )
     }
 
@@ -993,19 +994,9 @@ impl Settings {
     pub(super) fn visual_settings(&mut self, cx: &mut Context<Settings>) -> Div {
         let settings = &*self;
         let draft = &settings.model.draft;
-        if matches!(settings.model.target(), Target::Visualizer(_)) {
-            return column()
-                .gap_3()
-                .child(
-                    div()
-                        .text_sm()
-                        .child(settings.tr(settings.visual_page.label_id())),
-                )
-                .child(settings.visualizer_display_settings(cx));
-        }
         let scope = div()
             .text_sm()
-            .child(settings.tr("settings-visualizer-global-help"));
+            .child(settings.tr(settings.visual_page.label_id()));
         let content = match settings.visual_page {
             VisualPage::Common => {
                 let palette_control = dropdown_button(
@@ -1145,17 +1136,39 @@ impl Settings {
                                 .min_w(rems(180. / 16.)),
                             ))
                             .id("settings-appearance-help")
-                            .tooltip(text_tooltip(settings.tr("settings-appearance-help"))),
-                    ))
-                    .child(settings_card(
-                        palette(cx),
-                        settings.tr("settings-display-range"),
-                        settings.single(Field::VisualizationDb, cx),
-                    ))
-                    .child(settings_card(
-                        palette(cx),
-                        settings.tr("settings-animation"),
-                        settings.single(Field::VisualizationFps, cx),
+                            .tooltip(text_tooltip(settings.tr("settings-appearance-help")))
+                            .child(settings.pair(
+                                Field::VisualizationDb,
+                                Field::VisualizationFps,
+                                cx,
+                            ))
+                            .child(
+                                row().child(
+                                    FormField::new(
+                                        palette(cx),
+                                        settings.tr("settings-visualization-signal"),
+                                        signal,
+                                    )
+                                    .into_div()
+                                    .w(gpui::relative(0.5))
+                                    .min_w(rems(180. / 16.))
+                                    .pr_2()
+                                    .id("settings-visualization-signal-help")
+                                    .tooltip(text_tooltip(
+                                        settings.tr("settings-visualization-signal-hint"),
+                                    )),
+                                ),
+                            )
+                            .child(settings.single(Field::GpuMaterialBudget, cx))
+                            .child(row().child(visual_switch(
+                                &self.i18n,
+                                "settings-visualization-disabled",
+                                "",
+                                settings.tr("settings-visualization-disabled"),
+                                !draft.visualization_enabled,
+                                cx,
+                                |draft| draft.visualization_enabled = !draft.visualization_enabled,
+                            ))),
                     ))
                     .child(settings_card(
                         palette(cx),
@@ -1181,27 +1194,6 @@ impl Settings {
                             .child(settings.single(Field::Fps, cx))
                             .id("settings-analysis-help")
                             .tooltip(text_tooltip(settings.tr("settings-analysis-help"))),
-                    ))
-                    .child(settings_card(
-                        palette(cx),
-                        settings.tr("settings-processing"),
-                        column().gap_2().child(
-                            row().child(
-                                FormField::new(
-                                    palette(cx),
-                                    settings.tr("settings-visualization-signal"),
-                                    signal,
-                                )
-                                .into_div()
-                                .w(gpui::relative(0.5))
-                                .min_w(rems(180. / 16.))
-                                .pr_2()
-                                .id("settings-visualization-signal-help")
-                                .tooltip(text_tooltip(
-                                    settings.tr("settings-visualization-signal-hint"),
-                                )),
-                            ),
-                        ),
                     ))
             }
             VisualPage::Spectrum => {
@@ -1399,26 +1391,35 @@ impl Settings {
                 .gap_3()
                 .child(settings_card(
                     palette(cx),
+                    settings.info_label(
+                        palette(cx),
+                        settings.tr("settings-new-instance-defaults"),
+                        "settings-oscilloscope-defaults-help",
+                    ),
+                    row()
+                        .child(visual_switch(
+                            &settings.i18n,
+                            "oscilloscope-shared-grid",
+                            "",
+                            settings.tr("settings-oscilloscope-shared-axes"),
+                            draft.oscilloscope_shared_grid,
+                            cx,
+                            |draft| {
+                                draft.oscilloscope_shared_grid = !draft.oscilloscope_shared_grid
+                            },
+                        ))
+                        .child(
+                            div()
+                                .text_sm()
+                                .child(settings.tr("settings-oscilloscope-shared-axes")),
+                        ),
+                ))
+                .child(settings_card(
+                    palette(cx),
                     settings.tr("settings-display"),
                     settings.pair(Field::OscilloscopeTimeSpan, Field::OscilloscopeGain, cx),
                 ))
                 .child(settings.visualizer_color_settings(cx)),
-            VisualPage::Other => settings_card(
-                palette(cx),
-                settings.tr("settings-processing"),
-                column()
-                    .gap_2()
-                    .child(settings.single(Field::GpuMaterialBudget, cx))
-                    .child(row().child(visual_switch(
-                        &self.i18n,
-                        "settings-still-mode",
-                        "",
-                        settings.tr("settings-still-mode"),
-                        draft.still_mode,
-                        cx,
-                        |draft| draft.still_mode = !draft.still_mode,
-                    ))),
-            ),
             VisualPage::Waveform => column()
                 .gap_3()
                 .child(settings_card(

@@ -293,10 +293,17 @@ impl Core {
                     let previous = config.equalizer_ab.take().unwrap_or_default();
                     config.equalizer_ab = Some(std::mem::replace(&mut config.equalizer, previous));
                 }
-                SavePreset { name } => {
-                    if let Some(preset) =
-                        config.equalizer_presets.iter_mut().find(|p| p.name == name)
-                    {
+                SavePreset { name, overwrite } => {
+                    let existing = config.equalizer_presets.iter_mut().find(|p| p.name == name);
+                    ensure!(
+                        existing.is_some() == overwrite,
+                        if overwrite {
+                            "Unknown equalizer preset"
+                        } else {
+                            "Equalizer preset already exists"
+                        }
+                    );
+                    if let Some(preset) = existing {
                         preset.config = config.equalizer.clone();
                     } else {
                         config
@@ -323,7 +330,20 @@ impl Core {
                     );
                     config.equalizer_presets.retain(|p| p.name != name);
                 }
-                ImportPreset { path, name } => {
+                ImportPreset {
+                    path,
+                    name,
+                    overwrite,
+                } => {
+                    let existing = config.equalizer_presets.iter_mut().find(|p| p.name == name);
+                    ensure!(
+                        existing.is_some() == overwrite,
+                        if overwrite {
+                            "Unknown equalizer preset"
+                        } else {
+                            "Equalizer preset already exists"
+                        }
+                    );
                     use std::io::Read;
                     let file = rivu_format::regular_file::open_regular_file(&path)?;
                     ensure!(file.metadata()?.len() <= 65536, "Preset exceeds 64 KiB");
@@ -333,9 +353,7 @@ impl Core {
                     let value: rivu_dsp::equalizer::config::EqualizerConfig =
                         serde_json::from_slice(&bytes)?;
                     value.validate()?;
-                    if let Some(preset) =
-                        config.equalizer_presets.iter_mut().find(|p| p.name == name)
-                    {
+                    if let Some(preset) = existing {
                         preset.config = value;
                     } else {
                         config

@@ -567,33 +567,6 @@ impl WindowView {
                     this.shell.dismiss(shell::Surface::PanelCatalog);
                     this.duplicates.update(cx, |owner, cx| owner.open(cx));
                 }
-                settings::SettingsEvent::ApplyVisualizer {
-                    panel_id,
-                    options,
-                    session,
-                } => {
-                    if this
-                        .workspace
-                        .layouts
-                        .current_mut()
-                        .set_audio_visualizer_options(*panel_id, *options)
-                    {
-                        this.workspace.publish_panel_options();
-                        settings.update(cx, |settings, cx| {
-                            settings.complete_panel_apply(*session, Ok(()), cx)
-                        });
-                    } else {
-                        settings.update(cx, |settings, cx| {
-                            settings.complete_panel_apply(
-                                *session,
-                                Err(this.i18n.text("shell-visualizer-gone").to_owned()),
-                                cx,
-                            )
-                        });
-                    }
-                    this.sync_analysis(cx);
-                    cx.notify();
-                }
                 settings::SettingsEvent::ApplyArtwork {
                     panel_id,
                     options,
@@ -643,7 +616,7 @@ impl WindowView {
                     if !waveform.read(cx).accepts_seek_event(*generation) {
                         return;
                     }
-                    if this.state.system.config.still_mode
+                    if !this.state.system.config.visualization_enabled
                         || !this.state.system.config.waveform_seek_enabled
                     {
                         return;
@@ -668,7 +641,7 @@ impl WindowView {
                         .workspace
                         .interaction
                         .finish_waveform(*seconds, *generation)
-                        && !this.state.system.config.still_mode
+                        && this.state.system.config.visualization_enabled
                         && this.state.system.config.waveform_seek_enabled
                     {
                         this.send(
@@ -1009,8 +982,8 @@ impl WindowView {
         }
         let waveform_seek_disabled = self.state.system.config.waveform_seek_enabled
             && !state.system.config.waveform_seek_enabled;
-        let still_mode_changed =
-            self.state.system.config.still_mode != state.system.config.still_mode;
+        let visualization_enabled_changed = self.state.system.config.visualization_enabled
+            != state.system.config.visualization_enabled;
         let font_changed = self.state.system.config.ui_font != state.system.config.ui_font;
         let font_size_changed =
             self.state.system.config.ui_font_size != state.system.config.ui_font_size;
@@ -1043,7 +1016,7 @@ impl WindowView {
             }
             cx.notify();
         }
-        if still_mode_changed || waveform_seek_disabled {
+        if visualization_enabled_changed || waveform_seek_disabled {
             let cancellation = self.workspace.interaction.cancel();
             self.apply_interaction_cancellation(cancellation, cx);
         }
@@ -1173,7 +1146,7 @@ impl WindowView {
             self.state
                 .current_track()
                 .or(self.metadata.read(cx).track()),
-            self.state.system.config.still_mode,
+            self.state.system.config.visualization_enabled,
         );
     }
 
@@ -1216,17 +1189,21 @@ impl WindowView {
             );
         });
     }
-    pub(super) fn load_full_waveform(&mut self, cx: &mut Context<Self>) {
-        self.refresh(cx);
-        if self.state.system.config.still_mode {
-            return;
-        }
-        let Some(track) = self
-            .state
+    pub(super) fn full_waveform_target<'a>(
+        &'a self,
+        cx: &'a App,
+    ) -> Option<&'a rivu_protocol::model::Track> {
+        self.state
             .current_track()
             .or(self.metadata.read(cx).track())
-            .cloned()
-        else {
+    }
+
+    pub(super) fn load_full_waveform(&mut self, cx: &mut Context<Self>) {
+        self.refresh(cx);
+        if !self.state.system.config.visualization_enabled {
+            return;
+        }
+        let Some(track) = self.full_waveform_target(cx).cloned() else {
             return;
         };
         self.full_waveform_request.begin(&track);

@@ -13,8 +13,8 @@ use crate::{
     artwork::{ArtworkCacheReport, ArtworkManager},
     config::{
         AlbumArtworkDirection, AlbumArtworkMode, AlbumArtworkOptions, AlbumArtworkStyle,
-        AnalysisWindow, AudioVisualizerOptions, AudioVisualizerStyle, Config, ConfigPatch,
-        LogLevel, RgbColor, SpectrumStyle, VisualizationPalette, VisualizationSignal,
+        AnalysisWindow, AudioVisualizerStyle, Config, ConfigPatch, LogLevel, RgbColor,
+        SpectrumStyle, VisualizationPalette, VisualizationSignal,
     },
     core::CoreHandle,
     i18n::Localizer,
@@ -341,7 +341,7 @@ impl Field {
                 .w_full()
                 .flex_shrink_0()
                 .gap_1()
-                .child(settings.artwork_cache_label(
+                .child(settings.info_label(
                     theme,
                     settings.tr(self.label_id()),
                     "settings-artwork-memory-help",
@@ -386,9 +386,10 @@ fn visual_switch(
     let label = label.into();
     let hint = match id {
         "settings-tray" => i18n.text("settings-restart-hint"),
-        "settings-still-mode" => i18n.text("settings-still-mode-hint"),
+        "settings-visualization-disabled" => i18n.text("settings-visualization-disabled-hint"),
         "audio-visualizer-fade-idle" => i18n.text("settings-visualizer-fade-hint"),
         "audio-visualizer-grid" => i18n.text("settings-visualizer-guides-hint"),
+        "oscilloscope-shared-grid" => i18n.text("settings-oscilloscope-shared-axes-hint"),
         _ => "",
     };
     let label: SharedString = if hint.is_empty() {
@@ -413,7 +414,7 @@ fn visual_switch(
 
 fn settings_group(
     theme: &'static Palette,
-    title: impl Into<SharedString>,
+    title: impl IntoElement,
     content: impl IntoElement,
 ) -> Div {
     section_group(theme, title, content)
@@ -421,7 +422,7 @@ fn settings_group(
 
 fn settings_card(
     theme: &'static Palette,
-    title: impl Into<SharedString>,
+    title: impl IntoElement,
     content: impl IntoElement,
 ) -> Div {
     settings_group(theme, title, content)
@@ -488,11 +489,10 @@ enum VisualPage {
     SpatialSpectrum,
     Fractal,
     Oscilloscope,
-    Other,
 }
 
 impl VisualPage {
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 9] = [
         Self::Common,
         Self::Waveform,
         Self::Spectrum,
@@ -502,23 +502,7 @@ impl VisualPage {
         Self::SpatialSpectrum,
         Self::Fractal,
         Self::Oscilloscope,
-        Self::Other,
     ];
-
-    fn for_style(style: AudioVisualizerStyle) -> Self {
-        match style {
-            AudioVisualizerStyle::Waveform => Self::Waveform,
-            AudioVisualizerStyle::Spectrum => Self::Spectrum,
-            AudioVisualizerStyle::Spectrogram => Self::Spectrogram,
-            AudioVisualizerStyle::Bars
-            | AudioVisualizerStyle::Rings
-            | AudioVisualizerStyle::BarsRings => Self::BarsRings,
-            AudioVisualizerStyle::StereoDensity => Self::StereoDensity,
-            AudioVisualizerStyle::SpatialSpectrum => Self::SpatialSpectrum,
-            AudioVisualizerStyle::FractalBeams | AudioVisualizerStyle::FractalFlow => Self::Fractal,
-            AudioVisualizerStyle::Oscilloscope => Self::Oscilloscope,
-        }
-    }
 
     fn label_id(self) -> &'static str {
         match self {
@@ -531,7 +515,6 @@ impl VisualPage {
             Self::SpatialSpectrum => "settings-spatial-spectrum",
             Self::Fractal => "settings-fractal-family",
             Self::Oscilloscope => "settings-oscilloscope",
-            Self::Other => "settings-other",
         }
     }
 
@@ -546,7 +529,6 @@ impl VisualPage {
             Self::SpatialSpectrum => "settings-spatial-spectrum-scroll",
             Self::Fractal => "settings-fractal-scroll",
             Self::Oscilloscope => "settings-oscilloscope-scroll",
-            Self::Other => "settings-other-scroll",
         }
     }
 }
@@ -583,11 +565,6 @@ enum Measured {
 pub(super) enum SettingsEvent {
     Closed,
     ReviewDuplicates,
-    ApplyVisualizer {
-        panel_id: u64,
-        options: AudioVisualizerOptions,
-        session: u64,
-    },
     ApplyArtwork {
         panel_id: u64,
         options: AlbumArtworkOptions,
@@ -772,6 +749,9 @@ impl Settings {
     }
 
     fn cancel(&mut self, cx: &mut Context<Self>) {
+        if self.model.applying() {
+            return;
+        }
         self.active = false;
         self.root_stats.cancel();
         self.dropdown.close();
@@ -1829,20 +1809,6 @@ impl Settings {
         cx.notify();
     }
 
-    pub(super) fn open_visualizer(
-        &mut self,
-        panel_id: u64,
-        options: AudioVisualizerOptions,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.model
-            .reset_visualizer(&self.handle.config_snapshot(), panel_id, options);
-        self.page = SettingsPage::Visualizations;
-        self.visual_page = VisualPage::for_style(options.style);
-        self.show_session(window, cx);
-    }
-
     pub(super) fn open_artwork(
         &mut self,
         panel_id: u64,
@@ -1860,17 +1826,14 @@ impl Settings {
         if self.model.applying() {
             return;
         }
-        if self.model.target() != Target::Global {
-            let period = if matches!(self.model.target(), Target::Artwork(_)) {
-                self.float(
+        if matches!(self.model.target(), Target::Artwork(_)) {
+            let period = self
+                .float(
                     Field::AlbumArtworkPeriod,
                     self.model.draft.album_artwork_period_seconds,
                     cx,
                 )
-                .ok()
-            } else {
-                None
-            };
+                .ok();
             match self.model.begin_panel_apply(period) {
                 Some(PanelApply::Artwork {
                     panel_id,
@@ -1878,17 +1841,6 @@ impl Settings {
                     session,
                 }) => {
                     cx.emit(SettingsEvent::ApplyArtwork {
-                        panel_id,
-                        options,
-                        session,
-                    });
-                }
-                Some(PanelApply::Visualizer {
-                    panel_id,
-                    options,
-                    session,
-                }) => {
-                    cx.emit(SettingsEvent::ApplyVisualizer {
                         panel_id,
                         options,
                         session,
@@ -2019,9 +1971,6 @@ impl Settings {
             SettingChoice::SpectrumStyle(value) => self.model.draft.spectrum_style = value,
             SettingChoice::AudioVisualizerStyle(value) => {
                 self.model.draft.audio_visualizer_style = value;
-                if matches!(self.model.target(), Target::Visualizer(_)) {
-                    self.visual_page = VisualPage::for_style(value);
-                }
             }
             SettingChoice::Palette(value) => self.model.draft.visual_palette = value,
             SettingChoice::Fft(value) => self.model.draft.analysis_fft_size = value,
@@ -2181,13 +2130,23 @@ impl Settings {
         let mut body = row().flex_1().min_h_0().items_start();
         if self.model.target() == Target::Global {
             let sidebar_scroll = self.scrolls.entry("settings-sidebar").or_default().clone();
-            body = body.child(div().w(rems(11.)).h_full().flex_shrink_0().child(
-                rivu_ui::scrollable_area(
-                    "settings-sidebar-surface",
-                    self.sidebar(cx).id("settings-sidebar").w_full().h_full(),
-                    &sidebar_scroll,
-                ),
-            ));
+            body = body.child(
+                div()
+                    .w(rems(11.))
+                    .h_full()
+                    .flex_shrink_0()
+                    .child(rivu_ui::scrollable_area(
+                        "settings-sidebar-surface",
+                        div()
+                            .id("settings-sidebar")
+                            .flex()
+                            .flex_col()
+                            .w_full()
+                            .h_full()
+                            .child(self.sidebar(cx).w_full().flex_shrink_0()),
+                        &sidebar_scroll,
+                    )),
+            );
         }
         panel = panel.child(
             body.child(rivu_ui::scrollable_area(
@@ -2262,7 +2221,8 @@ impl Settings {
                                 "settings-discard",
                                 "",
                                 self.tr("settings-discard-changes-and-close"),
-                            ),
+                            )
+                            .enabled(!self.model.applying()),
                             cx,
                             |this, _, cx| this.cancel(cx),
                         )
@@ -2455,6 +2415,39 @@ mod tests {
     }
 
     #[gpui::test]
+    fn expanded_sidebar_scrolls_and_clamps_after_collapsing(cx: &mut TestAppContext) {
+        let (_directory, _runtime, settings) = fixture(cx);
+        settings.update(cx, |this, _| this.page = SettingsPage::Visualizations);
+        let window = cx.add_window({
+            let settings = settings.clone();
+            move |_, _| SettingsWindow(settings)
+        });
+        cx.update_window(window.into(), |_, window, cx| {
+            window.set_rem_size(px(32.));
+            window.draw(cx).clear(cx);
+        })
+        .unwrap();
+        let scroll = settings.read_with(cx, |this, _| this.scrolls["settings-sidebar"].clone());
+        assert!(scroll.max_offset().y > px(0.));
+        scroll.set_offset(gpui::point(px(0.), -scroll.max_offset().y));
+        cx.update_window(window.into(), |_, window, cx| {
+            window.draw(cx).clear(cx);
+        })
+        .unwrap();
+        assert_eq!(scroll.offset().y, -scroll.max_offset().y);
+        settings.update(cx, |this, cx| {
+            this.page = SettingsPage::Library;
+            cx.notify();
+        });
+        cx.update_window(window.into(), |_, window, cx| {
+            window.draw(cx).clear(cx);
+        })
+        .unwrap();
+        assert_eq!(scroll.max_offset().y, px(0.));
+        assert_eq!(scroll.offset().y, px(0.));
+    }
+
+    #[gpui::test]
     fn dropdown_ignores_modified_keys_and_escape_closes_only_candidates(cx: &mut TestAppContext) {
         use gpui::InputEvent as _;
 
@@ -2601,58 +2594,6 @@ mod tests {
             }
             assert!(this.parse(cx).is_ok());
         });
-    }
-
-    #[gpui::test]
-    fn visualizer_apply_ignores_hidden_global_numeric_editors(cx: &mut TestAppContext) {
-        let (_directory, runtime, settings) = fixture(cx);
-        let applied = Rc::new(RefCell::new(Vec::new()));
-        let _subscription = cx.update(|cx| {
-            let applied = applied.clone();
-            cx.subscribe(&settings, move |_, event, _| {
-                if let SettingsEvent::ApplyVisualizer {
-                    panel_id, options, ..
-                } = event
-                {
-                    applied.borrow_mut().push((*panel_id, *options));
-                }
-            })
-        });
-        settings.update(cx, |this, cx| {
-            let config = runtime.handle.config_snapshot();
-            let options = AudioVisualizerOptions {
-                style: AudioVisualizerStyle::Oscilloscope,
-                grid: false,
-                label: true,
-            };
-            this.model.reset_visualizer(&config, 7, options);
-            this.fill(cx);
-            for field in [
-                Field::OscilloscopeTimeSpan,
-                Field::OscilloscopeGain,
-                Field::VisualizationFps,
-                Field::SpectrumBars,
-                Field::AlbumArtworkPeriod,
-            ] {
-                this.set_value(field, "invalid", None, cx);
-            }
-            assert!(this.parse(cx).is_err());
-            this.apply_settings(cx);
-            assert!(this.model.applying());
-            assert_eq!(AudioVisualizerOptions::from(&this.model.draft), options);
-            assert_eq!(*runtime.handle.config_snapshot(), *config);
-        });
-        assert_eq!(
-            *applied.borrow(),
-            vec![(
-                7,
-                AudioVisualizerOptions {
-                    style: AudioVisualizerStyle::Oscilloscope,
-                    grid: false,
-                    label: true,
-                },
-            )]
-        );
     }
 
     fn precise_config(base: &Config) -> Config {
@@ -3098,7 +3039,7 @@ mod tests {
                 input.update(cx, |input, cx| {
                     input.replace_text_in_range(Some(0..1), "1", window, cx);
                 });
-                this.model.draft.still_mode = true;
+                this.model.draft.visualization_enabled = false;
                 this.model.draft.ui_theme = Theme::TokyoNight;
                 this.complete_settings_apply(submission, committed, result, cx);
                 assert_eq!(this.model.baseline().scan_max_depth, 7);
@@ -3113,7 +3054,7 @@ mod tests {
                         1..1
                     );
                 });
-                assert!(this.model.draft.still_mode);
+                assert!(!this.model.draft.visualization_enabled);
                 assert!(this.parse(cx).is_err());
                 this.set_value(Field::ScanMaxDepth, "9", None, cx);
             });
@@ -3131,7 +3072,7 @@ mod tests {
             let visible = this.parse(cx).unwrap();
             assert_eq!(visible.scan_max_depth, 9);
             assert_eq!(visible.volume, 0.3);
-            assert!(visible.still_mode);
+            assert!(!visible.visualization_enabled);
             assert_eq!(visible.ui_theme, Theme::TokyoNight);
             assert_eq!(visible, *this.model.baseline());
         });
@@ -3228,14 +3169,14 @@ mod tests {
         edit_input(&settings, window, Field::Scale, "1.456789", cx);
         settings.update(cx, |this, cx| {
             this.set_value(Field::ScanMaxDepth, "9", None, cx);
-            this.model.draft.still_mode = true;
+            this.model.draft.visualization_enabled = false;
             this.complete_settings_apply(submission, committed, result, cx);
             assert_eq!(
                 this.model.baseline().scan_max_depth,
                 crate::config::DEFAULT_SCAN_MAX_DEPTH
             );
             assert_eq!(this.value(Field::ScanMaxDepth, cx), "9");
-            assert!(this.model.draft.still_mode);
+            assert!(!this.model.draft.visualization_enabled);
             assert_eq!(this.model.baseline().ui_theme, baseline_theme);
             assert_eq!(this.model.draft.ui_theme, Theme::TokyoNightDay);
             assert!(!this.model.applying());
@@ -3261,10 +3202,68 @@ mod tests {
                 1.456789_f32.to_bits()
             );
             assert_eq!(this.model.baseline().volume, 0.2);
-            assert!(this.model.baseline().still_mode);
+            assert!(!this.model.baseline().visualization_enabled);
             assert_eq!(this.model.baseline().ui_theme, Theme::TokyoNightDay);
             assert_eq!(this.parse(cx).unwrap(), *this.model.baseline());
         });
+    }
+
+    #[gpui::test]
+    fn pending_global_apply_blocks_cancel_until_completion(cx: &mut TestAppContext) {
+        let (_directory, runtime, settings) = fixture(cx);
+        settings.update(cx, |this, cx| {
+            this.set_value(Field::ScanMaxDepth, "7", None, cx);
+        });
+        let (patch, submission) = submit(&settings, cx);
+        settings.update(cx, |this, cx| {
+            let session = this.model.session();
+            this.set_value(Field::ScanMaxDepth, "9", None, cx);
+            this.cancel(cx);
+            assert!(this.active);
+            assert!(this.model.applying());
+            assert_eq!(this.model.session(), session);
+            assert_eq!(this.value(Field::ScanMaxDepth, cx), "9");
+        });
+        let (committed, result) = execute(&runtime, patch);
+        assert!(result.is_ok());
+        settings.update(cx, |this, cx| {
+            this.complete_settings_apply(submission, committed, result, cx);
+            assert_eq!(this.value(Field::ScanMaxDepth, cx), "9");
+            this.cancel(cx);
+            assert!(!this.active);
+            assert_eq!(this.value(Field::ScanMaxDepth, cx), "7");
+            assert_eq!(this.handle.config_snapshot().scan_max_depth, 7);
+        });
+    }
+
+    #[gpui::test]
+    fn pending_panel_apply_blocks_cancel_until_success_or_failure(cx: &mut TestAppContext) {
+        let (_directory, _runtime, settings) = fixture(cx);
+        for result in [Ok(()), Err("save failed".to_owned())] {
+            settings.update(cx, |this, cx| {
+                let config = this.handle.config_snapshot();
+                this.model
+                    .reset_artwork(&config, 22, AlbumArtworkOptions::from(config.as_ref()));
+                this.active = true;
+                let Some(PanelApply::Artwork { session, .. }) =
+                    this.model.begin_panel_apply(Some(17.0))
+                else {
+                    panic!("expected panel apply");
+                };
+                this.model.draft.album_artwork_period_seconds = 19.0;
+                this.cancel(cx);
+                assert!(this.active);
+                assert!(this.model.applying());
+                assert_eq!(this.model.session(), session);
+                assert_eq!(this.model.target(), Target::Artwork(22));
+                this.complete_panel_apply(session, result, cx);
+                assert!(!this.model.applying());
+                assert_eq!(this.model.draft.album_artwork_period_seconds, 19.0);
+                this.cancel(cx);
+                assert!(!this.active);
+                assert_eq!(this.model.target(), Target::Global);
+            });
+        }
     }
 
     #[gpui::test]
@@ -3277,8 +3276,8 @@ mod tests {
         let (old_committed, old_result) = execute(&runtime, patch);
         assert!(old_result.is_ok());
         settings.update(cx, |this, cx| {
-            this.cancel(cx);
-            assert!(!this.active);
+            // Explicitly replace the session to exercise stale completion protection;
+            // user cancellation cannot close a session with an in-flight apply.
             let reopened = this.handle.config_snapshot();
             this.reset(&reopened, cx);
             this.active = true;

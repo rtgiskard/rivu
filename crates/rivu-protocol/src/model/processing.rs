@@ -37,19 +37,51 @@ pub enum EqualizerEdit {
     Enabled(bool),
     PreampDb(f64),
     OutputGainDb(f64),
-    Band { index: usize, band: EqBand },
-    BandField { index: usize, field: EqBandEdit },
-    AddBand { band: EqBand },
-    AddBands { count: usize },
-    RemoveBand { index: usize },
-    Replace { config: EqualizerConfig },
-    SavePreset { name: String },
-    LoadPreset { name: String },
-    DeletePreset { name: String },
-    ImportPreset { path: PathBuf, name: String },
-    ExportPreset { path: PathBuf, name: String },
+    Band {
+        index: usize,
+        band: EqBand,
+    },
+    BandField {
+        index: usize,
+        field: EqBandEdit,
+    },
+    AddBand {
+        band: EqBand,
+    },
+    AddBands {
+        count: usize,
+    },
+    RemoveBand {
+        index: usize,
+    },
+    Replace {
+        config: EqualizerConfig,
+    },
+    SavePreset {
+        name: String,
+        #[serde(default)]
+        overwrite: bool,
+    },
+    LoadPreset {
+        name: String,
+    },
+    DeletePreset {
+        name: String,
+    },
+    ImportPreset {
+        path: PathBuf,
+        name: String,
+        #[serde(default)]
+        overwrite: bool,
+    },
+    ExportPreset {
+        path: PathBuf,
+        name: String,
+    },
     SwapAb,
-    ResizeBands { count: usize },
+    ResizeBands {
+        count: usize,
+    },
 }
 
 impl EqualizerEdit {
@@ -450,6 +482,7 @@ mod equalizer_edit_tests {
             EqualizerEdit::ImportPreset {
                 path: "not-read.json".into(),
                 name: "Reference".to_owned(),
+                overwrite: false,
             },
             EqualizerEdit::ExportPreset {
                 path: "not-written.json".into(),

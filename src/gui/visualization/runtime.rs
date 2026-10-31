@@ -207,7 +207,8 @@ impl VisualizerRuntime {
         if config_changed {
             self.parameters = visualization::VisualParameters::from(config.as_ref());
         }
-        let still_changed = self.config.still_mode != config.still_mode;
+        let visualization_changed =
+            self.config.visualization_enabled != config.visualization_enabled;
         let fps_changed = self.config.visualization_fps != config.visualization_fps;
         let visibility_changed = self.visible != visible || self.shutting_down != shutting_down;
         let status_changed = self.status != status;
@@ -226,12 +227,12 @@ impl VisualizerRuntime {
             && !track_changed
             && source_generation == self.source_generation.wrapping_add(1)
             && seek_revision == self.seek_revision.wrapping_add(1)
-            && !still_changed
-            && !config.still_mode
+            && !visualization_changed
+            && config.visualization_enabled
             && !shutting_down
             && !settings_changed;
         let invalidate =
-            signal_changed || track_changed || still_changed || shutting_down || stopping;
+            signal_changed || track_changed || visualization_changed || shutting_down || stopping;
         let membership_changed = self.panel_revision != panels.revision
             || AudioVisualizerOptions::from(self.config.as_ref())
                 != AudioVisualizerOptions::from(config.as_ref());
@@ -294,7 +295,7 @@ impl VisualizerRuntime {
             self.awaiting_replacement = status != PlaybackStatus::Stopped;
         }
         let enabled = self.active();
-        let demand_changed = panels_changed || visibility_changed || still_changed;
+        let demand_changed = panels_changed || visibility_changed || visualization_changed;
         let mut spectrum_restored = false;
         if layout_panels_changed {
             let mut retained_spectrum = Vec::new();
@@ -375,12 +376,12 @@ impl VisualizerRuntime {
         }
         if was_running != self.analysis_interval()
             || visibility_changed
-            || still_changed
+            || visualization_changed
             || fps_changed
         {
             self.cancel_clock(cx);
         }
-        let waveform_enabled = !self.config.still_mode && !self.shutting_down;
+        let waveform_enabled = self.config.visualization_enabled && !self.shutting_down;
         let waveform_visible = self.active();
         self.waveform.update(cx, |waveform, cx| {
             waveform.retain_panels(
@@ -406,7 +407,7 @@ impl VisualizerRuntime {
     }
 
     fn active(&self) -> bool {
-        self.visible && !self.shutting_down && !self.config.still_mode
+        self.visible && !self.shutting_down && self.config.visualization_enabled
     }
 
     fn analysis_interval(&self) -> Option<Duration> {
@@ -954,6 +955,7 @@ mod tests {
                 style,
                 grid: false,
                 label: false,
+                oscilloscope_shared_grid: false,
             }),
             album_artwork: None,
         };
@@ -1103,6 +1105,7 @@ mod tests {
                     style: AudioVisualizerStyle::StereoDensity,
                     grid: false,
                     label: false,
+                    oscilloscope_shared_grid: false,
                 }
             ));
             panels.reconcile(&layout);
@@ -1246,6 +1249,7 @@ mod tests {
                 style: AudioVisualizerStyle::Spectrum,
                 grid: false,
                 label: false,
+                oscilloscope_shared_grid: false,
             },
         );
         let panels = demand(&layout);
@@ -1270,7 +1274,7 @@ mod tests {
                     changed.analysis_fft_size = 4096;
                 }
                 if transition == 3 {
-                    changed.still_mode = true;
+                    changed.visualization_enabled = false;
                 }
                 owner.sync(
                     VisualizerInputs {
@@ -1372,6 +1376,7 @@ mod tests {
                 style: AudioVisualizerStyle::Spectrogram,
                 grid: false,
                 label: false,
+                oscilloscope_shared_grid: false,
             },
         );
         let waveform_id = layout.add("audio_visualizer", None);
@@ -1381,6 +1386,7 @@ mod tests {
                 style: AudioVisualizerStyle::Waveform,
                 grid: false,
                 label: false,
+                oscilloscope_shared_grid: false,
             },
         );
         assert!(layout.activate(panel_id));
@@ -1528,11 +1534,11 @@ mod tests {
                 // Repeated wakeups must coalesce behind the one delayed request.
                 owner.request_frame(window, cx);
                 assert!(owner.frame_pending);
-                let mut still = config.as_ref().clone();
-                still.still_mode = true;
+                let mut disabled = config.as_ref().clone();
+                disabled.visualization_enabled = false;
                 owner.sync(
                     VisualizerInputs {
-                        config: Arc::new(still),
+                        config: Arc::new(disabled),
                         panels: &panels,
                         status: PlaybackStatus::Playing,
                         visible: true,
@@ -1894,7 +1900,7 @@ mod tests {
                     2 => state.seek_revision += 1,
                     3 => {
                         state.config = Arc::new(Config {
-                            still_mode: true,
+                            visualization_enabled: false,
                             ..config.as_ref().clone()
                         });
                     }

@@ -11,7 +11,7 @@ use rivu_format::decoder_hint::DecoderHint;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub const PROTOCOL_VERSION: u8 = 10;
+pub const PROTOCOL_VERSION: u8 = 12;
 pub const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub const MAX_CLIENTS: usize = 16;
@@ -1657,7 +1657,7 @@ pub struct WireConfig {
     ui_scale: f32,
     layout_snap_enabled: bool,
     layout_snap_grid_px: u32,
-    still_mode: bool,
+    visualization_enabled: bool,
     visualization_signal: rivu_format::config::VisualizationSignal,
     analysis_fps: u32,
     visualization_fps: u16,
@@ -1715,6 +1715,7 @@ pub struct WireConfig {
     waveform_peak_gamma: f32,
     oscilloscope_time_span_ms: f32,
     oscilloscope_gain: f32,
+    oscilloscope_shared_grid: bool,
     media_read_buffer_mb: u32,
     ffmpeg_enabled: bool,
     pipewire_auto_mix: bool,
@@ -1758,7 +1759,7 @@ impl From<&rivu_format::config::Config> for WireConfig {
             ui_scale: value.ui_scale,
             layout_snap_enabled: value.layout_snap_enabled,
             layout_snap_grid_px: value.layout_snap_grid_px,
-            still_mode: value.still_mode,
+            visualization_enabled: value.visualization_enabled,
             visualization_signal: value.visualization_signal,
             analysis_fps: value.analysis_fps,
             visualization_fps: value.visualization_fps,
@@ -1816,6 +1817,7 @@ impl From<&rivu_format::config::Config> for WireConfig {
             waveform_peak_gamma: value.waveform_peak_gamma,
             oscilloscope_time_span_ms: value.oscilloscope_time_span_ms,
             oscilloscope_gain: value.oscilloscope_gain,
+            oscilloscope_shared_grid: value.oscilloscope_shared_grid,
             media_read_buffer_mb: value.media_read_buffer_mb,
             ffmpeg_enabled: value.ffmpeg_enabled,
             pipewire_auto_mix: value.pipewire_auto_mix,
@@ -1861,7 +1863,7 @@ impl From<WireConfig> for rivu_format::config::Config {
             ui_scale: value.ui_scale,
             layout_snap_enabled: value.layout_snap_enabled,
             layout_snap_grid_px: value.layout_snap_grid_px,
-            still_mode: value.still_mode,
+            visualization_enabled: value.visualization_enabled,
             visualization_signal: value.visualization_signal,
             analysis_fps: value.analysis_fps,
             visualization_fps: value.visualization_fps,
@@ -1919,6 +1921,7 @@ impl From<WireConfig> for rivu_format::config::Config {
             waveform_peak_gamma: value.waveform_peak_gamma,
             oscilloscope_time_span_ms: value.oscilloscope_time_span_ms,
             oscilloscope_gain: value.oscilloscope_gain,
+            oscilloscope_shared_grid: value.oscilloscope_shared_grid,
             media_read_buffer_mb: value.media_read_buffer_mb,
             ffmpeg_enabled: value.ffmpeg_enabled,
             pipewire_auto_mix: value.pipewire_auto_mix,

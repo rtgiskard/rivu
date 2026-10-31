@@ -182,6 +182,7 @@ file_group!(Waveform, WaveformView {
 file_group!(Oscilloscope, OscilloscopeView {
     time_span_ms => oscilloscope_time_span_ms: f32,
     gain => oscilloscope_gain: f32,
+    shared_grid => oscilloscope_shared_grid: bool,
 });
 
 file_group!(AlbumArtwork, AlbumArtworkView {
@@ -193,7 +194,7 @@ file_group!(AlbumArtwork, AlbumArtworkView {
 });
 
 file_group!(General, GeneralView {
-    still_mode => still_mode: bool,
+    visualization_enabled => visualization_enabled: bool,
     signal => visualization_signal: VisualizationSignal,
     analysis_fps => analysis_fps: u32,
     fps => visualization_fps: u16,

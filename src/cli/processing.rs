@@ -346,7 +346,7 @@ mod tests {
                     panic!("expected equalizer edit");
                 };
                 match edit {
-                    EqualizerEdit::ImportPreset { path, name }
+                    EqualizerEdit::ImportPreset { path, name, .. }
                     | EqualizerEdit::ExportPreset { path, name } => {
                         assert_eq!(path, expected);
                         assert_eq!(name, "Reference");

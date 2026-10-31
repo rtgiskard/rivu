@@ -92,6 +92,10 @@ acknowledgements do not erase text typed after submission. File selection only
 changes a path draft. Unused backend settings remain available in an expandable
 section. Delete/Duplicate requires that node's drafts to be resolved; Undo/Redo
 requires all graph drafts to be applied or discarded.
+The denoise node's FFT selector offers only 256, 512, 1024, 2048, 4096 and 8192
+samples. Selecting a size changes the draft, not the committed node. It is
+independent of the visualization analysis FFT setting.
+
 
 Preview executes the selected node output's ancestors. Run targets the first
 Output node, identified by ID on its button; select another Output and Preview
@@ -129,9 +133,11 @@ Enter a total band count of 0–32 and press Enter. Increasing it appends enable
 0 dB peak bands with default Q and all channels selected; decreasing removes
 bands from the end. Existing bands and overall gains are preserved. New bands
 fill logarithmic gaps from 20 Hz to the lower of 20 kHz and 0.499 × the known
-track rate (20 kHz when unknown). Reset clears overall and band gains, retaining
-filter kinds, frequency, Q, slope, stages and channel targets. It also discards
-unapplied gain drafts for that target across panels; other drafts remain.
+track rate (20 kHz when unknown). Reset restores all EQ parameters to defaults
+while retaining the enabled state: both overall gains become zero and the band
+list becomes empty. Graph EQ also returns to the default IIR implementation.
+Reset discards all unapplied EQ drafts for that target across panels, including
+node implementation/taps drafts, and retires queued local edit intent.
 Band-count changes and Reset are unavailable while a processing acknowledgement is pending.
 
 Hover/focus the curve to see numbered band nodes. Drag horizontally for frequency
@@ -142,12 +148,17 @@ Left/Right semitone steps, Up/Down 0.5 dB gain steps, Enter/Space selection and
 Delete removal. Parameter fields provide exact values; deleting text there never
 deletes a band. Response-channel selection changes only the displayed curve,
 not processing targets. The curve/editor stack in narrow panels.
+Bands outside the plotted frequency range remain valid. Their nodes show an
+edge marker and retain the exact frequency in the selected-band hint and
+tooltip; clamping the plotted position does not retune the band.
+
 
 The footer bypass disables all playback effects. Clicking it while fully
 bypassed enables Monitor EQ only, not the previous graph audition. While EQ is
-off, configuration, preset, reset and A/B controls are locked, but curve selection
-and values remain visible. Existing drafts and selection survive disabling and
-are not applied automatically on re-enable.
+off, configuration, preset and reset controls are locked, but curve selection
+and values remain visible. A/B remains available so a swap to a disabled
+configuration can be reversed. Existing drafts and selection survive disabling
+and are not applied automatically on re-enable.
 
 Peak, low/high shelf, low/high pass, bandpass and notch filters are available.
 Q controls resonance/bandwidth except for shelves, which use shelf slope S
@@ -166,11 +177,17 @@ non-solo bands globally, even across differing channel targets. Monitor edits
 and bypass crossfade complete banks over 10 ms; settled bypass preserves samples.
 Graph edits affect future snapshots, not an admitted run.
 
-Save/load/delete named presets or import/export EqualizerConfig JSON. Imports
-require an ordinary file of at most 64 KiB; devices/FIFOs are rejected and reads
-remain bounded if the file grows. A/B swaps with the saved alternate; the first
-swap uses a disabled empty alternate. Save a preset if both alternatives must
-be retained.
+Save/load/delete named presets or import/export EqualizerConfig JSON. Save new
+preset is create-only. Overwrite, same-name import and deletion require desktop
+confirmation identifying the target (and import source path); cancellation sends
+no command. Changing the target or reopening the dialog invalidates old confirmation.
+CLI SavePreset/ImportPreset omit `overwrite` or set it false to create only;
+`overwrite: true` replaces only an existing preset, never creates a missing one.
+Imports require an ordinary file of at most 64 KiB; devices/FIFOs are rejected
+and reads remain bounded if the file grows. A/B swaps with the saved alternate;
+the first swap saves the current configuration and uses the disabled default
+with zero gains and no bands. The editor shows current/backup summaries and
+whether they are identical. Save a preset if both alternatives must be retained.
 
 
 [source,shell]
@@ -182,6 +199,7 @@ rivu processing eq '{"AddBands":{"count":6}}'
 rivu processing eq '{"AddBand":{"band":{"kind":"peak","frequency_hz":1200.0,"gain_db":3.0,"q":0.8}}}'
 rivu processing eq '{"BandField":{"index":0,"field":{"Channels":{"selected":[0]}}}}'
 rivu processing eq '{"SavePreset":{"name":"Voice presence"}}'
+rivu processing eq '{"SavePreset":{"name":"Voice presence","overwrite":true}}'
 rivu processing eq '"SwapAb"'
 rivu processing eq '{"LoadPreset":{"name":"Voice presence"}}'
 rivu processing eq '{"ExportPreset":{"path":"/absolute/presence.json","name":"Voice presence"}}'
@@ -231,6 +249,12 @@ it with another speech model reports an error, not a fallback. Environment/model
 paths and numeric fields still require Enter or Apply; toggles and device choices
 submit directly. Worker script, device and threads are shared by Speech and
 Separation. Collapsing an advanced section preserves its drafts.
+Applying a non-graph restoration or neural page parses all dirty fields before
+submission, then sends one sparse patch. Core validates and saves the combined
+candidate atomically: invalid fields cannot leave earlier fields applied or
+persisted. Acknowledgements clear only the exact submitted drafts; newer text
+remains editable for the next Apply. Enter still applies only its field.
+
 
 [source,shell]
 ----

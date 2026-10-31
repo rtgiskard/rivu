@@ -132,6 +132,14 @@ impl GraphField {
                 ("profile", "processing-profile"),
                 ("adaptive", "processing-adaptive"),
             ],
+            Self::Denoise(DenoiseField::FftSize) => &[
+                ("256", "256"),
+                ("512", "512"),
+                ("1024", "1024"),
+                ("2048", "2048"),
+                ("4096", "4096"),
+                ("8192", "8192"),
+            ],
             Self::Neural(NeuralField::Device) => &[
                 ("cpu", "processing-fields-cpu"),
                 ("cuda", "processing-fields-cuda"),
@@ -156,11 +164,7 @@ impl GraphField {
         Some(match self {
             Self::Taps => 2.,
             Self::Denoise(
-                D::FftSize
-                | D::SmoothingBins
-                | D::HumHarmonics
-                | D::ImpulseMaxWidth
-                | D::HumFundamentalHz,
+                D::SmoothingBins | D::HumHarmonics | D::ImpulseMaxWidth | D::HumFundamentalHz,
             )
             | Self::Neural(N::Threads) => 1.,
             Self::Neural(N::SpeechWetMix | N::SeparationOverlap) => 0.01,

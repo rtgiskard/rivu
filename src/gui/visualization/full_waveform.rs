@@ -71,12 +71,14 @@ impl FullWaveformRequest {
         self.target = None;
     }
 
-    pub(in crate::gui) fn retain_target(&mut self, track: Option<&Track>, still_mode: bool) {
-        if self
-            .target
-            .as_ref()
-            .is_some_and(|target| still_mode || track.is_none_or(|track| !target.matches(track)))
-        {
+    pub(in crate::gui) fn retain_target(
+        &mut self,
+        track: Option<&Track>,
+        visualization_enabled: bool,
+    ) {
+        if self.target.as_ref().is_some_and(|target| {
+            !visualization_enabled || track.is_none_or(|track| !target.matches(track))
+        }) {
             self.invalidate();
         }
     }

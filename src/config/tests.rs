@@ -272,7 +272,7 @@ fn theme_patch_preserves_unrelated_concurrent_changes() {
         volume: 0.25,
         output_device: Some("concurrent output".into()),
         ui_language: "zh-CN".into(),
-        still_mode: true,
+        visualization_enabled: false,
         ..baseline.clone()
     };
     let expected = Config {
@@ -809,7 +809,7 @@ fn save_reload_replaces_file_and_leaves_no_temporary_files() {
         ui_scale: 1.5,
         layout_snap_enabled: false,
         layout_snap_grid_px: 12,
-        still_mode: true,
+        visualization_enabled: false,
         visualization_signal: crate::config::VisualizationSignal::Before,
         analysis_fps: 30,
         visualization_fps: 120,
@@ -862,6 +862,7 @@ fn save_reload_replaces_file_and_leaves_no_temporary_files() {
         waveform_peak_gamma: 1.25,
         oscilloscope_time_span_ms: 25.0,
         oscilloscope_gain: 2.0,
+        oscilloscope_shared_grid: true,
         album_artwork_style: AlbumArtworkStyle::Glass,
         album_artwork_mode: AlbumArtworkMode::Rotating,
         album_artwork_period_seconds: 12.5,

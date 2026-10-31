@@ -475,8 +475,9 @@ during a save remain unsaved; failure preserves them for correction or retry.
 A successful save advances the submitted baseline and adopts newer loaded values
 only when no later edits remain. It cannot overwrite a newer draft or a different
 track's details.
-The visible note beside the editors explains that saves affect only Rivu, not
-audio files, and that clearing and saving a field clears its displayed text.
+Hover the info icon after the Tags heading for the save-scope and clearing note:
+saves affect only Rivu, not audio files; clearing and saving a field clears its
+displayed text.
 
 Only one track's draft is retained. Unsaved or saving details stay on that track
 instead of following playback. To abandon the draft, select another track, clear

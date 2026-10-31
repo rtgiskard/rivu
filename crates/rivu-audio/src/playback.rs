@@ -39,7 +39,7 @@ pub(super) struct PlaybackOptions {
     pub(super) device: Option<String>,
     pub(super) volume: f32,
     pub(super) pipewire_auto_mix: bool,
-    pub(super) still_mode: bool,
+    pub(super) visualization_enabled: bool,
     pub(super) equalizer: Arc<EqualizerConfig>,
     pub(super) source_info: Option<MediaInfo>,
     pub(super) listened_seconds: f64,
@@ -86,7 +86,7 @@ struct VisualizationCapture {
     seed: Option<WaveformFrame>,
     weights: Vec<[f32; 2]>,
     coverage: WaveformCoverage,
-    still_mode: bool,
+    visualization_enabled: bool,
     producer: Option<AnalysisProducer>,
     signal: VisualizationSignal,
     tap_identity: Option<AnalysisAudioIdentity>,
@@ -112,7 +112,7 @@ impl VisualizationCapture {
         if gap {
             self.begin_traversal();
         }
-        if self.still_mode {
+        if !self.visualization_enabled {
             self.coverage.skip();
             return;
         }
@@ -150,7 +150,7 @@ impl VisualizationCapture {
     }
 
     fn sync_tap(&mut self) -> Option<AnalysisAudioIdentity> {
-        let identity = if self.still_mode {
+        let identity = if !self.visualization_enabled {
             None
         } else {
             self.producer.as_ref().and_then(AnalysisProducer::identity)
@@ -258,7 +258,7 @@ impl Playback {
             device,
             volume,
             pipewire_auto_mix,
-            still_mode,
+            visualization_enabled,
             equalizer,
             source_info,
             listened_seconds,
@@ -301,7 +301,7 @@ impl Playback {
         let waveform_weights = super::channels::analysis_weights(source.layout());
         let waveform_seed = {
             let mut waveform = waveform.write();
-            waveform.set_still_mode(still_mode);
+            waveform.set_visualization_enabled(visualization_enabled);
             if let Some(info) = &source_info {
                 let display_path = waveform.path.clone().unwrap_or_else(|| path.clone());
                 let display_range = waveform.range;
@@ -316,7 +316,7 @@ impl Playback {
             } else {
                 waveform.select_source(&path, range, decoder_hint, &source);
             }
-            (!still_mode).then(|| waveform.clone())
+            visualization_enabled.then(|| waveform.clone())
         };
         let timestamp_tolerance = source.waveform_timestamp_tolerance();
         let waveform_coverage = WaveformCoverage::new(start, timestamp_tolerance);
@@ -363,7 +363,7 @@ impl Playback {
                 seed: waveform_seed,
                 weights: waveform_weights,
                 coverage: waveform_coverage,
-                still_mode,
+                visualization_enabled,
                 producer: Some(analyzer.audio_producer()),
                 signal: analyzer.settings().signal,
                 tap_identity: None,
@@ -525,11 +525,11 @@ impl Playback {
         Ok(())
     }
 
-    pub(super) fn set_still_mode(&mut self, enabled: bool) {
-        if self.visualization.still_mode == enabled {
+    pub(super) fn set_visualization_enabled(&mut self, enabled: bool) {
+        if self.visualization.visualization_enabled == enabled {
             return;
         }
-        if enabled {
+        if !enabled {
             self.visualization.flush();
             self.visualization.accumulator = None;
             // Discarding the prefix invalidates coverage even when no PCM is
@@ -539,9 +539,9 @@ impl Playback {
             self.visualization.before = VecDeque::new();
         }
         let mut waveform = self.visualization.waveform.write();
-        waveform.set_still_mode(enabled);
-        self.visualization.seed = (!enabled).then(|| waveform.clone());
-        self.visualization.still_mode = enabled;
+        waveform.set_visualization_enabled(enabled);
+        self.visualization.seed = enabled.then(|| waveform.clone());
+        self.visualization.visualization_enabled = enabled;
     }
 
     pub(super) fn errors(&self) -> &Receiver<OutputError> {
@@ -1132,7 +1132,7 @@ pub(super) mod tests {
                 seed: waveform_seed,
                 weights: waveform_weights,
                 coverage: waveform_coverage,
-                still_mode: false,
+                visualization_enabled: true,
                 producer: None,
                 signal: VisualizationSignal::After,
                 tap_identity: None,
@@ -1932,7 +1932,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn still_mode_preserves_pcm_and_never_completes_an_interrupted_envelope() {
+    fn disabling_visualization_preserves_pcm_and_never_completes_an_interrupted_envelope() {
         let file = pcm();
         for resume_before_eof in [false, true] {
             let (mut playback, mut render) = test_playback(
@@ -1950,7 +1950,7 @@ pub(super) mod tests {
             let offset = playback.offset_frames;
             let position = playback.position();
             let heard = playback.heard();
-            playback.set_still_mode(true);
+            playback.set_visualization_enabled(false);
             let suspended_revision = playback.visualization.waveform.read().revision;
             assert!(suspended_revision > initial.revision);
             assert_waveform_absent(&playback);
@@ -1966,7 +1966,7 @@ pub(super) mod tests {
                         suspended_revision
                     );
                     assert_waveform_absent(&playback);
-                    playback.set_still_mode(false);
+                    playback.set_visualization_enabled(true);
                     assert_waveform_absent(&playback);
                 }
                 playback.fill().unwrap();
@@ -1991,7 +1991,7 @@ pub(super) mod tests {
             } else {
                 assert_eq!(interrupted.revision, suspended_revision);
                 assert_waveform_absent(&playback);
-                playback.set_still_mode(false);
+                playback.set_visualization_enabled(true);
                 playback.fill().unwrap();
                 assert!(!playback.visualization.waveform.read().complete);
                 assert_waveform_absent(&playback);
@@ -2015,14 +2015,14 @@ pub(super) mod tests {
         let pending = playback.pending.clone();
         let pending_capacity = playback.pending.capacity();
         for pass in 0..32 {
-            playback.set_still_mode(true);
+            playback.set_visualization_enabled(false);
             let revision = playback.visualization.waveform.read().revision;
             assert_eq!(revision, retained_revision + pass + 1);
-            playback.set_still_mode(true);
+            playback.set_visualization_enabled(false);
             playback.fill().unwrap();
             assert_eq!(playback.visualization.waveform.read().revision, revision);
             assert_waveform_absent(&playback);
-            playback.set_still_mode(false);
+            playback.set_visualization_enabled(true);
             playback.fill().unwrap();
             assert!(playback.paused());
             assert_eq!(playback.pending, pending);
@@ -2054,7 +2054,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn still_mode_output_restarts_keep_gaps_but_a_fresh_scan_recovers() {
+    fn visualization_enabled_output_restarts_keep_gaps_but_a_fresh_scan_recovers() {
         let file = pcm();
         let (mut playback, _) = test_playback(
             file.path(),
@@ -2069,7 +2069,7 @@ pub(super) mod tests {
             .waveform
             .read()
             .retained_capacity_bytes();
-        playback.set_still_mode(true);
+        playback.set_visualization_enabled(false);
         for target in [None, Some(0.0), Some(0.5)] {
             let initial_revision = playback.visualization.waveform.read().revision;
             let (output, mut render) =
@@ -2079,13 +2079,13 @@ pub(super) mod tests {
                 .unwrap();
             playback.fill().unwrap();
             assert_waveform_absent(&playback);
-            playback.set_still_mode(true);
+            playback.set_visualization_enabled(false);
             assert_waveform_absent(&playback);
             assert_eq!(
                 playback.visualization.waveform.read().revision,
                 initial_revision
             );
-            playback.set_still_mode(false);
+            playback.set_visualization_enabled(true);
             assert_waveform_absent(&playback);
             let mut data = [0.0; 160];
             for block in 0..110 {
@@ -2102,10 +2102,10 @@ pub(super) mod tests {
                     .retained_capacity_bytes()
                     <= capacity_bound
             );
-            playback.set_still_mode(true);
+            playback.set_visualization_enabled(false);
             assert_waveform_absent(&playback);
         }
-        playback.set_still_mode(false);
+        playback.set_visualization_enabled(true);
         let (output, mut render) =
             crate::output::test_backend(8_000, false, playback.source.layout());
         playback

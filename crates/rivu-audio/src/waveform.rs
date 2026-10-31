@@ -17,7 +17,7 @@ const MAX_BINS: usize = 1024;
 const INITIAL_UNKNOWN_SPAN: f64 = 60.0;
 
 /// Coverage of one decoder traversal. Cached bins do not prove that seek-skipped
-/// intervals or PCM omitted in Still Mode were accumulated during this traversal.
+/// intervals or PCM omitted while visualizations were disabled were accumulated during this traversal.
 pub(super) struct WaveformCoverage {
     continuous: bool,
     end_seconds: f64,
@@ -404,8 +404,9 @@ impl WaveformFrame {
             + bytes(&self.bin_epochs)
     }
 
-    /// Still Mode owns this guard so late manual scans cannot restore results.
-    pub fn set_still_mode(&mut self, suspended: bool) {
+    /// Disabling visualization owns this guard so late manual scans cannot restore results.
+    pub fn set_visualization_enabled(&mut self, enabled: bool) {
+        let suspended = !enabled;
         if self.suspended == suspended {
             return;
         }
@@ -1012,11 +1013,11 @@ mod tests {
         assert_eq!(shared.rms_counts.iter().sum::<u64>(), 160);
         assert!(!cancelled.load(Ordering::Relaxed));
         assert!(shared.peaks.len() <= MAX_BINS);
-        shared.set_still_mode(true);
+        shared.set_visualization_enabled(false);
         assert!(cancelled.load(Ordering::Relaxed));
         assert_eq!(shared.retained_capacity_bytes(), 0);
         let suspended_revision = shared.revision;
-        shared.set_still_mode(false);
+        shared.set_visualization_enabled(true);
         pending.push(0.5, &[1.0; 160], 8_000, 1);
         pending.publish(&mut shared);
         assert_eq!(shared.revision, suspended_revision);
@@ -1025,7 +1026,7 @@ mod tests {
     }
 
     #[test]
-    fn still_mode_releases_all_bins_and_blocks_late_scans_across_source_changes() {
+    fn disabling_visualization_releases_all_bins_and_blocks_late_scans_across_source_changes() {
         let mut shared = frame(Some(2.0), 8_000);
         shared.set_channel_weights(&[[1.0, 0.0], [0.0, 1.0]]);
         shared.push(0.0, &[0.75; 1600], 8_000, 2);
@@ -1033,7 +1034,7 @@ mod tests {
         let retained = shared.retained_capacity_bytes();
         assert!(retained > 0);
         let revision = shared.revision;
-        shared.set_still_mode(true);
+        shared.set_visualization_enabled(false);
         let suspended_revision = shared.revision;
         assert!(suspended_revision > revision);
         assert_eq!(shared.suspension_generation(), 1);
@@ -1042,7 +1043,7 @@ mod tests {
         assert_eq!(shared.duration, Some(2.0));
         assert!(!shared.complete);
         for _ in 0..100 {
-            shared.set_still_mode(true);
+            shared.set_visualization_enabled(false);
             shared.select(
                 Path::new("track.wav"),
                 None,
@@ -1063,7 +1064,7 @@ mod tests {
             assert!(shared.matches(Path::new(path), None, DecoderHint::Auto));
             assert_eq!(shared.retained_capacity_bytes(), 0);
         }
-        shared.set_still_mode(false);
+        shared.set_visualization_enabled(true);
         let resumed_revision = shared.revision;
         assert_eq!(shared.retained_capacity_bytes(), 0);
         shared.prepare_bins(8_000);
@@ -1076,7 +1077,7 @@ mod tests {
         assert_eq!(shared.rms_counts.iter().sum::<u64>(), 160);
         assert!(shared.retained_capacity_bytes() <= retained);
         assert_eq!(shared.suspension_generation(), 1);
-        shared.set_still_mode(true);
+        shared.set_visualization_enabled(false);
         assert_eq!(shared.suspension_generation(), 2);
         assert_eq!(shared.retained_capacity_bytes(), 0);
     }
@@ -1700,7 +1701,7 @@ mod tests {
     }
 
     #[test]
-    fn decoder_hint_changes_reset_peaks_and_still_mode_preserves_identity() {
+    fn decoder_hint_changes_reset_peaks_and_disabling_visualization_preserves_identity() {
         let path = Path::new("track.wav");
         let mut frame = frame(Some(4.0), 1);
         for decoder_hint in [DecoderHint::Native, DecoderHint::Ffmpeg, DecoderHint::Auto] {
@@ -1720,10 +1721,10 @@ mod tests {
         }
 
         frame.select(path, None, DecoderHint::Ffmpeg, Some(4.0), 1);
-        frame.set_still_mode(true);
+        frame.set_visualization_enabled(false);
         assert!(frame.matches(path, None, DecoderHint::Ffmpeg));
         assert!(!frame.matches(path, None, DecoderHint::Native));
-        frame.set_still_mode(false);
+        frame.set_visualization_enabled(true);
         assert!(frame.matches(path, None, DecoderHint::Ffmpeg));
     }
 

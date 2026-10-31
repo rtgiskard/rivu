@@ -6,7 +6,7 @@ access to a shared playback instance that can also run headless.
 == Features
 
 * *Performance:* on-demand audio analysis and bounded caches limit background work
-  and memory retention. Still Mode suspends visualizations without stopping playback.
+  and memory retention. Visualizations can be disabled without stopping playback.
   See link:doc/22_cache.adoc[resource lifecycles]
 * *Customization:* named layouts, dockable panels, themes, fonts, visualization
   and artwork styles, and i18n support

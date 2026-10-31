@@ -117,7 +117,7 @@ pub(crate) enum Navigation {
 }
 
 pub(crate) enum GuiConfigChange {
-    ToggleStillMode,
+    ToggleVisualization,
     ToggleWaveformSeek,
     ToggleLibraryColumn(LibraryColumn),
     AddLibraryRoot(std::path::PathBuf),

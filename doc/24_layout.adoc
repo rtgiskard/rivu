@@ -465,7 +465,7 @@ and cancelled previews do not rediscover the panel tree. Rename and inactive-lay
 deletion leave the active demand intact.
 
 Playback updates consume these published facts rather than searching the layout
-for each feature or album panel. Visibility, Still mode, and shutdown gate existing
+for each feature or album panel. Visibility, visualization enablement, and shutdown gate existing
 demand. `VisualizerRuntime` retains ownership of its panel maps and rendering resources;
 it reconciles membership on workspace publication or relevant global visualizer
 style changes, independently of dynamic source generation, Seek revision, status,

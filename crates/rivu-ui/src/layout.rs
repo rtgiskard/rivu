@@ -118,7 +118,7 @@ pub fn list_viewport(child: impl IntoElement) -> Div {
 /// Shared heading and spacing for settings and metadata sections.
 pub fn section_group(
     theme: &'static crate::theme::Palette,
-    title: impl Into<SharedString>,
+    title: impl IntoElement,
     content: impl IntoElement,
 ) -> Div {
     column()
@@ -127,7 +127,12 @@ pub fn section_group(
         // Retain the established content inset without painting a nested frame.
         .border_1()
         .border_color(gpui::transparent_black())
-        .child(caption(theme, title))
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(theme.secondary))
+                .child(title),
+        )
         .child(content)
 }
 

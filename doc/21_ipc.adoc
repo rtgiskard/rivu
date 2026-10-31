@@ -140,11 +140,16 @@ The frame header is six bytes. `body_length` excludes the four-byte length field
 and includes the version, message type, and serialized body.
 
 Bodies use Postcard serialization without COBS framing. The current protocol
-version is `10`. Both peers must use matching protocol versions and positional
+version is `12`. Both peers must use matching protocol versions and positional
 wire schemas. The four-byte frame length remains little-endian; body integers
 follow Postcard's encoding.
 Version mismatches are rejected before decoding the body. There is no schema
 negotiation. See <<_wire_schemas,Wire schemas>> for positional fields and adapters.
+Monitor EQ `SavePreset` and `ImportPreset` carry an explicit positional `overwrite`
+boolean: false creates only, true replaces only an existing named preset.
+JSON commands may omit it for create-only behavior; positional wire encoding
+always carries it.
+
 
 Frame content is limited to 4 MiB for requests and 16 MiB for responses, including
 version/type but excluding the length prefix. The server admits 16 clients;

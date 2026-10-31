@@ -27,13 +27,15 @@ impl Core {
                 .map_err(|error| error.error);
         }
         let mut config = self.effective_config();
-        let still_mode = matches!(change, GuiConfigChange::ToggleStillMode);
+        let visualization_changed = matches!(change, GuiConfigChange::ToggleVisualization);
         let roots_changed = matches!(
             change,
             GuiConfigChange::AddLibraryRoot(_) | GuiConfigChange::RemoveLibraryRoot(_)
         );
         match change {
-            GuiConfigChange::ToggleStillMode => config.still_mode = !config.still_mode,
+            GuiConfigChange::ToggleVisualization => {
+                config.visualization_enabled = !config.visualization_enabled
+            }
             GuiConfigChange::ToggleWaveformSeek => {
                 config.waveform_seek_enabled = !config.waveform_seek_enabled
             }
@@ -55,7 +57,7 @@ impl Core {
             GuiConfigChange::Settings(_) => unreachable!(),
         }
         config.validate()?;
-        if still_mode {
+        if visualization_changed {
             self.engine.ensure_command_capacity(1)?;
         }
         // Quick controls change desired memory state; Apply or shutdown persists it.
@@ -64,10 +66,10 @@ impl Core {
             self.state.library.structure_revision =
                 self.state.library.structure_revision.wrapping_add(1);
         }
-        if still_mode {
+        if visualization_changed {
             self.engine
-                .send(AudioCommand::StillMode(
-                    self.state.configuration.config.still_mode,
+                .send(AudioCommand::VisualizationEnabled(
+                    self.state.configuration.config.visualization_enabled,
                 ))
                 .context("Configuration applied, but audio application failed")?;
         }
@@ -112,8 +114,9 @@ impl Core {
         let request = self.output_settings_request.wrapping_add(1);
         let config = &self.state.configuration.config;
         (|| -> Result<()> {
-            self.engine
-                .send(AudioCommand::StillMode(config.still_mode))?;
+            self.engine.send(AudioCommand::VisualizationEnabled(
+                config.visualization_enabled,
+            ))?;
             self.engine
                 .send(AudioCommand::MediaReadBuffer(config.media_read_buffer_mb))?;
             self.engine.send(AudioCommand::Volume(config.volume))?;

@@ -467,9 +467,10 @@ Static resets the cover upright. Animated source covers can continue while pause
 or Static; both animation types use the shared frame-rate cap. Lower caps skip
 source frames without slowing their timeline. Hiding the panel stops both kinds
 of animation, and rotation resumes without catching up on suspended time.
-Missing artwork uses the generated default cover. Still Mode does not affect cover
-loading or animation. Panels share cover loading but retain independent rotation
-and source-animation state. Track details keeps its full, static preview.
+Missing artwork uses the generated default cover. Disabling visualizations does
+not affect cover loading or animation. Panels share cover loading but retain
+independent rotation and source-animation state. Track details keeps its full,
+static preview.
 
 == MPRIS and artwork
 

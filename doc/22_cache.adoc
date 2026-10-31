@@ -82,7 +82,7 @@ their independent processing path.
 Workspace publishes panel membership and active-tab demand when layout structure
 or panel options change. Visualizer and artwork owners reconcile their retained
 consumers against that publication; ordinary playback position updates do not
-rediscover the layout. Window visibility and Still Mode gate existing demand.
+rediscover the layout. Window visibility and visualization enablement gate existing demand.
 Source/seek identity, playback state and waveform progress remain dynamic inputs:
 an unchanged panel set does not authorize retaining semantically obsolete data.
 See link:24_layout.adoc[GUI layout] for structural ownership and update boundaries.
@@ -252,10 +252,10 @@ in revocable GPU slots, and generative styles retain simulation state. Album
 artwork and font caches have their own owners and lifetimes. Submitted
 publications remain alive while their scenes reference them.
 
-Still Mode is a destructive suspension, not another cache policy: it stops
+Disabling visualizations is a destructive suspension, not another cache policy: it stops
 visualization demand and discards results as well as derived graphics. Its
 analysis, waveform-coverage, and late-result invariants are authoritative in
-link:23_visuals.adoc#_still_mode[Visualization Rendering Design]. Graphics that
+link:23_visuals.adoc#_visualization_enablement[Visualization Rendering Design]. Graphics that
 have already been submitted still follow the retirement boundary below.
 
 === Reuse and invalidation
@@ -689,7 +689,7 @@ originating instance rather than choosing a new backend.
 
 === Font data and glyphs
 
-Font retention is independent of visualization caching and Still Mode. Primary
+Font retention is independent of visualization caching and enablement. Primary
 family resolution runs at startup or saved-setting changes, not painting. Linux
 matching and missing-character lookup share one lazily initialized Fontconfig
 owner for the text system's lifetime, including retained initialization failure.

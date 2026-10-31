@@ -47,7 +47,7 @@ theme = "rivu_dark"
 level = "warning"
 
 [visualizations.general]
-still_mode = false
+visualization_enabled = true
 ----
 
 
@@ -69,7 +69,7 @@ Clearing an optional setting removes its key. Changed arrays, including arrays o
 tables, may be replaced as a unit rather than preserving their internal formatting
 and comments. A new or recreated file contains only overrides of the defaults.
 
-Playback controls and desktop shortcuts, including output selection, Still Mode,
+Playback controls and desktop shortcuts, including output selection, visualization enablement,
 Waveform seeking, Library columns, and library-folder changes, take effect in
 memory without writing the configuration file. A later configuration save includes
 these current values together with its explicit edits. Closing the desktop window is not application
@@ -279,9 +279,9 @@ wet = 0.8
 
 [neural]
 worker = "/absolute/model-bundle/runtime/worker.py"
-speech_interpreter = "/absolute/moss-venv/bin/python"
+speech_interpreter = "/absolute/.venv/bin/python"
 speech_manifest = "/absolute/moss-bundle/manifest.json"
-separation_interpreter = "/absolute/separate-venv/bin/python"
+separation_interpreter = "/absolute/.venv/bin/python"
 separation_manifest = "/absolute/kim-bundle/manifest.json"
 device = "cpu"
 threads = 4
@@ -290,7 +290,7 @@ threads = 4
 Replace paths with preparation output; no shell expansion occurs. Missing
 manifests leave neural operations unavailable, not automatically downloaded.
 See link:27_audio_processing.adoc[Audio processing] for graph editing, filter
-semantics, profile capture, separate environments, licensing, CLI examples and bounds.
+semantics, shared and isolated Python environments, licensing, CLI examples and bounds.
 
 == Desktop settings
 
@@ -306,10 +306,14 @@ preferences, layout, album artwork, desktop integration, and diagnostic logging.
 Interface presents these sections together on one scrollable page, without
 separate sidebar subpages. Panel-specific artwork settings remain a focused editor.
 Logging is application-wide, including headless operation, and remains in `[logging]`.
-Visualizations retains a General page, style-specific pages, and an Other page
-for defaults and colors. The sidebar groups related styles without flattening
-their individual settings pages.
+Visualizations has a General page and style-specific pages. General groups
+display and processing controls in Appearance, with frequency analysis in its
+own card. The sidebar groups related styles without flattening their individual
+pages. New-instance defaults have their own info icon and affect only
+subsequently created panels.
 Long sidebar labels are shortened to one line; hover over a category to read its full name.
+When expanded groups exceed the dialog height, scroll the sidebar independently
+with the mouse wheel or its scrollbar to reach the remaining pages.
 Dropdown keys: <<_desktop_keyboard_navigation,Desktop keyboard navigation>>.
 Empty inputs show inheritance, format, or special-value cues where relevant;
 hover for complete ranges and application timing. Clearing a field does not apply
@@ -322,8 +326,8 @@ inheritance on Apply.
 
 Media read buffering applies to future source opens, including full waveform
 scans; it does not reopen the current track. The application menu's Visualizations
-toggle changes Still Mode immediately without saving configuration. See
-<<_still_mode,Still Mode>> for what stops and which results are discarded.
+toggle changes visualization enablement immediately without saving configuration. See
+<<_visualization_enablement,Visualization enablement>> for what stops and which results are discarded.
 
 Settings edits a draft. Apply merges only fields changed since opening or the
 last successful Apply into the latest configuration, preserving unrelated
@@ -333,9 +337,10 @@ list. See <<_saving_configuration,Saving configuration>> for save failures and
 the saved-but-audio-failed case.
 
 Edits made while Apply is pending remain for the next Apply. Failed Apply keeps
-the draft for correction. Discard closes the editor and drops unsubmitted edits;
-it does not cancel an Apply already sent, and that completion cannot replace a
-newly opened editor's draft or feedback.
+the draft for correction. Discard and Escape cannot close the editor while Apply
+is pending: closing cannot revoke a submitted operation. After completion,
+Discard closes the editor and drops any remaining unsubmitted edits. Completions
+from a replaced edit session cannot change the new session's draft or feedback.
 
 Interface → Layout includes Layout snapping and Layout grid spacing. These save
 `interface.layout_snap_enabled` (default `true`) and `interface.layout_snap_grid_px` (default `16`,
@@ -450,11 +455,11 @@ navigation preserves the draft and each page's scroll position. An unavailable
 output target can be saved; applying it reports an audio error and can stop
 playback while retaining the saved selection. Draft merging, Discard, and error
 handling follow the <<_desktop_settings,Desktop settings>> rules.
-Instance settings instead apply
-only the selected panel's options to the in-memory layout: style, reference lines
-and labels for Audio Visualizer; style, mode, period and direction for artwork.
-They do not request a `layout.json` write; use layout sync or orderly exit to
-persist them. Applying fails if the instance no longer exists.
+Artwork instance settings apply only the selected panel's style, mode, period
+and direction to the in-memory layout. They do not request a `layout.json` write;
+use layout sync or orderly exit to persist them. Applying fails if the instance
+no longer exists. Visualization panels expose their local style, reference lines
+and labels directly in the right-click menu; Oscilloscope also offers Overlay traces.
 Inactive Spectrum fields retain their values and are still validated by Apply.
 If a retained value is invalid, open Visualizations → Spectrum: choose a Style
 other than Solid to edit bar count, width, or gap, or enable Peak markers to
@@ -534,7 +539,7 @@ high-refresh displays. Changing the cap preserves the angle. All Album artwork
 panels share only frame rate; the analysis rate is independent. Mode, period, and
 direction in this configuration supply defaults for new panels, not live overrides.
 Playback-driven rotation and animated source covers have separate clocks but
-share this FPS cap. Their pause, hiding, track-change, and Still Mode behavior is
+share this FPS cap. Their pause, hiding, track-change, and visualization-enable behavior is
 documented in link:04_playback.adoc#_album_artwork_panel[Album artwork panel].
 Track details' full, static preview does not use the Album artwork FPS cap.
 
@@ -691,9 +696,12 @@ index, defaulting to `0`. Panel objects require `kind`; `show_tab_bar` defaults 
 `true`. Audio Visualizer objects additionally store `style`, `grid`,
 and `label` directly in the panel object. These three fields must be supplied
 together or omitted together; omission initializes the instance from global
-defaults when that layout is opened. Once initialized, all three choices are
-saved explicitly. Unknown fields, invalid structures, and out-of-range indices
-are errors.
+defaults when that layout is opened. The optional `oscilloscope_shared_grid`
+boolean selects Overlay traces; when the three fields are supplied but this flag
+is absent, it defaults to `false` (separate channels). Initialized panels save
+all four choices explicitly. The mode flag requires the three visualizer fields
+and is valid only on `audio_visualizer` panels. Unknown fields, invalid structures,
+and out-of-range indices are errors.
 
 The catalog's `kind` values are `transport` (Playback), `library`, `albums`,
 `queue`, `playlists`, `history` (Recent tracks), `metadata` (Track details),
@@ -716,13 +724,13 @@ all four keys: `style`, `mode`, `period_seconds`, and `direction`. For example:
 The values use the same enums and positive finite period as
 <<_album_artwork,Album artwork>>. Omit the whole object to initialize from global
 defaults when that layout is opened; partial objects and `null` are invalid.
-The object belongs only to `album_artwork` panels, just as the three visualizer
-fields belong only to `audio_visualizer` panels. Animation FPS remains global.
+The object belongs only to `album_artwork` panels, just as the visualizer options
+belong only to `audio_visualizer` panels. Animation FPS remains global.
 
 
 == Visualizations
 
-Live analysis runs during playback only when Still Mode is off, the application
+Live analysis runs during playback only when visualizations are enabled, the application
 window is visible, and a style requiring live analysis is visible. Waveform uses
 the independent progressive or explicitly requested track-preview path.
 `visualizations.general.analysis_fps` accepts `5`–`60` and defaults to `20`; it limits FFT
@@ -735,17 +743,17 @@ generative light advance between accepted audio updates at this display cadence.
 Display time never advances beyond received audio. Pause stops analysis and
 audio-driven animation, preserving the last displayed frame in every style.
 The optional idle fade applies only to stopped playback, not pause.
-Hidden windows and Still Mode stop both clocks; losing focus alone does not.
+Hidden windows and disabled visualizations stop both clocks; losing focus alone does not.
 Stereo Density and Spatial Spectrum refresh from the latest analysis result,
 bounded by the display cap rather than replaying skipped publications.
 
 Switching tabs or temporarily hiding the window preserves the last visualization
 until fresh audio is ready, without replaying hidden time. Inactive views stop
 analysis and animation; switching one panel does not interrupt other visible views.
-Stop, seek, source replacement, incompatible analysis settings, and Still Mode
+Stop, seek, source replacement, incompatible analysis settings, and disabling visualizations
 clear stale results, including while hidden or paused. Closing the window releases
 its presentation; reopening does not restore old frames. Waveform keeps its track
-preview when hidden but discards it in Still Mode. Retention details are in
+preview when hidden but discards it when visualizations are disabled. Retention details are in
 link:22_cache.adoc#_visualization_caching[Visualization caching].
 
 `visualizations.general.palette` accepts `tokyo_night` or `deadbeef` (default `deadbeef`).
@@ -757,7 +765,7 @@ rendering design in link:23_visuals.adoc[Visualization Rendering Design].
 
 Before audio data is available, visualization panels show no waiting message;
 their backgrounds and any applicable reference guides remain. Loading, failure,
-Still Mode, and unavailable frequency-data messages remain distinct from this
+disabled-state icons, and unavailable frequency-data messages remain distinct from this
 normal initial state.
 
 Shared visualization settings apply as follows:
@@ -765,7 +773,7 @@ Shared visualization settings apply as follows:
 * `visualizations.general.signal` selects one shared signal for all audio-data views:
   `"before"` is before the active realtime processing chain; `"after"` (default)
   includes the active chain and monitor EQ. Both are before master volume.
-  Change it under Visualizations → General → Processing / cache. Analysis runs
+  Change it under Visualizations → General → Appearance. Analysis runs
   asynchronously; strict audio/visual synchronization is not guaranteed.
   Changing the signal resets realtime analysis history, but does not clear the
   rolling waveform or automatically start a full waveform scan. Equalizer changes
@@ -788,9 +796,9 @@ Shared visualization settings apply as follows:
   Changing size or window clears visualization history.
   `visualizations.general.analysis_fps` is the maximum analysis rate, independent of
   `visualizations.general.fps` and compositor-throttled display callbacks.
-* Still Mode stops processing and discards results; see <<_still_mode,Still Mode>>.
+* Disabling visualizations stops visualization processing and discards results; see <<_visualization_enablement,Visualization enablement>>.
   This is independent of rendering reuse and media read buffering.
-  In Settings → Visualizations → General → Processing / cache, its switch sits
+  In Settings → Visualizations → General → Appearance, its switch sits
   below the shared material-cache budget.
 
 Each frequency view has a range override; leave it empty to inherit General,
@@ -802,25 +810,31 @@ instances, while effect parameters are shared by all instances. See
 <<_audio_visualizer,Audio Visualizer>> for instance settings and style-specific
 effects. Inactive Spectrum style-dependent settings retain their values.
 
-=== Still Mode
+=== Visualization enablement
 
-`visualizations.general.still_mode` defaults to `false`. Enabling it replaces visualization
-instances with a static status, stops analysis sampling and FFT work, and discards
-all visualization results. Progressive waveform collection stops; any running
-full-waveform request is cancelled, and new requests are unavailable.
+`visualizations.general.visualization_enabled` defaults to `true`. Disabling it
+replaces audio-visualizer content with a large centered snowflake icon, stops
+analysis sampling and FFT work, and discards all visualization results.
+The Settings snowflake toggle is active when visualizations are disabled.
+Progressive waveform collection stops; any running full-waveform request is
+cancelled, and new requests are unavailable.
 
 Playback, seeking through the playback slider, ordinary interface effects,
 library operations, covers and their animation, IPC, MPRIS, and the tray are unchanged.
 Layout and visualization settings are preserved.
 
-Disabling Still Mode starts the visible views fresh, without reopening audio
-output or the decoder. Views rebuild from new audio; leaving the mode while
+Re-enabling visualizations starts the visible views fresh, without reopening audio
+output or the decoder. Views rebuild from new audio; enabling while
 paused does not restore an old picture. Waveform starts
 accumulating from subsequently decoded PCM, with discarded and skipped intervals
 left blank. An interrupted traversal is not marked complete. Full-waveform
-requests do not restart automatically; request one explicitly after leaving the
-mode if needed. Ordinary playback pause remains different: it freezes the current
+requests do not restart automatically; request one explicitly after re-enabling
+if needed. Ordinary playback pause remains different: it freezes the current
 visualizations without discarding their results.
+
+When upgrading a configuration that contains `visualizations.general.still_mode`,
+replace it with `visualizations.general.visualization_enabled` and invert the
+boolean value. The old key is not accepted; there is no compatibility alias.
 
 === Visualization dB ranges
 
@@ -951,7 +965,7 @@ accumulation = 75
 ----
 
 `interface.gpu_material_budget_mb` accepts `16`–`1024` MiB, default `64`. Change it
-under Settings → Visualizations → General → Processing / cache, then restart the
+under Settings → Visualizations → General → Appearance, then restart the
 GUI. It limits shared material buffers per window, not total GPU memory.
 Long Spectrogram histories may use fewer frequency rows to fit this budget;
 time resolution and playback audio are unchanged. See
@@ -967,9 +981,9 @@ Every Visualization panel uses the `audio_visualizer` kind and stores its style,
 reference-line visibility, and label visibility in `layout.json`. Right-click an
 instance and open `Visualizer style` to choose a style; its tab title, tooltip,
 and drag title follow that choice. `Back` returns without changing it. The main
-menu's `Display` group independently toggles `Reference lines` and `Labels`; a
-checkmark means enabled. Choosing a style or toggling an overlay closes the menu.
-Visualizer settings lets you apply these choices together to that instance.
+menu starts with style selection. The second group contains `Reference lines`,
+`Labels`, and style-specific actions; a checkmark means enabled. Choosing a style
+or toggling an overlay closes the menu.
 Moving panels preserves their choices; layout sync or orderly exit persists them
 across restarts. Different styles can run simultaneously. Global
 `visualizations.general.style`, `visualizations.general.grid`, and
@@ -1001,14 +1015,26 @@ labels that would overlap. Eleven styles are available:
   these are not detected beats.
 * `fractal_flow` maps low, mid, and high energy to filament motion;
   energy rises brighten the trails.
-* `oscilloscope` displays unwindowed stereo PCM: left above right, using the
-  primary and secondary colors as solid traces. A rising zero crossing on the
-  left triggers a configured sweep; right-only audio triggers on the right.
-  Short FFT windows show the available half-window. Reference lines mark channel
-  centers and visible amplitude limits; labels show channel order, input amplitude
-  limits, and the actual source-sample duration. Global controls under Settings →
+* `oscilloscope` displays unwindowed stereo PCM using the primary and secondary
+  colors as solid traces. By default, channels are separate, with left above
+  right. Overlay traces draws both traces on the same time and amplitude axes.
+  A rising zero crossing on the left triggers a configured sweep; right-only
+  audio triggers on the right. Short FFT windows show the available half-window.
+  Reference lines mark channel centers and visible amplitude limits. Dashed
+  vertical guides divide the time axis into ten equal intervals; in Separate
+  mode, each channel has its own guides that do not cross the inter-channel gap.
+  Labels show channel order as `L / R` in every language, input amplitude limits,
+  and the actual source-sample duration.
+  `visualizations.oscilloscope.shared_grid` defaults to `false` (Separate).
+  Its Overlay traces switch under Settings → Visualizations → Oscilloscope is a
+  new-instance default, independent of the global time span and gain controls.
+  Existing panels retain their layout-local mode. Right-click an Oscilloscope
+  panel and toggle Overlay traces after Reference lines and Labels to change only
+  that panel; this preserves its reference-line setting and other options.
+  Switching visualizer styles retains the panel's mode.
+  Global controls under Settings →
   Visualizations → Oscilloscope are `visualizations.oscilloscope.time_span_ms`
-  (`1`–`50` ms, default `10`) and `visualizations.oscilloscope.gain`
+  (`1`–`50` ms, default `20`) and `visualizations.oscilloscope.gain`
   (`0.1`–`10`, default `1`). Gain affects drawing only, not PCM or volume;
   a gain of `2` displays input amplitude limits of ±0.5.
   Sensitivity, dB range, Bloom, radial effects, and idle fade do not apply.

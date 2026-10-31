@@ -290,7 +290,7 @@ impl AudioProcessing {
         self.submit_node_drafts(id, keys, true, cx);
     }
 
-    fn discard_graph_node(&mut self, id: u64, cx: &mut Context<Self>) {
+    pub(in super::super) fn discard_graph_node(&mut self, id: u64, cx: &mut Context<Self>) {
         self.discard_node_equalizer_drafts(id, cx);
         if self
             .choosing_path
@@ -427,7 +427,10 @@ impl AudioProcessing {
         };
         let text = self.text(key, cx);
         let choices = descriptor.choices();
-        let control = if !choices.is_empty() {
+        let control = if descriptor == GraphField::Denoise(DenoiseField::FftSize) {
+            self.workbench_dropdown(panel, super::workbench::WorkbenchMenu::Fft, text.into(), cx)
+                .into_any_element()
+        } else if !choices.is_empty() {
             let mut options = row().flex_wrap().gap_1();
             for &(choice, label) in choices {
                 options = options.child(
@@ -585,9 +588,9 @@ impl AudioProcessing {
                 )
                 .id(("graph-draft-help", panel))
                 .tab_index(0)
-                .aria_label(self.tr("processing-fields-submit-help"))
+                .aria_label(self.tr("processing-graph-fields-submit-help"))
                 .tooltip(rivu_ui::text_tooltip(
-                    self.tr("processing-fields-submit-help"),
+                    self.tr("processing-graph-fields-submit-help"),
                 )),
             )
             .child(
@@ -857,6 +860,39 @@ mod tests {
         });
         graph.next_id = 4;
         graph
+    }
+
+    #[test]
+    fn fft_choices_are_legal_and_commit_only_through_validated_node_replacement() {
+        let mut graph = ProcessingGraph::default();
+        graph.nodes.push(GraphNode {
+            id: 3,
+            position: [0., 0.],
+            kind: GraphNodeKind::Denoise {
+                config: Default::default(),
+                profile: None,
+            },
+        });
+        graph.next_id = 4;
+        let field = GraphField::Denoise(super::DenoiseField::FftSize);
+        for &(value, _) in field.choices() {
+            let edit = node_replacement(&graph, 3, &[(key(&graph, 3, field), value.into())], None)
+                .unwrap();
+            let GraphEdit::Replace {
+                kind: GraphNodeKind::Denoise { config, .. },
+                ..
+            } = edit
+            else {
+                panic!("denoise node replacement");
+            };
+            assert_eq!(config.fft_size, value.parse::<usize>().unwrap());
+        }
+        for value in ["128", "257", "2049", "16384"] {
+            assert!(
+                node_replacement(&graph, 3, &[(key(&graph, 3, field), value.into())], None)
+                    .is_err()
+            );
+        }
     }
 
     #[test]

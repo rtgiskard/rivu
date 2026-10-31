@@ -225,7 +225,7 @@ gl-track = Track
 
 gl-release = Release
 
-gl-play-count = Play count
+gl-play-count = Plays
 
 gl-last-played = Last played
 

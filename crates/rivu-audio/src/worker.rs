@@ -152,7 +152,7 @@ pub(super) struct Worker {
     device: Option<String>,
     volume: f32,
     media_read_buffer_len: usize,
-    still_mode: bool,
+    visualization_enabled: bool,
     ffmpeg_enabled: bool,
     pipewire_auto_mix: bool,
     equalizer: Arc<EqualizerConfig>,
@@ -186,7 +186,7 @@ impl Worker {
             device: None,
             volume: 0.7,
             media_read_buffer_len,
-            still_mode: false,
+            visualization_enabled: true,
             ffmpeg_enabled: false,
             pipewire_auto_mix: true,
             equalizer: Arc::new(EqualizerConfig::default()),
@@ -235,13 +235,13 @@ impl Worker {
                 let snapshot = self.stop();
                 let _ = reply.send(snapshot);
             }
-            AudioCommand::StillMode(enabled) => {
-                self.analyzer.set_still_mode(enabled);
-                self.still_mode = enabled;
+            AudioCommand::VisualizationEnabled(enabled) => {
+                self.analyzer.set_visualization_enabled(enabled);
+                self.visualization_enabled = enabled;
                 if let Some(playback) = self.playback.as_mut() {
-                    playback.set_still_mode(enabled);
+                    playback.set_visualization_enabled(enabled);
                 } else {
-                    self.waveform.write().set_still_mode(enabled);
+                    self.waveform.write().set_visualization_enabled(enabled);
                 }
                 self.refresh_analysis();
             }
@@ -590,7 +590,7 @@ impl Worker {
                         device: self.device.clone(),
                         volume: self.volume,
                         pipewire_auto_mix: self.pipewire_auto_mix,
-                        still_mode: self.still_mode,
+                        visualization_enabled: self.visualization_enabled,
                         equalizer: Arc::clone(&self.equalizer),
                         source_info: opening.source_info,
                         listened_seconds: opening.listened_seconds,
@@ -1752,7 +1752,7 @@ mod tests {
     }
 
     #[test]
-    fn still_mode_discards_stopped_waveforms_without_changing_playback_policy() {
+    fn disabling_visualization_discards_stopped_waveforms_without_changing_playback_policy() {
         let (_send, commands) = async_channel::bounded(1);
         let (_wake, commands_ready) = bounded(1);
         let (events, _receive) = async_channel::bounded(1);
@@ -1784,11 +1784,11 @@ mod tests {
         );
         worker.command(AudioCommand::Volume(0.3));
         worker.analyzer.control.set_display_enabled(true);
-        worker.command(AudioCommand::StillMode(true));
+        worker.command(AudioCommand::VisualizationEnabled(false));
         let revision = waveform.read().revision;
         assert!(revision > completed.revision);
         for command in [
-            AudioCommand::StillMode(true),
+            AudioCommand::VisualizationEnabled(false),
             AudioCommand::Seek {
                 seconds: 0.5,
                 revision: 0,
@@ -1806,7 +1806,7 @@ mod tests {
             assert!(worker.playback.is_none());
             assert!(!worker.analyzer.control.accepts_audio());
         }
-        worker.command(AudioCommand::StillMode(false));
+        worker.command(AudioCommand::VisualizationEnabled(true));
         assert_eq!(waveform.read().retained_capacity_bytes(), 0);
         assert_eq!(waveform.read().revision, revision);
     }
@@ -1837,7 +1837,7 @@ mod tests {
                 device: None,
                 auto_mix: false,
             },
-            AudioCommand::StillMode(true),
+            AudioCommand::VisualizationEnabled(false),
             AudioCommand::MediaReadBuffer(2),
             AudioCommand::FfmpegEnabled(false),
             AudioCommand::AnalysisSettings(crate::analysis::AnalysisSettings::from(

@@ -2,9 +2,9 @@ use super::*;
 
 #[test]
 fn visualization_groups_round_trip_and_preserve_independent_ranges() {
-    let original = "[visualizations.general]\nstill_mode = true\nsignal = 'before'\nanalysis_fps = 30\nfps = 120\nbackground = '#123456'\npalette = 'tokyo_night'\nanalysis_fft_size = 4096\nanalysis_window = 'hann'\ndb_range = 85.0\nstyle = 'oscilloscope'\ngrid = true\nlabel = true\nprimary_color = '#112233'\nsecondary_color = '#445566'\nsensitivity = 2.0\nbloom_intensity = 1.0\n[visualizations.radial]\nrotation_speed = 2.0\nbar_width = 1.0\nbar_glow_layers = 3\nring_opacity = 0.5\ninner_diameter = 1.0\nfade_when_idle = true\n[visualizations.reactive]\ndb_range = 85.0\n[visualizations.spectrum]\ndb_range = 65.0\n[visualizations.spectrogram]\ndb_range = 105.0\n";
+    let original = "[visualizations.general]\nvisualization_enabled = false\nsignal = 'before'\nanalysis_fps = 30\nfps = 120\nbackground = '#123456'\npalette = 'tokyo_night'\nanalysis_fft_size = 4096\nanalysis_window = 'hann'\ndb_range = 85.0\nstyle = 'oscilloscope'\ngrid = true\nlabel = true\nprimary_color = '#112233'\nsecondary_color = '#445566'\nsensitivity = 2.0\nbloom_intensity = 1.0\n[visualizations.radial]\nrotation_speed = 2.0\nbar_width = 1.0\nbar_glow_layers = 3\nring_opacity = 0.5\ninner_diameter = 1.0\nfade_when_idle = true\n[visualizations.reactive]\ndb_range = 85.0\n[visualizations.spectrum]\ndb_range = 65.0\n[visualizations.spectrogram]\ndb_range = 105.0\n";
     let mut config = from_toml(original).unwrap();
-    assert!(config.still_mode);
+    assert!(!config.visualization_enabled);
     assert!(config.audio_visualizer_grid);
     assert!(config.audio_visualizer_labels);
     assert_eq!(config.audio_visualizer_rotation_speed, 2.0);
@@ -35,7 +35,7 @@ fn visualization_groups_round_trip_and_preserve_independent_ranges() {
 fn visualization_groups_reject_old_and_misplaced_keys() {
     for original in [
         "[visualizations.audio_visualizer]",
-        "visualizations.still_mode = true",
+        "visualizations.visualization_enabled = false",
         "visualizations.db_range = 85.0",
         "visualizations.general.labels = true",
         "visualizations.general.rotation_speed = 1.0",
@@ -513,8 +513,7 @@ fn incremental_edits_preserve_inline_and_dotted_tables() {
         assert_eq!(saved, original.replace("1.0", "1.25"));
         assert_eq!(from_toml(&saved).unwrap(), config);
     }
-    let original =
-        "visualizations = { spectrum = { interpolate = true }, general = { still_mode = true } }\n";
+    let original = "visualizations = { spectrum = { interpolate = true }, general = { visualization_enabled = false } }\n";
     let baseline = from_toml(original).unwrap();
     let mut config = baseline.clone();
     config.spectrum_interpolate = false;

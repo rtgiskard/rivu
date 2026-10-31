@@ -206,37 +206,6 @@ impl WindowView {
                         },
                     ));
                 }
-                if is_waveform && !self.state.system.config.still_mode {
-                    menu = menu.child(menu_item(
-                        "load-full-waveform",
-                        self.tr("shell-load-waveform"),
-                        cx,
-                        |this, _, cx| {
-                            this.panel_menu = None;
-                            this.load_full_waveform(cx);
-                            cx.notify();
-                        },
-                    ));
-                    menu = menu.child(menu_item(
-                        "waveform-click-seek",
-                        if self.state.system.config.waveform_seek_enabled {
-                            self.tr("shell-waveform-seek-on")
-                        } else {
-                            self.tr("shell-waveform-seek")
-                        },
-                        cx,
-                        |this, _, cx| {
-                            this.panel_menu = None;
-                            if let Err(error) = this
-                                .handle
-                                .update_gui_config(crate::core::GuiConfigChange::ToggleWaveformSeek)
-                            {
-                                this.error = Some(format!("{error:#}"));
-                            }
-                            cx.notify();
-                        },
-                    ));
-                }
                 if let Some(options) = self
                     .workspace
                     .layouts
@@ -327,30 +296,29 @@ impl WindowView {
                         .current()
                         .audio_visualizer_options(state.panel_id)
                 {
-                    menu = menu
-                        .child(menu_item(
-                            "audio-visualizer-style-menu",
-                            self.i18n.format(
-                                "shell-style-menu",
-                                &[(
-                                    "style",
-                                    visualization::audio_visualizer_style_label(
-                                        &self.i18n,
-                                        options.style,
-                                    )
-                                    .into(),
-                                )],
-                            ),
-                            cx,
-                            move |this, _, cx| {
-                                this.panel_menu = Some(PanelMenu {
-                                    page: PanelMenuPage::AudioVisualizerStyle,
-                                    ..state
-                                });
-                                cx.notify();
-                            },
-                        ))
-                        .child(div().h(px(1.)).mx_2().my_1().bg(rgb(theme.border)));
+                    menu = menu.child(menu_item(
+                        "audio-visualizer-style-menu",
+                        self.i18n.format(
+                            "shell-style-menu",
+                            &[(
+                                "style",
+                                visualization::audio_visualizer_style_label(
+                                    &self.i18n,
+                                    options.style,
+                                )
+                                .into(),
+                            )],
+                        ),
+                        cx,
+                        move |this, _, cx| {
+                            this.panel_menu = Some(PanelMenu {
+                                page: PanelMenuPage::AudioVisualizerStyle,
+                                ..state
+                            });
+                            cx.notify();
+                        },
+                    ));
+                    menu = menu.child(rivu_ui::menu_separator(theme));
                     menu = menu
                         .when(
                             !matches!(
@@ -389,32 +357,63 @@ impl WindowView {
                                 );
                             },
                         ))
-                        .child(div().h(px(1.)).mx_2().my_1().bg(rgb(theme.border)))
-                        .child(menu_item(
-                            "audio-visualizer-settings",
-                            self.tr("shell-visualizer-settings"),
-                            cx,
-                            move |this, window, cx| {
-                                this.panel_menu = None;
-                                if let Some(options) = this
-                                    .workspace
-                                    .layouts
-                                    .current()
-                                    .audio_visualizer_options(state.panel_id)
-                                {
-                                    this.settings.update(cx, |settings, cx| {
-                                        settings.open_visualizer(
+                        .when(
+                            options.style == crate::config::AudioVisualizerStyle::Oscilloscope,
+                            |menu| {
+                                menu.child(checked_menu_item(
+                                    "oscilloscope-shared-grid",
+                                    self.tr("shell-oscilloscope-shared-axes"),
+                                    options.oscilloscope_shared_grid,
+                                    MenuIndicator::Check,
+                                    cx,
+                                    move |this, _, cx| {
+                                        this.update_visualizer_options(
                                             state.panel_id,
-                                            options,
-                                            window,
+                                            |options| {
+                                                options.oscilloscope_shared_grid =
+                                                    !options.oscilloscope_shared_grid
+                                            },
                                             cx,
-                                        )
-                                    });
-                                    this.shell.open(shell::Surface::Settings);
-                                    cx.notify();
-                                }
+                                        );
+                                    },
+                                ))
                             },
-                        ));
+                        );
+                }
+                if is_waveform && self.state.system.config.visualization_enabled {
+                    menu = menu.child(rivu_ui::disabled_control(
+                        theme,
+                        menu_item(
+                            "load-full-waveform",
+                            self.tr("shell-load-waveform"),
+                            cx,
+                            |this, _, cx| {
+                                this.panel_menu = None;
+                                this.load_full_waveform(cx);
+                                cx.notify();
+                            },
+                        ),
+                        self.full_waveform_target(cx).is_none(),
+                    ));
+                    menu = menu.child(menu_item(
+                        "waveform-click-seek",
+                        if self.state.system.config.waveform_seek_enabled {
+                            self.tr("shell-waveform-seek-on")
+                        } else {
+                            self.tr("shell-waveform-seek")
+                        },
+                        cx,
+                        |this, _, cx| {
+                            this.panel_menu = None;
+                            if let Err(error) = this
+                                .handle
+                                .update_gui_config(crate::core::GuiConfigChange::ToggleWaveformSeek)
+                            {
+                                this.error = Some(format!("{error:#}"));
+                            }
+                            cx.notify();
+                        },
+                    ));
                 }
                 if is_queue {
                     menu = menu

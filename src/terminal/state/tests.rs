@@ -180,7 +180,8 @@ fn details_pin_search_target_reject_late_reads_and_restore_source() {
     terminal.draw(|frame| draw(frame, &state, &mut ui)).unwrap();
     ui.key_action(KeyEvent::from(KeyCode::End), &state);
     terminal.draw(|frame| draw(frame, &state, &mut ui)).unwrap();
-    assert!(terminal_text(&terminal).contains("Play count"));
+    assert!(matches!(&ui.details.state, DetailState::Ready(track) if track.id == 2));
+    assert_eq!(ui.details.scroll, ui.details.max_scroll);
     ui.key_action(KeyEvent::from(KeyCode::Esc), &state);
     let View::Search(search) = &ui.view else {
         panic!("search source lost")

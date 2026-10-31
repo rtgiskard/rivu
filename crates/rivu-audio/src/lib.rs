@@ -325,8 +325,8 @@ pub enum AudioCommand {
         device: Option<String>,
         auto_mix: bool,
     },
-    /// Drop visualization results/storage and suspend their work, preserving playback.
-    StillMode(bool),
+    /// Enable visualization; disabling drops results/storage and suspends work, preserving playback.
+    VisualizationEnabled(bool),
     MediaReadBuffer(u32),
     FfmpegEnabled(bool),
     /// Update analysis only; never reopen the decoder or output stream.

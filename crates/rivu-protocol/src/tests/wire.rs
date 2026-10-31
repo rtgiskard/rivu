@@ -954,6 +954,7 @@ fn configure_request_round_trip_preserves_optional_config_field_and_library_colu
         let config = rivu_format::config::Config {
             audio_visualizer_grid: output_device.is_some(),
             audio_visualizer_labels: output_device.is_none(),
+            oscilloscope_shared_grid: output_device.is_some(),
             scan_min_duration_secs: if output_device.is_some() { u32::MAX } else { 0 },
             spectrogram_flow_speed: if output_device.is_some() { 2.0 } else { 0.1 },
             spectrogram_accumulation: if output_device.is_some() { 95 } else { 10 },
@@ -1460,6 +1461,37 @@ fn large_explicit_occurrence_selections_fit_bounded_request_frames() {
         panic!("wrong command");
     };
     assert_eq!(queue_ids.len(), 200_000);
+}
+
+#[test]
+fn preset_write_intent_is_explicit_in_the_current_wire_contract() {
+    use rivu_protocol::model::EqualizerEdit;
+    for overwrite in [false, true] {
+        let save = EqualizerEdit::SavePreset {
+            name: "x".to_owned(),
+            overwrite,
+        };
+        assert_eq!(
+            postcard::to_allocvec(&save).unwrap(),
+            [9, 1, b'x', u8::from(overwrite)]
+        );
+    }
+    for json in [
+        r#"{"SavePreset":{"name":"x"}}"#,
+        r#"{"ImportPreset":{"name":"x","path":"preset.json"}}"#,
+    ] {
+        let edit: EqualizerEdit = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            edit,
+            EqualizerEdit::SavePreset {
+                overwrite: false,
+                ..
+            } | EqualizerEdit::ImportPreset {
+                overwrite: false,
+                ..
+            }
+        ));
+    }
 }
 
 #[test]

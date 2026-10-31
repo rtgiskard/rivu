@@ -66,8 +66,8 @@ not reprocess pending output. Rolling waveform capture remains decoder-driven.
 After and bypass taps borrow admitted PCM. A processed Before tap needs a
 source-aligned FIFO bounded by graph latency plus one converted fragment
 (at most two seconds of latency and 16,384 fragment frames, excluding preguard).
-It belongs to the current capture identity: source/seek, signal, pause, Still
-Mode and capture restarts cannot relabel retained samples as current audio.
+It belongs to the current capture identity: source/seek, signal, pause,
+visualization enablement and capture restarts cannot relabel retained samples as current audio.
 Optional-payload changes preserve admitted PCM; disabling capture releases the
 FIFO on the next refill, even without output admission.
 
@@ -86,13 +86,13 @@ Audio arrival wakes analysis to ingest a finite queued prefix independently of
 display requests. `analysis_fps` limits FFT transforms and publications, not PCM
 ingestion. Requests coalesce into one permit, retained until a complete fresh
 window and its publication deadline are available. The worker publishes one
-latest shared frame, not a result backlog; hidden, paused and Still Mode gates
+latest shared frame, not a result backlog; hidden, paused and disabled gates
 revoke permits and timed wakeups.
 
 FFT plans and working storage are prepared only when eligible audio arrives with
 active playback and display demand. They remain reusable across suspension;
 configuration changes alone do not allocate an analyzer. Pause or loss of demand
-clears capture input; Still Mode also breaks semantic continuity.
+clears capture input; disabling visualizations also breaks semantic continuity.
 
 Backpressure never blocks playback. A stalled worker drops stale queued input
 and marks a continuity break; fresh audio wakes recovery without polling. A
@@ -103,7 +103,7 @@ remains visible so consumers cannot smooth across unrelated audio.
 
 Display enablement and optional payloads form one coalesced control state,
 independent of the business-command queue. Closing a window relinquishes demand
-even when that queue is full. Playback and Still Mode remain separate gates;
+even when that queue is full. Playback and visualization enablement remain separate gates;
 display demand never starts playback. Capture restarts fence queued input and
 late publications, including quick hide/show transitions.
 
@@ -114,7 +114,7 @@ relabel old audio. Capture restarts and rejected seeks remain distinct from a
 successful semantic source change.
 
 Source/seek boundaries, Stop, dropped samples, FFT/window/signal or sample-rate
-changes, and Still Mode break signal continuity. The producer owns its generation;
+changes, and disabling visualizations break signal continuity. The producer owns its generation;
 neither a delayed publication nor an optional-demand change implies an audio gap.
 Views reject stale frames and reset envelopes or simulations rather than smoothing
 across unrelated audio. Outside the retained pause/reveal handoff described below,
@@ -174,7 +174,7 @@ is ready. Resumption reanchors display time rather than replaying the suspension
 A paused business update can request one refresh, but does not advance animation
 or start the optional Audio Visualizer idle fade; that fade applies only to stopped
 playback.
-Source replacement, seek intent, analysis-setting changes and Still Mode clear
+Source replacement, seek intent, analysis-setting changes and disabling visualizations clear
 incompatible retained results even while paused or hidden. These semantic facts
 are independent of producer continuity generation and seek previews.
 Stop retires all analysis input. With `fade_when_idle` enabled, an ordinary Stop
@@ -183,7 +183,7 @@ two seconds, then release it; no worker audio is consumed while stopped.
 Clearing the queue or changing the playback track clears that drawing immediately,
 even if Metadata still displays the same track. Additional source/seek boundaries
 observed together with Stop also clear it rather than preserve an uncertain fade.
-Still Mode discards the views rather than freezing them.
+Disabling visualizations discards the views rather than freezing them.
 Radial color, geometry, sensitivity, and rotation-speed edits preserve the frozen
 signal and animation time. A dB-range edit remaps the last accepted band peaks
 without consuming another audio publication or advancing smoothing. Narrowing
@@ -216,9 +216,9 @@ notification, compositor throttling limits native animation callbacks but not
 the independent analysis timer; analysis remains bounded by `analysis_fps` and
 retains only the latest publication until visibility is revoked.
 
-== Still Mode
+== Visualization enablement
 
-Still Mode gates both GUI demand and the audio-worker tap. Entry discards shared
+Visualization enablement gates both GUI demand and the audio-worker tap. Disabling discards shared
 analysis, Spectrogram history, stereo fields, fractal scenes, waveform bins and
 completed full-waveform previews. FFT plans and working storage remain reusable,
 but resumption needs a new complete audio window. Settings, source identity,
@@ -229,12 +229,15 @@ link:22_cache.adoc#_resource_boundaries[completion-aware lifetime].
 
 Discarded waveform coverage cannot become complete at EOF. Only fresh decoded
 PCM fills bins; there is no automatic backfill or rescan. A fresh uninterrupted
-traversal from zero can complete the envelope. Entry cancels explicit scans in
+traversal from zero can complete the envelope. Disabling cancels explicit scans in
 the audio worker. Decode loops observe cancellation between packets, but cannot
 interrupt a blocking file/container/codec call. Cancellation is not reported as
-a load failure, and leaving Still Mode neither restores previews nor starts a scan.
-The menu toggle changes only Still Mode through the core's serialized request
+a load failure, and re-enabling visualizations neither restores previews nor starts a scan.
+The menu toggle changes only visualization enablement through the core's serialized request
 path, preserving pending playback and device settings.
+The disabled-state icon and controls are described in
+link:01_config.adoc#_visualization_enablement[Visualization enablement].
+
 
 == Waveform
 
@@ -293,7 +296,7 @@ target or committed decoder hint retires affected requests/results; ordinary
 metadata and panel visibility changes retain them. A newer explicit request
 supersedes the old request without dropping the current display. Request and
 suspension generations reject stale completion independently of playback's
-statistics revisions. Still Mode cancels scans and discards the display.
+statistics revisions. Disabling visualizations cancels scans and discards the display.
 
 Progressive identity belongs to the opened source, not the latest library
 fingerprint. File content uses opened-file identity; memory-backed audition uses
@@ -422,7 +425,7 @@ PCM without blocking audio or other analysis. Panels share the selected sweep,
 never old PCM paired with newer timing or metrics.
 
 A rising zero crossing on the left anchors a sweep selected by
-`visualizations.oscilloscope.time_span_ms` (1–50 ms, default 10). A silent left
+`visualizations.oscilloscope.time_span_ms` (1–50 ms, default 20). A silent left
 channel selects the right trigger; a window shorter than two requested sweeps
 shows its available half-window. Without a crossing, the latest complete sweep
 is used. Trigger selection happens once per accepted publication. Painting
@@ -430,19 +433,22 @@ partitions the sweep into at most one bucket per physical pixel, preserving
 finite minimum and maximum amplitudes in each channel instead of dropping peaks.
 Invalid amplitudes are omitted. `visualizations.oscilloscope.gain` (0.1–10,
 default 1) scales drawing before clipping, without modifying retained PCM or
-playback volume. Left and right use separate vertical centers and solid
-primary/secondary colors. The label reports input amplitude limits of ±1/gain
+playback volume. Left and right use solid primary/secondary colors, with separate
+vertical centers by default. Overlay traces uses shared time and amplitude axes;
+the panel-local mode changes drawing only, not PCM or trigger selection. Its
+new-instance default and controls are described in
+link:01_config.adoc#_audio_visualizer[Audio Visualizer]. The label reports input amplitude limits of ±1/gain
 and the actual source endpoint duration `(samples - 1) / sample_rate`, rather
 than promising a span longer than the available buffer. It is omitted when the
-panel cannot fit it; overlay changes do not alter the samples or trigger.
+panel cannot fit it.
 
-Hiding the style or disabling presentation releases the GUI's retained PCM,
-keeping only a compact normalized final sweep of at most 2048 stereo points.
-Prepared analyzer storage can remain reusable across hide and Still Mode; actual
+Hiding the style releases the GUI's retained PCM, keeping only a compact normalized
+final sweep of at most 2048 stereo points. Disabling visualizations discards that
+drawing too. Prepared analyzer storage can remain reusable across either transition; actual
 PCM owners and input identities are retired, so restoring cannot replay pre-hide
 PCM. Pause freezes the latest displayed sweep without another refresh timer.
 Resume or reveal replaces it when a current complete PCM window arrives; Stop,
-source/seek invalidation, incompatible analysis settings, and Still Mode clear it.
+source/seek invalidation, incompatible analysis settings, and disabling visualizations clear it.
 With no valid sweep, only the background and enabled guides/labels are shown;
 there is no waiting-for-audio message.
 This style has no FFT windowing, automatic gain, dB color mapping, trails, or idle
@@ -593,7 +599,7 @@ Hiding or reduced motion cancels pending animation work. Focus loss alone does
 not stop rotation; the artwork FPS cap and native frame delivery still limit it.
 Animated source images retain GPUI's focus-based playback policy; source animation
 alone does not keep the artwork owner ticking while the window is inactive.
-Resuming rotation does not replay suspended time. Still Mode affects only audio
+Resuming rotation does not replay suspended time. Disabling visualizations affects only audio
 visualizations, not artwork. Styles introduce neither per-frame CPU geometry
 rotation nor a new application cache system.
 

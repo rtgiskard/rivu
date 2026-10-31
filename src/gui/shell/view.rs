@@ -333,7 +333,7 @@ impl Render for WindowView {
                             |this, _, cx| {
                                 this.shell.dismiss(shell::Surface::AppMenu);
                                 if let Err(error) = this.handle.update_gui_config(
-                                    crate::core::GuiConfigChange::ToggleStillMode,
+                                    crate::core::GuiConfigChange::ToggleVisualization,
                                 ) {
                                     this.error = Some(format!("{error:#}"));
                                 }
@@ -342,7 +342,7 @@ impl Render for WindowView {
                         )
                         .child(
                             rivu_ui::icon(
-                                if !self.state.system.config.still_mode {
+                                if self.state.system.config.visualization_enabled {
                                     "✓"
                                 } else {
                                     ""
@@ -357,7 +357,7 @@ impl Render for WindowView {
                             .text_size(rems(0.875))
                             .line_height(relative(1.))
                             .text_color(rgb(
-                                if !self.state.system.config.still_mode {
+                                if self.state.system.config.visualization_enabled {
                                     theme.accent
                                 } else {
                                     theme.muted

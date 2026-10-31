@@ -654,7 +654,7 @@ fn metadata_row(first: Div, second: Div) -> Div {
 
 fn metadata_group(
     theme: &'static rivu_ui::theme::Palette,
-    title: impl Into<SharedString>,
+    title: impl IntoElement,
     content: impl IntoElement,
 ) -> Div {
     section_group(theme, title, content)
@@ -1235,10 +1235,24 @@ impl Metadata {
                     )
                     .child(metadata_group(
                         theme,
-                        self.tr("gl-tags"),
+                        row()
+                            .gap_2()
+                            .child(caption(theme, self.tr("gl-tags")))
+                            .child(
+                                div()
+                                    .id(("metadata-tags-help", panel_id))
+                                    .flex_shrink_0()
+                                    .child(
+                                        caption(theme, "")
+                                            .opacity(0.6)
+                                            .text_color(rgb(theme.text)),
+                                    )
+                                    .tooltip(rivu_ui::text_tooltip(
+                                        self.tr("gl-metadata-edit-note"),
+                                    )),
+                            ),
                         column()
                             .gap_2()
-                            .child(caption(theme, self.tr("gl-metadata-edit-note")))
                             .child(metadata_row(
                                 self.panel_field(theme, Field::Title, self.tr("gl-title")),
                                 self.panel_field(theme, Field::Artist, self.tr("gl-artist")),
