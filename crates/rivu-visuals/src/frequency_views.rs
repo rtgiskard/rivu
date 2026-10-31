@@ -21,9 +21,10 @@ use spectrogram::{
 };
 #[cfg(test)]
 use spectrum::{
-    MAX_SPECTRUM_BARS, group_bands, shape_y, spectrum_bar_count, spectrum_labels_visible,
+    MAX_SPECTRUM_BARS, advance_envelope, group_bands, shape_y, smooth_release, smoothing_decay,
+    spectrum_bar_count, spectrum_labels_visible,
 };
-use spectrum::{Spectrum, advance_envelope, note_label, smooth_release, smoothing_decay};
+use spectrum::{Spectrum, note_label};
 
 use crate::VisualLabels;
 use crate::VisualParameters;
@@ -335,6 +336,9 @@ impl FrequencyViews {
             data.spectrum.last_update = None;
             data.spectrum.envelope_initialized = false;
         }
+        // Finish the old target's interval before accepting its replacement.
+        // Input arriving on every display tick must not suppress release.
+        data.advance_spectrum(now);
         let new_input = data.last_analysis_sequence != Some(frame.sequence);
         data.latest_levels.clone_from(&frame.spectrum_db);
         if data.spectrogram.visible
@@ -420,39 +424,7 @@ impl FrequencyViews {
         if !data.spectrum.visible || !data.spectrum.envelope_initialized {
             return changed;
         }
-        let last = data.spectrum.last_update.replace(now).unwrap_or(now);
-        let decay = smoothing_decay(now.saturating_sub(last), data.spectrum.smoothing_ms);
-        let mut body_changed = false;
-        for index in 0..data.spectrum.peaks.len() {
-            let before = data.display_level(index);
-            let peak_before = data.spectrum.peaks[index];
-            let value = finite_level(data.latest_levels[index]);
-            // A display tick never renews an accepted input's hold deadline.
-            data.spectrum.peaks[index] = advance_envelope(
-                data.spectrum.peaks[index],
-                data.spectrum.peak_deadlines[index],
-                value,
-                last,
-                now,
-                data.spectrum.peak_hold_ms,
-                data.spectrum.peak_gravity,
-            )
-            .0;
-            data.spectrum.bar_levels[index] = advance_envelope(
-                data.spectrum.bar_levels[index],
-                data.spectrum.bar_deadlines[index],
-                value,
-                last,
-                now,
-                data.spectrum.bar_hold_ms,
-                data.spectrum.bar_gravity,
-            )
-            .0;
-            data.spectrum.smoothed_levels[index] =
-                smooth_release(data.spectrum.smoothed_levels[index], value, decay);
-            body_changed |= before != data.display_level(index);
-            changed |= peak_before != data.spectrum.peaks[index];
-        }
+        changed |= data.advance_spectrum(now);
         let top_levels = if data.spectrum.show_peaks {
             &data.spectrum.peaks
         } else {
@@ -464,7 +436,7 @@ impl FrequencyViews {
             data.refresh_db_labels();
             changed = true;
         }
-        changed || body_changed
+        changed
     }
 
     pub fn spectrum(
@@ -2854,6 +2826,80 @@ mod tests {
             sample_heat_level(&frequencies, &levels, 120.0, 100.0, 400.0, false),
             -40.0
         );
+    }
+
+    #[test]
+    fn spectrum_release_survives_analysis_on_every_display_tick() {
+        for analysis_hz in [28_u64, 30] {
+            for display_hz in [15_u64, 28, 30, 60, 120] {
+                let mut visuals = FrequencyViews::new();
+                visuals.configure_config(&Config {
+                    analysis_rate_hz: analysis_hz as u32,
+                    spectrum_bar_gravity: 50.0,
+                    spectrum_smoothing_ms: 1000,
+                    ..Config::default()
+                });
+                let start = Duration::from_secs(1);
+                visuals.update(&frame(1.0, -10.0), start);
+                visuals.update(&frame(1.001, -80.0), start);
+                let mut accepted = 0;
+                for tick in 1..=display_hz {
+                    let now = start + Duration::from_secs_f64(tick as f64 / display_hz as f64);
+                    let publication = tick * analysis_hz / display_hz;
+                    if publication != accepted {
+                        visuals.update(&frame(now.as_secs_f64(), -80.0), now);
+                        accepted = publication;
+                    }
+                    visuals.animate(now);
+                }
+                {
+                    let data = visuals.data.borrow();
+                    // One second of release, including the 400 ms peak hold.
+                    for index in 0..4 {
+                        assert!((data.spectrum.peaks[index] - (-19.0)).abs() < 0.001);
+                        assert!((data.spectrum.bar_levels[index] - (-35.0)).abs() < 0.001);
+                        let expected = -80.0 + 70.0 * (-1.0_f32).exp();
+                        assert!((data.spectrum.smoothed_levels[index] - expected).abs() < 0.001);
+                    }
+                }
+                // A fresh attack still takes effect immediately after release.
+                visuals.update(&frame(2.1, -5.0), Duration::from_millis(2100));
+                let data = visuals.data.borrow();
+                assert_eq!(data.spectrum.peaks, vec![-5.0; 4]);
+                assert_eq!(data.spectrum.bar_levels, vec![-5.0; 4]);
+                assert_eq!(data.spectrum.smoothed_levels, vec![-5.0; 4]);
+            }
+        }
+    }
+
+    #[test]
+    fn spectrum_replacement_does_not_apply_new_target_to_elapsed_time() {
+        let mut visuals = FrequencyViews::new();
+        visuals.configure_config(&Config {
+            spectrum_peak_hold_ms: 0,
+            spectrum_peak_gravity: 50.0,
+            spectrum_bar_gravity: 50.0,
+            spectrum_smoothing_ms: 1000,
+            ..Config::default()
+        });
+        visuals.update(&frame(1.0, -10.0), Duration::from_secs(1));
+        visuals.update(&frame(1.5, -80.0), Duration::from_millis(1500));
+        {
+            let data = visuals.data.borrow();
+            assert_eq!(data.spectrum.peaks, vec![-10.0; 4]);
+            assert_eq!(data.spectrum.bar_levels, vec![-10.0; 4]);
+            assert_eq!(data.spectrum.smoothed_levels, vec![-10.0; 4]);
+        }
+        visuals.update(&frame(1.6, -80.0), Duration::from_millis(1600));
+        let data = visuals.data.borrow();
+        for index in 0..4 {
+            // Gravity follows the original hold deadline; smoothing follows
+            // only the 100 ms during which the lower target was accepted.
+            assert!((data.spectrum.peaks[index] - (-12.75)).abs() < 0.001);
+            assert!((data.spectrum.bar_levels[index] - (-12.75)).abs() < 0.001);
+            let expected = -80.0 + 70.0 * (-0.1_f32).exp();
+            assert!((data.spectrum.smoothed_levels[index] - expected).abs() < 0.001);
+        }
     }
 
     #[test]

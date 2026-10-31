@@ -171,9 +171,12 @@ it as new audio, and neither animation clock refreshes the business root.
 The display clock advances at wall-clock speed but never beyond the latest
 accepted audio timestamp. Spectrum hold/release and smoothing, radial rotation
 and smoothing, generative motion, and Spectrogram placement can therefore change
-between analysis publications without another FFT or history insertion. If the
-producer stalls, display time stops at the accepted boundary rather than inventing
-audio. Generation/sample-rate changes and clock rewinds reset continuity; the
+between analysis publications without another FFT or history insertion. Spectrum
+also integrates the previous target up to the current display time before accepting
+replacement levels. Release therefore advances even when every display tick consumes
+new analysis, without applying the new target retroactively to the elapsed interval.
+If the producer stalls, display time stops at the accepted boundary rather than
+inventing audio. Generation/sample-rate changes and clock rewinds reset continuity; the
 producer marks real sample gaps independently of publication cadence. Pause
 cancels analysis and audio-driven animation, preserving the last displayed frame
 in every visualization style. The presentation owner does not dispatch the worker's

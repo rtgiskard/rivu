@@ -103,6 +103,50 @@ pub(super) struct SpectrumPresentation {
 }
 
 impl FrequencyState {
+    pub(super) fn advance_spectrum(&mut self, now: Duration) -> bool {
+        if !self.spectrum.visible || !self.spectrum.envelope_initialized {
+            return false;
+        }
+        let last = self.spectrum.last_update.unwrap_or(now);
+        if now <= last {
+            return false;
+        }
+        self.spectrum.last_update = Some(now);
+        let decay = smoothing_decay(now - last, self.spectrum.smoothing_ms);
+        let mut changed = false;
+        for index in 0..self.spectrum.peaks.len() {
+            let before = self.display_level(index);
+            let peak_before = self.spectrum.peaks[index];
+            let value = finite_level(self.latest_levels[index]);
+            // Only accepted input can renew hold deadlines.
+            self.spectrum.peaks[index] = advance_envelope(
+                self.spectrum.peaks[index],
+                self.spectrum.peak_deadlines[index],
+                value,
+                last,
+                now,
+                self.spectrum.peak_hold_ms,
+                self.spectrum.peak_gravity,
+            )
+            .0;
+            self.spectrum.bar_levels[index] = advance_envelope(
+                self.spectrum.bar_levels[index],
+                self.spectrum.bar_deadlines[index],
+                value,
+                last,
+                now,
+                self.spectrum.bar_hold_ms,
+                self.spectrum.bar_gravity,
+            )
+            .0;
+            self.spectrum.smoothed_levels[index] =
+                smooth_release(self.spectrum.smoothed_levels[index], value, decay);
+            changed |=
+                before != self.display_level(index) || peak_before != self.spectrum.peaks[index];
+        }
+        changed
+    }
+
     pub(super) fn display_level(&self, index: usize) -> f32 {
         let level = finite_level(self.spectrum.bar_levels[index]);
         if self.spectrum.bar_gravity == 0.0 {
