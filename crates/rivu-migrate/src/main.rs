@@ -1,9 +1,7 @@
-mod terminal;
-
 use clap::{Parser, Subcommand};
 use rivu_migrate::{Mode, Options, Report, run};
+use rivu_utils::terminal::{TerminalEscaped, cli_error};
 use std::{path::PathBuf, process::ExitCode};
-use terminal::TerminalEscaped;
 
 #[derive(Parser)]
 #[command(
@@ -40,7 +38,11 @@ enum Command {
 }
 
 fn main() -> ExitCode {
-    let args = Args::try_parse().unwrap_or_else(|error| terminal::cli_error(error).exit());
+    let args = Args::try_parse().unwrap_or_else(|error| cli_error(error).exit());
+    if let Err(error) = rivu_utils::logging::init() {
+        eprintln!("Initializing logging failed: {:#}", TerminalEscaped(error));
+        return ExitCode::from(2);
+    }
     let mode = match args.command {
         Command::Check => Mode::Check,
         Command::Apply => Mode::Apply,
@@ -65,11 +67,14 @@ fn main() -> ExitCode {
         }
     }
     if let Err(error) = result {
-        eprintln!("Migration failed: {:#}", TerminalEscaped(error));
-        eprintln!(
-            "Resource status: configuration {}; database {}. No automatic rollback was performed.",
-            TerminalEscaped(report.config_status),
-            TerminalEscaped(report.database_status)
+        tracing::error!(
+            error = %format_args!("{:#}", TerminalEscaped(error)),
+            "Migration failed"
+        );
+        tracing::error!(
+            configuration = %TerminalEscaped(report.config_status),
+            database = %TerminalEscaped(report.database_status),
+            "Resource status; no automatic rollback was performed"
         );
         return ExitCode::from(2);
     }
@@ -82,7 +87,9 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::Args;
+    use clap::Parser;
+    use rivu_utils::terminal::cli_error;
 
     #[test]
     fn argument_diagnostics_escape_controls_without_flattening_layout() {
@@ -93,7 +100,7 @@ mod tests {
             let error = Args::try_parse_from(["rivu-migrate", argument])
                 .err()
                 .expect("invalid argument must fail");
-            let error = terminal::cli_error(error);
+            let error = cli_error(error);
             assert_eq!(error.exit_code(), 2);
             let diagnostic = error.to_string();
             assert!(diagnostic.contains(escaped), "{diagnostic:?}");

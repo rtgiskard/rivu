@@ -1,7 +1,7 @@
 //! Escape untrusted display values only at the terminal boundary.
 use std::fmt;
 
-pub(super) struct TerminalEscaped<T>(pub(super) T);
+pub struct TerminalEscaped<T>(pub T);
 
 impl<T: fmt::Display> fmt::Display for TerminalEscaped<T> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -38,7 +38,15 @@ impl<T: fmt::Display> fmt::Display for TerminalEscaped<T> {
     }
 }
 
-pub(super) fn cli_error(mut error: clap::Error) -> clap::Error {
+pub fn terminal_text(value: &str) -> std::borrow::Cow<'_, str> {
+    if value.chars().any(char::is_control) {
+        TerminalEscaped(value).to_string().into()
+    } else {
+        value.into()
+    }
+}
+
+pub fn cli_error(mut error: clap::Error) -> clap::Error {
     use clap::error::{ContextKind, ContextValue};
 
     // Preserve clap's trusted layout and styling; only argv values are untrusted.
@@ -66,7 +74,27 @@ pub(super) fn cli_error(mut error: clap::Error) -> clap::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::TerminalEscaped;
+
+    #[test]
+    fn terminal_display_escapes_all_c0_del_and_c1_controls() {
+        for value in (0u32..=0x1f).chain(0x7f..=0x9f) {
+            let character = char::from_u32(value).unwrap();
+            let expected = match character {
+                '\0' => "\\0".to_owned(),
+                '\t' => "\\t".to_owned(),
+                '\n' => "\\n".to_owned(),
+                '\r' => "\\r".to_owned(),
+                _ if value <= 0x7f => format!("\\x{value:02x}"),
+                _ => format!("\\u{{{value:04x}}}"),
+            };
+            assert_eq!(TerminalEscaped(character).to_string(), expected);
+        }
+        assert_eq!(
+            TerminalEscaped("\x1b[31mRed\x1b[0m\u{009b}31m").to_string(),
+            "\\x1b[31mRed\\x1b[0m\\u{009b}31m"
+        );
+    }
 
     #[test]
     fn alternate_format_preserves_and_escapes_every_error_cause() {

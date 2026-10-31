@@ -242,6 +242,8 @@ writes weekly logs under the data directory. `logging.retention_weeks` accepts
 `1`–`520` and defaults to `4`. `NO_COLOR` or `RIVU_COLOR=never` disables stderr
 colors. Closing the GUI window does not stop file logging.
 
+File logging starts after configuration is loaded; earlier events are not replayed.
+
 File logging may drop records under load rather than block the application.
 Orderly shutdown attempts to drain pending records; forced termination can lose
 them. Changing only the log level does not trigger retention cleanup. If creating

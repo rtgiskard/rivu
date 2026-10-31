@@ -1,6 +1,6 @@
 use super::{
     args::{TaskAction, TaskKind},
-    output::{TerminalEscaped, show_scan},
+    output::show_scan,
 };
 use anyhow::{Context, Result, bail, ensure};
 use rivu::i18n::Localizer;
@@ -11,6 +11,7 @@ use rivu_protocol::{
     },
     response::{TaskOutcome, ViewResponse},
 };
+use rivu_utils::terminal::TerminalEscaped;
 use std::path::Path;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

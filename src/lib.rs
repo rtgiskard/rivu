@@ -8,7 +8,6 @@ pub mod i18n;
 pub mod ipc;
 pub(crate) mod keyboard;
 pub(crate) mod library;
-pub(crate) mod logging;
 pub(crate) mod mpris;
 mod processing;
 pub mod projection;

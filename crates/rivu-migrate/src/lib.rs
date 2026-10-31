@@ -144,6 +144,11 @@ pub fn run(options: &Options, mode: Mode, report: &mut Report) -> Result<()> {
     } else {
         None
     };
+    tracing::info!(
+        config = ?options.config,
+        database = ?options.data_dir.join("library.db"),
+        "Preflighting migration resources"
+    );
     let config = validate_config(&options.config)
         .with_context(|| format!("Preflighting configuration {}", options.config.display()))?;
     let database = database_plan(options).with_context(|| {
@@ -200,6 +205,8 @@ pub fn apply_database_change(
     validate_config(&options.config)
         .with_context(|| format!("Preflighting configuration {}", options.config.display()))?;
     let plan = database_plan(options)?.context("No existing database to migrate")?;
+    let started = std::time::Instant::now();
+    tracing::info!(database = ?plan.path, "Checking storage capacity");
     storage_preflight(&plan)?;
     // Back up the complete database before attempting a transactional change.
     let (path, published, file) = reserve_backup(&plan.path)?;
@@ -209,6 +216,11 @@ pub fn apply_database_change(
         retained_partial: None,
     });
     let artifact = report.backups.last_mut().expect("just recorded backup");
+    tracing::info!(
+        database = ?plan.path,
+        backup = ?artifact.path,
+        "Backing up database"
+    );
     let mut destination =
         Connection::open_with_flags(&artifact.path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     {
@@ -263,16 +275,26 @@ pub fn apply_database_change(
     }
     sync_parent(&artifact.path)?;
     artifact.status = BackupStatus::Complete;
+    tracing::info!(
+        backup = ?artifact.path,
+        elapsed = ?started.elapsed(),
+        "Backup complete and synced"
+    );
     let writer = Connection::open_with_flags(&plan.path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     // FULL makes the migration transaction durable, including WAL.
     writer.pragma_update(None, "synchronous", "FULL")?;
     report.database_status = "migration attempted; inspect database on failure";
     let transaction = writer.unchecked_transaction()?;
+    tracing::info!(database = ?plan.path, "Applying changes in a transaction");
     change(&transaction).context("Applying transactional database migration")?;
     transaction
         .commit()
         .context("Committing database migration")?;
     report.database_status = "database migration committed";
+    tracing::info!(
+        elapsed = ?started.elapsed(),
+        "Database transaction committed"
+    );
     Ok(())
 }
 

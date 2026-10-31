@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/rivu-ui", "crates/rivu-format", "crates/rivu-migrate", "crates/rivu-dsp", "crates/rivu-audio", "crates/rivu-protocol", "crates/rivu-client", "crates/rivu-visuals"]
+members = ["crates/rivu-ui", "crates/rivu-format", "crates/rivu-utils", "crates/rivu-migrate", "crates/rivu-dsp", "crates/rivu-audio", "crates/rivu-protocol", "crates/rivu-client", "crates/rivu-visuals"]
 resolver = "3"
 
 [workspace.dependencies]
@@ -19,6 +19,7 @@ embed-nerd-font = []
 
 [dependencies]
 rivu-format = { path = "crates/rivu-format", default-features = false, features = ["database"] }
+rivu-utils = { path = "crates/rivu-utils" }
 rivu-audio = { path = "crates/rivu-audio", default-features = false }
 rivu-ui = { path = "crates/rivu-ui" }
 rivu-dsp = { path = "crates/rivu-dsp", default-features = false, features = ["execution"] }
@@ -49,8 +50,6 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "df48a139
 ashpd = { version = "0.13.13", default-features = false, features = ["async-io", "file_chooser"] }
 futures = "0.3"
 tracing = "0.1"
-tracing-appender = "0.2"
-tracing-subscriber = "0.3"
 libc = "0.2"
 parking_lot = "0.12"
 rand = "0.10.3"

@@ -8,7 +8,7 @@ use crate::{
     core::{CoreHandle, CoreLifecycle, CoreRuntime},
     execution::TaskRuntime,
     gui::{self, session::UiSession},
-    ipc, logging, mpris,
+    ipc, mpris,
     tray::TrayController,
 };
 use anyhow::{Context, Result, bail};
@@ -195,7 +195,7 @@ pub struct App {
     tray: Option<TrayController>,
     gui: Option<GuiHost>,
     server: Option<ipc::Server>,
-    session: Option<logging::Session>,
+    session: Option<rivu_utils::logging::Session>,
     // Field order keeps execution alive through all owners, including GUI teardown.
     tasks: TaskRuntime,
     // Retire the socket last, including after partial startup and core join.
@@ -252,6 +252,7 @@ impl App {
         paths: Vec<PathBuf>,
         graphical: bool,
     ) -> Result<Self> {
+        rivu_utils::logging::init()?;
         let socket_owner = ipc::SocketOwner::acquire(&data_dir)?;
         let signals =
             Signals::new([Signal::Int, Signal::Term]).context("Registering shutdown signals")?;
@@ -262,7 +263,10 @@ impl App {
         } else {
             "auto"
         }));
-        let session = logging::Session::start(&data_dir, &config)?;
+        let session = rivu_utils::logging::Session::start(
+            &data_dir,
+            &crate::config::logging_options(&config),
+        )?;
         let tasks = TaskRuntime::start()?;
         let runtime = CoreRuntime::start_with_logging(
             &data_dir,

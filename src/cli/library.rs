@@ -1,4 +1,4 @@
-use super::output::{TerminalEscaped, list_library, show_ack, terminal_text};
+use super::output::{list_library, show_ack};
 use super::{
     args::{LibraryAction, OtherTracksAction, Switch},
     client_path, output, submit_command, tasks,
@@ -11,6 +11,7 @@ use rivu_protocol::{
     model::{Command, Query},
     response::{StateSections, ViewResponse},
 };
+use rivu_utils::terminal::{TerminalEscaped, terminal_text};
 use std::path::Path;
 
 pub(super) fn run(

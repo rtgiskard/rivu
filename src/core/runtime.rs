@@ -176,12 +176,12 @@ impl CoreRuntime {
         Ok(runtime)
     }
 
-    // App loads through load_startup_config before starting process logging.
+    // App loads through load_startup_config before configuring file logging.
     pub(crate) fn start_with_logging(
         data_dir: &Path,
         config_path: &Path,
         config: Config,
-        logging: logging::Control,
+        logging: rivu_utils::logging::Control,
         executor: Arc<async_executor::Executor<'static>>,
         workers: Arc<BlockingExecutor>,
     ) -> Result<Self> {
@@ -199,7 +199,7 @@ impl CoreRuntime {
         data_dir: &Path,
         config_path: &Path,
         mut config: Config,
-        logging: Option<logging::Control>,
+        logging: Option<rivu_utils::logging::Control>,
         executor: Arc<async_executor::Executor<'static>>,
         workers: Arc<BlockingExecutor>,
     ) -> Result<Self> {

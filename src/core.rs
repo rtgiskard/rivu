@@ -9,7 +9,6 @@ use crate::{
     config::{Config, ConfigPatch, ConfigPersistence, LibraryColumn},
     execution::BlockingExecutor,
     library::{self, M3uItem, ScanResult},
-    logging,
     projection::{GuiSnapshot, MprisSnapshot, TraySnapshot},
     query_tracking::QueryTicket,
     store::Store,
@@ -432,7 +431,7 @@ impl CoreHandle {
 struct Core {
     store: Store,
     engine: AudioEngine,
-    logging: Option<logging::Control>,
+    logging: Option<rivu_utils::logging::Control>,
     executor: Arc<async_executor::Executor<'static>>,
     workers: Arc<BlockingExecutor>,
     read_queries: Option<query_worker::ReadQueries>,

@@ -50,6 +50,14 @@ and Core/UI state. `rivu-migrate` independently owns offline preflight, backups,
 and maintenance. Historical recognizers and conversions belong only in that tool,
 not in `rivu-format` or normal application decoding and SQL.
 
+`rivu-utils` shares logging and terminal diagnostics between the executables,
+without depending on application configuration or database formats. The
+application supplies logging options at startup and when settings change.
+
+Migration progress uses `info` events and failures use `error`, following the
+link:01_config.adoc#_logging_and_diagnostics[normal logging rules]. The tool's
+result and backup summaries remain on stdout; it does not create log files.
+
 For contract tests, use `cargo test -p rivu-format --no-default-features`;
 add `--features database` for schema and trigger behavior.
 

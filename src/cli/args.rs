@@ -1,4 +1,3 @@
-use super::output::TerminalEscaped;
 use clap::{Parser, Subcommand, ValueEnum};
 use rivu::i18n::Localizer;
 use std::path::PathBuf;
@@ -561,32 +560,6 @@ impl Args {
     }
 }
 
-pub(super) fn terminal_cli_error(mut error: clap::Error) -> clap::Error {
-    use clap::error::{ContextKind, ContextValue};
-
-    // Keep clap's trusted usage layout and styling, escaping only argv values.
-    for kind in [
-        ContextKind::InvalidArg,
-        ContextKind::InvalidSubcommand,
-        ContextKind::InvalidValue,
-        ContextKind::PriorArg,
-    ] {
-        if let Some(mut value) = error.remove(kind) {
-            match &mut value {
-                ContextValue::String(text) => *text = TerminalEscaped(&*text).to_string(),
-                ContextValue::Strings(texts) => {
-                    for text in texts {
-                        *text = TerminalEscaped(&*text).to_string();
-                    }
-                }
-                _ => {}
-            }
-            error.insert(kind, value);
-        }
-    }
-    error
-}
-
 pub(super) fn localize_help(command: &mut clap::Command, i18n: &Localizer, path: &str) {
     let messages = i18n
         .fixed_texts()
@@ -691,8 +664,9 @@ fn localize_command_help(
 
 #[cfg(test)]
 mod tests {
-    use super::{Args, terminal_cli_error};
+    use super::Args;
     use clap::CommandFactory;
+    use rivu_utils::terminal::cli_error;
 
     #[test]
     fn cli_parse_errors_escape_untrusted_arguments_and_preserve_exit_status() {
@@ -703,7 +677,7 @@ mod tests {
         ] {
             let error = Args::command().try_get_matches_from(arguments).unwrap_err();
             let status = error.exit_code();
-            let error = terminal_cli_error(error);
+            let error = cli_error(error);
             assert_eq!(error.exit_code(), status);
             assert_eq!(status, 2);
             let rendered = error.render().to_string();

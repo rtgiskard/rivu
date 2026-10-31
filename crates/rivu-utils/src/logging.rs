@@ -4,7 +4,6 @@
 //! the optional non-blocking file worker and leases the process-wide file route;
 //! shutting it down withdraws that route before flushing the worker.
 
-use crate::config::{Config, LogLevel};
 use anyhow::{Context, Result, ensure};
 use chrono::{SecondsFormat, Utc};
 use std::{
@@ -14,6 +13,7 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
+        mpsc::{self, Receiver, SyncSender},
     },
     time::{Duration, SystemTime},
 };
@@ -39,6 +39,21 @@ const SUNDAY_EPOCH_OFFSET: i64 = 3 * 24 * 60 * 60;
 const LOG_PREFIX: &str = "rivu.log.";
 const FILE_QUEUE_MESSAGES: usize = 4096;
 
+#[derive(Clone, Copy)]
+pub enum LogLevel {
+    Debug,
+    Info,
+    Warning,
+    Error,
+}
+
+#[derive(Clone, Copy)]
+pub struct Options {
+    pub level: LogLevel,
+    pub to_file: bool,
+    pub retention_weeks: u32,
+}
+
 struct RoutingState {
     level: AtomicU8,
     file_enabled: AtomicBool,
@@ -59,12 +74,12 @@ impl RoutingState {
     }
 }
 
-pub(crate) struct Session {
+pub struct Session {
     state: Arc<SessionState>,
 }
 
 #[derive(Clone)]
-pub(crate) struct Control {
+pub struct Control {
     state: Arc<SessionState>,
 }
 
@@ -79,17 +94,36 @@ struct SessionSettings {
     worker: Option<FileWorker>,
 }
 
+struct RetentionState {
+    weeks: AtomicU64,
+    committed: AtomicBool,
+}
+
 struct FileWorker {
     guard: WorkerGuard,
     dropped: ErrorCounter,
-    retention_weeks: Arc<AtomicU64>,
+    retention: Arc<RetentionState>,
+    wake: NonBlocking,
+    finished: Receiver<()>,
 }
 
 impl FileWorker {
+    fn set_retention(&mut self, weeks: u64) {
+        self.retention.weeks.store(weeks, Ordering::Relaxed);
+        self.retention.committed.store(true, Ordering::Release);
+        // NonBlocking enqueues even an empty write_all. The appender worker
+        // flushes that batch, so idle sessions need no first business event.
+        // If its bounded queue is full, an existing batch supplies the wakeup.
+        let _ = self.wake.write_all(&[]);
+    }
+
     fn retire(self) {
-        // The route has already been withdrawn, and no lifecycle/sink lock is
-        // held while WorkerGuard drains the queue and flushes the appender.
+        // Withdraw the route and drop every producer before retiring. The
+        // guard's bounded shutdown wait can expire during filesystem cleanup;
+        // wait for the writer itself to close, without holding lifecycle locks.
+        drop(self.wake);
         drop(self.guard);
+        let _ = self.finished.recv();
         let dropped = self.dropped.dropped_lines();
         if dropped != 0 {
             tracing::warn!(dropped_messages = dropped, "file logging queue overflow");
@@ -145,26 +179,38 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedSink {
 struct RetainingWriter {
     inner: RollingFileAppender,
     directory: PathBuf,
-    retention_weeks: Arc<AtomicU64>,
-    last_week: Option<i64>,
+    retention: Arc<RetentionState>,
+    last_cleanup: Option<(i64, u64)>,
+    // Last field: disconnect only after the appender/file has been dropped.
+    _finished: SyncSender<()>,
+}
+
+impl RetainingWriter {
+    fn cleanup_if_needed(&mut self) {
+        // Preparation must not delete files before persistence succeeds.
+        if !self.retention.committed.load(Ordering::Acquire) {
+            return;
+        }
+        let retention = self.retention.weeks.load(Ordering::Relaxed);
+        let cleanup = (current_week(), retention);
+        if self.last_cleanup != Some(cleanup) {
+            cleanup_old_logs(&self.directory, retention);
+            self.last_cleanup = Some(cleanup);
+        }
+    }
 }
 
 impl Write for RetainingWriter {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         let result = self.inner.write(bytes);
-        let week = current_week();
-        if self.last_week != Some(week) {
-            self.last_week = Some(week);
-            cleanup_old_logs(
-                &self.directory,
-                self.retention_weeks.load(Ordering::Relaxed),
-            );
-        }
+        self.cleanup_if_needed();
         result
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.inner.flush()
+        let result = self.inner.flush();
+        self.cleanup_if_needed();
+        result
     }
 }
 
@@ -201,6 +247,10 @@ where
         context.format_fields(writer.by_ref(), event)?;
         writeln!(writer)
     }
+}
+
+pub fn init() -> Result<()> {
+    install_once().map(|_| ())
 }
 
 fn install_once() -> Result<Arc<RoutingState>> {
@@ -242,14 +292,14 @@ fn subscriber(routing: Arc<RoutingState>) -> impl Subscriber + Send + Sync {
 }
 
 impl Session {
-    pub(crate) fn start(data_dir: &Path, config: &Config) -> Result<Self> {
+    pub fn start(data_dir: &Path, options: &Options) -> Result<Self> {
         let routing = install_once()?;
-        Self::start_with_routing(data_dir, config, routing)
+        Self::start_with_routing(data_dir, options, routing)
     }
 
     fn start_with_routing(
         data_dir: &Path,
-        config: &Config,
+        options: &Options,
         routing: Arc<RoutingState>,
     ) -> Result<Self> {
         let session = Self {
@@ -262,17 +312,17 @@ impl Session {
                 }),
             }),
         };
-        session.control().reconfigure(config)?;
+        session.control().reconfigure_with(options, || Ok(()))?;
         Ok(session)
     }
 
-    pub(crate) fn control(&self) -> Control {
+    pub fn control(&self) -> Control {
         Control {
             state: self.state.clone(),
         }
     }
 
-    pub(crate) fn shutdown(&mut self) {
+    pub fn shutdown(&mut self) {
         let worker = {
             let mut settings = self
                 .state
@@ -307,15 +357,11 @@ impl Drop for Session {
 }
 
 impl Control {
-    pub(crate) fn reconfigure(&self, config: &Config) -> Result<()> {
-        self.reconfigure_with(config, || Ok(()))
-    }
-
     // Prepare resources before persistence, then commit without a fallible step.
     // Neither persistence failure nor a competing file owner changes the route.
-    pub(crate) fn reconfigure_with(
+    pub fn reconfigure_with(
         &self,
-        config: &Config,
+        options: &Options,
         persist: impl FnOnce() -> Result<()>,
     ) -> Result<()> {
         let routing = &self.state.routing;
@@ -329,8 +375,8 @@ impl Control {
                 .expect("logging session mutex poisoned");
             ensure!(settings.active, "logging session has shut down");
             let mut lease = routing.lease.lock().expect("logging lease mutex poisoned");
-            let retention = u64::from(config.log_retention_weeks);
-            if config.log_to_file && settings.worker.is_none() {
+            let retention = u64::from(options.retention_weeks);
+            if options.to_file && settings.worker.is_none() {
                 ensure!(
                     !*lease,
                     "file logging is already owned by another active session"
@@ -340,22 +386,21 @@ impl Control {
 
             persist()?;
 
-            if config.log_to_file {
-                if let Some((writer, worker)) = prepared.take() {
-                    cleanup_old_logs(&self.state.data_dir.join("logs"), retention);
+            if options.to_file {
+                if let Some((writer, mut worker)) = prepared.take() {
+                    worker.set_retention(retention);
                     *routing.sink.lock().expect("logging sink mutex poisoned") =
                         LogSink::File(writer);
                     *lease = true;
                     settings.worker = Some(worker);
-                } else if let Some(worker) = settings.worker.as_ref()
-                    && worker.retention_weeks.load(Ordering::Relaxed) != retention
+                } else if let Some(worker) = settings.worker.as_mut()
+                    && worker.retention.weeks.load(Ordering::Relaxed) != retention
                 {
-                    worker.retention_weeks.store(retention, Ordering::Relaxed);
-                    cleanup_old_logs(&self.state.data_dir.join("logs"), retention);
+                    worker.set_retention(retention);
                 }
                 routing
                     .level
-                    .store(level_code(config.log_level), Ordering::Relaxed);
+                    .store(level_code(options.level), Ordering::Relaxed);
                 routing.file_enabled.store(true, Ordering::Release);
             } else if settings.worker.is_some() {
                 routing.file_enabled.store(false, Ordering::Release);
@@ -366,7 +411,8 @@ impl Control {
             Ok(())
         })();
         // Also retire a prepared worker after failed persistence, outside locks.
-        if let Some((_, worker)) = prepared {
+        if let Some((writer, worker)) = prepared {
+            drop(writer);
             worker.retire();
         }
         if let Some(worker) = retired {
@@ -387,12 +433,17 @@ fn make_file_writer(data_dir: &Path, retention: u64) -> Result<(NonBlocking, Fil
         .filename_prefix("rivu.log")
         .build(&directory)
         .with_context(|| format!("opening log file in {}", directory.display()))?;
-    let retention_weeks = Arc::new(AtomicU64::new(retention));
+    let retention = Arc::new(RetentionState {
+        weeks: AtomicU64::new(retention),
+        committed: AtomicBool::new(false),
+    });
+    let (finished, completion) = mpsc::sync_channel(0);
     let writer = RetainingWriter {
         inner: appender,
         directory,
-        retention_weeks: retention_weeks.clone(),
-        last_week: Some(current_week()),
+        retention: retention.clone(),
+        last_cleanup: None,
+        _finished: finished,
     };
     let (writer, guard) = NonBlockingBuilder::default()
         .buffered_lines_limit(FILE_QUEUE_MESSAGES)
@@ -401,7 +452,9 @@ fn make_file_writer(data_dir: &Path, retention: u64) -> Result<(NonBlocking, Fil
     let worker = FileWorker {
         guard,
         dropped: writer.error_counter(),
-        retention_weeks,
+        retention,
+        wake: writer.clone(),
+        finished: completion,
     };
     Ok((writer, worker))
 }
@@ -497,11 +550,19 @@ mod tests {
         (routing, dispatch)
     }
 
-    fn file_config(level: LogLevel) -> Config {
-        Config {
-            log_to_file: true,
-            log_level: level,
-            ..Config::default()
+    fn disabled_options() -> Options {
+        Options {
+            level: LogLevel::Warning,
+            to_file: false,
+            retention_weeks: 4,
+        }
+    }
+
+    fn file_options(level: LogLevel) -> Options {
+        Options {
+            level,
+            to_file: true,
+            retention_weeks: 4,
         }
     }
 
@@ -524,23 +585,247 @@ mod tests {
         });
     }
 
+    fn aged_log(data_dir: &Path, name: &str, weeks: u64) -> PathBuf {
+        let directory = data_dir.join("logs");
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join(name);
+        let file = fs::File::create(&path).unwrap();
+        let modified = SystemTime::now()
+            .checked_sub(Duration::from_secs(weeks * 7 * 24 * 60 * 60))
+            .unwrap();
+        file.set_times(fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        path
+    }
+
+    #[test]
+    fn empty_batches_trigger_startup_and_retention_cleanup_on_idle_worker() {
+        // Observe real appender flushes, not business log writes or polling.
+        struct ObservedWriter {
+            inner: RetainingWriter,
+            flushed: SyncSender<()>,
+        }
+
+        impl Write for ObservedWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.inner.write(bytes)
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                let result = self.inner.flush();
+                let _ = self.flushed.try_send(());
+                result
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let oldest = aged_log(directory.path(), "rivu.log.oldest", 12);
+        let older = aged_log(directory.path(), "rivu.log.older", 6);
+        let unrelated = aged_log(directory.path(), "unrelated", 12);
+        let retention = Arc::new(RetentionState {
+            weeks: AtomicU64::new(8),
+            committed: AtomicBool::new(false),
+        });
+        let (finished, completion) = mpsc::sync_channel(0);
+        let (flushed, flushes) = mpsc::sync_channel(1);
+        let writer = ObservedWriter {
+            inner: RetainingWriter {
+                inner: RollingFileAppender::builder()
+                    .rotation(Rotation::WEEKLY)
+                    .filename_prefix("rivu.log")
+                    .build(directory.path().join("logs"))
+                    .unwrap(),
+                directory: directory.path().join("logs"),
+                retention: retention.clone(),
+                last_cleanup: None,
+                _finished: finished,
+            },
+            flushed,
+        };
+        let (writer, guard) = NonBlockingBuilder::default()
+            .buffered_lines_limit(FILE_QUEUE_MESSAGES)
+            .finish(writer);
+        let mut worker = FileWorker {
+            guard,
+            dropped: writer.error_counter(),
+            retention,
+            wake: writer.clone(),
+            finished: completion,
+        };
+        worker.set_retention(8);
+        flushes.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(!oldest.exists());
+        assert!(older.exists());
+        worker.set_retention(4);
+        flushes.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(!older.exists());
+        assert!(unrelated.exists());
+        assert_eq!(worker.dropped.dropped_lines(), 0);
+        drop(writer);
+        worker.retire();
+    }
+
+    #[test]
+    fn shutdown_finishes_startup_cleanup_without_business_logs() {
+        let (routing, _) = harness();
+        let directory = tempfile::tempdir().unwrap();
+        let old = aged_log(directory.path(), "rivu.log.old", 6);
+        let mut session = Session::start_with_routing(
+            directory.path(),
+            &file_options(LogLevel::Warning),
+            routing,
+        )
+        .unwrap();
+        session.shutdown();
+        assert!(!old.exists());
+        assert!(log_contents(directory.path()).is_empty());
+    }
+
+    #[test]
+    fn rejected_enable_does_not_clean_up_prepared_writer() {
+        let (routing, _) = harness();
+        let directory = tempfile::tempdir().unwrap();
+        let old = aged_log(directory.path(), "rivu.log.old", 6);
+        let session =
+            Session::start_with_routing(directory.path(), &disabled_options(), routing).unwrap();
+        assert!(
+            session
+                .control()
+                .reconfigure_with(&file_options(LogLevel::Warning), || {
+                    anyhow::bail!("configuration save rejected")
+                })
+                .is_err()
+        );
+        assert!(old.exists());
+    }
+
+    #[test]
+    fn disabled_startup_does_not_create_log_directory_or_worker() {
+        let (routing, _) = harness();
+        let directory = tempfile::tempdir().unwrap();
+        let session =
+            Session::start_with_routing(directory.path(), &disabled_options(), routing).unwrap();
+        assert!(!directory.path().join("logs").exists());
+        assert!(session.state.settings.lock().unwrap().worker.is_none());
+    }
+
+    #[test]
+    fn retention_reconfiguration_keeps_rejected_policy_and_applies_committed_policy() {
+        let (routing, _) = harness();
+        let directory = tempfile::tempdir().unwrap();
+        let old = aged_log(directory.path(), "rivu.log.old", 6);
+        let initial = Options {
+            retention_weeks: 8,
+            ..file_options(LogLevel::Warning)
+        };
+        let mut session =
+            Session::start_with_routing(directory.path(), &initial, routing.clone()).unwrap();
+        assert!(
+            session
+                .control()
+                .reconfigure_with(&file_options(LogLevel::Warning), || {
+                    anyhow::bail!("configuration save rejected")
+                })
+                .is_err()
+        );
+        session.shutdown();
+        assert!(old.exists());
+
+        let mut session = Session::start_with_routing(directory.path(), &initial, routing).unwrap();
+        session
+            .control()
+            .reconfigure_with(&file_options(LogLevel::Warning), || Ok(()))
+            .unwrap();
+        session.shutdown();
+        assert!(!old.exists());
+    }
+
+    #[test]
+    fn retirement_waits_for_physical_writer_shutdown_after_guard_timeout() {
+        struct BlockedWriter {
+            entered: Option<SyncSender<()>>,
+            release: Receiver<()>,
+            _finished: SyncSender<()>,
+        }
+
+        impl Write for BlockedWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                if let Some(entered) = self.entered.take() {
+                    entered.send(()).unwrap();
+                    self.release.recv().unwrap();
+                }
+                Ok(())
+            }
+        }
+
+        let (entered, started) = mpsc::sync_channel(1);
+        let (release, blocked) = mpsc::sync_channel(1);
+        let (finished, completion) = mpsc::sync_channel(0);
+        let (writer, guard) = NonBlockingBuilder::default().finish(BlockedWriter {
+            entered: Some(entered),
+            release: blocked,
+            _finished: finished,
+        });
+        let mut worker = FileWorker {
+            guard,
+            dropped: writer.error_counter(),
+            retention: Arc::new(RetentionState {
+                weeks: AtomicU64::new(4),
+                committed: AtomicBool::new(false),
+            }),
+            wake: writer.clone(),
+            finished: completion,
+        };
+        worker.set_retention(4);
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        drop(writer);
+        let (retired, retired_receiver) = mpsc::sync_channel(1);
+        let retiring = std::thread::spawn(move || {
+            worker.retire();
+            retired.send(()).unwrap();
+        });
+        // tracing-appender's guard waits at most one second after enqueueing
+        // shutdown. Physical retirement must still wait for our blocked flush.
+        let result = retired_receiver.recv_timeout(Duration::from_millis(1200));
+        release.send(()).unwrap();
+        retiring.join().unwrap();
+        assert!(matches!(result, Err(mpsc::RecvTimeoutError::Timeout)));
+        retired_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+    }
+
     #[test]
     fn existing_callsites_follow_live_level_and_enable_changes() {
         let (routing, dispatch) = harness();
         let directory = tempfile::tempdir().unwrap();
         let mut session =
-            Session::start_with_routing(directory.path(), &Config::default(), routing).unwrap();
+            Session::start_with_routing(directory.path(), &disabled_options(), routing).unwrap();
         let control = session.control();
         emit(&dispatch, "disabled initially");
-        control.reconfigure(&file_config(LogLevel::Error)).unwrap();
+        control
+            .reconfigure_with(&file_options(LogLevel::Error), || Ok(()))
+            .unwrap();
         emit(&dispatch, "error only");
-        control.reconfigure(&file_config(LogLevel::Debug)).unwrap();
+        control
+            .reconfigure_with(&file_options(LogLevel::Debug), || Ok(()))
+            .unwrap();
         emit(&dispatch, "debug enabled");
-        control.reconfigure(&file_config(LogLevel::Error)).unwrap();
+        control
+            .reconfigure_with(&file_options(LogLevel::Error), || Ok(()))
+            .unwrap();
         emit(&dispatch, "debug disabled again");
-        control.reconfigure(&Config::default()).unwrap();
+        control
+            .reconfigure_with(&disabled_options(), || Ok(()))
+            .unwrap();
         emit(&dispatch, "file disabled");
-        control.reconfigure(&file_config(LogLevel::Debug)).unwrap();
+        control
+            .reconfigure_with(&file_options(LogLevel::Debug), || Ok(()))
+            .unwrap();
         emit(&dispatch, "file reenabled");
         session.shutdown();
         let contents = log_contents(directory.path());
@@ -560,16 +845,16 @@ mod tests {
         let second_dir = tempfile::tempdir().unwrap();
         let mut first = Session::start_with_routing(
             first_dir.path(),
-            &file_config(LogLevel::Error),
+            &file_options(LogLevel::Error),
             routing.clone(),
         )
         .unwrap();
         let _second =
-            Session::start_with_routing(second_dir.path(), &Config::default(), routing).unwrap();
+            Session::start_with_routing(second_dir.path(), &disabled_options(), routing).unwrap();
         let persisted = AtomicBool::new(false);
         let error = _second
             .control()
-            .reconfigure_with(&file_config(LogLevel::Debug), || {
+            .reconfigure_with(&file_options(LogLevel::Debug), || {
                 persisted.store(true, Ordering::Relaxed);
                 Ok(())
             })
@@ -589,11 +874,11 @@ mod tests {
         let (routing, dispatch) = harness();
         let directory = tempfile::tempdir().unwrap();
         let mut session =
-            Session::start_with_routing(directory.path(), &file_config(LogLevel::Error), routing)
+            Session::start_with_routing(directory.path(), &file_options(LogLevel::Error), routing)
                 .unwrap();
-        let rejected = Config {
-            log_retention_weeks: 1,
-            ..file_config(LogLevel::Debug)
+        let rejected = Options {
+            retention_weeks: 1,
+            ..file_options(LogLevel::Debug)
         };
         let error = session
             .control()
@@ -605,7 +890,7 @@ mod tests {
         assert!(
             session
                 .control()
-                .reconfigure_with(&Config::default(), || {
+                .reconfigure_with(&disabled_options(), || {
                     anyhow::bail!("configuration save rejected")
                 })
                 .is_err()
@@ -624,9 +909,9 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         fs::write(directory.path().join("logs"), "not a directory").unwrap();
         let mut session =
-            Session::start_with_routing(directory.path(), &Config::default(), routing).unwrap();
+            Session::start_with_routing(directory.path(), &disabled_options(), routing).unwrap();
         let persisted = AtomicBool::new(false);
-        let enabled = file_config(LogLevel::Debug);
+        let enabled = file_options(LogLevel::Debug);
         let error = session
             .control()
             .reconfigure_with(&enabled, || {
@@ -637,7 +922,10 @@ mod tests {
         assert!(error.to_string().contains("creating log directory"));
         assert!(!persisted.load(Ordering::Relaxed));
         fs::remove_file(directory.path().join("logs")).unwrap();
-        session.control().reconfigure(&enabled).unwrap();
+        session
+            .control()
+            .reconfigure_with(&enabled, || Ok(()))
+            .unwrap();
         emit(&dispatch, "after retry");
         session.shutdown();
         assert!(log_contents(directory.path()).contains("debug after retry"));
@@ -649,9 +937,9 @@ mod tests {
         let first_dir = tempfile::tempdir().unwrap();
         let second_dir = tempfile::tempdir().unwrap();
         let first =
-            Session::start_with_routing(first_dir.path(), &Config::default(), routing.clone())
+            Session::start_with_routing(first_dir.path(), &disabled_options(), routing.clone())
                 .unwrap();
-        let config = file_config(LogLevel::Debug);
+        let config = file_options(LogLevel::Debug);
         assert!(
             first
                 .control()
@@ -670,13 +958,13 @@ mod tests {
         let (routing, dispatch) = harness();
         let first_dir = tempfile::tempdir().unwrap();
         let second_dir = tempfile::tempdir().unwrap();
-        let config = file_config(LogLevel::Debug);
+        let config = file_options(LogLevel::Debug);
         let mut first =
             Session::start_with_routing(first_dir.path(), &config, routing.clone()).unwrap();
         let control = first.control();
         let stale = control.clone();
         let mut second =
-            Session::start_with_routing(second_dir.path(), &Config::default(), routing).unwrap();
+            Session::start_with_routing(second_dir.path(), &disabled_options(), routing).unwrap();
         tracing::dispatcher::with_default(&dispatch, || {
             for index in 0..64 {
                 tracing::debug!(target: "logging_test", "queued-before-shutdown-{index}");
@@ -687,14 +975,17 @@ mod tests {
         for index in 0..64 {
             assert!(contents.contains(&format!("queued-before-shutdown-{index}\n")));
         }
-        let error = stale.reconfigure(&config).unwrap_err();
+        let error = stale.reconfigure_with(&config, || Ok(())).unwrap_err();
         assert!(error.to_string().contains("shut down"));
         assert!(
             control
                 .reconfigure_with(&config, || panic!("must not persist after shutdown"))
                 .is_err()
         );
-        second.control().reconfigure(&config).unwrap();
+        second
+            .control()
+            .reconfigure_with(&config, || Ok(()))
+            .unwrap();
         first.shutdown();
         emit(&dispatch, "second owner");
         second.shutdown();
@@ -707,19 +998,25 @@ mod tests {
         let (routing, dispatch) = harness();
         let first_dir = tempfile::tempdir().unwrap();
         let second_dir = tempfile::tempdir().unwrap();
-        let config = file_config(LogLevel::Debug);
+        let config = file_options(LogLevel::Debug);
         let mut first =
             Session::start_with_routing(first_dir.path(), &config, routing.clone()).unwrap();
         emit(&dispatch, "before disable");
-        first.control().reconfigure(&Config::default()).unwrap();
+        first
+            .control()
+            .reconfigure_with(&disabled_options(), || Ok(()))
+            .unwrap();
         assert!(log_contents(first_dir.path()).contains("debug before disable"));
         let second = Session::start_with_routing(second_dir.path(), &config, routing).unwrap();
         let stale = second.control();
         emit(&dispatch, "before owner drop");
         drop(second);
         assert!(log_contents(second_dir.path()).contains("debug before owner drop"));
-        assert!(stale.reconfigure(&config).is_err());
-        first.control().reconfigure(&config).unwrap();
+        assert!(stale.reconfigure_with(&config, || Ok(())).is_err());
+        first
+            .control()
+            .reconfigure_with(&config, || Ok(()))
+            .unwrap();
         emit(&dispatch, "after owner drop");
         first.shutdown();
         assert!(log_contents(first_dir.path()).contains("debug after owner drop"));

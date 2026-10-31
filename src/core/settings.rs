@@ -93,7 +93,9 @@ impl Core {
             audio::ffmpeg_status().unwrap_or_else(|error| format!("unavailable: {error:#}"))
         };
         if let Some(logging) = self.logging.clone() {
-            logging.reconfigure_with(&config, || self.write_config(&config))?;
+            logging.reconfigure_with(&crate::config::logging_options(&config), || {
+                self.write_config(&config)
+            })?;
         } else {
             self.write_config(&config)?;
         }

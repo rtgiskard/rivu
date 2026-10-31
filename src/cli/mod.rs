@@ -7,9 +7,8 @@ mod tasks;
 use self::{
     args::{
         Action, Args, PlaybackAction, PlaylistAction, QueueAction, Repeat, Switch, localize_help,
-        terminal_cli_error,
     },
-    output::{TerminalEscaped, list_playlists, list_queue, show_ack, show_state},
+    output::{list_playlists, list_queue, show_ack, show_state},
 };
 use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, FromArgMatches};
@@ -19,6 +18,7 @@ use rivu_protocol::{
     model::{Command, RepeatMode},
     response::StateSections,
 };
+use rivu_utils::terminal::{TerminalEscaped, cli_error};
 use std::path::PathBuf;
 
 pub(super) struct CliError {
@@ -39,11 +39,10 @@ pub(super) fn run() -> std::result::Result<(), CliError> {
     localize_help(&mut command, &i18n, "");
     let matches = command
         .try_get_matches()
-        .unwrap_or_else(|error| terminal_cli_error(error).exit());
-    let args =
-        Args::from_arg_matches(&matches).unwrap_or_else(|error| terminal_cli_error(error).exit());
+        .unwrap_or_else(|error| cli_error(error).exit());
+    let args = Args::from_arg_matches(&matches).unwrap_or_else(|error| cli_error(error).exit());
     args.validate(&matches)
-        .unwrap_or_else(|error| terminal_cli_error(error).exit());
+        .unwrap_or_else(|error| cli_error(error).exit());
     let json = args.json;
     execute(args, i18n).map_err(|error| CliError { error, json })
 }

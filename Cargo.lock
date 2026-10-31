@@ -5130,6 +5130,7 @@ dependencies = [
  "rivu-format",
  "rivu-protocol",
  "rivu-ui",
+ "rivu-utils",
  "rivu-visuals",
  "rusqlite",
  "serde",
@@ -5141,8 +5142,6 @@ dependencies = [
  "tempfile",
  "toml 1.1.8+spec-1.1.0",
  "tracing",
- "tracing-appender",
- "tracing-subscriber",
  "unic-langid",
  "unicode-segmentation",
  "url",
@@ -5226,8 +5225,10 @@ dependencies = [
  "fs2",
  "libc",
  "rivu-format",
+ "rivu-utils",
  "rusqlite",
  "tempfile",
+ "tracing",
 ]
 
 [[package]]
@@ -5255,6 +5256,19 @@ dependencies = [
  "gpui",
  "gpui_platform",
  "unicode-segmentation",
+]
+
+[[package]]
+name = "rivu-utils"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "tempfile",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
 ]
 
 [[package]]

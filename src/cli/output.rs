@@ -4,58 +4,11 @@ use rivu_protocol::{
     model::{MAX_QUERY_ROWS, PlaybackStatus, Query},
     response::{QueryError, StateResponse, StateSections, ViewResponse},
 };
+use rivu_utils::terminal::{TerminalEscaped, terminal_text};
 use std::{
     io::{self, Write},
     path::Path,
 };
-
-// Escape only untrusted display values, never stored data or layout separators.
-pub(super) struct TerminalEscaped<T>(pub(super) T);
-
-impl<T: std::fmt::Display> std::fmt::Display for TerminalEscaped<T> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        struct Escaped<'a, 'b>(&'a mut std::fmt::Formatter<'b>);
-
-        impl std::fmt::Write for Escaped<'_, '_> {
-            fn write_str(&mut self, value: &str) -> std::fmt::Result {
-                let mut start = 0;
-                for (index, character) in value.char_indices() {
-                    if !character.is_control() {
-                        continue;
-                    }
-                    self.0.write_str(&value[start..index])?;
-                    match character {
-                        '\n' => self.0.write_str("\\n")?,
-                        '\r' => self.0.write_str("\\r")?,
-                        '\t' => self.0.write_str("\\t")?,
-                        '\0' => self.0.write_str("\\0")?,
-                        '\u{1}'..='\u{7f}' => write!(self.0, "\\x{:02x}", character as u32)?,
-                        _ => write!(self.0, "\\u{{{:04x}}}", character as u32)?,
-                    }
-                    start = index + character.len_utf8();
-                }
-                self.0.write_str(&value[start..])
-            }
-        }
-
-        use std::fmt::Write as _;
-        let alternate = formatter.alternate();
-        let mut output = Escaped(formatter);
-        if alternate {
-            write!(output, "{:#}", self.0)
-        } else {
-            write!(output, "{}", self.0)
-        }
-    }
-}
-
-pub(super) fn terminal_text(value: &str) -> std::borrow::Cow<'_, str> {
-    if value.chars().any(char::is_control) {
-        TerminalEscaped(value).to_string().into()
-    } else {
-        value.into()
-    }
-}
 
 pub(super) fn list_queue(i18n: &Localizer, data_dir: &Path, json: bool) -> Result<()> {
     let mut session = rivu_client::client_session(data_dir)?;
@@ -631,28 +584,9 @@ pub(super) fn show_scan(i18n: &Localizer, progress: &rivu_protocol::model::ScanP
 
 #[cfg(test)]
 mod tests {
-    use super::{TerminalEscaped, show_history, write_error};
+    use super::{show_history, write_error};
+    use rivu_utils::terminal::TerminalEscaped;
     use std::path::Path;
-
-    #[test]
-    fn terminal_display_escapes_all_c0_del_and_c1_controls() {
-        for value in (0u32..=0x1f).chain(0x7f..=0x9f) {
-            let character = char::from_u32(value).unwrap();
-            let expected = match character {
-                '\0' => "\\0".to_owned(),
-                '\t' => "\\t".to_owned(),
-                '\n' => "\\n".to_owned(),
-                '\r' => "\\r".to_owned(),
-                _ if value <= 0x7f => format!("\\x{value:02x}"),
-                _ => format!("\\u{{{value:04x}}}"),
-            };
-            assert_eq!(TerminalEscaped(character).to_string(), expected);
-        }
-        assert_eq!(
-            TerminalEscaped("\x1b[31mRed\x1b[0m\u{009b}31m").to_string(),
-            "\\x1b[31mRed\\x1b[0m\\u{009b}31m"
-        );
-    }
 
     #[test]
     fn terminal_display_preserves_unicode_and_program_separators() {

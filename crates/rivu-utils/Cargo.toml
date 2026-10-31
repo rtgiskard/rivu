@@ -1,0 +1,16 @@
+[package]
+name = "rivu-utils"
+version = "0.2.0"
+edition = "2024"
+description = "Shared logging and terminal diagnostics for Rivu"
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+clap = "4"
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = "0.3"
+
+[dev-dependencies]
+tempfile = "3.27"

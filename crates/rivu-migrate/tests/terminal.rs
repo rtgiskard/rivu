@@ -46,7 +46,7 @@ fn success_resources_are_escaped_without_rewriting_files_or_creating_backups() {
         "{stdout}"
     );
     assert!(!stdout.lines().any(|line| line.starts_with("Backup: ")));
-    assert!(output.stderr.is_empty());
+    assert_terminal_safe(&output.stderr);
     assert_eq!(fs::read_to_string(&config).unwrap(), original);
     assert!(database_path.is_file());
     assert!(!fs::read_dir(&data).unwrap().any(|entry| {
