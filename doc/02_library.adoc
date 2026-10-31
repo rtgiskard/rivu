@@ -283,7 +283,8 @@ Ctrl+A selects all matching recent tracks when this panel has focus. Sorting
 preserves selected track identities; refreshes discard selections that no longer exist.
 
 Right-click a track for the shared track actions, including batch Favorite and
-Unfavorite. Drag selected tracks to Queue or a named playlist catalog row to
+Unfavorite. Each is disabled when all selected tracks already have that state.
+Drag selected tracks to Queue or a named playlist catalog row to
 append them in their displayed order; dragging an unselected track carries only
 that track. These transfers do not remove history entries or change Library
 selection. Double-click plays the clicked track. Columns remain sortable and

@@ -288,6 +288,21 @@ impl HistoryBrowser {
         }
     }
 
+    pub(super) fn favorite_actions(&self, ids: &[i64]) -> (bool, bool) {
+        let mut actions = (false, false);
+        for id in ids {
+            let Some(entry) = self.positions.get(id).and_then(|&index| self.get(index)) else {
+                return (false, false);
+            };
+            actions.0 |= !entry.favorite;
+            actions.1 |= entry.favorite;
+            if actions == (true, true) {
+                break;
+            }
+        }
+        actions
+    }
+
     pub(in crate::gui) fn len(&self) -> usize {
         self.indices.len()
     }
@@ -316,6 +331,22 @@ impl HistoryBrowser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn favorite_actions_follow_selected_identities_after_sort_and_refresh() {
+        let mut history = HistoryBrowser::default();
+        let mut source = history_selection_source(&[1, 2, 3]);
+        Arc::make_mut(&mut source)[1].favorite = true;
+        history.sync(&source, None);
+        history.set_sort(HistorySort::Title);
+        assert_eq!(history.favorite_actions(&[1, 3]), (true, false));
+        assert_eq!(history.favorite_actions(&[2]), (false, true));
+        assert_eq!(history.favorite_actions(&[1, 2]), (true, true));
+        assert_eq!(history.favorite_actions(&[]), (false, false));
+        Arc::make_mut(&mut source)[0].favorite = true;
+        history.sync(&source, None);
+        assert_eq!(history.favorite_actions(&[1, 2]), (false, true));
+    }
 
     #[test]
     fn large_selection_releases_capacity_on_replace_clear_and_source_eviction() {

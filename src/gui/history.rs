@@ -212,6 +212,10 @@ impl History {
         true
     }
 
+    pub(super) fn favorite_actions(&self, ids: &[i64]) -> (bool, bool) {
+        self.model.favorite_actions(ids)
+    }
+
     fn send(&mut self, command: Command, cx: &mut Context<Self>) {
         if let Err(error) = self.context.handle().send(command) {
             cx.emit(HistoryEvent::Error(format!("{error:#}")));

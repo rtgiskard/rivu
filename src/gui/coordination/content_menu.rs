@@ -467,8 +467,31 @@ impl WindowView {
         self.send(command, cx);
     }
 
+    fn content_favorite_actions(&self, cx: &App) -> (bool, bool) {
+        match self
+            .content_menu
+            .as_ref()
+            .and_then(|menu| menu.remove.as_ref())
+        {
+            Some(Command::RemoveHistory { track_ids }) => {
+                self.history.read(cx).favorite_actions(track_ids)
+            }
+            _ => (true, true),
+        }
+    }
+
     fn content_action(&mut self, action: ContentAction, cx: &mut Context<Self>) {
         self.refresh(cx);
+        if let ContentAction::Favorite(favorite) = action {
+            let (can_favorite, can_unfavorite) = self.content_favorite_actions(cx);
+            if !(if favorite {
+                can_favorite
+            } else {
+                can_unfavorite
+            }) {
+                return;
+            }
+        }
         let Some(menu) = self.replace_content_menu(None, cx) else {
             return;
         };
@@ -880,19 +903,28 @@ impl WindowView {
                 ));
             }
             if state.tracks_only {
+                let (can_favorite, can_unfavorite) = self.content_favorite_actions(cx);
                 menu = menu
                     .child(rivu_ui::menu_separator(theme))
-                    .child(menu_item(
-                        "content-favorite",
-                        self.tr("li-favorite"),
-                        cx,
-                        |this, _, cx| this.content_action(ContentAction::Favorite(true), cx),
+                    .child(rivu_ui::disabled_control(
+                        theme,
+                        menu_item(
+                            "content-favorite",
+                            self.tr("li-favorite"),
+                            cx,
+                            |this, _, cx| this.content_action(ContentAction::Favorite(true), cx),
+                        ),
+                        !can_favorite,
                     ))
-                    .child(menu_item(
-                        "content-unfavorite",
-                        self.tr("li-unfavorite"),
-                        cx,
-                        |this, _, cx| this.content_action(ContentAction::Favorite(false), cx),
+                    .child(rivu_ui::disabled_control(
+                        theme,
+                        menu_item(
+                            "content-unfavorite",
+                            self.tr("li-unfavorite"),
+                            cx,
+                            |this, _, cx| this.content_action(ContentAction::Favorite(false), cx),
+                        ),
+                        !can_unfavorite,
                     ));
             }
             if state.remove.is_some() && !remove_history {
