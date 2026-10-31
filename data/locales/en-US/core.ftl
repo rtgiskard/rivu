@@ -62,6 +62,7 @@ core-help-version = Print version
 core-help-help-subcommand = Command to show help for
 core-help-data-dir = Data directory and instance to start or control
 core-help-config = Startup/probe configuration file; does not reconfigure a running instance
+core-help-log-level = Override this process's stderr and enabled file logging: debug, info, warning, error
 core-help-json = Print one JSON result; not available for GUI, serve, or TUI (usage errors remain clap diagnostics)
 core-help-gui = Open the desktop UI and optionally import paths
 core-help-serve = Run the shared core in the foreground without a GUI

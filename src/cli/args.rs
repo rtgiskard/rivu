@@ -14,10 +14,24 @@ pub(super) struct Args {
     pub(super) data_dir: Option<PathBuf>,
     #[arg(long, global = true, value_name = "FILE")]
     pub(super) config: Option<PathBuf>,
+    /// Override logging for this process.
+    #[arg(long, global = true, value_name = "LEVEL", value_parser = parse_log_level)]
+    pub(super) log_level: Option<rivu_utils::logging::LogLevel>,
     #[arg(long, global = true)]
     pub(super) json: bool,
     #[command(subcommand)]
     pub(super) action: Option<Action>,
+}
+
+fn parse_log_level(value: &str) -> Result<rivu_utils::logging::LogLevel, String> {
+    use rivu_utils::logging::LogLevel;
+    match value {
+        "debug" => Ok(LogLevel::Debug),
+        "info" => Ok(LogLevel::Info),
+        "warning" => Ok(LogLevel::Warning),
+        "error" => Ok(LogLevel::Error),
+        _ => Err("expected debug, info, warning, or error".to_owned()),
+    }
 }
 
 #[derive(Subcommand)]
@@ -596,7 +610,7 @@ pub(super) fn localize_help(command: &mut clap::Command, i18n: &Localizer, path:
     for (order, (name, positional)) in arguments.into_iter().enumerate() {
         let global = matches!(
             name.as_str(),
-            "data_dir" | "config" | "json" | "help" | "version"
+            "data_dir" | "config" | "log_level" | "json" | "help" | "version"
         );
         let name_key = name.replace('_', "-");
         let id = if path.is_empty() {
@@ -608,7 +622,7 @@ pub(super) fn localize_help(command: &mut clap::Command, i18n: &Localizer, path:
             Some(i18n.text("core-help-help"))
         } else if name == "version" {
             Some(i18n.text("core-help-version"))
-        } else if matches!(name.as_str(), "data_dir" | "config" | "json") {
+        } else if matches!(name.as_str(), "data_dir" | "config" | "log_level" | "json") {
             i18n.get_text(&format!("core-help-{name_key}"))
         } else {
             i18n.get_text(&id)
@@ -650,6 +664,41 @@ mod tests {
     use super::Args;
     use clap::CommandFactory;
     use rivu_utils::terminal::cli_error;
+
+    #[test]
+    fn log_level_is_global_and_rejects_unsupported_levels() {
+        use clap::Parser;
+        use rivu_utils::logging::LogLevel;
+
+        for (value, expected) in [("debug", 0), ("info", 1), ("warning", 2), ("error", 3)] {
+            for argv in [
+                vec!["rivu", "--log-level", value, "status"],
+                vec!["rivu", "playback", "devices", "--log-level", value],
+            ] {
+                let level = Args::try_parse_from(argv).unwrap().log_level.unwrap();
+                let actual = match level {
+                    LogLevel::Debug => 0,
+                    LogLevel::Info => 1,
+                    LogLevel::Warning => 2,
+                    LogLevel::Error => 3,
+                };
+                assert_eq!(actual, expected);
+            }
+        }
+        for argv in [
+            vec!["rivu", "--log-level"],
+            vec!["rivu", "status", "--log-level", "trace"],
+            vec!["rivu", "status", "--log-level", "invalid"],
+        ] {
+            assert!(Args::try_parse_from(argv).is_err());
+        }
+        assert!(
+            Args::try_parse_from(["rivu", "status"])
+                .unwrap()
+                .log_level
+                .is_none()
+        );
+    }
 
     #[test]
     fn scoped_cli_help_and_usage_errors_match_full_catalog() {

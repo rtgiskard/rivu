@@ -47,6 +47,7 @@ pub(super) fn run() -> std::result::Result<(), CliError> {
 }
 
 fn execute(args: Args, i18n: Localizer) -> Result<()> {
+    rivu_utils::logging::init(args.log_level)?;
     let config::paths::Paths {
         config: config_path,
         data_dir,

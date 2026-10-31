@@ -254,7 +254,7 @@ impl App {
         paths: Vec<PathBuf>,
         graphical: bool,
     ) -> Result<Self> {
-        rivu_utils::logging::init()?;
+        rivu_utils::logging::init(None)?;
         let socket_owner = startup::acquire_storage(&data_dir, &config_path)?;
         let signals =
             Signals::new([Signal::Int, Signal::Term]).context("Registering shutdown signals")?;

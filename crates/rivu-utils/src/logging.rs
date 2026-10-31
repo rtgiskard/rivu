@@ -56,6 +56,7 @@ pub struct Options {
 
 struct RoutingState {
     level: AtomicU8,
+    level_override: Option<u8>,
     file_enabled: AtomicBool,
     sink: Arc<Mutex<LogSink>>,
     // Configuration/ownership serialization is separate from the writer lock:
@@ -64,9 +65,10 @@ struct RoutingState {
 }
 
 impl RoutingState {
-    fn new() -> Self {
+    fn new(level_override: Option<LogLevel>) -> Self {
         Self {
             level: AtomicU8::new(level_code(LogLevel::Warning)),
+            level_override: level_override.map(level_code),
             file_enabled: AtomicBool::new(false),
             sink: Arc::new(Mutex::new(LogSink::Disabled)),
             lease: Mutex::new(false),
@@ -249,18 +251,20 @@ where
     }
 }
 
-pub fn init() -> Result<()> {
-    install_once().map(|_| ())
+/// Install logging with an optional process-lifetime override for both outputs.
+/// The first initialization wins; configuration changes cannot replace the override.
+pub fn init(level_override: Option<LogLevel>) -> Result<()> {
+    install_once(level_override).map(|_| ())
 }
 
-fn install_once() -> Result<Arc<RoutingState>> {
+fn install_once(level_override: Option<LogLevel>) -> Result<Arc<RoutingState>> {
     let mut installed = INSTALLATION
         .lock()
         .expect("logging installation mutex poisoned");
     if let Some(routing) = installed.as_ref() {
         return Ok(routing.clone());
     }
-    let routing = Arc::new(RoutingState::new());
+    let routing = Arc::new(RoutingState::new(level_override));
     tracing::subscriber::set_global_default(subscriber(routing.clone()))
         .context("installing Rivu logging subscriber")?;
     *installed = Some(routing.clone());
@@ -268,12 +272,18 @@ fn install_once() -> Result<Arc<RoutingState>> {
 }
 
 fn subscriber(routing: Arc<RoutingState>) -> impl Subscriber + Send + Sync {
+    let stderr_level = routing
+        .level_override
+        .unwrap_or(level_code(LogLevel::Warning));
     let stderr_layer = fmt::layer()
         .event_format(LineFormatter {
             ansi: stderr_ansi(),
         })
         .with_writer(io::stderr)
-        .with_filter(LevelFilter::WARN);
+        .with_filter(
+            dynamic_filter_fn(move |metadata, _| level_enabled(stderr_level, metadata.level()))
+                .with_max_level_hint(LevelFilter::DEBUG),
+        );
     let sink = routing.sink.clone();
     let file_layer = fmt::layer()
         .event_format(LineFormatter { ansi: false })
@@ -293,7 +303,7 @@ fn subscriber(routing: Arc<RoutingState>) -> impl Subscriber + Send + Sync {
 
 impl Session {
     pub fn start(data_dir: &Path, options: &Options) -> Result<Self> {
-        let routing = install_once()?;
+        let routing = install_once(None)?;
         Self::start_with_routing(data_dir, options, routing)
     }
 
@@ -398,9 +408,12 @@ impl Control {
                 {
                     worker.set_retention(retention);
                 }
-                routing
-                    .level
-                    .store(level_code(options.level), Ordering::Relaxed);
+                routing.level.store(
+                    routing
+                        .level_override
+                        .unwrap_or_else(|| level_code(options.level)),
+                    Ordering::Relaxed,
+                );
                 routing.file_enabled.store(true, Ordering::Release);
             } else if settings.worker.is_some() {
                 routing.file_enabled.store(false, Ordering::Release);
@@ -545,7 +558,7 @@ mod tests {
     use super::*;
 
     fn harness() -> (Arc<RoutingState>, tracing::Dispatch) {
-        let routing = Arc::new(RoutingState::new());
+        let routing = Arc::new(RoutingState::new(None));
         let dispatch = tracing::Dispatch::new(subscriber(routing.clone()));
         (routing, dispatch)
     }
@@ -583,6 +596,55 @@ mod tests {
             tracing::debug!(target: "logging_test", "debug {message}");
             tracing::error!(target: "logging_test", "error {message}");
         });
+    }
+
+    #[test]
+    fn process_override_survives_session_start_reconfiguration_and_file_toggle() {
+        for override_level in [LogLevel::Debug, LogLevel::Error] {
+            let routing = Arc::new(RoutingState::new(Some(override_level)));
+            let dispatch = tracing::Dispatch::new(subscriber(routing.clone()));
+            let directory = tempfile::tempdir().unwrap();
+            let mut session = Session::start_with_routing(
+                directory.path(),
+                &file_options(LogLevel::Warning),
+                routing,
+            )
+            .unwrap();
+            let control = session.control();
+            emit(&dispatch, "startup");
+            for (level, message) in [
+                (LogLevel::Error, "configured error"),
+                (LogLevel::Debug, "configured debug"),
+            ] {
+                control
+                    .reconfigure_with(&file_options(level), || Ok(()))
+                    .unwrap();
+                emit(&dispatch, message);
+            }
+            control
+                .reconfigure_with(&disabled_options(), || Ok(()))
+                .unwrap();
+            emit(&dispatch, "disabled");
+            control
+                .reconfigure_with(&file_options(LogLevel::Info), || Ok(()))
+                .unwrap();
+            emit(&dispatch, "reenabled");
+            session.shutdown();
+            let contents = log_contents(directory.path());
+            for message in [
+                "startup",
+                "configured error",
+                "configured debug",
+                "reenabled",
+            ] {
+                assert!(contents.contains(&format!("error {message}")));
+                assert_eq!(
+                    contents.contains(&format!("debug {message}")),
+                    matches!(override_level, LogLevel::Debug),
+                );
+            }
+            assert!(!contents.contains("disabled"));
+        }
     }
 
     fn aged_log(data_dir: &Path, name: &str, weeks: u64) -> PathBuf {

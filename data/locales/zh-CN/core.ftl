@@ -62,6 +62,7 @@ core-help-version = 显示版本
 core-help-help-subcommand = 要查看帮助的命令
 core-help-data-dir = 要启动或控制的实例及其数据目录
 core-help-config = 启动或文件探测使用的配置文件；不会重新配置运行中的实例
+core-help-log-level = 临时覆盖本进程的标准错误和已启用的文件日志等级：debug、info、warning、error
 core-help-json = 输出单个 JSON 结果；不适用于 GUI、serve 或 TUI（用法错误仍以 clap 诊断输出）
 core-help-gui = 打开桌面界面，可同时导入路径
 core-help-serve = 在前台运行共享核心，不打开图形界面

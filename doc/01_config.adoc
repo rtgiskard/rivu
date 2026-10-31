@@ -227,11 +227,15 @@ and link:04_playback.adoc#_mpris_and_artwork[MPRIS and artwork].
 
 === Logging and diagnostics
 
-`logging.level` accepts `debug`, `info`, `warning` (default), or `error`. Warnings
-and errors always go to stderr. `logging.to_file` defaults to `false`; enabling it
-writes weekly logs under the data directory. `logging.retention_weeks` accepts
-`1`–`520` and defaults to `4`. `NO_COLOR` or `RIVU_COLOR=never` disables stderr
-colors. Closing the GUI window does not stop file logging.
+`logging.level` accepts `debug`, `info`, `warning` (default), or `error` and
+controls file logging. By default, stderr receives warnings and errors.
+Global `--log-level LEVEL` overrides stderr and enabled file logging for this
+process's lifetime.
+
+`logging.to_file` defaults to `false`; enabling it writes weekly logs under the
+data directory. `logging.retention_weeks` accepts `1`–`520` and defaults to `4`.
+`NO_COLOR` or `RIVU_COLOR=never` disables stderr colors. Closing the GUI window
+does not stop file logging.
 
 File logging starts after configuration is loaded; earlier events are not replayed.
 Expired-log cleanup runs on the file writer, including when logging is enabled or

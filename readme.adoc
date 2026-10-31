@@ -84,6 +84,9 @@ Ctrl-C and SIGTERM also request a clean shutdown.
 CLI and TUI controls require a running core; `library probe` and `playback devices`
 can run independently. `--data-dir DIRECTORY` selects the instance. `--config FILE`
 selects startup/probe configuration, not settings in an already running core.
+`--log-level LEVEL` temporarily overrides this process's stderr and enabled file
+logging (`debug`, `info`, `warning`, `error`).
+See link:doc/01_config.adoc#_logging_and_diagnostics[logging and diagnostics].
 `--json` writes one result to stdout and runtime diagnostics as JSON to stderr;
 it is not available for GUI, serve, or TUI. Usage errors retain ordinary diagnostics.
 Use `rivu --help` or a subcommand's `--help` for exact arguments.
