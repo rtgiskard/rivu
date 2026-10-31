@@ -558,6 +558,66 @@ fn native_graph_decode_budget_failure_reports_requested_output_once() {
 }
 
 #[test]
+fn standalone_native_speech_dispatch_does_not_require_python_resources() {
+    let (directory, mut service, track, mut config) = fixture();
+    let mut writer = hound::WavWriter::create(
+        &track.path,
+        hound::WavSpec {
+            channels: 2,
+            sample_rate: 16_000,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        },
+    )
+    .unwrap();
+    for sample in PCM {
+        writer.write_sample(sample).unwrap();
+        writer.write_sample(sample).unwrap();
+    }
+    writer.finalize().unwrap();
+    let manifest = directory.path().join("manifest.json");
+    let settings = Arc::make_mut(&mut config);
+    settings.neural.speech_manifest = Some(manifest.clone());
+    settings.neural.speech_interpreter = directory.path().join("missing-python");
+    settings.neural.worker = directory.path().join("missing-worker.py");
+    let native_error = if cfg!(feature = "onnx") {
+        "Unsupported native speech model"
+    } else {
+        "Native ONNX inference requires a build with the onnx feature enabled"
+    };
+    for (metadata, expected) in [
+        (
+            serde_json::json!({
+                "version": 1, "operation": "speech", "id": "unsupported",
+                "backend": "onnx", "model": "model.onnx", "files": {},
+                "license_evidence": "license.txt"
+            }),
+            native_error,
+        ),
+        (serde_json::json!({}), "Neural worker does not exist"),
+    ] {
+        fs::write(&manifest, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        let started = service
+            .start(
+                track.clone(),
+                config.clone(),
+                ProcessingOperation::Speech,
+                None,
+            )
+            .unwrap();
+        loop {
+            if let Event::Finished { id, result } = next_event(&mut service) {
+                assert_eq!(id, started.id);
+                service.finish_task(id).unwrap();
+                let error = format!("{:#}", result.err().unwrap());
+                assert!(error.contains(expected), "{error}");
+                break;
+            }
+        }
+    }
+}
+
+#[test]
 fn neural_channel_rejection_uses_actual_decoder_not_stale_track_fields() {
     let (directory, mut service, mut track, mut config) = fixture();
     let manifest = directory.path().join("manifest.json");

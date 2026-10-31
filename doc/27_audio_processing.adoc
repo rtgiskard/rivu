@@ -271,30 +271,71 @@ classical spectral preset.
 
 === Explicit neural installation and offline deployment
 
-Speech backends are MossFormer2 SE48K and DeepFilterNet3; the separation
-backend is Kim Mel-band RoFormer (`melband_roformer_kim`). Each graph node selects its own
-prepared manifest, interpreter and worker. With `uv` already installed, run setup
-from the repository root in separate pinned environments: their PyTorch
-requirements differ. Install only the backends you need.
+Speech backends are UL-UNAS and GTCRN (Rust + ONNX Runtime, CPU only),
+MossFormer2 SE48K and DeepFilterNet3 (Python). The separation backend is
+Kim Mel-band RoFormer (`melband_roformer_kim`, Python). Standalone operations and
+graph nodes select the backend from the prepared manifest; each graph node has
+its own model configuration. Native speech does not use Python interpreter or
+worker paths. It requires the `onnx` build feature (enabled by default); builds
+without it reject native manifests rather than falling back to Python.
 
-Installation requires 10 GiB free per invocation; allow additional space for
-models, download caches, corpora and results. Preparation requires a new directory
+Run preparation from the repository root. It requires a new destination directory
 with an existing parent and 2 GiB free. Choose `--download` or local `--weights`;
-even local weights can require network access for pinned code/license evidence.
-Playback, builds and worker inference never download models. CPU is the default;
-CUDA requires an explicitly compatible environment and has no automatic fallback.
-Thread settings accept 1–8; the recorded local evaluation workflow uses at most four.
+even local weights require network access for pinned source/license evidence.
+Playback, builds and inference never download models.
+
+For native speech, install ONNX Runtime 1.23 or newer using the system package
+manager (on Arch Linux: `sudo pacman -S --needed onnxruntime`). If it is not on the
+dynamic-loader search path, set `ORT_DYLIB_PATH` to its absolute shared-library
+path before starting Rivu. Preparation uses only Python's standard library;
+there is no model-specific Python environment:
 
 [source,shell]
 ----
-python3 tools/audio_processing/install.py moss
-python3 tools/audio_processing/install.py separate
-python3 tools/audio_processing/prepare.py moss --download --directory .cache/neural/moss --interpreter "$PWD/.cache/neural/moss-venv/bin/python"
-python3 tools/audio_processing/prepare.py separate --download --directory .cache/neural/kim --interpreter "$PWD/.cache/neural/separate-venv/bin/python"
+mkdir -p .cache/neural
+python3 tools/audio_processing/prepare.py ul_unas --download --directory .cache/neural/ul-unas
+python3 tools/audio_processing/prepare.py gtcrn --download --directory .cache/neural/gtcrn
 ----
 
-The primary example prepares MossFormer2 and Kim. DeepFilterNet3 is optional
-and needs its own pinned environment:
+Configure the emitted `model_manifest` as the speech manifest. The bundle pins
+the official streaming ONNX artifact and retains upstream source/license evidence.
+Both models operate at 16 kHz internally; the native path preserves the source
+sample rate, exact frame count and mono/stereo speaker layout. Channels have
+independent recurrent state. CPU and 1–8 threads are supported; CUDA and the
+DeepFilterNet-only post-filter report errors rather than selecting another model.
+Wet mix and attenuation-limit controls remain available.
+Native analysis completes the last FFT512/hop256 frame with reflection against
+the original signal, then crops synthesis to the original length. This also
+defines short-input handling; it avoids a nearly zero single-window denominator
+at a partial final hop. A numerical reference must use the same explicit padding,
+not an unpadded upstream example with different final-frame coverage.
+
+For Python models, with `uv` already installed, run setup from the repository
+root. MossFormer2 and Kim share one environment. The installer resolves compatible
+dependency ranges rather than fixing every package to a historical version;
+`shared-installed.txt` records the resulting environment. Preparation binds each
+model bundle to the exact versions installed in its selected interpreter.
+
+BS-RoFormer 124-band (https://www.mvsep.com/quality_checker/entry/10197[MVSEP entry 10197], 2026-07-10) is not an installed backend:
+its exact checkpoint and complete inference configuration have not been located
+in the publisher's public artifacts. The open weights linked by the
+https://github.com/lucidrains/BS-RoFormer[lucidrains homepage] include a different 62-band ViperX checkpoint; it is not a substitute
+for the selected 124-band model or its reported scores.
+
+Python environment installation requires 10 GiB free per invocation; allow
+additional space for models, download caches, corpora and results. CPU is the
+default; CUDA requires an explicitly compatible environment and has no automatic
+fallback. Thread settings accept 1–8.
+
+[source,shell]
+----
+python3 tools/audio_processing/install.py shared
+python3 tools/audio_processing/prepare.py moss --download --directory .cache/neural/moss --interpreter "$PWD/.cache/neural/shared-venv/bin/python"
+python3 tools/audio_processing/prepare.py separate --download --directory .cache/neural/kim --interpreter "$PWD/.cache/neural/shared-venv/bin/python"
+----
+
+DeepFilterNet3 is optional and keeps its own pinned environment because its
+NumPy dependency is below 2, whereas Kim requires NumPy 2 or later:
 
 [source,shell]
 ----
@@ -302,22 +343,19 @@ python3 tools/audio_processing/install.py df3
 python3 tools/audio_processing/prepare.py df3 --download --directory .cache/neural/df3 --interpreter "$PWD/.cache/neural/df3-venv/bin/python"
 ----
 
-Migration: NSNet2 and HTDemucs are no longer supported. There are no automatic
-model substitutions: explicitly select a supported model and its environment.
-Reprovision or reprepare current supported-model bundles into new directories
-because the runtime sidecars have changed; configure the newly emitted paths.
-
-Preparation prints absolute `worker`, `interpreter` and `model_manifest` paths.
-Configure *all three* and preserve the interpreter's venv symlink rather than
-resolving it to base Python. The application does not bundle Python, workers or
-models. In GUI path controls, an empty manifest clears model selection; interpreter
-and worker paths are required. Placeholders are examples, not installed resources.
+Python preparation prints absolute `worker`, `interpreter` and `model_manifest`
+paths. Configure *all three* and preserve the interpreter's venv symlink rather
+than resolving it to base Python. The application does not bundle Python,
+workers, ONNX Runtime or models. An empty manifest clears model selection
+without deleting files. Interpreter and worker settings remain nonempty retained
+configuration values, but native speech never opens or executes these paths.
+Placeholders are examples, not installed resources.
 
 In a source checkout, inference code and schemas live in
 `tools/audio_processing/runtime/`; preparation, provisioning, export and evaluation
 entry points remain in `tools/audio_processing/`. A checkout-based worker path is
-`tools/audio_processing/runtime/worker.py`. Existing provisioned bundles keep
-their own `runtime/worker.py` snapshot and do not need a path change.
+`tools/audio_processing/runtime/worker.py`. Provisioned Python bundles use their
+own `runtime/worker.py` snapshot, not the checkout's worker path.
 
 Keep the complete provisioned bundle together: hashed runtime sidecars/schema,
 model assets and license/dependency records. Its manifest binds bundle paths,
@@ -326,7 +364,7 @@ runtime from the current checkout without downloading:
 
 [source,shell]
 ----
-/absolute/moss-venv/bin/python /absolute/rivu/tools/audio_processing/provision.py --manifest /absolute/moss/manifest.json --directory /absolute/new-moss-bundle
+/absolute/shared-venv/bin/python /absolute/rivu/tools/audio_processing/provision.py --manifest /absolute/moss/manifest.json --directory /absolute/new-moss-bundle
 ----
 
 The destination must be new. Provisioning does not copy the interpreter environment;
@@ -336,7 +374,7 @@ A bundle's runtime is a source snapshot: after worker updates, reprovision from
 the updated checkout into a new bundle and configure all three emitted paths.
 Do not patch hashed bundle files in place.
 
-Application inference runs `worker.py --stream` with request version 2 and event
+Python application inference runs `worker.py --stream` with request version 2 and event
 version 3. Stdin/stdout carry JSON controls and interleaved float32-le PCM in
 frames: one-byte kind, four-byte little-endian length, at most 64 KiB payload.
 Requests declare rate, channels and exact frame count, not audio paths. Each
@@ -352,18 +390,17 @@ from application execution. Its version-1 file job requires absolute `input_path
 and `output_dir`: input must be IEEE float32 WAV/WAVEX/RF64 and destination must
 be new with an existing parent. It writes stem WAVs and `result.json`, with an
 8 GiB total audio-output limit and 256 MiB additional free-space reserve.
-Both Python entrypoints validate inference controls once before constructing stream
-input or creating export outputs. Their shared internal execution path consumes
-the validated request; model assets and PCM/output protocol checks remain separate.
-Reprovision workers from this checkout when migrating to the framed protocol.
+Both Python entrypoints validate inference controls before constructing stream
+input or creating export outputs. Model assets and PCM/output protocol checks
+remain separate. Reprovision Python workers when migrating to the framed protocol.
 
 
-For a shared worker, select the emitted runtime worker compatible with both
-prepared manifests; interpreters and manifests remain operation-specific:
+Use the same shared interpreter for MossFormer2 and Kim, with a runtime worker
+compatible with both prepared manifests. Model manifests remain operation-specific:
 
 [source,shell]
 ----
-rivu processing neural '{"worker":"/absolute/new-moss-bundle/runtime/worker.py","speech_interpreter":"/absolute/moss-venv/bin/python","speech_manifest":"/absolute/new-moss-bundle/manifest.json","separation_interpreter":"/absolute/separate-venv/bin/python","separation_manifest":"/absolute/kim/manifest.json","device":"cpu","threads":4}'
+rivu processing neural '{"worker":"/absolute/new-moss-bundle/runtime/worker.py","speech_interpreter":"/absolute/shared-venv/bin/python","speech_manifest":"/absolute/new-moss-bundle/manifest.json","separation_interpreter":"/absolute/shared-venv/bin/python","separation_manifest":"/absolute/kim/manifest.json","device":"cpu","threads":4}'
 rivu processing start 42 speech --wait
 rivu processing start 43 separate --wait
 ----
@@ -378,20 +415,21 @@ redistribution; provisioning grants no additional license.
 proxy credentials in shared evidence, manifests or logs.
 
 Speech controls include wet mix and attenuation limit; the optional post-filter
-is supported only by DeepFilterNet3. Enabling it for another speech model fails
-rather than silently ignoring it. Separation overlap controls model overlap,
-not a quality guarantee. Neural source rates are 8–192 kHz; speech accepts
-Front Center mono or Front Left/Front Right stereo in that order, while separation
-requires that stereo layout. Other speaker identities or permutations are rejected
-rather than guessed from channel count. Speech channels are inferred independently,
-so stereo image can change. Rate conversion to 48 kHz speech / 44.1 kHz separation
-is explicit; output is trimmed back to the original rate, layout and exact frame
-count. No implicit downmix or duplicated mono separation is offered.
+is supported only by DeepFilterNet3. Separation overlap controls model overlap,
+not a quality guarantee. Python backends accept 8–192 kHz source rates; native
+speech accepts 8–384 kHz. Speech accepts Front Center mono or Front Left/Front
+Right stereo in that order, while separation requires that stereo layout. Other
+speaker identities or permutations are rejected rather than guessed from channel
+count. Speech channels are inferred independently, so stereo image can change.
+Inference rate conversion is explicit: 16 kHz for native speech, 48 kHz for Python
+speech and 44.1 kHz for separation. Output preserves the original rate, layout
+and exact frame count. No implicit downmix or duplicated mono separation is offered.
 
-Speech Wet=0 copies dry PCM without loading/executing a model or resampling.
-Input, controls, manifest and artifact hashes are still validated. Streaming
-requires NumPy but skips model-execution dependency checks; the file adapter
-also requires SoundFile and records bypass/model-not-executed in `result.json`.
+Speech Wet=0 copies dry PCM without executing a model or resampling. Input,
+controls, manifest and artifact hashes are still validated. Native dry bypass
+does not load ONNX Runtime. Python streaming still requires NumPy but skips
+model-execution dependency checks; the Python file adapter also requires
+SoundFile and records bypass/model-not-executed in `result.json`.
 
 === Tasks, retention and audition
 
@@ -406,8 +444,9 @@ the client binds subsequent status, cancel, audition and export requests to that
 instance. A bare task number is not sufficient, and restarting the service does
 not make a saved reference address a new task. A cancellation acknowledgement
 accepts the request, not proof that the worker has already retired. Cancellation
-invalidates publication, terminates/reaps neural workers and retires partial
-PCM; it does not publish a partial result. Source identity and job settings
+invalidates publication, terminates/reaps Python neural workers and retires partial
+PCM. Native ONNX jobs check cancellation between model frames and resampling
+batches. Neither path publishes a partial result. Source identity and job settings
 are captured. Later configuration or graph edits do not change that snapshot;
 changes to its registered source or media invalidate publication. Switching the
 playback track is different: it suppresses a pending automatic graph-audition
@@ -441,8 +480,8 @@ Results are immutable shared in-memory PCM: node execution creates no processing
 directory, intermediate WAV, request file or result report. A 512 MiB allocation
 budget covers active, retained and retiring PCM, charging shared backing storage
 once until its last owner releases it. Exhaustion fails explicitly without disk
-spill. Decoder/DSP state, model weights and Python workspace are additional costs;
-the budget is not a process-RSS limit.
+spill. Decoder/DSP state, model weights, ONNX Runtime and Python workspace are
+additional costs; the budget is not a process-RSS limit.
 The actual ordered speaker layout travels with shared PCM storage and its slices,
 through graph intermediates, memory decoding and audition; channel count is derived
 from it, not used to reconstruct speaker identities.
@@ -796,6 +835,19 @@ availability and source identity before reusing any record for acceptance.
 Human listening, quiet-content/stereo-artifact approval, broad lossless fullband
 music coverage and device-specific underrun/deadline evidence remain gaps.
 Reference parity, scalar improvement and reconstruction do not close them.
+
+=== Native ONNX speech integration checks
+
+Recorded synthetic comparisons used ONNX Runtime 1.23.2 CPU with the pinned
+GTCRN and UL-UNAS graphs and an independent Torch STFT/ISTFT reference using
+the same complete-hop reflection. Short inputs and partial final hops were
+included. UL-UNAS's log-magnitude features amplify FFT roundoff near zero:
+its constant one-sample extension differed by 6.39e-4, while feeding the exact
+Rust spectrum to the Python runtime reduced the difference to 7.4e-11. This
+distinguishes transform conditioning from model execution; it does not justify
+input special cases or establish speech quality, listening acceptance or
+cross-runtime bit equality. These observations are not acceptance of the current
+standalone or graph dispatch paths.
 
 === Historical quality and integration observations
 

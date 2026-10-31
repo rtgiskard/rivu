@@ -87,9 +87,9 @@ def download(url, target, maximum, proxy=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("model", choices=("separate", "df3", "moss"))
+    parser.add_argument("model", choices=("separate", "df3", "moss", "ul_unas", "gtcrn"))
     parser.add_argument("--directory", type=Path, required=True)
-    parser.add_argument("--interpreter", type=Path, required=True, help="absolute prepared venv Python path; preserve its symlink, do not resolve to base Python")
+    parser.add_argument("--interpreter", type=Path, help="Python models only: absolute prepared venv executable; preserve its symlink")
     parser.add_argument("--weights", type=Path)
     parser.add_argument("--download", action="store_true")
     parser.add_argument("--hf-host", choices=("huggingface.co", "hf-mirror.com"), default="huggingface.co")
@@ -97,8 +97,9 @@ def main():
     parser.add_argument("--proxy", help="explicit preparation-only curl proxy (e.g. socks5h://[::1]:22224); never used by inference")
     args = parser.parse_args()
     fetch = partial(download, proxy=args.proxy)
-    if not args.interpreter.is_absolute() or not args.interpreter.is_file():
-        parser.error("--interpreter must name an existing absolute prepared Python executable")
+    native = args.model in ("ul_unas", "gtcrn")
+    if not native and (args.interpreter is None or not args.interpreter.is_absolute() or not args.interpreter.is_file()):
+        parser.error("Python models require --interpreter naming an existing absolute prepared Python executable")
     target = args.directory.resolve()
     if target.exists():
         parser.error("directory must not exist (preparation never overwrites)")
@@ -137,13 +138,19 @@ def main():
         elif args.model == "moss":
             from runtime.mossformer import prepare
             manifest = prepare(args, target, fetch)
+        elif native:
+            from onnx_speech import prepare
+            manifest = prepare(args, target, fetch)
         manifest["license_evidence"] = "weight-license.txt"
         manifest["files"] = {str(path.relative_to(target)):digest(path) for path in sorted(target.rglob("*")) if path.is_file()}
         (target / "manifest.json").write_text(json.dumps(manifest, indent=2)+"\n")
-        provisioned = subprocess.run([str(args.interpreter), str(Path(__file__).with_name("provision.py").resolve()),
-                                     "--manifest", str(target / "manifest.json"), "--directory", str(target), "--populate-new"],
-                                    stdout=subprocess.PIPE, text=True, check=True)
-        print(provisioned.stdout.strip())
+        if native:
+            print(json.dumps({"model_manifest": str(target / "manifest.json"), "backend": "onnx"}))
+        else:
+            provisioned = subprocess.run([str(args.interpreter), str(Path(__file__).with_name("provision.py").resolve()),
+                                         "--manifest", str(target / "manifest.json"), "--directory", str(target), "--populate-new"],
+                                        stdout=subprocess.PIPE, text=True, check=True)
+            print(provisioned.stdout.strip())
     except BaseException:
         shutil.rmtree(target)
         raise

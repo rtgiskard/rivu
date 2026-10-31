@@ -53,7 +53,7 @@ package:
 	trap 'exit 1' HUP INT TERM; \
 	$(MAKE) install PREFIX= DESTDIR="$$stage/$(PACKAGE_NAME)"; \
 	{ \
-		printf 'Build: %s\nFeatures: ffmpeg (default); no embedded font\n' "$(RIVU_GIT_VERSION)"; \
+		printf 'Build: %s\nFeatures: ffmpeg, onnx (default); no embedded font\n' "$(RIVU_GIT_VERSION)"; \
 		printf 'RUSTFLAGS: %s\n' "$${RUSTFLAGS:-<unset>}"; \
 		rustc --version; \
 		getconf GNU_LIBC_VERSION; \

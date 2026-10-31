@@ -239,6 +239,16 @@ directly. Plain `cargo build --locked --release` builds only the application and
 Build outputs default to `.cache/target/`; `CARGO_TARGET_DIR` overrides that path.
 Local builds retain the compiler's default CPU target.
 
+Default builds enable `ffmpeg` and `onnx`. Native UL-UNAS/GTCRN speech inference
+requires `onnx` and a separately installed ONNX Runtime; see
+link:doc/27_audio_processing.adoc#_explicit_neural_installation_and_offline_deployment[neural installation].
+To omit ONNX inference while keeping FFmpeg, build with
+`cargo build --locked --release --no-default-features --features ffmpeg`.
+`--no-default-features` alone disables both FFmpeg and ONNX inference;
+`--no-default-features --features onnx` keeps ONNX without FFmpeg.
+Python-backed models remain available without `onnx`; native ONNX manifests
+report an explicit disabled-feature error instead of falling back to Python.
+
 With GNU tar and zstd installed, `make package` creates
 `.cache/dist/rivu-linux-<host-architecture>.tar.zst` and its SHA-256 checksum
 without installing into the system.
@@ -302,7 +312,8 @@ See link:doc/24_layout.adoc#_reusable_gpui_controls[component boundaries and hos
 and link:doc/23_visuals.adoc#_pinned_gpu_extensions[local GPUI extensions].
 
 `rivu -V` prints `package-version (build-identity)`; About shows build identity
-and features. `rivu-migrate -V` prints its package version.
+and enabled Cargo features (`ffmpeg`, `onnx`, `embed-nerd-font`, or `none`).
+`rivu-migrate -V` prints its package version.
 
 `make build` uses `git describe` (including `-dirty`) as the build identity;
 plain Cargo uses the package version. Override either with `RIVU_GIT_VERSION`,

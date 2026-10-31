@@ -17,6 +17,8 @@ use std::{
 
 mod export;
 pub(crate) mod graph;
+#[cfg(feature = "onnx")]
+mod native_speech;
 mod neural;
 mod reclaim;
 mod render;
@@ -441,11 +443,6 @@ impl Service {
                                     .as_ref()
                                     .is_some_and(|p| p.is_absolute() && p.is_file()),
                                 "Select an absolute local prepared model manifest first"
-                            );
-                            ensure!(
-                                config.neural.worker.is_file(),
-                                "Neural worker does not exist: {}",
-                                config.neural.worker.display()
                             );
                         }
                         render::check_cancel(&flag)?;

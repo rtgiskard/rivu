@@ -12,8 +12,9 @@ edition = "2024"
 description = "A lightweight, local-first Linux music player"
 
 [features]
-default = ["ffmpeg"]
+default = ["ffmpeg", "onnx"]
 ffmpeg = ["rivu-audio/ffmpeg"]
+onnx = ["dep:ort", "dep:realfft", "dep:sha2"]
 embed-nerd-font = []
 
 [dependencies]
@@ -57,6 +58,10 @@ ratatui = { version = "0.30.2", default-features = false, features = ["crossterm
 rusqlite = { version = "0.41.0", features = ["bundled", "functions"] }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
+sha2 = { version = "0.10", optional = true }
+realfft = { version = "3.5", optional = true }
+# Load an explicitly installed runtime; never download/link a runtime at build time.
+ort = { version = "=2.0.0-rc.11", optional = true, default-features = false, features = ["std", "load-dynamic"] }
 signal-hook = "0.4.5"
 # Artwork needs container/tag probing; codecs and decoding belong to rivu-audio.
 symphonia = { version = "0.6.1", default-features = false, features = ["all-formats", "all-meta", "flac", "mp1", "mp2", "mp3"] }

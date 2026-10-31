@@ -866,7 +866,7 @@ impl AlbumBrowser {
             .p_2()
             .gap_0()
             .cursor_pointer()
-            .on_hover(cx.listener(move |this, hovered, _, cx| {
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 if !hovered && this.dismissed_actions.as_ref() == Some(&hover_key) {
                     this.dismissed_actions = None;
                     cx.notify();

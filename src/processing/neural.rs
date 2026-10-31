@@ -138,6 +138,30 @@ pub(super) fn run(
     }
     .as_ref()
     .context("Missing model manifest")?;
+    // Dispatch before touching Python paths; native bundles have no Python runtime.
+    let mut contents = Vec::new();
+    std::fs::File::open(manifest)
+        .context("Opening model manifest")?
+        .take(1024 * 1024 + 1)
+        .read_to_end(&mut contents)?;
+    ensure!(
+        contents.len() <= 1024 * 1024,
+        "Model manifest exceeds 1 MiB"
+    );
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&contents).context("Reading model manifest")?;
+    if metadata["backend"] == "onnx" {
+        ensure!(speech, "Native ONNX models support speech only");
+        #[cfg(feature = "onnx")]
+        return super::native_speech::run(input, config, budget, cancel, progress, status);
+        #[cfg(not(feature = "onnx"))]
+        bail!("Native ONNX inference requires a build with the onnx feature enabled");
+    }
+    ensure!(
+        config.worker.is_file(),
+        "Neural worker does not exist: {}",
+        config.worker.display()
+    );
     let mut parameters = if speech {
         serde_json::json!({"wet_mix":config.speech_wet_mix,"attenuation_limit_db":config.speech_attenuation_limit_db})
     } else {
@@ -438,6 +462,12 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "onnx"))]
+    #[test]
+    fn disabled_onnx_rejects_native_manifest_without_python_fallback() {
+        subprocess_fixture(ProcessingOperation::Speech, 1, 1, "onnx-disabled", None);
+    }
+
     #[test]
     fn subprocess_complete_then_nonzero_exit_is_failure() {
         subprocess_fixture(
@@ -547,6 +577,12 @@ if outcome == 'complete-then-nonzero':
 "#,
         )
         .unwrap();
+        let manifest = if outcome == "onnx-disabled" {
+            &b"{\"backend\":\"onnx\"}"[..]
+        } else {
+            &b"{}"[..]
+        };
+        std::fs::write(directory.path().join(outcome), manifest).unwrap();
         let config = rivu_format::config::NeuralConfig {
             speech_interpreter: "python3".into(),
             separation_interpreter: "python3".into(),
@@ -617,6 +653,13 @@ if outcome == 'complete-then-nonzero':
         );
         if outcome == "unsupported-layout" {
             assert!(result.is_err(), "unsupported speakers must not publish PCM");
+            assert_eq!(rx.len(), 1);
+            assert_eq!(budget.used_bytes(), source_bytes);
+            return;
+        }
+        if outcome == "onnx-disabled" {
+            let error = result.err().expect("disabled ONNX must not publish PCM");
+            assert!(error.to_string().contains("onnx feature enabled"));
             assert_eq!(rx.len(), 1);
             assert_eq!(budget.used_bytes(), source_bytes);
             return;

@@ -19,6 +19,7 @@ fn main() {
 
     let features = [
         (cfg!(feature = "ffmpeg"), "ffmpeg"),
+        (cfg!(feature = "onnx"), "onnx"),
         (cfg!(feature = "embed-nerd-font"), "embed-nerd-font"),
     ]
     .into_iter()
