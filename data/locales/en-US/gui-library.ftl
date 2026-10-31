@@ -158,6 +158,8 @@ gl-play-track = Play track
 
 gl-remove-playlist = Remove from playlist
 
+gl-remove-history = Remove from recent tracks
+
 
 gl-new-playlist = New playlist…
 

@@ -1119,6 +1119,34 @@ impl Store {
             duplicate_groups,
         })
     }
+    pub(crate) fn remove_history(&self, ids: &[i64]) -> Result<(bool, bool)> {
+        if ids.is_empty() {
+            return Ok((false, false));
+        }
+        let encoded = serde_json::to_string(ids)?;
+        let tx = self.conn.unchecked_transaction()?;
+        validate_encoded_track_ids(&tx, &encoded)?;
+        let albums = tx.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM tracks AS t WHERE t.id IN (SELECT value FROM json_each(?1)) AND t.last_played IS NOT NULL AND {})", super::albums::representative("t")),
+            [&encoded],
+            |row| row.get(0),
+        )?;
+        let changed = tx.execute(
+            "UPDATE tracks SET last_played=NULL WHERE id IN (SELECT value FROM json_each(?1)) AND last_played IS NOT NULL",
+            [&encoded],
+        )? > 0;
+        tx.commit()?;
+        if changed {
+            let mut cache = self.track_cache.borrow_mut();
+            for id in ids {
+                if let Some((track, _)) = cache.entries.get_mut(id) {
+                    track.last_played = None;
+                }
+            }
+        }
+        Ok((changed, albums))
+    }
+
     pub fn mark_played(&self, track: i64, at: i64) -> Result<super::TrackStats> {
         let tx = self.conn.unchecked_transaction()?;
         let (mut stats, changed) = match tx.query_row(

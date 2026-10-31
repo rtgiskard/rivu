@@ -158,6 +158,8 @@ gl-play-track = 播放此曲目
 
 gl-remove-playlist = 从播放列表移除
 
+gl-remove-history = 从最近播放中移除
+
 
 gl-new-playlist = 新建播放列表…
 

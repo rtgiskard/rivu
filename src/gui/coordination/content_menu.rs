@@ -262,6 +262,7 @@ impl WindowView {
         let remove_label = match &remove {
             Some(Command::RemoveQueueEntries { .. }) => "gl-remove-queue-selected",
             Some(Command::RemovePlaylistEntries { .. }) => "gl-remove-playlist",
+            Some(Command::RemoveHistory { .. }) => "gl-remove-history",
             _ => "gl-remove-library-selected",
         };
         let menu = Some(ContentMenu {
@@ -869,6 +870,15 @@ impl WindowView {
                     .track_focus(&state.playlist_trigger)
                     .tab_stop(true),
                 );
+            let remove_history = matches!(&state.remove, Some(Command::RemoveHistory { .. }));
+            if remove_history {
+                menu = menu.child(menu_item(
+                    "content-remove",
+                    self.tr(state.remove_label),
+                    cx,
+                    |this, _, cx| this.content_action(ContentAction::Remove, cx),
+                ));
+            }
             if state.tracks_only {
                 menu = menu
                     .child(rivu_ui::menu_separator(theme))
@@ -885,23 +895,21 @@ impl WindowView {
                         |this, _, cx| this.content_action(ContentAction::Favorite(false), cx),
                     ));
             }
-            if state.remove.is_some() {
+            if state.remove.is_some() && !remove_history {
+                let item = menu_item(
+                    "content-remove",
+                    self.tr(state.remove_label),
+                    cx,
+                    |this, _, cx| {
+                        if let Some(menu) = &mut this.content_menu {
+                            menu.confirm_remove = Some(RemoveTarget::Selection);
+                        }
+                        cx.notify();
+                    },
+                );
                 menu = menu
                     .child(rivu_ui::menu_separator(theme))
-                    .child(rivu_ui::danger_menu_item(
-                        theme,
-                        menu_item(
-                            "content-remove",
-                            self.tr(state.remove_label),
-                            cx,
-                            |this, _, cx| {
-                                if let Some(menu) = &mut this.content_menu {
-                                    menu.confirm_remove = Some(RemoveTarget::Selection);
-                                }
-                                cx.notify();
-                            },
-                        ),
-                    ));
+                    .child(rivu_ui::danger_menu_item(theme, item));
             }
             if state.root.is_some() {
                 menu = menu

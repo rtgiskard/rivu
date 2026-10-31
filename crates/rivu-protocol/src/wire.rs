@@ -410,6 +410,9 @@ pub enum WireCommand {
     RemoveTracks {
         track_ids: Vec<i64>,
     },
+    RemoveHistory {
+        track_ids: Vec<i64>,
+    },
     Device {
         name: Option<String>,
     },
@@ -1270,6 +1273,7 @@ impl From<Command> for WireCommand {
                 decoder_hint,
             },
             Command::RemoveTracks { track_ids } => Self::RemoveTracks { track_ids },
+            Command::RemoveHistory { track_ids } => Self::RemoveHistory { track_ids },
             Command::Device { name } => Self::Device { name },
             Command::Analysis { enabled } => Self::Analysis { enabled },
             Command::DismissError => Self::DismissError,
@@ -1554,6 +1558,7 @@ impl TryFrom<WireCommand> for Command {
                 decoder_hint,
             },
             WireCommand::RemoveTracks { track_ids } => Self::RemoveTracks { track_ids },
+            WireCommand::RemoveHistory { track_ids } => Self::RemoveHistory { track_ids },
             WireCommand::Device { name } => Self::Device { name },
             WireCommand::Analysis { enabled } => Self::Analysis { enabled },
             WireCommand::DismissError => Self::DismissError,

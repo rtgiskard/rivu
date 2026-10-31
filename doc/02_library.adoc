@@ -289,6 +289,10 @@ that track. These transfers do not remove history entries or change Library
 selection. Double-click plays the clicked track. Columns remain sortable and
 shrink to fit; hovering a row exposes its individual favorite toggle.
 
+`Remove from recent tracks` removes the selected history records and clears their
+last-played times, without deleting tracks or changing play counts. Playback is
+uninterrupted; removed tracks return to history when played again.
+
 The loaded playback track shows only `Playing`, `Paused`, or `Stopped` in the
 Last played column, even before playback has confirmed any audio was heard.
 This follows the playback track, not the Recent tracks selection. Other rows

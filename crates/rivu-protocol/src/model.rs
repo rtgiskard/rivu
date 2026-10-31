@@ -839,6 +839,9 @@ pub enum Command {
     RemoveTracks {
         track_ids: Vec<i64>,
     },
+    RemoveHistory {
+        track_ids: Vec<i64>,
+    },
     Device {
         name: Option<String>,
     },

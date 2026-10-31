@@ -254,7 +254,22 @@ impl WindowView {
                     }
                     HistoryEvent::ContentMenu(payload) => {
                         if let Some(request) = payload.borrow_mut().take() {
-                            this.open_content_menu(request, cx);
+                            let remove = match &request.source {
+                                crate::gui::list_interaction::TrackSource::Tracks(track_ids) => {
+                                    Some(rivu_protocol::model::Command::RemoveHistory {
+                                        track_ids: track_ids.clone(),
+                                    })
+                                }
+                                crate::gui::list_interaction::TrackSource::Album(_) => None,
+                            };
+                            this.open_object_menu(
+                                request,
+                                crate::gui::list_interaction::ContentGuard::None,
+                                remove,
+                                None,
+                                None,
+                                cx,
+                            );
                         }
                     }
                     HistoryEvent::Error(error) => this.feature_error(error, cx),

@@ -1,6 +1,187 @@
 use super::*;
 
 #[test]
+fn committed_history_removal_retains_session_suppression_when_refresh_fails() {
+    let (directory, mut core) = fixture();
+    pending(&mut core, 1);
+    started(&mut core, Some(10.0)).unwrap();
+    let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+    connection
+        .execute("UPDATE tracks SET last_played='unreadable' WHERE id=4", [])
+        .unwrap();
+    let error = core
+        .command(Command::RemoveHistory { track_ids: vec![1] })
+        .unwrap_err();
+    assert!(error.to_string().contains("History removal committed"));
+    assert_eq!(core.track(1).unwrap().last_played, None);
+    assert!(core.playback.as_ref().unwrap().history_removed);
+    assert!(core.playback_history_pending);
+    connection
+        .execute("UPDATE tracks SET last_played=NULL WHERE id=4", [])
+        .unwrap();
+    core.command(Command::RemoveHistory { track_ids: vec![1] })
+        .unwrap();
+    assert!(!core.playback_history_pending);
+    assert!(core.state.library.history.is_empty());
+    progress(&mut core, 3.0, 3.0);
+    core.stop().unwrap();
+    assert_eq!(core.track(1).unwrap().last_played, None);
+}
+
+#[test]
+fn history_removal_changes_only_selected_timestamps_and_preserves_projections() {
+    let (_directory, mut core) = fixture();
+    core.store.set_favorite(&[1], true).unwrap();
+    core.store.increment_play_count(1).unwrap();
+    for id in [1, 2, 4] {
+        core.store.mark_played(id, id * 10).unwrap();
+    }
+    pending(&mut core, 1);
+    core.replace_history(core.store.history(MAX_QUERY_ROWS).unwrap());
+    let mut first = core.track(1).unwrap();
+    let mut second = core.track(2).unwrap();
+    let fourth = core.track(4).unwrap();
+    let queue = core.store.queue_page(None, 0, 100).unwrap();
+    let playlist = core
+        .store
+        .create_playlist_with_tracks("Keep entries", &[1, 2, 1])
+        .unwrap();
+    let entries = core
+        .store
+        .playlist_entries_page(playlist, None, 0, 100)
+        .unwrap();
+    let before = core.state.query_revisions();
+    core.command(Command::RemoveHistory {
+        track_ids: vec![2, 1, 1],
+    })
+    .unwrap();
+    first.last_played = None;
+    second.last_played = None;
+    assert_eq!(core.track(1).unwrap(), first);
+    assert_eq!(core.track(2).unwrap(), second);
+    assert_eq!(core.track(4).unwrap(), fourth);
+    assert_eq!(core.state.current_track().unwrap().last_played, None);
+    assert_eq!(
+        core.state
+            .library
+            .history
+            .iter()
+            .map(|row| row.track_id)
+            .collect::<Vec<_>>(),
+        [4]
+    );
+    assert_eq!(
+        core.store
+            .queue_page(None, 0, 100)
+            .unwrap()
+            .rows
+            .iter()
+            .map(|row| row.id)
+            .collect::<Vec<_>>(),
+        queue.rows.iter().map(|row| row.id).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        core.store
+            .playlist_entries_page(playlist, None, 0, 100)
+            .unwrap(),
+        entries
+    );
+    let after = core.state.query_revisions();
+    assert_ne!(after.library, before.library);
+    assert_eq!(after.queue, before.queue);
+    assert_eq!(after.playlist, before.playlist);
+    assert_eq!(after.structure, before.structure);
+    core.command(Command::RemoveHistory {
+        track_ids: vec![1, 2],
+    })
+    .unwrap();
+    core.command(Command::RemoveHistory { track_ids: vec![] })
+        .unwrap();
+    assert_eq!(core.state.query_revisions(), after);
+}
+
+#[test]
+fn history_removal_rolls_back_batch_and_does_not_suppress_on_failure() {
+    let (directory, mut core) = fixture();
+    for id in [1, 2] {
+        core.store.mark_played(id, id * 10).unwrap();
+    }
+    pending(&mut core, 1);
+    let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+    connection.execute_batch("CREATE TRIGGER reject_history_removal BEFORE UPDATE OF last_played ON tracks WHEN NEW.id=2 AND NEW.last_played IS NULL BEGIN SELECT RAISE(ABORT,'history rejected'); END;").unwrap();
+    let before = core.state.query_revisions();
+    assert!(
+        core.command(Command::RemoveHistory {
+            track_ids: vec![1, 2]
+        })
+        .is_err()
+    );
+    assert_eq!(core.track(1).unwrap().last_played, Some(10));
+    assert_eq!(core.track(2).unwrap().last_played, Some(20));
+    assert!(!core.playback.as_ref().unwrap().history_removed);
+    assert!(
+        core.command(Command::RemoveHistory {
+            track_ids: vec![1, 999]
+        })
+        .is_err()
+    );
+    assert_eq!(core.track(1).unwrap().last_played, Some(10));
+    assert_eq!(core.state.query_revisions(), before);
+}
+
+#[test]
+fn removed_active_history_stays_removed_through_late_start_progress_and_stop() {
+    for late_start in [false, true] {
+        let (_directory, mut core) = fixture();
+        pending(&mut core, 1);
+        if !late_start {
+            started(&mut core, Some(10.0)).unwrap();
+        }
+        let generation = core.generation;
+        core.command(Command::RemoveHistory { track_ids: vec![1] })
+            .unwrap();
+        assert_eq!(core.generation, generation);
+        assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
+        if late_start {
+            started(&mut core, Some(10.0)).unwrap();
+        }
+        progress(&mut core, 3.0, 3.0);
+        assert_eq!(play_count(&core, 1), 1);
+        core.playback_write_deferred = true;
+        core.flush_deferred_playback().unwrap();
+        assert_eq!(core.track(1).unwrap().last_played, None);
+        core.stop().unwrap();
+        assert_eq!(core.track(1).unwrap().last_played, None);
+        assert!(core.store.history(MAX_QUERY_ROWS).unwrap().is_empty());
+        pending(&mut core, 1);
+        started(&mut core, Some(10.0)).unwrap();
+        assert!(core.track(1).unwrap().last_played.is_some());
+        assert_eq!(core.state.library.history[0].track_id, 1);
+    }
+}
+
+#[test]
+fn removed_retired_history_discards_deferred_activity_but_counts_heard_audio() {
+    let (_directory, mut core) = fixture();
+    pending(&mut core, 1);
+    started(&mut core, Some(10.0)).unwrap();
+    let mut stats = core.playback.take().unwrap();
+    stats.record_heard(3.0, 100);
+    core.retired_playback = Some(super::super::playback::RetiredPlayback {
+        stats,
+        duration: Some(10.0),
+    });
+    core.playback_write_deferred = true;
+    core.command(Command::RemoveHistory { track_ids: vec![1] })
+        .unwrap();
+    core.flush_deferred_playback().unwrap();
+    assert!(core.retired_playback.is_none());
+    assert_eq!(play_count(&core, 1), 1);
+    assert_eq!(core.track(1).unwrap().last_played, None);
+    assert!(core.store.history(MAX_QUERY_ROWS).unwrap().is_empty());
+}
+
+#[test]
 fn committed_track_edit_invalidates_before_failed_refresh_and_same_edit_is_noop() {
     let (directory, mut core) = fixture_with_database(Some(10.0));
     core.state.queue.current_id = Some(1);

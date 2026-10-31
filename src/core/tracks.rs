@@ -206,6 +206,45 @@ impl Core {
         )
     }
 
+    pub(in crate::core) fn remove_history(&mut self, mut track_ids: Vec<i64>) -> Result<()> {
+        track_ids.sort_unstable();
+        track_ids.dedup();
+        if track_ids.is_empty() {
+            return Ok(());
+        }
+        let (changed, albums) = self.store.remove_history(&track_ids)?;
+        // Commit before suppressing producer writes: failed removals preserve history.
+        // The flag belongs to the session, including delayed Started/stop snapshots.
+        for playback in self.playback.iter_mut().chain(
+            self.retired_playback
+                .iter_mut()
+                .map(|retired| &mut retired.stats),
+        ) {
+            if track_ids.binary_search(&playback.track_id).is_ok() {
+                playback.history_removed = true;
+            }
+        }
+        if changed {
+            self.invalidate_collection_impacts(false, albums);
+            self.state
+                .library
+                .change_metadata(Some(&track_ids), Some(&[]));
+            if let Some(current) = self.state.current_track.as_mut()
+                && track_ids.binary_search(&current.id).is_ok()
+            {
+                Arc::make_mut(current).last_played = None;
+            }
+            self.playback_history_pending = true;
+        }
+        if self.playback_history_pending {
+            let history = self.store.history(MAX_QUERY_ROWS).context(
+                "History removal committed, but refreshing history failed; previous history retained",
+            )?;
+            self.replace_history(history);
+        }
+        Ok(())
+    }
+
     pub(in crate::core) fn set_favorite(
         &mut self,
         track_ids: &[i64],

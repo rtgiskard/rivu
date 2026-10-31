@@ -13,6 +13,7 @@ pub(super) struct PlaybackSession {
     pub(super) counted: bool,
     pub(super) last_heard_at: Option<i64>,
     pub(super) activity_updated: bool,
+    pub(super) history_removed: bool,
     pub(super) paused_at: Option<i64>,
 }
 impl PlaybackSession {
@@ -273,6 +274,7 @@ impl Core {
                 counted: false,
                 last_heard_at: None,
                 activity_updated: false,
+                history_removed: false,
                 paused_at: (status == PlaybackStatus::Paused).then(now),
             });
         }
@@ -337,7 +339,13 @@ impl Core {
             .as_ref()
             .and_then(|playback| playback.paused_at)
             .map_or(played_at, |paused_at| played_at.min(paused_at));
-        let stats = if self.database_maintenance_active() {
+        let stats = if self
+            .playback
+            .as_ref()
+            .is_some_and(|playback| playback.history_removed)
+        {
+            None
+        } else if self.database_maintenance_active() {
             self.playback_write_deferred = true;
             None
         } else {
@@ -689,8 +697,7 @@ impl Core {
             let count = self.count_play();
             let activity = if let Some((track_id, at)) =
                 self.playback.as_ref().and_then(|playback| {
-                    playback
-                        .started
+                    (playback.started && !playback.history_removed)
                         .then_some((playback.track_id, playback.last_heard_at))
                         .and_then(|(id, at)| at.map(|at| (id, at)))
                 }) {

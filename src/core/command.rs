@@ -550,6 +550,7 @@ impl Core {
                 decoder_hint,
             } => self.edit_track(track_id, title, artist, album, decoder_hint)?,
             Command::RemoveTracks { track_ids } => self.remove_tracks(track_ids)?,
+            Command::RemoveHistory { track_ids } => self.remove_history(track_ids)?,
             Command::SetFavorite {
                 track_ids,
                 favorite,
