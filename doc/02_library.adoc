@@ -753,8 +753,10 @@ rivu library keep-independent DESTINATION_ID
 == SQLite maintenance
 
 Rivu opens database format `4` only. A new database is initialized automatically;
-existing databases need valid current-format metadata. Upgrade a format `2`
-database offline with `rivu-migrate apply` before starting Rivu. The database stores library records,
+on a version mismatch, host startup invokes `rivu-migrate apply` to attempt an
+offline upgrade before opening business connections. Format `2` is the supported
+source. Install `rivu-migrate` beside `rivu` or on `PATH`; migration
+failure stops startup and prints diagnostics. The database stores library records,
 user edits and statistics, playlists, and queue occurrences and selection. Stop
 Rivu before external database edits. Queue restoration:
 link:04_playback.adoc#_queue[Playback].

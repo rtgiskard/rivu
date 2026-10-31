@@ -4,8 +4,8 @@
 
 == Scope and decisions
 
-This document describes current-format validation and the offline migration
-execution boundary. The <<_future_historical_conversion>>
+This document describes current-format validation, startup invocation, and the
+offline migration execution boundary. The <<_future_historical_conversion>>
 section defines requirements for additional conversions, not supported inputs.
 Operational commands belong in
 link:02_library.adoc#_sqlite_maintenance[SQLite maintenance] and
@@ -40,10 +40,11 @@ rivu-migrate --data-dir /path/to/data --config /path/to/config.toml apply
 
 === Integration scope
 
-The application operates on current formats. Database opening initializes an
-empty database or requires the current format. Upgrade a format `2` database
-offline with `rivu-migrate apply` before starting Rivu; all historical recognition
-and conversion stay in the independent tool.
+The application operates on current formats. Before configuration-dependent
+services or writable business operations, startup detects a database version
+mismatch and invokes the independent tool as described in <<_application_invocation>>.
+Normal database opening still initializes an empty database or requires the
+current format; all historical recognition and conversion stay in the tool.
 
 Non-goals are automatic downgrade, a migration plugin framework, distributed or
 cross-file transactions, a recovery-state database, automatic paired restore,
@@ -270,3 +271,22 @@ Configuration conversion additionally needs a source contract for omitted settin
 so current defaults cannot redefine historical intent. It must define its own
 mutation and recovery boundaries; the database protocol does not make both files
 atomic. All historical rules remain in the independent tool.
+
+== Application invocation
+
+On a database version mismatch, GUI and headless host startup automatically run
+`rivu-migrate --data-dir DATA --config CONFIG apply` with the resolved host paths.
+The executable is selected beside the running `rivu` binary when present,
+otherwise from `PATH`. Current or empty databases do not invoke it.
+
+Startup first acquires data-directory ownership and inspects the database through
+a short-lived read-only connection. It closes that connection and releases ownership
+before invoking the tool, which acquires its own exclusive ownership. After the
+child exits successfully, startup reacquires ownership and verifies the current
+format through a fresh connection. If another instance acquires ownership during
+this handoff, startup fails rather than proceeding without ownership or retrying.
+No skip-lock option or historical decoder is added to the application.
+
+Missing executables, failed conversion, or a noncurrent result stop startup before
+configuration, database business connections, and audio initialization. Failure
+never triggers data reset, automatic restoration, or blind retry.

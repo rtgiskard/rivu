@@ -1,6 +1,8 @@
 //! Application lifecycle and services shared by graphical and headless instances.
 //! CLI parsing and client-relative path translation remain at the binary boundary.
 
+mod startup;
+
 #[cfg(test)]
 use crate::config::ConfigPersistence;
 use crate::{
@@ -253,7 +255,7 @@ impl App {
         graphical: bool,
     ) -> Result<Self> {
         rivu_utils::logging::init()?;
-        let socket_owner = ipc::SocketOwner::acquire(&data_dir)?;
+        let socket_owner = startup::acquire_storage(&data_dir, &config_path)?;
         let signals =
             Signals::new([Signal::Int, Signal::Term]).context("Registering shutdown signals")?;
         let config = CoreRuntime::load_startup_config(&config_path)?;
