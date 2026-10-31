@@ -34,7 +34,7 @@ order and start its first entry; Append adds the complete collection without
 changing playback. CLI `rivu playlist play PLAYLIST_ID` does not ask for confirmation.
 The GUI asks before replacing a nonempty queue by default; Cancel or Esc preserves
 queue and playback. Configure `interface.confirm_queue_replace` under
-link:01_config.adoc#_volume_and_playback_controls[Volume and playback controls].
+link:01_config.adoc#volume-and-playback-controls[Volume and playback controls].
 
 [source,sh]
 ----
@@ -66,7 +66,7 @@ missing-field tooltips as playlist entries. Its favorite button changes the curr
 track's library favorite, not the browsing selection. Use the separate Album
 artwork panel for covers.
 Hover or focus the volume control to see its percentage. The title's crosshair
-locates the current queue occurrence; see <<_queue,Queue>>.
+locates the current queue occurrence; see <<queue,Queue>>.
 
 Repeat cycles Off, All, and One. Previous restarts the current entry when its
 position exceeds three seconds; at or before three seconds it navigates back,
@@ -102,7 +102,7 @@ Pause lets submitted audio finish before making output inactive, retaining unrea
 audio for resume. The displayed Paused state is the accepted intent, not an
 instantaneous hardware mute. Paused wall time does not advance playback or live
 analysis. Late heard-audio confirmations can still update listening statistics;
-see link:02_library.adoc#_play_counts_and_recent_tracks[Library].
+see link:02_library.adoc#play-counts-and-recent-tracks[Library].
 
 == Queue
 
@@ -127,7 +127,7 @@ queue recovery too. Exiting without a new selection preserves the saved occurren
 shutdown retries only an unsaved runtime selection.
 
 Desktop Queue rows use the shared
-link:02_library.adoc#_track_information[track information and hover rules].
+link:02_library.adoc#track-information[track information and hover rules].
 
 Use `rivu queue list` to find occurrence IDs for `queue play`, `queue remove`,
 and `queue move`. Move positions start at zero. `queue add TRACK_ID...` appends
@@ -135,7 +135,7 @@ every supplied occurrence in argument order without starting playback;
 `queue clear` empties the queue and stops playback. Removing queue occurrences
 does not unregister their library tracks. JSON listings contain occurrence rows
 with zero-based positions and display metadata. Discard incomplete listings after
-concurrent changes and retry; see link:02_library.adoc#_paged_views[Paged views].
+concurrent changes and retry; see link:02_library.adoc#paged-views[Paged views].
 
 === Adding local files
 
@@ -162,12 +162,12 @@ For positional CLI insertion, supply both `--index` and `--expected-revision` fr
 the observed queue state (`rivu --json status`). `--wait` reports the
 operation's completion, including skipped-file errors even when valid files were
 saved. Registered tracks appear under their configured folder or in
-link:02_library.adoc#_other[Other]. Clearing Queue does not remove them from Library.
+link:02_library.adoc#other[Other]. Clearing Queue does not remove them from Library.
 
 File additions share one media-task slot with scans, Other checks, and playlist
 imports. Accepted-task feedback belongs to the desktop Queue panel; shared status
 queries, result dismissal, cancellation, and shutdown are documented under
-link:02_library.adoc#_cancellation[Library cancellation]. A failed task can still
+link:02_library.adoc#cancellation[Library cancellation]. A failed task can still
 have registered files and inserted occurrences, for example when some input files
 were skipped or a refresh failed after commit. Inspect its result and the queue
 before retrying: replaying a committed addition creates more occurrences.
@@ -176,11 +176,11 @@ before retrying: replaying a committed addition creates more occurrences.
 === Queue controls
 
 The Queue panel displays occurrences in order and marks the current occurrence.
-Use the link:02_library.adoc#_desktop_selection_and_directory_tree[shared selection rules]
+Use the link:02_library.adoc#desktop-selection-and-directory-tree[shared selection rules]
 for clicks, ranges, and row context menus. Double-click plays that occurrence.
 Up/Down navigate the focused queue, Enter plays the selected occurrence, and Delete
 removes selected occurrences.
-Optional link:02_library.adoc#_desktop_list_search[Desktop list search] filters
+Optional link:02_library.adoc#desktop-list-search[Desktop list search] filters
 the visible occurrences without changing playback order. Selection actions apply
 to the matching occurrences; repeated tracks remain distinct queue entries.
 Background refreshes preserve the browsing position with or without a search
@@ -220,13 +220,13 @@ Clear requires confirmation. Track-group actions live in row context menus:
 Append to queue, Add to playlist, explicit Favorite and Unfavorite, and removal
 of the selected occurrences. Play targets the clicked occurrence. Favorite
 changes apply once per library track, including repeated queue occurrences.
-See the link:02_library.adoc#_desktop_selection_and_directory_tree[shared track-menu rules].
+See the link:02_library.adoc#desktop-selection-and-directory-tree[shared track-menu rules].
 Randomizing changes queue order without changing the current playback or shuffle setting.
 Removing duplicates keeps each track at its first position; if a later duplicate
 is playing, playback continues as that track's retained occurrence.
 
-Saving a queue as a playlist: link:03_playlist.adoc#_desktop_ui[Playlists].
-Scrolling and query retries: link:02_library.adoc#_paged_views[Library].
+Saving a queue as a playlist: link:03_playlist.adoc#desktop-ui[Playlists].
+Scrolling and query retries: link:02_library.adoc#paged-views[Library].
 
 [[keyboard-controls]]
 == Keyboard controls
@@ -268,7 +268,7 @@ seconds or volume by five percentage points; Home/End chooses the minimum/maximu
 Seek requires a current occurrence and known positive duration; volume does not.
 A slider key ends an active pointer drag so release cannot commit an old preview.
 Escape cancels the innermost interaction or leaves the editor first; see
-link:01_config.adoc#_desktop_keyboard_navigation[desktop control navigation].
+link:01_config.adoc#desktop-keyboard-navigation[desktop control navigation].
 
 == Output devices and speaker layouts
 
@@ -355,7 +355,7 @@ runs in a separate process and does not load FFmpeg in a running playback instan
 
 Library rows are not automatically reprobed after FFmpeg loads; use a forced
 rescan to refresh stored metadata. Probe commands and recognition provenance:
-link:02_library.adoc#_metadata_and_favorites[Library].
+link:02_library.adoc#metadata-and-favorites[Library].
 
 Build prerequisites and ABI compatibility: link:../readme.adoc[README].
 Enablement, disabling an active decoder, and build-feature restrictions:
@@ -392,9 +392,9 @@ Enter from the query focuses results, and Enter on a result plays it. Esc from
 results returns to the query; Esc from the query returns to Queue. The query owns
 printable characters, including playback shortcuts and `?`; F1 still opens help.
 Text edits use the shared
-link:02_library.adoc#_desktop_list_search[delayed application and immediate clearing].
+link:02_library.adoc#desktop-list-search[delayed application and immediate clearing].
 
-Library's link:02_library.adoc#_other[Other] has its own immediate `/` search.
+Library's link:02_library.adoc#other[Other] has its own immediate `/` search.
 `Alt+f` / `Alt+m` toggle favorite-only / missing-only filters; `Alt+s` cycles ID,
 album, and most-played sorting. Selection follows its track through changes while
 that track remains in the results. `e` appends the selected track; `Alt+e` appends
@@ -449,7 +449,7 @@ window use or playback; a watcher starting or restarting later is registered
 automatically.
 Its menu offers Play/Pause, Previous, Next, Shuffle, Repeat, and Quit.
 Repeat follows the cycle described under
-<<_transport_and_timing,Transport and timing>>.
+<<transport-and-timing,Transport and timing>>.
 
 == Album artwork panel
 
@@ -464,7 +464,7 @@ Use layout sync or quit the application normally to persist them across restarts
 instance Apply and closing the desktop window do not write `layout.json`.
 Settings → Interface → Album artwork changes defaults for new panels without
 overwriting existing panels. See
-link:01_config.adoc#_album_artwork[Album artwork configuration] for styles,
+link:01_config.adoc#album-artwork[Album artwork configuration] for styles,
 animation parameters, defaults, and shared frame rate.
 
 Rotation follows playback while the panel is visible. Pausing or hiding it retains
@@ -499,12 +499,12 @@ MPRIS uses the bundled application icon as its fallback. Directory discovery is
 cached, not watched for edits; moving a track retries it, otherwise restart Rivu
 to reliably rediscover changed directory covers. Encoded-file and decoded-image
 limits are configured separately in
-link:01_config.adoc#_desktop_settings[Settings].
+link:01_config.adoc#desktop-settings[Settings].
 Actual covers keep their original aspect ratio in the full, static preview.
 Local images are cached under the data directory's `artwork/` and exposed through
 `mpris:artUrl` when available. Background loading updates the selected preview
 and desktop metadata when ready. Cache failures do not prevent playback.
-Use link:01_config.adoc#_artwork_cache_maintenance[Settings artwork maintenance]
+Use link:01_config.adoc#artwork-cache-maintenance[Settings artwork maintenance]
 to inspect disk usage and manually clean expired, unprotected cover files.
 
 MPRIS supports transport, volume, shuffle, and repeat at rate `1.0`. Relative Seek
@@ -532,6 +532,6 @@ and are lost when the core exits.
 
 == Audio runtime crate
 
-Runtime ownership and backend contracts: link:21_ipc.adoc#_core_and_client_boundary[IPC].
+Runtime ownership and backend contracts: link:21_ipc.adoc#core-and-client-boundary[IPC].
 Build and runtime prerequisites: link:../readme.adoc[README].
 

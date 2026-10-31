@@ -6,15 +6,15 @@
 
 The design baseline dates to 2026-10-18. The fixed-schema rectangle,
 numerical-field, existing-path, independent-segment and numerical-waveform slices
-under <<_implemented_fixed_schema_slices>> are implemented and used by Rivu.
+under <<implemented-fixed-schema-slices>> are implemented and used by Rivu.
 The general `Program`, `RenderState<Schema>`, `RenderData<T>`, `Field2D<T>` and
 `ColorRamp` APIs, generated schemas, and general update transactions are proposals,
 not available interfaces. The agreed safety and platform boundaries remain binding.
 
-<<_implemented_fixed_schema_slices>> defines shipped behavior;
-<<_proposed_general_rendering_model>> describes future interfaces.
-<<_verification_and_decision_gates>> defines acceptance requirements, and
-<<_recorded_measurements>> retains dated comparisons, not benchmarks of subsequent revisions.
+<<implemented-fixed-schema-slices>> defines shipped behavior;
+<<proposed-general-rendering-model>> describes future interfaces.
+<<verification-and-decision-gates>> defines acceptance requirements, and
+<<recorded-measurements>> retains dated comparisons, not benchmarks of subsequent revisions.
 
 Current signal semantics and consumer ownership are authoritative in
 link:23_visuals.adoc[Visualization Rendering Design]; cache invalidation and
@@ -34,13 +34,13 @@ not invalid memory access, stale source identity, unbounded retention or audio s
 
 == Implemented fixed-schema slices
 
-[[_internal_led_vertical_slice]]
+[[internal-led-vertical-slice]]
 === Publication and drawing API
 
 Rivu uses a private fixed-schema model through the existing Scene-to-renderer path.
 FFT, analysis and simulation remain application-owned; no platform service, arbitrary
 shader composition or ABI generator is introduced. The original rectangle-only
-LED experiment is retained under <<_initial_comparative_measurements>>.
+LED experiment is retained under <<initial-comparative-measurements>>.
 
 The pinned renderer exposes the experimental `GpuPalette`, `GpuFrame`,
 schema-stable `GpuState`, `GpuSource` and `Window::paint_gpu` interfaces.
@@ -61,7 +61,7 @@ Update both revisions together and check these contracts; historical timings do
 not transfer automatically. Handles own CPU content, not device allocations or
 window identity: each window independently uploads and budgets shared content.
 Attached-window state and import belong only to the
-<<_application_facing_interface,proposed public model>>.
+<<application-facing-interface,proposed public model>>.
 
 ==== Waveform columns
 
@@ -71,8 +71,8 @@ infinities and finite values outside `0..=1` are rejected.
 `GpuWaveformParams::palette_start` selects the visible domain in a paired endpoint
 palette. The pipeline expands four instances per column; bounds, logical height
 and scale remain placement data. Signal and color semantics belong to
-link:23_visuals.adoc#_waveform[Waveform], and retention to
-link:22_cache.adoc#_waveform[Waveform caching].
+link:23_visuals.adoc#waveform[Waveform], and retention to
+link:22_cache.adoc#waveform[Waveform caching].
 
 ==== Independent segments
 
@@ -192,7 +192,7 @@ use `uv * extent - 0.5` and clamp neighboring indices; empty extents emit no dra
 and one-cell dimensions repeat their only sample. Ordinary fields map nonfinite
 values to the first palette sample; logarithmic mapping treats nonpositive values
 likewise. Column fields instead use the opaque-black missing/floor rule described
-under <<_internal_led_vertical_slice>>.
+under <<internal-led-vertical-slice>>.
 Each neighbor selects `floor(coordinate * (palette_length - 1) + 0.5)` before
 straight RGBA interpolation. Moving coloring into the shader does not eliminate
 its cost: enlarged or static draws still evaluate four mappings per output fragment.
@@ -256,7 +256,7 @@ surface invalidation, or on renderer destruction. Hide guarantees no next frame,
 so reclamation is not an idle timer. Submitted commands retain replaced textures until completion; early
 `destroy()` is forbidden. Alpha-mode-only changes rebuild affected pipelines
 without invalidating same-size attachments. Reattachment has its own boundary
-under <<_surface_reattachment>>.
+under <<surface-reattachment>>.
 
 Attachment bytes are separate from the material buffer budget. Four-byte targets
 with 4x sampling retain `width * height * (4 + 1) * 4` nominal bytes; single-sample
@@ -525,7 +525,7 @@ is still being read by an upload.
 
 Logical retirement belongs to GPUI and safe physical reclamation to WGPU. The current
 retention policy is authoritative in
-link:22_cache.adoc#_resource_boundaries[Resource boundaries]; generalization must
+link:22_cache.adoc#resource-boundaries[Resource boundaries]; generalization must
 preserve that ownership rather than recreate application-specific retirement queues.
 
 ==== Hidden windows and shutdown
@@ -533,7 +533,7 @@ preserve that ownership rather than recreate application-specific retirement que
 Hide guarantees no draw. Stop demand and detach cached-scene references for
 discarded content; model release alone cannot release replay-held data. Static
 caches may remain. Preserve the bounded completion maintenance described in
-<<_admission_and_retirement>>: in-flight storage stays charged until completion,
+<<admission-and-retirement>>: in-flight storage stays charged until completion,
 without requiring another presentation. Resume reconciles resources even with no
 visualizers; close revokes scene ownership without invalidating in-flight work.
 No cleanup-render or permanent polling loop is added.
@@ -653,7 +653,7 @@ At the measured revision, successful 192x128, 4x-MSAA synthetic frames retained
 the following nominal attachment bytes. These describe renderer-owned capacity
 in those runs, not physical VRAM or in-flight retired allocations. The later
 capacity-slack and sustained-reclamation policy in
-<<_shared_local_multisample_scratch>> is not measured by this table or the timing
+<<shared-local-multisample-scratch>> is not measured by this table or the timing
 and image comparisons below.
 
 [cols="2,1,1,1,1",options="header"]

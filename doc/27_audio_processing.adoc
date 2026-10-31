@@ -8,10 +8,10 @@ Rivu provides live Monitor EQ, source-preserving restoration and neural speech
 enhancement/separation, and a node graph for combining them. Monitor EQ changes
 playback; graph nodes and offline jobs use independent settings. Processing never
 rewrites source media, and no model download occurs during playback or a build.
-The practical workflow describes available behavior. <<_ownership_and_invariants,Ownership
-and invariants>> is the implementation contract; <<_quality_acceptance,quality
+The practical workflow describes available behavior. <<ownership-and-invariants,Ownership
+and invariants>> is the implementation contract; <<quality-acceptance,quality
 acceptance>> defines evaluation requirements rather than claiming they all pass.
-<<_recorded_local_evidence_and_remaining_limits,Recorded evidence>> distinguishes
+<<recorded-local-evidence-and-remaining-limits,Recorded evidence>> distinguishes
 measured observations from remaining acceptance gaps.
 
 == Practical workflow
@@ -111,7 +111,7 @@ also accepts relative destinations.
 
 Accepted graph and processing-setting edits save to `config.toml` immediately,
 independently of Settings Apply. Drafts, viewport and retained audio are not
-configuration commits. See link:01_config.adoc#_saving_configuration[Saving configuration].
+configuration commits. See link:01_config.adoc#saving-configuration[Saving configuration].
 
 === Equalizer
 
@@ -508,7 +508,7 @@ release; completion alone does not guarantee cached audio. Export jobs preserve
 their source handles and retain only a terminal receipt and the destination WAV,
 not another audition slot. `id` identifies the export receipt; `graph_run_id`
 identifies the frozen run used for further audition/export actions.
-See link:22_cache.adoc#_processing_output_retention[Processing output retention].
+See link:22_cache.adoc#processing-output-retention[Processing output retention].
 
 Native denoise and native-only graphs decode in blocks, retaining final PCM and
 bounded DSP/delay state rather than whole-track native intermediates. Profile

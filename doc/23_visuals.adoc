@@ -30,7 +30,7 @@ introduces no additional analysis worker, PCM pool or animation loop. Constructo
 share configuration-projection defaults; history and GPU allocation are demand-driven.
 Frequency views share analysis while each style owns its rendering state.
 Resource capacities and release points belong to
-link:22_cache.adoc#_visualization_caching[Visualization caching].
+link:22_cache.adoc#visualization-caching[Visualization caching].
 
 Visualization analysis is separate from audio output and observes samples before
 master volume gain. One global `visualizations.general.signal` setting selects `before`
@@ -82,7 +82,7 @@ sampling policy, not continuous metering; display interpolation cannot recover
 unobserved audio. Density instead accumulates samples during ingestion.
 
 Analysis preparation and retained analyzer capacity follow
-link:22_cache.adoc#_resource_boundaries[Resource boundaries]. Pause or loss of demand
+link:22_cache.adoc#resource-boundaries[Resource boundaries]. Pause or loss of demand
 clears capture input; disabling visualizations also breaks semantic continuity.
 Backpressure never blocks playback. A stalled worker drops stale queued input
 and marks a continuity break; fresh audio wakes recovery without polling. A
@@ -185,7 +185,7 @@ Source replacement, seek intent, FFT/window/signal changes and disabling visuali
 clear incompatible retained results even while paused or hidden. These semantic
 facts are independent of producer continuity generation and seek previews.
 Disabling visualizations discards the views rather than freezing them; its
-waveform and re-enablement consequences are in <<_visualization_enablement,Visualization enablement>>.
+waveform and re-enablement consequences are in <<visualization-enablement,Visualization enablement>>.
 
 ==== Appearance changes without new audio
 
@@ -216,7 +216,7 @@ A reliable Hidden notification cancels both clocks and disables analysis.
 Reveal waits for a current drawable replacement without replaying hidden audio;
 switching one panel never suspends unaffected visible panels. Final drawings,
 inactive-tab state and audio-worker pools have distinct lifetimes defined in
-link:22_cache.adoc#_resource_boundaries[Resource boundaries].
+link:22_cache.adoc#resource-boundaries[Resource boundaries].
 Loss of focus alone never disables analysis. Without a reliable visibility
 notification, compositor throttling limits native animation callbacks but not
 the independent analysis timer; analysis remains bounded by `analysis_rate_hz` and
@@ -231,7 +231,7 @@ but resumption needs a new complete audio window. Settings, source identity,
 playback and accounting survive. Transition generations reject queued samples
 and late scan results even across quick on/off switches or while hidden.
 Submitted graphics retain their independent
-link:22_cache.adoc#_resource_boundaries[completion-aware lifetime].
+link:22_cache.adoc#resource-boundaries[completion-aware lifetime].
 
 Discarded waveform coverage cannot become complete at EOF. Only fresh decoded
 PCM fills bins; there is no automatic backfill or rescan. A fresh uninterrupted
@@ -242,7 +242,7 @@ a load failure, and re-enabling visualizations neither restores previews nor sta
 The menu toggle changes only visualization enablement through the core's serialized request
 path, preserving pending playback and device settings.
 The disabled-state icon and controls are described in
-link:01_config.adoc#_visualization_enablement[Visualization enablement].
+link:01_config.adoc#visualization-enablement[Visualization enablement].
 
 
 == Waveform
@@ -336,7 +336,7 @@ blends its own floating-point center/endpoint colors rather than using one share
 vertical gradient; Peak uses its endpoint directly. Logical column boundaries and
 ceil-height geometry preserve one-logical-pixel markers through resize and scaling.
 Cursor and glow remain dynamic. The closed GPU interface is defined in
-link:25_gpu_rendering.adoc#_internal_led_vertical_slice[Publication and drawing API].
+link:25_gpu_rendering.adoc#internal-led-vertical-slice[Publication and drawing API].
 
 == Spectrum
 
@@ -376,9 +376,9 @@ They are not connected into a curve, preserving their transient-marker meaning.
 
 Rectangle coverage uses shared MSAA to avoid darkening adjacent zero-gap columns.
 Upload or paint failure reports an error rather than changing the fill. Geometry
-reuse and capacity belong to link:22_cache.adoc#_spectrum[Spectrum caching];
+reuse and capacity belong to link:22_cache.adoc#spectrum[Spectrum caching];
 transport and admission belong to
-link:25_gpu_rendering.adoc#_implemented_fixed_schema_slices[GPU rendering].
+link:25_gpu_rendering.adoc#implemented-fixed-schema-slices[GPU rendering].
 
 == Audio Visualizer ownership
 
@@ -390,7 +390,7 @@ Analysis and simulation results are shared by style, not panel: multiple panels
 do not duplicate a field or advance simulation independently, and distinct styles
 do not overwrite each other's state. Overlay toggles are paint-only. Retention
 across tab changes, hiding and destruction is defined in
-link:22_cache.adoc#_resource_boundaries[Resource boundaries].
+link:22_cache.adoc#resource-boundaries[Resource boundaries].
 
 === Radial styles
 
@@ -433,7 +433,7 @@ playback volume. Left and right use solid primary/secondary colors, with separat
 vertical centers by default. Overlay channels mode uses shared time and amplitude axes;
 the panel-local mode changes drawing only, not PCM or trigger selection. Its
 new-instance default and controls are described in
-link:01_config.adoc#_audio_visualizer[Audio Visualizer]. The label reports input amplitude limits of ±1/gain
+link:01_config.adoc#audio-visualizer[Audio Visualizer]. The label reports input amplitude limits of ±1/gain
 and the actual source endpoint duration `(samples - 1) / sample_rate`, rather
 than promising a span longer than the available buffer. It is omitted when the
 panel cannot fit it.
@@ -513,7 +513,7 @@ Frequency reduction preserves peaks; interpolation smooths known samples without
 lowering them. Resizing reprojects chronological intervals but cannot recover
 details already pooled at coarser resolution. Shared history capacity, sampling
 resolution and resizing policy are defined in
-link:22_cache.adoc#_spectrogram[Spectrogram caching].
+link:22_cache.adoc#spectrogram[Spectrogram caching].
 
 == Generative light
 
@@ -536,7 +536,7 @@ per tick. Paint and resize never advance the scene. After a pause or inactive ta
 fresh input reanchors time without catch-up or a synthetic onset. Inactive styles
 do not request band-power analysis. Real sample gaps reset simulation; sparse
 publications alone do not. Scene and final-drawing retention follow
-link:22_cache.adoc#_resource_boundaries[Resource boundaries].
+link:22_cache.adoc#resource-boundaries[Resource boundaries].
 
 Glow uses widening translucent strokes, not image feedback or blur. Three ordered
 layers share segment endpoints. Fixed topology, particle history and pulse slots
@@ -558,10 +558,10 @@ cover; neither requires extracted colors or audio data. Real and generated
 default covers share animation, interaction, and lifecycle rules. Style and
 frame-pacing changes preserve the rotation angle. Style controls, per-panel
 persistence, defaults, and the frame-rate range are documented in
-link:01_config.adoc#_album_artwork[Album artwork].
+link:01_config.adoc#album-artwork[Album artwork].
 
 Artwork uses the shared window frame gate described under
-<<_independent_analysis_and_display_clocks,Independent analysis and display clocks>>,
+<<independent-analysis-and-display-clocks,Independent analysis and display clocks>>,
 but retains its own FPS cap. This caps animation requests, not overall window
 submissions from playback or input. Rotation and animated covers share one demand;
 lower caps drop source frames rather than slowing their timeline. Cursor catch-up
@@ -584,7 +584,7 @@ Before a full scan starts, its Track query must still match the selected track's
 metadata stamp and request generation; unrelated library edits do not invalidate
 that query. Once decoding starts, ordinary metadata changes do not cancel it:
 the source, saved-hint, request-generation, and suspension checks described under
-<<_waveform,Waveform>> govern pending and completed previews.
+<<waveform,Waveform>> govern pending and completed previews.
 
 Spectrum tessellation and Waveform/Spectrogram GPU publication/paint failures are
 surfaced as visualization errors. Accepted analysis clears data-consistency errors;
@@ -626,7 +626,7 @@ The extensions add centered image transforms and shared GPU materials on
 Rivu's Linux/WGPU rendering path. Existing untransformed images and ordinary
 path backgrounds retain their drawing semantics, although ordinary Paths share
 the renderer's local MSAA scratch. See
-link:25_gpu_rendering.adoc#_implemented_fixed_schema_slices[Implemented fixed-schema slices]
+link:25_gpu_rendering.adoc#implemented-fixed-schema-slices[Implemented fixed-schema slices]
 for the available schemas, consumer cutover and resource limits. Radial Bars,
 Rings and Bars + Rings retain ordinary GPUI paths. The general `Program` and
 generated-schema interfaces remain proposals.
@@ -636,7 +636,7 @@ Shared images retain their normal image and atlas lifetimes.
 Cached views track their own entity dependencies, including dependencies shared
 with enclosing views. Parent redraw and scene replay must not sever a child's
 notifications or force unrelated cached siblings to rerender. Regression commands
-are listed under <<_renderer_regression_checks,Renderer regression checks>>.
+are listed under <<renderer-regression-checks,Renderer regression checks>>.
 
 === Why the patch is needed
 
@@ -649,7 +649,7 @@ pixels under scaling and rotation.
 
 Spectrum fills its geometry with the shared GPU palette material. Its full
 authored cubic palette is retained rather than approximated by two stops or
-repeated masked submissions; see <<_spectrum,Spectrum>>.
+repeated masked submissions; see <<spectrum,Spectrum>>.
 
 Rust scene records, WGPU pipelines and shader layouts change together. Palette
 Paths, ordinary fills and transformed image sprites have distinct drawing paths.

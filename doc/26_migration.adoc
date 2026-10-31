@@ -5,9 +5,9 @@
 == Scope and decisions
 
 This chapter defines format authority, startup handoff and offline conversion.
-<<_future_historical_conversion,Future conversions>> are requirements, not supported
-inputs. See link:02_library.adoc#_sqlite_maintenance[SQLite maintenance] for database
-operations and link:01_config.adoc#_saving_configuration[configuration saving].
+<<future-historical-conversion,Future conversions>> are requirements, not supported
+inputs. See link:02_library.adoc#sqlite-maintenance[SQLite maintenance] for database
+operations and link:01_config.adoc#saving-configuration[configuration saving].
 
 === Current implementation
 
@@ -107,7 +107,7 @@ configuration and application versions evolve independently.
 Explicit noncurrent versions are rejected before field decoding; malformed TOML
 and I/O retain distinct causes. There are no historical aliases. The tool neither
 rewrites nor backs up configuration and takes no configuration writer lock; see
-link:01_config.adoc#_saving_configuration[Saving configuration].
+link:01_config.adoc#saving-configuration[Saving configuration].
 
 == Persistent summaries and runtime authority
 
@@ -118,13 +118,13 @@ handle existing data and subsequent trigger behavior.
 Queue and playlists share ordered `playlist_entries`; the protected system
 playlist is `(id = 0, name = '')`. Occurrence identity, multiplicity, runtime
 revision tokens and coordinated writes follow
-link:21_ipc.adoc#_business_ownership_and_transactions[Core/Store transaction ownership].
+link:21_ipc.adoc#business-ownership-and-transactions[Core/Store transaction ownership].
 Runtime tokens are not persisted. External writes require stopping Rivu first.
 
 == Target selection and exclusion
 
 Target selection follows the application's
-link:../readme.adoc#_files_and_data_directories[path rules]; `--config` alone does
+link:../readme.adoc#files-and-data-directories[path rules]; `--config` alone does
 not select a database. Targets remain fixed for one operation, and an explicitly
 selected missing database is an error.
 
@@ -138,11 +138,11 @@ This advisory exclusion does not cover external database writers or configuratio
 shared by different data directories. Stop external writers for maintenance;
 configuration remains read-only, preserving bytes and symlinks. Its ordinary-file
 admission and 4 MiB UTF-8 TOML limit follow
-link:01_config.adoc#_file_access_and_external_editors[Configuration file access].
+link:01_config.adoc#file-access-and-external-editors[Configuration file access].
 
 Reports escape control characters without changing paths; argument errors retain
 clap's layout, streams and status. Progress uses `info`, failures `error`, under
-link:01_config.adoc#_logging_and_diagnostics[normal logging rules]. The tool creates
+link:01_config.adoc#logging-and-diagnostics[normal logging rules]. The tool creates
 no log files.
 
 == Apply protocol

@@ -14,7 +14,7 @@ Paths are literal: `~` and environment variables are not expanded.
 Use Settings to change the running instance, then Apply to save. To edit TOML
 directly, exit Rivu first, edit the file, and restart; the core does not watch
 external edits. Configuration controls application-wide defaults. Panel trees
-and instance preferences are saved separately in <<_layout,`layout.json`>>.
+and instance preferences are saved separately in <<layout,`layout.json`>>.
 
 Configuration groups application settings into `[library]`, `[playback]`,
 `[interface]`, `[logging]`, and `[visualizations]`. Global visualization controls
@@ -25,7 +25,7 @@ parameters to `[visualizations.reactive]`, and radial geometry and motion to
 `[visualizations.spectrum]`, `[visualizations.spectrogram]`,
 `[visualizations.waveform]`, and `[visualizations.oscilloscope]`.
 Album artwork settings live in `[interface.album_artwork]`; audio processing uses
-the additional tables described under <<_audio_processing_defaults,Audio processing defaults>>.
+the additional tables described under <<audio-processing-defaults,Audio processing defaults>>.
 Desktop integration belongs to Interface; output and decoding belong to Playback;
 shared analysis belongs to Visualizations. Dotted names below identify file paths.
 
@@ -110,7 +110,7 @@ manually, then restart to load the changes.
 scanning. `library.scan_max_depth` defaults to `64` and must be at least `1`.
 `library.scan_min_duration_seconds` is an unsigned 32-bit integer in whole seconds,
 defaulting to `0` (disabled). Both controls are in desktop Library settings.
-See link:02_library.adoc#_minimum_duration_for_new_tracks[Minimum duration for new tracks]
+See link:02_library.adoc#minimum-duration-for-new-tracks[Minimum duration for new tracks]
 for the admission policy, and link:02_library.adoc[Library] for roots, scan
 boundaries, and CUE/path rules.
 
@@ -119,8 +119,8 @@ boundaries, and CUE/path rules.
 `interface.query_batch_size` accepts `20`–`256` (default `64`) and tunes internal GUI/TUI
 query batches, not visible pages or CLI listing/export batches. Browsing scrolls
 continuously; query batch tuning stays in the configuration file, not desktop settings. Queue behavior is described in
-link:04_playback.adoc#_queue[Playback]; query and batch contracts in
-link:02_library.adoc#_paged_views[Library].
+link:04_playback.adoc#queue[Playback]; query and batch contracts in
+link:02_library.adoc#paged-views[Library].
 
 Long desktop lists support mouse-wheel scrolling and a draggable right-hand
 scrollbar; click its track to jump. Edge fades indicate more content above or below.
@@ -183,7 +183,7 @@ feature; see link:../readme.adoc[README] for a native-only build. Enabling permi
 FFmpeg use on future source opens; it does not load or validate runtime libraries.
 Libraries load on the first native-unsupported source in Auto mode, a track opened
 with the FFmpeg decoder hint, or an explicit
-link:02_library.adoc#_metadata_and_favorites[enhanced probe]. Missing libraries
+link:02_library.adoc#metadata-and-favorites[enhanced probe]. Missing libraries
 are reported when needed; native decoders continue to work. A load failure is
 retained until restart. Disabling stops a track currently decoded through FFmpeg;
 native-decoded playback is unaffected.
@@ -206,7 +206,7 @@ for IPC and MPRIS. Values are not rounded to whole percentages internally.
 to `off`. `playback.play_count_threshold_percent` defaults to `20` and must be finite and
 in `[0, 100)`; zero still requires some confirmed heard time. Edit the threshold
 in the configuration file or desktop settings; see
-link:02_library.adoc#_play_counts_and_recent_tracks[Library] for counting semantics.
+link:02_library.adoc#play-counts-and-recent-tracks[Library] for counting semantics.
 
 `interface.confirm_queue_replace` defaults to `true`. In the GUI, album and playlist
 actions that replace a non-empty queue ask for confirmation. Disable it in desktop
@@ -217,13 +217,13 @@ This preference does not change TUI, CLI, or IPC behavior.
 === Output and desktop integration
 
 Output selection and application errors are described under
-<<_output_and_applying_changes,Output and applying changes>> and in
-link:04_playback.adoc#_output_devices_and_speaker_layouts[Playback output].
+<<output-and-applying-changes,Output and applying changes>> and in
+link:04_playback.adoc#output-devices-and-speaker-layouts[Playback output].
 `interface.tray_enabled` and `interface.mpris_enabled` both default to `true` and
 independently control desktop integration. Tray changes require a graphical-host
 restart; MPRIS changes apply while running. Requirements and recovery are in
-link:04_playback.adoc#_desktop_tray_and_window_lifecycle[Desktop tray and window lifecycle]
-and link:04_playback.adoc#_mpris_and_artwork[MPRIS and artwork].
+link:04_playback.adoc#desktop-tray-and-window-lifecycle[Desktop tray and window lifecycle]
+and link:04_playback.adoc#mpris-and-artwork[MPRIS and artwork].
 
 === Logging and diagnostics
 
@@ -300,7 +300,7 @@ pages. General separates Appearance from Frequency analysis. New-panel defaults
 affect only subsequently created instances. Sidebar groups scroll when needed;
 hover truncated labels, fields and errors for their full text, accepted ranges
 and application timing. Errors also provide Copy. See
-<<_desktop_keyboard_navigation,Desktop keyboard navigation>> for dropdown controls.
+<<desktop-keyboard-navigation,Desktop keyboard navigation>> for dropdown controls.
 
 Add folders from Library; Settings lists them individually for removal. Paths are
 literal, not delimited text, and retain semicolons and trailing spaces. Removal
@@ -313,12 +313,12 @@ configuration, preserving unrelated changes from other controls and clients.
 An edited field wins over a concurrent change to that field; folder edits replace
 the roots list. Media read buffering affects future opens, including waveform
 scans, without reopening the current track. The application-menu Visualizations
-toggle applies immediately; see <<_visualization_enablement,Visualization enablement>>.
+toggle applies immediately; see <<visualization-enablement,Visualization enablement>>.
 
 While Apply is pending, later edits remain for the next submission and the editor
 cannot close. After completion, Discard closes it and drops unsubmitted edits.
 Completions from a replaced session cannot alter its successor. Save failures and
-saved-but-audio-failed behavior are in <<_saving_configuration,Saving configuration>>.
+saved-but-audio-failed behavior are in <<saving-configuration,Saving configuration>>.
 
 Interface → Layout includes Layout snapping and Layout grid spacing. These save
 `interface.layout_snap_enabled` (default `true`) and `interface.layout_snap_grid_px` (default `16`,
@@ -337,7 +337,7 @@ memory. Different covers and windows add their own costs. Apply re-evaluates ope
 covers, including previously rejected images; an over-budget image shows the
 default cover rather than a partial animation. Increasing the budget does not
 remove other image-admission limits. See
-link:22_cache.adoc#_artwork_lookup_retention[Artwork resource boundaries].
+link:22_cache.adoc#artwork-lookup-retention[Artwork resource boundaries].
 
 
 Interface → Album artwork sets new-panel style, mode, period and direction;
@@ -400,7 +400,7 @@ does not supply terminal glyphs. Missing glyphs can appear as boxes or blanks.
 Use the Mono variant of Symbols Nerd Font for single-cell icons. The TUI shares
 `interface.theme`, but its width-dependent information columns are built in;
 desktop font, scale, and Library column settings do not configure the terminal client. See
-link:04_playback.adoc#_terminal_client[Terminal client] for browsing and full details.
+link:04_playback.adoc#terminal-client[Terminal client] for browsing and full details.
 
 `interface.library_columns` selects desktop Library information columns. Its
 boolean keys are `artist`, `album`, `duration`, `codec`, and `bitrate`;
@@ -408,7 +408,7 @@ boolean keys are `artist`, `album`, `duration`, `codec`, and `bitrate`;
 to `false` for names only. Change them without restarting from the Library
 right-click menu → `Track information`. Both Library views share the saved
 selection; full tooltip information is unaffected. See
-link:02_library.adoc#_desktop_selection_and_directory_tree[Library display].
+link:02_library.adoc#desktop-selection-and-directory-tree[Library display].
 
 === Output and applying changes
 
@@ -417,13 +417,13 @@ exact name from `rivu playback devices`. `playback.pipewire_auto_mix` defaults t
 `true`; disable it to require a compatible speaker layout without remixing.
 Selection syntax, unavailable-device recovery, output rebuilding, normalization,
 and source-rate negotiation are documented in
-link:04_playback.adoc#_output_devices_and_speaker_layouts[Playback output].
+link:04_playback.adoc#output-devices-and-speaker-layouts[Playback output].
 
 Apply validates and saves the settings draft across all four sidebar groups together;
 navigation preserves the draft and each page's scroll position. An unavailable
 output target can be saved; applying it reports an audio error and can stop
 playback while retaining the saved selection. Draft merging, Discard, and error
-handling follow the <<_desktop_settings,Desktop settings>> rules.
+handling follow the <<desktop-settings,Desktop settings>> rules.
 Artwork instance settings apply only the selected panel's style, mode, period
 and direction to the in-memory layout. They do not request a `layout.json` write;
 use layout sync or orderly exit to persist them. Applying fails if the instance
@@ -473,7 +473,7 @@ does not follow symlinks or scan arbitrary subdirectories.
 Inspect reported errors and retry after fixing access or permissions. Maintenance
 has no automatic schedule or total-capacity guarantee, and the age input is not
 saved to `config.toml`. Ownership and retention rationale are documented in
-link:22_cache.adoc#_artwork_lookup_retention[Artwork lookup retention].
+link:22_cache.adoc#artwork-lookup-retention[Artwork lookup retention].
 
 
 === Album artwork
@@ -509,7 +509,7 @@ panels share only frame rate; the analysis rate is independent. Mode, period, an
 direction in this configuration supply defaults for new panels, not live overrides.
 Playback-driven rotation and animated source covers have separate clocks but
 share this FPS cap. Their pause, hiding, track-change, and visualization-enable behavior is
-documented in link:04_playback.adoc#_album_artwork_panel[Album artwork panel].
+documented in link:04_playback.adoc#album-artwork-panel[Album artwork panel].
 Track details' full, static preview does not use the Album artwork FPS cap.
 
 
@@ -648,7 +648,7 @@ all four keys: `style`, `mode`, `period_seconds`, and `direction`. For example:
 ----
 
 The values use the same enums and positive finite period as
-<<_album_artwork,Album artwork>>. Omit the whole object to initialize from global
+<<album-artwork,Album artwork>>. Omit the whole object to initialize from global
 defaults when that layout is opened; partial objects and `null` are invalid.
 The object belongs only to `album_artwork` panels, just as the visualizer options
 belong only to `audio_visualizer` panels. Animation FPS remains global.
@@ -692,7 +692,7 @@ compositor throttling can slow animation while the independent analysis timer
 continues. Closing the window releases its presentation; reopening does not
 restore old frames. Waveform keeps its track preview when hidden but discards it
 when visualizations are disabled. Scheduling and continuity details are in
-link:23_visuals.adoc#_presentation_scheduling_and_visibility[Presentation scheduling and visibility].
+link:23_visuals.adoc#presentation-scheduling-and-visibility[Presentation scheduling and visibility].
 
 `visualizations.general.palette` accepts `tokyo_night` or `deadbeef` (default `deadbeef`).
 Color settings use quoted `"#RRGGBB"` values.
@@ -700,7 +700,7 @@ Color settings use quoted `"#RRGGBB"` values.
 Visualization caches are always enabled within their resource bounds. Spectrum
 reuses frequency mappings but rebuilds its body on each panel render. Rendering
 reuse and resource budgets are described in
-link:22_cache.adoc#_visualization_caching[Visualization caching]; signal and
+link:22_cache.adoc#visualization-caching[Visualization caching]; signal and
 rendering design in link:23_visuals.adoc[Visualization Rendering Design].
 
 Before audio data is available, visualization panels show no waiting message;
@@ -737,14 +737,14 @@ Shared visualization settings apply as follows:
   Changing only the analysis rate preserves compatible visualization content and
   the current analysis window. Small FFT windows at low rates can miss short
   transients; increasing animation FPS cannot recover unobserved audio.
-* Disabling visualizations stops visualization processing and discards results; see <<_visualization_enablement,Visualization enablement>>.
+* Disabling visualizations stops visualization processing and discards results; see <<visualization-enablement,Visualization enablement>>.
   This is independent of rendering reuse and media read buffering.
   In Settings → Visualizations → General → Appearance, its switch sits
   below the shared material-cache budget.
 
 Each frequency view has a range override; leave it empty to inherit General,
 or clear an explicit value to restore inheritance. See
-<<_visualization_db_ranges,Visualization dB ranges>> for the configuration contract.
+<<visualization-db-ranges,Visualization dB ranges>> for the configuration contract.
 
 Settings → Visualizations groups shared controls, shared effects, and New panel
 defaults under General, with separate pages for view-specific controls. General
@@ -756,7 +756,7 @@ view. View-specific pages contain only independent parameters.
 
 Style, reference lines, and labels under New panel defaults affect new panels only;
 existing panels retain their layout-local choices. See
-<<_audio_visualizer,Audio Visualizer>> for panel settings and style-specific effects.
+<<audio-visualizer,Audio Visualizer>> for panel settings and style-specific effects.
 Inactive Spectrum style-dependent settings retain their values.
 
 === Visualization enablement
@@ -889,7 +889,7 @@ The remaining `visualizations.spectrum.*` settings are:
 |===
 
 Zero gravity snaps to the current level after hold; it does not hold peaks forever.
-Display range inheritance is described in <<_visualization_db_ranges,Visualization dB ranges>>.
+Display range inheritance is described in <<visualization-db-ranges,Visualization dB ranges>>.
 
 `visualizations.spectrum.interpolate` defaults to `false` and controls frequency interpolation and whether `solid` has a
 continuous or stepped boundary. `line` always connects valid body points
@@ -921,11 +921,11 @@ under Settings → Visualizations → General → Appearance, then restart the
 GUI. It limits shared material buffers per window, not total GPU memory.
 Long Spectrogram histories may use fewer frequency rows to fit this budget;
 time resolution and playback audio are unchanged. See
-link:22_cache.adoc#_visualization_caching[Visualization caching] for resource scope.
+link:22_cache.adoc#visualization-caching[Visualization caching] for resource scope.
 Both views use a logarithmic frequency axis and share `visualizations.general.analysis_fft_size` and
 `visualizations.general.analysis_window`. Their independent `visualizations.spectrum.db_range` and
 `visualizations.spectrogram.db_range` overrides inherit `visualizations.general.db_range` when omitted;
-see <<_visualization_db_ranges,Visualization dB ranges>>.
+see <<visualization-db-ranges,Visualization dB ranges>>.
 
 === Audio Visualizer
 
@@ -1046,5 +1046,5 @@ TOML and file-access errors retain their specific causes.
 commands and offline ownership requirements are documented in
 link:26_migration.adoc[Database and configuration migration]. Configuration and
 database schemas are independent of the application release number; layout files
-have their own contract under <<_layout_file,Layout file>>.
+have their own contract under <<layout-file,Layout file>>.
 

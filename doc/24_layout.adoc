@@ -25,7 +25,7 @@ Ownership follows lifetime rather than the visible panel tree:
 
 Layout management is desktop-local, not a Core IPC or CLI API. User controls,
 file syntax and Settings exclusion are in
-link:01_config.adoc#_layout[Configuration and layout].
+link:01_config.adoc#layout[Configuration and layout].
 
 Switching or duplicating replaces the active tree, cancels interactions,
 invalidates geometry and reconciles panel demand. Layouts hold structure and
@@ -37,7 +37,7 @@ an inactive one does not replace the tree.
 === Initial layouts
 
 The initial collection contains Default, Album and Visual, with Default active.
-Their composition is documented in link:01_config.adoc#_layout[Configuration and layout]. Templates
+Their composition is documented in link:01_config.adoc#layout[Configuration and layout]. Templates
 construct panel trees and instance-option slots only; normal initialization
 supplies missing artwork/visualizer defaults from configuration. They have no
 special runtime identity, update or deletion policy. Additional layouts duplicate
@@ -211,10 +211,10 @@ At the supported minimum window size (760 by 480), especially at interface scale
 2, not every list and plot can be useful simultaneously. Playback keeps vertical
 scrolling and horizontal scrolling for its controls so transport, seek and volume
 remain reachable. User adjustments are documented in
-link:01_config.adoc#_layout[Configuration and layout]; resizing or scaling never
+link:01_config.adoc#layout[Configuration and layout]; resizing or scaling never
 rewrites saved proportions.
 
-The separator minima in <<_dragging_and_snapping>> constrain adjacent regions,
+The separator minima in <<dragging-and-snapping>> constrain adjacent regions,
 including tabs, borders and content insets, not individual widgets or recursive
 nested-split sizes. Library, Queue, Albums, Recent tracks and Playlists share those
 rules so switching tabs does not change separator behavior. Saved proportions,
@@ -342,9 +342,9 @@ validity. Hidden windows and inactive tabs still reconcile core state and
 query-owner keys; revealing a panel demands only missing current data.
 Projection acceptance, metadata-draft retention, compact occurrence selection,
 and physical-worker cancellation follow
-link:22_cache.adoc#_query_projection_retention[Query projection retention].
+link:22_cache.adoc#query-projection-retention[Query projection retention].
 Keyboard list actions target only a visible active panel; see
-link:02_library.adoc#_paged_views[Paged views].
+link:02_library.adoc#paged-views[Paged views].
 
 Scroll offsets belong to panel instances in the current tree, not to their
 visibility in a frame. Inactive tabs retain their viewport state but cannot
@@ -364,7 +364,7 @@ owners. A feature owns its inputs, model, read execution, result acceptance, and
 rendering; multiple panels of that feature share its business state. The window
 coordinates explicit cross-feature actions and metadata confirmation, not a
 second aggregate browser model or query dispatcher. See
-link:22_cache.adoc#_query_projection_retention[Query projection retention].
+link:22_cache.adoc#query-projection-retention[Query projection retention].
 
 Audio processing configuration and jobs belong to Core, not the docking tree.
 Hiding its panel does not disable EQ or cancel work; geometry changes cancel
@@ -378,7 +378,7 @@ Features share one immutable Core snapshot refreshed per revision. Cross-feature
 transfers hand owned results to the coordinator rather than retaining duplicate
 row collections. Core serializes business commits and persistence; GUI refresh
 failure cannot undo an accepted commit. See
-link:21_ipc.adoc#_business_ownership_and_transactions[Business ownership and transactions].
+link:21_ipc.adoc#business-ownership-and-transactions[Business ownership and transactions].
 
 Shared list interactions freeze source identities and ordered selections against
 the Core snapshot; features keep occurrence-reordering rules and asynchronous
@@ -386,7 +386,7 @@ Library resolution. Targets decide acceptance and insertion position. The window
 coordinator owns content menus, manual-intent arbitration, queue replacement and
 album-menu resolution, not feature listing models. Copying tracks and reordering
 occurrences are distinct. Query cancellation, acceptance and physical-slot rules
-are authoritative in link:22_cache.adoc#_query_projection_retention[Query projection retention].
+are authoritative in link:22_cache.adoc#query-projection-retention[Query projection retention].
 
 Settings owns its baseline, draft, target and submission identity independently
 of controls. Inputs own editable text/caret. Successful completion rebases later
@@ -408,7 +408,7 @@ and background blocking. Feature confirmations can cover a surface without
 discarding its draft. Deferred focus requests carry a generation so an obsolete
 callback cannot focus a replacement surface. Workspace activation validates the
 target before cancelling an interaction; rollback follows the outgoing-tree rule
-in <<_dragging_and_snapping>>.
+in <<dragging-and-snapping>>.
 
 GPUI owns actual control focus and key dispatch; the shell coordinates surface
 scopes and restoration, while each feature keeps selection and keyboard targets
@@ -481,7 +481,7 @@ Layout visibility, not whether a cached subtree rendered in that frame, decides
 which retained scroll regions can receive input. Re-rendering a panel replaces
 only that panel's region registrations. Visualization scheduling and image
 retirement belong to a separate presentation owner; see
-link:23_visuals.adoc#_analysis_boundary[Analysis boundary].
+link:23_visuals.adoc#analysis-boundary[Analysis boundary].
 
 
 === Reusable GPUI controls

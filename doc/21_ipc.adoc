@@ -4,9 +4,9 @@
 
 This chapter follows the boundary from application ownership through socket
 sessions and consistency to the business operations behind them. External clients
-need <<_transport_and_frame_format,framing>>, <<_session_handshake,Hello>>,
-<<_revisions_and_watching,revisions>>, and
-<<_request_failures_and_completion,completion semantics>> before issuing commands.
+need <<transport-and-frame-format,framing>>, <<session-handshake,Hello>>,
+<<revisions-and-watching,revisions>>, and
+<<request-failures-and-completion,completion semantics>> before issuing commands.
 Query and task results belong to the running instance; neither a timeout nor a
 disconnected client rolls back an accepted operation.
 
@@ -70,7 +70,7 @@ completion notifies App independently of GUI registration, including on panic.
 Shutdown has a bounded lifecycle signal independent of the business queue;
 accepted IPC shutdown acknowledgements drain before transport retirement.
 Service joins run outside GPUI quit callbacks. Window/display resource release
-is described in link:22_cache.adoc#_renderer_buffers_atlases_and_display_lifecycle[Resource lifecycles];
+is described in link:22_cache.adoc#renderer-buffers-atlases-and-display-lifecycle[Resource lifecycles];
 closing a window is not framework teardown or a promise of headless-equivalent memory.
 
 === Owner execution and retirement
@@ -114,7 +114,7 @@ projections, whereas socket responses serialize them. Queue displays resolve
 metadata from bounded queue queries and their content revision, not unrelated
 library pages. TUI rendering visits visible queue rows while retaining global
 occurrence selection and scroll position. GUI page, selection-index, and worker
-retention are described in link:22_cache.adoc#_window_local_query_retention[Resource lifecycles].
+retention are described in link:22_cache.adoc#window-local-query-retention[Resource lifecycles].
 This avoids both a second control implementation and a universal whole-library
 snapshot on every playback update.
 
@@ -144,7 +144,7 @@ version is `12`. Both peers must use matching protocol versions and positional
 wire schemas. The four-byte frame length remains little-endian; body integers
 follow Postcard's encoding.
 Version mismatches are rejected before decoding the body. There is no schema
-negotiation. See <<_wire_schemas,Wire schemas>> for positional fields and adapters.
+negotiation. See <<wire-schemas,Wire schemas>> for positional fields and adapters.
 Monitor EQ `SavePreset` and `ImportPreset` carry an explicit positional `overwrite`
 boolean: false creates only, true replaces only an existing named preset.
 JSON commands may omit it for create-only behavior; positional wire encoding
@@ -195,7 +195,7 @@ startup, but cannot impersonate the server to a client.
 
 Startup binds the listener before database, configuration-write or audio work;
 binding grants ownership through teardown and partial startup failure. The
-link:26_migration.adoc#_application_invocation[automatic migration handoff] temporarily
+link:26_migration.adoc#application-invocation[automatic migration handoff] temporarily
 releases it to the tool, then reacquires and verifies before startup continues.
 The kernel releases the address when the last listener closes, including on
 process death; no stale-file cleanup is needed.
@@ -284,7 +284,7 @@ as omitted overrides inheriting their common setting. The IPC protocol version
 is independent of on-disk configuration and database schema versions:
 `WireConfig` transports runtime settings, not a versioned TOML document. Disk
 version authority and maintenance belong to
-link:26_migration.adoc#_version_authority[Database and configuration migration].
+link:26_migration.adoc#version-authority[Database and configuration migration].
 
 Processing task status distinguishes the task `id` from `graph_run_id`, the retained
 graph snapshot accepted by audition and export commands. Export receipts carry
@@ -642,7 +642,7 @@ is the sole nonempty effective artist, `Various artists` for multiple, or an emp
 string for none; artist sorting uses `Unknown artist` for that missing value.
 Count/page filters are identical but do not constrain
 whole-album actions. Indexed membership and persistent summary costs are covered
-under <<_transactional_inputs_and_bounded_storage_queries,storage ownership>>;
+under <<transactional-inputs-and-bounded-storage-queries,storage ownership>>;
 browsing behavior is in link:02_library.adoc[Library].
 
 `DuplicateGroups` pages ordinary-file groups by cached fingerprint and reports
@@ -764,7 +764,7 @@ appends; insertion requires `expected_revision`. Registration and queue insertio
 commit atomically; stale revisions reject the whole commit without an append fallback.
 The accepted command returns `Ack.scan_id`; completion and cancellation use the
 shared media-task lifecycle below. User-visible file admission rules are in
-link:04_playback.adoc#_adding_local_files[Adding local files].
+link:04_playback.adoc#adding-local-files[Adding local files].
 
 `InsertQueue {track_ids, index, expected_revision}` and
 `InsertPlaylist {playlist_id, track_ids, index, expected_revision}` insert directly
@@ -837,7 +837,7 @@ The new-track minimum-duration policy is captured when a scan/import starts and
 applied after exact-identity and relocation matching, never to previously stored
 identities. Successfully validated CUE sheets exempt their subtracks and referenced
 whole-file identities; failed sheets grant no exemption. See
-link:02_library.adoc#_minimum_duration_for_new_tracks[Library].
+link:02_library.adoc#minimum-duration-for-new-tracks[Library].
 
 Metadata reuse requires the current probe version, independently of schema or
 protocol versions; mismatch reprobes without invalidating fingerprints. Preparation
@@ -948,7 +948,7 @@ Directory pages count and select children before projecting track payloads.
 Temporary work scales with matching children; count-only requests omit it, and
 empty/out-of-range pages still report exact totals. OFFSET traversal retains its
 preceding-match cost. Count retention is described under
-link:22_cache.adoc#_core_owned_lookup_retention[Core lookup retention].
+link:22_cache.adoc#core-owned-lookup-retention[Core lookup retention].
 
 Album summaries and artist counts are persistent SQLite projections maintained
 in the same transaction as track changes. Unchanged effective metadata does no
@@ -957,7 +957,7 @@ substring search and OFFSET still scale with matching summaries. Reverse-referen
 indexes keep sparse library deletion scoped to affected queue/playlist entries.
 These indexes trade storage and write maintenance for scoped lookup work.
 Database format validation is described in
-link:26_migration.adoc#_version_authority[Database and configuration migration].
+link:26_migration.adoc#version-authority[Database and configuration migration].
 
 === Background commits and maintenance
 
@@ -1056,7 +1056,7 @@ save success. Producers retire before file output is flushed, outside GUI callba
 Standalone Core runtimes install no process subscriber. Processing shutdown closes
 event admission, joins workers, and drains unpublished outputs; retained auditions
 last until service retirement. See
-link:22_cache.adoc#_processing_output_retention[Processing output retention].
+link:22_cache.adoc#processing-output-retention[Processing output retention].
 
 === Audio processing commands
 
@@ -1077,7 +1077,7 @@ preserves the same three-way intent.
 `ProcessingBypass` disables Monitor EQ, restores original playback and revokes
 pending automatic audition without cancelling render/export jobs or deleting their
 results. Parameters and queue remain intact. See
-link:27_audio_processing.adoc#_practical_workflow[Playback bypass] for desktop/CLI use.
+link:27_audio_processing.adoc#practical-workflow[Playback bypass] for desktop/CLI use.
 
 `StartProcessing { track_id, operation, profile }` accepts `denoise`, `speech` or
 `separate`; profile is null or `{start_seconds,end_seconds}` in source-relative
@@ -1096,7 +1096,7 @@ the models actually used. Retained output availability is session-bounded.
 identify their ports and optional causal `start_frame` context; PCM remains owned
 by the service and is never serialized into status. Only an explicit export
 receipt carries a durable output path. See
-link:27_audio_processing.adoc#_tasks_retention_and_audition[Audio processing] for
+link:27_audio_processing.adoc#tasks-retention-and-audition[Audio processing] for
 CLI equivalents, terminal states, provisioning, PCM ownership and audition lifetime.
 
 ==== Immutable audio graph runs
@@ -1143,7 +1143,7 @@ and actual neural model IDs/SHA256 hashes.
 Output availability and status retention are separate; a terminal task alone
 does not authorize audition. Shared processing budgets and pinned-audition
 publication failure are specified in
-link:22_cache.adoc#_processing_output_retention[Processing output retention].
+link:22_cache.adoc#processing-output-retention[Processing output retention].
 Layout positions, revision counters, and node-ID allocation history do not affect
 audio equivalence or invalidate a frozen result; graph execution is described in
 link:27_audio_processing.adoc[Audio processing].

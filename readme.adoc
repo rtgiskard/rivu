@@ -13,9 +13,9 @@ image:https://github.com/user-attachments/assets/bf7493ca-cb1a-4b8e-97cb-0226f80
   See link:doc/22_cache.adoc[resource lifecycles]
 * *Customization:* named layouts, dockable panels, themes, fonts, visualization
   and artwork styles, and i18n support
-* *Library and albums:* folder and link:doc/02_library.adoc#_albums[album browsing],
+* *Library and albums:* folder and link:doc/02_library.adoc#albums[album browsing],
   search, favorites, library-only metadata edits, play counts, and recent history.
-  SQLite-backed storage and link:doc/02_library.adoc#_paged_views[on-demand paged browsing]
+  SQLite-backed storage and link:doc/02_library.adoc#paged-views[on-demand paged browsing]
   support large collections without whole-library snapshots
 * *Playlists and queue:* M3U/M3U8 import/export, drag-and-drop ordering and transfers,
   direct file additions, and a persistent playback queue
@@ -26,7 +26,7 @@ image:https://github.com/user-attachments/assets/bf7493ca-cb1a-4b8e-97cb-0226f80
   vocal/accompaniment separation; node graphs support real-time, hybrid, and offline
   execution, auditioning, and WAV export.
   Neural backends require prepared local models; see
-  link:doc/27_audio_processing.adoc#_practical_workflow[workflow and quality limits]
+  link:doc/27_audio_processing.adoc#practical-workflow[workflow and quality limits]
 * *Visualizations and artwork:* one Visualization panel with eleven styles,
   including waveform, spectrum, spectrogram, stereo analysis, and oscilloscope;
   independent album artwork
@@ -37,7 +37,7 @@ The desktop requires Wayland; audio output requires a running PipeWire 1.2 or ne
 
 == First use
 
-. Install Rivu using the <<_build_and_install,instructions below>>.
+. Install Rivu using the <<build-and-install,instructions below>>.
 . Run `rivu` (equivalent to `rivu gui`) to open the desktop UI.
 . Add a music directory with the Library `+` button, then hover its row and use
   the scan button to import tracks. Scanning is explicit: adding a directory or
@@ -45,11 +45,11 @@ The desktop requires Wayland; audio output requires a running PipeWire 1.2 or ne
 . Browse Library or Albums and double-click a track to play it.
 
 Alternatively, drag individual audio files into Queue without configuring a
-folder. This registers them under link:doc/02_library.adoc#_other[Other] and appends
+folder. This registers them under link:doc/02_library.adoc#other[Other] and appends
 queue entries without starting or replacing playback.
 
 Music directories can also be set through `library.roots` in `config.toml`;
-use absolute paths, not `~`. See link:doc/02_library.adoc#_roots_and_scanning[Library]
+use absolute paths, not `~`. See link:doc/02_library.adoc#roots-and-scanning[Library]
 for scanning and path rules.
 
 === Other interfaces and shutdown
@@ -85,7 +85,7 @@ can run independently. `--data-dir DIRECTORY` selects the instance. `--config FI
 selects startup/probe configuration.
 `--log-level LEVEL` temporarily overrides this process's stderr and enabled file
 logging (`debug`, `info`, `warning`, `error`).
-See link:doc/01_config.adoc#_logging_and_diagnostics[logging and diagnostics].
+See link:doc/01_config.adoc#logging-and-diagnostics[logging and diagnostics].
 `--json` writes one result to stdout and runtime diagnostics as JSON to stderr;
 it is not available for GUI, serve, or TUI.
 Use `rivu --help` or a subcommand's `--help` for exact arguments.
@@ -106,7 +106,7 @@ Use `rivu status` for instance state and `rivu task status KIND INSTANCE:ID` or
 For scan/import/relocation/processing commands, `--wait` returns the terminal
 result rather than an acceptance acknowledgement. A timeout can leave a mutation's
 result unknown; do not repeat it blindly. See
-link:doc/02_library.adoc#_cli_output[CLI output] for result and failure semantics.
+link:doc/02_library.adoc#cli-output[CLI output] for result and failure semantics.
 
 Use the task reference printed by startup or completion output; its instance
 identity prevents a saved reference from addressing a different task after restart.
@@ -127,11 +127,11 @@ typical Linux installation: `~/.local/share/rivu`) and
 The data directory contains `library.db` (library and playback state),
 `layout.json` (desktop layouts), the `artwork/` cache, and optional `logs/`.
 Shared-state persistence is independent of client lifetime. See
-link:doc/01_config.adoc#_saving_configuration[configuration saving] and
-link:doc/04_playback.adoc#_queue[queue restoration] for their independent guarantees.
-Stop Rivu before link:doc/02_library.adoc#_sqlite_maintenance[database maintenance];
+link:doc/01_config.adoc#saving-configuration[configuration saving] and
+link:doc/04_playback.adoc#queue[queue restoration] for their independent guarantees.
+Stop Rivu before link:doc/02_library.adoc#sqlite-maintenance[database maintenance];
 external writes while it runs are unsupported. Keep `rivu-migrate` installed with
-`rivu` for link:doc/26_migration.adoc#_application_invocation[automatic startup migration].
+`rivu` for link:doc/26_migration.adoc#application-invocation[automatic startup migration].
 Unsupported formats or migration failure stop startup without resetting data.
 Client and wire contracts are in link:doc/21_ipc.adoc[IPC].
 
@@ -142,7 +142,7 @@ Client and wire contracts are in link:doc/21_ipc.adoc[IPC].
 ** link:doc/02_library.adoc[Library, metadata, history, and database maintenance]
 ** link:doc/03_playlist.adoc[Playlists and import/export]
 ** link:doc/04_playback.adoc[Playback, audio output, queue, TUI, and desktop integration]
-** link:doc/27_audio_processing.adoc#_practical_workflow[Audio processing, graph execution, audition and export]
+** link:doc/27_audio_processing.adoc#practical-workflow[Audio processing, graph execution, audition and export]
 * Design notes
 ** link:doc/21_ipc.adoc[Core and client boundaries, IPC protocol]
 ** link:doc/22_cache.adoc[Caching and resource lifecycles]
@@ -150,7 +150,7 @@ Client and wire contracts are in link:doc/21_ipc.adoc[IPC].
 ** link:doc/24_layout.adoc[Desktop layout and docking]
 ** link:doc/25_gpu_rendering.adoc[Parameter-driven GPU rendering: implemented slices, proposal and measurements]
 ** link:doc/26_migration.adoc[Database and configuration migration boundaries]
-** link:doc/27_audio_processing.adoc#_ownership_and_invariants[Audio processing ownership, quality acceptance and evidence]
+** link:doc/27_audio_processing.adoc#ownership-and-invariants[Audio processing ownership, quality acceptance and evidence]
 * Project status
 ** link:doc/90_open_issues.adoc[Open issues, deferred investigations and resolution records]
 * Agent development skills
@@ -178,8 +178,8 @@ Run `rivu-linux-x86_64/bin/rivu` directly, or install both executables from the
 archive's `bin/` directory into a directory on `PATH`. For desktop launcher
 integration, install the archive's `share/` tree under the same installation prefix.
 
-<<_ffmpeg_and_native_only_builds,FFmpeg support>> is included;
-install a Nerd Font as described under <<_font_embedding,Font embedding>>.
+<<ffmpeg-and-native-only-builds,FFmpeg support>> is included;
+install a Nerd Font as described under <<font-embedding,Font embedding>>.
 
 === Arch Linux package
 
@@ -228,7 +228,7 @@ Python tests require NumPy, SciPy, soundfile, and jsonschema:
 `sudo pacman -S --needed python python-numpy python-scipy python-soundfile python-jsonschema`.
 Use `PYTHON=/path/to/python` to select a prepared interpreter. Real-model checks
 need explicitly prepared environments and local manifests; see
-link:doc/27_audio_processing.adoc#_quality_acceptance[audio-processing acceptance].
+link:doc/27_audio_processing.adoc#quality-acceptance[audio-processing acceptance].
 These behavior tests do not establish model quality or runtime memory usage.
 
 The link:.github/workflows/build.yml[CI workflow] runs lint and behavior suites
@@ -244,7 +244,7 @@ Local builds retain the compiler's default CPU target.
 
 Default builds enable `ffmpeg` and `onnx`. Native UL-UNAS/GTCRN speech inference
 requires `onnx` and a separately installed ONNX Runtime; see
-link:doc/27_audio_processing.adoc#_explicit_neural_installation_and_offline_deployment[neural installation].
+link:doc/27_audio_processing.adoc#explicit-neural-installation-and-offline-deployment[neural installation].
 To omit ONNX inference while keeping FFmpeg, build with
 `cargo build --locked --release --no-default-features --features ffmpeg`.
 `--no-default-features` alone disables both FFmpeg and ONNX inference;
@@ -268,10 +268,8 @@ The extension supports little-endian x86-64 and aarch64 Linux; cross-compiling
 is not currently a supported build path. FFmpeg libraries load on demand, not
 during startup or status queries. Native decoding works without them.
 The compiled extension is disabled at runtime until
-`playback.ffmpeg_enabled = true`; see link:doc/04_playback.adoc#_optional_ffmpeg_decoder[Playback]
+`playback.ffmpeg_enabled = true`; see link:doc/04_playback.adoc#optional-ffmpeg-decoder[Playback]
 for decoder behavior and runtime dependencies.
-See the link:doc/04_playback.adoc#_audio_runtime_crate[audio runtime crate] for
-FFmpeg binding generation and native audio dependencies.
 
 To build without FFmpeg support, omit the FFmpeg package and disable default features:
 
@@ -311,8 +309,8 @@ Release builds strip symbols. For troubleshooting, set
 `CARGO_PROFILE_RELEASE_STRIP=none` when building or installing.
 
 Run `make ui-demo` on a Wayland desktop to explore the reusable GUI controls.
-See link:doc/24_layout.adoc#_reusable_gpui_controls[component boundaries and host setup]
-and link:doc/23_visuals.adoc#_pinned_gpu_extensions[pinned GPUI extensions].
+See link:doc/24_layout.adoc#reusable-gpui-controls[component boundaries and host setup]
+and link:doc/23_visuals.adoc#pinned-gpu-extensions[pinned GPUI extensions].
 
 `rivu -V` prints `package-version (build-identity)`; About shows build identity
 and enabled Cargo features (`ffmpeg`, `onnx`, `embed-nerd-font`, or `none`).
@@ -322,8 +320,8 @@ and enabled Cargo features (`ffmpeg`, `onnx`, `embed-nerd-font`, or `none`).
 plain Cargo uses the package version. Override either with `RIVU_GIT_VERSION`,
 including for source archives without Git metadata. Git tags may differ from package
 versions. Compatibility is governed separately by
-link:doc/26_migration.adoc#_version_authority[disk formats] and
-link:doc/21_ipc.adoc#_wire_schemas[IPC schemas].
+link:doc/26_migration.adoc#version-authority[disk formats] and
+link:doc/21_ipc.adoc#wire-schemas[IPC schemas].
 
 Set `SOURCE_DATE_EPOCH` to nonnegative Unix seconds for a reproducible build
 timestamp. Invalid values fail the build; About displays the timestamp locally.

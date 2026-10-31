@@ -10,7 +10,7 @@ the owner can release it. Entry and payload limits are not process-RSS limits,
 and releasing an application reference need not immediately reclaim GPU memory.
 
 Query stamps and revision domains are defined in
-link:21_ipc.adoc#_query_results_and_pagination[IPC]. Signal meaning and continuity
+link:21_ipc.adoc#query-results-and-pagination[IPC]. Signal meaning and continuity
 belong to link:23_visuals.adoc[Visualization Rendering Design], layout/interaction
 contracts to link:24_layout.adoc[GUI layout], and GPU admission/API guarantees
 to link:25_gpu_rendering.adoc[GPU rendering]. The sections below retain the
@@ -79,7 +79,7 @@ for independent commits; writer transactions bypass them to avoid rollback leaka
 There is no polling timer or collection-sized row cache. Root aggregation and
 directory relations are request-local; persistent album summaries are transactional
 database projections, not evictable pages. See
-link:21_ipc.adoc#_transactional_inputs_and_bounded_storage_queries[IPC storage queries].
+link:21_ipc.adoc#transactional-inputs-and-bounded-storage-queries[IPC storage queries].
 
 === Window-local query retention
 
@@ -103,7 +103,7 @@ Bitrate revision changes retire retained display payloads for demand-driven
 reload while preserving selection, counts, and navigation geometry. There is no
 bitrate history, replay cache, or track-to-view reverse index. Old responses fail
 the same query-stamp admission as other stale data. See
-link:21_ipc.adoc#_query_results_and_pagination[IPC query results].
+link:21_ipc.adoc#query-results-and-pagination[IPC query results].
 
 ==== Demand, cancellation, and physical retirement
 
@@ -243,7 +243,7 @@ while playback, exports or aliases still own the PCM. Export publication recheck
 cancellation and source identity before its atomic no-clobber commit. Shutdown
 joins workers; live audio survives until its final playback owner releases it.
 Workflow, native streaming and neural memory boundaries are specified in
-link:27_audio_processing.adoc#_tasks_retention_and_audition[Audio processing].
+link:27_audio_processing.adoc#tasks-retention-and-audition[Audio processing].
 
 
 == Visualization caching
@@ -264,7 +264,7 @@ The ownership layers have different retirement boundaries:
 |Audio analysis worker
 |Reusable FFT machinery and bounded optional snapshot pools. Suspending capture
 clears accepted input, not necessarily prepared allocation capacity; see
-<<_resource_boundaries,Resource boundaries>>.
+<<resource-boundaries,Resource boundaries>>.
 |Window presentation owner
 |The latest accepted staging frame, shared by visible consumers. Removing demand
 releases the corresponding staging payloads; this is not a history cache.
@@ -283,7 +283,7 @@ of visualization enablement.
 Disabling visualizations is a destructive suspension, not another cache policy: it stops
 visualization demand and discards results as well as derived graphics. Its
 analysis, waveform-coverage, and late-result invariants are authoritative in
-link:23_visuals.adoc#_visualization_enablement[Visualization Rendering Design]. Graphics that
+link:23_visuals.adoc#visualization-enablement[Visualization Rendering Design]. Graphics that
 have already been submitted still follow the retirement boundary below.
 
 === Reuse and invalidation
@@ -305,7 +305,7 @@ owner for column pooling; they reject invalidated or replacement previews. Keys
 do not pin preview snapshots. All-unknown data produces no publication, while
 known silence remains drawable. The renderer owns upload reuse and
 completion-aware retirement. Signal semantics are in
-link:23_visuals.adoc#_waveform[Waveform].
+link:23_visuals.adoc#waveform[Waveform].
 
 ==== Spectrum
 
@@ -315,14 +315,14 @@ rebuilds its body, though retained scenes can replay without a render.
 One shared 1024-entry palette uses cubic colors quantized to 8-bit channels;
 range, size and style do not change its identity. Waveform instead uses floating-point
 endpoints. Body representation belongs to
-link:25_gpu_rendering.adoc#_consumer_cutover_contracts[GPU consumer contracts].
+link:25_gpu_rendering.adoc#consumer-cutover-contracts[GPU consumer contracts].
 
 Suspension retains the final immutable body, normalized peak markers, and display
 labels for each current layout panel. Envelopes, frequency mappings, and scratch
 are released. Restoration draws that presentation until a current drawable result
 replaces it; semantic invalidation discards it. This frozen presentation is not a
 body-reuse cache. Envelope and palette semantics are in
-link:23_visuals.adoc#_spectrum[Spectrum rendering].
+link:23_visuals.adoc#spectrum[Spectrum rendering].
 
 ==== Spectrogram
 
@@ -331,8 +331,8 @@ frequency mapping and sampling-size changes rebuild affected publications withou
 discarding compatible history. FFT/window or signal changes discard incompatible
 history; duration/rate changes resize retention and start a new pooling interval.
 Unrelated Spectrum settings do not rebucket audio. Pooling semantics belong to
-link:23_visuals.adoc#_spectrogram[Spectrogram]; tile publication belongs to
-link:25_gpu_rendering.adoc#_spectrogram_column_fields[GPU column fields].
+link:23_visuals.adoc#spectrogram[Spectrogram]; tile publication belongs to
+link:25_gpu_rendering.adoc#spectrogram-column-fields[GPU column fields].
 
 Drawable panels share one bounded history sized for the largest requested
 physical plot width, capped by history seconds times analysis FPS, with at least
@@ -371,7 +371,7 @@ it does not replay frames received while hidden.
 Hiding releases GUI working state, Spectrogram history and stereo/generative
 simulation resources while retaining bounded final drawings as described below.
 Audio-worker analyzer capacity has a separate lifetime. Base waveform previews
-retain their independent bounded lifetime; see <<_waveform,Waveform caching>>.
+retain their independent bounded lifetime; see <<waveform,Waveform caching>>.
 Waveform numerical payloads grow with effective display-column count and panel
 count, not panel pixel area: four f32 values (16 bytes) per column, at most 1024
 columns per panel, plus the shared paired-color palette and publication metadata.
@@ -384,7 +384,7 @@ capped sampling height, in addition to the frequency data needed to preserve his
 
 Renderer admission is separate from CPU retention; its startup budget also limits
 Spectrogram sampling. Accounting, limits and pressure behavior belong to
-link:25_gpu_rendering.adoc#_admission_and_retirement[GPU admission and retirement].
+link:25_gpu_rendering.adoc#admission-and-retirement[GPU admission and retirement].
 
 Removed panel entries are pruned. Window suspension retains only final drawing
 data: radial styles keep at most 32 levels and rotation; stereo styles keep their
@@ -394,7 +394,7 @@ its PCM owner. Pause and inactive fractal tabs instead retain the bounded scene
 without running it. Layout removal, semantic invalidation and window destruction
 release these publications. There is no general screenshot cache. Physical GPU
 retirement is defined in
-link:25_gpu_rendering.adoc#_admission_and_retirement[GPU admission and retirement].
+link:25_gpu_rendering.adoc#admission-and-retirement[GPU admission and retirement].
 
 The GUI staging frame releases optional Density, Spatial Spectrum, metrics, and
 band-energy payloads when their last display demand disappears; losing all
@@ -409,7 +409,7 @@ The processed Before tap's source-aligned FIFO is separate from the analysis rin
 and waveform retention. Capture-identity changes, inactive analysis or exhaustion
 of its output span release samples and allocation, including on refills admitting
 no new PCM. Its capacity and admission contract are defined in
-link:23_visuals.adoc#_pcm_admission[PCM admission].
+link:23_visuals.adoc#pcm-admission[PCM admission].
 
 Density owns one 256 × 256 accumulation field and three immutable snapshot slots:
 1 MiB of cell storage per active analyzer, excluding rendering and control state.
@@ -437,7 +437,7 @@ Density and Spatial Spectrum retain revocable numerical GPU publications of
 256 KiB and 128 KiB respectively, plus a shared 4 KiB palette per style.
 Unchanged fields and resize reuse them; hiding clears application ownership.
 Captured frames and device storage follow
-link:25_gpu_rendering.adoc#_admission_and_retirement[GPU retirement].
+link:25_gpu_rendering.adoc#admission-and-retirement[GPU retirement].
 
 === Design tradeoffs
 
@@ -570,7 +570,7 @@ shared content path alone cannot authorize reuse under a different encoded polic
 both successful decodes and remembered failures are policy-keyed.
 Directory discovery checks only the source's immediate directory and exact
 `cover`, `folder`, or `front` stems; full candidate rules are documented in
-link:04_playback.adoc#_mpris_and_artwork[MPRIS and artwork].
+link:04_playback.adoc#mpris-and-artwork[MPRIS and artwork].
 There is no automatic file-count or total-byte budget, startup directory inventory,
 or automatic cleanup. No persistent track-to-image index is restored after restart:
 the first source probe discovers the image hash, then reuses its file if present.
@@ -595,7 +595,7 @@ two-character lowercase-hex buckets, using the filename forms described above.
 Files at the cache root and unrecognized names are excluded from statistics and
 cleanup. It does not follow symlinks or descend into nested directories.
 
-Only explicit link:01_config.adoc#_artwork_cache_maintenance[Settings maintenance]
+Only explicit link:01_config.adoc#artwork-cache-maintenance[Settings maintenance]
 enumerates disposable files. Statistics and cleanup use modification age, not
 last-access age; normal reuse does not touch timestamps. Cleanup skips every
 file referenced by a resident lookup result, including idle cached results and
@@ -651,7 +651,7 @@ including cumulative BGRA pixels and conservative frame/vector overhead. The
 budget includes every composited GIF/WebP animation frame; even tiny frames
 incur an overhead charge. It applies per immutable content path per window, not
 across all active/retired images or windows. Settings operation is described in
-link:01_config.adoc#_desktop_settings[Desktop settings].
+link:01_config.adoc#desktop-settings[Desktop settings].
 
 A committed budget change invalidates shared cover loads and completed failures,
 retires completed pixels at the existing scene boundary, and refreshes all cover
@@ -808,7 +808,7 @@ bounds. Submitted GPU work retains replaced resources until completion;
 reclamation neither destroys in-flight textures nor waits for the GPU. These
 attachment bytes are separate from the GPU-material buffer budget. Exact
 capacity and reclamation policy is authoritative in
-link:25_gpu_rendering.adoc#_shared_local_multisample_scratch[Shared local multisample scratch].
+link:25_gpu_rendering.adoc#shared-local-multisample-scratch[Shared local multisample scratch].
 Instance storage above its initial capacity shrinks after
 120 successful frames at no more than one-quarter utilization, retaining twice
 the observed peak rounded up to a power of two and never below initial capacity.

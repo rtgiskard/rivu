@@ -4,7 +4,7 @@
 
 Playlists are ordered collections of library tracks; repeated tracks have distinct
 entry IDs. Additions, imports, queue saves, and transfers preserve order and duplicates.
-The link:04_playback.adoc#_queue[queue] is separate: loading a playlist or saving a
+The link:04_playback.adoc#queue[queue] is separate: loading a playlist or saving a
 queue creates an independent copy, not a live link.
 
 == Management
@@ -35,14 +35,14 @@ rivu playlist move ENTRY_ID 0
 
 Saving a queue as a playlist is atomic: failure leaves no newly created empty
 playlist. For whole-playlist versus individual-track playback, confirmation, and
-queue replacement failures, see link:04_playback.adoc#_transport_and_timing[Playback].
+queue replacement failures, see link:04_playback.adoc#transport-and-timing[Playback].
 
 == Desktop UI
 
 === Catalog and naming
 
 Select a playlist in the catalog to browse its tracks. The catalog and track list
-have independent link:02_library.adoc#_desktop_list_search[searches]; filtering
+have independent link:02_library.adoc#desktop-list-search[searches]; filtering
 does not restrict whole-playlist Play, Append, or Export.
 
 Drag a playlist name to change catalog order. A row's upper half inserts before
@@ -59,7 +59,7 @@ selected playlist. Play loads the complete saved order; Append copies it without
 changing playback. Empty or unknown playlists leave Queue unchanged. Append
 rejects changed contents rather than copying a stale or partial list. Playback
 and queue-replacement behavior are described under
-link:04_playback.adoc#_transport_and_timing[Playback].
+link:04_playback.adoc#transport-and-timing[Playback].
 
 The row menu also offers Add current track, Remove duplicates, Rename, and Delete.
 Add current track uses the playback track, not Library selection, and requires a
@@ -73,7 +73,7 @@ and removes only the playlist, never music files.
 
 === Track selection and ordering
 
-Use the link:02_library.adoc#_desktop_selection_and_directory_tree[shared selection rules]
+Use the link:02_library.adoc#desktop-selection-and-directory-tree[shared selection rules]
 to select tracks and ranges, including unloaded pages. The count shows selection
 size. With the track list focused, arrows navigate, Home/End selects the first/last
 matching entry, Shift+arrows extends a range, Ctrl+A selects all matches, and Delete
@@ -111,7 +111,7 @@ Right-click a track or selected group and choose Add to playlist to select an
 existing playlist or New playlist. The shared name dialog saves the captured
 tracks without changing the source collection. This selector also works when
 the Playlists panel is not visible. Track menus follow the
-link:02_library.adoc#_desktop_selection_and_directory_tree[shared selection rules].
+link:02_library.adoc#desktop-selection-and-directory-tree[shared selection rules].
 
 For a nonempty queue, use Queue → Save queue as playlist. The editable default
 name is `Queue_YYYYMMDD_HHMMSS`. Every occurrence is saved in queue order without
@@ -125,7 +125,7 @@ numbers remain absolute when search hides rows; positional drops are unavailable
 while the destination entry list is filtered.
 Switching playlists clears track selection; deleting the selected playlist from
 another client clears it on refresh. Empty playlists and unloaded pages do not
-imply deletion. See link:02_library.adoc#_paged_views[Paged views] for loading,
+imply deletion. See link:02_library.adoc#paged-views[Paged views] for loading,
 timeouts, and CLI incomplete-output recovery.
 
 A range is selected only after all its rows load and any Details draft confirmation
@@ -141,7 +141,7 @@ can navigate again. Failed group removal does not partially remove entries.
 Listings restart if this playlist's membership or order changes, not on renames
 or changes to other playlists. Metadata edits may invalidate displayed results
 without changing entry identity. Stale group edits are rejected; exports use a
-consistent snapshot. Protocol details: link:21_ipc.adoc#_query_results_and_pagination[IPC query validity].
+consistent snapshot. Protocol details: link:21_ipc.adoc#query-results-and-pagination[IPC query validity].
 
 == Import and export
 
@@ -156,12 +156,12 @@ described under link:02_library.adoc[Library]; paths inside an imported document
 instead resolve relative to that document. An M3U/M3U8 document itself need not
 be inside a library root. All audio and CUE paths, including a directly imported
 CUE sheet, must lie within configured logical roots; see
-link:02_library.adoc#_scan_policies_and_recovery[Library scan boundaries and errors].
+link:02_library.adoc#scan-policies-and-recovery[Library scan boundaries and errors].
 Imports scan referenced sources before creating the playlist and may create
 partial playlists: `--wait` reports scan errors even when readable tracks were
 saved. Only identities successfully read or validly reused by that import's scan
 can enter its playlist; an old library row does not make a failed source eligible.
-The link:02_library.adoc#_minimum_duration_for_new_tracks[minimum-duration admission policy]
+The link:02_library.adoc#minimum-duration-for-new-tracks[minimum-duration admission policy]
 applies to ordinary audio entries not referenced by a successfully validated CUE
 sheet in the same import; excluded new tracks do not enter the playlist.
 Import fails if no entries resolve successfully. Without `--name`, the playlist
@@ -170,7 +170,7 @@ and default names are validated before a scan starts or any scan data is saved.
 Imports use the shared media-task slot; accepted-task feedback appears in Playlists,
 separately from rejected-request errors. Use `--wait` for completion. Preparation
 can be cancelled without saving; Saving cannot. Status, dismissal, and shutdown:
-link:02_library.adoc#_cancellation[Library cancellation].
+link:02_library.adoc#cancellation[Library cancellation].
 
 === Input limits and cancellation
 
@@ -182,8 +182,7 @@ saving tracks or creating a playlist. Partial results apply only to later scans.
 
 Limits are 16 MiB per M3U, 1 MiB per CUE, 64 MiB aggregate input (distinct sheets
 read once), and 100,000 expanded occurrences. Exceeding input or retained-data
-limits aborts before saving; these are not playlist-size caps. Resource accounting:
-link:21_ipc.adoc#_core_and_client_boundary[Core and client boundary].
+limits aborts before saving; these are not playlist-size caps.
 
 === Commit and export lifecycle
 
@@ -199,7 +198,7 @@ Imports retain resolved occurrences in expanded input order, including repeats.
 Export preserves saved order and multiplicity, subject to CUE restrictions below.
 
 Listings and exports include every entry, not only visible rows. For listing
-changes and retries, see link:02_library.adoc#_paged_views[Paged views]. Only one
+changes and retries, see link:02_library.adoc#paged-views[Paged views]. Only one
 export can run at a time. Its reply reports final output, not startup, and
 concurrent playlist edits do not alter the exported snapshot.
 
@@ -249,8 +248,8 @@ remain at the end of the preceding segment; `PREGAP` and `POSTGAP` do not synthe
 silence. Invalid syntax, unsupported directives, source failures, or invalid
 segment bounds reject the whole sheet rather than importing a partial sheet.
 
-CUE library identities and directory scanning: link:02_library.adoc#_cue_library_tracks[Library].
-Subtrack playback: link:04_playback.adoc#_transport_and_timing[Playback].
+CUE library identities and directory scanning: link:02_library.adoc#cue-library-tracks[Library].
+Subtrack playback: link:04_playback.adoc#transport-and-timing[Playback].
 
 === CUE export restrictions
 

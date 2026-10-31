@@ -51,7 +51,7 @@ delay to current demand. Obsolete completion cannot clear it, submission cannot
 restart the delay, and no replacement worker may bypass the occupied slot.
 Verify hide/reopen and search replacement behind a query longer than 150 ms,
 including failed-page retry. See
-link:22_cache.adoc#_query_projection_retention[Query projection retention].
+link:22_cache.adoc#query-projection-retention[Query projection retention].
 
 === Different data directories sharing one database file
 
@@ -96,7 +96,7 @@ Runtime System and Configuration have independent IPC sections and revisions.
 Only explicit Configuration reads convert and transfer the effective Config;
 omitted sections preserve retained client values and do not acknowledge unread
 tokens. Configuration-only publications wake Watch, and a new instance requires
-a fresh Hello. See link:21_ipc.adoc#_revisions_and_watching[Revisions and watching].
+a fresh Hello. See link:21_ipc.adoc#revisions-and-watching[Revisions and watching].
 
 The recorded comparison used 256 long-path roots and three retained clients,
 each reading System 100 times, repeated three times. Response bytes per client
@@ -116,7 +116,7 @@ releasing its physical worker slot. The original reply or disconnection retires
 that slot; late data and obsolete timeout feedback cannot publish, and only the
 latest retained demand may then start. Non-GUI query and command deadlines are
 unchanged. The ownership contract is documented in
-link:22_cache.adoc#_query_projection_retention[Query projection retention].
+link:22_cache.adoc#query-projection-retention[Query projection retention].
 
 === Drag-only panel catalog insertion
 
@@ -129,7 +129,7 @@ leave the tree unchanged. Preview candidates do not allocate live IDs.
 The recorded acceptance used layout tests and an isolated nested Wayland GUI:
 inert clicks, center/edge insertion, empty layouts, invalid drops, Escape and tab
 transfers. This is historical evidence, not a new run. Current operations are in
-link:01_config.adoc#_layout[Configuration and layout].
+link:01_config.adoc#layout[Configuration and layout].
 
 === Small visualization canvas feedback
 
@@ -145,7 +145,7 @@ Acceptance used GUI behavior tests and a real nested Wayland window with labels
 enabled: capture, shrink until undrawable, grow while still held, release without
 a seek, then seek through a fresh press. Configured labels remained enabled and
 returned on larger surfaces. Current sizing belongs in
-link:24_layout.adoc#_geometry_and_constrained_viewports[Geometry and constrained viewports].
+link:24_layout.adoc#geometry-and-constrained-viewports[Geometry and constrained viewports].
 
 === Saved queue selection after startup read failure
 
@@ -157,7 +157,7 @@ saved occurrence. Acceptance covered failed startup followed by shutdown, recove
 before an append, and retry of a genuinely failed runtime selection save. An
 isolated headless instance with invalid historical metadata preserved the selected
 duplicate occurrence through shutdown and recovered it before an append after
-repair. Current behavior is documented in link:04_playback.adoc#_queue[Queue].
+repair. Current behavior is documented in link:04_playback.adoc#queue[Queue].
 
 === Multi-root scan missing reconciliation
 
@@ -173,7 +173,7 @@ identities counted 500,500 root predicates before and 1,000 ancestor hash lookup
 after. These are operation counts, not latency or RSS measurements. An isolated
 headless scan of 1,000 absent files also exercised bounded-diagnostic truncation:
 the scan transaction committed, while all 1,000 identities remained protected from
-missing detection. See link:02_library.adoc#_errors_and_partial_results[Errors and partial results].
+missing detection. See link:02_library.adoc#errors-and-partial-results[Errors and partial results].
 
 === Repeated playlist import identity resolution
 
@@ -194,4 +194,4 @@ occurrences made two identity queries and retained only the accepted pair.
 Database reads verified the full saved order and multiplicity. These are query
 counts, not latency or RSS measurements; the probe was removed after observation.
 Current import behavior is documented in
-link:03_playlist.adoc#_commit_and_export_lifecycle[Commit and export lifecycle].
+link:03_playlist.adoc#commit-and-export-lifecycle[Commit and export lifecycle].
