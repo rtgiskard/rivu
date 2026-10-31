@@ -37,11 +37,12 @@ pub fn tree_row(
     id: impl Into<ElementId>,
     depth: usize,
     selected: bool,
+    height: gpui::Pixels,
 ) -> Stateful<Div> {
     div()
         .id(id)
         .w_full()
-        .h_7()
+        .h(height)
         .px_2()
         .pr_2()
         .pl(gpui::rems(0.5 + depth as f32 * 1.25))
@@ -63,8 +64,9 @@ pub fn dropdown_row(
     id: impl Into<ElementId>,
     selected: bool,
     label: impl Into<SharedString>,
+    height: gpui::Pixels,
 ) -> Stateful<Div> {
-    list_row_surface(theme, id, selected)
+    list_row_surface(theme, id, selected, height)
         .when(!selected, |row| row.bg(rgb(theme.panel).alpha(0.0)))
         .hover(move |style| {
             style.bg(rgb(if selected {
@@ -73,7 +75,6 @@ pub fn dropdown_row(
                 theme.highlight
             }))
         })
-        .h(gpui::rems(DROPDOWN_ROW_REMS))
         .child(div().flex_1().min_w_0().truncate().child(label.into()))
 }
 
@@ -111,11 +112,12 @@ fn list_row_surface(
     theme: &'static crate::theme::Palette,
     id: impl Into<ElementId>,
     selected: bool,
+    height: gpui::Pixels,
 ) -> Stateful<Div> {
     div()
         .id(id)
         .w_full()
-        .h(gpui::rems(LIST_ROW_REMS))
+        .h(height)
         .flex_shrink_0()
         .flex()
         .items_center()
@@ -135,8 +137,9 @@ pub fn list_row(
     theme: &'static crate::theme::Palette,
     id: impl Into<ElementId>,
     selected: bool,
+    height: gpui::Pixels,
 ) -> Stateful<Div> {
-    list_row_surface(theme, id, selected)
+    list_row_surface(theme, id, selected, height)
         .hover(move |style| style.bg(row_background(theme, selected, true)))
 }
 

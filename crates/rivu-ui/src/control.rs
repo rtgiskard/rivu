@@ -462,36 +462,6 @@ pub fn danger_control(
         .border_color(rgb(theme.error))
 }
 
-/// Independent square switch; Regular padding and minimum size follow UI scale.
-pub fn toggle_button<T: 'static>(
-    id: impl Into<ElementId>,
-    icon: impl Into<SharedString>,
-    hint: impl Into<SharedString>,
-    enabled: bool,
-    cx: &mut Context<T>,
-    action: impl Fn(&mut T, &mut Context<T>) + 'static,
-) -> Stateful<Div> {
-    let theme = crate::theme::palette(cx);
-    active_control(
-        theme,
-        activate_control(
-            icon_button_surface(theme, id, icon, hint, cx),
-            cx,
-            move |this, _, cx| {
-                action(this, cx);
-                cx.notify();
-            },
-        )
-        .role(Role::Switch)
-        .aria_toggled(if enabled {
-            Toggled::True
-        } else {
-            Toggled::False
-        }),
-        enabled,
-    )
-}
-
 /// Shared trigger for settings and other anchored dropdowns.
 pub fn dropdown_trigger(
     theme: &'static crate::theme::Palette,
@@ -532,6 +502,7 @@ pub fn icon(glyph: impl Into<SharedString>, cx: &gpui::App) -> Div {
 
 /// Controlled labeled checkbox. The owner commits the requested next value.
 /// Its hit area uses normal control sizing; disabled controls never request changes.
+/// The owner notifies after accepting a change, like every controlled button.
 pub fn checkbox<T: 'static>(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
@@ -556,7 +527,6 @@ pub fn checkbox<T: 'static>(
     let control = activate_control(control, cx, move |this, _, cx| {
         if enabled {
             on_change(this, !checked, cx);
-            cx.notify();
         }
     });
     disabled_control(theme, control, !enabled)
@@ -1217,7 +1187,14 @@ mod tests {
             assert_eq!(node.label(), Some("Save changes"));
             assert!(node.supports_action(gpui::AccessibleAction::Click));
 
-            let toggle = toggle_button("enabled", "󰄲", "Enabled", true, cx, |_, _| {});
+            let toggle = IconButton::new("enabled", "󰄲", "Enabled")
+                .switch(true)
+                .build(
+                    IconButtonStyle::Surface,
+                    IconButtonDensity::Regular,
+                    cx,
+                    |_, _, _| {},
+                );
             let mut node = gpui::accesskit::Node::new(toggle.a11y_role().unwrap());
             toggle.write_a11y_info(&mut node);
             assert_eq!(node.role(), Role::Switch);
@@ -1520,14 +1497,14 @@ mod tests {
                         |_, _, _| {},
                         |control| control.track_focus(&self.focus),
                     ),
-                ControlFamily::Toggle => toggle_button(
-                    "centered-toggle",
-                    glyph,
-                    "Playback",
-                    self.alternate,
-                    cx,
-                    |_, _| {},
-                ),
+                ControlFamily::Toggle => IconButton::new("centered-toggle", glyph, "Playback")
+                    .switch(self.alternate)
+                    .build(
+                        IconButtonStyle::Surface,
+                        IconButtonDensity::Regular,
+                        cx,
+                        |_, _, _| {},
+                    ),
                 ControlFamily::Checkbox => checkbox(
                     "centered-checkbox",
                     "Include",

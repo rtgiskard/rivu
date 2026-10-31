@@ -214,11 +214,12 @@ pub fn paged_loading_row<T: 'static>(
     error: Option<&str>,
     show: bool,
     labels: LoadingRowLabels,
+    height: gpui::Pixels,
     cx: &mut gpui::Context<T>,
     retry: impl Fn(&mut T, &mut gpui::Window, &mut gpui::Context<T>) + 'static,
 ) -> Stateful<Div> {
     let theme = crate::theme::palette(cx);
-    list_row(theme, id, false)
+    list_row(theme, id, false, height)
         .child(
             caption(theme, labels.message)
                 .flex_1()
@@ -263,7 +264,7 @@ mod row_tests {
     }
 
     impl Render for LoadingRow {
-        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             div().size_full().child(
                 paged_loading_row(
                     ("loading-row", 0usize),
@@ -278,14 +279,14 @@ mod row_tests {
                         retry: "Retry loading".into(),
                         copy_error: "Copy full error".into(),
                     },
+                    crate::list_row_height(window, cx),
                     cx,
                     |this, _, cx| {
                         this.retries += 1;
                         cx.notify();
                     },
                 )
-                .w(gpui::px(240.))
-                .h(gpui::rems(crate::LIST_ROW_REMS)),
+                .w(gpui::px(240.)),
             )
         }
     }

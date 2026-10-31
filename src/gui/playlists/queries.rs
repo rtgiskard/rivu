@@ -332,6 +332,7 @@ impl Playlists {
         &self,
         kind: ViewRequestKind,
         index: usize,
+        height: gpui::Pixels,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let error = match kind {
@@ -352,6 +353,7 @@ impl Playlists {
                 retry: self.tr("gl-retry-loading"),
                 copy_error: self.tr("shell-copy-message"),
             },
+            height,
             cx,
             move |this, _, cx| {
                 this.retry_view_page(kind, cx);

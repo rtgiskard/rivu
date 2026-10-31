@@ -116,7 +116,7 @@ impl WindowView {
                                 }
                                 this.shell.dismiss(shell::Surface::PanelCatalog);
                                 this.start_panel_docking(drag.source, window, cx);
-                                if !this.panel_docking_blocked() {
+                                if !this.panel_docking_blocked(cx) {
                                     this.update_panel_docking(window.mouse_position(), window, cx);
                                 }
                                 cx.notify();

@@ -245,8 +245,8 @@ impl Library {
                                     gpui::ElementId::named_usize("library-loading", index),
                                     0,
                                     false,
+                                    row_height,
                                 )
-                                .h(row_height)
                                 .gap_0()
                                 .overflow_hidden()
                                 .child(
@@ -479,8 +479,8 @@ impl Library {
                                 row_id,
                                 0,
                                 selected,
+                                row_height,
                             )
-                            .h(row_height)
                             .gap_0()
                             .overflow_hidden()
                             .group("library-track-row")

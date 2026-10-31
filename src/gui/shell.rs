@@ -224,57 +224,63 @@ impl WindowView {
         }
     }
 
-    fn current_keyboard_surface(&self, cx: &App) -> Option<KeyboardSurface> {
-        if self.shell.help().is_some() {
-            return Some(KeyboardSurface::Dialog(DialogSurface::KeyboardHelp));
-        }
-        if self.manual_confirmation_open() {
-            return Some(KeyboardSurface::Dialog(DialogSurface::MetadataConfirmation));
-        }
-        if self.shell.is_open(shell::Surface::About) {
-            return Some(KeyboardSurface::Dialog(DialogSurface::About));
-        }
-        if self.duplicates.read(cx).is_open() {
-            return Some(KeyboardSurface::Dialog(DialogSurface::DuplicateReview));
-        }
-        if self.shell.is_open(shell::Surface::Settings) {
-            return Some(KeyboardSurface::Settings);
-        }
-        if self.playlists.read(cx).editor_open() {
-            return Some(KeyboardSurface::Dialog(DialogSurface::PlaylistEditor));
-        }
-        if let Some(action) = self.playlists.read(cx).action() {
-            return Some(if matches!(action, playlists::PlaylistAction::Menu(..)) {
-                KeyboardSurface::Menu(MenuSurface::Playlist)
-            } else {
-                KeyboardSurface::Dialog(DialogSurface::PlaylistDelete)
-            });
-        }
-        if self.queue_replace.is_some() {
-            return Some(KeyboardSurface::Dialog(DialogSurface::QueueReplacement));
-        }
-        if self.shell.is_open(shell::Surface::Layouts) {
-            return Some(KeyboardSurface::Dialog(if self.layout_action.is_some() {
-                DialogSurface::LayoutAction
-            } else {
-                DialogSurface::LayoutManager
-            }));
-        }
-        if let Some(menu) = &self.content_menu {
-            return Some(KeyboardSurface::Menu(MenuSurface::Content(
-                menu.keyboard_page(),
-            )));
-        }
-        if let Some(menu) = &self.panel_menu {
-            return Some(KeyboardSurface::Menu(MenuSurface::Panel(menu.page)));
-        }
-        if self.shell.is_open(shell::Surface::AppMenu) {
-            return Some(KeyboardSurface::Menu(MenuSurface::App));
-        }
-        if self.shell.is_open(shell::Surface::PanelCatalog) {
-            return Some(KeyboardSurface::Menu(MenuSurface::PanelCatalog));
-        }
-        None
+    /// Bottom-to-top composition order is also the authority for input ownership.
+    /// Lower surfaces remain mounted so confirmations do not discard their drafts.
+    fn surface_layers(&self, cx: &App) -> impl DoubleEndedIterator<Item = KeyboardSurface> + use<> {
+        use DialogSurface as D;
+        use KeyboardSurface::{Dialog, Menu, Settings};
+        use MenuSurface as M;
+        [
+            match self.shell.surface {
+                Some(Surface::AppMenu) => Some(Menu(M::App)),
+                Some(Surface::PanelCatalog) if !self.workspace.layouts.current().locked => {
+                    Some(Menu(M::PanelCatalog))
+                }
+                _ => None,
+            },
+            self.panel_menu.map(|menu| Menu(M::Panel(menu.page))),
+            self.content_menu
+                .as_ref()
+                .map(|menu| Menu(M::Content(menu.keyboard_page()))),
+            self.playlists.read(cx).action().map(|action| {
+                if matches!(action, playlists::PlaylistAction::Menu(..)) {
+                    Menu(M::Playlist)
+                } else {
+                    Dialog(D::PlaylistDelete)
+                }
+            }),
+            self.queue_replace
+                .as_ref()
+                .map(|_| Dialog(D::QueueReplacement)),
+            self.playlists
+                .read(cx)
+                .editor_open()
+                .then_some(Dialog(D::PlaylistEditor)),
+            self.shell.is_open(Surface::Layouts).then_some(Dialog(
+                if self.layout_action.is_some() {
+                    D::LayoutAction
+                } else {
+                    D::LayoutManager
+                },
+            )),
+            self.shell.is_open(Surface::Settings).then_some(Settings),
+            self.duplicates
+                .read(cx)
+                .is_open()
+                .then_some(Dialog(D::DuplicateReview)),
+            self.shell
+                .is_open(Surface::About)
+                .then_some(Dialog(D::About)),
+            self.shell.help().map(|_| Dialog(D::KeyboardHelp)),
+            self.manual_confirmation_open()
+                .then_some(Dialog(D::MetadataConfirmation)),
+        ]
+        .into_iter()
+        .flatten()
+    }
+
+    pub(super) fn current_keyboard_surface(&self, cx: &App) -> Option<KeyboardSurface> {
+        self.surface_layers(cx).next_back()
     }
 
     fn synchronize_keyboard_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -344,20 +350,29 @@ impl WindowView {
         match key {
             "down" | "up" => self.shell.scope().advance(key == "up", window, cx),
             "escape" | "left" => {
-                if self.content_menu.is_some() {
-                    self.back_content_menu(cx);
-                } else if let Some(menu) = &mut self.panel_menu {
-                    if matches!(menu.page, PanelMenuPage::Main) {
-                        self.panel_menu = None;
-                    } else {
-                        menu.page = PanelMenuPage::Main;
+                match self.current_keyboard_surface(cx) {
+                    Some(KeyboardSurface::Menu(MenuSurface::Content(_))) => {
+                        self.back_content_menu(cx);
                     }
-                } else if self.playlists.read(cx).action().is_some() {
-                    self.playlists
-                        .update(cx, |playlists, cx| playlists.clear_action(cx));
-                } else {
-                    self.shell.dismiss(shell::Surface::AppMenu);
-                    self.shell.dismiss(shell::Surface::PanelCatalog);
+                    Some(KeyboardSurface::Menu(MenuSurface::Panel(_))) => {
+                        let menu = self.panel_menu.as_mut().expect("live panel menu");
+                        if matches!(menu.page, PanelMenuPage::Main) {
+                            self.panel_menu = None;
+                        } else {
+                            menu.page = PanelMenuPage::Main;
+                        }
+                    }
+                    Some(KeyboardSurface::Menu(MenuSurface::Playlist)) => {
+                        self.playlists
+                            .update(cx, |playlists, cx| playlists.clear_action(cx));
+                    }
+                    Some(KeyboardSurface::Menu(MenuSurface::App)) => {
+                        self.shell.dismiss(Surface::AppMenu);
+                    }
+                    Some(KeyboardSurface::Menu(MenuSurface::PanelCatalog)) => {
+                        self.shell.dismiss(Surface::PanelCatalog);
+                    }
+                    _ => return,
                 }
                 cx.notify();
             }

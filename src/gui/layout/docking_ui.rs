@@ -51,16 +51,8 @@ fn docking_candidate(
 }
 
 impl WindowView {
-    pub(in crate::gui) fn panel_docking_blocked(&self) -> bool {
-        self.workspace.layouts.current().locked
-            || self.shell.is_open(shell::Surface::Settings)
-            || self.shell.is_open(shell::Surface::About)
-            || self.shell.help().is_some()
-            || self.shell.is_open(shell::Surface::Layouts)
-            || self.shell.is_open(shell::Surface::AppMenu)
-            || self.panel_menu.is_some()
-            || self.content_menu.is_some()
-            || self.shell.is_open(shell::Surface::PanelCatalog)
+    pub(in crate::gui) fn panel_docking_blocked(&self, cx: &App) -> bool {
+        self.workspace.layouts.current().locked || self.current_keyboard_surface(cx).is_some()
     }
 
     pub(in crate::gui) fn start_panel_docking(
@@ -96,7 +88,7 @@ impl WindowView {
     ) {
         self.synchronize_interaction(window, cx);
         // Wayland's implicit button grab can deliver outside motion without MouseExit.
-        if self.panel_docking_blocked()
+        if self.panel_docking_blocked(cx)
             || !Bounds::new(Point::default(), window.viewport_size()).contains(&pointer)
         {
             self.cancel_panel_docking(window, cx);
@@ -256,7 +248,7 @@ impl WindowView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.panel_docking_blocked()
+        if self.panel_docking_blocked(cx)
             || self
                 .workspace
                 .interaction

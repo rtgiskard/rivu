@@ -562,21 +562,14 @@ impl AlbumBrowser {
 
     fn loading_row(&self, index: usize, cx: &mut Context<Self>) -> Div {
         let theme = rivu_ui::theme::palette(cx);
-        let track_row = self.model.selected().is_some();
-        let error = if track_row {
-            self.model.tracks().error(index)
-        } else {
-            self.model.albums().error(index)
-        };
+        let error = self.model.albums().error(index);
         column()
-            .when(track_row, |view| view.flex_row().items_center())
             .overflow_hidden()
             .child(
                 caption(
                     theme,
                     error.unwrap_or(self.i18n.text("shell-loading")).to_owned(),
                 )
-                .when(track_row, |text| text.flex_1().min_w_0().truncate())
                 .when(!self.loading_text.show(&(), error.is_some()), |text| {
                     text.invisible()
                 }),
@@ -590,9 +583,35 @@ impl AlbumBrowser {
                             cx,
                             |this, _, cx| this.retry(cx),
                         )
-                        .when(!track_row, |control| control.self_start()),
+                        .self_start(),
                 )
             })
+    }
+
+    fn track_loading_row(
+        &self,
+        index: usize,
+        height: gpui::Pixels,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<Div> {
+        let error = self.model.tracks().error(index);
+        rivu_ui::loading::paged_loading_row(
+            ("album-track-loading", index),
+            error,
+            self.loading_text.show(&(), error.is_some()),
+            rivu_ui::loading::LoadingRowLabels {
+                message: self.tr(if error.is_some() {
+                    "shell-loading-failed"
+                } else {
+                    "shell-loading"
+                }),
+                retry: self.tr("gl-retry-loading"),
+                copy_error: self.tr("shell-copy-message"),
+            },
+            height,
+            cx,
+            |this, _, cx| this.retry(cx),
+        )
     }
 
     fn send(&mut self, command: Command, cx: &mut Context<Self>) {
@@ -1136,14 +1155,12 @@ impl Render for AlbumBrowser {
                     self.model.tracks().len(),
                     &self.track_scroll,
                     cx.processor(|this, range: Range<usize>, window, cx| {
+                        let row_height = rivu_ui::list_row_height(window, cx);
                         range
                             .map(|index| {
                                 let Some(track) = this.model.tracks().get(index) else {
                                     return this
-                                        .loading_row(index, cx)
-                                        .h(rivu_ui::list_row_height(window, cx))
-                                        .w_full()
-                                        .px_2()
+                                        .track_loading_row(index, row_height, cx)
                                         .into_any_element();
                                 };
                                 let id = track.id;
@@ -1155,7 +1172,12 @@ impl Render for AlbumBrowser {
                                     track_marker(this.current_track, this.playback_status, id);
                                 track_list_row(
                                     theme,
-                                    ("album-track", id as u64),
+                                    rivu_ui::list_row(
+                                        theme,
+                                        ("album-track", id as u64),
+                                        false,
+                                        row_height,
+                                    ),
                                     TrackText {
                                         album: None,
                                         ..TrackText::from(track)
@@ -1163,10 +1185,8 @@ impl Render for AlbumBrowser {
                                     index,
                                     marker.is_some()
                                         && this.playback_status == PlaybackStatus::Playing,
-                                    false,
                                     &this.i18n,
                                 )
-                                .h(rivu_ui::list_row_height(window, cx))
                                 .group("album-track-row")
                                 .relative()
                                 .gap_0()

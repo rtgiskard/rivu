@@ -321,12 +321,11 @@ impl Queue {
                     self.model.rows.len(),
                     &scroll,
                     cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
+                        let row_height = rivu_ui::list_row_height(window, cx);
                         range
                             .map(|index| {
                                 let Some(entry) = this.model.rows.get(index) else {
-                                    return this
-                                        .paged_loading_row(index, cx)
-                                        .h(rivu_ui::list_row_height(window, cx));
+                                    return this.paged_loading_row(index, row_height, cx);
                                 };
                                 let id = entry.id;
                                 let track_id = entry.track_id;
@@ -335,24 +334,29 @@ impl Queue {
                                 let can_move_down = position + 1 < this.state.queue.total;
                                 let revision = this.state.queue.revision;
                                 let playing = this.state.queue.current_id == Some(id);
+                                let source = QueueIdentity::from(entry);
+                                let generation = this.model.page_projection.generation();
                                 let drag_owner = cx.entity().downgrade();
                                 let drag_i18n = std::sync::Arc::clone(&this.context.i18n);
                                 let drag = QueueDrag {
                                     owner: cx.entity().entity_id(),
-                                    source: QueueIdentity::from(entry),
+                                    source,
                                     entries: Default::default(),
-                                    revision: this.state.queue.revision,
+                                    revision,
                                 };
                                 track_list_row(
                                     theme,
-                                    ("queue-entry", id),
+                                    rivu_ui::list_row(
+                                        theme,
+                                        ("queue-entry", id),
+                                        this.model.contains(&id),
+                                        row_height,
+                                    ),
                                     TrackText::from(&entry.track),
                                     position,
                                     playing,
-                                    this.model.contains(&id),
                                     &this.context.i18n,
                                 )
-                                .h(rivu_ui::list_row_height(window, cx))
                                 .when(entry.track.missing, |row| {
                                     row.child(caption(theme, this.tr("gl-missing")))
                                 })
@@ -482,7 +486,12 @@ impl Queue {
                                     cx.listener(
                                         move |this, event: &gpui::MouseDownEvent, _, cx| {
                                             cx.emit(QueueEvent::FocusRequested);
-                                            if this.model.contains(&id) && !this.model.ready() {
+                                            this.refresh(cx);
+                                            let rows =
+                                                this.model.operation_rows(source, generation);
+                                            if revision != this.state.queue.revision
+                                                || rows.is_empty()
+                                            {
                                                 cx.stop_propagation();
                                                 return;
                                             }
@@ -490,17 +499,10 @@ impl Queue {
                                                 this.select_queue_entry(id, false, false, cx);
                                                 cx.notify();
                                             }
-                                            let rows = this.model.ordered();
-                                            let track_ids = if rows.iter().any(|row| row.id == id) {
-                                                rows.iter().map(|row| row.track_id).collect()
-                                            } else {
-                                                vec![track_id]
-                                            };
-                                            let queue_ids = if rows.iter().any(|row| row.id == id) {
-                                                rows.iter().map(|row| row.id).collect()
-                                            } else {
-                                                vec![id]
-                                            };
+                                            // Selection requests may await confirmation; keep this operation frozen.
+                                            let track_ids =
+                                                rows.iter().map(|row| row.track_id).collect();
+                                            let queue_ids = rows.iter().map(|row| row.id).collect();
                                             cx.emit(QueueEvent::ContentMenu {
                                                 request: std::cell::RefCell::new(Some(
                                                     ContentMenuRequest {
@@ -562,12 +564,10 @@ impl Queue {
                                                             {
                                                                 return Vec::new();
                                                             }
-                                                            if this.model.contains(&drag.source.id)
-                                                            {
-                                                                this.model.ordered()
-                                                            } else {
-                                                                vec![drag.source]
-                                                            }
+                                                            this.model.operation_rows(
+                                                                drag.source,
+                                                                generation,
+                                                            )
                                                         })
                                                         .unwrap_or_default()
                                                 });
@@ -833,6 +833,7 @@ impl Queue {
     pub(super) fn paged_loading_row(
         &self,
         index: usize,
+        height: gpui::Pixels,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<Div> {
         let error = self.model.rows.error(index);
@@ -849,6 +850,7 @@ impl Queue {
                 retry: self.tr("gl-retry-loading"),
                 copy_error: self.tr("shell-copy-message"),
             },
+            height,
             cx,
             |this, _, cx| {
                 this.retry_queue_page(cx);

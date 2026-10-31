@@ -465,7 +465,7 @@ impl AudioProcessing {
             | GraphField::MixSolo(index) => {
                 format!("{label} {}", index + 1)
             }
-            GraphField::Denoise(field) => match fields::denoise_group(field) {
+            GraphField::Denoise(field) => match field.group_label_id() {
                 Some(group) => format!("{} · {label}", self.tr(group)),
                 None => label,
             },
@@ -1328,6 +1328,125 @@ mod tests {
         .unwrap();
         draw(cx, handle);
     }
+    fn replace_parameter_text(
+        cx: &mut TestAppContext,
+        processing: &Entity<AudioProcessing>,
+        handle: AnyWindowHandle,
+        key: FieldKey,
+        text: &str,
+    ) {
+        cx.update_window(handle, |_, window, cx| {
+            use gpui::EntityInputHandler as _;
+            let input = processing.read(cx).fields[&key].input.clone();
+            let length = input.read(cx).text().encode_utf16().count();
+            input.update(cx, |input, cx| {
+                input.replace_text_in_range(Some(0..length), text, window, cx)
+            });
+        })
+        .unwrap();
+        draw(cx, handle);
+    }
+
+    #[gpui::test]
+    fn ordinary_ack_keeps_retyped_draft_and_ignores_programmatic_sync(cx: &mut TestAppContext) {
+        let (_directory, _runtime, processing, handle) = fixture(cx);
+        let key = FieldKey::Neural(NeuralField::Threads);
+        processing.update(cx, |this, _| this.command_active = true);
+        replace_parameter_text(cx, &processing, handle, key, "4");
+        let submitted = processing.update(cx, |this, cx| {
+            this.apply_field(key, cx);
+            this.commands.pop_front().unwrap().field.unwrap()
+        });
+        replace_parameter_text(cx, &processing, handle, key, "5");
+        replace_parameter_text(cx, &processing, handle, key, "4");
+        let generation = processing.update(cx, |this, cx| {
+            this.finish_parameter_fields(submitted, cx);
+            assert!(this.fields[&key].dirty);
+            assert_eq!(this.fields[&key].input.read(cx).text(), "4");
+            this.apply_field(key, cx);
+            let submitted = this.commands.pop_front().unwrap().field.unwrap();
+            this.finish_parameter_fields(submitted, cx);
+            assert!(!this.fields[&key].dirty);
+            let generation = this.fields[&key].generation;
+            this.fields[&key]
+                .input
+                .update(cx, |input, cx| input.set_text("6", cx));
+            generation
+        });
+        cx.run_until_parked();
+        processing.read_with(cx, |this, _| {
+            assert!(!this.fields[&key].dirty);
+            assert_eq!(this.fields[&key].generation, generation);
+        });
+    }
+
+    #[gpui::test]
+    fn stale_chooser_failure_cannot_pollute_new_draft_or_release_new_request(
+        cx: &mut TestAppContext,
+    ) {
+        let (_directory, _runtime, processing, _handle) = fixture(cx);
+        processing.update(cx, |this, cx| {
+            this.graph_select(3, cx);
+            let key = *this
+                .fields
+                .keys()
+                .find(|key| {
+                    matches!(
+                        key,
+                        FieldKey::Graph(NodeField {
+                            node: 3,
+                            field: GraphField::Neural(NeuralField::Worker),
+                            ..
+                        })
+                    )
+                })
+                .unwrap();
+            this.panel_input(PANEL, key, "Worker", cx);
+            this.stage_graph_text(key, "python".into(), cx);
+            let revision = this.state.system.config.processing_graph.revision;
+            let generation = this.graph_editor.draft_stamps[&key].generation;
+            let old = this.begin_path_request(PANEL, key);
+            this.stage_graph_text(key, "new-worker.py".into(), cx);
+            this.finish_graph_path_request(
+                old,
+                (revision, generation, "python"),
+                Err::<_, &str>("old chooser failure"),
+                cx,
+            );
+            assert!(
+                this.choosing_path.is_none(),
+                "the completed request retires its own busy state"
+            );
+            assert!(!this.graph_editor.field_errors.contains_key(&key));
+            assert_eq!(this.text(key, cx), "new-worker.py");
+
+            let generation = this.graph_editor.draft_stamps[&key].generation;
+            let old = this.begin_path_request(PANEL, key);
+            this.discard_graph_node(3, cx);
+            this.stage_graph_text(key, "latest-worker.py".into(), cx);
+            let current = this.begin_path_request(PANEL, key);
+            this.finish_graph_path_request(
+                old,
+                (revision, generation, "new-worker.py"),
+                Err::<_, &str>("obsolete failure"),
+                cx,
+            );
+            assert_eq!(this.choosing_path, Some(current));
+            assert_eq!(this.text(key, cx), "latest-worker.py");
+            assert!(!this.graph_editor.field_errors.contains_key(&key));
+
+            let generation = this.graph_editor.draft_stamps[&key].generation;
+            this.finish_graph_path_request(
+                current,
+                (revision, generation, "latest-worker.py"),
+                Err::<_, &str>("current failure"),
+                cx,
+            );
+            assert!(this.choosing_path.is_none());
+            assert_eq!(this.graph_editor.field_errors[&key], "current failure");
+        });
+    }
+
     #[gpui::test]
     async fn replacing_node_kind_drops_obsolete_drafts_before_new_edits(cx: &mut TestAppContext) {
         let (_directory, runtime, processing, handle) = fixture(cx);

@@ -527,6 +527,7 @@ impl EqualizerEditor {
 
     fn band_edit(&mut self, index: usize, field: EqBandEdit, cx: &mut Context<Self>) {
         self.eq(EqualizerEdit::BandField { index, field }, cx);
+        cx.notify();
     }
 
     fn field(&mut self, key: &EqField, label: &str, value: String, cx: &mut Context<Self>) {
@@ -1207,6 +1208,18 @@ impl EqualizerEditor {
             EqField::Band(_, BandField::Stages) => Some("processing-stage-help"),
             _ => None,
         };
+        let mut numeric = rivu_ui::NumericInput::new(
+            div()
+                .min_w_0()
+                .when(compact, |view| view.w(rems(3.5)).flex_shrink_0())
+                .when(!compact, |view| view.w(rems(5.)).flex_shrink_0())
+                .child(field.input.clone()),
+        )
+        .unit(
+            caption(theme, unit)
+                .when(!compact, |view| view.w(rems(1.5)))
+                .flex_shrink_0(),
+        );
         let mut control = row()
             .gap_1()
             .when(compact, |view| view.flex_shrink_0())
@@ -1228,18 +1241,6 @@ impl EqualizerEditor {
                     .id(SharedString::from(format!("eq-draft-{key}")))
                     .tooltip(rivu_ui::text_tooltip(self.tr("processing-draft")))
                     .when(field.dirty, |view| view.child("·")),
-            )
-            .child(
-                div()
-                    .min_w_0()
-                    .when(compact, |view| view.w(rems(3.5)).flex_shrink_0())
-                    .when(!compact, |view| view.w(rems(5.)).flex_shrink_0())
-                    .child(field.input.clone()),
-            )
-            .child(
-                caption(theme, unit)
-                    .when(!compact, |view| view.w(rems(1.5)))
-                    .flex_shrink_0(),
             );
         if let Some(step) = step {
             for (suffix, glyph, hint, delta) in [
@@ -1247,7 +1248,7 @@ impl EqualizerEditor {
                 ("more", "+", "processing-field-increase", step),
             ] {
                 let key_owned = *key;
-                control = control.child(
+                numeric = numeric.step(
                     rivu_ui::IconButton::new(
                         SharedString::from(format!("eq-step-{key}-{suffix}")),
                         glyph,
@@ -1263,6 +1264,7 @@ impl EqualizerEditor {
                 );
             }
         }
+        control = control.child(numeric.into_div().flex_shrink_0());
         if !compact && self.band_numeric_range(key).is_none() {
             let key_owned = *key;
             control = control.child(
@@ -1958,7 +1960,6 @@ impl EqualizerEditor {
     fn equalizer_view(&mut self, panel: u64, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let theme = rivu_ui::theme::palette(cx);
         let graph = self.graph(panel, window, cx);
-        let eq = &self.config;
         let gains = row()
             .min_w_0()
             .flex_wrap()
@@ -1991,43 +1992,18 @@ impl EqualizerEditor {
             .top_0()
             .left_0()
             .size_full();
-            let trigger = rivu_ui::dropdown_trigger(
-                theme,
+            let response_label = self.tr("processing-response-channel");
+            let trigger = rivu_ui::ChoiceSelect::new(
                 ("eq-response-channel", panel),
                 format!(
                     "{} {}",
                     self.tr("processing-response-channel"),
                     self.response_channel + 1
                 ),
-                self.channel_choices.is_open(),
-                cx,
             )
-            .w_auto()
-            .flex_shrink_0()
-            .relative()
-            .role(Role::ComboBox)
-            .aria_label(self.tr("processing-response-channel"))
-            .debug_selector(move || format!("eq-response-channel-{panel}"))
-            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                match this
-                    .channel_choices
-                    .key(event, rivu_ui::ChoiceMode::Select, false, window)
-                    .apply(window, cx)
-                {
-                    rivu_ui::ChoiceAction::Commit(index) => {
-                        this.choose_response_channel(index, window, cx)
-                    }
-                    rivu_ui::ChoiceAction::Dismiss => {
-                        this.channel_choices.close();
-                        cx.notify();
-                    }
-                    rivu_ui::ChoiceAction::Navigated => cx.notify(),
-                    _ => {}
-                }
-            }))
-            .child(measure);
-            controls = controls.child(rivu_ui::activate_control(
-                trigger,
+            .build(
+                self,
+                |this| Some(&mut this.channel_choices),
                 cx,
                 move |this, _, cx| {
                     if this.channel_choices.is_open() {
@@ -2042,7 +2018,19 @@ impl EqualizerEditor {
                     }
                     cx.notify();
                 },
-            ));
+                Self::choose_response_channel,
+                |this, _, cx| {
+                    this.channel_choices.close();
+                    cx.notify();
+                },
+            )
+            .w_auto()
+            .flex_shrink_0()
+            .relative()
+            .aria_label(response_label)
+            .debug_selector(move || format!("eq-response-channel-{panel}"))
+            .child(measure);
+            controls = controls.child(trigger);
         }
         curve = curve.child(graph);
         if self.response_error.is_none() {
@@ -2090,7 +2078,7 @@ impl EqualizerEditor {
                 .when(self.target == EqTarget::Monitor, |view| {
                     let preset = self
                         .owner
-                        .update(cx, |owner, cx| owner.preset_view(panel, cx))
+                        .update(cx, |owner, cx| owner.preset_view(panel, window, cx))
                         .ok();
                     view.child(div().flex_1().max_w_full().min_w_0().children(preset))
                 });
@@ -2158,6 +2146,7 @@ impl EqualizerEditor {
                     .child(div().flex_1())
                     .child(reset_controls),
             );
+        let eq = &self.config;
         if let Some(band) = eq.bands.get(self.band) {
             let index = self.band;
             let frequency = self
@@ -5186,9 +5175,12 @@ mod tests {
     }
 
     impl Render for PresetWindow {
-        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let panels = self.owner.update(cx, |owner, cx| {
-                (owner.preset_view(7, cx), owner.preset_view(8, cx))
+                (
+                    owner.preset_view(7, window, cx),
+                    owner.preset_view(8, window, cx),
+                )
             });
             self.scope
                 .surface(div().id("preset-test").size_full())
@@ -5202,6 +5194,35 @@ mod tests {
                     .mt_32(),
                 )
         }
+    }
+
+    #[gpui::test]
+    fn preset_choices_follow_names_across_candidate_reordering(cx: &mut TestAppContext) {
+        let (_directory, _runtime, owner, _editor, handle) = fixture_with_owner(cx);
+        cx.update_window(handle, |_, window, cx| {
+            owner.update(cx, |owner, cx| {
+                owner.command_active = true;
+                let mut state = (*owner.state).clone();
+                Arc::make_mut(&mut state.system.config).equalizer_presets = ["First", "Second"]
+                    .into_iter()
+                    .map(|name| rivu_format::config::EqualizerPreset { name: name.into(), config: Default::default() })
+                    .collect();
+                owner.reconcile(Rc::new(state), cx);
+                owner.toggle_preset(7, false, window, cx);
+                owner.preset_choices.select_index(1);
+                let mut state = (*owner.state).clone();
+                Arc::make_mut(&mut state.system.config).equalizer_presets.reverse();
+                owner.reconcile(Rc::new(state), cx);
+                let selected = owner.preset_choices.selected_index().unwrap();
+                assert_eq!(selected, 0);
+                assert_eq!(owner.preset_choices.item(selected).unwrap().value, "Second");
+                owner.choose_preset(selected, window, cx);
+                assert!(owner.preset_popup.is_none());
+                assert!(!owner.preset_choices.is_open());
+                assert!(matches!(&owner.commands.back().unwrap().command,
+                    Command::EqualizerEdit { edit: EqualizerEdit::LoadPreset { name } } if name == "Second"));
+            });
+        }).unwrap();
     }
 
     #[gpui::test]

@@ -724,7 +724,8 @@ impl WindowView {
                 ));
             }
             let count = self.playlists.read(cx).catalog_len();
-            let height = (rivu_ui::list_row_height(window, cx) * count.max(1) as f32)
+            let row_height = rivu_ui::list_row_height(window, cx);
+            let height = (row_height * count.max(1) as f32)
                 .min(window.rem_size() * POPOVER_MAX_REMS)
                 .min(window.viewport_size().height * 0.5);
             let target_focus = state.playlist_targets.focus.clone();
@@ -748,7 +749,7 @@ impl WindowView {
                                 count,
                                 &state.playlist_targets.scroll,
                                 cx.processor(
-                                    move |this, range: std::ops::Range<usize>, window, cx| {
+                                    move |this, range: std::ops::Range<usize>, _window, cx| {
                                         range
                                             .map(|index| {
                                                 let Some((id, name)) =
@@ -763,12 +764,14 @@ impl WindowView {
                                                         },
                                                     )
                                                 else {
-                                                    return this
-                                                        .playlists
-                                                        .update(cx, |playlists, cx| {
-                                                            playlists.catalog_loading_row(index, cx)
-                                                        })
-                                                        .h(rivu_ui::list_row_height(window, cx));
+                                                    return this.playlists.update(
+                                                        cx,
+                                                        |playlists, cx| {
+                                                            playlists.catalog_loading_row(
+                                                                index, row_height, cx,
+                                                            )
+                                                        },
+                                                    );
                                                 };
                                                 let selected = this
                                                     .content_menu
@@ -810,7 +813,7 @@ impl WindowView {
                                                 .debug_selector(move || {
                                                     format!("content-playlist-target-{id}")
                                                 })
-                                                .h(rivu_ui::list_row_height(window, cx))
+                                                .h(row_height)
                                             })
                                             .collect::<Vec<_>>()
                                     },

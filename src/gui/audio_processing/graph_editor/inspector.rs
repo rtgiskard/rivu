@@ -20,8 +20,16 @@ pub(super) fn submission_current(
     submitted: &SubmittedField,
     text: Option<&str>,
 ) -> bool {
-    stamp.is_some_and(|stamp| stamp.generation == submitted.generation)
-        && text == Some(submitted.text.as_str())
+    stamp.is_some_and(|stamp| {
+        text.is_some_and(|text| {
+            submitted_text_current(
+                stamp.generation,
+                submitted.generation,
+                text,
+                &submitted.text,
+            )
+        })
+    })
 }
 
 fn draft_revision_current(stamp: Option<&DraftStamp>, revision: u64) -> bool {
@@ -140,6 +148,7 @@ impl AudioProcessing {
             return;
         };
         field.dirty = true;
+        field.generation += 1;
         field.input.update(cx, |input, cx| input.set_text(text, cx));
         if key.graph_node().is_some() {
             self.graph_editor.draft_generation += 1;
@@ -295,9 +304,9 @@ impl AudioProcessing {
         if self
             .choosing_path
             .as_ref()
-            .is_some_and(|key| key.graph_node() == Some(id))
+            .is_some_and(|request| request.key.graph_node() == Some(id))
         {
-            self.chooser_generation += 1;
+            self.choosing_path = None;
         }
         for (key, field) in &mut self.fields {
             if key.graph_node() == Some(id) {
@@ -344,9 +353,7 @@ impl AudioProcessing {
             .map_or(0, |stamp| stamp.generation);
         let revision = self.state.system.config.processing_graph.revision;
         let title = self.tr("processing-fields-browse").to_string();
-        self.chooser_generation += 1;
-        let chooser_generation = self.chooser_generation;
-        self.choosing_path = Some(key);
+        let request = self.begin_path_request(panel, key);
         cx.spawn(async move |this, cx| {
             let result = ashpd::desktop::file_chooser::SelectedFiles::open_file()
                 .title(title.as_str())
@@ -355,57 +362,69 @@ impl AudioProcessing {
                 .await
                 .and_then(|request| request.response());
             let _ = this.update(cx, |this, cx| {
-                if this.chooser_generation != chooser_generation {
-                    cx.notify();
-                    return;
-                }
-                this.choosing_path = None;
-                if !this.panel_inputs.contains_key(&panel) {
-                    cx.notify();
-                    return;
-                }
-                match crate::gui::chooser_result(result) {
-                    Ok(Some(files)) => {
-                        let current = this
-                            .fields
-                            .get(&key)
-                            .map(|field| field.input.read(cx).text());
-                        let current_generation = this
-                            .graph_editor
-                            .draft_stamps
-                            .get(&key)
-                            .map_or(0, |stamp| stamp.generation);
-                        if path_snapshot_current(
-                            (revision, generation, &original),
-                            (
-                                this.state.system.config.processing_graph.revision,
-                                current_generation,
-                                current,
-                            ),
-                        ) && let Some(path) = crate::gui::chooser_path(&files)
-                        {
-                            match path.into_os_string().into_string() {
-                                Ok(path) => this.stage_graph_text(key, path, cx),
-                                Err(_) => {
-                                    this.graph_editor.field_errors.insert(
-                                        key,
-                                        this.tr("processing-result-path-encoding").to_string(),
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        this.graph_editor
-                            .field_errors
-                            .insert(key, error.to_string());
-                    }
-                }
-                cx.notify();
+                this.finish_graph_path_request(
+                    request,
+                    (revision, generation, &original),
+                    crate::gui::chooser_result(result),
+                    cx,
+                );
             });
         })
         .detach();
+        cx.notify();
+    }
+
+    pub(super) fn finish_graph_path_request<E: std::fmt::Display>(
+        &mut self,
+        request: PathRequest,
+        snapshot: (u64, u64, &str),
+        result: Result<Option<ashpd::desktop::file_chooser::SelectedFiles>, E>,
+        cx: &mut Context<Self>,
+    ) {
+        let PathRequest { panel, key, .. } = request;
+        let owner_current = self.panel_inputs.contains_key(&panel)
+            && matches!(key, FieldKey::Graph(binding) if self.state.system.config.processing_graph.nodes.iter().any(|node| binding.matches(node)))
+            && path_snapshot_current(
+                snapshot,
+                (
+                    self.state.system.config.processing_graph.revision,
+                    self.graph_editor
+                        .draft_stamps
+                        .get(&key)
+                        .map_or(0, |stamp| stamp.generation),
+                    self.fields
+                        .get(&key)
+                        .map(|field| field.input.read(cx).text()),
+                ),
+            );
+        if !retire_path_request(&mut self.choosing_path, request) {
+            return;
+        }
+        cx.notify();
+        if !owner_current {
+            return;
+        }
+        match result {
+            Ok(Some(files)) => {
+                if let Some(path) = crate::gui::chooser_path(&files) {
+                    match path.into_os_string().into_string() {
+                        Ok(path) => self.stage_graph_text(key, path, cx),
+                        Err(_) => {
+                            self.graph_editor.field_errors.insert(
+                                key,
+                                self.tr("processing-result-path-encoding").to_string(),
+                            );
+                        }
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                self.graph_editor
+                    .field_errors
+                    .insert(key, error.to_string());
+            }
+        }
         cx.notify();
     }
 
@@ -456,25 +475,27 @@ impl AudioProcessing {
             .into_any_element()
         } else {
             let input = self.panel_input(panel, key, &label, cx);
-            let mut editor = row()
-                .id(SharedString::from(format!(
-                    "graph-path-help-{panel}-{key:?}"
-                )))
-                .gap_1()
-                .child(div().flex_1().min_w_0().child(input))
-                .when_some(self.path_help(key), |view, help| {
-                    view.tooltip(rivu_ui::text_tooltip(help))
-                });
-            if let Some(step) = descriptor.numeric_step() {
+            let editor = if let Some(step) = descriptor.numeric_step() {
+                let mut numeric = rivu_ui::NumericInput::new(input);
                 for (sign, delta) in [("−", -step), ("+", step)] {
-                    editor = editor.child(button(
+                    numeric = numeric.step(button(
                         SharedString::from(format!("graph-step-{panel}-{key:?}-{sign}")),
                         SharedString::from(format!("{sign}{}", step)),
                         cx,
                         move |this, _, cx| this.step_graph_field(key, delta, cx),
                     ));
                 }
-            }
+                numeric.into_div()
+            } else {
+                row().gap_1().child(div().flex_1().min_w_0().child(input))
+            };
+            let mut editor = editor
+                .id(SharedString::from(format!(
+                    "graph-path-help-{panel}-{key:?}"
+                )))
+                .when_some(self.path_help(key), |view, help| {
+                    view.tooltip(rivu_ui::text_tooltip(help))
+                });
             if descriptor.is_path() {
                 editor = editor.child(disabled_control(
                     theme,

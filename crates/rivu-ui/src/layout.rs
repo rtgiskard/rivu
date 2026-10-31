@@ -146,6 +146,35 @@ pub fn two_column(first: Div, second: Div) -> Div {
         .child(second.flex_1())
 }
 
+/// Horizontal attachments for an existing numeric editor; values and edits remain owner-owned.
+/// This shell does not parse text, constrain values, or replace a vertical [`FormField`].
+pub struct NumericInput {
+    surface: Div,
+}
+
+impl NumericInput {
+    pub fn new(input: impl IntoElement) -> Self {
+        Self {
+            surface: row().gap_1().child(div().flex_1().min_w_0().child(input)),
+        }
+    }
+
+    pub fn unit(mut self, unit: impl IntoElement) -> Self {
+        self.surface = self.surface.child(unit);
+        self
+    }
+
+    /// Append an existing step button with its owner-provided action and disabled state.
+    pub fn step(mut self, action: impl IntoElement) -> Self {
+        self.surface = self.surface.child(action);
+        self
+    }
+
+    pub fn into_div(self) -> Div {
+        self.surface
+    }
+}
+
 /// Shared label-and-control field with optional, content-sized feedback.
 pub struct FormField {
     surface: Div,

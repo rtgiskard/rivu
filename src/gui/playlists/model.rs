@@ -63,6 +63,7 @@ pub(in crate::gui) struct PlaylistBrowser {
     selected_name: String,
     selected_total: Option<usize>,
     selection_generation: u64,
+    entry_generation: u64,
 }
 
 impl PlaylistBrowser {
@@ -79,6 +80,7 @@ impl PlaylistBrowser {
         self.summaries.scroll.scroll_to_item(0, ScrollStrategy::Top);
     }
     pub(super) fn search_entries(&mut self, query: Option<String>) {
+        self.entry_generation = self.entry_generation.wrapping_add(1);
         self.track_selection.query = query.clone();
         self.entries.query = query;
         self.track_selection.clear();
@@ -215,6 +217,33 @@ impl PlaylistBrowser {
     pub(in crate::gui) fn selection_generation(&self) -> u64 {
         self.selection_generation
     }
+    pub(super) fn entry_generation(&self) -> u64 {
+        self.entry_generation
+    }
+    pub(super) fn operation_rows(
+        &self,
+        playlist_id: i64,
+        generation: u64,
+        source: selection::EntryIdentity,
+    ) -> Vec<selection::EntryIdentity> {
+        if self.selected != Some(playlist_id)
+            || self.entries.playlist_id != Some(playlist_id)
+            || self.entry_generation != generation
+            || self
+                .entries
+                .rows
+                .get(source.offset)
+                .map(|row| selection::EntryIdentity::row(row, source.offset))
+                != Some(source)
+        {
+            return Vec::new();
+        }
+        if self.track_selection.contains(source.id) {
+            self.track_selection.ordered()
+        } else {
+            vec![source]
+        }
+    }
     pub(in crate::gui) fn selected_entry(&self) -> Option<i64> {
         self.track_selection.active.map(|row| row.id)
     }
@@ -223,6 +252,7 @@ impl PlaylistBrowser {
         let changed = self.selected != Some(id);
         if changed {
             self.selection_generation = self.selection_generation.wrapping_add(1);
+            self.entry_generation = self.entry_generation.wrapping_add(1);
             self.track_selection.clear();
         }
         self.selected = Some(id);
@@ -239,6 +269,7 @@ impl PlaylistBrowser {
 
     pub(super) fn clear_selection(&mut self) {
         self.selection_generation = self.selection_generation.wrapping_add(1);
+        self.entry_generation = self.entry_generation.wrapping_add(1);
         self.selected = None;
         self.selected_total = None;
         self.track_selection.clear();
@@ -355,6 +386,69 @@ mod tests {
             name: format!("playlist {id}"),
             entry_count,
         }
+    }
+    #[test]
+    fn operation_snapshot_uses_one_ordered_occurrence_group_and_projection() {
+        let mut playlists = PlaylistBrowser::default();
+        playlists.select(1, "one".into(), 0);
+        playlists.prepare_entries(1);
+        playlists.prepare_page(true, 0, 20);
+        playlists.accept_entries(Page {
+            total: 3,
+            rows: (0..3)
+                .map(|index| PlaylistEntryRow {
+                    id: index as i64 + 10,
+                    track_id: 7,
+                    position: index,
+                    offset: index,
+                    title: String::new(),
+                    path: Default::default(),
+                    channels: 0,
+                    sample_rate: 0,
+                    bits_per_sample: None,
+                    bitrate_bps: None,
+                    bitrate_exact: false,
+                    cue_number: None,
+                    artist: String::new(),
+                    album: String::new(),
+                    duration: None,
+                    codec: String::new(),
+                    missing: false,
+                    favorite: false,
+                })
+                .collect(),
+        });
+        let identity = |offset| selection::EntryIdentity {
+            id: offset as i64 + 10,
+            track_id: 7,
+            position: offset,
+            offset,
+        };
+        let generation = playlists.entry_generation();
+        playlists.track_selection.select(identity(2), false);
+        playlists.track_selection.select(identity(0), true);
+        let frozen = playlists.operation_rows(1, generation, identity(2));
+        assert_eq!(frozen, [identity(0), identity(2)]);
+        assert_eq!(
+            frozen.iter().map(|row| row.track_id).collect::<Vec<_>>(),
+            [7, 7]
+        );
+        assert_eq!(
+            playlists.operation_rows(1, generation, identity(1)),
+            [identity(1)]
+        );
+        assert!(
+            playlists
+                .operation_rows(2, generation, identity(1))
+                .is_empty()
+        );
+        playlists.search_entries(Some("changed".into()));
+        assert!(
+            playlists
+                .operation_rows(1, generation, identity(2))
+                .is_empty()
+        );
+        assert_eq!(frozen, [identity(0), identity(2)]);
     }
 
     #[test]
@@ -585,7 +679,7 @@ mod tests {
     }
 
     #[test]
-    fn playlist_switch_generation_rejects_drag_after_switching_back() {
+    fn playlist_selection_generation_changes_only_with_identity() {
         let mut playlists = PlaylistBrowser::default();
         playlists.select(1, "one".into(), 0);
         let original = playlists.selection_generation();

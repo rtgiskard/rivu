@@ -1,6 +1,6 @@
 use crate::gui::appearance::fonts;
 use gpui::{Div, ElementId, SharedString, Stateful, div, prelude::*, rgb};
-use rivu_ui::{caption, column, lazy_row_tooltip, list_row, row, row_tooltip, two_line_text};
+use rivu_ui::{caption, column, lazy_row_tooltip, row, row_tooltip, two_line_text};
 use std::{borrow::Cow, fmt::Write, path::Path};
 
 pub(in crate::gui) fn track_title<'a>(
@@ -139,11 +139,10 @@ pub(in crate::gui) fn metadata_text(
 /// Numbered track row shared by album, playlist, and queue views.
 pub(crate) fn track_list_row(
     theme: &'static rivu_ui::theme::Palette,
-    id: impl Into<gpui::ElementId>,
+    surface: gpui::Stateful<Div>,
     text: TrackText<'_>,
     index: usize,
     playing: bool,
-    selected: bool,
     i18n: &crate::i18n::Localizer,
 ) -> gpui::Stateful<Div> {
     let title: SharedString = text.title.into_owned().into();
@@ -201,7 +200,7 @@ pub(crate) fn track_list_row(
             .into(),
         )
     });
-    list_row(theme, id, selected)
+    surface
         .child(
             div()
                 .w_8()

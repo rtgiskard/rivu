@@ -416,7 +416,7 @@ impl WindowView {
                                 view.on_drag(drag, move |drag, _, window, cx| {
                                     let _ = entity.update(cx, |this, cx| {
                                         this.start_panel_docking(drag.source, window, cx);
-                                        if !this.panel_docking_blocked() {
+                                        if !this.panel_docking_blocked(cx) {
                                             this.update_panel_docking(
                                                 window.mouse_position(),
                                                 window,

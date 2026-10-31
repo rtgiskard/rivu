@@ -2,8 +2,8 @@
 //! committed graph, selection and task ownership remain with their existing owners.
 use super::*;
 use rivu_ui::{
-    ChoiceAction, ChoiceItem, ChoiceMode, ChoicePopup, IconButton, IconButtonDensity,
-    IconButtonStyle, Slider, SliderInput, SliderKey, activate_control, dropdown_trigger,
+    ChoiceItem, ChoicePopup, ChoiceSelect, IconButton, IconButtonDensity, IconButtonStyle, Slider,
+    SliderInput, SliderKey,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -702,49 +702,29 @@ impl AudioProcessing {
         .top_0()
         .left_0()
         .size_full();
-        let trigger = dropdown_trigger(
-            rivu_ui::theme::palette(cx),
+        ChoiceSelect::new(
             SharedString::from(format!("workbench-menu-{panel}-{}", menu as u8)),
             label,
-            open,
-            cx,
         )
-        .w_auto()
-        .flex_shrink_0()
-        .relative()
-        .role(Role::ComboBox)
-        .aria_label(hint.clone())
-        .tooltip(rivu_ui::text_tooltip(hint))
-        .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-            match this
-                .graph_editor
-                .workbench_choices
-                .key(event, ChoiceMode::Select, false, window)
-                .apply(window, cx)
-            {
-                ChoiceAction::Commit(index) => this.choose_workbench_item(index, window, cx),
-                ChoiceAction::Dismiss => {
+        .build(
+            self,
+            move |this| {
+                (this.graph_editor.workbench_menu == Some((panel, menu)))
+                    .then_some(&mut this.graph_editor.workbench_choices)
+            },
+            cx,
+            move |this, _, cx| {
+                if this.graph_editor.workbench_menu == Some((panel, menu))
+                    && this.graph_editor.workbench_choices.is_open()
+                {
                     this.close_workbench_controls();
-                    cx.notify();
-                }
-                ChoiceAction::Navigated => cx.notify(),
-                _ => {}
-            }
-        }))
-        .child(measure);
-        activate_control(trigger, cx, move |this, _, cx| {
-            if this.graph_editor.workbench_menu == Some((panel, menu))
-                && this.graph_editor.workbench_choices.is_open()
-            {
-                this.close_workbench_controls();
-            } else {
-                this.close_workbench_controls();
-                let Some(anchor) = trigger_bounds.get()[menu as usize] else {
-                    return;
-                };
-                this.graph_editor.workbench_anchor.set(Some(anchor));
-                let (items, selected) =
-                    match menu {
+                } else {
+                    this.close_workbench_controls();
+                    let Some(anchor) = trigger_bounds.get()[menu as usize] else {
+                        return;
+                    };
+                    this.graph_editor.workbench_anchor.set(Some(anchor));
+                    let (items, selected) = match menu {
                         WorkbenchMenu::Add => (
                             [
                                 "processing-equalizer",
@@ -814,11 +794,23 @@ impl AudioProcessing {
                             )
                         }
                     };
-                this.graph_editor.workbench_menu = Some((panel, menu));
-                this.graph_editor.workbench_choices.open(items, selected);
-            }
-            cx.notify();
-        })
+                    this.graph_editor.workbench_menu = Some((panel, menu));
+                    this.graph_editor.workbench_choices.open(items, selected);
+                }
+                cx.notify();
+            },
+            Self::choose_workbench_item,
+            |this, _, cx| {
+                this.close_workbench_controls();
+                cx.notify();
+            },
+        )
+        .w_auto()
+        .flex_shrink_0()
+        .relative()
+        .aria_label(hint.clone())
+        .tooltip(rivu_ui::text_tooltip(hint))
+        .child(measure)
     }
 
     fn choose_workbench_item(&mut self, index: usize, _: &mut Window, cx: &mut Context<Self>) {

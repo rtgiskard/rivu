@@ -1,5 +1,5 @@
 use crate::{
-    control::{button, disabled_control, toggle_button},
+    control::{IconButton, IconButtonDensity, IconButtonStyle, button, disabled_control},
     focus::FocusScope,
     layout::FormField,
     overlay::{ButtonTooltip, ListDragPreview},
@@ -26,9 +26,17 @@ impl Render for KeyboardControls {
             }),
             self.disabled,
         );
-        let toggle = toggle_button("toggle", "T", "Toggle: off", false, cx, |this, _| {
-            this.counts[2] += 1;
-        });
+        let toggle = IconButton::new("toggle", "T", "Toggle: off")
+            .switch(false)
+            .build(
+                IconButtonStyle::Surface,
+                IconButtonDensity::Regular,
+                cx,
+                |this, _, cx| {
+                    this.counts[2] += 1;
+                    cx.notify();
+                },
+            );
         let outside = button("outside", "Outside", cx, |this, _, _| this.counts[3] += 1);
         div().size_full().child(outside).child(
             self.scope
@@ -281,27 +289,31 @@ impl Render for TypographySamples {
             .child(crate::icon("", cx).text_sm().child(icon))
             .child(crate::tooltip_surface(window, cx, 22.5).child(tooltip))
             .child(
-                crate::list_row(crate::theme::palette(cx), "sized-row", false)
-                    .relative()
-                    .h(crate::list_row_height(window, cx))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_0()
-                            .child(div().text_sm().child(row_title))
-                            .child(div().text_xs().child(row_detail)),
+                crate::list_row(
+                    crate::theme::palette(cx),
+                    "sized-row",
+                    false,
+                    crate::list_row_height(window, cx),
+                )
+                .relative()
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_0()
+                        .child(div().text_sm().child(row_title))
+                        .child(div().text_xs().child(row_detail)),
+                )
+                .child(
+                    gpui::canvas(
+                        move |bounds, _, _| {
+                            row_bounds.set(bounds);
+                        },
+                        |_, _, _, _| {},
                     )
-                    .child(
-                        gpui::canvas(
-                            move |bounds, _, _| {
-                                row_bounds.set(bounds);
-                            },
-                            |_, _, _, _| {},
-                        )
-                        .absolute()
-                        .size_full(),
-                    ),
+                    .absolute()
+                    .size_full(),
+                ),
             )
     }
 }
@@ -679,19 +691,31 @@ impl Render for RowSurfaces {
             .font_size_scale(crate::theme::font_size_scale(cx))
             .text_sm()
             .child(
-                crate::row::list_row(theme, "geometry-list", self.selected)
-                    .h(crate::row::list_row_height(window, cx))
-                    .child(text),
+                crate::row::list_row(
+                    theme,
+                    "geometry-list",
+                    self.selected,
+                    crate::row::list_row_height(window, cx),
+                )
+                .child(text),
             )
             .child(
-                crate::row::tree_row(theme, "geometry-tree", 1, self.selected)
-                    .h(crate::row::tree_row_height(window, cx))
-                    .child(div().flex_1().min_w_0().truncate().child(label)),
+                crate::row::tree_row(
+                    theme,
+                    "geometry-tree",
+                    1,
+                    self.selected,
+                    crate::row::tree_row_height(window, cx),
+                )
+                .child(div().flex_1().min_w_0().truncate().child(label)),
             )
-            .child(
-                crate::row::dropdown_row(theme, "geometry-dropdown", self.selected, label)
-                    .h(crate::row::single_line_row_height(window, cx)),
-            )
+            .child(crate::row::dropdown_row(
+                theme,
+                "geometry-dropdown",
+                self.selected,
+                label,
+                crate::row::single_line_row_height(window, cx),
+            ))
             .on_children_prepainted(move |children, _, _| {
                 let mut measured = bounds.get();
                 measured[..3].copy_from_slice(&children);
@@ -777,7 +801,7 @@ struct RowActionFocus {
 }
 
 impl Render for RowActionFocus {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let bounds = self.action_bounds.clone();
         let action = crate::IconButton::new("favorite", "♥", "Favorite")
             .toggled(!self.activations.is_multiple_of(2))
@@ -808,23 +832,27 @@ impl Render for RowActionFocus {
             .size_full()
             .child(self.search.clone())
             .child(
-                crate::list_row(theme, "track-row", false)
-                    .group("action-row")
-                    .relative()
-                    .w_64()
-                    .h_12()
-                    .on_mouse_down(
-                        gpui::MouseButton::Left,
-                        cx.listener(|this, _, _, _| this.selections += 1),
-                    )
-                    .on_drag((), move |_, _, _, cx| {
-                        drag_starts.set(drag_starts.get() + 1);
-                        cx.new(|_| ListDragPreview {
-                            label: "Track".into(),
-                        })
+                crate::list_row(
+                    theme,
+                    "track-row",
+                    false,
+                    crate::list_row_height(window, cx),
+                )
+                .group("action-row")
+                .relative()
+                .w_64()
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _, _, _| this.selections += 1),
+                )
+                .on_drag((), move |_, _, _, cx| {
+                    drag_starts.set(drag_starts.get() + 1);
+                    cx.new(|_| ListDragPreview {
+                        label: "Track".into(),
                     })
-                    .child(div().flex_1().child("Track"))
-                    .child(actions),
+                })
+                .child(div().flex_1().child("Track"))
+                .child(actions),
             )
     }
 }

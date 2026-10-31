@@ -369,15 +369,6 @@ impl EntrySelection {
         ids.sort_unstable_by_key(|id| self.selected[id].position);
         ids
     }
-    pub(in crate::gui) fn drag_ids(&self, source: i64) -> Vec<i64> {
-        if !self.ready() {
-            Vec::new()
-        } else if self.contains(source) {
-            self.ordered_ids()
-        } else {
-            vec![source]
-        }
-    }
     fn fail(&mut self, message: String) {
         self.busy = false;
         self.error = Some(message);
@@ -2072,7 +2063,6 @@ mod tests {
         selection.select(identity(255, 255), false);
         assert!(selection.ready());
         assert_eq!(selection.ordered_ids(), vec![255]);
-        assert_eq!(selection.drag_ids(255), vec![255]);
         assert!(selection.take_navigation().is_none());
     }
 
@@ -2476,7 +2466,6 @@ mod tests {
             assert!(selection.contains(7));
             assert!(!selection.contains(8));
             assert!(selection.ordered_ids().is_empty());
-            assert!(selection.drag_ids(7).is_empty());
             for _ in 0..100 {
                 assert!(!navigate(&mut selection, scope, 30, true, false, false));
                 assert!(selection.take_navigation().is_none());
@@ -2789,8 +2778,6 @@ mod tests {
         assert_eq!(selection.active, Some(identity(2, 1)));
         assert_eq!(selection.anchor, Some(identity(2, 1)));
         assert_eq!(selection.ids().len(), 2);
-        assert_eq!(selection.drag_ids(9), vec![9]);
-        assert_eq!(selection.drag_ids(2), vec![2]);
     }
 
     #[test]
@@ -2842,7 +2829,7 @@ mod tests {
             false
         ));
         assert_eq!(selection.len(), end - start);
-        assert_eq!(selection.drag_ids(active.id).len(), end - start);
+        assert_eq!(selection.ordered().len(), end - start);
     }
 
     #[test]
@@ -2856,7 +2843,6 @@ mod tests {
         selection.fail("range failed".into());
         assert_eq!(selection.len(), 1);
         assert!(selection.ordered_ids().is_empty());
-        assert!(selection.drag_ids(7).is_empty());
         selection.invalidate();
         selection.reconcile(vec![identity(7, 18)]);
         assert_eq!(selection.ordered_ids(), vec![7]);
@@ -2914,8 +2900,6 @@ mod tests {
         selection.reconcile(vec![identity(9, 0), identity(3, 10)]);
         assert_eq!(selection.ordered_ids(), vec![9, 3]);
         assert!(!selection.contains(2));
-        assert_eq!(selection.drag_ids(3), vec![9, 3]);
-        assert_eq!(selection.drag_ids(4), vec![4]);
         assert_eq!(selection.active, Some(identity(3, 10)));
         assert_eq!(selection.anchor, Some(identity(3, 10)));
     }

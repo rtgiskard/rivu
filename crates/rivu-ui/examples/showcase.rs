@@ -2,10 +2,9 @@
 //! A component consumer: all values, filtering and loading transitions are host-owned.
 use gpui::{prelude::*, *};
 use rivu_ui::{
-    ChoiceAction, ChoiceItem, ChoiceMode, ChoicePopup, ChoiceState, FocusScope, FormField,
-    IconButton, IconButtonDensity, IconButtonGroup, IconButtonStyle, ProgressBar, Slider,
-    SliderInput, SliderKey, VirtualList, button, checkbox, column, disabled_control,
-    dropdown_trigger,
+    ChoiceItem, ChoicePopup, ChoiceSelect, ChoiceState, FocusScope, FormField, IconButton,
+    IconButtonDensity, IconButtonGroup, IconButtonStyle, ProgressBar, Slider, SliderInput,
+    SliderKey, VirtualList, button, checkbox, column, disabled_control,
     input::{Input, InputEvent},
     input_aligned_control, list_row,
     loading::{LoadingRowLabels, LoadingText, paged_loading_row},
@@ -277,56 +276,44 @@ impl Render for Showcase {
             "Second option with a long descriptive label",
             "Third option",
         ];
-        let dropdown = dropdown_trigger(
-            colors,
-            "example-choice",
-            labels[self.choice],
-            self.choices.is_open(),
-            cx,
-        )
-        .role(Role::ComboBox)
-        .aria_label("Example choice")
-        .on_click(cx.listener(|this, _, _, cx| {
-            if this.choices.is_open() {
-                this.choices.close();
-            } else {
-                this.choices.open(
-                    [
-                        "First option",
-                        "Second option with a long descriptive label",
-                        "Third option",
-                    ]
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, label)| ChoiceItem::new(i, label)),
-                    this.choice,
-                );
-            }
-            cx.notify();
-        }))
-        .capture_key_down(cx.listener(|this, event, window, cx| {
-            match this
-                .choices
-                .key(event, ChoiceMode::Select, false, window)
-                .apply(window, cx)
-            {
-                ChoiceAction::Commit(index) => this.choose(index, window, cx),
-                ChoiceAction::Dismiss => {
+        let dropdown = ChoiceSelect::new("example-choice", labels[self.choice])
+            .build(
+                self,
+                |this| Some(&mut this.choices),
+                cx,
+                |this, _, cx| {
+                    if this.choices.is_open() {
+                        this.choices.close();
+                    } else {
+                        this.choices.open(
+                            [
+                                "First option",
+                                "Second option with a long descriptive label",
+                                "Third option",
+                            ]
+                            .into_iter()
+                            .enumerate()
+                            .map(|(i, label)| ChoiceItem::new(i, label)),
+                            this.choice,
+                        );
+                    }
+                    cx.notify();
+                },
+                Self::choose,
+                |this, _, cx| {
                     this.choices.close();
                     cx.notify();
-                }
-                ChoiceAction::Navigated => cx.notify(),
-                _ => {}
-            }
-        }))
-        .child(
-            canvas(
-                cx.processor(|this, bounds, _, _| this.anchor.set(bounds)),
-                |_, _, _, _| {},
+                },
             )
-            .absolute()
-            .size_full(),
-        );
+            .aria_label("Example choice")
+            .child(
+                canvas(
+                    cx.processor(|this, bounds, _, _| this.anchor.set(bounds)),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            );
         let icon_groups = row().flex_wrap().children(
             [
                 (
@@ -476,9 +463,9 @@ impl Render for Showcase {
             .child(column().w_64().max_w_full().child(button("long-action", "保存更改 / Save changes with a deliberately long action label", cx, |this,_,cx| { this.clicks += 1; cx.notify(); })))
             .child(icon_groups)
             .child(checkbox("enabled", "Enable action and editor", self.enabled, true, cx, |this,next,cx| {
-                this.enabled = next; this.input.update(cx,|input,cx| input.set_enabled(next,cx));
+                this.enabled = next; this.input.update(cx,|input,cx| input.set_enabled(next,cx)); cx.notify();
             }))
-            .child(checkbox("checked", "A host-owned setting", self.checked, self.enabled, cx, |this,next,_| { this.checked = next; }))
+            .child(checkbox("checked", "A host-owned setting", self.checked, self.enabled, cx, |this,next,cx| { this.checked = next; cx.notify(); }))
             .child(row().items_start().child(FormField::new(colors, "Retained text", self.input.clone()).hint("The host retains this draft and decides when to apply it.").into_div().flex_1()).child(FormField::new(colors, "Choice", dropdown).into_div().flex_1()))
             .child(format!("User edits: {} · Draft: {}",self.edits,self.input.read(cx).text()))
             .child(slider_demo)
@@ -499,12 +486,11 @@ impl Render for Showcase {
                             return paged_loading_row(("placeholder",index),error,this.loading.show(&(),error.is_some()),LoadingRowLabels {
                                 message: if error.is_some() { "Loading failed".into() } else { "Loading…".into() },
                                 retry: "Retry loading".into(), copy_error: "Copy full error".into(),
-                            },cx,|this,_,cx| this.set_rows(Rows::Loading,cx)).h(row_height).into_any_element();
+                            },row_height,cx,|this,_,cx| this.set_rows(Rows::Loading,cx)).into_any_element();
                         }
                         let title: SharedString = row_title(this.filtered[index]).into();
                         let detail: SharedString = "Secondary line · compact leading follows each line's font size".into();
-                        list_row(colors,("row",index),false)
-                            .h(row_height)
+                        list_row(colors,("row",index),false,row_height)
                             .child(row_tooltip(two_line_text(colors,title.clone(),detail.clone()).id(("text",index)),title,detail)).into_any_element()
                     }).collect::<Vec<_>>()
                 })).h(rems(12.)).flex_shrink_0().w_full().scrollbar("example-scroll")

@@ -14,18 +14,18 @@ mod slider;
 pub mod surface;
 pub mod theme;
 
-pub use choice::{ChoiceAction, ChoiceItem, ChoiceMode, ChoicePopup, ChoiceState};
+pub use choice::{ChoiceAction, ChoiceItem, ChoiceMode, ChoicePopup, ChoiceSelect, ChoiceState};
 pub use control::{
     IconButton, IconButtonDensity, IconButtonGroup, IconButtonStyle, activate_control,
     active_control, button, button_style, checkbox, danger_control, disabled_control,
-    dropdown_trigger, icon, sortable_header, toggle_button,
+    dropdown_trigger, icon, sortable_header,
 };
 pub use focus::{FocusScope, context_menu_key, dropdown_key, tab_key};
 pub use input::input_aligned_control;
 pub use layout::{
-    FormField, StatusKind, caption, column, label_value_row, list_panel_header, list_viewport,
-    panel_header, panel_header_actions, panel_heading_row, panel_surface, panel_toolbar, row,
-    section_group, status_message, two_column,
+    FormField, NumericInput, StatusKind, caption, column, label_value_row, list_panel_header,
+    list_viewport, panel_header, panel_header_actions, panel_heading_row, panel_surface,
+    panel_toolbar, row, section_group, status_message, two_column,
 };
 pub use list::VirtualList;
 pub use menu::{

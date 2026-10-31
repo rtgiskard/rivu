@@ -70,34 +70,33 @@ impl WindowView {
             cx.stop_propagation();
             return;
         }
-        if self.shell.help().is_some() {
-            if let Some(action) = keyboard::resolve(key, modifiers, KeyContext::GuiHelp) {
-                self.help_key(action, cx);
+        let surface = self.current_keyboard_surface(cx);
+        match surface {
+            Some(shell::KeyboardSurface::Dialog(shell::DialogSurface::KeyboardHelp)) => {
+                if let Some(action) = keyboard::resolve(key, modifiers, KeyContext::GuiHelp) {
+                    self.help_key(action, cx);
+                }
+                cx.stop_propagation();
+                return;
             }
-            cx.stop_propagation();
-            return;
-        }
-        if matches!(
-            self.current_keyboard_surface(cx),
-            Some(shell::KeyboardSurface::Menu(..))
-        ) {
-            if plain {
-                self.menu_key(key, window, cx);
+            Some(shell::KeyboardSurface::Menu(..)) => {
+                if plain {
+                    self.menu_key(key, window, cx);
+                }
+                cx.stop_propagation();
+                return;
             }
-            cx.stop_propagation();
-            return;
-        }
-        if self.manual_confirmation_open() {
-            if cancel {
-                self.cancel_manual_action(cx);
+            Some(shell::KeyboardSurface::Dialog(shell::DialogSurface::MetadataConfirmation)) => {
+                if cancel {
+                    self.cancel_manual_action(cx);
+                }
+                cx.stop_propagation();
+                return;
             }
-            cx.stop_propagation();
-            return;
+            _ => {}
         }
         if rivu_ui::tab_key(event) {
-            if self.current_keyboard_surface(cx).is_some()
-                && self.current_keyboard_surface(cx) != Some(shell::KeyboardSurface::Settings)
-            {
+            if surface.is_some() && surface != Some(shell::KeyboardSurface::Settings) {
                 self.shell.scope().advance(modifiers.shift, window, cx);
             } else if modifiers.shift {
                 window.focus_prev(cx);
@@ -113,64 +112,58 @@ impl WindowView {
             cx.stop_propagation();
             return;
         }
-        if self.playlists.read(cx).action().is_some() {
-            if cancel {
-                self.playlists.update(cx, |playlists, cx| {
-                    playlists.dismiss_playlist_action(window, cx)
-                });
-            }
-            cx.stop_propagation();
-            return;
-        }
-        if self.queue_replace.is_some() {
-            if cancel {
-                self.dismiss_queue_replace(window, cx);
-            }
-            cx.stop_propagation();
-            return;
-        }
-        if self.playlists.read(cx).editor_open() {
-            if cancel {
-                self.playlists.update(cx, |playlists, cx| {
-                    playlists.cancel_playlist_name(window, cx)
-                });
-                cx.stop_propagation();
-            } else if !self.input_focused(window, cx) {
-                cx.stop_propagation();
-            }
-            return;
-        }
-        if self.duplicates.read(cx).is_open() {
-            if cancel {
-                self.duplicates
-                    .update(cx, |duplicates, cx| duplicates.handle_cancel(cx));
-            }
-            cx.stop_propagation();
-            return;
-        }
-        if self.shell.is_open(shell::Surface::About) {
-            if cancel {
-                self.shell.dismiss(shell::Surface::About);
-                cx.notify();
-            }
-            cx.stop_propagation();
-            return;
-        }
-        if self.shell.is_open(shell::Surface::Settings) {
-            return;
-        }
-        if self.shell.is_open(shell::Surface::Layouts) {
-            if cancel {
-                if self.layout_action.is_some() {
-                    self.layout_action = None;
-                } else {
-                    self.shell.dismiss(shell::Surface::Layouts);
+        match surface {
+            Some(shell::KeyboardSurface::Dialog(dialog)) => {
+                use shell::DialogSurface;
+                if cancel {
+                    match dialog {
+                        DialogSurface::PlaylistDelete => {
+                            self.playlists.update(cx, |playlists, cx| {
+                                playlists.dismiss_playlist_action(window, cx)
+                            });
+                        }
+                        DialogSurface::QueueReplacement => self.dismiss_queue_replace(window, cx),
+                        DialogSurface::PlaylistEditor => {
+                            self.playlists.update(cx, |playlists, cx| {
+                                playlists.cancel_playlist_name(window, cx)
+                            });
+                        }
+                        DialogSurface::DuplicateReview => {
+                            self.duplicates
+                                .update(cx, |duplicates, cx| duplicates.handle_cancel(cx));
+                        }
+                        DialogSurface::About => {
+                            self.shell.dismiss(shell::Surface::About);
+                            cx.notify();
+                        }
+                        DialogSurface::LayoutAction => {
+                            self.layout_action = None;
+                            self.focus_keyboard_surface(window, cx);
+                            cx.notify();
+                        }
+                        DialogSurface::LayoutManager => {
+                            self.shell.dismiss(shell::Surface::Layouts);
+                            self.focus_keyboard_surface(window, cx);
+                            cx.notify();
+                        }
+                        DialogSurface::KeyboardHelp | DialogSurface::MetadataConfirmation => {
+                            unreachable!("handled before editor and Tab routing");
+                        }
+                    }
+                    cx.stop_propagation();
+                } else if !matches!(
+                    dialog,
+                    DialogSurface::LayoutManager | DialogSurface::LayoutAction
+                ) && (dialog != DialogSurface::PlaylistEditor
+                    || !self.input_focused(window, cx))
+                {
+                    cx.stop_propagation();
                 }
-                self.focus_keyboard_surface(window, cx);
-                cx.notify();
-                cx.stop_propagation();
+                return;
             }
-            return;
+            Some(shell::KeyboardSurface::Settings) => return,
+            Some(shell::KeyboardSurface::Menu(..)) => unreachable!("menus handled before Tab"),
+            None => {}
         }
         let context = self.keyboard_context();
         let action = keyboard::resolve(key, modifiers, context);

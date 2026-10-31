@@ -425,10 +425,12 @@ a newer intent.
 === Surfaces, focus and input routing
 
 The shell owns mutually exclusive application surfaces and keyboard focus
-restoration. Feature confirmations can cover a surface without discarding its
-draft. Deferred focus requests carry a generation so an obsolete callback cannot
-focus a replacement surface. Workspace activation validates the target before
-cancelling an interaction and rolls back a live split against the outgoing tree,
+restoration. One ordered surface inventory drives composition, keyboard authority
+and background blocking. Feature confirmations can cover a surface without
+discarding its draft. Deferred focus requests carry a generation so an obsolete
+callback cannot focus a replacement surface. Workspace activation validates the
+target before cancelling an interaction and rolls back a live split against the
+outgoing tree,
 never against reused IDs in the incoming tree.
 
 GPUI owns actual control focus and key dispatch; the shell coordinates surface
@@ -439,6 +441,12 @@ keyboard. Closing a surface validates its invoking control against the next draw
 tree; a missing origin falls back to the layout, and a newer workspace focus
 choice supersedes deferred restoration. Panel removal hands focus back when its
 removed control owned it and routes panel commands to a surviving active panel.
+
+Queue and Playlist owners resolve an operation into one ordered occurrence
+snapshot before dispatch. Menu and drag payloads retain that snapshot, including
+duplicate track IDs; stale source identities or entry-view generations are rejected.
+Playlist identity and entry-view generations are independent, so filtering entries
+does not replace a selected playlist's pending or failed summary lookup.
 
 Pointer activation belongs to semantic regions. Passive row content bubbles to
 its row, while independent actions isolate selection and drag initiation.
@@ -510,9 +518,9 @@ Shared track controls provide favorite state, tooltips and pointer isolation;
 feature owners decide visibility and commands. Loading rows offer explicit retry
 and full-error copying, including keyboard/accessibility activation. Copying does
 not retry. The 150 ms loading delay is presentation only; request identity,
-physical slots and recovery remain feature-owned. Tree/album placeholders retain
-their own geometry. Tooltip content requiring current input resolves on opening,
-without an additional data subscription.
+physical slots and recovery remain feature-owned. Tree and album-grid placeholders
+retain their own geometry. Tooltip content requiring current input resolves on
+opening, without an additional data subscription.
 
 ==== Appearance and semantic controls
 
@@ -526,9 +534,10 @@ remove Click/Focus and leave Tab order while retaining focus identity; business
 guards remain with owners. Decorative glyphs do not create duplicate controls,
 and rich menu content needs a textual accessible name.
 
-Checkboxes and choices are controlled: owners accept changes and update dependent
-state. They do not save configuration or replace Settings' Apply/Discard boundary.
-Action groups share appearance, not state or commands. Hosts choose wrapping,
+Checkboxes and choices are controlled: owners accept changes, update dependent
+state and invalidate their owning entity. They do not save configuration or replace
+Settings' Apply/Discard boundary. Icon switches use `IconButton::new(...).switch(on)`;
+action groups share appearance, not state or commands. Hosts choose wrapping,
 inline clipping or scrolling. Hover actions appear on their row's hover or
 descendant keyboard-visible focus, not list-wide focus; hidden actions leave
 text width available. Mouse activation retains native focus without pinning the
@@ -560,14 +569,17 @@ scrolling; hosts supply filtering, mapping, commit and dismissal. Select and edi
 modes share navigation, but text/IME submission stays with Input. Closing releases candidates.
 Callbacks and retained row presses belong to the candidate generation: replacement
 or reopening invalidates them, while highlight movement does not. Page movement
-uses rendered row height. Select-mode keys are handled before native Enter/Space
-activation is armed.
+uses rendered row height. `ChoiceSelect` binds select-only triggers to the owning
+panel/menu's candidate state and handles keys before native Enter/Space activation
+is armed. Editable text and IME remain separate owner policy.
 
 Dialog and Popover provide materials, viewport constraints and modal pointer
 barriers, not global surface state, draft protection or automatic outside-close
 policy. Ordinary dialogs use a scrolling card; specialized surfaces can own
-internal scrolling. FormField and label/value rows share presentation only:
-callers retain inputs, validation, formatting, drafts and submission.
+internal scrolling. FormField and label/value rows share presentation only.
+NumericInput groups an existing editor with optional unit and step controls,
+preserving owner-provided unit widths; callers retain parsing, validation,
+formatting, drafts and submission.
 
 Monitor EQ popovers have one panel owner and shared keyboard scope. Dismissal
 restores the live trigger only while the popup still owns focus; outside presses
@@ -582,6 +594,10 @@ range renderer. It neither owns records/selection nor fetches data. Only the
 actual viewport requests demand; sample-row measurement does not. Sparse
 placeholders retain logical indices and viewport decorations share content
 coordinates with drop targets.
+
+List, tree, dropdown and paged-loading rows require an explicit resolved height.
+Range renderers resolve it once per batch and reuse it for records and placeholders,
+keeping virtual-list measurement and visible row geometry on the same contract.
 
 Deferred viewport delivery runs after paint, weakly holds its owner and may repeat
 equal ranges so retry/new data need not await scrolling. Owners still check

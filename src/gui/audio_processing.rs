@@ -40,6 +40,14 @@ pub(super) enum Page {
     Results,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FieldInputKind {
+    Number,
+    Choice,
+    Boolean,
+    Path,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(super) enum DenoiseField {
     Mode,
@@ -64,29 +72,83 @@ pub(super) enum DenoiseField {
 }
 
 impl DenoiseField {
-    pub(super) fn name(self) -> &'static str {
+    fn label_id(self) -> &'static str {
         match self {
-            Self::Mode => "mode",
-            Self::Strength => "strength",
-            Self::SpectralGainFloorDb => "spectral_gain_floor_db",
-            Self::AttackMs => "attack_ms",
-            Self::ReleaseMs => "release_ms",
-            Self::SmoothingBins => "smoothing_bins",
-            Self::TransientProtection => "transient_protection",
-            Self::Wet => "wet",
-            Self::FftSize => "fft_size",
-            Self::StationaryNoiseDbfs => "stationary_noise_dbfs",
-            Self::HumEnabled => "hum.enabled",
-            Self::HumFundamentalHz => "hum.fundamental_hz",
-            Self::HumHarmonics => "hum.harmonics",
-            Self::HumQ => "hum.q",
-            Self::ImpulseEnabled => "impulse.enabled",
-            Self::ImpulseMaxWidth => "impulse.max_width",
-            Self::ImpulseThreshold => "impulse.threshold",
-            Self::ImpulseFloorDbfs => "impulse.floor_dbfs",
-            Self::ImpulseTransientProtection => "impulse.transient_protection",
+            Self::Mode => "processing-denoise-mode",
+            Self::Strength => "processing-strength",
+            Self::SpectralGainFloorDb => "processing-spectral-gain-floor",
+            Self::AttackMs => "processing-attack",
+            Self::ReleaseMs => "processing-release",
+            Self::SmoothingBins => "processing-smoothing",
+            Self::TransientProtection | Self::ImpulseTransientProtection => "processing-transients",
+            Self::Wet => "processing-wet",
+            Self::FftSize => "processing-fft",
+            Self::StationaryNoiseDbfs => "processing-stationary-floor",
+            Self::HumEnabled | Self::ImpulseEnabled => "processing-enabled",
+            Self::HumFundamentalHz => "processing-hum-frequency",
+            Self::HumHarmonics => "processing-harmonics",
+            Self::HumQ => "processing-q",
+            Self::ImpulseMaxWidth => "processing-impulse-width",
+            Self::ImpulseThreshold => "processing-threshold",
+            Self::ImpulseFloorDbfs => "processing-impulse-floor",
         }
     }
+
+    fn group_label_id(self) -> Option<&'static str> {
+        match self {
+            Self::HumEnabled | Self::HumFundamentalHz | Self::HumHarmonics | Self::HumQ => {
+                Some("processing-hum")
+            }
+            Self::ImpulseEnabled
+            | Self::ImpulseMaxWidth
+            | Self::ImpulseThreshold
+            | Self::ImpulseFloorDbfs
+            | Self::ImpulseTransientProtection => Some("processing-impulse"),
+            _ => None,
+        }
+    }
+
+    fn choices(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            Self::Mode => &[
+                ("off", "processing-off"),
+                ("stationary", "processing-stationary"),
+                ("profile", "processing-profile"),
+                ("adaptive", "processing-adaptive"),
+            ],
+            Self::FftSize => &[
+                ("256", "256"),
+                ("512", "512"),
+                ("1024", "1024"),
+                ("2048", "2048"),
+                ("4096", "4096"),
+                ("8192", "8192"),
+            ],
+            _ => &[],
+        }
+    }
+
+    fn input_kind(self) -> FieldInputKind {
+        match self {
+            Self::Mode | Self::FftSize => FieldInputKind::Choice,
+            Self::HumEnabled | Self::ImpulseEnabled => FieldInputKind::Boolean,
+            _ => FieldInputKind::Number,
+        }
+    }
+
+    fn numeric_step(self) -> Option<f64> {
+        if self.input_kind() != FieldInputKind::Number {
+            return None;
+        }
+        Some(match self {
+            Self::SmoothingBins
+            | Self::HumHarmonics
+            | Self::ImpulseMaxWidth
+            | Self::HumFundamentalHz => 1.,
+            _ => 0.1,
+        })
+    }
+
     pub(super) fn text(self, config: &DenoiseConfig) -> String {
         match self {
             Self::Mode => match config.mode {
@@ -254,21 +316,75 @@ pub(super) enum NeuralField {
 }
 
 impl NeuralField {
-    pub(super) fn name(self) -> &'static str {
+    fn label_id(self) -> &'static str {
         match self {
-            Self::SpeechInterpreter => "speech_interpreter",
-            Self::SeparationInterpreter => "separation_interpreter",
-            Self::Worker => "worker",
-            Self::SpeechManifest => "speech_manifest",
-            Self::SeparationManifest => "separation_manifest",
-            Self::Device => "device",
-            Self::Threads => "threads",
-            Self::SpeechWetMix => "speech_wet_mix",
-            Self::SpeechAttenuationLimitDb => "speech_attenuation_limit_db",
-            Self::SpeechPostFilter => "speech_post_filter",
-            Self::SeparationOverlap => "separation_overlap",
+            Self::SpeechInterpreter => "processing-speech-interpreter",
+            Self::SeparationInterpreter => "processing-separation-interpreter",
+            Self::Worker => "processing-worker",
+            Self::SpeechManifest => "processing-speech-manifest",
+            Self::SeparationManifest => "processing-separation-manifest",
+            Self::Device => "processing-device",
+            Self::Threads => "processing-threads",
+            Self::SpeechWetMix => "processing-speech-wet",
+            Self::SpeechAttenuationLimitDb => "processing-speech-attenuation",
+            Self::SpeechPostFilter => "processing-speech-post-filter",
+            Self::SeparationOverlap => "processing-separation-overlap",
         }
     }
+
+    fn choices(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            Self::Device => &[
+                ("cpu", "processing-fields-cpu"),
+                ("cuda", "processing-fields-cuda"),
+            ],
+            _ => &[],
+        }
+    }
+
+    fn input_kind(self) -> FieldInputKind {
+        match self {
+            Self::Device => FieldInputKind::Choice,
+            Self::SpeechPostFilter => FieldInputKind::Boolean,
+            Self::SpeechInterpreter
+            | Self::SeparationInterpreter
+            | Self::Worker
+            | Self::SpeechManifest
+            | Self::SeparationManifest => FieldInputKind::Path,
+            _ => FieldInputKind::Number,
+        }
+    }
+
+    fn numeric_step(self) -> Option<f64> {
+        match self {
+            Self::Threads => Some(1.),
+            Self::SpeechWetMix | Self::SeparationOverlap => Some(0.01),
+            Self::SpeechAttenuationLimitDb => Some(0.1),
+            _ => None,
+        }
+    }
+
+    fn path_placeholder(self) -> Option<&'static str> {
+        Some(match self {
+            Self::SpeechManifest | Self::SeparationManifest => "processing-manifest-placeholder",
+            Self::SpeechInterpreter | Self::SeparationInterpreter => {
+                "processing-interpreter-placeholder"
+            }
+            Self::Worker => "processing-worker-placeholder",
+            _ => return None,
+        })
+    }
+
+    fn path_help(self) -> Option<&'static str> {
+        Some(match self {
+            Self::SpeechManifest | Self::SeparationManifest => "processing-manifest-path-help",
+            Self::SpeechInterpreter => "processing-speech-interpreter-help",
+            Self::SeparationInterpreter => "processing-separation-interpreter-help",
+            Self::Worker => "processing-worker-path-help",
+            _ => return None,
+        })
+    }
+
     pub(super) fn text(self, config: &NeuralConfig) -> String {
         match self {
             Self::SpeechInterpreter => config.speech_interpreter.display().to_string(),
@@ -444,11 +560,35 @@ pub(super) fn path_snapshot_current(
 ) -> bool {
     requested.0 == current.0 && requested.1 == current.1 && current.2 == Some(requested.2)
 }
+fn submitted_text_current(
+    generation: u64,
+    submitted_generation: u64,
+    text: &str,
+    submitted_text: &str,
+) -> bool {
+    generation == submitted_generation && text == submitted_text
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PathRequest {
+    id: u64,
+    panel: u64,
+    key: FieldKey,
+}
+
+fn retire_path_request(active: &mut Option<PathRequest>, request: PathRequest) -> bool {
+    if *active != Some(request) {
+        return false;
+    }
+    *active = None;
+    true
+}
 
 struct Field {
     input: Entity<Input>,
     committed: String,
     dirty: bool,
+    generation: u64,
     _subscription: Subscription,
 }
 
@@ -457,9 +597,15 @@ struct PanelInput {
     _subscriptions: [Subscription; 2],
 }
 
+struct SubmittedParameter {
+    input: Entity<Input>,
+    generation: u64,
+    text: String,
+}
+
 struct SubmittedFields {
-    first: Option<(Entity<Input>, String)>,
-    rest: Vec<(Entity<Input>, String)>,
+    first: Option<SubmittedParameter>,
+    rest: Vec<SubmittedParameter>,
 }
 
 struct Submission {
@@ -538,7 +684,7 @@ pub(super) struct AudioProcessing {
     page: Page,
     fields: HashMap<FieldKey, Field>,
     panel_inputs: HashMap<u64, HashMap<FieldKey, PanelInput>>,
-    choosing_path: Option<FieldKey>,
+    choosing_path: Option<PathRequest>,
     chooser_generation: u64,
     error: Option<String>,
     pending: usize,
@@ -550,6 +696,7 @@ pub(super) struct AudioProcessing {
     speech_advanced: bool,
     separation_advanced: bool,
     preset_popup: Option<PresetPopup>,
+    preset_choices: rivu_ui::ChoiceState<String>,
     preset_intent_generation: u64,
     preset_bounds: HashMap<u64, Rc<Cell<Option<Bounds<Pixels>>>>>,
     results: ResultsState,
@@ -635,6 +782,7 @@ impl AudioProcessing {
             speech_advanced: false,
             separation_advanced: false,
             preset_popup: None,
+            preset_choices: rivu_ui::ChoiceState::default(),
             preset_intent_generation: 0,
             preset_bounds: HashMap::new(),
             results: ResultsState::default(),
@@ -701,8 +849,11 @@ impl AudioProcessing {
         if !self.state.system.config.equalizer.enabled {
             let _ = self.set_preset_popup(None, cx);
         }
-        if preset_names_changed && let Some(popup) = &self.preset_popup {
-            self.notify_preset_panel(popup.panel, cx);
+        if preset_names_changed {
+            self.sync_preset_choices(cx);
+            if let Some(popup) = &self.preset_popup {
+                self.notify_preset_panel(popup.panel, cx);
+            }
         }
         self.reconcile_graph(cx);
         self.reconcile_equalizers(cx);
@@ -778,6 +929,12 @@ impl AudioProcessing {
         self.panel_inputs.retain(|id, _| layout.contains_panel(*id));
         self.graph_editor.retain_panels(layout);
         self.results.retain_panels(layout);
+        if self
+            .choosing_path
+            .is_some_and(|request| !visible || !layout.is_panel_active(request.panel))
+        {
+            self.choosing_path = None;
+        }
         self.retain_workbench_controls(layout, visible);
         if self
             .graph_editor
@@ -796,7 +953,7 @@ impl AudioProcessing {
     fn send_field(
         &mut self,
         command: Command,
-        submitted: Option<(Entity<Input>, String)>,
+        submitted: Option<SubmittedParameter>,
         cx: &mut Context<Self>,
     ) {
         self.enqueue_submission(
@@ -866,20 +1023,7 @@ impl AudioProcessing {
                     this.graph_ack(success, cx);
                 }
                 if success && let Some(submitted) = submitted {
-                    for (input, value) in submitted.first.into_iter().chain(submitted.rest) {
-                        if let Some(field) = this
-                            .fields
-                            .values_mut()
-                            .find(|field| field.input.entity_id() == input.entity_id())
-                            && field.input.read(cx).text().trim() == value
-                        {
-                            field.dirty = false;
-                            let committed = field.committed.clone();
-                            field
-                                .input
-                                .update(cx, |input, cx| input.set_text(committed, cx));
-                        }
-                    }
+                    this.finish_parameter_fields(submitted, cx);
                 }
                 if let Some(field) = equalizer_field {
                     this.finish_equalizer_field(field, success, cx);
@@ -892,15 +1036,42 @@ impl AudioProcessing {
         cx.notify();
     }
 
+    fn finish_parameter_fields(&mut self, submitted: SubmittedFields, cx: &mut Context<Self>) {
+        for submitted in submitted.first.into_iter().chain(submitted.rest) {
+            if let Some(field) = self
+                .fields
+                .values_mut()
+                .find(|field| field.input.entity_id() == submitted.input.entity_id())
+                && submitted_text_current(
+                    field.generation,
+                    submitted.generation,
+                    field.input.read(cx).text().trim(),
+                    &submitted.text,
+                )
+            {
+                field.dirty = false;
+                let committed = field.committed.clone();
+                field
+                    .input
+                    .update(cx, |input, cx| input.set_text(committed, cx));
+            }
+        }
+    }
+
+    fn begin_path_request(&mut self, panel: u64, key: FieldKey) -> PathRequest {
+        self.chooser_generation += 1;
+        let request = PathRequest {
+            id: self.chooser_generation,
+            panel,
+            key,
+        };
+        self.choosing_path = Some(request);
+        request
+    }
+
     fn path_placeholder(&self, key: FieldKey) -> Option<SharedString> {
         let id = match key {
-            FieldKey::Neural(NeuralField::SpeechManifest | NeuralField::SeparationManifest) => {
-                "processing-manifest-placeholder"
-            }
-            FieldKey::Neural(
-                NeuralField::SpeechInterpreter | NeuralField::SeparationInterpreter,
-            ) => "processing-interpreter-placeholder",
-            FieldKey::Neural(NeuralField::Worker) => "processing-worker-placeholder",
+            FieldKey::Neural(field) => field.path_placeholder()?,
             FieldKey::PresetPath => "processing-preset-path-placeholder",
             FieldKey::GraphExport => "processing-export-path-placeholder",
             FieldKey::Graph(binding) => binding.field.path_placeholder()?,
@@ -911,16 +1082,7 @@ impl AudioProcessing {
 
     fn path_help(&self, key: FieldKey) -> Option<SharedString> {
         let id = match key {
-            FieldKey::Neural(NeuralField::SpeechManifest | NeuralField::SeparationManifest) => {
-                "processing-manifest-path-help"
-            }
-            FieldKey::Neural(NeuralField::SpeechInterpreter) => {
-                "processing-speech-interpreter-help"
-            }
-            FieldKey::Neural(NeuralField::SeparationInterpreter) => {
-                "processing-separation-interpreter-help"
-            }
-            FieldKey::Neural(NeuralField::Worker) => "processing-worker-path-help",
+            FieldKey::Neural(field) => field.path_help()?,
             FieldKey::Graph(binding) => binding.field.path_help()?,
             _ => return None,
         };
@@ -950,6 +1112,7 @@ impl AudioProcessing {
                 input,
                 committed: value,
                 dirty: false,
+                generation: 0,
                 _subscription: subscription,
             },
         );
@@ -974,6 +1137,7 @@ impl AudioProcessing {
                 InputEvent::Changed { user: true, .. } => {
                     if let Some(field) = this.fields.get_mut(&name) {
                         field.dirty = true;
+                        field.generation += 1;
                     }
                     if name == FieldKey::PresetName {
                         this.notify_preset_labels(cx);
@@ -1009,15 +1173,9 @@ impl AudioProcessing {
             DenoiseField::ImpulseTransientProtection,
         ] {
             let value = field.text(&self.state.system.config.denoise);
-            let (group, name) = field.name().split_once('.').unwrap_or(("", field.name()));
-            let label = if group.is_empty() {
-                self.parameter_label(name)
-            } else {
-                format!(
-                    "{} · {}",
-                    self.parameter_label(group),
-                    self.parameter_label(name)
-                )
+            let label = match field.group_label_id() {
+                Some(group) => format!("{} · {}", self.tr(group), self.tr(field.label_id())),
+                None => self.tr(field.label_id()).to_string(),
             };
             self.field(FieldKey::Denoise(field), &label, value, cx);
         }
@@ -1035,7 +1193,7 @@ impl AudioProcessing {
             let value = field.text(&self.state.system.config.neural);
             self.field(
                 FieldKey::Neural(field),
-                &self.parameter_label(field.name()),
+                &self.tr(field.label_id()),
                 value,
                 cx,
             );
@@ -1074,10 +1232,11 @@ impl AudioProcessing {
         let result = self.field_command(key, &value);
         match result {
             Ok(Some(command)) => {
-                let submitted = self
-                    .fields
-                    .get(&key)
-                    .map(|field| (field.input.clone(), value));
+                let submitted = self.fields.get(&key).map(|field| SubmittedParameter {
+                    input: field.input.clone(),
+                    generation: field.generation,
+                    text: value,
+                });
                 self.send_field(command, submitted, cx);
             }
             Ok(None) => {}
@@ -1199,6 +1358,7 @@ impl AudioProcessing {
         cx: &mut Context<Self>,
     ) -> Option<PresetPopup> {
         let next_panel = popup.as_ref().map(|popup| popup.panel);
+        self.preset_choices.close();
         let previous = std::mem::replace(&mut self.preset_popup, popup);
         let previous_panel = previous.as_ref().map(|popup| popup.panel);
         if let Some(panel) = previous_panel {
@@ -1255,7 +1415,94 @@ impl AudioProcessing {
             }),
             cx,
         );
+        if !manage {
+            self.sync_preset_choices(cx);
+        }
         cx.notify();
+    }
+
+    fn sync_preset_choices(&mut self, cx: &App) {
+        if !self
+            .preset_popup
+            .as_ref()
+            .is_some_and(|popup| !popup.manage)
+        {
+            return;
+        }
+        let selected_name = self
+            .preset_choices
+            .selected_index()
+            .and_then(|index| self.preset_choices.item(index))
+            .map(|item| item.value.clone())
+            .unwrap_or_else(|| self.text(FieldKey::PresetName, cx));
+        let presets = &self.state.system.config.equalizer_presets;
+        let selected = presets
+            .iter()
+            .position(|preset| preset.name == selected_name)
+            .unwrap_or(0);
+        self.preset_choices.open(
+            presets
+                .iter()
+                .map(|preset| rivu_ui::ChoiceItem::new(preset.name.clone(), preset.name.clone())),
+            selected,
+        );
+    }
+
+    fn choose_preset(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.state.system.config.equalizer.enabled
+            || !self
+                .preset_popup
+                .as_ref()
+                .is_some_and(|popup| !popup.manage)
+        {
+            return;
+        }
+        let Some(name) = self
+            .preset_choices
+            .item(index)
+            .map(|item| item.value.clone())
+        else {
+            return;
+        };
+        if !self
+            .state
+            .system
+            .config
+            .equalizer_presets
+            .iter()
+            .any(|preset| preset.name == name)
+        {
+            return;
+        }
+        if let Some(field) = self.fields.get_mut(&FieldKey::PresetName) {
+            field
+                .input
+                .update(cx, |input, cx| input.set_text(name.clone(), cx));
+            field.dirty = false;
+        }
+        self.close_preset(window, cx);
+        self.eq(EqualizerEdit::LoadPreset { name }, cx);
+    }
+
+    fn dismiss_preset_choices(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(popup) = self.preset_popup.as_ref().filter(|popup| !popup.manage) else {
+            return false;
+        };
+        if self
+            .preset_bounds
+            .get(&popup.panel)
+            .and_then(|bounds| bounds.get())
+            .is_some_and(|bounds| bounds.contains(&event.position))
+        {
+            return false;
+        }
+        self.close_preset(window, cx);
+        true
     }
 
     fn request_preset_action(&mut self, panel: u64, action: PresetAction, cx: &mut Context<Self>) {
@@ -1399,7 +1646,7 @@ impl AudioProcessing {
             ))
     }
 
-    fn preset_view(&mut self, panel: u64, cx: &mut Context<Self>) -> Div {
+    fn preset_view(&mut self, panel: u64, window: &Window, cx: &mut Context<Self>) -> Div {
         let theme = rivu_ui::theme::palette(cx);
         let enabled = self.state.system.config.equalizer.enabled;
         for key in [FieldKey::PresetName, FieldKey::PresetPath] {
@@ -1429,23 +1676,26 @@ impl AudioProcessing {
         } else {
             name.into()
         };
-        let trigger = activate_control(
-            disabled_control(
-                theme,
-                dropdown_trigger(
-                    theme,
-                    ("eq-presets", panel),
-                    label,
-                    self.preset_popup
+        let expanded = self
+            .preset_popup
+            .as_ref()
+            .is_some_and(|popup| popup.panel == panel && !popup.manage);
+        let trigger = rivu_ui::ChoiceSelect::new(("eq-presets", panel), label)
+            .build(
+                self,
+                move |this| {
+                    this.preset_popup
                         .as_ref()
-                        .is_some_and(|popup| popup.panel == panel && !popup.manage),
-                    cx,
-                ),
-                !enabled,
-            ),
-            cx,
-            move |this, window, cx| this.toggle_preset(panel, false, window, cx),
-        );
+                        .is_some_and(|popup| popup.panel == panel && !popup.manage)
+                        .then_some(&mut this.preset_choices)
+                },
+                cx,
+                move |this, window, cx| this.toggle_preset(panel, false, window, cx),
+                Self::choose_preset,
+                Self::close_preset,
+            )
+            .aria_expanded(expanded);
+        let trigger = disabled_control(theme, trigger, !enabled);
         let mut content = column().min_w_0().gap_1().child(
             row()
                 .relative()
@@ -1488,69 +1738,64 @@ impl AudioProcessing {
             .filter(|popup| popup.panel == panel && !popup.manage)
             && let Some(bounds) = bounds.get()
         {
-            let mut choices = popup
-                .scope
-                .menu_surface(Popover::surface(theme, ("eq-preset-choices", panel)))
-                .role(Role::Menu)
-                .flex()
-                .flex_col()
-                .max_h(rems(12.))
-                .overflow_y_scroll()
-                .p_1()
-                .w(bounds.size.width)
-                .on_mouse_down_out(
-                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                        if !bounds.contains(&event.position) {
-                            this.close_preset(window, cx);
-                            cx.stop_propagation();
-                        }
-                    }),
+            let scope = popup.scope.clone();
+            let choices = if self.preset_choices.is_open() {
+                rivu_ui::ChoicePopup::new(
+                    ("eq-preset-choices", panel),
+                    ("eq-preset-choice-scroll", panel),
+                    bounds,
                 )
-                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                    if event.keystroke.key == "escape" && !event.keystroke.modifiers.modified() {
-                        this.close_preset(window, cx);
-                        cx.stop_propagation();
-                    }
-                }));
-            for (index, preset) in self
-                .state
-                .system
-                .config
-                .equalizer_presets
-                .iter()
-                .enumerate()
-            {
-                let name = preset.name.clone();
-                choices = choices.child(menu_item(
-                    SharedString::from(format!("eq-preset-{panel}-{index}")),
-                    name.clone(),
+                .render(
+                    self,
+                    |this| &this.preset_choices,
+                    Self::choose_preset,
+                    Self::dismiss_preset_choices,
+                    window,
                     cx,
-                    move |this, window, cx| {
-                        if !this.state.system.config.equalizer.enabled {
-                            return;
-                        }
-                        if let Some(field) = this.fields.get_mut(&FieldKey::PresetName) {
-                            field
-                                .input
-                                .update(cx, |input, cx| input.set_text(name.clone(), cx));
-                            field.dirty = false;
-                        }
-                        this.close_preset(window, cx);
-                        this.eq(EqualizerEdit::LoadPreset { name: name.clone() }, cx);
-                    },
-                ));
-            }
-            if self.state.system.config.equalizer_presets.is_empty() {
-                choices = choices.child(caption(theme, self.tr("processing-preset-empty")));
-            }
-            content = content.child(
+                )
+            } else {
                 deferred(
                     anchored()
                         .position(bounds.bottom_left())
                         .snap_to_window()
-                        .child(choices),
+                        .child(
+                            Popover::surface(theme, ("eq-preset-empty", panel))
+                                .p_1()
+                                .on_mouse_down_out(cx.listener(|this, event, window, cx| {
+                                    if this.dismiss_preset_choices(event, window, cx) {
+                                        cx.stop_propagation();
+                                    }
+                                }))
+                                .child(caption(theme, self.tr("processing-preset-empty"))),
+                        ),
                 )
-                .with_priority(2),
+                .with_priority(2)
+                .into_any_element()
+            };
+            content = content.child(
+                scope
+                    .surface(div().id(("eq-preset-choice-scope", panel)))
+                    .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                        match this
+                            .preset_choices
+                            .key(event, rivu_ui::ChoiceMode::Select, false, window)
+                            .apply(window, cx)
+                        {
+                            rivu_ui::ChoiceAction::Commit(index) => {
+                                this.choose_preset(index, window, cx)
+                            }
+                            rivu_ui::ChoiceAction::Dismiss => this.close_preset(window, cx),
+                            rivu_ui::ChoiceAction::Navigated => cx.notify(),
+                            _ if event.keystroke.key == "escape"
+                                && !event.keystroke.modifiers.modified() =>
+                            {
+                                this.close_preset(window, cx);
+                                cx.stop_propagation();
+                            }
+                            _ => {}
+                        }
+                    }))
+                    .child(choices),
             );
         }
         if let Some(popup) = self
@@ -1748,10 +1993,9 @@ impl AudioProcessing {
     fn parameter_controls(&self, fields: &[DenoiseField], cx: &mut Context<Self>) -> Div {
         let mut content = column().min_w_0().gap_1();
         for &field in fields {
-            let name = field.name().rsplit('.').next().unwrap_or(field.name());
             content = content.child(self.field_view(
                 FieldKey::Denoise(field),
-                self.parameter_label(name),
+                self.tr(field.label_id()),
                 true,
                 cx,
             ));
@@ -1762,17 +2006,9 @@ impl AudioProcessing {
     fn restoration_view(&self, panel: u64, cx: &mut Context<Self>) -> Div {
         let theme = rivu_ui::theme::palette(cx);
         let config = &self.state.system.config.denoise;
+        let selected_mode = DenoiseField::Mode.text(config);
         let mut modes = row().gap_1();
-        for (mode, slug, label) in [
-            (DenoiseMode::Off, "off", "processing-off"),
-            (
-                DenoiseMode::Stationary,
-                "stationary",
-                "processing-stationary",
-            ),
-            (DenoiseMode::Profile, "profile", "processing-profile"),
-            (DenoiseMode::Adaptive, "adaptive", "processing-adaptive"),
-        ] {
+        for &(slug, label) in DenoiseField::Mode.choices() {
             modes = modes.child(
                 button(
                     SharedString::from(format!("denoise-mode-{slug}")),
@@ -1780,17 +2016,14 @@ impl AudioProcessing {
                     cx,
                     move |this, _, cx| {
                         this.patch_denoise(
-                            DenoisePatch {
-                                mode: Some(mode),
-                                ..Default::default()
-                            },
+                            DenoiseField::Mode.patch(slug).expect("valid mode choice"),
                             cx,
                         )
                     },
                 )
                 .flex_shrink_0()
                 .whitespace_nowrap()
-                .when(config.mode == mode, |view| view.bg(rgb(theme.selected))),
+                .when(selected_mode == slug, |view| view.bg(rgb(theme.selected))),
             );
         }
         let mut content = column()
@@ -1844,7 +2077,7 @@ impl AudioProcessing {
         ));
         for (group, enabled, toggle, fields) in [
             (
-                "hum",
+                "processing-hum",
                 config.hum.enabled,
                 DenoiseField::HumEnabled,
                 &[
@@ -1854,7 +2087,7 @@ impl AudioProcessing {
                 ][..],
             ),
             (
-                "impulse",
+                "processing-impulse",
                 config.impulse.enabled,
                 DenoiseField::ImpulseEnabled,
                 &[
@@ -1873,23 +2106,15 @@ impl AudioProcessing {
                 .border_color(rgb(theme.border))
                 .child(checkbox(
                     SharedString::from(format!("restoration-enable-{group}-{panel}")),
-                    self.parameter_label(group),
+                    self.tr(group),
                     enabled,
                     true,
                     cx,
                     move |this, enabled, cx| {
-                        let patch = match toggle {
-                            DenoiseField::HumEnabled => DenoisePatch {
-                                hum_enabled: Some(enabled),
-                                ..Default::default()
-                            },
-                            DenoiseField::ImpulseEnabled => DenoisePatch {
-                                impulse_enabled: Some(enabled),
-                                ..Default::default()
-                            },
-                            _ => unreachable!("restoration toggle"),
-                        };
-                        this.patch_denoise(patch, cx);
+                        this.patch_denoise(
+                            toggle.patch(&enabled.to_string()).expect("boolean toggle"),
+                            cx,
+                        );
                     },
                 ));
             if enabled {
@@ -1911,7 +2136,7 @@ impl AudioProcessing {
         for &field in fields {
             content = content.child(self.field_view(
                 FieldKey::Neural(field),
-                self.parameter_label(field.name()),
+                self.tr(field.label_id()),
                 true,
                 cx,
             ));
@@ -2003,26 +2228,23 @@ impl AudioProcessing {
         if open {
             let mut runtime = self.neural_fields(&[NeuralField::Worker, NeuralField::Threads], cx);
             let mut devices = row().gap_1().flex_wrap();
-            for (device, value, label) in [
-                (NeuralDevice::Cpu, "cpu", "CPU"),
-                (NeuralDevice::Cuda, "cuda", "CUDA"),
-            ] {
+            let selected_device = NeuralField::Device.text(neural);
+            for &(value, label) in NeuralField::Device.choices() {
                 devices = devices.child(
                     button(
                         SharedString::from(format!("neural-device-{value}")),
-                        label,
+                        self.tr(label),
                         cx,
                         move |this, _, cx| {
                             this.patch_neural(
-                                NeuralPatch {
-                                    device: Some(device),
-                                    ..Default::default()
-                                },
+                                NeuralField::Device
+                                    .patch(value)
+                                    .expect("valid device choice"),
                                 cx,
                             )
                         },
                     )
-                    .when(neural.device == device, |v| v.bg(rgb(theme.selected))),
+                    .when(selected_device == value, |v| v.bg(rgb(theme.selected))),
                 );
             }
             runtime = runtime.child(Self::parameter_row(
@@ -2095,24 +2317,26 @@ impl AudioProcessing {
             .map(|(key, field)| {
                 (
                     *key,
-                    field.input.clone(),
-                    field.input.read(cx).text().trim().to_owned(),
+                    SubmittedParameter {
+                        input: field.input.clone(),
+                        generation: field.generation,
+                        text: field.input.read(cx).text().trim().to_owned(),
+                    },
                 )
             })
             .collect();
         match page_parameter_command(
             self.page,
-            fields.iter().map(|(key, _, value)| (*key, value.as_str())),
+            fields
+                .iter()
+                .map(|(key, submitted)| (*key, submitted.text.as_str())),
         ) {
             Ok(Some(command)) => self.enqueue_submission(
                 Submission {
                     command,
                     field: Some(SubmittedFields {
                         first: None,
-                        rest: fields
-                            .into_iter()
-                            .map(|(_, input, value)| (input, value))
-                            .collect(),
+                        rest: fields.into_iter().map(|(_, submitted)| submitted).collect(),
                     }),
                     equalizer_field: None,
                 },

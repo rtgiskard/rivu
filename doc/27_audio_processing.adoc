@@ -252,8 +252,9 @@ Separation. Collapsing an advanced section preserves its drafts.
 Applying a non-graph restoration or neural page parses all dirty fields before
 submission, then sends one sparse patch. Core validates and saves the combined
 candidate atomically: invalid fields cannot leave earlier fields applied or
-persisted. Acknowledgements clear only the exact submitted drafts; newer text
-remains editable for the next Apply. Enter still applies only its field.
+persisted. Acknowledgements clear only the exact submitted drafts; edits made
+while submission is pending remain drafts even when the text returns to its
+submitted value. Enter still applies only its field.
 
 
 [source,shell]
@@ -659,6 +660,15 @@ Core owns committed configuration and result admission. Editors retain drafts
 and interaction state, submitting typed, validated edits; graph commits require
 the expected revision. Failed validation leaves committed settings unchanged.
 JSON is the IPC/import format, not a second configuration owner.
+
+Restoration and neural field descriptors supply labels, choices, input kinds and
+steps to both page and graph editors. Page edits remain sparse patches; graph
+edits replace a validated node at its expected revision. Draft completion matches
+the input entity, user-edit generation and text; programmatic synchronization is
+not a user edit. File-choice results, including cancellation and errors, must
+still belong to the original panel and draft. Graph choices additionally check
+node kind and revision. Completing an old request cannot clear a newer request's
+busy state or publish an error into its draft.
 
 Core state owns the selected audition and media-task identity; projections consume
 those facts rather than defining them. The processing service owns worker retirement,

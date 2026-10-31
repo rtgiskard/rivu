@@ -60,23 +60,8 @@ pub(in super::super) enum GraphField {
     MixSolo(usize),
 }
 
-pub(super) fn denoise_group(field: DenoiseField) -> Option<&'static str> {
-    use DenoiseField::*;
-    match field {
-        HumEnabled | HumFundamentalHz | HumHarmonics | HumQ => Some("processing-hum"),
-        ImpulseEnabled
-        | ImpulseMaxWidth
-        | ImpulseThreshold
-        | ImpulseFloorDbfs
-        | ImpulseTransientProtection => Some("processing-impulse"),
-        _ => None,
-    }
-}
-
 impl GraphField {
     pub(super) fn label(self) -> &'static str {
-        use DenoiseField as D;
-        use NeuralField as N;
         match self {
             Self::Implementation => "processing-fields-implementation",
             Self::Taps => "processing-graph-taps",
@@ -85,38 +70,8 @@ impl GraphField {
             Self::MixGain(_) => "processing-graph-input-gain",
             Self::MixMuted(_) => "processing-graph-input-muted",
             Self::MixSolo(_) => "processing-graph-input-solo",
-            Self::Denoise(field) => match field {
-                D::Mode => "processing-denoise-mode",
-                D::Strength => "processing-strength",
-                D::SpectralGainFloorDb => "processing-spectral-gain-floor",
-                D::AttackMs => "processing-attack",
-                D::ReleaseMs => "processing-release",
-                D::SmoothingBins => "processing-smoothing",
-                D::TransientProtection | D::ImpulseTransientProtection => "processing-transients",
-                D::Wet => "processing-wet",
-                D::FftSize => "processing-fft",
-                D::StationaryNoiseDbfs => "processing-stationary-floor",
-                D::HumEnabled | D::ImpulseEnabled => "processing-enabled",
-                D::HumFundamentalHz => "processing-hum-frequency",
-                D::HumHarmonics => "processing-harmonics",
-                D::HumQ => "processing-q",
-                D::ImpulseMaxWidth => "processing-impulse-width",
-                D::ImpulseThreshold => "processing-threshold",
-                D::ImpulseFloorDbfs => "processing-impulse-floor",
-            },
-            Self::Neural(field) => match field {
-                N::SpeechInterpreter => "processing-speech-interpreter",
-                N::SeparationInterpreter => "processing-separation-interpreter",
-                N::Worker => "processing-worker",
-                N::SpeechManifest => "processing-speech-manifest",
-                N::SeparationManifest => "processing-separation-manifest",
-                N::Device => "processing-device",
-                N::Threads => "processing-threads",
-                N::SpeechWetMix => "processing-speech-wet",
-                N::SpeechAttenuationLimitDb => "processing-speech-attenuation",
-                N::SpeechPostFilter => "processing-speech-post-filter",
-                N::SeparationOverlap => "processing-separation-overlap",
-            },
+            Self::Denoise(field) => field.label_id(),
+            Self::Neural(field) => field.label_id(),
         }
     }
 
@@ -126,67 +81,29 @@ impl GraphField {
                 ("iir", "processing-graph-iir"),
                 ("linear_phase", "processing-graph-fir"),
             ],
-            Self::Denoise(DenoiseField::Mode) => &[
-                ("off", "processing-off"),
-                ("stationary", "processing-stationary"),
-                ("profile", "processing-profile"),
-                ("adaptive", "processing-adaptive"),
-            ],
-            Self::Denoise(DenoiseField::FftSize) => &[
-                ("256", "256"),
-                ("512", "512"),
-                ("1024", "1024"),
-                ("2048", "2048"),
-                ("4096", "4096"),
-                ("8192", "8192"),
-            ],
-            Self::Neural(NeuralField::Device) => &[
-                ("cpu", "processing-fields-cpu"),
-                ("cuda", "processing-fields-cuda"),
-            ],
+            Self::Denoise(field) => field.choices(),
+            Self::Neural(field) => field.choices(),
             _ => &[],
         }
     }
 
     pub(super) fn is_boolean(self) -> bool {
-        matches!(
-            self,
-            Self::Denoise(DenoiseField::HumEnabled | DenoiseField::ImpulseEnabled)
-                | Self::Neural(NeuralField::SpeechPostFilter)
-                | Self::MixMuted(_)
-                | Self::MixSolo(_)
-        )
+        match self {
+            Self::Denoise(field) => field.input_kind() == super::super::FieldInputKind::Boolean,
+            Self::Neural(field) => field.input_kind() == super::super::FieldInputKind::Boolean,
+            Self::MixMuted(_) | Self::MixSolo(_) => true,
+            _ => false,
+        }
     }
 
     pub(super) fn numeric_step(self) -> Option<f64> {
-        use DenoiseField as D;
-        use NeuralField as N;
-        Some(match self {
-            Self::Taps => 2.,
-            Self::Denoise(
-                D::SmoothingBins | D::HumHarmonics | D::ImpulseMaxWidth | D::HumFundamentalHz,
-            )
-            | Self::Neural(N::Threads) => 1.,
-            Self::Neural(N::SpeechWetMix | N::SeparationOverlap) => 0.01,
-            Self::ProfileStart
-            | Self::ProfileEnd
-            | Self::MixGain(_)
-            | Self::Denoise(
-                D::Strength
-                | D::SpectralGainFloorDb
-                | D::AttackMs
-                | D::ReleaseMs
-                | D::TransientProtection
-                | D::Wet
-                | D::StationaryNoiseDbfs
-                | D::HumQ
-                | D::ImpulseThreshold
-                | D::ImpulseFloorDbfs
-                | D::ImpulseTransientProtection,
-            )
-            | Self::Neural(N::SpeechAttenuationLimitDb) => 0.1,
-            _ => return None,
-        })
+        match self {
+            Self::Denoise(field) => field.numeric_step(),
+            Self::Neural(field) => field.numeric_step(),
+            Self::Taps => Some(2.),
+            Self::ProfileStart | Self::ProfileEnd | Self::MixGain(_) => Some(0.1),
+            _ => None,
+        }
     }
 
     pub(super) fn is_timestamp(self) -> bool {
@@ -198,30 +115,17 @@ impl GraphField {
     }
 
     pub(in super::super) fn path_placeholder(self) -> Option<&'static str> {
-        Some(match self {
-            Self::Neural(NeuralField::SpeechManifest | NeuralField::SeparationManifest) => {
-                "processing-manifest-placeholder"
-            }
-            Self::Neural(NeuralField::SpeechInterpreter | NeuralField::SeparationInterpreter) => {
-                "processing-interpreter-placeholder"
-            }
-            Self::Neural(NeuralField::Worker) => "processing-worker-placeholder",
-            _ => return None,
-        })
+        match self {
+            Self::Neural(field) => field.path_placeholder(),
+            _ => None,
+        }
     }
 
     pub(in super::super) fn path_help(self) -> Option<&'static str> {
-        Some(match self {
-            Self::Neural(NeuralField::SpeechManifest | NeuralField::SeparationManifest) => {
-                "processing-manifest-path-help"
-            }
-            Self::Neural(NeuralField::SpeechInterpreter) => "processing-speech-interpreter-help",
-            Self::Neural(NeuralField::SeparationInterpreter) => {
-                "processing-separation-interpreter-help"
-            }
-            Self::Neural(NeuralField::Worker) => "processing-worker-path-help",
-            _ => return None,
-        })
+        match self {
+            Self::Neural(field) => field.path_help(),
+            _ => None,
+        }
     }
 
     pub(super) fn inactive(self, kind: &GraphNodeKind) -> bool {

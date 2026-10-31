@@ -232,6 +232,57 @@ fn choice_callback<Owner: 'static, Value: 'static>(
     }
 }
 
+/// Select-only trigger binding over the owner's existing candidate state.
+/// Editable text, composition, candidate creation and accepted values remain owner policy.
+/// The accessor returns `Some` only while these candidates belong to this trigger.
+pub struct ChoiceSelect {
+    id: ElementId,
+    label: SharedString,
+}
+
+impl ChoiceSelect {
+    pub fn new(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+        }
+    }
+
+    pub fn build<Owner: 'static, Value: 'static>(
+        self,
+        owner: &mut Owner,
+        state: impl Fn(&mut Owner) -> Option<&mut ChoiceState<Value>> + 'static,
+        cx: &mut Context<Owner>,
+        toggle: impl Fn(&mut Owner, &mut Window, &mut Context<Owner>) + 'static,
+        choose: impl Fn(&mut Owner, usize, &mut Window, &mut Context<Owner>) + 'static,
+        dismiss: impl Fn(&mut Owner, &mut Window, &mut Context<Owner>) + 'static,
+    ) -> Stateful<Div> {
+        let trigger = crate::dropdown_trigger(
+            palette(cx),
+            self.id,
+            self.label,
+            state(owner).is_some_and(|choices| choices.is_open()),
+            cx,
+        )
+        .role(Role::ComboBox)
+        .capture_key_down(cx.listener(move |owner, event, window, cx| {
+            let Some(choices) = state(owner) else {
+                return;
+            };
+            match choices
+                .key(event, ChoiceMode::Select, false, window)
+                .apply(window, cx)
+            {
+                ChoiceAction::Commit(index) => choose(owner, index, window, cx),
+                ChoiceAction::Dismiss => dismiss(owner, window, cx),
+                ChoiceAction::Navigated => cx.notify(),
+                _ => {}
+            }
+        }));
+        crate::activate_control(trigger, cx, toggle)
+    }
+}
+
 /// Anchored, viewport-bounded candidate popup. Outside pointer events request dismissal;
 /// the owner can reject it (for example over an editable anchor) without changing focus.
 pub struct ChoicePopup {
@@ -294,8 +345,8 @@ impl ChoicePopup {
                                 ("choice", index),
                                 selected == Some(index),
                                 label,
+                                row_height,
                             )
-                            .h(row_height)
                             .role(Role::ListBoxOption)
                             .aria_label(hint.clone())
                             .aria_selected(selected == Some(index))
@@ -849,18 +900,15 @@ mod tests {
         choices: ChoiceState<u8>,
         opens: usize,
         committed: Option<usize>,
+        dismissed: usize,
+        owns_choices: bool,
     }
 
     impl Render for NativeChoice {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            let trigger = crate::activate_control(
-                crate::dropdown_trigger(
-                    palette(cx),
-                    "trigger",
-                    "Choose",
-                    self.choices.is_open(),
-                    cx,
-                ),
+            let trigger = ChoiceSelect::new("trigger", "Choose").build(
+                self,
+                |this| this.owns_choices.then_some(&mut this.choices),
                 cx,
                 |this, _, cx| {
                     this.opens += 1;
@@ -868,22 +916,21 @@ mod tests {
                         .open([ChoiceItem::new(1, "One"), ChoiceItem::new(2, "Two")], 0);
                     cx.notify();
                 },
+                |this, index, _, cx| {
+                    this.committed = Some(index);
+                    this.choices.close();
+                    cx.notify();
+                },
+                |this, _, cx| {
+                    this.dismissed += 1;
+                    this.choices.close();
+                    cx.notify();
+                },
             );
             self.scope
                 .surface(div().id("choice-scope"))
-                .capture_key_down(cx.listener(|this, event, window, cx| {
-                    let disposition = this.choices.key(event, ChoiceMode::Select, false, window);
-                    match disposition.apply(window, cx) {
-                        ChoiceAction::Commit(index) => {
-                            this.committed = Some(index);
-                            this.choices.close();
-                        }
-                        ChoiceAction::Dismiss => this.choices.close(),
-                        _ => {}
-                    }
-                    cx.notify();
-                }))
                 .child(trigger)
+                .child(crate::button("next", "Next", cx, |_, _, _| {}))
         }
     }
 
@@ -900,6 +947,8 @@ mod tests {
                 choices: ChoiceState::default(),
                 opens: 0,
                 committed: None,
+                dismissed: 0,
+                owns_choices: true,
             }
         });
         let handle: AnyWindowHandle = window.into();
@@ -936,5 +985,64 @@ mod tests {
             assert!(!choice.choices.is_open());
         })
         .unwrap();
+    }
+    #[test]
+    fn select_binding_routes_owner_dismissal_and_preserves_tab_after_reassignment() {
+        use gpui::InputEvent as _;
+        for (key, owns_choices) in ["escape", "tab", "shift-tab"]
+            .into_iter()
+            .flat_map(|key| [true, false].map(|owned| (key, owned)))
+        {
+            let mut cx = TestAppContext::single();
+            cx.update(crate::theme::init_test);
+            let scope = cx.update(crate::FocusScope::new);
+            let window = cx.add_window({
+                let scope = scope.clone();
+                move |_, _| NativeChoice {
+                    scope,
+                    choices: ChoiceState::default(),
+                    opens: 0,
+                    committed: None,
+                    dismissed: 0,
+                    owns_choices: true,
+                }
+            });
+            cx.update_window(window.into(), |root, window, cx| {
+                window.draw(cx).clear(cx);
+                scope.handle().focus(window, cx);
+                scope.advance(false, window, cx);
+                let trigger = window.focused(cx).unwrap();
+                let choice = root.downcast::<NativeChoice>().unwrap();
+                choice.update(cx, |this, cx| {
+                    this.choices.open([ChoiceItem::new(1, "One")], 0);
+                    cx.notify();
+                });
+                window.draw(cx).clear(cx);
+                // A rendered trigger must not dismiss another trigger's replacement state.
+                choice.update(cx, |this, _| this.owns_choices = owns_choices);
+                let keystroke = Keystroke::parse(key).unwrap();
+                window.dispatch_event(
+                    KeyDownEvent {
+                        keystroke: keystroke.clone(),
+                        is_held: false,
+                        prefer_character_input: false,
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+                window.dispatch_event(KeyUpEvent { keystroke }.to_platform_input(), cx);
+                let owner = choice.read(cx);
+                assert_eq!(owner.dismissed, usize::from(owns_choices));
+                assert_eq!(owner.opens, 0);
+                assert_eq!(owner.committed, None);
+                assert_eq!(owner.choices.is_open(), !owns_choices);
+                if key == "escape" {
+                    assert_eq!(window.focused(cx), Some(trigger));
+                } else {
+                    assert_ne!(window.focused(cx), Some(trigger));
+                }
+            })
+            .unwrap();
+        }
     }
 }

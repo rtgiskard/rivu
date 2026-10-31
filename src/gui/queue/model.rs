@@ -222,6 +222,22 @@ impl QueueBrowser {
         rows.sort_unstable_by_key(|row| row.position);
         rows
     }
+    pub(super) fn operation_rows(
+        &self,
+        source: QueueIdentity,
+        generation: u64,
+    ) -> Vec<QueueIdentity> {
+        if generation != self.page_projection.generation()
+            || self.rows.get(source.offset).map(QueueIdentity::from) != Some(source)
+        {
+            return Vec::new();
+        }
+        if self.contains(&source.id) {
+            self.ordered()
+        } else {
+            vec![source]
+        }
+    }
     pub(super) fn ordered_ids(&self) -> Vec<u64> {
         if !self.ready() {
             return Vec::new();
@@ -728,6 +744,33 @@ mod tests {
             position,
             offset: position,
         }
+    }
+    #[test]
+    fn operation_snapshot_preserves_occurrences_and_rejects_stale_sources() {
+        let mut queue = queue(7);
+        queue.rows.begin(0, 20);
+        queue.rows.accept(Page {
+            total: 3,
+            rows: vec![row(10, 0), row(11, 1), row(12, 2)],
+        });
+        let generation = queue.page_projection.generation();
+        queue.select(identity(12, 2), false);
+        queue.select(identity(10, 0), true);
+        let frozen = queue.operation_rows(identity(12, 2), generation);
+        assert_eq!(frozen, [identity(10, 0), identity(12, 2)]);
+        assert_eq!(
+            frozen.iter().map(|row| row.track_id).collect::<Vec<_>>(),
+            [1, 1]
+        );
+        assert_eq!(
+            queue.operation_rows(identity(11, 1), generation),
+            [identity(11, 1)]
+        );
+        assert_eq!(queue.ordered_ids(), [10, 12]);
+        assert!(queue.operation_rows(identity(11, 0), generation).is_empty());
+        queue.change_search(Some("different projection".into()));
+        assert!(queue.operation_rows(identity(12, 2), generation).is_empty());
+        assert_eq!(frozen, [identity(10, 0), identity(12, 2)]);
     }
     #[test]
     fn bitrate_revision_retires_payload_preserving_identity_geometry_and_worker() {

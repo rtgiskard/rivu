@@ -409,9 +409,7 @@ impl AudioProcessing {
         };
         let original = field.input.read(cx).text().to_owned();
         let draft_generation = self.results.export_draft_generation;
-        self.chooser_generation += 1;
-        let chooser_generation = self.chooser_generation;
-        self.choosing_path = Some(FieldKey::GraphExport);
+        let request = self.begin_path_request(panel, FieldKey::GraphExport);
         let i18n = Arc::clone(&self.context.i18n);
         cx.spawn(async move |this, cx| {
             let result = ashpd::desktop::file_chooser::SelectedFiles::save_file()
@@ -422,10 +420,9 @@ impl AudioProcessing {
                 .await
                 .and_then(|request| request.response());
             let _ = this.update(cx, |this, cx| {
-                if this.chooser_generation != chooser_generation {
+                if !retire_path_request(&mut this.choosing_path, request) {
                     return;
                 }
-                this.choosing_path = None;
                 cx.notify();
                 if !this.panel_inputs.contains_key(&panel)
                     || !path_snapshot_current(

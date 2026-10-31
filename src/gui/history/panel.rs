@@ -280,168 +280,205 @@ impl History {
             .child(div().w(px(12.)).flex_shrink_0());
         let scroll = self.context.scroll.borrow_mut().list(("history", panel_id));
         panel_surface(("history-panel", panel_id))
-            .child(
-                panel_heading_row(
-                    list_panel_header(
-                        theme,
-                        self.tr("shell-panel-history"),
-                        self.context.i18n
-                            .format("gl-track-count", &[("count", history_total.into())]),
-                    ),
-                    panel_header_actions().child(self.search.clone()),
+            .child(panel_heading_row(
+                list_panel_header(
+                    theme,
+                    self.tr("shell-panel-history"),
+                    self.context
+                        .i18n
+                        .format("gl-track-count", &[("count", history_total.into())]),
                 ),
-            )
+                panel_header_actions().child(self.search.clone()),
+            ))
             .when(history_len == 0, |panel| {
-                panel.child(caption(theme, self.tr(if history_total == 0 {
-                    "search-empty"
-                } else {
-                    "search-no-matches"
-                })))
+                panel.child(caption(
+                    theme,
+                    self.tr(if history_total == 0 {
+                        "search-empty"
+                    } else {
+                        "search-no-matches"
+                    }),
+                ))
             })
             .child(list_viewport(
-                column().size_full().child(header).child(VirtualList::new(("history-rows", panel_id), history_len, &scroll, cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
-                    range
-                        .filter_map(|index| {
-                            let item = this.model.get(index)?;
-                            let id = item.track_id;
-                            let favorite = item.favorite;
-                            let title = if item.title.is_empty() {
-                                this.context.i18n.text("gl-untitled").to_owned()
-                            } else {
-                                item.title.clone()
-                            };
-                            let last_played = this.column_widths.as_ref()
-                                .filter(|cache| cache.playback.is_some_and(|(track, _)| track == id))
-                                .and_then(|cache| cache.playback_text.clone())
-                                .unwrap_or_else(|| this.format_played_at(Some(item.played_at)).into());
-                            let selected = this.model.contains(id);
-                            let generation = this.model.generation();
-                            let drag_owner = cx.weak_entity();
-                            let drag_i18n = this.context.i18n.clone();
-                            Some(
-                                list_row(
-                                    theme,
-                                    ("history-entry", id as u64),
-                                    selected,
-                                )
-                                .h(rivu_ui::single_line_row_height(window, cx))
-                                .gap_0()
-                                .group("history-track-row")
-                                .relative()
-                                .child(
-                                    caption(theme, (index + 1).to_string())
-                                        .font_features(tabular_numbers())
-                                        .w(widths[0])
-                                        .flex_shrink_0()
-                                        .px_2()
-                                        .min_w_0()
-                                        .truncate(),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .px_2()
-                                        .text_sm()
-                                        .truncate()
-                                        .child(title),
-                                )
-                                .child(
-                                    caption(theme, item.play_count.to_string())
-                                        .font_features(tabular_numbers())
-                                        .w(widths[1])
-                                        .flex_shrink_0()
-                                        .px_2()
-                                        .min_w_0()
-                                        .truncate(),
-                                )
-                                .child(
-                                    caption(theme, last_played.to_owned())
-                                        .w(widths[2])
-                                        .flex_shrink_0()
-                                        .px_2()
-                                        .min_w_0()
-                                        .truncate(),
-                                )
-                                .child(
-                                    hover_actions(
-                                        theme,
-                                        ("history-track-actions", id as u64),
-                                        "history-track-row",
-                                        selected,
-                                    )
-                                    .child(
-                                        this.track_favorite_toggle(
-                                            ("history-entry-favorite", id as u64),
-                                            id,
-                                            favorite,
-                                            cx,
-                                        ),
-                                    ),
-                                )
-                                .on_mouse_down(
-                                    gpui::MouseButton::Right,
-                                    cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
-                                        cx.stop_propagation();
-                                        cx.emit(HistoryEvent::FocusRequested { panel_id });
-                                        this.refresh(cx);
-                                        let ids = this.model.drag_ids(id, generation);
-                                        if ids.is_empty() {
-                                            return;
-                                        }
-                                        if !this.model.contains(id) {
-                                            this.request_selection(id, false, false, cx);
-                                        }
-                                        cx.emit(HistoryEvent::ContentMenu(RefCell::new(Some(ContentMenuRequest {
-                                            source: TrackSource::Tracks(ids),
-                                            position: event.position,
-                                            play: Some(Command::Play { track_id: id }),
-                                        }))));
-                                    }),
-                                )
-                                .on_click(cx.listener(
-                                    move |this, event: &gpui::ClickEvent, _, cx| {
-                                        cx.emit(HistoryEvent::FocusRequested { panel_id });
-                                        let modifiers = event.modifiers();
-                                        this.request_selection(
-                                            id,
-                                            modifiers.shift,
-                                            modifiers.control,
-                                            cx,
-                                        );
-                                        if event.click_count() == 2 {
-                                            this.send(Command::Play { track_id: id }, cx);
-                                        }
-                                    },
-                                ))
-                                .on_drag(ContentDrag::pending(), move |drag, _, window, cx| {
-                                    let ids = drag_owner
-                                        .update(cx, |this, cx| {
-                                            this.refresh(cx);
-                                            let ids = this.model.drag_ids(id, generation);
-                                            if !ids.is_empty() && !this.model.contains(id) {
-                                                this.request_selection(id, false, false, cx);
-                                            }
-                                            ids
+                column().size_full().child(header).child(
+                    VirtualList::new(
+                        ("history-rows", panel_id),
+                        history_len,
+                        &scroll,
+                        cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
+                            let row_height = rivu_ui::single_line_row_height(window, cx);
+                            range
+                                .filter_map(|index| {
+                                    let item = this.model.get(index)?;
+                                    let id = item.track_id;
+                                    let favorite = item.favorite;
+                                    let title = if item.title.is_empty() {
+                                        this.context.i18n.text("gl-untitled").to_owned()
+                                    } else {
+                                        item.title.clone()
+                                    };
+                                    let last_played = this
+                                        .column_widths
+                                        .as_ref()
+                                        .filter(|cache| {
+                                            cache.playback.is_some_and(|(track, _)| track == id)
                                         })
-                                        .unwrap_or_default();
-                                    let count = ids.len();
-                                    drag.initialize(TrackSource::Tracks(ids));
-                                    rivu_ui::begin_list_drag(window, cx);
-                                    let label = drag_i18n.format(
-                                        "gl-track-count",
-                                        &[("count", count.into())],
-                                    ).into();
-                                    cx.new(|_| rivu_ui::ListDragPreview { label })
-                                }),
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                }))
-                .h_full()
-                .flex_1()
-                .min_h_0()
-                .w_full().scrollbar(("history-scrollbar", panel_id))),
+                                        .and_then(|cache| cache.playback_text.clone())
+                                        .unwrap_or_else(|| {
+                                            this.format_played_at(Some(item.played_at)).into()
+                                        });
+                                    let selected = this.model.contains(id);
+                                    let generation = this.model.generation();
+                                    let drag_owner = cx.weak_entity();
+                                    let drag_i18n = this.context.i18n.clone();
+                                    Some(
+                                        list_row(
+                                            theme,
+                                            ("history-entry", id as u64),
+                                            selected,
+                                            row_height,
+                                        )
+                                        .gap_0()
+                                        .group("history-track-row")
+                                        .relative()
+                                        .child(
+                                            caption(theme, (index + 1).to_string())
+                                                .font_features(tabular_numbers())
+                                                .w(widths[0])
+                                                .flex_shrink_0()
+                                                .px_2()
+                                                .min_w_0()
+                                                .truncate(),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .px_2()
+                                                .text_sm()
+                                                .truncate()
+                                                .child(title),
+                                        )
+                                        .child(
+                                            caption(theme, item.play_count.to_string())
+                                                .font_features(tabular_numbers())
+                                                .w(widths[1])
+                                                .flex_shrink_0()
+                                                .px_2()
+                                                .min_w_0()
+                                                .truncate(),
+                                        )
+                                        .child(
+                                            caption(theme, last_played.to_owned())
+                                                .w(widths[2])
+                                                .flex_shrink_0()
+                                                .px_2()
+                                                .min_w_0()
+                                                .truncate(),
+                                        )
+                                        .child(
+                                            hover_actions(
+                                                theme,
+                                                ("history-track-actions", id as u64),
+                                                "history-track-row",
+                                                selected,
+                                            )
+                                            .child(
+                                                this.track_favorite_toggle(
+                                                    ("history-entry-favorite", id as u64),
+                                                    id,
+                                                    favorite,
+                                                    cx,
+                                                ),
+                                            ),
+                                        )
+                                        .on_mouse_down(
+                                            gpui::MouseButton::Right,
+                                            cx.listener(
+                                                move |this, event: &gpui::MouseDownEvent, _, cx| {
+                                                    cx.stop_propagation();
+                                                    cx.emit(HistoryEvent::FocusRequested {
+                                                        panel_id,
+                                                    });
+                                                    this.refresh(cx);
+                                                    let ids = this.model.drag_ids(id, generation);
+                                                    if ids.is_empty() {
+                                                        return;
+                                                    }
+                                                    if !this.model.contains(id) {
+                                                        this.request_selection(
+                                                            id, false, false, cx,
+                                                        );
+                                                    }
+                                                    cx.emit(HistoryEvent::ContentMenu(
+                                                        RefCell::new(Some(ContentMenuRequest {
+                                                            source: TrackSource::Tracks(ids),
+                                                            position: event.position,
+                                                            play: Some(Command::Play {
+                                                                track_id: id,
+                                                            }),
+                                                        })),
+                                                    ));
+                                                },
+                                            ),
+                                        )
+                                        .on_click(cx.listener(
+                                            move |this, event: &gpui::ClickEvent, _, cx| {
+                                                cx.emit(HistoryEvent::FocusRequested { panel_id });
+                                                let modifiers = event.modifiers();
+                                                this.request_selection(
+                                                    id,
+                                                    modifiers.shift,
+                                                    modifiers.control,
+                                                    cx,
+                                                );
+                                                if event.click_count() == 2 {
+                                                    this.send(Command::Play { track_id: id }, cx);
+                                                }
+                                            },
+                                        ))
+                                        .on_drag(
+                                            ContentDrag::pending(),
+                                            move |drag, _, window, cx| {
+                                                let ids = drag_owner
+                                                    .update(cx, |this, cx| {
+                                                        this.refresh(cx);
+                                                        let ids =
+                                                            this.model.drag_ids(id, generation);
+                                                        if !ids.is_empty()
+                                                            && !this.model.contains(id)
+                                                        {
+                                                            this.request_selection(
+                                                                id, false, false, cx,
+                                                            );
+                                                        }
+                                                        ids
+                                                    })
+                                                    .unwrap_or_default();
+                                                let count = ids.len();
+                                                drag.initialize(TrackSource::Tracks(ids));
+                                                rivu_ui::begin_list_drag(window, cx);
+                                                let label = drag_i18n
+                                                    .format(
+                                                        "gl-track-count",
+                                                        &[("count", count.into())],
+                                                    )
+                                                    .into();
+                                                cx.new(|_| rivu_ui::ListDragPreview { label })
+                                            },
+                                        ),
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                        }),
+                    )
+                    .h_full()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .scrollbar(("history-scrollbar", panel_id)),
+                ),
             ))
             .into_any_element()
     }

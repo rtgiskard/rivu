@@ -495,9 +495,10 @@ impl Playlists {
     pub(in crate::gui) fn catalog_loading_row(
         &self,
         index: usize,
+        height: gpui::Pixels,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<Div> {
-        self.paged_loading_row(ViewRequestKind::Summaries, index, cx)
+        self.paged_loading_row(ViewRequestKind::Summaries, index, height, cx)
     }
     fn request_queue_replace(
         &self,
@@ -651,13 +652,12 @@ impl Playlists {
 pub(super) struct PlaylistDrag {
     i18n: std::sync::Arc<crate::i18n::Localizer>,
     pub(super) playlist_id: i64,
-    source_id: i64,
     // GPUI keeps the original on_drag value; the constructor creates only its preview.
     entry_ids: std::cell::OnceCell<Vec<i64>>,
     pub(super) track_ids: std::cell::OnceCell<Vec<i64>>,
     pub(super) revision: u64,
     stamp: rivu_protocol::model::QueryStamp,
-    selection_generation: u64,
+    entry_generation: u64,
 }
 
 impl PlaylistDrag {
@@ -707,7 +707,7 @@ impl Playlists {
         self.browser.playlists().selected() == Some(drag.playlist_id)
             && self.browser.playlists().entries().query.is_none()
             && self.browser.playlists().entries().playlist_id == Some(drag.playlist_id)
-            && self.browser.playlists().selection_generation() == drag.selection_generation
+            && self.browser.playlists().entry_generation() == drag.entry_generation
             && self.playlist_occurrence_stamp(drag.playlist_id) == drag.stamp
             && self.playlist_revision(drag.playlist_id) == drag.revision
             && drag.accepts(target)
@@ -1169,8 +1169,7 @@ impl Playlists {
                     .map(|index| {
                         let Some(p) = this.browser.playlists().summaries().rows.get(index) else {
                             return this
-                                .paged_loading_row(ViewRequestKind::Summaries, index, cx)
-                                .h(list_row_height(window, cx))
+                                .paged_loading_row(ViewRequestKind::Summaries, index, row_height, cx)
                                 .into_any_element();
                         };
                         let id = p.id;
@@ -1183,8 +1182,8 @@ impl Playlists {
                             theme,
                             ("playlist", id as u64),
                             this.browser.playlists().selected() == Some(id),
+                            row_height,
                         )
-                        .h(list_row_height(window, cx))
                         .when(
                             (this.focused && this.layout_focus.is_focused(window))
                                 && this.browser.focus() == Some(super::BrowserFocus::Playlists)
@@ -1372,8 +1371,12 @@ impl Playlists {
                         .map(|index| {
                             let Some(e) = this.browser.playlists().entries().rows.get(index) else {
                                 return this
-                                    .paged_loading_row(ViewRequestKind::Entries, index, cx)
-                                    .h(list_row_height(window, cx))
+                                    .paged_loading_row(
+                                        ViewRequestKind::Entries,
+                                        index,
+                                        row_height,
+                                        cx,
+                                    )
                                     .into_any_element();
                             };
                             let id = e.id;
@@ -1382,31 +1385,33 @@ impl Playlists {
                             let favorite = e.favorite;
                             let revision = this.playlist_revision(playlist_id);
                             let stamp = this.playlist_occurrence_stamp(playlist_id);
-                            let selection_generation =
-                                this.browser.playlists().selection_generation();
+                            let entry_generation = this.browser.playlists().entry_generation();
+                            let source = selection::EntryIdentity::row(e, index);
                             let drag_owner = cx.entity().downgrade();
                             let drag = PlaylistDrag {
                                 i18n: std::sync::Arc::clone(&this.i18n),
                                 playlist_id,
-                                source_id: id,
                                 entry_ids: Default::default(),
                                 track_ids: Default::default(),
                                 revision,
                                 stamp,
-                                selection_generation,
+                                entry_generation,
                             };
                             track_list_row(
                                 theme,
-                                ("playlist-entry", id as u64),
+                                rivu_ui::list_row(
+                                    theme,
+                                    ("playlist-entry", id as u64),
+                                    this.browser.playlists().track_selection.contains(id),
+                                    row_height,
+                                ),
                                 TrackText::from(e),
                                 e.position,
                                 this.state
                                     .current_track()
                                     .is_some_and(|track| track.id == track_id),
-                                this.browser.playlists().track_selection.contains(id),
                                 &this.i18n,
                             )
-                            .h(list_row_height(window, cx))
                             .when(e.missing, |row| {
                                 row.child(caption(theme, this.tr("gl-missing")))
                             })
@@ -1507,8 +1512,14 @@ impl Playlists {
                                     move |this, event: &gpui::MouseDownEvent, window, cx| {
                                         this.focus_layout(window, cx);
                                         this.focus_list(cx);
-                                        if this.browser.playlists().track_selection.contains(id)
-                                            && !this.browser.playlists().track_selection.ready()
+                                        this.refresh(cx);
+                                        let rows = this.browser.playlists().operation_rows(
+                                            playlist_id,
+                                            entry_generation,
+                                            source,
+                                        );
+                                        if this.playlist_revision(playlist_id) != revision
+                                            || rows.is_empty()
                                         {
                                             cx.stop_propagation();
                                             return;
@@ -1516,18 +1527,9 @@ impl Playlists {
                                         if !this.browser.playlists().track_selection.contains(id) {
                                             this.select_playlist_entry(id, index, false, false, cx);
                                         }
-                                        let rows =
-                                            this.browser.playlists().track_selection.ordered();
-                                        let track_ids = if rows.iter().any(|row| row.id == id) {
-                                            rows.iter().map(|row| row.track_id).collect()
-                                        } else {
-                                            vec![track_id]
-                                        };
-                                        let entry_ids = if rows.iter().any(|row| row.id == id) {
-                                            rows.iter().map(|row| row.id).collect()
-                                        } else {
-                                            vec![id]
-                                        };
+                                        let track_ids =
+                                            rows.iter().map(|row| row.track_id).collect();
+                                        let entry_ids = rows.iter().map(|row| row.id).collect();
                                         this.open_object_menu(
                                             super::ContentMenuRequest {
                                                 source: TrackSource::Tracks(track_ids),
@@ -1587,11 +1589,6 @@ impl Playlists {
                                                             || this
                                                                 .browser
                                                                 .playlists()
-                                                                .selection_generation()
-                                                                != drag.selection_generation
-                                                            || this
-                                                                .browser
-                                                                .playlists()
                                                                 .entries()
                                                                 .query
                                                                 .is_some()
@@ -1603,41 +1600,33 @@ impl Playlists {
                                                         {
                                                             return Vec::new();
                                                         }
+                                                        let rows = this
+                                                            .browser
+                                                            .playlists()
+                                                            .operation_rows(
+                                                                drag.playlist_id,
+                                                                drag.entry_generation,
+                                                                source,
+                                                            );
+                                                        if rows.is_empty() {
+                                                            return Vec::new();
+                                                        }
                                                         if !this
                                                             .browser
                                                             .playlists()
                                                             .track_selection
-                                                            .contains(drag.source_id)
+                                                            .contains(source.id)
                                                         {
                                                             this.select_playlist_entry(
-                                                                drag.source_id,
-                                                                index,
-                                                                false,
-                                                                false,
-                                                                cx,
+                                                                source.id, index, false, false, cx,
                                                             );
                                                         }
-                                                        let tracks = if this
-                                                            .browser
-                                                            .playlists()
-                                                            .track_selection
-                                                            .contains(drag.source_id)
-                                                        {
-                                                            this.browser
-                                                                .playlists()
-                                                                .track_selection
-                                                                .ordered()
-                                                                .iter()
+                                                        let _ = drag.track_ids.set(
+                                                            rows.iter()
                                                                 .map(|row| row.track_id)
-                                                                .collect()
-                                                        } else {
-                                                            vec![track_id]
-                                                        };
-                                                        let _ = drag.track_ids.set(tracks);
-                                                        this.browser
-                                                            .playlists()
-                                                            .track_selection
-                                                            .drag_ids(drag.source_id)
+                                                                .collect(),
+                                                        );
+                                                        rows.iter().map(|row| row.id).collect()
                                                     })
                                                     .unwrap_or_default()
                                             });
@@ -1962,12 +1951,11 @@ mod playlist_drag_tests {
         let drag = PlaylistDrag {
             i18n: std::sync::Arc::new(crate::i18n::Localizer::new("en-US")),
             playlist_id: 8,
-            source_id: 40,
             entry_ids: std::cell::OnceCell::from(vec![7, 40, 2]),
             track_ids: std::cell::OnceCell::from(vec![9, 9, 3]),
             revision: 19,
             stamp: Default::default(),
-            selection_generation: 4,
+            entry_generation: 4,
         };
         assert_eq!(drag.track_ids.get().unwrap(), &[9, 9, 3]);
         for target in [7, 40, 2] {
@@ -2021,12 +2009,11 @@ mod playlist_drag_tests {
         let drag = || PlaylistDrag {
             i18n: std::sync::Arc::new(crate::i18n::Localizer::new("en-US")),
             playlist_id: 8,
-            source_id: 40,
             entry_ids: std::cell::OnceCell::from(vec![7, 40, 2]),
             track_ids: std::cell::OnceCell::from(vec![9, 9, 3]),
             revision: 19,
             stamp: Default::default(),
-            selection_generation: 4,
+            entry_generation: 4,
         };
         let mut state = GuiSnapshot::default();
         state.queue.revision = 6;

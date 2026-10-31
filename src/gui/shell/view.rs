@@ -13,7 +13,7 @@ impl Render for WindowView {
         self.synchronize_interaction(window, cx);
         self.synchronize_keyboard_focus(window, cx);
         if self.workspace.interaction.docking().is_some()
-            && (!cx.has_active_drag() || self.panel_docking_blocked())
+            && (!cx.has_active_drag() || self.panel_docking_blocked(cx))
         {
             self.cancel_panel_docking(window, cx);
         }
@@ -53,10 +53,11 @@ impl Render for WindowView {
             .font(self.ui_font.clone())
             .track_focus(self.shell.layout_focus())
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                if this.current_keyboard_surface(cx).is_none() {
+                let surface = this.current_keyboard_surface(cx);
+                if surface.is_none() {
                     this.shell.capture_origin(window, cx);
                 }
-                if let Some(surface) = this.current_keyboard_surface(cx) {
+                if let Some(surface) = surface {
                     let within_surface = match surface {
                         KeyboardSurface::Settings => this
                             .settings
@@ -98,10 +99,10 @@ impl Render for WindowView {
             }))
             .on_key_down(cx.listener(Self::keyboard_input))
             .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                if this.current_keyboard_surface(cx).is_none() {
+                let modal = this.current_keyboard_surface(cx).is_some();
+                if !modal {
                     this.shell.capture_origin(window, cx);
                 }
-                let modal = this.current_keyboard_surface(cx).is_some();
                 this.workspace
                     .scroll_views
                     .borrow_mut()
@@ -459,11 +460,6 @@ impl Render for WindowView {
             app = app.child(self.docking_overlay(theme));
         }
 
-        if let Some(state) = self.panel_menu {
-            app = app.child(self.render_panel_menu(state, theme, window, cx));
-        }
-        app = app.child(self.content_menu_overlay(window, cx));
-
         let menu_scope = matches!(
             self.current_keyboard_surface(cx),
             Some(KeyboardSurface::Menu(..))
@@ -474,55 +470,68 @@ impl Render for WindowView {
         self.playlists.update(cx, |playlists, cx| {
             playlists.set_shell_context(layout_focus, menu_scope, dialog_scope, cx);
         });
-        if self.playlists.read(cx).action().is_some() {
-            app = app.child(self.playlists.update(cx, |playlists, cx| {
-                playlists.playlist_action_overlay(window, cx)
-            }));
-        }
-        if self.queue_replace.is_some() {
-            app = app.child(self.queue_replace_overlay(window, cx));
-        }
-        if self.playlists.read(cx).editor_open() {
-            app = app.child(self.playlists.update(cx, |playlists, cx| {
-                playlists.playlist_name_dialog(window, cx)
-            }));
-        }
-        if self.shell.is_open(shell::Surface::Layouts) {
-            app = app.child(self.layouts_panel(window, cx));
-        }
-        if self.shell.is_open(shell::Surface::Settings) {
-            app = app.child(
-                self.settings
-                    .clone()
-                    .cached(gpui::StyleRefinement::default().absolute().size_full()),
-            );
-        }
-        if self.duplicates.read(cx).is_open() {
-            let surface = self.dialog_surface(Dialog::backdrop("duplicate-review-modal"));
-            app = app.child(self.duplicates.update(cx, |duplicates, cx| {
-                duplicates
-                    .render_modal(surface, window, cx)
-                    .into_any_element()
-            }));
-        }
-        if self.shell.is_open(shell::Surface::About) {
-            static LOGO: std::sync::LazyLock<Arc<Image>> = std::sync::LazyLock::new(|| {
-                Arc::new(Image::from_bytes(
-                    ImageFormat::Png,
-                    crate::artwork::DEFAULT_IMAGE.to_vec(),
-                ))
-            });
-            let built = chrono::DateTime::<chrono::Utc>::from_timestamp(
-                env!("RIVU_BUILD_TIMESTAMP")
-                    .parse()
-                    .expect("build script emits Unix seconds"),
-                0,
-            )
-            .expect("build script validates timestamp range")
-            .with_timezone(&chrono::Local)
-            .format("%Y-%m-%d %H:%M:%S %:z")
-            .to_string();
-            app = app.child(
+        for surface in self.surface_layers(cx) {
+            match surface {
+                KeyboardSurface::Menu(MenuSurface::App | MenuSurface::PanelCatalog) => {}
+                KeyboardSurface::Menu(MenuSurface::Panel(_)) => {
+                    let state = self.panel_menu.expect("live panel menu");
+                    app = app.child(self.render_panel_menu(state, theme, window, cx));
+                }
+                KeyboardSurface::Menu(MenuSurface::Content(_)) => {
+                    app = app.child(self.content_menu_overlay(window, cx));
+                }
+                KeyboardSurface::Menu(MenuSurface::Playlist)
+                | KeyboardSurface::Dialog(DialogSurface::PlaylistDelete) => {
+                    app = app.child(self.playlists.update(cx, |playlists, cx| {
+                        playlists.playlist_action_overlay(window, cx)
+                    }));
+                }
+                KeyboardSurface::Dialog(DialogSurface::QueueReplacement) => {
+                    app = app.child(self.queue_replace_overlay(window, cx));
+                }
+                KeyboardSurface::Dialog(DialogSurface::PlaylistEditor) => {
+                    app = app.child(self.playlists.update(cx, |playlists, cx| {
+                        playlists.playlist_name_dialog(window, cx)
+                    }));
+                }
+                KeyboardSurface::Dialog(
+                    DialogSurface::LayoutManager | DialogSurface::LayoutAction,
+                ) => {
+                    app = app.child(self.layouts_panel(window, cx));
+                }
+                KeyboardSurface::Settings => {
+                    app = app.child(
+                        self.settings
+                            .clone()
+                            .cached(gpui::StyleRefinement::default().absolute().size_full()),
+                    );
+                }
+                KeyboardSurface::Dialog(DialogSurface::DuplicateReview) => {
+                    let surface = self.dialog_surface(Dialog::backdrop("duplicate-review-modal"));
+                    app = app.child(self.duplicates.update(cx, |duplicates, cx| {
+                        duplicates
+                            .render_modal(surface, window, cx)
+                            .into_any_element()
+                    }));
+                }
+                KeyboardSurface::Dialog(DialogSurface::About) => {
+                    static LOGO: std::sync::LazyLock<Arc<Image>> = std::sync::LazyLock::new(|| {
+                        Arc::new(Image::from_bytes(
+                            ImageFormat::Png,
+                            crate::artwork::DEFAULT_IMAGE.to_vec(),
+                        ))
+                    });
+                    let built = chrono::DateTime::<chrono::Utc>::from_timestamp(
+                        env!("RIVU_BUILD_TIMESTAMP")
+                            .parse()
+                            .expect("build script emits Unix seconds"),
+                        0,
+                    )
+                    .expect("build script validates timestamp range")
+                    .with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d %H:%M:%S %:z")
+                    .to_string();
+                    app = app.child(
                 Dialog::backdrop("about-modal")
                     .map(|surface| self.dialog_surface(surface))
                     .child(
@@ -615,12 +624,17 @@ impl Render for WindowView {
                             ),
                     ),
             );
-        }
-        if let Some(context) = self.shell.help() {
-            app = app.child(self.keyboard_help_overlay(context, cx));
-        }
-        if let Some(confirmation) = self.render_manual_confirmation(window, cx) {
-            app = app.child(confirmation);
+                }
+                KeyboardSurface::Dialog(DialogSurface::KeyboardHelp) => {
+                    let context = self.shell.help().expect("live keyboard help");
+                    app = app.child(self.keyboard_help_overlay(context, cx));
+                }
+                KeyboardSurface::Dialog(DialogSurface::MetadataConfirmation) => {
+                    if let Some(confirmation) = self.render_manual_confirmation(window, cx) {
+                        app = app.child(confirmation);
+                    }
+                }
+            }
         }
         self.workspace.scroll_views.borrow_mut().finish_frame();
         app

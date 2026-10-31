@@ -484,11 +484,17 @@ fn visual_switch(
         })
     )
     .into();
-    rivu_ui::toggle_button(id, icon, hint, enabled, cx, move |this, cx| {
-        toggle(&mut this.model.draft);
-        this.model.edited();
-        this.sync_field_enabled(cx);
-    })
+    IconButton::new(id, icon, hint).switch(enabled).build(
+        IconButtonStyle::Surface,
+        IconButtonDensity::Regular,
+        cx,
+        move |this, _, cx| {
+            toggle(&mut this.model.draft);
+            this.model.edited();
+            this.sync_field_enabled(cx);
+            cx.notify();
+        },
+    )
 }
 
 fn settings_group(

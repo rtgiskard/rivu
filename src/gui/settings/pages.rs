@@ -17,8 +17,9 @@ use crate::{
 };
 use gpui::{Context, Div, SharedString, div, prelude::*, rems, rgb};
 use rivu_ui::{
-    ChoiceItem, FormField, StatusKind, button, caption, column, copyable_message, disabled_control,
-    row, status_message, text_tooltip, theme::palette, two_column,
+    ChoiceItem, FormField, IconButton, IconButtonDensity, IconButtonStyle, StatusKind, button,
+    caption, column, copyable_message, disabled_control, row, status_message, text_tooltip,
+    theme::palette, two_column,
 };
 
 impl Settings {
@@ -445,37 +446,45 @@ impl Settings {
                     row()
                         .flex_wrap()
                         .gap_2()
-                        .child(rivu_ui::toggle_button(
-                            "settings-ffmpeg",
-                            "\u{f384}",
-                            self.i18n.format(
-                                "settings-ffmpeg-status",
-                                &[
-                                    (
-                                        "state",
-                                        self.i18n
-                                            .text(if ffmpeg {
-                                                "settings-on"
-                                            } else {
-                                                "settings-off"
-                                            })
-                                            .into(),
-                                    ),
-                                    (
-                                        "detail",
-                                        ffmpeg_hint(&self.i18n, &self.ffmpeg_status)
-                                            .to_owned()
-                                            .into(),
-                                    ),
-                                ],
+                        .child(
+                            IconButton::new(
+                                "settings-ffmpeg",
+                                "\u{f384}",
+                                self.i18n.format(
+                                    "settings-ffmpeg-status",
+                                    &[
+                                        (
+                                            "state",
+                                            self.i18n
+                                                .text(if ffmpeg {
+                                                    "settings-on"
+                                                } else {
+                                                    "settings-off"
+                                                })
+                                                .into(),
+                                        ),
+                                        (
+                                            "detail",
+                                            ffmpeg_hint(&self.i18n, &self.ffmpeg_status)
+                                                .to_owned()
+                                                .into(),
+                                        ),
+                                    ],
+                                ),
+                            )
+                            .switch(ffmpeg)
+                            .build(
+                                IconButtonStyle::Surface,
+                                IconButtonDensity::Regular,
+                                cx,
+                                |this, _, cx| {
+                                    this.model.draft.ffmpeg_enabled =
+                                        !this.model.draft.ffmpeg_enabled;
+                                    this.model.edited();
+                                    cx.notify();
+                                },
                             ),
-                            ffmpeg,
-                            cx,
-                            |this, _| {
-                                this.model.draft.ffmpeg_enabled = !this.model.draft.ffmpeg_enabled;
-                                this.model.edited();
-                            },
-                        ))
+                        )
                         .child(visual_switch(
                             &self.i18n,
                             "settings-pipewire-auto-mix",
@@ -605,28 +614,35 @@ impl Settings {
             row()
                 .flex_wrap()
                 .gap_2()
-                .child(rivu_ui::toggle_button(
-                    "settings-mpris",
-                    "󰐹",
-                    self.i18n.format(
-                        "settings-mpris-status",
-                        &[
-                            (
-                                "state",
-                                self.i18n
-                                    .text(if mpris { "settings-on" } else { "settings-off" })
-                                    .into(),
-                            ),
-                            ("detail", self.mpris_status.to_owned().into()),
-                        ],
+                .child(
+                    IconButton::new(
+                        "settings-mpris",
+                        "󰐹",
+                        self.i18n.format(
+                            "settings-mpris-status",
+                            &[
+                                (
+                                    "state",
+                                    self.i18n
+                                        .text(if mpris { "settings-on" } else { "settings-off" })
+                                        .into(),
+                                ),
+                                ("detail", self.mpris_status.to_owned().into()),
+                            ],
+                        ),
+                    )
+                    .switch(mpris)
+                    .build(
+                        IconButtonStyle::Surface,
+                        IconButtonDensity::Regular,
+                        cx,
+                        |this, _, cx| {
+                            this.model.draft.mpris_enabled = !this.model.draft.mpris_enabled;
+                            this.model.edited();
+                            cx.notify();
+                        },
                     ),
-                    mpris,
-                    cx,
-                    |this, _| {
-                        this.model.draft.mpris_enabled = !this.model.draft.mpris_enabled;
-                        this.model.edited();
-                    },
-                ))
+                )
                 .child(visual_switch(
                     &self.i18n,
                     "settings-tray",
