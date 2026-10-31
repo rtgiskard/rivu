@@ -172,7 +172,7 @@ class LocalBackendTransportTests(unittest.TestCase):
         scratch.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=scratch) as directory:
             base = Path(directory)
-            bundle_fixture(base, operation, "nsnet2" if operation == "speech" else "htdemucs")
+            bundle_fixture(base, operation, "MossFormer2_SE_48K" if operation == "speech" else "melband_roformer_kim")
             audio = np.linspace(-1.25, 1.25, frames*channels, dtype="<f4").reshape(-1, channels)
             audio[0, 0] = -0.0
             request = {"version":2,"task_id":"local-transport","operation":operation,"sample_rate":8000,

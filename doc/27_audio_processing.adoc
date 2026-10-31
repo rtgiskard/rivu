@@ -271,8 +271,8 @@ classical spectral preset.
 
 === Explicit neural installation and offline deployment
 
-Speech backends are MossFormer2 SE48K, NSNet2 and DeepFilterNet3; separation
-backends are Kim MelBand RoFormer and HTDemucs. Each graph node selects its own
+Speech backends are MossFormer2 SE48K and DeepFilterNet3; the separation
+backend is Kim Mel-band RoFormer (`melband_roformer_kim`). Each graph node selects its own
 prepared manifest, interpreter and worker. With `uv` already installed, run setup
 from the repository root in separate pinned environments: their PyTorch
 requirements differ. Install only the backends you need.
@@ -283,8 +283,7 @@ with an existing parent and 2 GiB free. Choose `--download` or local `--weights`
 even local weights can require network access for pinned code/license evidence.
 Playback, builds and worker inference never download models. CPU is the default;
 CUDA requires an explicitly compatible environment and has no automatic fallback.
-The pinned NSNet2 environment is CPU-only. Thread settings accept 1–8; the recorded
-local evaluation workflow uses at most four.
+Thread settings accept 1–8; the recorded local evaluation workflow uses at most four.
 
 [source,shell]
 ----
@@ -294,20 +293,19 @@ python3 tools/audio_processing/prepare.py moss --download --directory .cache/neu
 python3 tools/audio_processing/prepare.py separate --download --directory .cache/neural/kim --interpreter "$PWD/.cache/neural/separate-venv/bin/python"
 ----
 
-The primary example prepares MossFormer2 and Kim. Add only the optional
-backends you intend to compare; HTDemucs shares the separation environment,
-while DeepFilterNet3 needs its own pinned environment:
+The primary example prepares MossFormer2 and Kim. DeepFilterNet3 is optional
+and needs its own pinned environment:
 
 [source,shell]
 ----
-python3 tools/audio_processing/prepare.py htdemucs --download --directory .cache/neural/htdemucs --interpreter "$PWD/.cache/neural/separate-venv/bin/python"
 python3 tools/audio_processing/install.py df3
 python3 tools/audio_processing/prepare.py df3 --download --directory .cache/neural/df3 --interpreter "$PWD/.cache/neural/df3-venv/bin/python"
 ----
 
-For optional NSNet2, use `install.py speech`, then `prepare.py nsnet2` with
-`.cache/neural/speech-venv/bin/python`: installation names the environment,
-preparation names the model.
+Migration: NSNet2 and HTDemucs are no longer supported. There are no automatic
+model substitutions: explicitly select a supported model and its environment.
+Reprovision or reprepare current supported-model bundles into new directories
+because the runtime sidecars have changed; configure the newly emitted paths.
 
 Preparation prints absolute `worker`, `interpreter` and `model_manifest` paths.
 Configure *all three* and preserve the interpreter's venv symlink rather than
@@ -372,8 +370,8 @@ rivu processing start 43 separate --wait
 
 MossFormer2's primary model card declares Apache-2.0; Kim's original trainer card
 declares MIT. Preparation pins checkpoints and records weight evidence separately
-from code permissions. HTDemucs/DeepFilterNet3 retain actual provenance and
-unresolved weight-permission facts, not synthesized grants. Review notices before
+from code permissions. DeepFilterNet3 retains actual provenance and unresolved
+weight-permission facts, not synthesized grants. Review notices before
 redistribution; provisioning grants no additional license.
 
 `prepare.py --proxy` applies only to preparation, never inference. Do not put
@@ -899,13 +897,13 @@ the baseline sample-exactly. Representative 48 kHz/256-frame times, in microseco
 The worst selected call was 248.281 microseconds, below its nominal block
 interval. Variation is not a uniform-speedup or physical-device deadline claim.
 
-`.cache/neural/graph-backend-evidence/comparison.json` compares the same first
-three seconds of an official MUSDB AAC excerpt (132300 stereo frames, 44.1 kHz).
-Vocal per-channel SI-SDR was 10.854/10.358 dB for HTDemucs and 12.429/11.742 dB
-for Kim. Single four-thread CPU runs reported processing RTF 1.200 and 10.327,
-not repeated estimates. Both reconstruction residual peaks were 2.98e-8, a
-mixture-minus-vocals invariant. This is neither a full-corpus ranking nor
-fullband/listening acceptance.
+The Kim result in `.cache/neural/graph-backend-evidence/comparison.json` covers
+the first three seconds of an official MUSDB AAC excerpt (132300 stereo frames,
+44.1 kHz). Vocal per-channel SI-SDR was 12.429/11.742 dB. A single four-thread
+CPU run reported processing RTF 10.327, not a repeated estimate. The reconstruction
+residual peak was 2.98e-8, a mixture-minus-vocals invariant, not evidence of
+separation quality. This is neither a full-corpus ranking nor fullband/listening
+acceptance.
 ====
 
 === Implementation cost audit
@@ -924,22 +922,6 @@ saved one allocation and 16,640 requested bytes at FFT 2048, or 65,792 bytes at
 FFT 8192; partial-wet capacity was unchanged. Both versions allocated zero bytes
 inside preallocated processing/finish. Seven timing repetitions showed no uniform
 speedup. Requested allocation bytes are not RSS or callback-deadline evidence.
-
-==== NSNet2 numerical processing
-
-`.cache/speech-optimize-20261023/nsnet-numeric.json` and
-`nsnet-numeric-numpy-2.5.4.json` record exact baseline feature/synthesis parity
-across 13 lengths and mono/stereo under pinned NumPy 1.26.4 and NumPy 2.5.4.
-For 12-second stereo input, pinned-runtime feature temporary peaks fell
-18,567,672 → 13,875,816 bytes; synthesis was essentially unchanged. Timing
-distributions overlapped.
-
-The subsequent batched FFT consumer under `.cache/audio-review-next/` matched
-44 length/layout cases per NumPy version without modifying input spectra. At
-48 kHz stereo/576,037 samples, pinned-runtime traced synthesis peaks fell
-55,394,788 → 18,485,420 bytes. Nine alternating-order timings had baseline/batched
-medians 25.899/23.107 ms and ranges 25.125–31.046/22.243–24.647 ms. Other version/
-short-input distributions overlapped; this is not an end-to-end model speedup.
 
 ==== Shared worker storage
 

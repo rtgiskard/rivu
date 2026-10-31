@@ -6,8 +6,8 @@ From the repository root, with uv already explicitly installed:
   python tools/audio_processing/install.py separate
   python tools/audio_processing/install.py df3
 
-The separate environment supports both Kim Mel-band RoFormer and HTDemucs;
-prepare.py selects and pins their distinct weights/architecture per manifest.
+The separate environment supports Kim Mel-band RoFormer; prepare.py pins its
+weights and architecture in the manifest.
 These prepare independent pinned Python environments below .cache/neural.
 Pinned CPU PyTorch environments and checkpoints require approximately5-8GiB
 combined, plus corpus/results. The command requires10GiB free reserve. Download
@@ -15,7 +15,6 @@ caches and temporary files are directed below .cache/neural. No global Python
 packages are changed. CUDA deployments must explicitly prepare matching pinned
 PyTorch/torchaudio versions themselves; the worker never silently falls back.
 
-Optional explicit baseline: install.py speech (NSNet2).
 DeepFilterNet3: install.py df3, then prepare.py df3 --download or --weights.
 Its public pretrained weight-license status is unresolved and recorded as such;
 candidate preparation does not imply permission to redistribute the weights.
@@ -30,7 +29,6 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 PINS = {
-    "speech": ("3.11", [], ["onnxruntime==1.23.2", "numpy==1.26.4", "scipy==1.11.4", "soundfile==0.12.1"]),
     "moss": ("3.12.15", ["torch==2.11.0+cpu", "torchaudio==2.11.0+cpu"], [
         "numpy==2.2.6", "scipy==1.15.3", "soundfile==0.13.1", "einops==0.8.1",
         "rotary-embedding-torch==0.8.3", "torchinfo==1.8.0", "pystoi==0.4.1"]),

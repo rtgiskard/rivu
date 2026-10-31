@@ -8,61 +8,6 @@ import unittest
 
 import numpy as np
 
-from runtime.nsnet2 import _log_power, _synthesize
-
-
-class NSNetSpectralTests(unittest.TestCase):
-    def setUp(self):
-        self.hop = 512
-        self.window = np.sqrt(0.5 - 0.5 * np.cos(2 * np.pi * np.arange(960) / 960)).astype("float32")
-
-    def spectrum(self, audio):
-        padded = np.pad(audio, ((self.hop, self.hop + (-len(audio)) % self.hop), (0, 0)))
-        frames = np.lib.stride_tricks.sliding_window_view(padded, len(self.window), axis=0)[::self.hop]
-        return np.fft.rfft(frames * self.window, n=1024, axis=-1).transpose(1, 0, 2)
-
-    def test_log_power_floor_and_complex_bins(self):
-        spectrum = np.array([0, 1e-8j, 1e-6, 3 + 4j, -2 - 3j], dtype="complex128")
-        original = spectrum.copy()
-        expected = np.array([-12, -12, -12, 1.3979400086720377, 1.1139433523068367], dtype="float32")
-        output = _log_power(spectrum)
-        self.assertEqual(output.dtype, np.float32)
-        np.testing.assert_array_equal(output, expected)
-        np.testing.assert_array_equal(spectrum, original)
-
-    def test_overlap_add_edges_hops_and_independent_channels(self):
-        for count in (1, 447, 448, 511, 512, 513, 959, 960, 961, 1024, 1025, 48037):
-            with self.subTest(count=count):
-                audio = np.random.default_rng(count).normal(0, 0.1, (count, 2)).astype("float32")
-                audio[0, 0], audio[-1, 1] = 1.5, -1.25
-                spectrum = self.spectrum(audio)
-                # Real spectral gain processing, not a substituted inference session.
-                spectrum *= np.array([0.25, 0.75], dtype="float32")[:, None, None]
-                output = _synthesize(spectrum, self.window, self.window**2, self.hop, count)
-                self.assertEqual(output.shape, audio.shape)
-                self.assertEqual(output.dtype, np.float32)
-                np.testing.assert_allclose(output, audio * [0.25, 0.75], rtol=2e-6, atol=2e-7)
-
-    def test_frequency_mask_and_channel_order_match_direct_overlap_add(self):
-        for count in (4097, 31745, 32257, 65025):
-            with self.subTest(count=count):
-                audio = np.random.default_rng(6).normal(0, 0.1, (count, 2)).astype("float32")
-                spectrum = self.spectrum(audio)
-                spectrum[0, :, 100:] = 0
-                spectrum[1, :, :200] *= 0.1
-                spectrum.setflags(write=False)
-                frames = np.fft.irfft(spectrum, n=1024, axis=-1)[..., :960]
-                expected = np.zeros((len(audio) + 2 * self.hop + (-len(audio)) % self.hop, 2))
-                weight = np.zeros(len(expected))
-                for index in range(frames.shape[1]):
-                    begin = index * self.hop
-                    expected[begin:begin+960] += frames[:, index].T * self.window[:, None]
-                    weight[begin:begin+960] += self.window**2
-                expected = expected[self.hop:self.hop+len(audio)] / weight[self.hop:self.hop+len(audio), None]
-                output = _synthesize(spectrum, self.window, self.window**2, self.hop, len(audio))
-                np.testing.assert_array_equal(output, expected.astype("float32"))
-
-
 @unittest.skipUnless(importlib.util.find_spec("torch") and importlib.util.find_spec("torchaudio"),
                      "Torch and torchaudio required for real Kaldi/spectral numerics")
 class MossFormerNumericalTests(unittest.TestCase):

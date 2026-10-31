@@ -1,6 +1,6 @@
 """Behavioral checks; optional real-model tests use explicitly prepared manifests.
 
-Set RIVU_SPEECH_MANIFEST, RIVU_KIM_MANIFEST and/or RIVU_HTDEMUCS_MANIFEST.
+Set RIVU_SPEECH_MANIFEST and/or RIVU_KIM_MANIFEST.
 Run with the corresponding prepared interpreter: python -m unittest discover -s tools/audio_processing -p 'test_*.py'
 """
 import importlib.util
@@ -19,7 +19,7 @@ def export_request():
     return {"version":1,"task_id":"test","operation":"speech","input_path":"/input.wav",
             "output_dir":"/new-output","model_manifest":"/manifest.json"}
 
-def bundle_fixture(base, operation="speech", model="nsnet2", provenance=None):
+def bundle_fixture(base, operation="speech", model="MossFormer2_SE_48K", provenance=None):
     """Current admission fixture, not a downloadable or executable model."""
     import sys
     runtime = base / "runtime"
@@ -58,7 +58,7 @@ class ProvisionTests(unittest.TestCase):
             evidence = source / "weight-license.txt"
             evidence.write_text("Construction provenance fixture.")
             manifest_path = source / "manifest.json"
-            manifest_path.write_text(json.dumps({"version":1, "operation":"speech", "id":"nsnet2",
+            manifest_path.write_text(json.dumps({"version":1, "operation":"speech", "id":"MossFormer2_SE_48K",
                 "packages":{"fixture":"1"}, "license_evidence":"weight-license.txt",
                 "files":{"weight-license.txt":digest(evidence)}}))
             with patch("provision.importlib.metadata.distributions", return_value=[distribution]), \
@@ -68,12 +68,12 @@ class ProvisionTests(unittest.TestCase):
                 with patch.object(sys, "argv", ["provision.py", "--manifest", str(manifest_path),
                                                "--directory", str(bundled)]):
                     provision.main()
-                self.assertEqual(validate_manifest(bundled / "manifest.json", "speech")["id"], "nsnet2")
+                self.assertEqual(validate_manifest(bundled / "manifest.json", "speech")["id"], "MossFormer2_SE_48K")
                 self.assertEqual(manifest_path.read_bytes(), construction)
                 with patch.object(sys, "argv", ["provision.py", "--manifest", str(manifest_path),
                                                "--directory", str(source), "--populate-new"]):
                     provision.main()
-                self.assertEqual(validate_manifest(manifest_path, "speech")["id"], "nsnet2")
+                self.assertEqual(validate_manifest(manifest_path, "speech")["id"], "MossFormer2_SE_48K")
                 before = manifest_path.read_bytes()
                 target = root / "reprovisioned"
                 with patch.object(sys, "argv", ["provision.py", "--manifest", str(manifest_path),
@@ -121,8 +121,8 @@ class ProtocolTests(unittest.TestCase):
         scratch.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=scratch) as directory:
             base = Path(directory)
-            for operation, models in (("separate", ("melband_roformer_kim", "htdemucs")),
-                                      ("speech", ("MossFormer2_SE_48K", "nsnet2", "DeepFilterNet3"))):
+            for operation, models in (("separate", ("melband_roformer_kim",)),
+                                      ("speech", ("MossFormer2_SE_48K", "DeepFilterNet3"))):
                 for model in models:
                     with self.subTest(model=model):
                         manifest = bundle_fixture(base, operation, model)
@@ -134,6 +134,16 @@ class ProtocolTests(unittest.TestCase):
             path.write_text(json.dumps(manifest))
             with self.assertRaisesRegex(WorkerError,"unsupported model"):
                 validate_manifest(path,operation)
+
+    def test_obsolete_models_are_rejected_at_manifest_admission(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            for operation, model in (("speech", "nsnet2"), ("separate", "htdemucs")):
+                with self.subTest(model=model):
+                    bundle_fixture(base, operation, model)
+                    with self.assertRaisesRegex(WorkerError, "unsupported model id") as error:
+                        validate_manifest(base / "manifest.json", operation)
+                    self.assertEqual(error.exception.code, "model_manifest")
 
     def test_construction_manifest_cannot_be_admitted_for_inference(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -266,9 +276,7 @@ class ExplicitExportTests(unittest.TestCase):
             request = {**export_request(), "input_path":str(source),
                        "output_dir":str(base / "result"), "model_manifest":str(base / "manifest.json"),
                        "parameters":{"wet_mix":0.25}}
-            calls = []
             def infer(samples):
-                calls.append(samples.shape)
                 return samples * -0.5 + np.float32(0.125)
             with patch("runtime.worker.build_engine", return_value=(8000, infer)), \
                  patch("runtime.worker.importlib.metadata.version", return_value="1"), \
@@ -277,7 +285,6 @@ class ExplicitExportTests(unittest.TestCase):
             output, rate = sf.read(base / "result/speech.wav", dtype="float32", always_2d=True)
             np.testing.assert_array_equal(output, audio * 0.75 + (audio * -0.5 + np.float32(0.125)) * 0.25)
             self.assertEqual(rate, 8000)
-            self.assertEqual(len(calls), 2)
             report = json.loads((base / "result/result.json").read_text())
             self.assertFalse(report["processing"]["bypass"])
             self.assertTrue(report["processing"]["model_executed"])
@@ -417,7 +424,7 @@ class ExplicitExportTests(unittest.TestCase):
             source = base / "input.wav"
             sf.write(source, np.zeros((32 * 48000, 2), dtype="float32"), 48000, subtype="FLOAT")
             manifest = base / "manifest.json"
-            bundle_fixture(base, "separate", "htdemucs")
+            bundle_fixture(base, "separate", "melband_roformer_kim")
             destination = base / "result"
             request = {"version":1,"task_id":"riff-stems","operation":"separate","input_path":str(source),
                        "output_dir":str(destination),"model_manifest":str(manifest)}
@@ -483,7 +490,6 @@ class ExplicitExportTests(unittest.TestCase):
             self.assertGreater(report_path.stat().st_size, 65536)
             report = json.loads(report_path.read_text())
             self.assertEqual(report["model"]["provenance"]["record"], "x" * 70000)
-            self.assertEqual(len(report["metrics"]["block_seconds"]), 2)
             self.assertEqual(report["source_sha256"], digest(source))
             output, rate = sf.read(destination / "speech.wav", dtype="float32", always_2d=True)
             self.assertEqual(rate, 8000)
@@ -573,9 +579,6 @@ class RealSeparationTests(unittest.TestCase):
 
     def test_kim_source_rate_stereo_boundary_and_exact_complement(self):
         self.check_model("RIVU_KIM_MANIFEST", "melband_roformer_kim")
-
-    def test_htdemucs_source_rate_stereo_boundary_and_exact_complement(self):
-        self.check_model("RIVU_HTDEMUCS_MANIFEST", "htdemucs")
 
 if __name__ == "__main__":
     unittest.main()

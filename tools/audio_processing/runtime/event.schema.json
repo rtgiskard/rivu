@@ -41,7 +41,7 @@
         "model": {
           "type": "object", "required": ["id", "sha256"], "additionalProperties": false,
           "properties": {
-            "id": {"enum": ["MossFormer2_SE_48K", "nsnet2", "DeepFilterNet3", "melband_roformer_kim", "htdemucs"]},
+            "id": {"enum": ["MossFormer2_SE_48K", "DeepFilterNet3", "melband_roformer_kim"]},
             "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$", "description": "Canonical prepared manifest SHA256; explicit evaluation export may retain detailed provenance."}
           }
         }

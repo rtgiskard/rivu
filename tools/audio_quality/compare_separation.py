@@ -4,7 +4,8 @@
 Example (with the prepared separation interpreter):
   python tools/audio_quality/compare_separation.py --mixture /abs/mixture.wav \
     --reference /abs/vocals.wav --result /abs/kim-output/result.json \
-    --result /abs/htdemucs-output/result.json --provenance 'corpus/revision/recipe'
+    --result /abs/kim-alternate-settings/result.json \
+    --provenance 'corpus/revision/recipe'
 
 No inference, downloads, resampling, level matching, automatic alignment or
 winner selection. Objective scores on one excerpt are not a latest/best claim.

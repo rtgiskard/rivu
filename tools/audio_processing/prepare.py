@@ -6,8 +6,6 @@ Run from repository root after installing the desired interpreter:
     --interpreter "$PWD/.cache/neural/moss-venv/bin/python"
   python tools/audio_processing/prepare.py separate --download --directory .cache/neural/kim \
     --interpreter "$PWD/.cache/neural/separate-venv/bin/python"
-  python tools/audio_processing/prepare.py htdemucs --download --directory .cache/neural/htdemucs \
-    --interpreter "$PWD/.cache/neural/separate-venv/bin/python"
   python tools/audio_processing/prepare.py df3 --download --directory .cache/neural/df3 \
     --interpreter "$PWD/.cache/neural/df3-venv/bin/python"
 
@@ -34,10 +32,8 @@ Keep the interpreter venv symlink path; resolving it to base Python loses its
 site-packages. An existing verified model can be bundled without network using
 its prepared interpreter and provision.py --manifest OLD --directory NEW.
 
-NSNet2 remains a baseline, not a claim of current best quality. HTDemucs uses a
-different hybrid waveform/spectrogram architecture from Kim Mel-band RoFormer.
-DF3 and HTDemucs weight-license grants are not established here: licensing is
-recorded factually, not used as a gate on explicit user candidate preparation.
+DF3 weight-license grants are not established here: licensing is recorded
+factually, not used as a gate on explicit user candidate preparation.
 Unknown terms are never represented as redistribution permission. --proxy may
 explicitly select a local HTTP/SOCKS proxy via curl; inference stays offline.
 """
@@ -91,7 +87,7 @@ def download(url, target, maximum, proxy=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("model", choices=("separate", "htdemucs", "df3", "nsnet2", "moss"))
+    parser.add_argument("model", choices=("separate", "df3", "moss"))
     parser.add_argument("--directory", type=Path, required=True)
     parser.add_argument("--interpreter", type=Path, required=True, help="absolute prepared venv Python path; preserve its symlink, do not resolve to base Python")
     parser.add_argument("--weights", type=Path)
@@ -135,17 +131,11 @@ def main():
                         "provenance":{"weights":KIM_URL,"weight_license":KIM_CARD,"transport_host":args.hf_host,
                                       "code":"https://github.com/Ryan5453/unblend/tree/64fd0216b9f0309c9d055457002d6910dc245950",
                                       "code_license":"MIT", "weights_license":"MIT"}}
-        elif args.model == "htdemucs":
-            from htdemucs import prepare
-            manifest = prepare(args, target, fetch)
         elif args.model == "df3":
             from df3 import prepare
             manifest = prepare(args, target, fetch)
         elif args.model == "moss":
             from runtime.mossformer import prepare
-            manifest = prepare(args, target, fetch)
-        else:
-            from runtime.nsnet2 import prepare
             manifest = prepare(args, target, fetch)
         manifest["license_evidence"] = "weight-license.txt"
         manifest["files"] = {str(path.relative_to(target)):digest(path) for path in sorted(target.rglob("*")) if path.is_file()}

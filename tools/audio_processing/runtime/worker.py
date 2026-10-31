@@ -39,7 +39,7 @@ MAX_WINDOW_BYTES = 128 * 1024**2
 MAX_REPORT_BYTES = 8 * 1024**2
 JSON_FRAME, INPUT_PCM, INPUT_END = 0, 1, 2
 STEM_KINDS = {"speech":17, "vocals":18, "accompaniment":19}
-RUNTIME_FILES = ("worker.py", "mossformer.py", "nsnet2.py", "request.schema.json", "event.schema.json")
+RUNTIME_FILES = ("worker.py", "mossformer.py", "request.schema.json", "event.schema.json")
 
 class WorkerError(Exception):
     def __init__(self, code, message):
@@ -102,7 +102,7 @@ def validate_artifacts(path, operation):
     manifest = read_json(path)
     require(isinstance(manifest, dict) and manifest.get("version") == 1 and manifest.get("operation") == operation,
             "model_manifest", "manifest version/operation mismatch")
-    allowed_models = ("melband_roformer_kim", "htdemucs") if operation == "separate" else ("DeepFilterNet3", "nsnet2", "MossFormer2_SE_48K")
+    allowed_models = ("melband_roformer_kim",) if operation == "separate" else ("DeepFilterNet3", "MossFormer2_SE_48K")
     require(manifest.get("id") in allowed_models, "model_manifest", "unsupported model id for operation")
     packages = manifest.get("packages")
     require(isinstance(packages, dict) and packages and all(isinstance(name, str) and name and isinstance(version, str) and version
@@ -180,12 +180,6 @@ def resample_exact(audio, source_rate, target_rate):
 
 def build_engine(manifest, base, device, controls=None):
     controls = controls or {}
-    if manifest["id"] == "nsnet2":
-        if __package__:
-            from .nsnet2 import load_engine
-        else:
-            from nsnet2 import load_engine
-        return load_engine(manifest, base, device, controls)
     import numpy as np
     import torch
     require(device != "cuda" or torch.cuda.is_available(), "device_unavailable", "CUDA requested but unavailable; no CPU fallback")
@@ -200,7 +194,7 @@ def build_engine(manifest, base, device, controls=None):
         else:
             from mossformer import load_engine
         return load_engine(manifest, base, device, controls)
-    if manifest["id"] in ("melband_roformer_kim", "htdemucs"):
+    if manifest["id"] == "melband_roformer_kim":
         from unblend import Separator
         from unblend.repo import ModelRepository
         repository = ModelRepository(metadata_path=base / "registry.json", extra_models=[])
