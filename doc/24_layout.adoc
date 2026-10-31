@@ -596,6 +596,11 @@ actual viewport requests demand; sample-row measurement does not. Sparse
 placeholders retain logical indices and viewport decorations share content
 coordinates with drop targets.
 
+Shared list viewport shells retain horizontal clearance but no vertical inset:
+scrollable content and edge fades meet the shell's top and bottom. Content-sized
+playlist viewports therefore use row heights directly, without extra vertical
+padding compensation.
+
 List, tree, dropdown and paged-loading rows require an explicit resolved height.
 Range renderers resolve it once per batch and reuse it for records and placeholders,
 keeping virtual-list measurement and visible row geometry on the same contract.

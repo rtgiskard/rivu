@@ -100,7 +100,7 @@ pub fn list_panel_header(
         .child(caption(theme, subtitle).min_w_0().truncate())
 }
 
-/// Shared viewport shell for virtualized lists.
+/// Shared viewport shell; vertical edges coincide with its scrollable content.
 pub fn list_viewport(child: impl IntoElement) -> Div {
     div()
         .flex()
@@ -111,7 +111,7 @@ pub fn list_viewport(child: impl IntoElement) -> Div {
         .w_full()
         .overflow_hidden()
         .rounded_md()
-        .p(px(1.))
+        .px(px(1.))
         .child(child)
 }
 

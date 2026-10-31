@@ -12,7 +12,7 @@ use super::{
     components::track::{TrackText, favorite_button, row_text, track_list_row},
     list_interaction::{LibraryDrag, ListDrag},
 };
-use gpui::{AnyElement, Context, Div, SharedString, Window, div, prelude::*, px, rgb};
+use gpui::{AnyElement, Context, Div, SharedString, Window, div, prelude::*, rgb};
 use rivu_protocol::model::Command;
 
 use crate::gui::list_interaction::TrackSource;
@@ -1412,7 +1412,7 @@ impl Playlists {
             .gap_2()
             .child(list_viewport(catalog).when(playlist_id.is_some(), |view| {
                 view.flex_none()
-                    .h(row_height * catalog_len.max(1) as f32 + px(2.))
+                    .h(row_height * catalog_len.max(1) as f32)
                     .max_h(gpui::relative(1. / 3.))
             }));
         if let Some(playlist_id) = playlist_id {
@@ -1850,7 +1850,7 @@ impl Playlists {
                         list_viewport(entries)
                             .flex_none()
                             .flex_shrink_1()
-                            .h(row_height * entries_len.max(1) as f32 + px(2.))
+                            .h(row_height * entries_len.max(1) as f32)
                             .max_h(gpui::relative(1.)),
                     )
                     .child(
@@ -2161,7 +2161,7 @@ mod content_menu_keyboard_tests {
     };
     use gpui::{
         AnyWindowHandle, InputEvent, KeyDownEvent, KeyUpEvent, Keystroke, TestAppContext,
-        VisualTestContext,
+        VisualTestContext, px,
     };
     use rivu_protocol::model::{Page, PlaylistSummary, Query};
     use rivu_protocol::response::ViewResponse;
