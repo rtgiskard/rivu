@@ -1090,45 +1090,13 @@ impl Store {
         for id in removal.ids {
             self.track_cache.borrow_mut().entries.remove(id);
         }
-        let ids = removal.encoded;
-        let queue_positions = tx
-            .prepare("SELECT position FROM playlist_entries WHERE playlist_id=0 AND track_id IN (SELECT value FROM json_each(?1)) ORDER BY position")?
-            .query_map([&ids], |row| row.get(0))?
-            .collect::<rusqlite::Result<Vec<i64>>>()?;
-        let playlist_positions = removed_playlist_positions(
-            tx,
-            "SELECT playlist_id,position FROM playlist_entries WHERE playlist_id>0 AND track_id IN (SELECT value FROM json_each(?1)) ORDER BY playlist_id,position",
-            [&ids],
-        )?;
-        tx.execute(
-            "DELETE FROM playlist_entries WHERE track_id IN (SELECT value FROM json_each(?1))",
-            [&ids],
-        )?;
-        tx.execute(
-            "DELETE FROM tracks WHERE id IN (SELECT value FROM json_each(?1))",
-            [&ids],
-        )?;
-        close_gaps(tx, &queue_positions, 0)?;
-        let mut playlists = Vec::with_capacity(playlist_positions.len());
-        for (playlist_id, positions) in playlist_positions {
-            close_gaps(tx, &positions, playlist_id)?;
-            playlists.push(playlist_id);
-        }
-        Ok((playlists, !queue_positions.is_empty()))
+        let (_, playlists, queue) = remove_track_references(tx, Some(&removal.encoded))?;
+        Ok((playlists, queue))
     }
 
     pub fn remove_missing_tracks(&self) -> Result<TrackRemovalImpact> {
         self.track_cache.borrow_mut().entries.clear();
         let tx = self.conn.unchecked_transaction()?;
-        let queue_positions = tx
-            .prepare("SELECT position FROM playlist_entries WHERE playlist_id=0 AND track_id IN (SELECT id FROM tracks WHERE missing=1) ORDER BY position")?
-            .query_map([], |row| row.get(0))?
-            .collect::<rusqlite::Result<Vec<i64>>>()?;
-        let playlist_positions = removed_playlist_positions(
-            &tx,
-            "SELECT playlist_id,position FROM playlist_entries WHERE playlist_id>0 AND track_id IN (SELECT id FROM tracks WHERE missing=1) ORDER BY playlist_id,position",
-            [],
-        )?;
         let duplicate_groups = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM tracks WHERE missing=1 AND cue_sheet IS NULL AND fingerprint IS NOT NULL)",
             [], |row| row.get(0),
@@ -1141,21 +1109,11 @@ impl Store {
             [],
             |row| row.get(0),
         )?;
-        tx.execute(
-            "DELETE FROM playlist_entries WHERE track_id IN (SELECT id FROM tracks WHERE missing=1)",
-            [],
-        )?;
-        let removed = tx.execute("DELETE FROM tracks WHERE missing=1", [])?;
-        close_gaps(&tx, &queue_positions, 0)?;
-        let mut playlists = Vec::with_capacity(playlist_positions.len());
-        for (playlist_id, positions) in playlist_positions {
-            close_gaps(&tx, &positions, playlist_id)?;
-            playlists.push(playlist_id);
-        }
+        let (removed, playlists, queue) = remove_track_references(&tx, None)?;
         tx.commit()?;
         Ok(TrackRemovalImpact {
             removed,
-            queue: !queue_positions.is_empty(),
+            queue,
             albums,
             playlists,
             duplicate_groups,
@@ -1263,6 +1221,49 @@ pub(super) fn validate_encoded_track_ids(conn: &Connection, ids: &str) -> Result
         bail!("Track {id} does not exist");
     }
     Ok(())
+}
+
+/// Select IDs in SQL so missing cleanup never materializes the catalog in Rust.
+fn remove_track_references(
+    tx: &Transaction<'_>,
+    encoded_ids: Option<&str>,
+) -> Result<(usize, Vec<i64>, bool)> {
+    // Keep selection shared across all statements without allocating SQL strings.
+    macro_rules! queries {
+        ($ids:literal) => {
+            (
+                concat!("SELECT position FROM playlist_entries WHERE playlist_id=0 AND track_id IN (", $ids, ") ORDER BY position"),
+                concat!("SELECT playlist_id,position FROM playlist_entries WHERE playlist_id>0 AND track_id IN (", $ids, ") ORDER BY playlist_id,position"),
+                concat!("DELETE FROM playlist_entries WHERE track_id IN (", $ids, ")"),
+                concat!("DELETE FROM tracks WHERE id IN (", $ids, ")"),
+            )
+        };
+    }
+    let (queue_sql, playlists_sql, entries_sql, tracks_sql) = if encoded_ids.is_some() {
+        queries!("SELECT value FROM json_each(?1)")
+    } else {
+        queries!("SELECT id FROM tracks WHERE missing=1")
+    };
+    let parameters = params![encoded_ids];
+    let parameters = if encoded_ids.is_some() {
+        parameters
+    } else {
+        &[]
+    };
+    let queue_positions = tx
+        .prepare(queue_sql)?
+        .query_map(parameters, |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<i64>>>()?;
+    let playlist_positions = removed_playlist_positions(tx, playlists_sql, parameters)?;
+    tx.execute(entries_sql, parameters)?;
+    let removed = tx.execute(tracks_sql, parameters)?;
+    close_gaps(tx, &queue_positions, 0)?;
+    let mut playlists = Vec::with_capacity(playlist_positions.len());
+    for (playlist_id, positions) in playlist_positions {
+        close_gaps(tx, &positions, playlist_id)?;
+        playlists.push(playlist_id);
+    }
+    Ok((removed, playlists, !queue_positions.is_empty()))
 }
 
 fn removed_playlist_positions(
@@ -1409,6 +1410,58 @@ mod deletion_tests {
             .conn
             .query_row("SELECT COUNT(*) FROM tracks", [], |row| row.get(0))?;
         assert_eq!(track_count, 7);
+        Ok(())
+    }
+
+    #[test]
+    fn both_deletion_selections_report_references_and_metadata_domains() -> Result<()> {
+        for missing in [false, true] {
+            let store = fixture()?;
+            store.conn.execute_batch(
+                "UPDATE tracks SET raw_album='Album' WHERE id=2;
+                 UPDATE tracks SET fingerprint=zeroblob(32) WHERE id IN (2,3);
+                 UPDATE tracks SET missing=1 WHERE id IN (2,8);",
+            )?;
+            let impact = if missing {
+                store.remove_missing_tracks()?
+            } else {
+                store.remove_prepared_tracks(store.prepare_track_removal(&[2, 8])?)?
+            };
+            assert_eq!(impact.removed, 2);
+            assert!(impact.queue && impact.albums && impact.duplicate_groups);
+            assert_eq!(impact.playlists, [10, 20]);
+            assert_eq!(current(&store)?, Some(106));
+            assert!(store.track(2)?.is_none());
+            assert!(store.track(8)?.is_none());
+            assert!(store.track(3)?.is_some());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn deletion_failure_restores_references_positions_and_current_occurrence() -> Result<()> {
+        for missing in [false, true] {
+            let store = fixture()?;
+            store.conn.execute_batch(
+                "UPDATE tracks SET missing=1 WHERE id=2;
+                 CREATE TEMP TRIGGER reject_track_delete BEFORE DELETE ON tracks
+                 WHEN OLD.id=2 BEGIN SELECT RAISE(ABORT,'reject deletion'); END;",
+            )?;
+            let queue = queue_rows(&store)?;
+            let playlists = playlist_rows(&store)?;
+            let result = if missing {
+                store.remove_missing_tracks().map(|_| ())
+            } else {
+                store
+                    .remove_prepared_tracks(store.prepare_track_removal(&[2])?)
+                    .map(|_| ())
+            };
+            assert!(result.is_err());
+            assert_eq!(queue_rows(&store)?, queue);
+            assert_eq!(playlist_rows(&store)?, playlists);
+            assert_eq!(current(&store)?, Some(106));
+            assert!(store.track(2)?.is_some());
+        }
         Ok(())
     }
 }

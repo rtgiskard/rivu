@@ -367,9 +367,10 @@ Query limits, revisions, and batch contracts: link:21_ipc.adoc[IPC].
 Title, artist, album, favorite, and decoder-hint edits change Rivu's database only;
 media files, tags, and CUE sheets are never rewritten. Rescans preserve matching IDs,
 overrides, favorites, decoder hints, counts, and last-played timestamps. `library remove` and
-`library clean-missing` remove records and their queue/playlist references only;
-they never delete media files. Missing rows remain visible in playlist views
-until removed or cleaned.
+`library clean-missing` atomically remove records and their queue/playlist
+references, compacting positions without changing surviving occurrence identities
+or relative order. They never delete media files. Missing rows remain visible in
+playlist views until removed or cleaned.
 
 Failed writes leave saved data unchanged. A refresh error after a committed edit
 does not roll it back; older rows may remain visible until refresh succeeds.
