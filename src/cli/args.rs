@@ -7,7 +7,7 @@ use std::path::PathBuf;
     name = "rivu",
     version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("RIVU_GIT_VERSION"), ")"),
     about = "A quiet, local-first music player",
-    long_about = "Run without a command to open the desktop UI. GUI and serve own one shared core per data directory; control commands connect to it. Data/config options select startup storage and configuration, not live settings."
+    long_about = "Run without a command to open the desktop UI. GUI and serve own one shared core per data directory; control commands connect to it."
 )]
 pub(super) struct Args {
     #[arg(long, global = true, value_name = "DIRECTORY")]
@@ -117,7 +117,7 @@ pub(super) enum ProcessingAction {
     Denoise { patch: String },
     /// Merge local interpreter/manifest settings from a NeuralPatch JSON object.
     Neural { patch: String },
-    /// Process one library source without modifying it. Separation requires stereo.
+    /// Process one library source. Separation requires stereo.
     Start {
         track_id: i64,
         #[arg(value_enum)]
@@ -212,14 +212,14 @@ pub(super) enum ProcessingAudition {
 
 #[derive(Subcommand)]
 pub(super) enum TaskAction {
-    /// Read the retained state of a task, including terminal failures.
+    /// Show task status.
     Status {
         #[arg(value_enum)]
         kind: TaskKind,
         #[arg(value_name = "INSTANCE:TASK_ID")]
         id: super::tasks::TaskReference,
     },
-    /// Request cancellation without undoing committed work.
+    /// Request task cancellation.
     Cancel {
         #[arg(value_enum)]
         kind: TaskKind,
@@ -237,7 +237,7 @@ pub(super) enum TaskKind {
 
 #[derive(Subcommand)]
 pub(super) enum LibraryAction {
-    /// Import audio files, CUE sheets or directories without blocking playback.
+    /// Import audio files, CUE sheets or directories.
     Scan {
         /// Paths relative to this client's working directory, or absolute paths.
         #[arg(required = true)]
@@ -260,7 +260,7 @@ pub(super) enum LibraryAction {
         #[arg(long, action = clap::ArgAction::Set)]
         missing: Option<bool>,
     },
-    /// Edit Rivu's library metadata; does not rewrite media files.
+    /// Edit library metadata.
     Edit {
         track_id: i64,
         #[arg(long)]
@@ -270,19 +270,19 @@ pub(super) enum LibraryAction {
         #[arg(long)]
         album: Option<String>,
     },
-    /// Remove library records, never the media files.
+    /// Remove library records.
     Remove {
         #[arg(required = true)]
         track_ids: Vec<i64>,
     },
-    /// Set or clear favorites without modifying media files.
+    /// Set or clear favorites.
     Favorite {
         #[arg(value_enum)]
         mode: Switch,
         #[arg(required = true)]
         track_ids: Vec<i64>,
     },
-    /// Remove missing library records and their references, never media files.
+    /// Remove missing library records and their references.
     CleanMissing,
     /// Show library size and aggregate play counts.
     Stats,

@@ -234,18 +234,10 @@ process's lifetime.
 
 `logging.to_file` defaults to `false`; enabling it writes weekly logs under the
 data directory. `logging.retention_weeks` accepts `1`–`520` and defaults to `4`.
-`NO_COLOR` or `RIVU_COLOR=never` disables stderr colors. Closing the GUI window
-does not stop file logging.
+`NO_COLOR` or `RIVU_COLOR=never` disables stderr colors.
 
-File logging starts after configuration is loaded; earlier events are not replayed.
-Expired-log cleanup runs on the file writer, including when logging is enabled or
-retention changes without new records. Log-open errors remain synchronous;
-orderly shutdown waits for the writer and pending cleanup.
-
-File logging may drop records under load rather than block the application.
-Orderly shutdown attempts to drain pending records; forced termination can lose
-them. Changing only the log level does not trigger retention cleanup. If creating
-the writer or saving configuration fails, the previous logging settings stay active.
+File logging starts after configuration is loaded. Records may be dropped under
+load; forced termination can lose pending records.
 
 === Audio processing defaults
 

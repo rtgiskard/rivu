@@ -24,7 +24,7 @@ image:https://github.com/user-attachments/assets/bf7493ca-cb1a-4b8e-97cb-0226f80
   controls and system tray integration
 * *Audio processing:* live parametric EQ, restoration, speech enhancement, and
   vocal/accompaniment separation; node graphs support real-time, hybrid, and offline
-  execution, auditioning, and WAV export without changing source media.
+  execution, auditioning, and WAV export.
   Neural backends require prepared local models; see
   link:doc/27_audio_processing.adoc#_practical_workflow[workflow and quality limits]
 * *Visualizations and artwork:* one Visualization panel with eleven styles,
@@ -70,8 +70,7 @@ Passing explicit paths to `rivu gui PATH...` or `rivu serve PATH...` requests a 
 within configured library roots; it does not add roots. `rivu gui PATH...` also
 requests scanning when raising an existing window.
 One core runs per data directory. All clients must use the same `--data-dir` to
-reach the same instance. `--config` selects configuration when starting a core;
-it does not reconfigure an existing instance.
+reach the same instance. `--config` selects configuration when starting a core.
 
 Closing the GUI window leaves playback and the core running. Reopen it with
 `rivu gui`; stop the instance with `rivu quit`, `Quit Rivu`, or MPRIS `Quit` when
@@ -83,12 +82,12 @@ Ctrl-C and SIGTERM also request a clean shutdown.
 
 CLI and TUI controls require a running core; `library probe` and `playback devices`
 can run independently. `--data-dir DIRECTORY` selects the instance. `--config FILE`
-selects startup/probe configuration, not settings in an already running core.
+selects startup/probe configuration.
 `--log-level LEVEL` temporarily overrides this process's stderr and enabled file
 logging (`debug`, `info`, `warning`, `error`).
 See link:doc/01_config.adoc#_logging_and_diagnostics[logging and diagnostics].
 `--json` writes one result to stdout and runtime diagnostics as JSON to stderr;
-it is not available for GUI, serve, or TUI. Usage errors retain ordinary diagnostics.
+it is not available for GUI, serve, or TUI.
 Use `rivu --help` or a subcommand's `--help` for exact arguments.
 
 [source,sh]
@@ -116,6 +115,9 @@ CLI preset, playlist, and graph export paths resolve against the invoking client
 working directory, not the host's; absolute paths are unchanged.
 
 == Files and data directories
+
+Rivu treats source media as read-only. Library, queue, and playlist edits change
+Rivu's records, not source files; audio processing writes separate outputs.
 
 By default, Rivu uses the platform data directory reported by the OS (on a
 typical Linux installation: `~/.local/share/rivu`) and
