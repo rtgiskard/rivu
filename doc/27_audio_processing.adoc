@@ -311,10 +311,13 @@ at a partial final hop. A numerical reference must use the same explicit padding
 not an unpadded upstream example with different final-frame coverage.
 
 For Python models, with `uv` already installed, run setup from the repository
-root. MossFormer2 and Kim share one environment. The installer resolves compatible
-dependency ranges rather than fixing every package to a historical version;
-`shared-installed.txt` records the resulting environment. Preparation binds each
+root. MossFormer2 and Kim use `.cache/neural/.venv`. The installer resolves
+compatible dependency ranges rather than fixing every package to a historical
+version; `installed.txt` records the resulting environment. Preparation binds each
 model bundle to the exact versions installed in its selected interpreter.
+uv uses its default user cache and managed-Python locations, honoring existing
+environment configuration. Only temporary files are directed to `.cache/tmp`
+to keep large extraction/build files off memory-backed temporary storage.
 
 BS-RoFormer 124-band (https://www.mvsep.com/quality_checker/entry/10197[MVSEP entry 10197], 2026-07-10) is not an installed backend:
 its exact checkpoint and complete inference configuration have not been located
@@ -329,9 +332,9 @@ fallback. Thread settings accept 1–8.
 
 [source,shell]
 ----
-python3 tools/audio_processing/install.py shared
-python3 tools/audio_processing/prepare.py moss --download --directory .cache/neural/moss --interpreter "$PWD/.cache/neural/shared-venv/bin/python"
-python3 tools/audio_processing/prepare.py separate --download --directory .cache/neural/kim --interpreter "$PWD/.cache/neural/shared-venv/bin/python"
+python3 tools/audio_processing/install.py
+python3 tools/audio_processing/prepare.py moss --download --directory .cache/neural/moss --interpreter "$PWD/.cache/neural/.venv/bin/python"
+python3 tools/audio_processing/prepare.py separate --download --directory .cache/neural/kim --interpreter "$PWD/.cache/neural/.venv/bin/python"
 ----
 
 DeepFilterNet3 is optional and keeps its own pinned environment because its
@@ -364,7 +367,7 @@ runtime from the current checkout without downloading:
 
 [source,shell]
 ----
-/absolute/shared-venv/bin/python /absolute/rivu/tools/audio_processing/provision.py --manifest /absolute/moss/manifest.json --directory /absolute/new-moss-bundle
+/absolute/.venv/bin/python /absolute/rivu/tools/audio_processing/provision.py --manifest /absolute/moss/manifest.json --directory /absolute/new-moss-bundle
 ----
 
 The destination must be new. Provisioning does not copy the interpreter environment;
@@ -395,12 +398,12 @@ input or creating export outputs. Model assets and PCM/output protocol checks
 remain separate. Reprovision Python workers when migrating to the framed protocol.
 
 
-Use the same shared interpreter for MossFormer2 and Kim, with a runtime worker
+Use the same interpreter for MossFormer2 and Kim, with a runtime worker
 compatible with both prepared manifests. Model manifests remain operation-specific:
 
 [source,shell]
 ----
-rivu processing neural '{"worker":"/absolute/new-moss-bundle/runtime/worker.py","speech_interpreter":"/absolute/shared-venv/bin/python","speech_manifest":"/absolute/new-moss-bundle/manifest.json","separation_interpreter":"/absolute/shared-venv/bin/python","separation_manifest":"/absolute/kim/manifest.json","device":"cpu","threads":4}'
+rivu processing neural '{"worker":"/absolute/new-moss-bundle/runtime/worker.py","speech_interpreter":"/absolute/.venv/bin/python","speech_manifest":"/absolute/new-moss-bundle/manifest.json","separation_interpreter":"/absolute/.venv/bin/python","separation_manifest":"/absolute/kim/manifest.json","device":"cpu","threads":4}'
 rivu processing start 42 speech --wait
 rivu processing start 43 separate --wait
 ----

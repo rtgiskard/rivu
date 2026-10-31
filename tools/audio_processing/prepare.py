@@ -3,9 +3,9 @@
 
 Run from repository root after installing the desired interpreter:
   python tools/audio_processing/prepare.py moss --download --directory .cache/neural/moss \
-    --interpreter "$PWD/.cache/neural/moss-venv/bin/python"
+    --interpreter "$PWD/.cache/neural/.venv/bin/python"
   python tools/audio_processing/prepare.py separate --download --directory .cache/neural/kim \
-    --interpreter "$PWD/.cache/neural/separate-venv/bin/python"
+    --interpreter "$PWD/.cache/neural/.venv/bin/python"
   python tools/audio_processing/prepare.py df3 --download --directory .cache/neural/df3 \
     --interpreter "$PWD/.cache/neural/df3-venv/bin/python"
 
@@ -128,7 +128,7 @@ def main():
                 "checkpoint":{"format":"safetensors","path":str(checkpoint),"sha256":KIM_SHA,"size_bytes":912885624}}}}
             (target / "registry.json").write_text(json.dumps(registry, indent=2)+"\n")
             manifest = {"version":1,"operation":"separate","id":"melband_roformer_kim",
-                        "packages":{"unblend":"1.0.0","torch":"2.13.0","numpy":"2.2.6","scipy":"1.15.3","soundfile":"0.13.1"},
+                        "packages":["unblend", "torch", "torchaudio", "torchcodec", "numpy", "scipy", "soundfile"],
                         "provenance":{"weights":KIM_URL,"weight_license":KIM_CARD,"transport_host":args.hf_host,
                                       "code":"https://github.com/Ryan5453/unblend/tree/64fd0216b9f0309c9d055457002d6910dc245950",
                                       "code_license":"MIT", "weights_license":"MIT"}}
@@ -141,6 +141,13 @@ def main():
         elif native:
             from onnx_speech import prepare
             manifest = prepare(args, target, fetch)
+        if args.model in ("moss", "separate"):
+            # Bind the selected environment, not historical installer versions.
+            manifest["packages"] = json.loads(subprocess.check_output([
+                str(args.interpreter), "-c",
+                "import importlib.metadata as m, json, sys; print(json.dumps({name:m.version(name) for name in sys.argv[1:]}))",
+                *manifest["packages"],
+            ], text=True))
         manifest["license_evidence"] = "weight-license.txt"
         manifest["files"] = {str(path.relative_to(target)):digest(path) for path in sorted(target.rglob("*")) if path.is_file()}
         (target / "manifest.json").write_text(json.dumps(manifest, indent=2)+"\n")

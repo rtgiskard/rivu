@@ -2,7 +2,7 @@
 """Provision an explicit standalone local worker/model bundle without any network.
 
 Run with the already prepared interpreter, not system Python:
-  /abs/moss-venv/bin/python tools/audio_processing/provision.py \
+  /abs/.venv/bin/python tools/audio_processing/provision.py \
     --manifest /abs/moss/manifest.json --directory /abs/new-moss-bundle
 
 The new bundle contains immutable model artifacts, worker sidecar sources/schema,

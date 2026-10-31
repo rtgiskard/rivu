@@ -40,8 +40,8 @@ def prepare(args, target, download):
     if checkpoint.stat().st_size != 221552019 or digest(checkpoint) != WEIGHT_SHA:
         raise ValueError("MossFormer2 SE48K checkpoint differs from pinned publisher artifact")
     return {"version":1,"operation":"speech","id":"MossFormer2_SE_48K",
-            "packages":{"torch":"2.11.0","torchaudio":"2.11.0","numpy":"2.2.6","scipy":"1.15.3",
-                        "soundfile":"0.13.1","einops":"0.8.1","rotary-embedding-torch":"0.8.3","torchinfo":"1.8.0"},
+            "packages":["torch", "torchaudio", "numpy", "scipy", "soundfile", "einops",
+                        "rotary-embedding-torch", "torchinfo"],
             "provenance":{"weights":WEIGHT_URL,"code_revision":CODE_REVISION,"model_revision":MODEL_REVISION,
                           "weight_license":"Apache-2.0","code_license":"Apache-2.0","license_source":LICENSE_CARD},
             "geometry":{"core_seconds":8,"context_seconds":2,"window_samples":1920,"hop_samples":384,
