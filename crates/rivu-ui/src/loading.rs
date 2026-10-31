@@ -232,21 +232,25 @@ pub fn paged_loading_row<T: 'static>(
             |row, error| {
                 row.role(gpui::Role::Group)
                     .aria_label(error.clone())
-                    .child(IconButton::new("copy-error", "⧉", labels.copy_error).build(
-                        IconButtonStyle::Quiet,
-                        IconButtonDensity::Regular,
-                        cx,
-                        move |_, _, cx| {
-                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                error.to_string(),
-                            ));
-                        },
-                    ))
-                    .child(IconButton::new("retry", "󰑐", labels.retry).build(
+                    .child(
+                        IconButton::new("copy-error", "⧉", labels.copy_error).build_with(
+                            IconButtonStyle::Quiet,
+                            IconButtonDensity::Regular,
+                            cx,
+                            move |_, _, cx| {
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                    error.to_string(),
+                                ));
+                            },
+                            |control| control.min_h_0().h(height - gpui::px(2.)).py_0(),
+                        ),
+                    )
+                    .child(IconButton::new("retry", "󰑐", labels.retry).build_with(
                         IconButtonStyle::Quiet,
                         IconButtonDensity::Regular,
                         cx,
                         retry,
+                        |control| control.min_h_0().h(height - gpui::px(2.)).py_0(),
                     ))
             },
         )
@@ -279,7 +283,7 @@ mod row_tests {
                         retry: "Retry loading".into(),
                         copy_error: "Copy full error".into(),
                     },
-                    crate::list_row_height(window, cx),
+                    crate::menu_row_height(window, cx),
                     cx,
                     |this, _, cx| {
                         this.retries += 1;

@@ -251,6 +251,8 @@ impl WindowView {
                         .names()
                         .filter(|name| *name != "Default"),
                 );
+            let row_height = rivu_ui::menu_row_height(window, cx);
+            let action_size = row_height - px(2.);
             for (index, name) in names.enumerate() {
                 let current = name == self.workspace.layouts.active_name();
                 let target: SharedString = name.to_owned().into();
@@ -258,7 +260,8 @@ impl WindowView {
                     .id(target.clone())
                     .group("layout-choice-row")
                     .w_full()
-                    .min_h_8()
+                    .h(row_height)
+                    .flex_shrink_0()
                     .gap_1()
                     .child(
                         menu_item(
@@ -273,7 +276,7 @@ impl WindowView {
                 if current {
                     choice = choice.child(
                         div()
-                            .size_8()
+                            .size(action_size)
                             .flex_shrink_0()
                             .flex()
                             .items_center()
@@ -294,13 +297,14 @@ impl WindowView {
                                 &[("name", name.as_str().into())],
                             ),
                         )
-                        .build(
+                        .build_with(
                             IconButtonStyle::Quiet,
                             IconButtonDensity::Regular,
                             cx,
                             move |this, window, cx| {
                                 this.begin_layout_action(Action::Delete(name.clone()), window, cx)
                             },
+                            |control| control.min_h_0().min_w_0().size(action_size).p_0(),
                         )
                         .flex_shrink_0(),
                     ));

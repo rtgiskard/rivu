@@ -240,6 +240,8 @@ bounds, size to contents and scroll when taller than the viewport; each catalog
 row wraps within its own group and overlong individual labels truncate. Shared
 menus, tooltips and drag previews retain viewport clearance rather than expanding
 the workspace minimum.
+Action menus and playlist destination candidates share a single-line height that
+follows typography and interface scale, including loading and recovery rows.
 
 === Headings and inline actions
 
@@ -260,8 +262,8 @@ shrink inside the action allocation. At extremely narrow widths, panel clipping
 remains authoritative.
 
 Layout management separates its heading, list and action footer. Names shrink
-while current-layout and delete actions retain their slots; Duplicate/Rename
-stay grouped and Sync sits opposite them in a wrapping footer.
+while current-layout and delete actions retain equal-sized slots without changing
+row height; Duplicate/Rename stay grouped and Sync sits opposite them in a wrapping footer.
 
 Tooltip placement belongs to GPUI's window overlay. It anchors to the pointer
 position at opening, prefers above, then below or a side, and clamps against

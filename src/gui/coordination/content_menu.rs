@@ -603,7 +603,7 @@ impl WindowView {
             "down" => index + 1,
             "pageup" | "pagedown" => {
                 let height = targets.scroll.0.borrow().base_handle.bounds().size.height;
-                let row_height = rivu_ui::list_row_height(window, cx);
+                let row_height = rivu_ui::menu_row_height(window, cx);
                 let visible = ((f32::from(height) / f32::from(row_height)).floor() as usize).max(1);
                 if key == "pagedown" {
                     index.saturating_add(visible).min(count - 1)
@@ -724,7 +724,7 @@ impl WindowView {
                 ));
             }
             let count = self.playlists.read(cx).catalog_len();
-            let row_height = rivu_ui::list_row_height(window, cx);
+            let row_height = rivu_ui::menu_row_height(window, cx);
             let height = (row_height * count.max(1) as f32)
                 .min(window.rem_size() * POPOVER_MAX_REMS)
                 .min(window.viewport_size().height * 0.5);
@@ -793,6 +793,7 @@ impl WindowView {
                                                         ("content-playlist-target", id as u64),
                                                         name.clone(),
                                                         div().min_w_0().truncate().child(name),
+                                                        cx,
                                                     ),
                                                     cx,
                                                     move |this, _, cx| {
