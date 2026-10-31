@@ -395,6 +395,17 @@ impl Playback {
             .scroll
             .borrow_mut()
             .content(("transport", panel_id));
+        let icon_scale = rivu_ui::theme::font_size_scale(cx);
+        let missing_metadata = |view: gpui::Stateful<gpui::Div>| {
+            view.size(gpui::rems(icon_scale))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(gpui::rems(1.))
+                .font_size_scale(icon_scale)
+                .line_height(gpui::relative(1.))
+                .text_color(rgb(theme.muted).alpha(0.6))
+        };
         column()
             .id(("transport-panel", panel_id))
             .size_full()
@@ -502,7 +513,8 @@ impl Playback {
                     })
                     .child(
                         row()
-                            .items_baseline()
+                            .items_center()
+                            .gap_1()
                             .text_sm()
                             .line_height(gpui::relative(1.25))
                             .flex_1()
@@ -519,9 +531,7 @@ impl Playback {
                                 .when(!artist.trim().is_empty(), |view| {
                                     view.text_color(rgb(theme.text))
                                 })
-                                .when(artist.trim().is_empty(), |view| {
-                                    view.text_color(rgb(theme.muted).alpha(0.6))
-                                }),
+                                .when(artist.trim().is_empty(), missing_metadata),
                             )
                             .child(caption(theme, "·").text_sm().flex_shrink_0())
                             .child(
@@ -536,9 +546,7 @@ impl Playback {
                                 .when(!album.trim().is_empty(), |view| {
                                     view.text_color(rgb(theme.secondary))
                                 })
-                                .when(album.trim().is_empty(), |view| {
-                                    view.text_color(rgb(theme.muted).alpha(0.6))
-                                }),
+                                .when(album.trim().is_empty(), missing_metadata),
                             ),
                     )
                     .child(
