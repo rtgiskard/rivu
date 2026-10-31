@@ -275,7 +275,7 @@ fn queue_pages_keep_global_navigation_and_duplicate_occurrence_actions() {
     let mut state = TuiSnapshot::default();
     state.queue.total = 200_000;
     state.system.query_batch_size = 3;
-    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
+    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
     tui.ui.page_size = 4;
     tui.ui.queue.selection.select(Some(50_000));
     *tui.ui.queue.selection.offset_mut() = 49_999;
@@ -314,7 +314,7 @@ fn queue_rejects_delayed_pages_and_selection_lookups_after_navigation() {
     let mut state = TuiSnapshot::default();
     state.queue.total = 30;
     state.system.query_batch_size = 3;
-    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
+    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
     let delayed = tui.ui.query_request(&state).unwrap();
     assert!(matches!(
         delayed.query(),
@@ -397,7 +397,7 @@ pub(in crate::terminal) fn load_queue(ui: &mut UiState, state: &TuiSnapshot) {
 #[test]
 fn empty_queue_changes_wait_for_occurrence_rows_before_actions() {
     let mut state = TuiSnapshot::default();
-    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
+    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
     assert!(tui.ui.query_request(&state).is_none());
     state.queue.total = 2;
     state.queue.revision = 1;
@@ -596,7 +596,7 @@ fn tabs_wrap_in_both_directions_and_ignore_retired_shortcuts() {
 fn tab_round_trip_moves_cached_pages_and_preserves_subpage_coordinates() {
     let mut state = query_snapshot();
     Arc::make_mut(&mut state.library.playlist_entry_revisions).insert(5, 0);
-    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
+    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
     tui.ui.queue.set_viewport(3);
     load_queue(&mut tui.ui, &state);
     for _ in 0..7 {
@@ -705,7 +705,7 @@ fn tab_round_trip_moves_cached_pages_and_preserves_subpage_coordinates() {
 #[test]
 fn switching_tabs_rejects_old_completion_even_after_returning_to_same_page() {
     let state = query_snapshot();
-    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
+    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
     let old = tui.ui.query_request(&state).unwrap();
     tui.ui.requested = Some(old.clone());
     tui.ui.key_action(KeyEvent::from(KeyCode::Tab), &state);
@@ -726,7 +726,7 @@ fn switching_tabs_rejects_old_completion_even_after_returning_to_same_page() {
 #[test]
 fn hidden_pages_invalidate_without_cancelling_visible_queue_and_handle_deletion() {
     let state = query_snapshot();
-    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
+    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
     tui.ui.view = View::Tree(LibraryTree {
         directory: "/music".into(),
         ..LibraryTree::default()
@@ -780,7 +780,7 @@ fn hidden_pages_invalidate_without_cancelling_visible_queue_and_handle_deletion(
 fn hidden_pages_follow_page_size_and_library_root_changes() {
     let mut state = query_snapshot();
     state.system.library_roots = Arc::new(vec!["/one".into()]);
-    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
+    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
     tui.ui.key_action(KeyEvent::from(KeyCode::Tab), &state);
     load_visible(&mut tui.ui, &state);
     tui.ui.key_action(KeyEvent::from(KeyCode::Tab), &state);
@@ -832,7 +832,7 @@ fn hidden_pages_follow_page_size_and_library_root_changes() {
 #[test]
 fn search_retains_editor_traversal_and_cached_library_while_highlighting_library() {
     let state = query_snapshot();
-    let mut ui = UiState::new(Arc::new(Localizer::new("en-US")));
+    let mut ui = UiState::new(Arc::new(Localizer::for_terminal("en-US")));
     ui.view = View::Tree(LibraryTree {
         directory: "/music/disc".into(),
         ..LibraryTree::default()
@@ -866,7 +866,7 @@ fn unrelated_updates_preserve_pending_and_loaded_terminal_pages() {
         playlist_view(1),
     ] {
         let state = query_snapshot();
-        let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
+        let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
         tui.ui.view = view;
         let request = tui.ui.query_request(&state).unwrap();
         tui.ui.requested = Some(request.clone());
@@ -911,7 +911,7 @@ fn unrelated_updates_preserve_pending_and_loaded_terminal_pages() {
 fn directory_pages_refresh_for_metadata_and_structure_but_not_publication() {
     for metadata in [true, false] {
         let state = query_snapshot();
-        let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
+        let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
         tui.ui.view = View::Tree(LibraryTree {
             directory: "/music".into(),
             ..LibraryTree::default()
@@ -953,7 +953,7 @@ fn directory_pages_refresh_for_metadata_and_structure_but_not_publication() {
 #[test]
 fn playlist_metadata_refresh_keeps_occurrence_and_compact_lookup_scope() {
     let state = query_snapshot();
-    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
+    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
     tui.ui.view = playlist_view(1);
     load_visible(&mut tui.ui, &state);
     let mut next = state.clone();
@@ -1022,7 +1022,7 @@ fn playlist_metadata_refresh_keeps_occurrence_and_compact_lookup_scope() {
 #[test]
 fn deleted_playlist_returns_to_summaries_and_rejects_pending_rows() {
     let state = query_snapshot();
-    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
+    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
     tui.ui.view = playlist_view(1);
     let request = tui.ui.query_request(&state).unwrap();
     let mut next = state.clone();
@@ -1043,7 +1043,7 @@ fn deleted_playlist_returns_to_summaries_and_rejects_pending_rows() {
 #[test]
 fn terminal_page_demand_does_not_change_projection_but_page_size_does() {
     let state = query_snapshot();
-    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
+    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
     tui.ui.view = View::Playlists(PagedList::default());
     let first = tui.ui.query_request(&state).unwrap();
     assert!(tui.ui.apply_query(&state, &first, Ok(response(&first, 12))));
@@ -1067,7 +1067,7 @@ fn terminal_page_demand_does_not_change_projection_but_page_size_does() {
 #[test]
 fn failed_playlist_pages_ignore_retry_keys_and_recover_after_reopening() {
     let state = query_snapshot();
-    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
+    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
     tui.ui.view = View::Playlists(PagedList::default());
     let request = tui.ui.query_request(&state).unwrap();
     assert!(
@@ -1128,7 +1128,7 @@ fn playlist_reorder_preserves_unrelated_terminal_views() {
             },
         },
     ] {
-        let mut tui = TuiState::new(snapshot.clone(), Arc::new(Localizer::new("en-US")));
+        let mut tui = TuiState::new(snapshot.clone(), Arc::new(Localizer::for_terminal("en-US")));
         tui.ui.view = view;
         load_visible(&mut tui.ui, &snapshot);
         let generation = tui.ui.projection.generation();
@@ -1145,7 +1145,7 @@ fn terminal_playlist_reorder_relocates_identity_and_rejects_stale_results() {
     let mut snapshot = TuiSnapshot::default();
     snapshot.system.query_batch_size = 1;
     Arc::make_mut(&mut snapshot.library.playlist_entry_revisions).insert(1, 0);
-    let mut tui = TuiState::new(snapshot, Arc::new(Localizer::new("en-US")));
+    let mut tui = TuiState::new(snapshot, Arc::new(Localizer::for_terminal("en-US")));
     tui.ui.view = View::PlaylistDetail {
         playlists: (ListState::default(), 1),
         detail: PlaylistDetail {
@@ -1261,7 +1261,7 @@ fn every_queried_view_renders_across_batches_without_resetting_scroll() {
 
 fn other_tracks_pending_selection_regression(revisions: bool) {
     let mut state = query_snapshot();
-    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
+    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
     let mut tree = LibraryTree {
         other_tracks: true,
         ..LibraryTree::default()
@@ -1363,7 +1363,7 @@ fn other_tracks_selection_survives_consecutive_revisions_before_locate() {
 fn other_tracks_selection_survives_changes_between_locate_and_page() {
     for revision_change in [false, true] {
         let mut state = query_snapshot();
-        let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
+        let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
         let mut tree = LibraryTree {
             other_tracks: true,
             ..LibraryTree::default()
@@ -1695,7 +1695,7 @@ fn query_editor_keeps_printable_shortcuts_and_rejects_modified_text() {
 fn help_scrolls_every_binding_without_touching_the_underlying_queue() {
     for language in ["en-US", "zh-CN"] {
         let state = TuiSnapshot::default();
-        let mut ui = UiState::new(Arc::new(Localizer::new(language)));
+        let mut ui = UiState::new(Arc::new(Localizer::for_terminal(language)));
         ui.queue.total = 100;
         ui.queue.loaded = true;
         ui.queue.selection.select(Some(7));
@@ -1746,7 +1746,7 @@ fn boundary_navigation_queries_unloaded_pages_and_rejects_old_demands() {
     let mut state = TuiSnapshot::default();
     state.queue.total = 100;
     state.system.query_batch_size = 3;
-    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
+    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
     let old = tui.ui.query_request(&state).unwrap();
     tui.ui.key_action(KeyEvent::from(KeyCode::End), &state);
     let last = tui.ui.query_request(&state).unwrap();
@@ -1885,7 +1885,7 @@ fn details_containers_are_not_tracks_and_query_editor_owns_i() {
 fn bitrate_tui() -> TuiState {
     let mut state = query_snapshot();
     state.queue.total = 3;
-    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
+    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
     tui.ui.queue.set_viewport(2);
     tui.ui.queue.insert(
         0,
@@ -1992,7 +1992,7 @@ fn bitrate_late_page_responses_are_rejected_and_retried_at_the_new_stamp() {
         playlist_view(1),
     ] {
         let state = query_snapshot();
-        let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
+        let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
         tui.ui.view = view;
         let pending = tui.ui.query_request(&state).unwrap();
         tui.ui.requested = Some(pending.clone());
@@ -2180,7 +2180,7 @@ fn bitrate_stale_or_future_response_stamps_retire_and_retry() {
 fn bitrate_changes_leave_summary_pages_and_count_requests_untouched() {
     for root in [false, true] {
         let state = query_snapshot();
-        let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
+        let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
         tui.ui.view = if root {
             View::Tree(LibraryTree::new(&["/music".into()]))
         } else {
@@ -2267,7 +2267,7 @@ fn bitrate_details_reject_late_reads_and_preserve_scroll_during_retry() {
 #[test]
 fn bitrate_changes_do_not_retire_playlist_location_lookups() {
     let state = query_snapshot();
-    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
+    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
     tui.ui.view = playlist_view(1);
     let View::PlaylistDetail { detail, .. } = &mut tui.ui.view else {
         unreachable!()

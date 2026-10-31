@@ -37,7 +37,7 @@ use std::{
 /// quitting the screen only restores the terminal; the server keeps playing.
 pub fn run(data_dir: &Path, language: &str) -> Result<()> {
     let termination = TerminalTermination::new().context("register terminal shutdown signals")?;
-    let i18n = Arc::new(Localizer::new(language));
+    let i18n = Arc::new(Localizer::for_terminal(language));
     enable_raw_mode().context("enable terminal raw mode")?;
     let mut stdout = io::stdout();
     if let Err(error) = execute!(stdout, EnterAlternateScreen) {

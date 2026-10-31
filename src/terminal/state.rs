@@ -1170,7 +1170,7 @@ impl UiState {
 #[cfg(test)]
 impl Default for UiState {
     fn default() -> Self {
-        Self::new(Arc::new(Localizer::new("en-US")))
+        Self::new(Arc::new(Localizer::for_terminal("en-US")))
     }
 }
 

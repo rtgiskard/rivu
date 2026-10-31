@@ -27,6 +27,29 @@ const ZH: &str = concat!(
     "\n",
 );
 
+const EN_CLI: &str = include_str!("../data/locales/en-US/core.ftl");
+const ZH_CLI: &str = include_str!("../data/locales/zh-CN/core.ftl");
+const EN_TERMINAL: &str = concat!(
+    include_str!("../data/locales/en-US/core.ftl"),
+    "\n",
+    include_str!("../data/locales/en-US/gui-shell.ftl"),
+    "\n",
+    include_str!("../data/locales/en-US/gui-library.ftl"),
+    "\n",
+    include_str!("../data/locales/en-US/terminal.ftl"),
+    "\n",
+);
+const ZH_TERMINAL: &str = concat!(
+    include_str!("../data/locales/zh-CN/core.ftl"),
+    "\n",
+    include_str!("../data/locales/zh-CN/gui-shell.ftl"),
+    "\n",
+    include_str!("../data/locales/zh-CN/gui-library.ftl"),
+    "\n",
+    include_str!("../data/locales/zh-CN/terminal.ftl"),
+    "\n",
+);
+
 pub use rivu_format::config::normalize_language;
 
 fn environment_language<'a>(values: impl IntoIterator<Item = Option<&'a str>>) -> &'static str {
@@ -62,7 +85,22 @@ pub struct Localizer {
 }
 
 impl Localizer {
+    /// GUI resources, including the keyboard labels shared with the terminal.
     pub fn new(language: &str) -> Self {
+        Self::for_resources(language, EN, ZH)
+    }
+
+    /// CLI help, control-command output, and headless-core startup messages only.
+    pub fn for_cli(language: &str) -> Self {
+        Self::for_resources(language, EN_CLI, ZH_CLI)
+    }
+
+    /// Terminal and shared shell/library labels, without GUI settings resources.
+    pub fn for_terminal(language: &str) -> Self {
+        Self::for_resources(language, EN_TERMINAL, ZH_TERMINAL)
+    }
+
+    fn for_resources(language: &str, english: &str, translated: &str) -> Self {
         let language = match normalize_language(language) {
             "auto" => {
                 let values = ["LC_ALL", "LC_MESSAGES", "LANG"].map(|key| std::env::var(key).ok());
@@ -71,11 +109,11 @@ impl Localizer {
             "zh-CN" => "zh-CN",
             _ => "en-US",
         };
-        Self::for_language(language)
-    }
-
-    fn for_language(language: &'static str) -> Self {
-        Self::with_resources(language, EN, (language == "zh-CN").then_some(ZH))
+        Self::with_resources(
+            language,
+            english,
+            (language == "zh-CN").then_some(translated),
+        )
     }
 
     fn with_resources(language: &'static str, english: &str, translated: Option<&str>) -> Self {
@@ -129,10 +167,14 @@ impl Localizer {
             .map(|(id, text)| (id.as_str(), text.as_str()))
     }
 
+    /// Look up an optional fixed message without copying the presentation cache.
+    pub fn get_text(&self, id: &str) -> Option<&str> {
+        self.fixed.get(id).map(String::as_str)
+    }
+
     /// Borrow a fixed message. Unknown IDs and dynamic messages are programming errors.
     pub fn text(&self, id: &str) -> &str {
-        self.fixed
-            .get(id)
+        self.get_text(id)
             .unwrap_or_else(|| panic!("unknown or dynamic Fluent text ID: {id}"))
     }
 
@@ -237,29 +279,49 @@ mod tests {
         }
         assert_eq!(environment_language([None, None, None]), "en-US");
         assert_eq!(Localizer::new("unsupported").language(), "en-US");
+        assert_eq!(Localizer::for_cli("unsupported").language(), "en-US");
+        assert_eq!(Localizer::for_terminal("unsupported").language(), "en-US");
     }
 
     #[test]
     fn embedded_catalogs_are_complete_and_format_without_errors() {
-        let english = signatures(EN);
-        assert_eq!(
-            english,
-            signatures(ZH),
-            "both languages need identical IDs and named arguments"
-        );
-        for language in ["en-US", "zh-CN"] {
-            let localizer = Localizer::new(language);
-            for (id, names) in &english {
-                let args = names
-                    .iter()
-                    .map(|name| (name.as_str(), FluentValue::from(2)))
-                    .collect::<Vec<_>>();
-                let rendered = localizer.format(id, &args);
-                if names.is_empty() {
-                    assert_eq!(localizer.text(id), rendered);
+        for (english, translated, constructor) in [
+            (EN, ZH, Localizer::new as fn(&str) -> Localizer),
+            (EN_CLI, ZH_CLI, Localizer::for_cli),
+            (EN_TERMINAL, ZH_TERMINAL, Localizer::for_terminal),
+        ] {
+            let english = signatures(english);
+            assert_eq!(
+                english,
+                signatures(translated),
+                "both languages need identical IDs and named arguments"
+            );
+            for language in ["en-US", "zh-CN"] {
+                let localizer = constructor(language);
+                for (id, names) in &english {
+                    let args = names
+                        .iter()
+                        .map(|name| (name.as_str(), FluentValue::from(2)))
+                        .collect::<Vec<_>>();
+                    let rendered = localizer.format(id, &args);
+                    if names.is_empty() {
+                        assert_eq!(localizer.text(id), rendered);
+                    }
                 }
             }
         }
+    }
+
+    #[test]
+    fn presentation_owners_keep_independent_languages() {
+        let gui = Localizer::new("zh-CN");
+        let cli = Localizer::for_cli("en-US");
+        let terminal = Localizer::for_terminal("en-US");
+        assert_eq!(gui.language(), "zh-CN");
+        assert_eq!(cli.language(), "en-US");
+        assert_eq!(terminal.language(), "en-US");
+        assert_ne!(gui.text("core-play"), cli.text("core-play"));
+        assert_eq!(cli.text("core-play"), terminal.text("core-play"));
     }
 
     #[test]

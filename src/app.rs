@@ -260,11 +260,11 @@ impl App {
             Signals::new([Signal::Int, Signal::Term]).context("Registering shutdown signals")?;
         let config = CoreRuntime::load_startup_config(&config_path)?;
         let artwork_limit_bytes = config.artwork_file_limit_mib as usize * 1024 * 1024;
-        let i18n = Arc::new(crate::i18n::Localizer::new(if graphical {
-            &config.ui_language
+        let i18n = Arc::new(if graphical {
+            crate::i18n::Localizer::new(&config.ui_language)
         } else {
-            "auto"
-        }));
+            crate::i18n::Localizer::for_cli("auto")
+        });
         let session = rivu_utils::logging::Session::start(
             &data_dir,
             &crate::config::logging_options(&config),

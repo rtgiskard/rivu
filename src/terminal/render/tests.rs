@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 #[test]
 fn details_loading_and_errors_preserve_scroll_until_fresh_track_is_rendered() {
-    let i18n = Localizer::new("en-US");
+    let i18n = Localizer::for_terminal("en-US");
     let colors = TerminalColors::new(crate::theme::Theme::default());
     let mut details = Details {
         target: Some(2),
@@ -48,7 +48,10 @@ fn details_loading_and_errors_preserve_scroll_until_fresh_track_is_rendered() {
 #[test]
 fn snapshot_theme_changes_recolor_main_help_and_details_without_changing_content() {
     for overlay in 0..3 {
-        let mut tui = TuiState::new(TuiSnapshot::default(), Arc::new(Localizer::new("en-US")));
+        let mut tui = TuiState::new(
+            TuiSnapshot::default(),
+            Arc::new(Localizer::for_terminal("en-US")),
+        );
         tui.ui.show_help = overlay == 1;
         if overlay == 2 {
             tui.ui.details_active = true;
@@ -79,7 +82,7 @@ fn snapshot_theme_changes_recolor_main_help_and_details_without_changing_content
 
 #[test]
 fn details_preserve_missing_paths_unknowns_zeroes_and_responsive_order() {
-    let i18n = Localizer::new("en-US");
+    let i18n = Localizer::for_terminal("en-US");
     let colors = TerminalColors::new(crate::theme::Theme::default());
     for width in [40, 73, 74, 96, 120] {
         let mut details = Details {
@@ -138,7 +141,7 @@ fn details_preserve_missing_paths_unknowns_zeroes_and_responsive_order() {
 #[test]
 fn help_hierarchy_wraps_and_scrolls_read_only_in_current_context() {
     for (language, width) in [("en-US", 96), ("zh-CN", 28)] {
-        let mut ui = UiState::new(Arc::new(Localizer::new(language)));
+        let mut ui = UiState::new(Arc::new(Localizer::for_terminal(language)));
         ui.show_help = true;
         let state = TuiSnapshot::default();
         let mut terminal = Terminal::new(TestBackend::new(width, 18)).unwrap();
@@ -162,7 +165,7 @@ fn query_tail_preserves_graphemes_and_keeps_input_cursor_visible() {
             query: query.into(),
             ..LibrarySearch::default()
         };
-        let i18n = Localizer::new(language);
+        let i18n = Localizer::for_terminal(language);
         for width in [1, 8, 18, 24, 60] {
             let mut terminal = Terminal::new(TestBackend::new(width, 8)).unwrap();
             terminal
@@ -236,7 +239,7 @@ fn metadata_columns_clip_whole_graphemes_without_shifting_duration() {
 
 #[test]
 fn browser_modes_leave_all_rows_below_the_count_header_for_items() {
-    let i18n = Localizer::new("en-US");
+    let i18n = Localizer::for_terminal("en-US");
     for mode in [
         BrowserMode::Tracks,
         BrowserMode::PlaylistTracks,
@@ -424,7 +427,7 @@ fn playback_markers_follow_occurrence_and_status_not_selection() {
                     frame.area(),
                     &state,
                     &mut page,
-                    &Localizer::new("en-US"),
+                    &Localizer::for_terminal("en-US"),
                     TerminalColors::new(state.system.ui_theme),
                 )
             })
@@ -478,7 +481,7 @@ fn localized_playlist_rendering_preserves_user_metadata() {
         }],
     );
     for language in ["en-US", "zh-CN"] {
-        let i18n = Localizer::new(language);
+        let i18n = Localizer::for_terminal(language);
         let mut terminal = Terminal::new(TestBackend::new(80, 8)).unwrap();
         terminal
             .draw(|frame| {
@@ -503,7 +506,7 @@ fn queue_mutations_relocate_selected_occurrence_and_clamp_deleted_selection() {
     let mut state = TuiSnapshot::default();
     state.queue.total = 12;
     state.system.query_batch_size = 3;
-    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
+    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
     tui.ui.queue.selection.select(Some(8));
     load_queue(&mut tui.ui, &state);
     state.queue.total = 11;

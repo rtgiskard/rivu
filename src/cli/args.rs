@@ -561,18 +561,6 @@ impl Args {
 }
 
 pub(super) fn localize_help(command: &mut clap::Command, i18n: &Localizer, path: &str) {
-    let messages = i18n
-        .fixed_texts()
-        .collect::<std::collections::HashMap<_, _>>();
-    localize_command_help(command, i18n, path, &messages);
-}
-
-fn localize_command_help(
-    command: &mut clap::Command,
-    i18n: &Localizer,
-    path: &str,
-    messages: &std::collections::HashMap<&str, &str>,
-) {
     let id = if command.get_name() == "help" {
         "core-help-help".to_owned()
     } else if path.is_empty() {
@@ -580,10 +568,10 @@ fn localize_command_help(
     } else {
         format!("core-help-{path}")
     };
-    if let Some(text) = messages.get(id.as_str()) {
+    if let Some(text) = i18n.get_text(&id) {
         *command = std::mem::take(command)
-            .about((*text).to_owned())
-            .long_about((*text).to_owned());
+            .about(text.to_owned())
+            .long_about(text.to_owned());
     }
     if path.is_empty() {
         *command = std::mem::take(command).long_about(i18n.text("core-help-long").to_owned());
@@ -621,15 +609,10 @@ fn localize_command_help(
         } else if name == "version" {
             Some(i18n.text("core-help-version"))
         } else if matches!(name.as_str(), "data_dir" | "config" | "json") {
-            messages
-                .get(format!("core-help-{name_key}").as_str())
-                .copied()
+            i18n.get_text(&format!("core-help-{name_key}"))
         } else {
-            messages.get(id.as_str()).copied().or_else(|| {
-                messages
-                    .get(format!("core-help-arg-{name_key}").as_str())
-                    .copied()
-            })
+            i18n.get_text(&id)
+                .or_else(|| i18n.get_text(&format!("core-help-arg-{name_key}")))
         };
         *command = std::mem::take(command).mut_arg(name, |arg| {
             let arg = arg
@@ -658,7 +641,7 @@ fn localize_command_help(
         } else {
             format!("{path}-{}", child.get_name())
         };
-        localize_command_help(child, i18n, &child_path, messages);
+        localize_help(child, i18n, &child_path);
     }
 }
 
@@ -667,6 +650,42 @@ mod tests {
     use super::Args;
     use clap::CommandFactory;
     use rivu_utils::terminal::cli_error;
+
+    #[test]
+    fn scoped_cli_help_and_usage_errors_match_full_catalog() {
+        fn assert_help_matches(scoped: &mut clap::Command, full: &mut clap::Command) {
+            assert_eq!(
+                scoped.render_long_help().to_string(),
+                full.render_long_help().to_string(),
+                "help changed for {}",
+                scoped.get_name()
+            );
+            for (scoped, full) in scoped.get_subcommands_mut().zip(full.get_subcommands_mut()) {
+                assert_help_matches(scoped, full);
+            }
+        }
+
+        for language in ["en-US", "zh-CN"] {
+            let mut scoped = Args::command();
+            scoped.build();
+            super::localize_help(&mut scoped, &super::Localizer::for_cli(language), "");
+            let mut full = Args::command();
+            full.build();
+            super::localize_help(&mut full, &super::Localizer::new(language), "");
+            assert_help_matches(&mut scoped, &mut full);
+
+            for arguments in [
+                vec!["rivu", "library", "list", "--unknown"],
+                vec!["rivu", "playback", "seek", "not-a-number"],
+                vec!["rivu", "processing", "graph", "run"],
+            ] {
+                let scoped = scoped.clone().try_get_matches_from(&arguments).unwrap_err();
+                let full = full.clone().try_get_matches_from(&arguments).unwrap_err();
+                assert_eq!(scoped.exit_code(), full.exit_code());
+                assert_eq!(scoped.render().to_string(), full.render().to_string());
+            }
+        }
+    }
 
     #[test]
     fn cli_parse_errors_escape_untrusted_arguments_and_preserve_exit_status() {

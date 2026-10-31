@@ -32,8 +32,7 @@ pub(super) fn print_error(error: &CliError) {
 
 pub(super) fn run() -> std::result::Result<(), CliError> {
     // Command-line surfaces use the process locale, independently of GUI settings.
-    let language = "auto";
-    let i18n = Localizer::new(language);
+    let i18n = Localizer::for_cli("auto");
     let mut command = Args::command();
     command.build();
     localize_help(&mut command, &i18n, "");

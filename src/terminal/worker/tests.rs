@@ -37,7 +37,7 @@ fn shutdown_snapshot_exits_loading_before_input_or_worker_dispatch() {
     crate::terminal::run_loop_with_events(
         directory.path(),
         &mut terminal,
-        Arc::new(crate::i18n::Localizer::new("en")),
+        Arc::new(crate::i18n::Localizer::for_terminal("en")),
         &AtomicBool::new(false),
         watcher,
         |_| panic!("shutdown must not wait for keyboard input"),
@@ -78,7 +78,7 @@ fn shutdown_snapshot_exits_existing_projection_and_cancels_pending_query() {
     crate::terminal::run_loop_with_events(
         directory.path(),
         &mut terminal,
-        Arc::new(crate::i18n::Localizer::new("en")),
+        Arc::new(crate::i18n::Localizer::for_terminal("en")),
         &AtomicBool::new(false),
         watcher,
         |_| {
@@ -116,7 +116,7 @@ fn watcher_disconnection_exits_loading_and_existing_projection_as_an_error() {
         let error = crate::terminal::run_loop_with_events(
             directory.path(),
             &mut terminal,
-            Arc::new(crate::i18n::Localizer::new("en")),
+            Arc::new(crate::i18n::Localizer::for_terminal("en")),
             &AtomicBool::new(false),
             watcher,
             |_| {
