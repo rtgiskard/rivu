@@ -429,7 +429,7 @@ impl Store {
         Self::validate_playlist_name(name)?;
         let tx = self.conn.unchecked_transaction()?;
         available_playlist_name(&tx, name)?;
-        tx.execute("INSERT INTO playlists(name)VALUES(?)", [name])?;
+        tx.execute("INSERT INTO playlists(name,position) SELECT ?1,COALESCE(MAX(position)+1,0) FROM playlists WHERE id>0", [name])?;
         let id = tx.last_insert_rowid();
         append_tracks(&tx, id, tracks)?;
         tx.commit()?;
@@ -440,7 +440,7 @@ impl Store {
         Self::validate_playlist_name(name)?;
         let tx = self.conn.unchecked_transaction()?;
         available_playlist_name(&tx, name)?;
-        tx.execute("INSERT INTO playlists(name) VALUES(?1)", [name])?;
+        tx.execute("INSERT INTO playlists(name,position) SELECT ?1,COALESCE(MAX(position)+1,0) FROM playlists WHERE id>0", [name])?;
         let id = tx.last_insert_rowid();
         let inserted = tx.execute("INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT ?1,track_id,row_number() OVER (ORDER BY position,id)-1 FROM playlist_entries WHERE playlist_id=0 ORDER BY position,id", [id])?;
         tx.commit()?;

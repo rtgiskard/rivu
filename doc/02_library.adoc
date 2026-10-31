@@ -752,8 +752,9 @@ rivu library keep-independent DESTINATION_ID
 
 == SQLite maintenance
 
-Rivu opens database format `2` only. A new database is initialized automatically;
-existing databases need valid current-format metadata. It stores library records,
+Rivu opens database format `4` only. A new database is initialized automatically;
+existing databases need valid current-format metadata. Upgrade a format `2`
+database offline with `rivu-migrate apply` before starting Rivu. The database stores library records,
 user edits and statistics, playlists, and queue occurrences and selection. Stop
 Rivu before external database edits. Queue restoration:
 link:04_playback.adoc#_queue[Playback].
@@ -763,8 +764,10 @@ link:04_playback.adoc#_queue[Playback].
 `rivu-migrate check` inspects configuration and database formats without starting
 the player or changing their contents; SQLite may update coordination sidecars.
 `apply` requires exclusive offline ownership: stop Rivu and external database
-writers first. It validates current resources without rewriting them, creating
-backups, or initializing missing resources.
+writers first. It upgrades a validated format `2` database directly to `4` with a durable
+backup, preserving the existing playlist catalog order and all user data.
+Current resources are validated without rewriting them or creating backups;
+missing resources are not initialized.
 
 [source,sh]
 ----

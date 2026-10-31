@@ -12,6 +12,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod catalog_order;
+mod target_schema;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Check,
@@ -89,6 +92,7 @@ impl Default for Report {
 struct DatabasePlan {
     path: PathBuf,
     connection: Connection,
+    schema_version: i64,
 }
 
 fn validate_config(path: &Path) -> Result<Option<PathBuf>> {
@@ -126,12 +130,25 @@ fn database_plan(options: &Options) -> Result<Option<DatabasePlan>> {
     }
     let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .with_context(|| format!("Opening database read-only {}", path.display()))?;
-    database::validate_structure(&connection).context("Validating database schema structure")?;
-    Ok(Some(DatabasePlan { path, connection }))
+    let schema_version = match database::inspect(&connection)? {
+        database::DatabaseState::Versioned { schema_version: 2 } => {
+            catalog_order::validate(&connection).context("Validating database schema structure")?;
+            2
+        }
+        _ => {
+            target_schema::validate(&connection).context("Validating database schema structure")?;
+            database::SCHEMA_VERSION
+        }
+    };
+    Ok(Some(DatabasePlan {
+        path,
+        connection,
+        schema_version,
+    }))
 }
 
-/// Validate existing resources without rewriting them. Apply additionally takes
-/// offline ownership; no released database migration is currently available.
+/// Inspect existing resources without rewriting them. Apply additionally takes
+/// offline ownership and backs up supported older formats before upgrading them.
 pub fn run(options: &Options, mode: Mode, report: &mut Report) -> Result<()> {
     // Apply inspects existing resources under the same ownership as the host;
     // acquiring only after preflight would leave the plan open to startup races.
@@ -168,23 +185,47 @@ pub fn run(options: &Options, mode: Mode, report: &mut Report) -> Result<()> {
             options.config.display()
         )),
     }
+    let needs_migration = database
+        .as_ref()
+        .is_some_and(|plan| plan.schema_version != database::SCHEMA_VERSION);
     match &database {
-        Some(plan) => report.resources.push(format!(
-            "Database {}: schema {}; current, untouched",
-            plan.path.display(),
-            database::SCHEMA_VERSION
-        )),
+        Some(plan) => report.resources.push(if needs_migration {
+            format!(
+                "Database {}: schema {}; migration to schema {} required",
+                plan.path.display(),
+                plan.schema_version,
+                database::SCHEMA_VERSION
+            )
+        } else {
+            format!(
+                "Database {}: schema {}; current, untouched",
+                plan.path.display(),
+                database::SCHEMA_VERSION
+            )
+        }),
         None => report.resources.push(format!(
             "Database {}: absent at default location; not created",
             options.data_dir.join("library.db").display()
         )),
     }
-    report.needs_changes = false;
+    report.needs_changes = needs_migration;
     if mode == Mode::Apply {
-        report.resources.push(
-            "No database migration is required for the current baseline; resources are unchanged."
-                .to_owned(),
-        );
+        if needs_migration {
+            let plan = database.as_ref().expect("migration requires a database");
+            apply_plan(plan, report, |transaction| {
+                catalog_order::apply(transaction)
+            })?;
+            report.needs_changes = false;
+            report.resources.push(format!(
+                "Database {}: migrated to schema {}; catalog order preserved",
+                plan.path.display(),
+                database::SCHEMA_VERSION
+            ));
+        } else {
+            report
+                .resources
+                .push("No database migration is required; resources are unchanged.".to_owned());
+        }
     }
     Ok(())
 }
@@ -194,7 +235,7 @@ pub fn run(options: &Options, mode: Mode, report: &mut Report) -> Result<()> {
 /// backup before invoking `change` in a FULL-synchronous transaction. The operation
 /// must include its own postcondition validation; any error rolls it back. Reports
 /// retain backup artifacts and attempted/committed status even on failure.
-/// This is execution infrastructure, not a registered baseline migration.
+/// Registered migrations use the same backup and transaction implementation.
 pub fn apply_database_change(
     options: &Options,
     report: &mut Report,
@@ -205,9 +246,17 @@ pub fn apply_database_change(
     validate_config(&options.config)
         .with_context(|| format!("Preflighting configuration {}", options.config.display()))?;
     let plan = database_plan(options)?.context("No existing database to migrate")?;
+    apply_plan(&plan, report, change)
+}
+
+fn apply_plan(
+    plan: &DatabasePlan,
+    report: &mut Report,
+    change: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<()>,
+) -> Result<()> {
     let started = std::time::Instant::now();
     tracing::info!(database = ?plan.path, "Checking storage capacity");
-    storage_preflight(&plan)?;
+    storage_preflight(plan)?;
     // Back up the complete database before attempting a transactional change.
     let (path, published, file) = reserve_backup(&plan.path)?;
     report.backups.push(BackupReport {

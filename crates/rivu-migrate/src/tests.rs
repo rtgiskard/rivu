@@ -225,6 +225,7 @@ fn unsupported_database_leaves_valid_unversioned_configuration_untouched() {
     for sql in [
         "UPDATE rivu_meta SET format_version=99 WHERE singleton=1",
         "UPDATE rivu_meta SET format_version=1 WHERE singleton=1",
+        "UPDATE rivu_meta SET format_version=3 WHERE singleton=1",
         "DELETE FROM rivu_meta",
         "DROP TABLE playlist_entries",
     ] {
@@ -445,4 +446,239 @@ fn transactional_change_failure_rolls_back_and_reentry_keeps_distinct_backups() 
         "# original\n[playback]\n"
     );
     assert!(execute(&options, Mode::Apply).unwrap().backups.is_empty());
+}
+
+fn version_two_fixture() -> (tempfile::TempDir, Options) {
+    let (directory, options) = fixture();
+    let conn = Connection::open(options.data_dir.join("library.db")).unwrap();
+    // Schema 2 is the same occurrence schema, without persisted catalog order.
+    conn.execute_batch(
+        "ALTER TABLE playlists DROP COLUMN position;
+         UPDATE rivu_meta SET format_version=2;
+         INSERT INTO tracks(id,path) VALUES(1,'one'),(2,'two');
+         INSERT INTO playlists(id,name) VALUES(30,'Zebra'),(10,'Middle'),(20,'Alpha');
+         INSERT INTO playlist_entries(id,playlist_id,track_id,position) VALUES
+             (41,0,1,0),(42,0,2,1),(43,0,1,2),(51,10,2,0),(52,10,1,1),(53,10,2,2);
+         UPDATE tracks SET title_override='User title',favorite=1,play_count=7,last_played=42 WHERE id=1;
+         UPDATE rivu_meta SET current_queue_entry_id=42;",
+    )
+    .unwrap();
+    (directory, options)
+}
+
+fn occurrence_snapshot(conn: &Connection) -> Vec<(i64, i64, i64, i64)> {
+    conn.prepare("SELECT id,playlist_id,track_id,position FROM playlist_entries ORDER BY id")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+}
+
+#[test]
+fn catalog_migration_preserves_previous_order_contents_and_queue_after_reopen() {
+    let (_directory, options) = version_two_fixture();
+    fs::write(
+        &options.config,
+        "# preserve formatting\n[playback]\nvolume_percent=37\n",
+    )
+    .unwrap();
+    let path = options.data_dir.join("library.db");
+    let conn = Connection::open(&path).unwrap();
+    let source_version = format_version(&conn);
+    let occurrences = occurrence_snapshot(&conn);
+    let schema: i64 = conn
+        .pragma_query_value(None, "schema_version", |row| row.get(0))
+        .unwrap();
+    let changes = conn.total_changes();
+    let checked = execute(&options, Mode::Check).unwrap();
+    assert!(checked.needs_changes);
+    assert!(checked.backups.is_empty());
+    assert_eq!(format_version(&conn), source_version);
+    assert_eq!(conn.total_changes(), changes);
+    assert_eq!(
+        conn.pragma_query_value(None, "schema_version", |row| row.get::<_, i64>(0))
+            .unwrap(),
+        schema
+    );
+    assert!(database::validate_structure(&conn).is_err());
+
+    let applied = execute(&options, Mode::Apply).unwrap();
+    assert!(!applied.needs_changes);
+    assert_eq!(applied.backups.len(), 1);
+    assert_eq!(applied.backups[0].status, BackupStatus::Complete);
+    let backup = Connection::open(&applied.backups[0].path).unwrap();
+    assert_eq!(format_version(&backup), source_version);
+    catalog_order::validate(&backup).unwrap();
+    assert_eq!(occurrence_snapshot(&backup), occurrences);
+    drop(conn);
+
+    let conn = Connection::open(&path).unwrap();
+    database::validate_structure(&conn).unwrap();
+    let order = conn
+        .prepare("SELECT id,name,position FROM playlists WHERE id>0 ORDER BY position,id")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(
+        order,
+        [(10, "Middle"), (20, "Alpha"), (30, "Zebra")]
+            .into_iter()
+            .enumerate()
+            .map(|(position, (id, name))| (id, name.to_owned(), position as i64))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(occurrence_snapshot(&conn), occurrences);
+    assert_eq!(
+        conn.query_row("SELECT current_queue_entry_id FROM rivu_meta", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap(),
+        42
+    );
+    let statistics = conn
+        .query_row(
+            "SELECT title_override,favorite,play_count,last_played FROM tracks WHERE id=1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, bool>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(statistics, (String::from("User title"), true, 7, 42));
+    assert_eq!(
+        conn.query_row(
+            "SELECT seq FROM sqlite_sequence WHERE name='playlists'",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        30
+    );
+    assert_eq!(
+        fs::read_to_string(&options.config).unwrap(),
+        "# preserve formatting\n[playback]\nvolume_percent=37\n"
+    );
+    let repeated = execute(&options, Mode::Apply).unwrap();
+    assert!(!repeated.needs_changes);
+    assert!(repeated.backups.is_empty());
+}
+
+#[test]
+fn unrecognized_schema_changes_roll_back_without_losing_user_objects() {
+    for (change, retained_value) in [
+        (
+            "CREATE TABLE private_notes(value TEXT); INSERT INTO private_notes VALUES('keep me');",
+            "SELECT value FROM private_notes",
+        ),
+        (
+            "CREATE INDEX custom_title_lookup ON tracks(raw_title);",
+            "SELECT name FROM sqlite_schema WHERE name='custom_title_lookup'",
+        ),
+        (
+            "ALTER TABLE tracks ADD COLUMN retired TEXT DEFAULT '  keep me  ';",
+            "SELECT retired FROM tracks WHERE id=1",
+        ),
+        (
+            "DROP TRIGGER albums_update; CREATE TRIGGER albums_update AFTER UPDATE ON tracks BEGIN SELECT 1; END;",
+            "SELECT name FROM sqlite_schema WHERE name='albums_update'",
+        ),
+        (
+            "DROP INDEX albums_artist; CREATE INDEX albums_artist ON albums(COALESCE(artist,'unknown artist'),title,directory);",
+            "SELECT sql FROM sqlite_schema WHERE name='albums_artist'",
+        ),
+        (
+            "CREATE TABLE sqlitex_notes(value TEXT); INSERT INTO sqlitex_notes VALUES('keep me');",
+            "SELECT value FROM sqlitex_notes",
+        ),
+    ] {
+        let (_directory, options) = version_two_fixture();
+        let conn = Connection::open(options.data_dir.join("library.db")).unwrap();
+        conn.execute_batch(change).unwrap();
+        let retained: String = conn
+            .query_row(retained_value, [], |row| row.get(0))
+            .unwrap();
+        let occurrences = occurrence_snapshot(&conn);
+        let mut report = Report::default();
+        assert!(run(&options, Mode::Apply, &mut report).is_err(), "{change}");
+        assert_eq!(report.backups.len(), 1);
+        assert_eq!(report.backups[0].status, BackupStatus::Complete);
+        assert_eq!(format_version(&conn), 2);
+        catalog_order::validate(&conn).unwrap();
+        assert_eq!(
+            conn.query_row(retained_value, [], |row| row.get::<_, String>(0))
+                .unwrap(),
+            retained
+        );
+        assert_eq!(occurrence_snapshot(&conn), occurrences);
+    }
+}
+
+#[test]
+fn failed_catalog_migration_rolls_back_schema_version_and_data() {
+    let (_directory, options) = version_two_fixture();
+    let conn = Connection::open(options.data_dir.join("library.db")).unwrap();
+    let occurrences = occurrence_snapshot(&conn);
+    let mut report = Report::default();
+    assert!(
+        apply_database_change(&options, &mut report, |transaction| {
+            catalog_order::apply(transaction)?;
+            bail!("deterministic postcondition failure")
+        })
+        .is_err()
+    );
+    assert_eq!(report.backups.len(), 1);
+    assert_eq!(report.backups[0].status, BackupStatus::Complete);
+    catalog_order::validate(&conn).unwrap();
+    assert_eq!(occurrence_snapshot(&conn), occurrences);
+    assert_eq!(
+        conn.query_row("SELECT current_queue_entry_id FROM rivu_meta", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap(),
+        42
+    );
+}
+
+#[test]
+fn incompatible_old_formats_are_rejected_before_backup_or_schema_changes() {
+    for sql in [
+        "DROP INDEX playlist_order",
+        "DELETE FROM playlists WHERE id=0",
+        "ALTER TABLE playlists ADD COLUMN position INTEGER NOT NULL DEFAULT 0",
+    ] {
+        let (_directory, options) = version_two_fixture();
+        let conn = Connection::open(options.data_dir.join("library.db")).unwrap();
+        conn.execute_batch(sql).unwrap();
+        let version = format_version(&conn);
+        let schema: i64 = conn
+            .pragma_query_value(None, "schema_version", |row| row.get(0))
+            .unwrap();
+        for mode in [Mode::Check, Mode::Apply] {
+            let mut report = Report::default();
+            assert!(run(&options, mode, &mut report).is_err());
+            assert!(report.backups.is_empty());
+            assert_eq!(format_version(&conn), version);
+            assert_eq!(
+                conn.pragma_query_value(None, "schema_version", |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                schema
+            );
+        }
+    }
 }

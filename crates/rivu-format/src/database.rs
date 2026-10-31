@@ -47,7 +47,7 @@ pub fn validate_current(conn: &Connection) -> Result<()> {
             schema_version: SCHEMA_VERSION,
         } => Ok(()),
         DatabaseState::Versioned { schema_version } => bail!(
-            "Unsupported database version {schema_version}; back up the database and WAL before replacing it; rescanning cannot restore user state"
+            "Unsupported database version {schema_version}; stop Rivu and run rivu-migrate check, then rivu-migrate apply; back up the database and WAL first because rescanning cannot restore user state"
         ),
         DatabaseState::Empty | DatabaseState::Unversioned => bail!(
             "Unsupported library database; back up the database and WAL before replacing it; rescanning cannot restore user state"
@@ -59,6 +59,15 @@ pub fn validate_current(conn: &Connection) -> Result<()> {
 /// used by current readers and writers and the required indexes, not SQL spelling.
 pub fn validate_structure(conn: &Connection) -> Result<()> {
     validate_current(conn)?;
+    validate_common_structure(conn)?;
+    conn.prepare("SELECT position FROM playlists LIMIT 0")
+        .context("Unsupported library database: missing catalog order")?;
+    Ok(())
+}
+
+/// Shared structural invariants retained by the offline migration tool.
+/// This does not establish a format version; callers must validate it separately.
+pub fn validate_common_structure(conn: &Connection) -> Result<()> {
     for (table, columns) in [
         (
             "rivu_meta",
@@ -300,7 +309,7 @@ pub fn ensure_current(conn: &Connection) -> Result<()> {
         validate_structure(conn)
     }
 }
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 4;
 
 const TRACK_TABLE: &str = "CREATE TABLE tracks(
     id INTEGER PRIMARY KEY AUTOINCREMENT,path TEXT NOT NULL,
@@ -335,7 +344,8 @@ pub fn create_current(conn: &Connection) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
     tx.execute_batch(TRACK_TABLE)?;
     tx.execute_batch(
-        "CREATE TABLE playlists(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL);
+        "CREATE TABLE playlists(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,
+            position INTEGER NOT NULL DEFAULT 0 CHECK(position>=0));
         INSERT INTO playlists(id,name) VALUES(0,'');
         CREATE TABLE playlist_entries(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -675,7 +685,7 @@ mod tests {
 
     #[test]
     fn unsupported_versions_are_rejected_before_any_schema_or_data_write() -> Result<()> {
-        for version in [0, 1, SCHEMA_VERSION + 1] {
+        for version in [0, 1, 2, 3, 99] {
             let conn = Connection::open_in_memory()?;
             create_current(&conn)?;
             conn.execute(
@@ -912,12 +922,12 @@ mod tests {
     }
 
     #[test]
-    fn collection_preflight_rejects_incompatible_version_two_without_writes() -> Result<()> {
+    fn collection_preflight_rejects_incompatible_current_structure_without_writes() -> Result<()> {
         for incompatible in [
             "DELETE FROM playlists WHERE id=0;",
             "UPDATE playlists SET name='visible' WHERE id=0;",
             "CREATE UNIQUE INDEX forbidden_membership ON playlist_entries(playlist_id,track_id);",
-            "ALTER TABLE rivu_meta RENAME TO unsupported_meta; CREATE TABLE rivu_meta(singleton INTEGER PRIMARY KEY,format_version INTEGER NOT NULL,current_queue_entry_id INTEGER); INSERT INTO rivu_meta VALUES(1,2,NULL);",
+            "ALTER TABLE rivu_meta RENAME TO unsupported_meta; CREATE TABLE rivu_meta(singleton INTEGER PRIMARY KEY,format_version INTEGER NOT NULL,current_queue_entry_id INTEGER); INSERT INTO rivu_meta SELECT singleton,format_version,current_queue_entry_id FROM unsupported_meta;",
             "INSERT INTO tracks(id,path) VALUES(1,'one'); INSERT INTO playlists(id,name) VALUES(1,'ordinary'); INSERT INTO playlist_entries(id,playlist_id,track_id,position) VALUES(1,1,1,0); UPDATE rivu_meta SET current_queue_entry_id=1;",
         ] {
             let conn = Connection::open_in_memory()?;

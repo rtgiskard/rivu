@@ -5,33 +5,45 @@
 == Scope and decisions
 
 This document describes current-format validation and the offline migration
-execution boundary. The separate <<_future_historical_conversion>> and
-<<_future_application_invocation>> sections define design requirements, not
-additional supported inputs or startup behavior.
+execution boundary. The <<_future_historical_conversion>>
+section defines requirements for additional conversions, not supported inputs.
 Operational commands belong in
 link:02_library.adoc#_sqlite_maintenance[SQLite maintenance] and
 link:01_config.adoc#_saving_configuration[Saving configuration].
 
 === Current implementation
 
-The database format is `2`; the independent configuration schema is `1`.
+The database format is `4`; the independent configuration schema is `1`.
 
-* `rivu-migrate check` validates existing current configuration and database formats.
-* `rivu-migrate apply` repeats validation under offline ownership. No registered
-  conversion steps are available: current resources are left unchanged and no
-  backup is created.
-* Existing databases must already satisfy the current format, even if they are
-  empty. Missing default resources are reported without creating them; an explicitly
-  selected missing database is an error.
+* `rivu-migrate check` validates current resources and reports supported database
+  upgrades without changing them.
+* `rivu-migrate apply` upgrades a validated format `2` database directly to `4` under
+  offline ownership, retaining a durable SQLite backup. Current resources are left
+  unchanged and do not create a backup.
+* Format `4` stores playlist catalog order in `playlists.position`. Upgrading from
+  format `2` initializes this order from playlist IDs and retains all playlist
+  contents, playback statistics, indexes, and the playback queue.
+* Missing default resources are reported without creating them; an explicitly
+  selected missing database is an error. Unknown or malformed formats are rejected.
 * A valid configuration without an explicit version is current and left untouched.
+
+To inspect or upgrade an existing format `2` database before application
+startup, stop Rivu and run the tool with the intended data directory and configuration:
+
+[source,sh]
+----
+rivu-migrate --data-dir /path/to/data --config /path/to/config.toml check
+rivu-migrate --data-dir /path/to/data --config /path/to/config.toml apply
+----
+
 
 
 === Integration scope
 
-The application operates on current formats and does not invoke migration during
-startup. Normal database opening initializes an empty database or requires the
-current format. Offline conversion belongs to the independent tool; possible
-startup invocation is specified separately below.
+The application operates on current formats. Database opening initializes an
+empty database or requires the current format. Upgrade a format `2` database
+offline with `rivu-migrate apply` before starting Rivu; all historical recognition
+and conversion stay in the independent tool.
 
 Non-goals are automatic downgrade, a migration plugin framework, distributed or
 cross-file transactions, a recovery-state database, automatic paired restore,
@@ -70,16 +82,24 @@ The singleton `rivu_meta` row stores `format_version` and
 interpretation, not the application release or a count of writes. The current
 queue occurrence references unified `playlist_entries.id` with `ON DELETE SET NULL`;
 runtime storage accepts only occurrences belonging to the system queue.
-New databases create format `2` directly, without historical migrations.
+New databases create format `4` directly, without historical migrations.
 
 
 Offline preflight checks required tables and readable columns, primary and unique
 keys, index properties and usability, the queue singleton, and required trigger
-names. It does not rely on a version stamp alone or compare SQL text for exact
-spelling. A failed structural check is rejected, not repaired by installing
-current triggers. This is not a full integrity check or proof of trigger semantics
-and derived-summary correctness. Normal application opening uses the cheaper
-format guard rather than repeating offline structural preflight.
+names. Before a migration transaction commits, its complete user-defined schema
+is also compared with a fresh database created by the current schema authority.
+Tables, indexes, views, and triggers must have the same identities and definition
+tokens, including columns, defaults, constraints, and expressions. Whitespace and
+unquoted token case are ignored; quoted identifiers and literal contents remain
+exact. Equivalent hand-written schema rewrites can therefore be conservatively
+rejected. Unexpected objects or definitions fail with the object name and roll
+back the migration; unknown objects are not silently deleted. Current-format
+resources use this same strict check without rewriting or creating a backup.
+SQLite-owned internal objects are excluded, and file bytes and size need not match.
+This is not a full integrity check or validation of stored derived-summary data.
+Normal application opening uses the cheaper format guard rather than repeating
+offline structural preflight.
 
 A missing version is not evidence of a known oldest schema. Unknown, future, or
 malformed formats are rejected; changing a marker does not make them current.
@@ -163,12 +183,10 @@ preserve clap's usage layout, output stream, and exit status.
 
 == Apply protocol
 
-The supported `apply` command takes ownership, validates, and returns unchanged.
-The existing database-change execution infrastructure supports the protocol below,
-but has no registered conversion or CLI option. It also requires current-format
-preflight; historical conversion needs its own source-format admission. The
-supplied change must validate its postconditions inside the transaction.
-Configuration remains read-only.
+The supported `apply` command upgrades validated format `2` databases
+directly to `4`. The independent tool admits the source format before applying
+its conversion. Current-format resources return unchanged. Configuration remains
+read-only. Every database change follows this protocol:
 
 . Acquire data-directory ownership and fix the selected targets.
 . Recheck database structure and readability and strictly validate configuration.
@@ -233,28 +251,22 @@ must contain no migration package or historical decoder.
 
 == Future historical conversion
 
-No historical conversion is implemented. Supporting one requires evidence of the
-source structure and interpretation; missing or invalid versions do not authorize
-guessing. Database changes need a deliberate schema-version decision and must
-transform and validate data and structure before updating the marker in the same
-transaction. Merely stamping a version is not migration.
+The supported source format `2` upgrades directly to the current format `4`;
+format `3` is not a supported historical format. Version numbers need not be
+consecutive. Additional conversions require evidence
+of the source structure and interpretation; missing or invalid versions do not
+authorize guessing. Database changes need a deliberate schema-version decision
+and must validate the source and target structure and user data before updating
+the marker in the same transaction. An incompatible database cannot be made
+current by merely changing its marker.
+
+Each conversion must explicitly remove known obsolete tables, indexes, and columns
+inside the migration transaction and verify their absence before committing.
+Unknown objects are not garbage to delete. The current `2` to `4` conversion adds
+playlist catalog positions; it does not retire any format `2` table, index, or
+column, so no removal is needed for this conversion.
 
 Configuration conversion additionally needs a source contract for omitted settings
 so current defaults cannot redefine historical intent. It must define its own
 mutation and recovery boundaries; the database protocol does not make both files
 atomic. All historical rules remain in the independent tool.
-
-== Future application invocation
-
-A future startup integration may invoke the tool before configuration-dependent
-services or writable business operations. The application needs no historical
-decoders for this; user confirmation is a separate policy.
-
-Invocation must define one resource owner and an explicit handoff or inherited
-capability. A parent cannot hold ownership while asking its child to reacquire it;
-a caller-controlled skip-lock flag is not a handoff protocol.
-
-After successful conversion and validation, startup rereads configuration and opens
-fresh database connections. Failure prevents business initialization and presents
-the tool's error, without unrelated fallback or blind automatic retry.
-

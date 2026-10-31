@@ -31,9 +31,9 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Validate existing formats without reserving resources; exit 2 on error.
+    /// Inspect existing formats and report required migrations without changes.
     Check,
-    /// Validate under offline ownership; the current baseline has no migration steps.
+    /// Back up and migrate supported databases under offline ownership.
     Apply,
 }
 

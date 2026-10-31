@@ -146,7 +146,7 @@ mod tests {
 
     #[test]
     fn incompatible_databases_are_rejected_without_changing_schema_or_data() -> Result<()> {
-        for version in [None, Some(0), Some(1), Some(3)] {
+        for version in [None, Some(0), Some(1), Some(2), Some(3), Some(99)] {
             let directory = tempfile::tempdir()?;
             let path = directory.path().join("library.db");
             let store = Store::open(&path)?;

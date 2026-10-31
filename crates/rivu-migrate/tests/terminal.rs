@@ -75,7 +75,6 @@ fn unsupported_format_errors_escape_hostile_paths_without_changes() {
     assert_eq!(output.status.code(), Some(2));
     let stderr = assert_terminal_safe(&output.stderr);
     assert!(stderr.contains(ESCAPED), "{stderr}");
-    assert!(stderr.contains("Unsupported database version"), "{stderr}");
     assert!(output.stdout.is_empty());
     assert!(!config.exists());
 }
@@ -91,9 +90,5 @@ fn preflight_error_paths_are_escaped_at_final_cli_output() {
     assert_eq!(output.status.code(), Some(2));
     let stderr = assert_terminal_safe(&output.stderr);
     assert!(stderr.contains(&format!("{ESCAPED}.toml")), "{stderr}");
-    assert!(
-        stderr.contains("Validating current configuration"),
-        "{stderr}"
-    );
     assert_eq!(fs::read_to_string(&config).unwrap(), "[broken");
 }
