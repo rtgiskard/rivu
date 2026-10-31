@@ -62,9 +62,9 @@ Waveform uses stereo numerical columns. Spectrum Peaks remain ordinary GPUI
 quads, and radial styles and artwork retain their independent rendering paths.
 
 The definitions live in
-https://github.com/rtgiskard/gpui-wgpu/blob/a0f85409415952902b89413654e31bc34cb9d980/crates/gpui/src/gpu.rs[`gpui::gpu`];
+https://github.com/rtgiskard/gpui-wgpu/blob/90825c290a1b78b8ef6a42706c2ee8e788fab947/crates/gpui/src/gpu.rs[`gpui::gpu`];
 the device-local implementation is
-https://github.com/rtgiskard/gpui-wgpu/blob/a0f85409415952902b89413654e31bc34cb9d980/crates/gpui_wgpu/src/gpu_material.rs[`gpu_material`]. These publication
+https://github.com/rtgiskard/gpui-wgpu/blob/90825c290a1b78b8ef6a42706c2ee8e788fab947/crates/gpui_wgpu/src/gpu_material.rs[`gpu_material`]. These publication
 handles contain CPU content, not device allocations or an attached-window
 identity. They can be recorded in different windows; each renderer independently
 uploads and budgets the content it uses. Attached-window state and explicit import

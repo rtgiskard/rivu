@@ -656,12 +656,15 @@ percentages from a different implementation.
 == Pinned GPU extensions
 
 `Cargo.toml` overrides `gpui` and `gpui_wgpu` with the same fixed commit
-`a0f85409415952902b89413654e31bc34cb9d980` from
+`bd54c4c1e00046d2b7aff7355c7fc0fe8a78d9f2` from
 https://github.com/rtgiskard/gpui-wgpu[`gpui-wgpu`]. Both crates are maintained
 together outside Rivu, under the upstream Apache-2.0 license. Their baseline is
 https://github.com/zed-industries/zed/tree/df48a139ce9c292738b523252c12f044697e673f[Zed revision df48a139ce9c292738b523252c12f044697e673f];
 the remaining GPUI platform crates retain that pinned dependency baseline.
 This is a maintained capability patch, not a framework replacement or upgrade.
+The layout engine follows the Taffy 0.15 update in
+https://github.com/zed-industries/zed/commit/b488c4e81451f2042d5f47d93f6158732ac28212[Zed revision b488c4e81451f2042d5f47d93f6158732ac28212],
+without upgrading the remaining platform crates.
 The extensions add centered image transforms and shared GPU materials on
 Rivu's Linux/WGPU rendering path. Existing untransformed images and ordinary
 path backgrounds retain their drawing semantics, although ordinary Paths share
@@ -725,7 +728,7 @@ Check out the exact revision pinned by Rivu before running its commands:
 ----
 git clone https://github.com/rtgiskard/gpui-wgpu
 cd gpui-wgpu
-git checkout a0f85409415952902b89413654e31bc34cb9d980
+git checkout bd54c4c1e00046d2b7aff7355c7fc0fe8a78d9f2
 make test
 ----
 
@@ -735,4 +738,33 @@ behavior. They are not substitutes for Rivu application behavior tests.
 
 From Rivu's repository root, run `cargo test --locked --test gpui_cached_dependencies`
 for the application-side cached-view notification and replay regressions.
+
+For a native-window smoke check, use a Wayland desktop with a working WGPU
+adapter and PipeWire server. Build the updated consumer first with
+`cargo build --locked --bin rivu`; an existing binary does not test a new pin.
+From Rivu's repository root, create isolated application storage and disable
+desktop integrations so the smoke instance does not claim the normal tray or
+MPRIS identity:
+
+[source,sh]
+----
+mkdir -p .cache
+smoke_dir=$(mktemp -d "$PWD/.cache/gpui-smoke.XXXXXX")
+printf '[interface]\ntray_enabled = false\nmpris_enabled = false\n' > "$smoke_dir/config.toml"
+.cache/target/debug/rivu --data-dir "$smoke_dir" gui
+----
+
+Retain the same `smoke_dir` in another terminal to stop the instance with
+`.cache/target/debug/rivu --data-dir "$smoke_dir" quit`; closing its window alone
+does not stop the core. Do not point the smoke instance at normal user storage
+or pass music paths unless importing test media is intentional. Keep the real
+Wayland runtime environment: changing `XDG_RUNTIME_DIR` would also disconnect
+the compositor and audio endpoints. This isolates application data and desktop
+registration, not the shared GPU or audio server.
+
+Check initial text and artwork rendering, cached-view updates, window resizing,
+and the visualization styles being exercised. Empty isolated storage cannot
+establish playback-driven visualization behavior; use disposable test media for
+that check. `make ui-demo` is a separate component showcase, not an application
+or playback smoke test.
 
