@@ -89,6 +89,12 @@ window and its publication deadline are available. The worker publishes one
 latest shared frame, not a result backlog; hidden, paused and disabled gates
 revoke permits and timed wakeups.
 
+Analysis always observes the latest complete window. When that window is shorter
+than the analysis interval, a transient between observed windows can be absent
+from Spectrum, Spectrogram, RMS and band-energy drive. This is a music-animation
+sampling policy, not continuous metering; display interpolation cannot recover
+unobserved audio. Density instead accumulates samples during ingestion.
+
 FFT plans and working storage are prepared only when eligible audio arrives with
 active playback and display demand. They remain reusable across suspension;
 configuration changes alone do not allocate an analyzer. Pause or loss of demand
@@ -116,6 +122,8 @@ successful semantic source change.
 Source/seek boundaries, Stop, dropped samples, FFT/window/signal or sample-rate
 changes, and disabling visualizations break signal continuity. The producer owns its generation;
 neither a delayed publication nor an optional-demand change implies an audio gap.
+Changing only `analysis_rate_hz` adjusts scheduling without breaking continuity
+or discarding the accepted sampling window and compatible presentations.
 Views reject stale frames and reset envelopes or simulations rather than smoothing
 across unrelated audio. Outside the retained pause/reveal handoff described below,
 Spectrum withdraws its current bars and peak envelopes while analysis is invalid.
@@ -174,9 +182,9 @@ is ready. Resumption reanchors display time rather than replaying the suspension
 A paused business update can request one refresh, but does not advance animation
 or start the optional Audio Visualizer idle fade; that fade applies only to stopped
 playback.
-Source replacement, seek intent, analysis-setting changes and disabling visualizations clear
-incompatible retained results even while paused or hidden. These semantic facts
-are independent of producer continuity generation and seek previews.
+Source replacement, seek intent, FFT/window/signal changes and disabling visualizations
+clear incompatible retained results even while paused or hidden. These semantic
+facts are independent of producer continuity generation and seek previews.
 Stop retires all analysis input. With `fade_when_idle` enabled, an ordinary Stop
 on the same actual playback track can fade the last bounded radial drawing for
 two seconds, then release it; no worker audio is consumed while stopped.
@@ -188,10 +196,13 @@ Radial color, geometry, sensitivity, and rotation-speed edits preserve the froze
 signal and animation time. A dB-range edit remaps the last accepted band peaks
 without consuming another audio publication or advancing smoothing. Narrowing
 then widening the range therefore recovers peaks clipped only for display.
+Suspension and reveal reanchor radial animation time without recomputing its
+integrated rotation phase from the current speed; speed edits preserve phase.
 
 Presentation changes are not new audio: Spectrum and Spectrogram appearance,
-range and axis settings invalidate their retained drawing and rebuild from any
-compatible working levels/history. A suspended panel whose working data has been
+range and axis settings invalidate only affected retained drawings and rebuild
+from compatible working levels/history. Shared palette and background changes
+affect both views. A suspended panel whose working data has been
 released cannot reconstruct that data from its final drawing. It waits for fresh
 input after an incompatible mapping change. Source/seek and FFT/window/signal
 changes instead clear incompatible signal state, including when paused; they
@@ -525,8 +536,10 @@ placement, and resizing reprojects the same chronological intervals.
 
 History width and sampling resolution bound retained resources. Complete FFT
 snapshots are reduced to a logarithmic grid of at most 1024 retained rows, further
-bounded by the shared material budget and history capacity. Presentation targets
-one row per physical panel pixel, capped by that retained grid. Reduction preserves
+bounded by the shared material budget and history capacity. Configuration changes
+size history against the widest measured panel before resampling; a cadence edit
+that leaves this capacity unchanged preserves the retained frequency grid.
+Presentation targets one row per physical panel pixel, capped by that grid. Reduction preserves
 peaks; optional interpolation smooths between known samples without lowering them.
 Narrowing the time grid coalesces compatible buckets instead of shortening the
 configured duration. Resizing cannot recover details already pooled at a coarser

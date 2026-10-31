@@ -317,6 +317,14 @@ impl From<&Config> for AnalysisSettings {
 }
 
 impl AnalysisSettings {
+    /// Whether retained samples and publications have the same signal meaning.
+    /// Analysis cadence changes scheduling only, not the FFT or its continuity.
+    pub fn signal_compatible_with(self, other: Self) -> bool {
+        self.fft_size == other.fft_size
+            && self.window == other.window
+            && self.signal == other.signal
+    }
+
     fn valid(self) -> bool {
         (5..=60).contains(&self.fps)
             && matches!(
@@ -682,10 +690,12 @@ impl AnalysisWorker {
             if *current == settings {
                 return;
             }
+            if !current.signal_compatible_with(settings) {
+                self.control.frame_requested.store(false, Ordering::Release);
+                self.control.continuity.fetch_add(1, Ordering::AcqRel);
+                self.control.epoch.fetch_add(2, Ordering::AcqRel);
+            }
             *current = settings;
-            self.control.frame_requested.store(false, Ordering::Release);
-            self.control.continuity.fetch_add(1, Ordering::AcqRel);
-            self.control.epoch.fetch_add(2, Ordering::AcqRel);
             drop(current);
             if let Some(worker) = &self.worker {
                 worker.thread().unpark();
@@ -1299,6 +1309,9 @@ fn analyze(
         let active = control.accepts_audio_for(current_demand_token);
         if let Some(analyzer) = &mut runtime.analyzer {
             if active {
+                if analyzer.settings.signal_compatible_with(settings) {
+                    analyzer.settings = settings;
+                }
                 analyzer.set_visualizer_demand(demand);
             } else if !demand.spectrogram {
                 // Demand can disappear while paused/hidden, with no new PCM
@@ -1353,7 +1366,7 @@ fn analyze(
                     && current_intent == control.desired_intent.load(Ordering::Acquire)
                     && current_intent == control.applied_intent.load(Ordering::Acquire)
                     && control.accepts_audio()
-                    && *control.settings.read() == settings
+                    && control.settings.read().signal_compatible_with(settings)
                     && control.display_token() == current_demand_token
                     && control.visualization_enabled.load(Ordering::Acquire)
                         == current_visualization_token
@@ -3547,6 +3560,145 @@ mod tests {
         assert_eq!(frame.display_token, worker.control.display_token());
         assert_eq!([frame.rms_left, frame.rms_right], [0.5, 0.25]);
         assert!(!worker.control.frame_requested.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn fps_only_changes_preserve_incomplete_audio_and_its_publication_permit() {
+        let shared = Arc::new(RwLock::new(AnalysisFrame::default()));
+        let worker = AnalysisWorker::new(shared.clone()).unwrap();
+        let settings = AnalysisSettings {
+            fps: 5,
+            fft_size: 512,
+            window: AnalysisWindow::None,
+            signal: VisualizationSignal::After,
+        };
+        worker.configure(settings);
+        set_test_playback(&worker, true);
+        let mut producer = worker.audio_producer();
+        producer.push_samples(std::iter::repeat_n([0.5, -0.25], 511));
+        worker.control.request_frame();
+        wait_until(|| producer.ring.occupied_len() == 0);
+        let epoch = worker.control.epoch.load(Ordering::Acquire);
+        let continuity = worker.control.continuity.load(Ordering::Acquire);
+        worker.configure(AnalysisSettings {
+            fps: 60,
+            ..settings
+        });
+        assert_eq!(worker.control.epoch.load(Ordering::Acquire), epoch);
+        assert_eq!(
+            worker.control.continuity.load(Ordering::Acquire),
+            continuity
+        );
+        assert!(worker.control.frame_requested.load(Ordering::Acquire));
+
+        // The original permit and 511 samples must survive the rate change.
+        producer.push_samples(std::iter::once([0.5, -0.25]));
+        wait_for_frame(&shared, |frame| frame.settings.is_some());
+        let frame = shared.read();
+        assert_eq!(frame.settings, Some(worker.settings()));
+        assert_eq!(frame.audio_epoch, epoch);
+        assert_eq!([frame.rms_left, frame.rms_right], [0.5, 0.25]);
+        assert!((frame.sample_time.as_secs_f64() - 512.0 / 48_000.0).abs() < 0.00000001);
+    }
+
+    #[test]
+    fn fps_only_change_accepts_in_flight_output_and_preserves_the_next_permit() {
+        let shared = Arc::new(RwLock::new(AnalysisFrame::default()));
+        let worker = AnalysisWorker::new(shared.clone()).unwrap();
+        let settings = AnalysisSettings {
+            fps: 60,
+            fft_size: 512,
+            window: AnalysisWindow::None,
+            signal: VisualizationSignal::After,
+        };
+        worker.configure(settings);
+        set_test_playback(&worker, true);
+        let mut producer = worker.audio_producer();
+        producer.push_samples(std::iter::repeat_n([0.25; 2], 512));
+        worker.control.request_frame();
+        wait_for_frame(&shared, |frame| frame.settings.is_some());
+        let previous = shared.read().clone();
+
+        // Hold publication after a full replacement window is transformed.
+        let held = shared.write();
+        producer.push_samples(std::iter::repeat_n([0.5; 2], 512));
+        worker.control.request_frame();
+        wait_until(|| !worker.control.frame_requested.load(Ordering::Acquire));
+        worker.control.request_frame();
+        worker.configure(AnalysisSettings { fps: 5, ..settings });
+        assert!(worker.control.frame_requested.load(Ordering::Acquire));
+        drop(held);
+        wait_for_frame(&shared, |frame| frame.sequence > previous.sequence);
+        let current = shared.read().clone();
+        assert_eq!(current.generation, previous.generation);
+        assert_eq!(current.audio_epoch, previous.audio_epoch);
+        assert_eq!([current.rms_left, current.rms_right], [0.5; 2]);
+        assert!(worker.control.frame_requested.load(Ordering::Acquire));
+
+        // A rate change also wakes a ready window without another PCM arrival
+        // or request. One sample is enough because the rolling window survived.
+        producer.push_samples(std::iter::once([0.75; 2]));
+        wait_until(|| producer.ring.occupied_len() == 0);
+        worker.configure(settings);
+        wait_for_frame(&shared, |frame| frame.sequence > current.sequence);
+        let frame = shared.read();
+        assert_eq!(frame.generation, previous.generation);
+        assert_eq!(frame.audio_epoch, previous.audio_epoch);
+        assert_eq!(frame.settings, Some(settings));
+        assert!(frame.sample_time > current.sample_time);
+        let expected = ((511.0 * 0.5_f32.powi(2) + 0.75_f32.powi(2)) / 512.0).sqrt();
+        assert!((frame.rms_left - expected).abs() < 0.0001);
+        assert!(!worker.control.frame_requested.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn fft_window_and_signal_changes_discard_incompatible_partial_audio() {
+        for change in 0..3 {
+            let shared = Arc::new(RwLock::new(AnalysisFrame::default()));
+            let worker = AnalysisWorker::new(shared.clone()).unwrap();
+            let settings = AnalysisSettings {
+                fps: 60,
+                fft_size: 512,
+                window: AnalysisWindow::None,
+                signal: VisualizationSignal::After,
+            };
+            worker.configure(settings);
+            set_test_playback(&worker, true);
+            let mut producer = worker.audio_producer();
+            producer.push_samples(std::iter::repeat_n([0.25; 2], 511));
+            worker.control.request_frame();
+            wait_until(|| producer.ring.occupied_len() == 0);
+            let old_epoch = worker.control.epoch.load(Ordering::Acquire);
+            let old_continuity = worker.control.continuity.load(Ordering::Acquire);
+            let mut changed = settings;
+            match change {
+                0 => changed.fft_size = 1024,
+                1 => changed.window = AnalysisWindow::Hann,
+                _ => changed.signal = VisualizationSignal::Before,
+            }
+            worker.configure(changed);
+            let epoch = worker.control.epoch.load(Ordering::Acquire);
+            assert_ne!(epoch, old_epoch);
+            assert_ne!(
+                worker.control.continuity.load(Ordering::Acquire),
+                old_continuity
+            );
+            wait_for_frame(&shared, |frame| frame.audio_epoch == epoch);
+            assert!(shared.read().settings.is_none());
+            assert!(!worker.control.frame_requested.load(Ordering::Acquire));
+
+            producer.push_samples(std::iter::once([0.75; 2]));
+            worker.control.request_frame();
+            wait_until(|| producer.ring.occupied_len() == 0);
+            assert!(shared.read().settings.is_none());
+            assert!(worker.control.frame_requested.load(Ordering::Acquire));
+            producer.push_samples(std::iter::repeat_n(
+                [0.75; 2],
+                changed.fft_size as usize - 1,
+            ));
+            wait_for_frame(&shared, |frame| frame.settings == Some(changed));
+            assert!((shared.read().rms_left - 0.75).abs() < 0.0001);
+        }
     }
 
     #[test]

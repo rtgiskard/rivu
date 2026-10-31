@@ -65,12 +65,12 @@ impl OscilloscopeRenderer {
             config.effect_secondary_color.rgb(),
         ];
         let changed = data.visible != visible
-            || data.settings != settings
+            || !data.settings.signal_compatible_with(settings)
             || data.background != config.visualization_background.rgb()
             || data.colors != colors
             || data.time_span_ms != config.oscilloscope_time_span_ms
             || data.gain != config.oscilloscope_gain;
-        if data.settings != settings {
+        if !data.settings.signal_compatible_with(settings) {
             data.clear();
         }
         if data.gain != config.oscilloscope_gain {
@@ -93,7 +93,11 @@ impl OscilloscopeRenderer {
     // Restoration keeps the compact sweep until usable PCM replaces it.
     pub(super) fn update(&self, frame: &AnalysisFrame) {
         let mut data = self.0.borrow_mut();
-        if frame.settings != Some(data.settings) || frame.sample_rate == 0 {
+        if frame
+            .settings
+            .is_none_or(|settings| !settings.signal_compatible_with(data.settings))
+            || frame.sample_rate == 0
+        {
             data.clear();
             return;
         }
@@ -638,6 +642,65 @@ mod tests {
         assert_eq!(scope.0.borrow().points[0], [0.25, -0.5]);
         scope.clear();
         assert!(scope.0.borrow().points.is_empty());
+    }
+
+    #[test]
+    fn fps_only_changes_keep_visible_and_hidden_sweeps_and_accept_older_cadence_pcm() {
+        for visible in [true, false] {
+            let scope = OscilloscopeRenderer::new();
+            let mut config = Config {
+                analysis_rate_hz: 5,
+                ..Config::default()
+            };
+            scope.configure_config(&config, true);
+            let mut frame = frame(&config);
+            scope.update(&frame);
+            scope.configure_config(&config, visible);
+            let points = scope.0.borrow().points.clone();
+            let source = scope.0.borrow().source;
+            let span = scope.0.borrow().sweep_span_ms;
+            config.analysis_rate_hz = 60;
+            assert!(!scope.configure_config(&config, visible));
+            assert_eq!(scope.0.borrow().points, points);
+            assert_eq!(scope.0.borrow().source, source);
+            assert_eq!(scope.0.borrow().sweep_span_ms, span);
+
+            // A result calculated before configure remains compatible. Hidden
+            // panels freeze it; a visible panel can consume it immediately.
+            frame.visualizer.pcm = vec![[0.75, -0.125]; 512].into();
+            scope.update(&frame);
+            if visible {
+                assert_eq!(scope.0.borrow().points[0], [0.75, -0.125]);
+            } else {
+                assert_eq!(scope.0.borrow().points, points);
+                scope.configure_config(&config, true);
+                scope.update(&frame);
+                assert_eq!(scope.0.borrow().points[0], [0.75, -0.125]);
+            }
+        }
+    }
+
+    #[test]
+    fn fft_window_and_signal_changes_revoke_sweeps_and_reject_old_pcm() {
+        for change in 0..3 {
+            let scope = OscilloscopeRenderer::new();
+            let mut config = Config::default();
+            scope.configure_config(&config, true);
+            let old = frame(&config);
+            scope.update(&old);
+            assert!(!scope.0.borrow().points.is_empty());
+            match change {
+                0 => config.analysis_fft_size = 512,
+                1 => config.analysis_window = rivu_format::config::AnalysisWindow::Hann,
+                _ => config.visualization_signal = rivu_format::config::VisualizationSignal::Before,
+            }
+            assert!(scope.configure_config(&config, true));
+            assert!(scope.0.borrow().points.is_empty());
+            scope.update(&old);
+            assert!(scope.0.borrow().points.is_empty());
+            scope.update(&frame(&config));
+            assert_eq!(scope.0.borrow().points[0], [0.25, -0.5]);
+        }
     }
 
     #[test]

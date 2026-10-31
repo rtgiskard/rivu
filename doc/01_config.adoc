@@ -803,6 +803,8 @@ Shared visualization settings apply as follows:
   Changing size or window clears visualization history.
   `visualizations.general.analysis_rate_hz` is the maximum analysis rate, independent of
   `visualizations.general.animation_fps` and compositor-throttled display callbacks.
+  Changing only this rate preserves compatible visualization content and the
+  current analysis window; small FFT windows at low rates can miss short transients.
 * Disabling visualizations stops visualization processing and discards results; see <<_visualization_enablement,Visualization enablement>>.
   This is independent of rendering reuse and media read buffering.
   In Settings → Visualizations → General → Appearance, its switch sits

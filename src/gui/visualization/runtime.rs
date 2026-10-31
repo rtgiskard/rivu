@@ -213,8 +213,10 @@ impl VisualizerRuntime {
         let visibility_changed = self.visible != visible || self.shutting_down != shutting_down;
         let status_changed = self.status != status;
         let position_changed = self.position != position || self.duration != duration;
-        let settings_changed = rivu_audio::analysis::AnalysisSettings::from(self.config.as_ref())
-            != rivu_audio::analysis::AnalysisSettings::from(config.as_ref());
+        let settings_changed = !rivu_audio::analysis::AnalysisSettings::from(self.config.as_ref())
+            .signal_compatible_with(rivu_audio::analysis::AnalysisSettings::from(
+                config.as_ref(),
+            ));
         let signal_changed = self.source_generation != source_generation
             || self.seek_revision != seek_revision
             || settings_changed;
@@ -377,12 +379,17 @@ impl VisualizerRuntime {
                 self.needs_refresh = false;
             }
         }
-        if was_running != self.analysis_interval()
+        if was_running.is_some() != self.analysis_interval().is_some()
             || visibility_changed
             || visualization_changed
             || fps_changed
         {
             self.cancel_clock(cx);
+        } else if was_running != self.analysis_interval() {
+            // Cadence changes replace only the analysis timer. A pending draw
+            // and the accepted display clock still describe the same signal.
+            self.analysis_timer.take();
+            self.start_analysis_clock(cx);
         }
         let waveform_enabled = self.config.visualization_enabled && !self.shutting_down;
         let waveform_visible = self.active();
@@ -1228,6 +1235,129 @@ mod tests {
             owner.consume_analysis(Instant::now(), cx);
             assert_eq!(owner.staging.spectrum_db, [-12.0, -24.0]);
             assert_eq!(owner.sequence, 7);
+        });
+    }
+
+    #[gpui::test]
+    fn cadence_changes_preserve_playing_and_paused_input_but_signal_changes_revoke_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        let config = Config {
+            volume: 0.0,
+            ffmpeg_enabled: false,
+            mpris_enabled: false,
+            analysis_rate_hz: 5,
+            ..Config::default()
+        };
+        config.save(&config_path).unwrap();
+        let runtime = CoreRuntime::start(directory.path(), &config_path).unwrap();
+        let config = Arc::new(config);
+        let mut layout = layout::Layout {
+            root: None,
+            next_id: 1,
+            locked: false,
+        };
+        layout.add("audio_visualizer", None);
+        let panels = demand(&layout);
+        let waveform =
+            cx.new(|_| visualization::Waveform::new(Arc::clone(&runtime.handle.waveform)));
+        let owner = cx.new(|cx| {
+            VisualizerRuntime::new(
+                runtime.handle.clone(),
+                Arc::new(Localizer::new("en-US")),
+                waveform,
+                cx.new(|_| crate::gui::animation_frames::AnimationFrames::default()),
+                cx,
+            )
+        });
+        owner.update(cx, |owner, cx| {
+            for status in [PlaybackStatus::Playing, PlaybackStatus::Paused] {
+                let inputs = |config| VisualizerInputs {
+                    config,
+                    panels: &panels,
+                    status,
+                    source_generation: 0,
+                    seek_revision: 0,
+                    visible: true,
+                    shutting_down: false,
+                    current_track_id: None,
+                    waveform_track: None,
+                    position: 0.0,
+                    duration: None,
+                };
+                for change in 0..4 {
+                    owner.sync(inputs(Arc::clone(&config)), cx);
+                    let now = Instant::now();
+                    owner.staging = AnalysisFrame {
+                        sequence: 7,
+                        generation: 1,
+                        sample_rate: 48_000,
+                        sample_time: Duration::from_secs(1),
+                        settings: Some(config.as_ref().into()),
+                        frequencies_hz: vec![100.0, 1000.0],
+                        spectrum_db: vec![-12.0, -24.0],
+                        ..Default::default()
+                    };
+                    owner.sequence = 7;
+                    owner.awaiting_replacement = false;
+                    owner.animation_clock = AnimationClock::default();
+                    owner.animation_clock.accept(&owner.staging, now);
+                    owner.staging.sample_time += Duration::from_millis(200);
+                    owner.animation_clock.accept(&owner.staging, now);
+                    if status == PlaybackStatus::Paused {
+                        owner.animation_clock.suspend();
+                    }
+                    let generation = owner.frame_generation;
+                    let last_tick = owner.animation_clock.last_tick;
+                    let mut changed = config.as_ref().clone();
+                    match change {
+                        0 => changed.analysis_rate_hz = 60,
+                        1 => changed.analysis_fft_size = 512,
+                        2 => changed.analysis_window = crate::config::AnalysisWindow::Hann,
+                        _ => {
+                            changed.visualization_signal =
+                                crate::config::VisualizationSignal::Before
+                        }
+                    }
+                    owner.sync(inputs(Arc::new(changed)), cx);
+                    if change == 0 {
+                        assert_eq!(owner.sequence, 7);
+                        assert_eq!(owner.staging.spectrum_db, [-12.0, -24.0]);
+                        assert_eq!(owner.staging.settings, Some(config.as_ref().into()));
+                        assert_eq!(owner.frame_generation, generation);
+                        assert_eq!(owner.animation_clock.last_tick, last_tick);
+                        assert!(!owner.awaiting_replacement);
+                        let elapsed = if status == PlaybackStatus::Playing {
+                            10
+                        } else {
+                            0
+                        };
+                        assert_eq!(
+                            owner
+                                .animation_clock
+                                .advance(now + Duration::from_millis(10)),
+                            Duration::from_millis(1000 + elapsed)
+                        );
+                        assert_eq!(
+                            owner.analysis_interval(),
+                            (status == PlaybackStatus::Playing)
+                                .then(|| Duration::from_secs_f64(1.0 / 60.0))
+                        );
+                        assert_eq!(
+                            owner.analysis_timer.is_some(),
+                            status == PlaybackStatus::Playing
+                        );
+                    } else {
+                        assert!(owner.staging.settings.is_none());
+                        assert!(owner.staging.spectrum_db.is_empty());
+                        assert!(owner.animation_clock.source.is_none());
+                        assert!(owner.awaiting_replacement);
+                    }
+                }
+            }
+            owner.release_display_resources(cx);
         });
     }
 

@@ -6,9 +6,7 @@ use gpui::{
     AnyElement, App, Bounds, PathBuilder, Rgba, TextAlign, Window, canvas, div, point, prelude::*,
     px, rgb,
 };
-use rivu_audio::analysis::AnalysisFrame;
-#[cfg(test)]
-use rivu_audio::analysis::AnalysisSettings;
+use rivu_audio::analysis::{AnalysisFrame, AnalysisSettings};
 use rivu_format::config::{
     AnalysisWindow, AudioVisualizerOptions, AudioVisualizerStyle, VisualizationSignal,
 };
@@ -313,9 +311,12 @@ impl RadialRenderer {
         if frame.spectrum_db.is_empty()
             || frame.spectrum_db.len() != frame.frequencies_hz.len()
             || !frame.settings.is_some_and(|settings| {
-                settings.fft_size == data.fft_size
-                    && settings.window == data.window
-                    && settings.signal == data.signal
+                settings.signal_compatible_with(AnalysisSettings {
+                    fft_size: data.fft_size,
+                    window: data.window,
+                    signal: data.signal,
+                    ..settings
+                })
             })
         {
             data.displayed.clear();
@@ -375,6 +376,13 @@ impl RadialRenderer {
             *retained = level;
             *target = ((level + db_range) / db_range).clamp(0.0, 1.0);
         }
+        // A retained picture resumes its phase, even when its envelope or
+        // frequency mapping must be refreshed. Only new signal state starts
+        // from the presentation clock; suspension merely replaces the anchor.
+        if data.displayed.is_empty() {
+            data.time = (presentation_time.as_secs_f64() * data.rotation_speed as f64)
+                .rem_euclid(TWO_PI as f64) as f32;
+        }
         if data.displayed.len() != count || mapping_changed || data.last_presentation_time.is_none()
         {
             let RadialState {
@@ -382,8 +390,6 @@ impl RadialRenderer {
             } = &mut *data;
             displayed.clone_from(targets);
             data.last_presentation_time = Some(presentation_time);
-            data.time = (presentation_time.as_secs_f64() * data.rotation_speed as f64)
-                .rem_euclid(TWO_PI as f64) as f32;
         }
         data.last_sample_time = Some(frame.sample_time);
     }
@@ -1350,6 +1356,81 @@ mod tests {
             radial.data.borrow().last_sample_time,
             Some(audio.sample_time)
         );
+    }
+
+    #[test]
+    fn radial_resume_preserves_phase_after_speed_change() {
+        for hidden in [false, true] {
+            let mut radial = RadialRenderer::new();
+            let mut config = Config {
+                radial_rotation_speed: 0.5,
+                ..Config::default()
+            };
+            radial.configure(&VisualParameters::from(&config));
+            let mut audio = frame();
+            radial.update(&audio, Duration::from_secs(2));
+            radial.animate(Duration::from_secs(3));
+            config.radial_rotation_speed = 1.25;
+            radial.configure(&VisualParameters::from(&config));
+            radial.animate(Duration::from_secs(4));
+            let frozen_phase = radial.data.borrow().time;
+            if hidden {
+                radial.set_visible(false);
+            } else {
+                radial.suspend();
+            }
+            assert!(!radial.animate(Duration::from_secs(10)));
+            if hidden {
+                radial.set_visible(true);
+            }
+            audio.sample_time += Duration::from_secs(1);
+            audio.spectrum_db.fill(-70.0);
+            radial.update(&audio, Duration::from_secs(20));
+            {
+                let data = radial.data.borrow();
+                assert_eq!(data.time, frozen_phase);
+                assert_eq!(data.displayed, vec![0.0; 4]);
+            }
+            assert!(!radial.animate(Duration::from_secs(20)));
+            radial.animate(Duration::from_millis(20_200));
+            let expected = (frozen_phase + 0.2 * config.radial_rotation_speed).rem_euclid(TWO_PI);
+            assert!((radial.data.borrow().time - expected).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn new_radial_source_initializes_phase_instead_of_resuming_history() {
+        for hidden in [false, true] {
+            let mut radial = RadialRenderer::new();
+            let mut config = Config {
+                radial_rotation_speed: 0.5,
+                ..Config::default()
+            };
+            radial.configure(&VisualParameters::from(&config));
+            let mut audio = frame();
+            radial.update(&audio, Duration::from_secs(2));
+            radial.animate(Duration::from_secs(3));
+            config.radial_rotation_speed = 1.25;
+            radial.configure(&VisualParameters::from(&config));
+            radial.animate(Duration::from_secs(4));
+            if hidden {
+                radial.set_visible(false);
+            } else {
+                radial.suspend();
+            }
+            audio.generation += 1;
+            audio.spectrum_db.fill(-70.0);
+            radial.update(&audio, Duration::from_secs(20));
+            if hidden {
+                radial.set_visible(true);
+                radial.update(&audio, Duration::from_secs(20));
+            }
+            let expected = (20.0_f64 * f64::from(config.radial_rotation_speed))
+                .rem_euclid(f64::from(TWO_PI)) as f32;
+            let data = radial.data.borrow();
+            assert_eq!(data.time, expected);
+            assert_eq!(data.displayed, vec![0.0; 4]);
+        }
     }
 
     #[test]
