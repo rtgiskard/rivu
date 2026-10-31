@@ -1,5 +1,43 @@
 use super::*;
 
+/// One optional startup read; dropping its waiter never detaches physical work.
+pub(super) struct InitialDevices {
+    pub(super) finished: oneshot::Receiver<Result<Vec<String>>>,
+    worker: Option<async_executor::Task<()>>,
+}
+
+impl InitialDevices {
+    pub(super) fn start(
+        executor: &async_executor::Executor<'static>,
+        workers: Arc<BlockingExecutor>,
+        enumerate: impl FnOnce() -> Result<Vec<String>> + Send + 'static,
+    ) -> Self {
+        let (completed, finished) = oneshot::channel();
+        let worker = executor.spawn(async move {
+            let result = workers.execute(enumerate).await.and_then(|result| result);
+            // One completion slot cannot backpressure shutdown retirement.
+            let _ = completed.send(result);
+        });
+        Self {
+            finished,
+            worker: Some(worker),
+        }
+    }
+
+    pub(super) fn join(&mut self) -> Result<()> {
+        retire_optional_worker(
+            &mut self.worker,
+            "Initial device enumeration worker panicked",
+        )
+    }
+}
+
+impl Drop for InitialDevices {
+    fn drop(&mut self) {
+        let _ = self.join();
+    }
+}
+
 /// Runtime lifecycle control, separate from business requests and view wakeups.
 #[derive(Clone)]
 pub(crate) struct CoreLifecycle {
@@ -214,9 +252,9 @@ impl CoreRuntime {
         let saved_config = config_path.try_exists()?.then(|| config.clone());
         std::fs::create_dir_all(data_dir)?;
         tracing::info!(path = %config_path.display(), "configuration_loaded");
-        // Keep the handle usable with a config-only snapshot. Database views,
-        // device enumeration and optional decoder probing run on the core
-        // worker so the GUI is not blocked by startup I/O.
+        // Keep the handle usable with a config-only snapshot. Core loads its
+        // database projections independently of optional device enumeration,
+        // which runs through the application's bounded blocking executor.
         let store = Store::open(&data_dir.join("library.db"))?;
         store.set_track_cache_query_batch_size(config.query_batch_size);
         tracing::debug!("store_ready");
@@ -259,6 +297,7 @@ impl CoreRuntime {
             executor: executor.clone(),
             workers,
             read_queries: None,
+            initial_devices: None,
             revision_updates,
             state: initial,
             shared,

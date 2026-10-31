@@ -25,10 +25,8 @@ impl Render for WindowView {
         let docking_view = cx.entity().downgrade();
         let paint_presentation = self.presentation.clone();
         let paint_artwork_images = self.artwork_images.clone();
-        let layouts = self.workspace.layouts.clone();
-        let layout_view = layouts
-            .current()
-            .root
+        let root = self.workspace.layouts.current().root.clone();
+        let layout_view = root
             .as_ref()
             .map(|root| self.render_node(root, window, cx))
             .unwrap_or_else(|| {

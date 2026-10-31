@@ -17,6 +17,18 @@ to link:25_gpu_rendering.adoc[GPU rendering]. The sections below retain the
 invalidation consequences needed to reason about resource use without repeating
 those mechanisms.
 
+== Startup work
+
+Device discovery runs on the application's bounded blocking executor, independently
+of queue restoration and request handling. Core publishes the result without
+changing the selected output; the device list may initially be empty. Shutdown
+acknowledgement can precede discovery completion, but process exit waits for it.
+
+Saved layouts are read and parsed alongside application initialization. The
+persistence writer starts only when the GUI session accepts that data, before
+the first window is constructed. Reopening uses session memory, so no late disk
+load can replace an edited workspace.
+
 == Queue control and mutation working memory
 
 SQLite owns the complete occurrence order. Core retains a scalar queue projection

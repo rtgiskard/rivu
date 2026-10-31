@@ -57,15 +57,16 @@ struct Shared {
 #[derive(Clone)]
 pub(in crate::gui) struct LayoutPersistenceHandle(Arc<Shared>);
 
-pub(in crate::gui) struct LayoutPersistence {
-    handle: LayoutPersistenceHandle,
-    worker: Option<JoinHandle<()>>,
+/// Startup-only data. Loading it creates no persistence thread or save request.
+pub(crate) struct LoadedLayouts {
+    path: PathBuf,
+    layouts: LayoutSet,
+    error: Option<String>,
+    saved: bool,
 }
 
-impl LayoutPersistence {
-    pub fn new(path: PathBuf) -> Self {
-        // This is the session's only startup read, not an interactive save or a
-        // window-reopen read. All runtime validation/encoding/writes are below.
+impl LoadedLayouts {
+    pub(crate) fn load(path: PathBuf) -> Self {
         let (layouts, error, saved) = match LayoutSet::load(&path) {
             Ok(layouts) => (layouts, None, true),
             Err(error)
@@ -77,6 +78,28 @@ impl LayoutPersistence {
             }
             Err(error) => (LayoutSet::default(), Some(format!("{error:#}")), false),
         };
+        Self {
+            path,
+            layouts,
+            error,
+            saved,
+        }
+    }
+}
+
+pub(in crate::gui) struct LayoutPersistence {
+    handle: LayoutPersistenceHandle,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl LayoutPersistence {
+    pub fn new(loaded: LoadedLayouts) -> Self {
+        let LoadedLayouts {
+            path,
+            layouts,
+            error,
+            saved,
+        } = loaded;
         Self::start(layouts, error, saved, move |snapshot| {
             snapshot.save(&path).map_err(|error| format!("{error:#}"))
         })
@@ -171,7 +194,7 @@ impl LayoutPersistence {
         }
     }
 
-    pub fn handle(&self) -> LayoutPersistenceHandle {
+    pub(in crate::gui) fn handle(&self) -> LayoutPersistenceHandle {
         self.handle.clone()
     }
 
@@ -363,7 +386,7 @@ mod tests {
     fn missing_file_is_initialized_on_flush() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("layout.json");
-        let owner = LayoutPersistence::new(path.clone());
+        let owner = LayoutPersistence::new(LoadedLayouts::load(path.clone()));
         let expected = owner.handle().snapshot().0;
         owner.flush().unwrap();
         assert!(LayoutSet::load(&path).unwrap().persisted_eq(&expected));
@@ -375,7 +398,7 @@ mod tests {
         let path = directory.path().join("layout.json");
         let invalid = b"{\"layouts\": damaged but recoverable";
         std::fs::write(&path, invalid).unwrap();
-        let owner = LayoutPersistence::new(path.clone());
+        let owner = LayoutPersistence::new(LoadedLayouts::load(path.clone()));
         let handle = owner.handle();
         assert!(handle.snapshot().1.is_some());
         handle.submit(&named("replacement"));
@@ -399,7 +422,7 @@ mod tests {
         assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
         let path = directory.path().join("layout.json");
         symlink(&fifo, &path).unwrap();
-        let owner = LayoutPersistence::new(path.clone());
+        let owner = LayoutPersistence::new(LoadedLayouts::load(path.clone()));
         assert!(owner.handle().snapshot().1.is_some());
         owner.flush().unwrap();
         assert!(std::fs::symlink_metadata(path).unwrap().is_symlink());
@@ -632,7 +655,7 @@ mod tests {
         let original = named("original");
         original.save(&path).unwrap();
         let previous = fs::read(&path).unwrap();
-        let owner = LayoutPersistence::new(path.clone());
+        let owner = LayoutPersistence::new(LoadedLayouts::load(path.clone()));
         let handle = owner.handle();
         let mut invalid = named("invalid");
         invalid.current_mut().next_id = 0;

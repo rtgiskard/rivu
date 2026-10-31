@@ -243,6 +243,9 @@ writes weekly logs under the data directory. `logging.retention_weeks` accepts
 colors. Closing the GUI window does not stop file logging.
 
 File logging starts after configuration is loaded; earlier events are not replayed.
+Expired-log cleanup runs on the file writer, including when logging is enabled or
+retention changes without new records. Log-open errors remain synchronous;
+orderly shutdown waits for the writer and pending cleanup.
 
 File logging may drop records under load rather than block the application.
 Orderly shutdown attempts to drain pending records; forced termination can lose

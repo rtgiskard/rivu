@@ -1,12 +1,12 @@
 //! Window ownership and release of visual subscriptions and analysis demand.
 
+pub(crate) use super::layout::persistence::LoadedLayouts;
 use super::{WindowView, layout::persistence::LayoutPersistence};
 use crate::{app::AppHandle, artwork::ArtworkManager, core::CoreHandle, i18n::Localizer};
 use anyhow::Result;
 use gpui::*;
 use std::{
     cell::RefCell,
-    path::PathBuf,
     rc::{Rc, Weak},
     sync::Arc,
 };
@@ -25,7 +25,7 @@ impl UiSession {
     pub(crate) fn new(
         handle: CoreHandle,
         app: AppHandle,
-        layout_path: PathBuf,
+        layouts: LoadedLayouts,
         artwork_manager: Arc<ArtworkManager>,
         i18n: Arc<Localizer>,
     ) -> Rc<RefCell<Self>> {
@@ -33,7 +33,7 @@ impl UiSession {
             RefCell::new(Self {
                 handle,
                 app,
-                layout_save: LayoutPersistence::new(layout_path),
+                layout_save: LayoutPersistence::new(layouts),
                 artwork_manager,
                 i18n,
                 self_weak: self_weak.clone(),

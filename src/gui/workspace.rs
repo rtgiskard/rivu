@@ -288,7 +288,9 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::super::layout::{
-        Axis, Layout, Panel, layout_geometry::SplitDrag, persistence::LayoutPersistence,
+        Axis, Layout, Panel,
+        layout_geometry::SplitDrag,
+        persistence::{LayoutPersistence, LoadedLayouts},
     };
     use super::*;
     use crate::gui::interaction::{Measured, WindowGeometry};
@@ -304,7 +306,8 @@ mod tests {
 
     fn fixture() -> (tempfile::TempDir, LayoutPersistence, Workspace) {
         let directory = tempfile::tempdir().unwrap();
-        let save = LayoutPersistence::new(directory.path().join("layout.json"));
+        let save =
+            LayoutPersistence::new(LoadedLayouts::load(directory.path().join("layout.json")));
         let (visualizer, artwork) = defaults();
         let (workspace, error) = Workspace::new(save.handle(), visualizer, artwork);
         assert!(error.is_none());

@@ -435,6 +435,7 @@ struct Core {
     executor: Arc<async_executor::Executor<'static>>,
     workers: Arc<BlockingExecutor>,
     read_queries: Option<query_worker::ReadQueries>,
+    initial_devices: Option<runtime::InitialDevices>,
     revision_updates: Arc<RwLock<Vec<mpsc::Sender<()>>>>,
     state: CoreState,
     shared: Arc<RwLock<CoreState>>,
@@ -508,6 +509,7 @@ impl Drop for Core {
         drop(self.active_relocation.take());
         while self.relocation_rx.try_recv().is_ok() {}
         drop(self.active_optimization.take());
+        drop(self.initial_devices.take());
         // AudioEngine::drop sends shutdown and physically joins its worker.
     }
 }
@@ -521,7 +523,6 @@ impl Core {
             self.advance_playlist_entry_revision(playlist_id);
         }
         self.replace_history(self.store.history(MAX_QUERY_ROWS)?);
-        self.state.system.devices = Arc::new(audio::devices().unwrap_or_default());
         self.state.system.ffmpeg_status = if self.state.configuration.config.ffmpeg_enabled {
             audio::ffmpeg_status().unwrap_or_else(|error| format!("unavailable: {error:#}"))
         } else {

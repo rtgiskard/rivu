@@ -260,6 +260,16 @@ impl App {
             Signals::new([Signal::Int, Signal::Term]).context("Registering shutdown signals")?;
         let config = CoreRuntime::load_startup_config(&config_path)?;
         let artwork_limit_bytes = config.artwork_file_limit_mib as usize * 1024 * 1024;
+        let tasks = TaskRuntime::start()?;
+        let layouts = graphical.then(|| {
+            let path = data_dir.join("layout.json");
+            let workers = Arc::clone(&tasks.workers);
+            tasks.handle.spawn(async move {
+                workers
+                    .execute(move || gui::session::LoadedLayouts::load(path))
+                    .await
+            })
+        });
         let i18n = Arc::new(if graphical {
             crate::i18n::Localizer::new(&config.ui_language)
         } else {
@@ -269,7 +279,6 @@ impl App {
             &data_dir,
             &crate::config::logging_options(&config),
         )?;
-        let tasks = TaskRuntime::start()?;
         let runtime = CoreRuntime::start_with_logging(
             &data_dir,
             &config_path,
@@ -319,7 +328,7 @@ impl App {
                 session: UiSession::new(
                     app.runtime.handle.clone(),
                     app.handle.clone(),
-                    data_dir.join("layout.json"),
+                    futures::executor::block_on(layouts.expect("graphical layout preparation"))?,
                     Arc::clone(&app.artwork),
                     Arc::clone(&i18n),
                 ),

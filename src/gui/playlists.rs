@@ -2155,7 +2155,10 @@ mod playlist_drag_tests {
 mod content_menu_keyboard_tests {
     use super::*;
     use crate::config::ConfigPersistence;
-    use crate::gui::{ContentMenuRequest, WindowView, layout::persistence::LayoutPersistence};
+    use crate::gui::{
+        ContentMenuRequest, WindowView,
+        layout::persistence::{LayoutPersistence, LoadedLayouts},
+    };
     use gpui::{
         AnyWindowHandle, InputEvent, KeyDownEvent, KeyUpEvent, Keystroke, TestAppContext,
         VisualTestContext,
@@ -2215,7 +2218,8 @@ mod content_menu_keyboard_tests {
             panic!("expected playlist summaries");
         };
         assert_eq!(ready.total, 72);
-        let save = LayoutPersistence::new(directory.path().join("layouts.json"));
+        let save =
+            LayoutPersistence::new(LoadedLayouts::load(directory.path().join("layouts.json")));
         let handle = runtime.handle.clone();
         let save_handle = save.handle();
         let artwork = Arc::new(crate::artwork::ArtworkManager::new(directory.path()));

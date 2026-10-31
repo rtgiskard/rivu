@@ -11,6 +11,7 @@ pub(super) enum BusinessEvent {
     ExternalAdmission(admission::Event),
     Optimization(Result<DatabaseOptimization>),
     FfmpegLoaded,
+    DevicesEnumerated(Result<Vec<String>>),
     Shutdown(CoreLifecycle),
 }
 
@@ -70,6 +71,7 @@ impl Core {
     ) -> Option<BusinessEvent> {
         let Core {
             engine,
+            initial_devices,
             scan_rx,
             relocation_rx,
             active_export,
@@ -97,6 +99,14 @@ impl Core {
                     std::future::pending::<()>().await;
                 }
             }.fuse() => BusinessEvent::FfmpegLoaded,
+            result = async {
+                match initial_devices.as_mut() {
+                    Some(task) => (&mut task.finished).await,
+                    None => std::future::pending().await,
+                }
+            }.fuse() => BusinessEvent::DevicesEnumerated(result.unwrap_or_else(|_| {
+                Err(anyhow::anyhow!("Initial device enumeration ended without a result"))
+            })),
             event = async {
                 match active_external_admission.as_mut() {
                     Some(task) => task.next_event().await,
@@ -161,6 +171,14 @@ impl Core {
                     .unwrap_or_else(|error| format!("unavailable: {error:#}"));
                 self.publish();
             }
+            BusinessEvent::DevicesEnumerated(result) => {
+                if let Some(mut task) = self.initial_devices.take()
+                    && let Ok(devices) = task.join().and(result)
+                {
+                    self.state.system.devices = Arc::new(devices);
+                    self.publish();
+                }
+            }
             BusinessEvent::Shutdown(control) => {
                 self.state.system.shutting_down = true;
                 self.publish();
@@ -186,6 +204,18 @@ impl Core {
     }
 
     pub(super) fn initialize(&mut self) {
+        self.initialize_with_device_enumerator(audio::devices);
+    }
+
+    pub(super) fn initialize_with_device_enumerator(
+        &mut self,
+        enumerate: impl FnOnce() -> Result<Vec<String>> + Send + 'static,
+    ) {
+        self.initial_devices = Some(runtime::InitialDevices::start(
+            &self.executor,
+            self.workers.clone(),
+            enumerate,
+        ));
         let started = Instant::now();
         tracing::debug!("initial_load_started");
         if let Err(error) = self.load_initial_state() {
@@ -327,6 +357,9 @@ impl Core {
         if let Some((reply, result)) = self.shutdown_optimization() {
             self.complete_optimization(reply, result);
         }
+        // Optional startup work is not cancelled or published during shutdown.
+        // Completion includes the physical PipeWire connection's retirement.
+        drop(self.initial_devices.take());
         // Every persistence domain gets its final attempt, even after a failure.
         let deferred = self
             .flush_deferred_playback()

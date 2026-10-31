@@ -1,6 +1,151 @@
 use super::*;
 use crate::core::catalog::ScanFinished;
 
+fn initialize_with_pending_devices(
+    mut core: Core,
+) -> (
+    Core,
+    crossbeam_channel::Sender<()>,
+    Arc<std::sync::atomic::AtomicBool>,
+) {
+    struct PhysicalRetirement(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for PhysicalRetirement {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    let tasks = TaskRuntime::with_blocking_limit(1).unwrap();
+    core.executor = tasks.handle.clone();
+    core.workers = tasks.workers.clone();
+    core._test_tasks = Some(tasks);
+    Arc::make_mut(&mut core.state.configuration.config).ffmpeg_enabled = false;
+    let (release, released) = bounded(1);
+    let (started, entered) = bounded(1);
+    let (initialized, ready) = bounded(1);
+    let retired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let physical_retired = retired.clone();
+    let initialization = thread::spawn(move || {
+        core.initialize_with_device_enumerator(move || {
+            let _retirement = PhysicalRetirement(physical_retired);
+            started.send(()).unwrap();
+            // Disconnect also releases the gate when the test unwinds.
+            let _ = released.recv();
+            Ok(vec!["discovered-output".into()])
+        });
+        let _ = initialized.send(core);
+    });
+    entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    let core = ready.recv_timeout(Duration::from_secs(5)).unwrap();
+    initialization.join().unwrap();
+    (core, release, retired)
+}
+
+#[test]
+fn startup_device_enumeration_keeps_restored_queue_queries_available() {
+    let (_directory, mut core) = fixture();
+    core.store.set_queue_current(Some(3)).unwrap();
+    core.state.queue = QueueState::default();
+    core.state.current_track = None;
+    let (core, release, retired) = initialize_with_pending_devices(core);
+    assert_eq!(core.state.queue.current_id, Some(3));
+    assert_eq!(core.state.current_track().unwrap().id, 2);
+    assert!(!core.queue_projection_stale);
+    let (handle, control, worker, _) = navigation_runtime(core);
+    let query = futures::executor::block_on(async {
+        rivu_protocol::transport::timeout(
+            Duration::from_secs(5),
+            handle.query_async(Query::QueuePage {
+                query: None,
+                offset: 0,
+                limit: 5,
+            }),
+        )
+        .await
+        .unwrap()
+    });
+    let ViewResponse::QueuePage(page) = query.result.unwrap() else {
+        panic!("expected restored queue page");
+    };
+    assert_eq!(page.total, 5);
+    assert_eq!(
+        page.rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+        [1, 2, 3, 4, 5]
+    );
+    assert!(
+        futures::executor::block_on(handle.request_ack(Command::Device {
+            name: Some("new-selection".into()),
+        }))
+        .is_success()
+    );
+    assert!(!retired.load(Ordering::Acquire));
+    assert!(handle.gui_snapshot().system.devices.is_empty());
+
+    let state = handle.state.clone();
+    let (published, publication) = bounded(1);
+    handle.set_wakeup(move || {
+        let state = state.read();
+        if state.system.devices.as_slice() == ["discovered-output"] {
+            let _ = published.try_send(state.system.selected_device.clone());
+        }
+    });
+    release.send(()).unwrap();
+    assert_eq!(
+        publication.recv_timeout(Duration::from_secs(5)).unwrap(),
+        Some("new-selection".into())
+    );
+    assert!(retired.load(Ordering::Acquire));
+    assert_eq!(handle.state.read().queue.current_id, Some(3));
+    control.request_shutdown().unwrap();
+    let core = worker.join().unwrap();
+    assert!(core.initial_devices.is_none());
+}
+
+#[test]
+fn startup_device_enumeration_retires_physically_on_shutdown_and_owner_drop() {
+    for drop_owner in [false, true] {
+        let (_directory, core) = fixture();
+        let (mut core, release, retired) = initialize_with_pending_devices(core);
+        // Isolate Core's retirement from the application's final pool drain.
+        let _tasks = core._test_tasks.take().unwrap();
+        let shared = core.shared.clone();
+        let (_sender, requests) = async_channel::bounded(1);
+        let (control, shutdown) = CoreLifecycle::new();
+        let (completed, completion) = bounded(1);
+        let physical_retired = retired.clone();
+        control.set_completion_callback(move || {
+            completed
+                .send(physical_retired.load(Ordering::Acquire))
+                .unwrap();
+        });
+        let worker_control = control.clone();
+        let worker = thread::spawn(move || {
+            let _completion = CompletionGuard(worker_control.clone());
+            let mut core = core;
+            if !drop_owner {
+                core.run(requests, shutdown, &worker_control);
+                assert!(core.initial_devices.is_none());
+                assert!(core.state.system.devices.is_empty());
+            }
+        });
+        if !drop_owner {
+            assert!(
+                futures::executor::block_on(
+                    control.shutdown_ack_async(|| shared.read().system.revision)
+                )
+                .is_success()
+            );
+        }
+        assert!(!control.is_complete());
+        assert!(!retired.load(Ordering::Acquire));
+        release.send(()).unwrap();
+        worker.join().unwrap();
+        assert!(completion.recv_timeout(Duration::from_secs(5)).unwrap());
+        assert!(control.is_complete());
+    }
+}
+
 #[test]
 fn runtime_completion_notifies_on_panic_and_reconciles_late_registration() {
     let (control, _shutdown) = CoreLifecycle::new();
