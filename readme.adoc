@@ -310,7 +310,7 @@ Release builds strip symbols. For troubleshooting, set
 
 Run `make ui-demo` on a Wayland desktop to explore the reusable GUI controls.
 See link:doc/24_layout.adoc#_reusable_gpui_controls[component boundaries and host setup]
-and link:doc/23_visuals.adoc#_pinned_gpu_extensions[local GPUI extensions].
+and link:doc/23_visuals.adoc#_pinned_gpu_extensions[pinned GPUI extensions].
 
 `rivu -V` prints `package-version (build-identity)`; About shows build identity
 and enabled Cargo features (`ffmpeg`, `onnx`, `embed-nerd-font`, or `none`).

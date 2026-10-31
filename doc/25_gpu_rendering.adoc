@@ -47,7 +47,7 @@ FFT, analysis and simulation remain application-owned; no platform service, arbi
 shader composition or ABI generator is introduced. The original rectangle-only
 LED experiment is retained under <<_initial_comparative_measurements>>.
 
-The current vendor implementation exposes the deliberately experimental
+The pinned renderer implementation exposes the deliberately experimental
 `GpuPalette`, `GpuFrame`, schema-stable `GpuState`, `GpuSource` and
 `Window::paint_gpu` for integration work. One recording entry accepts normalized
 rectangle instances, row-major numerical fields, independent line segments,
@@ -61,9 +61,10 @@ Beams/Flow use segments; Spectrogram uses fields with independent column interva
 Waveform uses stereo numerical columns. Spectrum Peaks remain ordinary GPUI
 quads, and radial styles and artwork retain their independent rendering paths.
 
-The definitions live in link:../vendor/gpui/src/gpu.rs[`gpui::gpu`]; the
-device-local implementation is
-link:../vendor/gpui_wgpu/src/gpu_material.rs[`gpu_material`]. These publication
+The definitions live in
+https://github.com/rtgiskard/gpui-wgpu/blob/a0f85409415952902b89413654e31bc34cb9d980/crates/gpui/src/gpu.rs[`gpui::gpu`];
+the device-local implementation is
+https://github.com/rtgiskard/gpui-wgpu/blob/a0f85409415952902b89413654e31bc34cb9d980/crates/gpui_wgpu/src/gpu_material.rs[`gpu_material`]. These publication
 handles contain CPU content, not device allocations or an attached-window
 identity. They can be recorded in different windows; each renderer independently
 uploads and budgets the content it uses. Attached-window state and explicit import
@@ -157,7 +158,7 @@ scene order; MSAA admission starts at the resulting actual upload cursor.
 
 === Different consumers and interface extraction
 
-The vendor interface covers numerical fields, existing path coloring and
+The renderer interface covers numerical fields, existing path coloring and
 rectangles without introducing application analysis or style state.
 Fields use explicit linear or logarithmic scalar-to-palette mapping. Coordinates
 use `uv * extent - 0.5` and clamp neighboring indices; empty extents emit no draw,
@@ -369,10 +370,11 @@ the fixed encoders and publication constructors remain the available path.
 
 === Scope
 
-The patch surface is drawing/state/scene support in `vendor/gpui`, device-local
-execution and reclamation in `vendor/gpui_wgpu`, visualization consumers and
-necessary ABI tooling/tests. Keep the pinned `gpui_linux` dependency and the
-existing transport:
+Drawing/state/scene support belongs to `crates/gpui`, and device-local execution
+and reclamation to `crates/gpui_wgpu`, in the independent `gpui-wgpu` repository.
+Rivu owns visualization consumers and application integration tests. Update both
+renderer patch revisions together; keep the pinned `gpui_linux` dependency and
+the existing transport:
 
 [source,text]
 ----

@@ -100,7 +100,7 @@ symphonia-format-mkv = { path = "vendor/symphonia-format-mkv" }
 symphonia-format-ogg = { path = "vendor/symphonia-format-ogg" }
 symphonia-format-riff = { path = "vendor/symphonia-format-riff" }
 
-# Pinned GPUI extensions: GPU image transforms and shared visualization materials.
+# Pinned GPUI extensions maintained together in the independent renderer repository.
 [patch."https://github.com/zed-industries/zed"]
-gpui = { path = "vendor/gpui" }
-gpui_wgpu = { path = "vendor/gpui_wgpu" }
+gpui = { git = "https://github.com/rtgiskard/gpui-wgpu", rev = "a0f85409415952902b89413654e31bc34cb9d980" }
+gpui_wgpu = { git = "https://github.com/rtgiskard/gpui-wgpu", rev = "a0f85409415952902b89413654e31bc34cb9d980" }

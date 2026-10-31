@@ -655,12 +655,13 @@ percentages from a different implementation.
 
 == Pinned GPU extensions
 
-`Cargo.toml` overrides `gpui` and `gpui_wgpu` with `vendor/gpui` and
-`vendor/gpui_wgpu`, derived from
-https://github.com/zed-industries/zed/tree/df48a139ce9c292738b523252c12f044697e673f[Zed revision df48a139ce9c292738b523252c12f044697e673f]
-under the upstream Apache-2.0 license. The remaining GPUI platform crates and
-standalone manifests retain that pinned dependency baseline. This is a
-maintained rendering capability patch, not a framework replacement or upgrade.
+`Cargo.toml` overrides `gpui` and `gpui_wgpu` with the same fixed commit
+`a0f85409415952902b89413654e31bc34cb9d980` from
+https://github.com/rtgiskard/gpui-wgpu[`gpui-wgpu`]. Both crates are maintained
+together outside Rivu, under the upstream Apache-2.0 license. Their baseline is
+https://github.com/zed-industries/zed/tree/df48a139ce9c292738b523252c12f044697e673f[Zed revision df48a139ce9c292738b523252c12f044697e673f];
+the remaining GPUI platform crates retain that pinned dependency baseline.
+This is a maintained capability patch, not a framework replacement or upgrade.
 The extensions add centered image transforms and shared GPU materials on
 Rivu's Linux/WGPU rendering path. Existing untransformed images and ordinary
 path backgrounds retain their drawing semantics, although ordinary Paths share
@@ -675,7 +676,7 @@ Shared images retain their normal image and atlas lifetimes.
 Cached views track their own entity dependencies, including dependencies shared
 with enclosing views. Parent redraw and scene replay must not sever a child's
 notifications or force unrelated cached siblings to rerender. Regression commands
-are listed under <<_vendor_regression_checks,Vendor regression checks>>.
+are listed under <<_renderer_regression_checks,Renderer regression checks>>.
 
 === Why the patch is needed
 
@@ -705,35 +706,33 @@ Linux/Vulkan runtime evidence does not establish Metal or browser support.
 The extra fields also increase shared vertex/sprite record sizes, so this
 patch is not a universal rendering or memory improvement.
 
-When updating GPUI, compare these extensions against their pinned baseline,
-keep Rust and shader record layouts synchronized, and preserve transformed
-image clipping, palette Path mapping, atlas lifetime, and drawing order.
-Revalidate ordinary untransformed images and plain paths as well as all migrated
-consumers. Drop the local overrides and obsolete vendor code only when
-the selected upstream revision supplies the required behavior and all Rivu
-callers have migrated; a newer dependency version alone is not sufficient.
+Maintain framework and renderer changes in `gpui-wgpu`, then update both Rivu
+patch revisions together. When updating the upstream baseline, compare these
+extensions against it, keep Rust and shader record layouts synchronized, and
+preserve transformed image clipping, palette Path mapping, atlas lifetime and
+drawing order. Revalidate ordinary untransformed images and plain paths as well
+as all migrated consumers. Drop the overrides only when the selected upstream
+revision supplies the required behavior and all Rivu callers have migrated;
+a newer dependency version alone is not sufficient.
 
-=== Vendor regression checks
+=== Renderer regression checks
 
-Run the following commands from the repository root. The standalone vendor
-workspaces keep copied upstream crates outside Rivu's workspace lint targets;
-they are not substitutes for application behavior tests. Headless WGPU checks
-need an available WGPU adapter and do not establish native-window behavior.
+Framework, shader and headless GPU regressions live in the independent
+`gpui-wgpu` repository, together with licensed font and image fixtures.
+Check out the exact revision pinned by Rivu before running its commands:
 
-Run `cargo test --manifest-path vendor/gpui_wgpu/Cargo.toml --lib` to exercise
-the patched shader and headless GPU regressions in their isolated test workspace.
-The companion GPUI workspace runs publication/replay regressions with
-`cargo test --manifest-path vendor/gpui/Cargo.toml --lib gpu::tests --no-default-features`
-and existing scene regressions with
-`cargo test --manifest-path vendor/gpui/Cargo.toml --lib scene::reclamation_tests --no-default-features`.
-Run `cargo test --manifest-path vendor/gpui/Cargo.toml --lib elements::img:: --no-default-features`
-for source-animation cursor and frame-request ownership regressions. Automatic
-frame requests are exercised beneath a rendered entity, matching real image views.
-Compilation also requires the pinned upstream `assets/fonts/lilex` and
-`assets/fonts/ibm-plex-sans` fixtures, placed under this repository's
-`tests/fixtures/fonts/` with their original subdirectory names.
-Upstream test-only font and image fixtures retain their original licenses.
+[source,sh]
+----
+git clone https://github.com/rtgiskard/gpui-wgpu
+cd gpui-wgpu
+git checkout a0f85409415952902b89413654e31bc34cb9d980
+make test
+----
 
-Run `cargo test --test gpui_cached_dependencies` for the application-side
-cached-view notification and replay regressions.
+See that repository's README for focused checks and build prerequisites.
+Headless WGPU checks need an available adapter and do not establish native-window
+behavior. They are not substitutes for Rivu application behavior tests.
+
+From Rivu's repository root, run `cargo test --locked --test gpui_cached_dependencies`
+for the application-side cached-view notification and replay regressions.
 

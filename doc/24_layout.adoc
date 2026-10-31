@@ -632,7 +632,7 @@ or maintaining a second volume model.
 
 ==== Integration and showcase
 
-The package uses this workspace's pinned GPUI revision and local patches. It is
+The package uses this workspace's pinned GPUI revision and renderer patches. It is
 not a renderer-independent API or a promise of compatibility with arbitrary GPUI
 versions. `make lint` and `make build` include the component package;
 `cargo test -p rivu-ui` runs its interaction and viewport regression tests.
