@@ -844,7 +844,7 @@ fn duration_threshold_is_snapshotted_for_file_directory_and_forced_scans() {
                 let new = directory.path().join("new.wav");
                 write_pcm(&existing);
                 write_pcm(&new);
-                Arc::make_mut(&mut core.state.configuration.config).scan_min_duration_secs =
+                Arc::make_mut(&mut core.state.configuration.config).scan_min_duration_seconds =
                     threshold;
                 let paths = if directory_scope {
                     vec![directory.path().to_path_buf()]
@@ -854,7 +854,7 @@ fn duration_threshold_is_snapshotted_for_file_directory_and_forced_scans() {
                 core.scan(paths, force).unwrap();
                 // Mutating the live configuration after acceptance must not alter
                 // this task, regardless of when its worker reaches the source.
-                Arc::make_mut(&mut core.state.configuration.config).scan_min_duration_secs =
+                Arc::make_mut(&mut core.state.configuration.config).scan_min_duration_seconds =
                     1 - threshold;
                 assert!(settle_scan(&mut core));
                 let status = core.scan_results.back().unwrap();
@@ -891,7 +891,7 @@ fn duration_only_exclusions_complete_successfully_without_errors() {
     let (directory, mut core) = fixture();
     let path = directory.path().join("new.wav");
     write_pcm(&path);
-    Arc::make_mut(&mut core.state.configuration.config).scan_min_duration_secs = 1;
+    Arc::make_mut(&mut core.state.configuration.config).scan_min_duration_seconds = 1;
     core.scan(vec![path.clone()], false).unwrap();
     assert!(settle_scan(&mut core));
     let task = core.scan_results.back().unwrap();
@@ -931,7 +931,7 @@ fn forced_duration_scan_refreshes_cached_short_existing_tracks() {
             ..ScanResult::default()
         })
         .unwrap();
-    Arc::make_mut(&mut core.state.configuration.config).scan_min_duration_secs = 1;
+    Arc::make_mut(&mut core.state.configuration.config).scan_min_duration_seconds = 1;
     core.scan(vec![path], true).unwrap();
     assert!(settle_scan(&mut core));
     let track = core.store.track(1).unwrap().unwrap();
@@ -975,13 +975,13 @@ fn duration_threshold_playlist_import_keeps_existing_tracks_and_uses_accepted_sn
         } else {
             1
         };
-        Arc::make_mut(&mut core.state.configuration.config).scan_min_duration_secs = 3;
+        Arc::make_mut(&mut core.state.configuration.config).scan_min_duration_seconds = 3;
         core.command(Command::ImportPlaylist {
             path: path.clone(),
             name: Some("Filtered mix".into()),
         })
         .unwrap();
-        Arc::make_mut(&mut core.state.configuration.config).scan_min_duration_secs = 0;
+        Arc::make_mut(&mut core.state.configuration.config).scan_min_duration_seconds = 0;
         assert!(settle_scan(&mut core));
         let task = core.scan_results.back().unwrap();
         assert_eq!(task.progress.errors, 0);
@@ -2306,7 +2306,7 @@ fn other_check_empty_roots_rechecks_only_registered_sources_without_duration_fil
     write_pcm(&unregistered);
     let config = Arc::make_mut(&mut core.state.configuration.config);
     config.library_roots.clear();
-    config.scan_min_duration_secs = 3600;
+    config.scan_min_duration_seconds = 3600;
     core.command(Command::CheckOtherTracks { force: true })
         .unwrap();
     let id = core.active_scan.as_ref().unwrap().status.id;

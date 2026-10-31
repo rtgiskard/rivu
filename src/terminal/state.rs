@@ -41,7 +41,8 @@ impl TuiState {
     }
 
     pub(super) fn apply_snapshot(&mut self, next: TuiSnapshot) {
-        let page_size_changed = self.snapshot.system.page_size != next.system.page_size;
+        let page_size_changed =
+            self.snapshot.system.query_batch_size != next.system.query_batch_size;
         self.ui.sync_queue(&self.snapshot, &next);
         if page_size_changed {
             self.ui.queue.pages.clear();
@@ -336,7 +337,7 @@ impl UiState {
         if tree.other_tracks || !tree.directory.as_os_str().is_empty() {
             return false;
         }
-        let limit = state.system.page_size as usize;
+        let limit = state.system.query_batch_size as usize;
         let mut changed = false;
         while let Some(offset) = tree.entries.next_offset(limit) {
             let rows = std::iter::once(DirectoryRow::OtherTracks)
@@ -385,7 +386,7 @@ impl UiState {
             self.cancel_query();
             self.mark_local_change();
         }
-        let limit = state.system.page_size as usize;
+        let limit = state.system.query_batch_size as usize;
         let (kind, offset) = match &self.view {
             View::Queue if state.queue.total != 0 => match self.queue_anchor {
                 Some(queue_id) => (QueryKind::QueueSelection(queue_id), 0),

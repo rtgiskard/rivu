@@ -341,7 +341,7 @@ impl Core {
         tracing::info!(
             input = ?input,
             max_depth = config.scan_max_depth,
-            min_duration_secs = config.scan_min_duration_secs,
+            min_duration_secs = config.scan_min_duration_seconds,
             "library_scan_started"
         );
         let id = self.next_scan_id;
@@ -478,7 +478,7 @@ impl Core {
                 )
                 .await
                 .map(|mut result| {
-                    result.min_duration_secs = config.scan_min_duration_secs;
+                    result.min_duration_secs = config.scan_min_duration_seconds;
                     result
                 })
             }

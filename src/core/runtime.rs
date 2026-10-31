@@ -218,9 +218,9 @@ impl CoreRuntime {
         // device enumeration and optional decoder probing run on the core
         // worker so the GUI is not blocked by startup I/O.
         let store = Store::open(&data_dir.join("library.db"))?;
-        store.set_track_cache_page_size(config.page_size);
+        store.set_track_cache_query_batch_size(config.query_batch_size);
         tracing::debug!("store_ready");
-        let engine = AudioEngine::new(config.media_read_buffer_mb)?;
+        let engine = AudioEngine::new(config.media_read_buffer_mib)?;
         tracing::info!("audio_engine_ready");
         let (sender, receiver) = async_channel::bounded(64);
         let (control, shutdown_receiver) = CoreLifecycle::new();

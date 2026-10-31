@@ -31,9 +31,9 @@ impl TrackCache {
 }
 
 impl Store {
-    pub(crate) fn set_track_cache_page_size(&self, page_size: u32) {
+    pub(crate) fn set_track_cache_query_batch_size(&self, query_batch_size: u32) {
         let mut cache = self.track_cache.borrow_mut();
-        cache.capacity = (page_size as usize).saturating_mul(2);
+        cache.capacity = (query_batch_size as usize).saturating_mul(2);
         cache.trim();
         let capacity = cache.capacity;
         cache.entries.shrink_to(capacity);

@@ -718,7 +718,7 @@ fn runtime_wire_round_trip_preserves_large_client_configuration_without_transfer
             ))
         })
         .collect();
-    config.page_size = 91;
+    config.query_batch_size = 91;
     snapshot.configuration.config_path = "/configuration-only-marker/config.toml".into();
     let retained = Arc::clone(&snapshot.configuration.config);
     let full = StateResponse {
@@ -764,7 +764,7 @@ fn runtime_wire_round_trip_preserves_large_client_configuration_without_transfer
     response.apply_to(&mut snapshot);
     assert_eq!(snapshot.system.scan_message, "runtime progress");
     assert!(Arc::ptr_eq(&retained, &snapshot.configuration.config));
-    assert_eq!(snapshot.configuration.config.page_size, 91);
+    assert_eq!(snapshot.configuration.config.query_batch_size, 91);
     assert_eq!(
         snapshot.configuration.config_path,
         std::path::Path::new("/configuration-only-marker/config.toml")
@@ -823,9 +823,9 @@ fn configuration_wire_adapter_preserves_optional_fields_and_library_columns() {
         ),
     ] {
         let config = Arc::new(rivu_format::config::Config {
-            scan_min_duration_secs: if output_device.is_some() { u32::MAX } else { 0 },
-            spectrogram_flow_speed: if output_device.is_some() { 2.0 } else { 0.1 },
-            spectrogram_accumulation: if output_device.is_some() { 95 } else { 10 },
+            scan_min_duration_seconds: if output_device.is_some() { u32::MAX } else { 0 },
+            spectrogram_startup_expansion_speed: if output_device.is_some() { 2.0 } else { 0.1 },
+            spectrogram_outflow_threshold_percent: if output_device.is_some() { 95 } else { 10 },
             output_device,
             library_columns,
             ui_theme: rivu_format::config::Theme::TokyoNight,
@@ -952,12 +952,12 @@ fn configure_request_round_trip_preserves_optional_config_field_and_library_colu
         ),
     ] {
         let config = rivu_format::config::Config {
-            audio_visualizer_grid: output_device.is_some(),
-            audio_visualizer_labels: output_device.is_none(),
-            oscilloscope_shared_grid: output_device.is_some(),
-            scan_min_duration_secs: if output_device.is_some() { u32::MAX } else { 0 },
-            spectrogram_flow_speed: if output_device.is_some() { 2.0 } else { 0.1 },
-            spectrogram_accumulation: if output_device.is_some() { 95 } else { 10 },
+            default_visualizer_reference_lines: output_device.is_some(),
+            default_visualizer_labels: output_device.is_none(),
+            oscilloscope_overlay_channels: output_device.is_some(),
+            scan_min_duration_seconds: if output_device.is_some() { u32::MAX } else { 0 },
+            spectrogram_startup_expansion_speed: if output_device.is_some() { 2.0 } else { 0.1 },
+            spectrogram_outflow_threshold_percent: if output_device.is_some() { 95 } else { 10 },
             output_device,
             library_columns,
             ui_theme: rivu_format::config::Theme::TokyoNightDay,
@@ -1556,12 +1556,40 @@ fn processing_commands_and_configuration_use_current_positional_contract() {
     config.denoise.spectral_gain_floor_db = -31.5;
     config.neural.speech_manifest = Some("/models/speech.json".into());
     config.neural.separation_overlap = 0.5;
-    config.spectrogram_flow_speed = 1.25;
-    config.spectrogram_accumulation = 85;
+    config.spectrogram_startup_expansion_speed = 1.25;
+    config.spectrogram_outflow_threshold_percent = 85;
     let wire = WireConfig::from(&config);
     let bytes = postcard::to_allocvec(&wire).unwrap();
     let decoded: WireConfig = postcard::from_bytes(&bytes).unwrap();
     assert_eq!(rivu_format::config::Config::from(decoded), config);
+}
+
+#[test]
+fn spectrum_bar_layout_postcard_round_trip_preserves_both_positional_variants() {
+    use rivu_format::config::{Config, SpectrumBarLayout};
+
+    for (layout, expected_bytes) in [
+        (
+            SpectrumBarLayout::Automatic { width: 7.25 },
+            vec![0, 0, 0, 232, 64],
+        ),
+        (SpectrumBarLayout::Fixed { count: 257 }, vec![1, 129, 2]),
+    ] {
+        let bytes = postcard::to_allocvec(&WireSpectrumBarLayout::from(layout)).unwrap();
+        assert_eq!(bytes, expected_bytes);
+        let decoded: WireSpectrumBarLayout = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(SpectrumBarLayout::from(decoded), layout);
+
+        let config = Config {
+            spectrum_bar_layout: layout,
+            spectrum_gap: 2.5,
+            spectrogram_history_seconds: 37,
+            ..Default::default()
+        };
+        let bytes = postcard::to_allocvec(&WireConfig::from(&config)).unwrap();
+        let decoded: WireConfig = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(Config::from(decoded), config);
+    }
 }
 
 #[test]

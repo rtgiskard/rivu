@@ -957,14 +957,14 @@ mod tests {
 
         fn response(
             revisions: StateRevisions,
-            page_size: Option<u32>,
+            query_batch_size: Option<u32>,
             runtime: bool,
         ) -> StateResponse {
             StateResponse {
                 revisions,
-                configuration: page_size.map(|page_size| {
+                configuration: query_batch_size.map(|query_batch_size| {
                     let mut state = ConfigurationState::default();
-                    Arc::make_mut(&mut state.config).page_size = page_size;
+                    Arc::make_mut(&mut state.config).query_batch_size = query_batch_size;
                     state.config_path = "/server/config.toml".into();
                     state
                 }),
@@ -1083,7 +1083,7 @@ mod tests {
         );
         assert!(client.get_state(configuration).is_err());
         assert_eq!(client.instance_id(), None);
-        assert_eq!(snapshot.configuration.config.page_size, 37);
+        assert_eq!(snapshot.configuration.config.query_batch_size, 37);
         assert_eq!(applied.configuration, 1);
 
         let update = client.get_state(configuration).unwrap();
@@ -1091,13 +1091,13 @@ mod tests {
         assert_eq!(update.sections(), configuration);
         applied.apply_sections(update.revisions, update.sections());
         update.apply_to(&mut snapshot);
-        assert_eq!(snapshot.configuration.config.page_size, 91);
+        assert_eq!(snapshot.configuration.config.query_batch_size, 91);
         assert_eq!(snapshot.system.last_error.as_deref(), Some("runtime 2"));
         assert_eq!(latest.changed_since(applied), runtime);
         client.disconnect();
         let error = client.get_state(configuration).unwrap_err();
         assert!(error.downcast_ref::<InstanceChanged>().is_some());
-        assert_eq!(snapshot.configuration.config.page_size, 91);
+        assert_eq!(snapshot.configuration.config.query_batch_size, 91);
         assert_eq!(applied.configuration, 2);
         assert_eq!(client.instance_id(), None);
         server.join().unwrap();

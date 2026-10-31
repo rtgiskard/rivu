@@ -190,7 +190,7 @@ impl Library {
     }
 
     pub(in crate::gui) fn view_page_size(&self) -> usize {
-        self.state.system.config.page_size as usize
+        self.state.system.config.query_batch_size as usize
     }
     fn request_library_search_counts(&mut self, cx: &mut Context<Self>) {
         let (changed, request) = self.library.prepare_search_counts(

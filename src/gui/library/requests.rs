@@ -608,7 +608,7 @@ mod tests {
             let mut state = (*browser.state).clone();
             let config = std::sync::Arc::make_mut(&mut state.system.config);
             config.library_roots = roots.clone();
-            config.page_size = 20;
+            config.query_batch_size = 20;
             browser.visible = true;
             browser.reconcile(std::rc::Rc::new(state), cx);
             let branch = root_branches(browser, &roots).remove(0);

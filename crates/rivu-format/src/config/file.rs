@@ -5,7 +5,7 @@ use toml_edit::TableLike;
 // Serialize only changed runtime fields, using the same key and serde rules as
 // full exports. Optional fields serialize to an absent entry when cleared.
 macro_rules! patch_field {
-    ($table:expr, $baseline:expr, $config:expr, $(#[$attr:meta])* $key:ident => $field:ident : $ty:ty) => {
+    ($table:expr, $baseline:expr, $config:expr, $(#[$attr:meta])* $key:ident => $field:ident : $ty:ty $(=> $mode:ident)?) => {
         if $baseline.$field != $config.$field {
             #[derive(Serialize)]
             struct Field<'a> {
@@ -14,15 +14,24 @@ macro_rules! patch_field {
             }
             let before = toml_edit::ser::to_document(&Field { $key: &$baseline.$field })?;
             let mut after = toml_edit::ser::to_document(&Field { $key: &$config.$field })?;
-            super::edit::patch($table, stringify!($key), before.get(stringify!($key)), after.remove(stringify!($key)))?;
+            // Required structured payloads need every member on first write.
+            // Existing fields still preserve unchanged values and decoration.
+            let before = if patch_field!(@complete $($mode)?) && !$table.contains_key(stringify!($key)) {
+                None
+            } else {
+                before.get(stringify!($key))
+            };
+            super::edit::patch($table, stringify!($key), before, after.remove(stringify!($key)))?;
         }
     };
+    (@complete) => { false };
+    (@complete complete) => { true };
 }
 
 // Each leaf declares its file key, runtime field and type once. Loading overlays
 // supplied values on one Config::default(); saving borrows the runtime fields.
 macro_rules! file_group {
-    ($owned:ident, $view:ident { $( $(#[$attr:meta])* $key:ident => $field:ident : $ty:ty, )* } $(; $nested:ident : $nested_owned:ident, $nested_view:ident)*) => {
+    ($owned:ident, $view:ident { $( $(#[$attr:meta])* $key:ident => $field:ident : $ty:ty $(=> $mode:ident)?, )* } $(; $nested:ident : $nested_owned:ident, $nested_view:ident)*) => {
         #[derive(Default, Deserialize)]
         #[serde(default, deny_unknown_fields)]
         struct $owned {
@@ -47,7 +56,7 @@ macro_rules! file_group {
                     return Ok(());
                 }
                 let table = super::edit::group(parent, key)?;
-                $( patch_field!(table, baseline, config, $(#[$attr])* $key => $field: $ty); )*
+                $( patch_field!(table, baseline, config, $(#[$attr])* $key => $field: $ty $(=> $mode)?); )*
                 $( $nested_owned::patch(table, stringify!($nested), baseline, config)?; )*
                 Ok(())
             }
@@ -70,7 +79,7 @@ macro_rules! file_group {
 file_group!(Library, LibraryView {
     roots => library_roots: Vec<PathBuf>,
     scan_max_depth => scan_max_depth: u32,
-    scan_min_duration_secs => scan_min_duration_secs: u32,
+    scan_min_duration_seconds => scan_min_duration_seconds: u32,
 });
 
 fn deserialize_volume_percent<'de, D: serde::Deserializer<'de>>(
@@ -100,7 +109,7 @@ file_group!(Playback, PlaybackView {
     shuffle => shuffle: bool,
     repeat => repeat: RepeatMode,
     play_count_threshold_percent => play_count_threshold_percent: f64,
-    media_read_buffer_mb => media_read_buffer_mb: u32,
+    media_read_buffer_mib => media_read_buffer_mib: u32,
     ffmpeg_enabled => ffmpeg_enabled: bool,
     pipewire_auto_mix => pipewire_auto_mix: bool,
 });
@@ -111,13 +120,13 @@ file_group!(Interface, InterfaceView {
     tray_enabled => tray_enabled: bool,
     mpris_enabled => mpris_enabled: bool,
     confirm_queue_replace => confirm_queue_replace: bool,
-    page_size => page_size: u32,
-    artwork_file_limit_mb => artwork_file_limit_mb: u32,
-    artwork_decode_budget_mb => artwork_decode_budget_mb: u32,
-    gpu_material_budget_mb => gpu_material_budget_mb: u32,
+    query_batch_size => query_batch_size: u32,
+    artwork_file_limit_mib => artwork_file_limit_mib: u32,
+    artwork_decode_budget_mib => artwork_decode_budget_mib: u32,
+    gpu_material_budget_mib => gpu_material_budget_mib: u32,
     library_columns => library_columns: LibraryColumns,
     font => ui_font: String,
-    font_size => ui_font_size: u32,
+    font_size_pt => ui_font_size_pt: u32,
     scale => ui_scale: f32,
     layout_snap_enabled => layout_snap_enabled: bool,
     layout_snap_grid_px => layout_snap_grid_px: u32,
@@ -132,8 +141,7 @@ file_group!(Logging, LoggingView {
 file_group!(Spectrum, SpectrumView {
     style => spectrum_style: SpectrumStyle,
     interpolate => spectrum_interpolate: bool,
-    bar_width => spectrum_bar_width: f32,
-    bars => spectrum_bars: u32,
+    bar_layout => spectrum_bar_layout: SpectrumBarLayout => complete,
     gap => spectrum_gap: f32,
     peaks => spectrum_peaks: bool,
     peak_hold_ms => spectrum_peak_hold_ms: u32,
@@ -147,27 +155,26 @@ file_group!(Spectrum, SpectrumView {
 
 file_group!(Spectrogram, SpectrogramView {
     interpolate => spectrogram_interpolate: bool,
-    sampling_points_scale => spectrogram_sampling_points_scale: f32,
-    interpolation_points => spectrogram_interpolation_points: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     db_range => spectrogram_db_range: Option<f32>,
     history_seconds => spectrogram_history_seconds: u32,
-    flow_speed => spectrogram_flow_speed: f32,
-    accumulation => spectrogram_accumulation: u32,
+    startup_expansion_speed => spectrogram_startup_expansion_speed: f32,
+    outflow_threshold_percent => spectrogram_outflow_threshold_percent: u32,
 });
 
 file_group!(Radial, RadialView {
-    rotation_speed => audio_visualizer_rotation_speed: f32,
-    bar_width => audio_visualizer_bar_width: f32,
-    bar_glow_layers => audio_visualizer_bar_glow_layers: u32,
-    ring_opacity => audio_visualizer_ring_opacity: f32,
-    inner_diameter => audio_visualizer_inner_diameter: f32,
-    fade_when_idle => audio_visualizer_fade_when_idle: bool,
+    rotation_speed => radial_rotation_speed: f32,
+    bar_width => radial_bar_width: f32,
+    ring_opacity => radial_ring_opacity: f32,
+    inner_diameter => radial_inner_diameter: f32,
+    fade_when_idle => radial_fade_when_idle: bool,
 });
 
 file_group!(Reactive, ReactiveView {
     #[serde(skip_serializing_if = "Option::is_none")]
-    db_range => audio_visualizer_db_range: Option<f32>,
+    db_range => reactive_db_range: Option<f32>,
+    sensitivity => reactive_sensitivity: f32,
+    bloom_intensity => reactive_bloom_intensity: f32,
 });
 
 file_group!(Waveform, WaveformView {
@@ -182,7 +189,7 @@ file_group!(Waveform, WaveformView {
 file_group!(Oscilloscope, OscilloscopeView {
     time_span_ms => oscilloscope_time_span_ms: f32,
     gain => oscilloscope_gain: f32,
-    shared_grid => oscilloscope_shared_grid: bool,
+    overlay_channels => oscilloscope_overlay_channels: bool,
 });
 
 file_group!(AlbumArtwork, AlbumArtworkView {
@@ -194,26 +201,32 @@ file_group!(AlbumArtwork, AlbumArtworkView {
 });
 
 file_group!(General, GeneralView {
-    visualization_enabled => visualization_enabled: bool,
+    enabled => visualization_enabled: bool,
     signal => visualization_signal: VisualizationSignal,
-    analysis_fps => analysis_fps: u32,
-    fps => visualization_fps: u16,
-    background => visual_background: RgbColor,
-    palette => visual_palette: VisualizationPalette,
+    analysis_rate_hz => analysis_rate_hz: u32,
+    animation_fps => visualization_fps: u16,
+    background => visualization_background: RgbColor,
+    palette => visualization_palette: VisualizationPalette,
     analysis_fft_size => analysis_fft_size: u32,
     analysis_window => analysis_window: AnalysisWindow,
     db_range => visualization_db_range: f32,
-    style => audio_visualizer_style: AudioVisualizerStyle,
-    grid => audio_visualizer_grid: bool,
-    label => audio_visualizer_labels: bool,
-    primary_color => audio_visualizer_primary_color: RgbColor,
-    secondary_color => audio_visualizer_secondary_color: RgbColor,
-    sensitivity => audio_visualizer_sensitivity: f32,
-    bloom_intensity => audio_visualizer_bloom_intensity: f32,
+});
+
+file_group!(Defaults, DefaultsView {
+    style => default_visualizer_style: AudioVisualizerStyle,
+    reference_lines => default_visualizer_reference_lines: bool,
+    labels => default_visualizer_labels: bool,
+});
+
+file_group!(Effects, EffectsView {
+    primary_color => effect_primary_color: RgbColor,
+    secondary_color => effect_secondary_color: RgbColor,
 });
 
 file_group!(Visualizations, VisualizationsView {
 }; general: General, GeneralView
+; defaults: Defaults, DefaultsView
+; effects: Effects, EffectsView
 ; radial: Radial, RadialView
 ; reactive: Reactive, ReactiveView
 ; spectrum: Spectrum, SpectrumView

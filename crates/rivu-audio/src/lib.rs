@@ -193,11 +193,11 @@ impl WaveformScanSnapshot {
 /// Scan only on an explicit request, preserving the captured signal and graph.
 pub fn waveform(
     snapshot: &WaveformScanSnapshot,
-    media_read_buffer_mb: u32,
+    media_read_buffer_mib: u32,
     ffmpeg_enabled: bool,
     cancelled: &std::sync::atomic::AtomicBool,
 ) -> Result<WaveformFrame> {
-    source::Source::waveform(snapshot, media_read_buffer_mb, ffmpeg_enabled, cancelled)
+    source::Source::waveform(snapshot, media_read_buffer_mib, ffmpeg_enabled, cancelled)
 }
 
 use crate::analysis::{AnalysisControl, AnalysisFrame, AnalysisSettings, AnalysisWorker};
@@ -401,7 +401,7 @@ pub struct AudioEngine {
     shutdown: Mutex<Option<AudioShutdown>>,
 }
 impl AudioEngine {
-    pub fn new(media_read_buffer_mb: u32) -> Result<Self> {
+    pub fn new(media_read_buffer_mib: u32) -> Result<Self> {
         let (commands, receive) = async_channel::bounded(64);
         let (command_wake, commands_ready) = bounded(1);
         let (send_events, events) = async_channel::bounded(128);
@@ -411,7 +411,7 @@ impl AudioEngine {
         let worker_waveform = waveform.clone();
         let analyzer = AnalysisWorker::new(analysis.clone())?;
         let analysis_control = Arc::clone(&analyzer.control);
-        let media_read_buffer_len = usize::try_from(media_read_buffer_mb)
+        let media_read_buffer_len = usize::try_from(media_read_buffer_mib)
             .expect("media read buffer size does not fit usize")
             .saturating_mul(BYTES_PER_MEBIBYTE);
         let worker = thread::Builder::new()

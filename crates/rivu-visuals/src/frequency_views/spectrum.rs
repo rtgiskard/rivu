@@ -12,7 +12,7 @@ use gpui::{
     App, Bounds, GpuFrame, GpuLimits, GpuPathParams, GpuRectangle, GpuRectangleParams, GpuSource,
     PathBuilder, Pixels, Point, SharedString, Window, fill, point, px, rgb, size,
 };
-use rivu_format::config::SpectrumStyle;
+use rivu_format::config::{SpectrumBarLayout, SpectrumStyle};
 use std::{collections::HashMap, ops::Range, sync::Arc, time::Duration};
 
 pub(super) const MAX_SPECTRUM_BARS: usize = 2000;
@@ -34,8 +34,7 @@ pub(super) struct Spectrum {
     pub(super) last_update: Option<Duration>,
     pub(super) top_db: f32,
     pub(super) db_range: f32,
-    pub(super) bars: u32,
-    pub(super) bar_width: f32,
+    pub(super) bar_layout: SpectrumBarLayout,
     pub(super) interpolate: bool,
     pub(super) style: SpectrumStyle,
     pub(super) gap: f32,
@@ -68,8 +67,7 @@ impl Spectrum {
             last_update: None,
             top_db: 0.0,
             db_range: config.spectrum_db_range(),
-            bars: config.spectrum_bars,
-            bar_width: config.spectrum_bar_width,
+            bar_layout: config.spectrum_bar_layout,
             interpolate: config.spectrum_interpolate,
             style: config.spectrum_style,
             gap: config.spectrum_gap,
@@ -439,8 +437,7 @@ impl FrequencyState {
         let bars = spectrum_bar_count(
             plot.size.width / px(1.0),
             self.spectrum.style == SpectrumStyle::Solid,
-            self.spectrum.bars,
-            self.spectrum.bar_width,
+            self.spectrum.bar_layout,
             self.spectrum.gap,
         );
         let body = self.prepare_spectrum_body(panel_id, plot, bars, low, high)?;
@@ -518,7 +515,7 @@ impl FrequencyState {
         window: &mut Window,
         cx: &mut App,
     ) -> Result<(), String> {
-        let show_labels = spectrum_labels_visible(options.label, bounds.size.height);
+        let show_labels = spectrum_labels_visible(options.labels, bounds.size.height);
         let labels = self
             .spectrum
             .presentations
@@ -545,7 +542,7 @@ impl FrequencyState {
         for (step, label) in presentation.db_labels.iter().enumerate() {
             let fraction = step as f32 / (presentation.db_labels.len() - 1) as f32;
             let y = plot.top() + plot.size.height * fraction;
-            if options.grid {
+            if options.reference_lines {
                 grid_path.move_to(point(plot.left(), y));
                 grid_path.line_to(point(plot.right(), y));
             }
@@ -559,7 +556,7 @@ impl FrequencyState {
                 );
             }
         }
-        if options.grid {
+        if options.reference_lines {
             let path = grid_path
                 .build()
                 .map_err(|error| format!("Cannot tessellate spectrum grid: {error}"))?;
@@ -654,17 +651,19 @@ pub(super) fn smooth_release(previous: f32, value: f32, decay: f32) -> f32 {
 pub(super) fn spectrum_bar_count(
     width: f32,
     solid: bool,
-    requested: u32,
-    bar_width: f32,
+    layout: SpectrumBarLayout,
     gap: f32,
 ) -> usize {
     let drawable = (width.floor() as usize).max(1);
     let count = if solid {
         drawable
-    } else if requested == 0 {
-        (width / (bar_width + gap).max(1.0)).floor() as usize
     } else {
-        requested as usize
+        match layout {
+            SpectrumBarLayout::Automatic { width: bar_width } => {
+                (width / (bar_width + gap).max(1.0)).floor() as usize
+            }
+            SpectrumBarLayout::Fixed { count } => count as usize,
+        }
     };
     count.clamp(1, MAX_SPECTRUM_BARS).min(drawable)
 }

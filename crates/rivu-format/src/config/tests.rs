@@ -2,28 +2,27 @@ use super::*;
 
 #[test]
 fn visualization_groups_round_trip_and_preserve_independent_ranges() {
-    let original = "[visualizations.general]\nvisualization_enabled = false\nsignal = 'before'\nanalysis_fps = 30\nfps = 120\nbackground = '#123456'\npalette = 'tokyo_night'\nanalysis_fft_size = 4096\nanalysis_window = 'hann'\ndb_range = 85.0\nstyle = 'oscilloscope'\ngrid = true\nlabel = true\nprimary_color = '#112233'\nsecondary_color = '#445566'\nsensitivity = 2.0\nbloom_intensity = 1.0\n[visualizations.radial]\nrotation_speed = 2.0\nbar_width = 1.0\nbar_glow_layers = 3\nring_opacity = 0.5\ninner_diameter = 1.0\nfade_when_idle = true\n[visualizations.reactive]\ndb_range = 85.0\n[visualizations.spectrum]\ndb_range = 65.0\n[visualizations.spectrogram]\ndb_range = 105.0\n";
+    let original = "[visualizations.general]\nenabled = false\nsignal = 'before'\nanalysis_rate_hz = 30\nanimation_fps = 120\nbackground = '#123456'\npalette = 'tokyo_night'\nanalysis_fft_size = 4096\nanalysis_window = 'hann'\ndb_range = 85.0\n[visualizations.radial]\nrotation_speed = 2.0\nbar_width = 1.0\nring_opacity = 0.5\ninner_diameter = 1.0\nfade_when_idle = true\n[visualizations.reactive]\nsensitivity = 2.0\nbloom_intensity = 1.0\ndb_range = 85.0\n[visualizations.spectrum]\ndb_range = 65.0\n[visualizations.spectrogram]\ndb_range = 105.0\n[visualizations.defaults]\nstyle = 'oscilloscope'\nreference_lines = true\nlabels = true\n[visualizations.effects]\nprimary_color = '#112233'\nsecondary_color = '#445566'\n";
     let mut config = from_toml(original).unwrap();
     assert!(!config.visualization_enabled);
-    assert!(config.audio_visualizer_grid);
-    assert!(config.audio_visualizer_labels);
-    assert_eq!(config.audio_visualizer_rotation_speed, 2.0);
-    assert_eq!(config.audio_visualizer_db_range, Some(85.0));
+    assert!(config.default_visualizer_reference_lines);
+    assert!(config.default_visualizer_labels);
+    assert_eq!(config.radial_rotation_speed, 2.0);
+    assert_eq!(config.reactive_db_range, Some(85.0));
     assert_eq!(from_toml(&to_toml(&config).unwrap()).unwrap(), config);
     let baseline = config.clone();
     config.visualization_db_range = 95.0;
     assert_eq!(config.spectrum_db_range(), 65.0);
     assert_eq!(config.spectrogram_db_range(), 105.0);
-    assert_eq!(config.audio_visualizer_db_range(), 85.0);
+    assert_eq!(config.reactive_db_range(), 85.0);
     let saved = update_toml(original, Some(&baseline), &config).unwrap();
     assert_eq!(from_toml(&saved).unwrap(), config);
     let baseline = config.clone();
-    config.audio_visualizer_db_range = None;
+    config.reactive_db_range = None;
     let saved = update_toml(&saved, Some(&baseline), &config).unwrap();
     assert_eq!(from_toml(&saved).unwrap(), config);
-    assert_eq!(config.audio_visualizer_db_range(), 95.0);
+    assert_eq!(config.reactive_db_range(), 95.0);
     let table: toml::Value = toml::from_str(&saved).unwrap();
-    assert!(table["visualizations"].get("audio_visualizer").is_none());
     assert!(
         table["visualizations"]["reactive"]
             .get("db_range")
@@ -32,10 +31,8 @@ fn visualization_groups_round_trip_and_preserve_independent_ranges() {
 }
 
 #[test]
-fn visualization_groups_reject_old_and_misplaced_keys() {
+fn visualization_groups_reject_misplaced_and_unknown_keys() {
     for original in [
-        "[visualizations.audio_visualizer]",
-        "visualizations.visualization_enabled = false",
         "visualizations.db_range = 85.0",
         "visualizations.general.labels = true",
         "visualizations.general.rotation_speed = 1.0",
@@ -51,10 +48,10 @@ fn visualization_groups_reject_old_and_misplaced_keys() {
 
 #[test]
 fn oscilloscope_style_roundtrips_global_defaults_and_incremental_edits() {
-    let original = "[visualizations.general]\nstyle = 'oscilloscope'\n[visualizations.oscilloscope]\ntime_span_ms = 25.0\ngain = 2.5\n";
+    let original = "[visualizations.general]\n[visualizations.oscilloscope]\ntime_span_ms = 25.0\ngain = 2.5\n[visualizations.defaults]\nstyle = 'oscilloscope'\n";
     let config = from_toml(original).unwrap();
     assert_eq!(
-        config.audio_visualizer_style,
+        config.default_visualizer_style,
         AudioVisualizerStyle::Oscilloscope
     );
     assert_eq!(config.oscilloscope_time_span_ms, 25.0);
@@ -220,11 +217,11 @@ fn absent_version_uses_current_schema_and_serializes_explicitly() {
         assert_eq!(from_toml(input).unwrap(), Config::default());
     }
     let config = from_toml(
-        "[interface]\nlanguage = 'ZH_cn'\npage_size = 42\n[playback]\nvolume_percent = 25\nrepeat = 'one'\n",
+        "[interface]\nlanguage = 'ZH_cn'\nquery_batch_size = 42\n[playback]\nvolume_percent = 25\nrepeat = 'one'\n",
     )
     .unwrap();
     assert_eq!(config.ui_language, "zh-CN");
-    assert_eq!(config.page_size, 42);
+    assert_eq!(config.query_batch_size, 42);
     assert_eq!(config.volume, 0.25);
     assert_eq!(config.repeat, RepeatMode::One);
     let saved = to_toml(&config).unwrap();
@@ -289,6 +286,25 @@ fn grouped_round_trip_uses_shared_defaults_validation_and_normalization() {
     assert_eq!(config.volume, 0.25);
     let saved = to_toml(&config).unwrap();
     assert_eq!(from_toml(&saved).unwrap(), config);
+    let empty_font = Config {
+        ui_font: String::new(),
+        ..config.clone()
+    };
+    assert!(empty_font.validate().is_err());
+    assert!(to_toml(&empty_font).is_err());
+    assert!(update_toml(text, Some(&config), &empty_font).is_err());
+    for (font, valid) in [("字".repeat(42), true), ("字".repeat(43), false)] {
+        let direct = Config {
+            ui_font: font,
+            ..config.clone()
+        };
+        assert_eq!(direct.validate().is_ok(), valid);
+        assert_eq!(to_toml(&direct).is_ok(), valid);
+        assert_eq!(update_toml(text, Some(&config), &direct).is_ok(), valid);
+        if valid {
+            assert_eq!(from_toml(&to_toml(&direct).unwrap()).unwrap(), direct);
+        }
+    }
     assert!(
         to_toml(&Config {
             volume: f32::NAN,
@@ -301,7 +317,10 @@ fn grouped_round_trip_uses_shared_defaults_validation_and_normalization() {
 #[test]
 fn visualization_animation_fps_validates_and_persists_boundaries() {
     for fps in [0, 1, 60, 240] {
-        let config = from_toml(&format!("[visualizations.general]\nfps = {fps}\n")).unwrap();
+        let config = from_toml(&format!(
+            "[visualizations.general]\nanimation_fps = {fps}\n"
+        ))
+        .unwrap();
         assert_eq!(config.visualization_fps, fps);
         let saved = to_toml(&config).unwrap();
         assert_eq!(from_toml(&saved).unwrap(), config);
@@ -317,7 +336,12 @@ fn visualization_animation_fps_validates_and_persists_boundaries() {
         assert!(to_toml(&config).is_err());
     }
     for value in ["-1", "241", "65536", "1.5", "'60'"] {
-        assert!(from_toml(&format!("[visualizations.general]\nfps = {value}\n")).is_err());
+        assert!(
+            from_toml(&format!(
+                "[visualizations.general]\nanimation_fps = {value}\n"
+            ))
+            .is_err()
+        );
     }
 }
 
@@ -486,6 +510,27 @@ fn changed_fields_preserve_unrelated_toml_and_explicit_defaults() {
 }
 
 #[test]
+fn visualization_shared_groups_patch_preserves_format_and_independent_defaults() {
+    let original = "# Shared controls\n[visualizations.defaults]\nstyle='spectrum' # new panels\nreference_lines=true\nlabels=false\n[visualizations.effects]\nprimary_color='#112233' # chosen color\nsecondary_color='#445566'\n[visualizations.reactive]\nsensitivity=2.0 # chosen gain\nbloom_intensity=1.0\n[visualizations.oscilloscope]\noverlay_channels=true\n";
+    let baseline = from_toml(original).unwrap();
+    let mut config = baseline.clone();
+    config.reactive_sensitivity = 3.0;
+    let saved = update_toml(original, Some(&baseline), &config).unwrap();
+    assert_eq!(
+        saved,
+        original.replace("sensitivity=2.0", "sensitivity=3.0")
+    );
+    assert_eq!(from_toml(&saved).unwrap(), config);
+    assert_eq!(from_toml(&to_toml(&config).unwrap()).unwrap(), config);
+    let baseline = config.clone();
+    config.default_visualizer_labels = true;
+    let saved = update_toml(&saved, Some(&baseline), &config).unwrap();
+    assert_eq!(from_toml(&saved).unwrap(), config);
+    assert!(saved.contains("primary_color='#112233' # chosen color"));
+    assert!(saved.contains("style='spectrum' # new panels"));
+}
+
+#[test]
 fn new_configuration_only_materializes_changed_nested_fields() {
     let baseline = Config::default();
     let mut config = baseline.clone();
@@ -513,7 +558,8 @@ fn incremental_edits_preserve_inline_and_dotted_tables() {
         assert_eq!(saved, original.replace("1.0", "1.25"));
         assert_eq!(from_toml(&saved).unwrap(), config);
     }
-    let original = "visualizations = { spectrum = { interpolate = true }, general = { visualization_enabled = false } }\n";
+    let original =
+        "visualizations = { spectrum = { interpolate = true }, general = { enabled = false } }\n";
     let baseline = from_toml(original).unwrap();
     let mut config = baseline.clone();
     config.spectrum_interpolate = false;
@@ -593,4 +639,97 @@ fn incremental_output_budget_includes_retained_comments() {
         io::ErrorKind::InvalidData
     );
     assert!(update_toml("[playback", Some(&baseline), &config).is_err());
+}
+
+#[test]
+fn spectrum_layout_validates_each_active_payload() {
+    for layout in [
+        SpectrumBarLayout::Automatic { width: 1.0 },
+        SpectrumBarLayout::Automatic { width: 20.0 },
+        SpectrumBarLayout::Fixed { count: 1 },
+        SpectrumBarLayout::Fixed { count: 512 },
+    ] {
+        let config = Config {
+            spectrum_bar_layout: layout,
+            ..Config::default()
+        };
+        config.validate().unwrap();
+        assert_eq!(from_toml(&to_toml(&config).unwrap()).unwrap(), config);
+    }
+    for width in [0.0, 0.99, 20.01, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        let config = Config {
+            spectrum_bar_layout: SpectrumBarLayout::Automatic { width },
+            ..Config::default()
+        };
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("visualizations.spectrum.bar_layout.width")
+        );
+    }
+    for count in [0, 513, u32::MAX] {
+        let config = Config {
+            spectrum_bar_layout: SpectrumBarLayout::Fixed { count },
+            ..Config::default()
+        };
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("visualizations.spectrum.bar_layout.count")
+        );
+    }
+}
+
+#[test]
+fn spectrum_layout_toml_is_strict_and_mode_switch_removes_inactive_payload() {
+    for body in [
+        "mode = 'automatic'\nwidth = 3.0\ncount = 64",
+        "mode = 'fixed'\ncount = 64\nwidth = 3.0",
+        "mode = 'automatic'",
+        "mode = 'fixed'",
+        "mode = 'unknown'\nwidth = 3.0",
+        "width = 3.0",
+        "mode = 'fixed'\ncount = 0",
+        "mode = 'automatic'\nwidth = nan",
+    ] {
+        assert!(
+            from_toml(&format!("[visualizations.spectrum.bar_layout]\n{body}\n")).is_err(),
+            "accepted {body}"
+        );
+    }
+    let mut original =
+        "[visualizations.spectrum.bar_layout]\nmode = 'automatic'\nwidth = 4.25 # chosen width\n"
+            .to_owned();
+    let mut config = from_toml(&original).unwrap();
+    for layout in [
+        SpectrumBarLayout::Fixed { count: 73 },
+        SpectrumBarLayout::Automatic { width: 5.75 },
+        SpectrumBarLayout::Fixed { count: 64 },
+    ] {
+        let baseline = config.clone();
+        config.spectrum_bar_layout = layout;
+        original = update_toml(&original, Some(&baseline), &config).unwrap();
+        assert_eq!(from_toml(&original).unwrap(), config);
+        let document: toml::Value = toml::from_str(&original).unwrap();
+        let table = document["visualizations"]["spectrum"]["bar_layout"]
+            .as_table()
+            .unwrap();
+        assert_eq!(table.len(), 2);
+        match layout {
+            SpectrumBarLayout::Automatic { width } => {
+                assert_eq!(table["mode"].as_str(), Some("automatic"));
+                assert_eq!(table["width"].as_float(), Some(f64::from(width)));
+                assert!(!table.contains_key("count"));
+            }
+            SpectrumBarLayout::Fixed { count } => {
+                assert_eq!(table["mode"].as_str(), Some("fixed"));
+                assert_eq!(table["count"].as_integer(), Some(i64::from(count)));
+                assert!(!table.contains_key("width"));
+            }
+        }
+    }
 }

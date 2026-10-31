@@ -256,7 +256,7 @@ impl App {
         let signals =
             Signals::new([Signal::Int, Signal::Term]).context("Registering shutdown signals")?;
         let config = CoreRuntime::load_startup_config(&config_path)?;
-        let artwork_limit_bytes = config.artwork_file_limit_mb as usize * 1024 * 1024;
+        let artwork_limit_bytes = config.artwork_file_limit_mib as usize * 1024 * 1024;
         let i18n = Arc::new(crate::i18n::Localizer::new(if graphical {
             &config.ui_language
         } else {
@@ -670,7 +670,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let config = directory.path().join("config.toml");
         crate::config::Config {
-            media_read_buffer_mb: 1,
+            media_read_buffer_mib: 1,
             ffmpeg_enabled: false,
             ..Default::default()
         }
@@ -837,7 +837,7 @@ mod tests {
         let data_dir = directory.path().to_path_buf();
         let config_path = data_dir.join("config.toml");
         crate::config::Config {
-            media_read_buffer_mb: 1,
+            media_read_buffer_mib: 1,
             ffmpeg_enabled: false,
             mpris_enabled: false,
             tray_enabled: false,
@@ -865,7 +865,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let config_path = directory.path().join("config.toml");
         crate::config::Config {
-            media_read_buffer_mb: 1,
+            media_read_buffer_mib: 1,
             ffmpeg_enabled: false,
             mpris_enabled: false,
             tray_enabled: false,

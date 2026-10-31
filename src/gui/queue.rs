@@ -116,7 +116,8 @@ impl Queue {
                 && self.state.library.revision != state.library.revision)
             || self.state.library.bitrate_revision != state.library.bitrate_revision;
         let total_changed = self.state.queue.total != state.queue.total;
-        let page_size_changed = self.state.system.config.page_size != state.system.config.page_size;
+        let page_size_changed =
+            self.state.system.config.query_batch_size != state.system.config.query_batch_size;
         let current_changed = self.state.queue.current_id != state.queue.current_id
             || self.state.queue.current_position != state.queue.current_position;
         let media_task_changed = self.state.system.scanning != state.system.scanning
@@ -345,7 +346,7 @@ mod tests {
                 this.sync_queue(cx);
                 let (_, token) = this
                     .model
-                    .demand_page(0..1, this.state.system.config.page_size as usize)
+                    .demand_page(0..1, this.state.system.config.query_batch_size as usize)
                     .unwrap();
                 this.loading = LoadingText::new(Duration::ZERO);
                 this.loading.begin((), token, Instant::now());
@@ -359,7 +360,7 @@ mod tests {
                 assert!(!this.loading.show(&(), false));
                 assert!(
                     this.model
-                        .demand_page(0..1, this.state.system.config.page_size as usize)
+                        .demand_page(0..1, this.state.system.config.query_batch_size as usize)
                         .is_none()
                 );
                 this.loading.finish(&(), token);

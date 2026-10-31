@@ -272,7 +272,7 @@ initialization copies, including after completion; these are admission accountin
 limits, not measured VRAM or a budget for the entire GPUI window. CPU payload
 capacities are supplied separately by the caller. A host sets the per-window limit
 with `Window::set_gpu_material_budget` before drawing; the window's two scenes
-retain it across clear and replay. Rivu applies `interface.gpu_material_budget_mb`
+retain it across clear and replay. Rivu applies `interface.gpu_material_budget_mib`
 when creating its GUI, and retains that value for Spectrogram sampling until restart.
 Spectrogram targets at most one eighth of that budget for one numerical payload
 including column intervals: two history generations, each charged for two copies,

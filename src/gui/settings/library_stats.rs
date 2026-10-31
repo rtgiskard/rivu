@@ -61,7 +61,7 @@ impl RootStats {
         self.owner.cancel();
     }
 
-    pub(super) fn reopen(&mut self) {
+    pub(super) fn retry(&mut self) {
         self.owner.cancel();
         self.restart();
     }
@@ -298,7 +298,7 @@ mod tests {
         assert_eq!(stats.values[Path::new("/empty")].total, 0);
         assert!(stats.error.is_none());
         assert!(stats.prepare().is_none());
-        stats.reopen();
+        stats.retry();
         let read = stats.prepare().unwrap();
         let invalid = QueryResponse {
             revisions: revisions(1),
@@ -308,7 +308,7 @@ mod tests {
         assert!(stats.values.is_empty());
         assert!(stats.error.is_some());
         assert!(stats.prepare().is_none());
-        stats.reopen();
+        stats.retry();
         assert!(stats.error.is_none());
         assert!(stats.prepare().is_some());
     }
@@ -325,7 +325,7 @@ mod tests {
         assert!(!stats.in_flight);
         assert!(stats.prepare().is_none());
 
-        stats.reopen();
+        stats.retry();
         let read = stats.prepare().unwrap();
         stats.complete(
             read,
@@ -361,6 +361,25 @@ mod tests {
         stats.complete(read, invalid);
         assert!(stats.values.is_empty());
         assert!(stats.error.is_some());
+    }
+
+    #[test]
+    fn root_stats_retry_waits_for_physical_worker_and_rejects_its_late_result() {
+        let mut stats = RootStats::default();
+        stats.sync(&["/music".into()], 1);
+        let read = stats.prepare().unwrap();
+        stats.fail(&read, "Timed out".into());
+        stats.retry();
+        assert!(stats.error.is_none());
+        assert!(stats.in_flight);
+        assert!(stats.prepare().is_none());
+        let late = response(&read, 1, 99);
+        stats.complete(read, late);
+        assert!(stats.values.is_empty());
+        let read = stats.prepare().unwrap();
+        let current = response(&read, 1, 3);
+        stats.complete(read, current);
+        assert_eq!(stats.values[Path::new("/music")].total, 3);
     }
 
     #[test]

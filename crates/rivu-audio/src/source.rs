@@ -1305,12 +1305,12 @@ impl Source {
 
     pub(super) fn waveform(
         snapshot: &super::WaveformScanSnapshot,
-        media_read_buffer_mb: u32,
+        media_read_buffer_mib: u32,
         ffmpeg_enabled: bool,
         cancelled: &AtomicBool,
     ) -> Result<super::WaveformFrame> {
         check_cancelled(Some(cancelled))?;
-        let buffer_len = usize::try_from(media_read_buffer_mb)
+        let buffer_len = usize::try_from(media_read_buffer_mib)
             .context("Waveform media buffer size does not fit usize")?
             .saturating_mul(super::BYTES_PER_MEBIBYTE);
         let mut source = if let Some(pcm) = &snapshot.pcm {

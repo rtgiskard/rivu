@@ -194,9 +194,9 @@ fn presentation_hiding_retains_pending_and_completed_full_previews(cx: &mut gpui
         panel_id,
         crate::config::AudioVisualizerOptions {
             style: crate::config::AudioVisualizerStyle::Waveform,
-            grid: true,
-            label: true,
-            oscilloscope_shared_grid: false,
+            reference_lines: true,
+            labels: true,
+            oscilloscope_overlay_channels: false,
         },
     );
     let mut panels = crate::gui::workspace::WorkspacePanels::default();

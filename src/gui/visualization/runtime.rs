@@ -281,7 +281,7 @@ impl VisualizerRuntime {
             self.frequency_views.clear_presentation();
             if fade_on_stop {
                 self.style_coordinator
-                    .stop(Instant::now(), self.config.audio_visualizer_fade_when_idle);
+                    .stop(Instant::now(), self.config.radial_fade_when_idle);
             } else {
                 self.style_coordinator.clear();
             }
@@ -412,7 +412,7 @@ impl VisualizerRuntime {
 
     fn analysis_interval(&self) -> Option<Duration> {
         (self.active() && self.demand.enabled && self.status == PlaybackStatus::Playing)
-            .then(|| Duration::from_secs_f64(1.0 / self.config.analysis_fps as f64))
+            .then(|| Duration::from_secs_f64(1.0 / self.config.analysis_rate_hz as f64))
     }
 
     fn cancel_clock(&mut self, cx: &mut gpui::App) {
@@ -611,7 +611,7 @@ impl VisualizerRuntime {
         if !self.active() {
             return div()
                 .size_full()
-                .bg(rgb(self.config.visual_background.rgb()))
+                .bg(rgb(self.config.visualization_background.rgb()))
                 .into_any_element();
         }
         let theme = rivu_ui::theme::palette(cx);
@@ -953,9 +953,9 @@ mod tests {
             show_tab_bar: true,
             audio_visualizer: style.map(|style| AudioVisualizerOptions {
                 style,
-                grid: false,
-                label: false,
-                oscilloscope_shared_grid: false,
+                reference_lines: false,
+                labels: false,
+                oscilloscope_overlay_channels: false,
             }),
             album_artwork: None,
         };
@@ -1103,9 +1103,9 @@ mod tests {
                 9,
                 AudioVisualizerOptions {
                     style: AudioVisualizerStyle::StereoDensity,
-                    grid: false,
-                    label: false,
-                    oscilloscope_shared_grid: false,
+                    reference_lines: false,
+                    labels: false,
+                    oscilloscope_overlay_channels: false,
                 }
             ));
             panels.reconcile(&layout);
@@ -1247,9 +1247,9 @@ mod tests {
             panel_id,
             AudioVisualizerOptions {
                 style: AudioVisualizerStyle::Spectrum,
-                grid: false,
-                label: false,
-                oscilloscope_shared_grid: false,
+                reference_lines: false,
+                labels: false,
+                oscilloscope_overlay_channels: false,
             },
         );
         let panels = demand(&layout);
@@ -1374,9 +1374,9 @@ mod tests {
             panel_id,
             AudioVisualizerOptions {
                 style: AudioVisualizerStyle::Spectrogram,
-                grid: false,
-                label: false,
-                oscilloscope_shared_grid: false,
+                reference_lines: false,
+                labels: false,
+                oscilloscope_overlay_channels: false,
             },
         );
         let waveform_id = layout.add("audio_visualizer", None);
@@ -1384,9 +1384,9 @@ mod tests {
             waveform_id,
             AudioVisualizerOptions {
                 style: AudioVisualizerStyle::Waveform,
-                grid: false,
-                label: false,
-                oscilloscope_shared_grid: false,
+                reference_lines: false,
+                labels: false,
+                oscilloscope_overlay_channels: false,
             },
         );
         assert!(layout.activate(panel_id));
@@ -1529,7 +1529,9 @@ mod tests {
                 assert!(owner.analysis_timer.is_some());
                 assert_eq!(
                     owner.analysis_interval(),
-                    Some(Duration::from_secs_f64(1.0 / config.analysis_fps as f64))
+                    Some(Duration::from_secs_f64(
+                        1.0 / config.analysis_rate_hz as f64
+                    ))
                 );
                 // Repeated wakeups must coalesce behind the one delayed request.
                 owner.request_frame(window, cx);
@@ -1694,7 +1696,7 @@ mod tests {
             volume: 0.0,
             ffmpeg_enabled: false,
             mpris_enabled: false,
-            audio_visualizer_fade_when_idle: true,
+            radial_fade_when_idle: true,
             ..Config::default()
         }
         .save(&config_path)
@@ -1811,7 +1813,7 @@ mod tests {
             volume: 0.0,
             ffmpeg_enabled: false,
             mpris_enabled: false,
-            audio_visualizer_fade_when_idle: true,
+            radial_fade_when_idle: true,
             ..Config::default()
         }
         .save(&config_path)
@@ -1924,7 +1926,7 @@ mod tests {
             volume: 0.0,
             ffmpeg_enabled: false,
             mpris_enabled: false,
-            audio_visualizer_fade_when_idle: true,
+            radial_fade_when_idle: true,
             ..Config::default()
         }
         .save(&config_path)

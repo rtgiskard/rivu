@@ -182,21 +182,22 @@ pub enum AudioVisualizerStyle {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AudioVisualizerOptions {
     pub style: AudioVisualizerStyle,
-    pub grid: bool,
-    pub label: bool,
+    pub reference_lines: bool,
+    pub labels: bool,
     #[serde(default)]
-    pub oscilloscope_shared_grid: bool,
+    pub oscilloscope_overlay_channels: bool,
 }
 
 impl From<&Config> for AudioVisualizerOptions {
     fn from(config: &Config) -> Self {
         Self {
-            style: config.audio_visualizer_style,
-            grid: config.audio_visualizer_grid,
-            label: config.audio_visualizer_labels,
-            oscilloscope_shared_grid: config.oscilloscope_shared_grid,
+            style: config.default_visualizer_style,
+            reference_lines: config.default_visualizer_reference_lines,
+            labels: config.default_visualizer_labels,
+            oscilloscope_overlay_channels: config.oscilloscope_overlay_channels,
         }
     }
 }
@@ -364,7 +365,20 @@ impl LibraryColumns {
     }
 }
 
-pub const DEFAULT_PAGE_SIZE: u32 = 64;
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SpectrumBarLayout {
+    Automatic { width: f32 },
+    Fixed { count: u32 },
+}
+
+impl Default for SpectrumBarLayout {
+    fn default() -> Self {
+        Self::Automatic { width: 3.0 }
+    }
+}
+
+pub const DEFAULT_QUERY_BATCH_SIZE: u32 = 64;
 pub const DEFAULT_SCAN_MAX_DEPTH: u32 = 64;
 const DEFAULT_UI_FONT: &str = "monospace";
 
@@ -377,7 +391,7 @@ macro_rules! config_fields {
         /// Maximum directory depth traversed from each requested scan start.
         pub scan_max_depth: u32,
         /// Minimum duration in seconds for newly admitted tracks; 0 disables filtering.
-        pub scan_min_duration_secs: u32,
+        pub scan_min_duration_seconds: u32,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub output_device: Option<String>,
         pub volume: f32,
@@ -392,13 +406,13 @@ macro_rules! config_fields {
         pub log_to_file: bool,
         pub log_retention_weeks: u32,
         /// Default number of rows fetched by GUI and TUI paginated views.
-        pub page_size: u32,
+        pub query_batch_size: u32,
         /// Maximum encoded image bytes admitted per cover, in MiB.
-        pub artwork_file_limit_mb: u32,
+        pub artwork_file_limit_mib: u32,
         /// Retained decoded real-cover frames per cover, in MiB.
-        pub artwork_decode_budget_mb: u32,
+        pub artwork_decode_budget_mib: u32,
         /// Shared GPU material-buffer admission budget, applied at GUI startup.
-        pub gpu_material_budget_mb: u32,
+        pub gpu_material_budget_mib: u32,
         pub library_columns: LibraryColumns,
         /// Startup presentation language: auto, en-US, or zh-CN.
         pub ui_language: String,
@@ -407,7 +421,7 @@ macro_rules! config_fields {
         /// UI font family; defaults to monospace, including empty saved values.
         pub ui_font: String,
         /// Base UI font size in points, independent of interface scaling.
-        pub ui_font_size: u32,
+        pub ui_font_size_pt: u32,
         pub ui_scale: f32,
         pub layout_snap_enabled: bool,
         /// Layout snap grid spacing in logical pixels before interface scaling.
@@ -415,17 +429,16 @@ macro_rules! config_fields {
         /// Enable audio visualizations and their analysis without changing playback.
         pub visualization_enabled: bool,
         pub visualization_signal: VisualizationSignal,
-        pub analysis_fps: u32,
+        pub analysis_rate_hz: u32,
         /// Animation request cap (0 follows display callbacks), at most 240 FPS.
         pub visualization_fps: u16,
-        pub visual_background: RgbColor,
-        pub visual_palette: VisualizationPalette,
+        pub visualization_background: RgbColor,
+        pub visualization_palette: VisualizationPalette,
         pub spectrum_style: SpectrumStyle,
         pub analysis_fft_size: u32,
         pub analysis_window: AnalysisWindow,
         pub spectrum_interpolate: bool,
-        pub spectrum_bar_width: f32,
-        pub spectrum_bars: u32,
+        pub spectrum_bar_layout: SpectrumBarLayout,
         pub spectrum_gap: f32,
         pub spectrum_peaks: bool,
         pub spectrum_peak_hold_ms: u32,
@@ -435,25 +448,20 @@ macro_rules! config_fields {
         /// Falling acceleration in dB/s²; zero snaps to the current level after hold.
         pub spectrum_bar_gravity: f32,
         pub spectrum_smoothing_ms: u32,
-        pub audio_visualizer_style: AudioVisualizerStyle,
-        pub audio_visualizer_grid: bool,
-        pub audio_visualizer_labels: bool,
-        pub audio_visualizer_sensitivity: f32,
-        pub audio_visualizer_rotation_speed: f32,
-        pub audio_visualizer_bar_width: f32,
-        pub audio_visualizer_bar_glow_layers: u32,
-        pub audio_visualizer_ring_opacity: f32,
-        pub audio_visualizer_bloom_intensity: f32,
-        pub audio_visualizer_inner_diameter: f32,
-        pub audio_visualizer_fade_when_idle: bool,
-        pub audio_visualizer_primary_color: RgbColor,
-        pub audio_visualizer_secondary_color: RgbColor,
+        pub default_visualizer_style: AudioVisualizerStyle,
+        pub default_visualizer_reference_lines: bool,
+        pub default_visualizer_labels: bool,
+        pub reactive_sensitivity: f32,
+        pub radial_rotation_speed: f32,
+        pub radial_bar_width: f32,
+        pub radial_ring_opacity: f32,
+        pub reactive_bloom_intensity: f32,
+        pub radial_inner_diameter: f32,
+        pub radial_fade_when_idle: bool,
+        pub effect_primary_color: RgbColor,
+        pub effect_secondary_color: RgbColor,
 
         pub spectrogram_interpolate: bool,
-        /// Scale applied to the visible panel height when choosing source rows.
-        pub spectrogram_sampling_points_scale: f32,
-        /// Maximum logarithmic frequency rows generated for each cached column.
-        pub spectrogram_interpolation_points: u32,
         pub waveform_seek_enabled: bool,
         /// Default display span inherited by visualizations without an override.
         pub visualization_db_range: f32,
@@ -462,13 +470,13 @@ macro_rules! config_fields {
         #[serde(skip_serializing_if = "Option::is_none")]
         pub spectrogram_db_range: Option<f32>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        pub audio_visualizer_db_range: Option<f32>,
+        pub reactive_db_range: Option<f32>,
         /// Maximum continuous audio history shown by Spectrogram.
         pub spectrogram_history_seconds: u32,
         /// Transient flow speed in panel-widths per second; audio-time scroll is unchanged.
-        pub spectrogram_flow_speed: f32,
+        pub spectrogram_startup_expansion_speed: f32,
         /// Percentage of effective history accumulated before outflow begins.
-        pub spectrogram_accumulation: u32,
+        pub spectrogram_outflow_threshold_percent: u32,
         pub waveform_cursor_color: RgbColor,
         pub waveform_glow: f32,
         pub waveform_rms_gain: f32,
@@ -476,7 +484,7 @@ macro_rules! config_fields {
         pub waveform_peak_gamma: f32,
         pub oscilloscope_time_span_ms: f32,
         pub oscilloscope_gain: f32,
-        pub oscilloscope_shared_grid: bool,
+        pub oscilloscope_overlay_channels: bool,
         pub album_artwork_style: AlbumArtworkStyle,
         pub album_artwork_mode: AlbumArtworkMode,
         /// Positive finite seconds per full rotation, used for new artwork panels.
@@ -484,7 +492,7 @@ macro_rules! config_fields {
         pub album_artwork_direction: AlbumArtworkDirection,
         /// Animation request cap (0 follows display callbacks), at most 240 FPS.
         pub album_artwork_fps: u16,
-        pub media_read_buffer_mb: u32,
+        pub media_read_buffer_mib: u32,
         pub ffmpeg_enabled: bool,
         pub pipewire_auto_mix: bool,
         pub equalizer: $crate::config::EqualizerConfig,
@@ -513,7 +521,7 @@ impl Default for Config {
         Self {
             library_roots: Vec::new(),
             scan_max_depth: DEFAULT_SCAN_MAX_DEPTH,
-            scan_min_duration_secs: 0,
+            scan_min_duration_seconds: 0,
             output_device: None,
             volume: 0.7,
             shuffle: false,
@@ -525,30 +533,29 @@ impl Default for Config {
             log_level: LogLevel::Warning,
             log_to_file: false,
             log_retention_weeks: 4,
-            page_size: DEFAULT_PAGE_SIZE,
-            artwork_file_limit_mb: 16,
-            artwork_decode_budget_mb: 64,
-            gpu_material_budget_mb: 64,
+            query_batch_size: DEFAULT_QUERY_BATCH_SIZE,
+            artwork_file_limit_mib: 16,
+            artwork_decode_budget_mib: 64,
+            gpu_material_budget_mib: 64,
             library_columns: LibraryColumns::default(),
             ui_language: "auto".to_owned(),
             ui_theme: Theme::default(),
             ui_font: DEFAULT_UI_FONT.to_owned(),
-            ui_font_size: 12,
+            ui_font_size_pt: 12,
             ui_scale: 1.0,
             layout_snap_enabled: true,
             layout_snap_grid_px: 16,
             visualization_enabled: true,
             visualization_signal: VisualizationSignal::After,
-            analysis_fps: 20,
+            analysis_rate_hz: 20,
             visualization_fps: 0,
-            visual_background: RgbColor(0x08090c),
-            visual_palette: VisualizationPalette::Deadbeef,
+            visualization_background: RgbColor(0x08090c),
+            visualization_palette: VisualizationPalette::Deadbeef,
             spectrum_style: SpectrumStyle::Solid,
             analysis_fft_size: 8192,
             analysis_window: AnalysisWindow::BlackmanHarris,
             spectrum_interpolate: false,
-            spectrum_bar_width: 3.0,
-            spectrum_bars: 0,
+            spectrum_bar_layout: SpectrumBarLayout::default(),
             spectrum_gap: 1.0,
             spectrum_peaks: true,
             spectrum_peak_hold_ms: 400,
@@ -556,31 +563,28 @@ impl Default for Config {
             spectrum_bar_hold_ms: 0,
             spectrum_bar_gravity: 200.0,
             spectrum_smoothing_ms: 80,
-            audio_visualizer_style: AudioVisualizerStyle::BarsRings,
-            audio_visualizer_grid: false,
-            audio_visualizer_labels: false,
-            audio_visualizer_sensitivity: 1.5,
-            audio_visualizer_rotation_speed: 0.5,
-            audio_visualizer_bar_width: 0.6,
-            audio_visualizer_bar_glow_layers: 2,
-            audio_visualizer_ring_opacity: 0.8,
-            audio_visualizer_bloom_intensity: 0.5,
-            audio_visualizer_inner_diameter: 0.7,
-            audio_visualizer_fade_when_idle: false,
-            audio_visualizer_primary_color: RgbColor(0x7aa2f7),
-            audio_visualizer_secondary_color: RgbColor(0xbb9af7),
+            default_visualizer_style: AudioVisualizerStyle::BarsRings,
+            default_visualizer_reference_lines: false,
+            default_visualizer_labels: false,
+            reactive_sensitivity: 1.5,
+            radial_rotation_speed: 0.5,
+            radial_bar_width: 0.6,
+            radial_ring_opacity: 0.8,
+            reactive_bloom_intensity: 0.5,
+            radial_inner_diameter: 0.7,
+            radial_fade_when_idle: false,
+            effect_primary_color: RgbColor(0x7aa2f7),
+            effect_secondary_color: RgbColor(0xbb9af7),
 
             spectrogram_interpolate: true,
-            spectrogram_sampling_points_scale: 0.5,
-            spectrogram_interpolation_points: 1024,
             waveform_seek_enabled: true,
             visualization_db_range: 70.0,
             spectrum_db_range: None,
             spectrogram_db_range: None,
-            audio_visualizer_db_range: None,
+            reactive_db_range: None,
             spectrogram_history_seconds: 20,
-            spectrogram_flow_speed: 0.75,
-            spectrogram_accumulation: 75,
+            spectrogram_startup_expansion_speed: 0.75,
+            spectrogram_outflow_threshold_percent: 75,
             waveform_cursor_color: RgbColor(0x73daca),
             waveform_glow: 1.0,
             waveform_rms_gain: 0.94,
@@ -588,13 +592,13 @@ impl Default for Config {
             waveform_peak_gamma: 2.0,
             oscilloscope_time_span_ms: 20.0,
             oscilloscope_gain: 1.0,
-            oscilloscope_shared_grid: false,
+            oscilloscope_overlay_channels: false,
             album_artwork_style: AlbumArtworkStyle::Halo,
             album_artwork_mode: AlbumArtworkMode::Rotating,
             album_artwork_period_seconds: 20.0,
             album_artwork_direction: AlbumArtworkDirection::Clockwise,
             album_artwork_fps: 0,
-            media_read_buffer_mb: 2,
+            media_read_buffer_mib: 2,
             ffmpeg_enabled: false,
             pipewire_auto_mix: true,
             equalizer: EqualizerConfig::default(),
@@ -618,13 +622,13 @@ impl Config {
             .unwrap_or(self.visualization_db_range)
     }
 
-    pub fn audio_visualizer_db_range(&self) -> f32 {
-        self.audio_visualizer_db_range
+    pub fn reactive_db_range(&self) -> f32 {
+        self.reactive_db_range
             .unwrap_or(self.visualization_db_range)
     }
 
     pub fn gpu_material_budget_bytes(&self) -> u64 {
-        u64::from(self.gpu_material_budget_mb) * 1024 * 1024
+        u64::from(self.gpu_material_budget_mib) * 1024 * 1024
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -687,13 +691,15 @@ impl Config {
             self.play_count_threshold_percent
         );
         ensure!(
-            self.ui_font.len() <= 128 && !self.ui_font.chars().any(char::is_control),
-            "interface.font must be at most 128 characters without control characters"
+            !self.ui_font.is_empty()
+                && self.ui_font.len() <= 128
+                && !self.ui_font.chars().any(char::is_control),
+            "interface.font must be 1..128 UTF-8 bytes without control characters"
         );
         ensure!(
-            (8..=18).contains(&self.ui_font_size),
-            "interface.font_size must be between 8 and 18 pt (inclusive); got {}",
-            self.ui_font_size
+            (8..=18).contains(&self.ui_font_size_pt),
+            "interface.font_size_pt must be between 8 and 18 pt (inclusive); got {}",
+            self.ui_font_size_pt
         );
         ensure!(
             self.ui_scale.is_finite() && (0.75..=2.0).contains(&self.ui_scale),
@@ -706,23 +712,23 @@ impl Config {
             self.layout_snap_grid_px
         );
         ensure!(
-            matches!(self.media_read_buffer_mb, 1 | 2 | 4 | 8 | 16),
-            "playback.media_read_buffer_mb must be one of 1, 2, 4, 8, or 16 MiB; got {}",
-            self.media_read_buffer_mb
+            matches!(self.media_read_buffer_mib, 1 | 2 | 4 | 8 | 16),
+            "playback.media_read_buffer_mib must be one of 1, 2, 4, 8, or 16 MiB; got {}",
+            self.media_read_buffer_mib
         );
         ensure!(
-            (16..=1024).contains(&self.gpu_material_budget_mb),
-            "interface.gpu_material_budget_mb must be between 16 and 1024 MiB"
+            (16..=1024).contains(&self.gpu_material_budget_mib),
+            "interface.gpu_material_budget_mib must be between 16 and 1024 MiB"
         );
         ensure!(
-            (1..=64).contains(&self.artwork_file_limit_mb),
-            "interface.artwork_file_limit_mb must be between 1 and 64 MiB; got {}",
-            self.artwork_file_limit_mb
+            (1..=64).contains(&self.artwork_file_limit_mib),
+            "interface.artwork_file_limit_mib must be between 1 and 64 MiB; got {}",
+            self.artwork_file_limit_mib
         );
         ensure!(
-            (1..=1024).contains(&self.artwork_decode_budget_mb),
-            "interface.artwork_decode_budget_mb must be between 1 and 1024 MiB; got {}",
-            self.artwork_decode_budget_mb
+            (1..=1024).contains(&self.artwork_decode_budget_mib),
+            "interface.artwork_decode_budget_mib must be between 1 and 1024 MiB; got {}",
+            self.artwork_decode_budget_mib
         );
         ensure!(
             (1..=520).contains(&self.log_retention_weeks),
@@ -730,18 +736,18 @@ impl Config {
             self.log_retention_weeks
         );
         ensure!(
-            (20..=MAX_QUERY_ROWS as u32).contains(&self.page_size),
-            "interface.page_size must be between 20 and 256; got {}",
-            self.page_size
+            (20..=MAX_QUERY_ROWS as u32).contains(&self.query_batch_size),
+            "interface.query_batch_size must be between 20 and 256; got {}",
+            self.query_batch_size
         );
         ensure!(
-            (5..=60).contains(&self.analysis_fps),
-            "visualizations.general.analysis_fps must be between 5 and 60 (inclusive); got {}",
-            self.analysis_fps
+            (5..=60).contains(&self.analysis_rate_hz),
+            "visualizations.general.analysis_rate_hz must be between 5 and 60 (inclusive); got {}",
+            self.analysis_rate_hz
         );
         ensure!(
             self.visualization_fps <= 240,
-            "visualizations.general.fps must be between 0 and 240"
+            "visualizations.general.animation_fps must be between 0 and 240"
         );
         for (name, range) in [
             (
@@ -753,10 +759,7 @@ impl Config {
                 "visualizations.spectrogram.db_range",
                 self.spectrogram_db_range,
             ),
-            (
-                "visualizations.reactive.db_range",
-                self.audio_visualizer_db_range,
-            ),
+            ("visualizations.reactive.db_range", self.reactive_db_range),
         ] {
             if let Some(range) = range {
                 ensure!(
@@ -772,51 +775,49 @@ impl Config {
             ),
             "visualizations.general.analysis_fft_size must be a power of two from 512 to 32768"
         );
-        ensure!(
-            self.spectrum_bar_width.is_finite() && (1.0..=20.0).contains(&self.spectrum_bar_width),
-            "visualizations.spectrum.bar_width must be between 1 and 20 pixels"
-        );
-        ensure!(
-            self.spectrum_bars <= 512,
-            "visualizations.spectrum.bars must be 0 (auto) or between 1 and 512"
-        );
+        match self.spectrum_bar_layout {
+            SpectrumBarLayout::Automatic { width } => ensure!(
+                width.is_finite() && (1.0..=20.0).contains(&width),
+                "visualizations.spectrum.bar_layout.width must be finite and between 1 and 20 pixels"
+            ),
+            SpectrumBarLayout::Fixed { count } => ensure!(
+                (1..=512).contains(&count),
+                "visualizations.spectrum.bar_layout.count must be between 1 and 512"
+            ),
+        }
         ensure!(
             self.spectrum_gap.is_finite() && (0.0..=8.0).contains(&self.spectrum_gap),
             "visualizations.spectrum.gap must be between 0 and 8 pixels"
         );
-        ensure!(
-            self.audio_visualizer_bar_glow_layers <= 4,
-            "visualizations.radial.bar_glow_layers must be between 0 and 4"
-        );
         for (name, value, range) in [
             (
-                "visualizations.general.sensitivity",
-                self.audio_visualizer_sensitivity,
+                "visualizations.reactive.sensitivity",
+                self.reactive_sensitivity,
                 0.0..=5.0,
             ),
             (
                 "visualizations.radial.rotation_speed",
-                self.audio_visualizer_rotation_speed,
+                self.radial_rotation_speed,
                 0.0..=10.0,
             ),
             (
                 "visualizations.radial.bar_width",
-                self.audio_visualizer_bar_width,
+                self.radial_bar_width,
                 0.0..=2.0,
             ),
             (
                 "visualizations.radial.ring_opacity",
-                self.audio_visualizer_ring_opacity,
+                self.radial_ring_opacity,
                 0.0..=1.0,
             ),
             (
-                "visualizations.general.bloom_intensity",
-                self.audio_visualizer_bloom_intensity,
+                "visualizations.reactive.bloom_intensity",
+                self.reactive_bloom_intensity,
                 0.0..=2.0,
             ),
             (
                 "visualizations.radial.inner_diameter",
-                self.audio_visualizer_inner_diameter,
+                self.radial_inner_diameter,
                 0.0..=2.0,
             ),
         ] {
@@ -857,26 +858,17 @@ impl Config {
             "visualizations.spectrum.smoothing_ms must be between 0 and 1000 ms"
         );
         ensure!(
-            self.spectrogram_sampling_points_scale.is_finite()
-                && (0.4..=1.4).contains(&self.spectrogram_sampling_points_scale),
-            "visualizations.spectrogram.sampling_points_scale must be between 0.4 and 1.4"
-        );
-        ensure!(
             (1..=60).contains(&self.spectrogram_history_seconds),
             "visualizations.spectrogram.history_seconds must be between 1 and 60 seconds"
         );
         ensure!(
-            self.spectrogram_flow_speed.is_finite()
-                && (0.1..=2.0).contains(&self.spectrogram_flow_speed),
-            "visualizations.spectrogram.flow_speed must be finite and between 0.1 and 2.0 panel-widths/s"
+            self.spectrogram_startup_expansion_speed.is_finite()
+                && (0.1..=2.0).contains(&self.spectrogram_startup_expansion_speed),
+            "visualizations.spectrogram.startup_expansion_speed must be finite and between 0.1 and 2.0 panel-widths/s"
         );
         ensure!(
-            (10..=95).contains(&self.spectrogram_accumulation),
-            "visualizations.spectrogram.accumulation must be between 10 and 95 percent"
-        );
-        ensure!(
-            (64..=4096).contains(&self.spectrogram_interpolation_points),
-            "visualizations.spectrogram.interpolation_points must be between 64 and 4096"
+            (10..=95).contains(&self.spectrogram_outflow_threshold_percent),
+            "visualizations.spectrogram.outflow_threshold_percent must be between 10 and 95 percent"
         );
         ensure!(
             self.waveform_glow.is_finite() && (0.0..=2.0).contains(&self.waveform_glow),

@@ -117,7 +117,7 @@ struct PreparedScan {
     generation: u64,
     snapshot: Option<anyhow::Result<SnapshotReply>>,
     fallback: rivu_audio::WaveformScanSnapshot,
-    buffer_mb: u32,
+    buffer_mib: u32,
     ffmpeg_enabled: bool,
 }
 
@@ -1093,7 +1093,7 @@ impl Waveform {
                 config.signal,
                 Arc::clone(&config.equalizer),
             ),
-            buffer_mb: config.buffer_mb,
+            buffer_mib: config.buffer_mib,
             ffmpeg_enabled: config.ffmpeg_enabled,
         });
         cx.notify();
@@ -1145,7 +1145,7 @@ impl Waveform {
                         }
                         let mut frame = rivu_audio::waveform(
                             &snapshot,
-                            setup.buffer_mb,
+                            setup.buffer_mib,
                             setup.ffmpeg_enabled,
                             &cancelled,
                         )?;
@@ -1413,7 +1413,7 @@ impl Waveform {
             .min_w_0()
             .min_h_0()
             .overflow_hidden()
-            .bg(rgb(config.visual_background.rgb()));
+            .bg(rgb(config.visualization_background.rgb()));
         let Some(source) = self.source.as_deref() else {
             self.plot.borrow_mut().columns.remove(&panel_id);
             if let Some(generation) = self.remove_interaction_panel(panel_id) {
@@ -1446,14 +1446,14 @@ impl Waveform {
                 .into_any_element();
         }
         let waveform = Rc::clone(&self.plot);
-        let palette = super::palette::active_palette_lut(config.visual_palette);
-        let config_palette = config.visual_palette;
+        let palette = super::palette::active_palette_lut(config.visualization_palette);
+        let config_palette = config.visualization_palette;
         let error_i18n = Arc::clone(i18n);
         let error_theme = theme;
         let water = rgb(config.waveform_cursor_color.rgb());
-        let background = rgb(config.visual_background.rgb());
+        let background = rgb(config.visualization_background.rgb());
         let glow = config.waveform_glow;
-        let labels = options.label;
+        let labels = options.labels;
         let rms_gain = config.waveform_rms_gain;
         let peak_gain = config.waveform_peak_gain;
         let peak_gamma = config.waveform_peak_gamma;

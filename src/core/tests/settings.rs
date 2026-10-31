@@ -59,14 +59,19 @@ fn runtime_and_configuration_responses_derive_from_one_publication() {
     core.publish();
     let (handle, _requests) = super::task_wait::wait_handle(&core);
     let initial = handle.state(StateSections::ALL);
-    Arc::make_mut(&mut core.state.configuration.config).page_size = 91;
+    Arc::make_mut(&mut core.state.configuration.config).query_batch_size = 91;
     Arc::make_mut(&mut core.state.configuration.config).ui_theme = crate::theme::Theme::TokyoNight;
     core.state.system.last_error = Some("new runtime".into());
     let unpublished = handle.state(StateSections::ALL);
     assert_eq!(unpublished.revisions, initial.revisions);
     assert_eq!(
-        unpublished.configuration.unwrap().config.page_size,
-        initial.configuration.as_ref().unwrap().config.page_size
+        unpublished.configuration.unwrap().config.query_batch_size,
+        initial
+            .configuration
+            .as_ref()
+            .unwrap()
+            .config
+            .query_batch_size
     );
     assert_eq!(
         unpublished.system.unwrap().last_error,
@@ -93,13 +98,18 @@ fn runtime_and_configuration_responses_derive_from_one_publication() {
         Some("new runtime")
     );
     assert_eq!(
-        response.configuration.as_ref().unwrap().config.page_size,
+        response
+            .configuration
+            .as_ref()
+            .unwrap()
+            .config
+            .query_batch_size,
         91
     );
     let mut snapshot = ClientSnapshot::default();
     response.apply_to(&mut snapshot);
     let tui = crate::projection::TuiSnapshot::from_client(&snapshot, None);
-    assert_eq!(tui.system.page_size, 91);
+    assert_eq!(tui.system.query_batch_size, 91);
     assert_eq!(tui.system.ui_theme, crate::theme::Theme::TokyoNight);
     assert_eq!(tui.system.last_error.as_deref(), Some("new runtime"));
 }
@@ -225,7 +235,7 @@ fn changed_apply_and_exit_preserve_comments_and_untouched_normalized_settings() 
         let _audio = recording_audio(&mut core);
         let path = core.state.configuration.config_path.clone();
         let original = format!(
-            "# Hand-edited configuration\n[playback]\nvolume_percent = 75 # chosen volume\n[interface]\nlanguage = 'ZH_cn' # preserve spelling\npage_size=42\n[library]\nroots = ['{}/unused/..'] # preserve logical spelling\n",
+            "# Hand-edited configuration\n[playback]\nvolume_percent = 75 # chosen volume\n[interface]\nlanguage = 'ZH_cn' # preserve spelling\nquery_batch_size=42\n[library]\nroots = ['{}/unused/..'] # preserve logical spelling\n",
             directory.path().display(),
         );
         std::fs::write(&path, &original).unwrap();
@@ -253,14 +263,14 @@ fn changed_apply_and_exit_preserve_comments_and_untouched_normalized_settings() 
         let saved = std::fs::read_to_string(&path).unwrap();
         assert!(saved.contains("# Hand-edited configuration\n"));
         assert!(saved.contains("# chosen volume\n"));
-        assert!(saved.contains("language = 'ZH_cn' # preserve spelling\npage_size=42\n"));
+        assert!(saved.contains("language = 'ZH_cn' # preserve spelling\nquery_batch_size=42\n"));
         assert!(saved.contains(&format!(
             "roots = ['{}/unused/..'] # preserve logical spelling\n",
             directory.path().display(),
         )));
         let loaded = Config::load(&path).unwrap();
         assert_eq!(loaded.volume, 0.25);
-        assert_eq!(loaded.page_size, 42);
+        assert_eq!(loaded.query_batch_size, 42);
         assert_eq!(loaded.ui_language, "zh-CN");
         let document: toml::Table = toml::from_str(&saved).unwrap();
         assert!(document.get("visualizations").is_none());
@@ -274,7 +284,7 @@ fn changed_save_recreates_missing_file_from_defaults_not_saved_snapshot() {
     let (_directory, mut core) = fixture();
     let _audio = recording_audio(&mut core);
     let mut config = core.effective_config();
-    config.page_size = 42;
+    config.query_batch_size = 42;
     config.output_device = Some("retained-output".into());
     core.command(Command::Configure {
         config: Arc::new(config),
@@ -286,7 +296,7 @@ fn changed_save_recreates_missing_file_from_defaults_not_saved_snapshot() {
     assert!(core.flush_config().unwrap());
     let loaded = Config::load(&path).unwrap();
     assert_eq!(loaded, core.effective_config());
-    assert_eq!(loaded.page_size, 42);
+    assert_eq!(loaded.query_batch_size, 42);
     assert_eq!(loaded.output_device.as_deref(), Some("retained-output"));
     assert_eq!(loaded.volume, 0.25);
     let saved: toml::Table = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -305,7 +315,7 @@ fn apply_clears_optional_device_without_rewriting_unrelated_settings() {
     })
     .unwrap();
     let path = core.state.configuration.config_path.clone();
-    let original = "# Keep these comments\n[playback]\noutput_device = 'USB DAC'\n[interface]\npage_size = 64 # explicit default\n";
+    let original = "# Keep these comments\n[playback]\noutput_device = 'USB DAC'\n[interface]\nquery_batch_size = 64 # explicit default\n";
     std::fs::write(&path, original).unwrap();
     let baseline = core.state.configuration.config.clone();
     let mut draft = baseline.as_ref().clone();
@@ -1040,7 +1050,7 @@ fn configure_failed_save_keeps_desired_settings_and_does_not_deliver_audio() {
     config.repeat = RepeatMode::All;
     config.visualization_enabled = false;
     config.ffmpeg_enabled = false;
-    config.page_size = 32;
+    config.query_batch_size = 32;
     config.output_device = Some("configured-output".into());
     Arc::make_mut(&mut core.state.system.devices).push("configured-output".into());
     core.played = vec![1, 2];
@@ -1080,7 +1090,7 @@ fn configure_rejected_preparation_keeps_saved_and_desired_settings() {
     let mut config = previous.as_ref().clone();
     config.volume = 0.25;
     config.visualization_enabled = false;
-    config.page_size = 0;
+    config.query_batch_size = 0;
 
     core.command(Command::Configure {
         config: std::sync::Arc::new(config),
@@ -1224,7 +1234,7 @@ fn configure_saved_but_disconnected_audio_retains_desired_settings() {
     config.repeat = RepeatMode::All;
     config.visualization_enabled = false;
     config.ffmpeg_enabled = false;
-    config.page_size = 32;
+    config.query_batch_size = 32;
     config.output_device = Some("configured-output".into());
     Arc::make_mut(&mut core.state.system.devices).push("configured-output".into());
     core.played = vec![1, 2];

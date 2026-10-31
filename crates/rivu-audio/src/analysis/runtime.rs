@@ -272,7 +272,7 @@ pub struct AnalysisSettings {
 impl From<&Config> for AnalysisSettings {
     fn from(config: &Config) -> Self {
         Self {
-            fps: config.analysis_fps,
+            fps: config.analysis_rate_hz,
             fft_size: config.analysis_fft_size,
             window: config.analysis_window,
             signal: config.visualization_signal,

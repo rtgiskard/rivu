@@ -17,12 +17,13 @@ external edits. Configuration controls application-wide defaults. Panel trees
 and instance preferences are saved separately in <<_layout,`layout.json`>>.
 
 Configuration groups application settings into `[library]`, `[playback]`,
-`[interface]`, `[logging]`, and `[visualizations]`. Shared visualization defaults
-live in `[visualizations.general]`; radial effects use `[visualizations.radial]`
-and the reactive level-range override uses `[visualizations.reactive]`.
-View-specific settings live in `[visualizations.spectrum]`,
-`[visualizations.spectrogram]`, `[visualizations.waveform]`, and
-`[visualizations.oscilloscope]`.
+`[interface]`, `[logging]`, and `[visualizations]`. Global visualization controls
+live in `[visualizations.general]`; `[visualizations.defaults]` seeds new panels.
+Shared effect colors belong to `[visualizations.effects]`, shared energy-response
+parameters to `[visualizations.reactive]`, and radial geometry and motion to
+`[visualizations.radial]`. View-specific settings live in
+`[visualizations.spectrum]`, `[visualizations.spectrogram]`,
+`[visualizations.waveform]`, and `[visualizations.oscilloscope]`.
 Album artwork settings live in `[interface.album_artwork]`; audio processing uses
 the additional tables described under <<_audio_processing_defaults,Audio processing defaults>>.
 Desktop integration belongs to Interface; output and decoding belong to Playback;
@@ -40,14 +41,14 @@ volume_percent = 70
 
 [interface]
 font = "monospace"
-font_size = 12
+font_size_pt = 12
 theme = "rivu_dark"
 
 [logging]
 level = "warning"
 
 [visualizations.general]
-visualization_enabled = true
+enabled = true
 ----
 
 
@@ -82,6 +83,12 @@ and the desktop error notice. Retry after correcting the cause. Exit makes one
 final save attempt but does not wait for a successful retry. Atomic replacement
 protects against incomplete writes, not power loss.
 
+Invalid field values keep Apply from saving, including text entered before a
+control became inactive. Settings opens the field's page; inactive controls explain
+how to re-enable them and offer Reset field text to restore only that field's last
+accepted value. Other draft edits remain intact. Editing after a successful Apply
+clears its success notice; edits made while Apply is pending remain unsaved.
+
 An audio-application failure after a successful save does not roll back the saved
 configuration. Resolve the audio error before retrying or restarting.
 Configuration and layout persistence are independent: Apply does not save a
@@ -110,7 +117,7 @@ manually, then restart to load the changes.
 
 `library.roots` defaults to an empty list; add existing directories before
 scanning. `library.scan_max_depth` defaults to `64` and must be at least `1`.
-`library.scan_min_duration_secs` is an unsigned 32-bit integer in whole seconds,
+`library.scan_min_duration_seconds` is an unsigned 32-bit integer in whole seconds,
 defaulting to `0` (disabled). Both controls are in desktop Library settings.
 See link:02_library.adoc#_minimum_duration_for_new_tracks[Minimum duration for new tracks]
 for the admission policy, and link:02_library.adoc[Library] for roots, scan
@@ -118,7 +125,7 @@ boundaries, and CUE/path rules.
 
 === Browsing and keyboard navigation
 
-`interface.page_size` accepts `20`–`256` (default `64`) and tunes internal GUI/TUI
+`interface.query_batch_size` accepts `20`–`256` (default `64`) and tunes internal GUI/TUI
 query batches, not visible pages or CLI listing/export batches. Browsing scrolls
 continuously; query batch tuning stays in the configuration file, not desktop settings. Queue behavior is described in
 link:04_playback.adoc#_queue[Playback]; query and batch contracts in
@@ -177,7 +184,7 @@ details may remain in English.
 
 === Decoding and read buffering
 
-`playback.media_read_buffer_mb` defaults to `2`; accepted sizes are `1`, `2`, `4`, `8`,
+`playback.media_read_buffer_mib` defaults to `2`; accepted sizes are `1`, `2`, `4`, `8`,
 and `16` MiB.
 
 `playback.ffmpeg_enabled` defaults to `false`. The default build includes the `ffmpeg`
@@ -347,13 +354,13 @@ Interface → Layout includes Layout snapping and Layout grid spacing. These sav
 integer `1`–`64` logical pixels before interface scaling) in `config.toml`.
 
 Library → Covers & cache includes Encoded cover file limit (MiB), saved as
-`interface.artwork_file_limit_mb`: an integer from `1` to `64`, default `16`.
+`interface.artwork_file_limit_mib`: an integer from `1` to `64`, default `16`.
 It limits each encoded embedded or directory image, not its decoded memory.
 Apply saves the value; restart the entire application, including its core, to use
 the new limit. Closing and reopening only the window does not apply it.
 
 Library → Covers & cache includes Cover decode budget (MiB per cover), saved as
-`interface.artwork_decode_budget_mb`: an integer from `1` to `1024`, default `64`.
+`interface.artwork_decode_budget_mib`: an integer from `1` to `1024`, default `64`.
 It limits the retained decoded frames of each cover, not total process or GPU
 memory. Different covers and windows add their own costs. Apply re-evaluates open
 covers, including previously rejected images; an over-budget image shows the
@@ -412,7 +419,7 @@ Fontconfig hinting, subpixel, and synthetic-bold settings do not control GUI
 rendering. Complex shaping and named variable-font instances may differ from
 other applications.
 
-`interface.font_size` accepts integer point sizes from `8` to `18`, default `12`
+`interface.font_size_pt` accepts integer point sizes from `8` to `18`, default `12`
 (16 logical pixels before interface scaling). Apply to update open windows.
 It adjusts desktop text and icon glyphs, not plot annotations or terminal text,
 and is independent of `interface.scale`.
@@ -462,7 +469,7 @@ no longer exists. Visualization panels expose their local style, reference lines
 and labels directly in the right-click menu; Oscilloscope also offers Overlay traces.
 Inactive Spectrum fields retain their values and are still validated by Apply.
 If a retained value is invalid, open Visualizations → Spectrum: choose a Style
-other than Solid to edit bar count, width, or gap, or enable Peak markers to
+other than Solid to edit the active bar-layout value or gap, or enable Peak markers to
 edit marker hold or gravity. Correct the value, then restore the desired style
 or toggle and apply again. Disabling a field does not discard or repair its value.
 
@@ -670,7 +677,7 @@ window starts locked.
         "children": [
           {"type": "tabs", "panels": [{"kind": "library"}]},
           {"type": "tabs", "panels": [{"kind": "queue"}]},
-          {"type": "tabs", "panels": [{"kind": "audio_visualizer", "style": "waveform", "grid": false, "label": false}]}
+          {"type": "tabs", "panels": [{"kind": "audio_visualizer", "style": "waveform", "reference_lines": false, "labels": false}]}
         ]
       }
     }
@@ -693,10 +700,10 @@ Configuration remains TOML; layout persistence remains JSON.
 
 `tabs` requires a nonempty `panels` array. Its optional `active` is a zero-based
 index, defaulting to `0`. Panel objects require `kind`; `show_tab_bar` defaults to
-`true`. Audio Visualizer objects additionally store `style`, `grid`,
-and `label` directly in the panel object. These three fields must be supplied
+`true`. Audio Visualizer objects additionally store `style`, `reference_lines`,
+and `labels` directly in the panel object. These three fields must be supplied
 together or omitted together; omission initializes the instance from global
-defaults when that layout is opened. The optional `oscilloscope_shared_grid`
+defaults when that layout is opened. The optional `oscilloscope_overlay_channels`
 boolean selects Overlay traces; when the three fields are supplied but this flag
 is absent, it defaults to `false` (separate channels). Initialized panels save
 all four choices explicitly. The mode flag requires the three visualizer fields
@@ -733,8 +740,8 @@ belong only to `audio_visualizer` panels. Animation FPS remains global.
 Live analysis runs during playback only when visualizations are enabled, the application
 window is visible, and a style requiring live analysis is visible. Waveform uses
 the independent progressive or explicitly requested track-preview path.
-`visualizations.general.analysis_fps` accepts `5`–`60` and defaults to `20`; it limits FFT
-analysis, not display animation. `visualizations.general.fps` defaults to `0`, following
+`visualizations.general.analysis_rate_hz` accepts `5`–`60` and defaults to `20`; it limits FFT
+analysis, not display animation. `visualizations.general.animation_fps` defaults to `0`, following
 native window frames; `1`–`240` caps the shared animation rate for Spectrum,
 Spectrogram, and Audio Visualizer. It does not affect Waveform or album artwork.
 Set it under Settings → Visualizations → General → Animation, separately from
@@ -789,13 +796,13 @@ Shared visualization settings apply as follows:
   and the radial/stereo/fractal styles unless their settings override it. It does
   not affect Waveform gain, Oscilloscope amplitude, or volume.
 * `visualizations.general.analysis_fft_size`, `visualizations.general.analysis_window`, and
-  `visualizations.general.analysis_fps` apply to live-analysis styles, not Waveform.
+  `visualizations.general.analysis_rate_hz` apply to live-analysis styles, not Waveform.
   Oscilloscope uses unwindowed PCM bounded by the selected FFT size.
   FFT size accepts powers of two from `512` to `32768` and defaults to `8192`.
   Window accepts `hann`, `blackman_harris` (default), or `none`.
   Changing size or window clears visualization history.
-  `visualizations.general.analysis_fps` is the maximum analysis rate, independent of
-  `visualizations.general.fps` and compositor-throttled display callbacks.
+  `visualizations.general.analysis_rate_hz` is the maximum analysis rate, independent of
+  `visualizations.general.animation_fps` and compositor-throttled display callbacks.
 * Disabling visualizations stops visualization processing and discards results; see <<_visualization_enablement,Visualization enablement>>.
   This is independent of rendering reuse and media read buffering.
   In Settings → Visualizations → General → Appearance, its switch sits
@@ -805,14 +812,21 @@ Each frequency view has a range override; leave it empty to inherit General,
 or clear an explicit value to restore inheritance. See
 <<_visualization_db_ranges,Visualization dB ranges>> for the configuration contract.
 
-Audio Visualizer style, reference lines, and labels are defaults for new
-instances, while effect parameters are shared by all instances. See
-<<_audio_visualizer,Audio Visualizer>> for instance settings and style-specific
-effects. Inactive Spectrum style-dependent settings retain their values.
+Settings → Visualizations separates General controls, Shared effects, New panel
+defaults, and view-specific controls. Shared effects has one editor for the colors
+used by radial, stereo-analysis, fractal, and Oscilloscope styles, one range override
+for radial, stereo-analysis, and fractal styles, and sensitivity and Bloom for
+radial and fractal styles. These are shared values, not separate preferences per
+view. View-specific pages contain only independent parameters.
+
+Style, reference lines, and labels under New panel defaults affect new panels only;
+existing panels retain their layout-local choices. See
+<<_audio_visualizer,Audio Visualizer>> for panel settings and style-specific effects.
+Inactive Spectrum style-dependent settings retain their values.
 
 === Visualization enablement
 
-`visualizations.general.visualization_enabled` defaults to `true`. Disabling it
+`visualizations.general.enabled` defaults to `true`. Disabling it
 replaces audio-visualizer content with a large centered snowflake icon, stops
 analysis sampling and FFT work, and discards all visualization results.
 The Settings snowflake toggle is active when visualizations are disabled.
@@ -832,17 +846,15 @@ requests do not restart automatically; request one explicitly after re-enabling
 if needed. Ordinary playback pause remains different: it freezes the current
 visualizations without discarding their results.
 
-When upgrading a configuration that contains `visualizations.general.still_mode`,
-replace it with `visualizations.general.visualization_enabled` and invert the
-boolean value. The old key is not accepted; there is no compatibility alias.
-
 === Visualization dB ranges
 
-`visualizations.general.db_range` defaults to `70` dB. The optional `visualizations.spectrum.db_range`,
-`visualizations.spectrogram.db_range`, and `visualizations.reactive.db_range` override it only for their
-named view. Every supplied range must be finite and between `1` and `160` dB,
-inclusive. An explicit override remains an override even if it equals the shared
-default; changing General later affects only views without overrides.
+`visualizations.general.db_range` defaults to `70` dB. The optional
+`visualizations.spectrum.db_range` and `visualizations.spectrogram.db_range` override
+their respective views. `visualizations.reactive.db_range` is shared by radial,
+stereo-analysis, and fractal styles. Every supplied range must be finite and
+between `1` and `160` dB, inclusive. An explicit override remains an override even
+if it equals the shared default; changing General later affects only views without
+overrides.
 
 In TOML, omit a view's override key to inherit the shared default. Do not write an empty
 string or a blank assignment: overrides are numeric when present. Saving an
@@ -891,7 +903,7 @@ level. Known silence remains visible as a minimum-height RMS fill; unknown
 intervals stay blank.
 
 Waveform time labels follow the instance's Labels option. Their default for new
-instances is `visualizations.general.label` (`false`).
+panels is `visualizations.defaults.labels` (`false`).
 `cursor_color` defaults to `"#73DACA"`; `glow` accepts `0`–`2`, default `1.0`.
 Amplitude settings are:
 
@@ -910,13 +922,28 @@ rendering only, not playback volume or decoded preview data.
 
 Spectrum shows current frequency energy. `visualizations.spectrum.style` accepts `bars`,
 `outline`, `led`, `line`, or `solid` (default `solid`). Motion freezes while paused.
+Bar layout has two exclusive modes. Automatic mode derives the number of bands
+from the panel width, requested bar width (`1`–`20` logical pixels), and gap:
+
+[source,toml]
+----
+[visualizations.spectrum]
+bar_layout = { mode = "automatic", width = 3.0 }
+----
+
+This is the default layout. For a fixed count, use
+`bar_layout = { mode = "fixed", count = 64 }`; `count` accepts `1`–`512`.
+Only the selected mode's parameter is allowed. Solid derives its slots from
+drawable logical-pixel width, up to the renderer's slot limit, and ignores bar layout and gap.
+
+In desktop settings, correct an invalid active value before switching layout
+modes. Switching initializes the new mode to a width of `3.0` or a count of `64`.
+
 The remaining `visualizations.spectrum.*` settings are:
 
 [cols="2,2,1",options="header"]
 |===
 |Key |Range or meaning |Default
-|`bars` |`0` (automatic) or `1`–`512` |`0`
-|`bar_width` |`1`–`20` pixels; automatic band sizing |`3.0`
 |`gap` |`0`–`8` pixels |`1.0`
 |`peaks` |Show discrete peak markers |`true`
 |`peak_hold_ms` |`0`–`2000` ms |`400`
@@ -927,7 +954,6 @@ The remaining `visualizations.spectrum.*` settings are:
 |===
 
 Zero gravity snaps to the current level after hold; it does not hold peaks forever.
-An explicit `bars` count overrides automatic sizing by `bar_width`.
 Display range inheritance is described in <<_visualization_db_ranges,Visualization dB ranges>>.
 
 `visualizations.spectrum.interpolate` defaults to `false` and controls frequency interpolation and whether `solid` has a
@@ -941,16 +967,16 @@ Its `visualizations.spectrogram.*` settings include:
 * `interpolate`: default `true`; controls interpolation between source rows.
 * `history_seconds`: `1`–`60`, default `20`; retained history also depends on panel
   width and analysis rate.
-* `flow_speed` (Flow speed): `0.1`–`2.0` panel-widths per second, default `0.75`;
+* `startup_expansion_speed` (Startup expansion speed): `0.1`–`2.0` panel-widths per second, default `0.75`;
   limits the transient filling front, not steady scrolling, which follows audio time.
-* `accumulation` (Outflow threshold): `10`–`95` percent, default `75`; the minimum
+* `outflow_threshold_percent` (Outflow threshold): `10`–`95` percent, default `75`; the minimum
   effective-history fraction before outflow. Filling and speed limits can delay
   release further; changing the threshold does not restart a release already underway.
-* `sampling_points_scale`: `0.4`–`1.4`, default `0.5`, choosing source frequency
-  rows relative to visible panel height.
-* `interpolation_points` (Maximum frequency rows): `64`–`4096`, default `1024`.
-  This limits rendering rows with or without interpolation; it does not change
-  FFT size or add measured frequency detail.
+
+Sampling resolution follows panel height and available source-frequency rows,
+with an internal limit of 1024 rows and the shared material budget described below.
+It applies with or without interpolation and does not change FFT size or add
+measured frequency detail.
 
 These two flow controls apply globally to Spectrogram panels. Changing them
 preserves retained history; Settings uses the usual Apply / Discard workflow.
@@ -960,11 +986,11 @@ Motion smoothing is fixed, with no separate setting.
 ----
 [visualizations.spectrogram]
 history_seconds = 20
-flow_speed = 0.75
-accumulation = 75
+startup_expansion_speed = 0.75
+outflow_threshold_percent = 75
 ----
 
-`interface.gpu_material_budget_mb` accepts `16`–`1024` MiB, default `64`. Change it
+`interface.gpu_material_budget_mib` accepts `16`–`1024` MiB, default `64`. Change it
 under Settings → Visualizations → General → Appearance, then restart the
 GUI. It limits shared material buffers per window, not total GPU memory.
 Long Spectrogram histories may use fewer frequency rows to fit this budget;
@@ -986,8 +1012,8 @@ menu starts with style selection. The second group contains `Reference lines`,
 or toggling an overlay closes the menu.
 Moving panels preserves their choices; layout sync or orderly exit persists them
 across restarts. Different styles can run simultaneously. Global
-`visualizations.general.style`, `visualizations.general.grid`, and
-`visualizations.general.label` seed new instances only. Style defaults to `bars_rings`;
+`visualizations.defaults.style`, `visualizations.defaults.reference_lines`, and
+`visualizations.defaults.labels` seed new panels only. Style defaults to `bars_rings`;
 both overlay defaults are `false`.
 
 Reference lines and labels are independently optional. Radial guides show
@@ -1025,7 +1051,7 @@ labels that would overlap. Eleven styles are available:
   mode, each channel has its own guides that do not cross the inter-channel gap.
   Labels show channel order as `L / R` in every language, input amplitude limits,
   and the actual source-sample duration.
-  `visualizations.oscilloscope.shared_grid` defaults to `false` (Separate).
+  `visualizations.oscilloscope.overlay_channels` defaults to `false` (Separate).
   Its Overlay traces switch under Settings → Visualizations → Oscilloscope is a
   new-instance default, independent of the global time span and gain controls.
   Existing panels retain their layout-local mode. Right-click an Oscilloscope
@@ -1042,9 +1068,9 @@ labels that would overlap. Eleven styles are available:
 Both fractal styles are generative art, not amplitude or phase measurements.
 
 Live-analysis styles use `visualizations.general.analysis_fft_size` and
-`visualizations.general.analysis_fps`; Waveform does not request FFT or PCM snapshots.
+`visualizations.general.analysis_rate_hz`; Waveform does not request FFT or PCM snapshots.
 Spectrum, Spectrogram, and Waveform use `visualizations.general.palette`; the remaining
-styles share the two `visualizations.general.*_color` endpoints.
+styles share `visualizations.effects.primary_color` and `secondary_color`.
 `visualizations.general.analysis_window` affects FFT measurements, not Oscilloscope
 PCM; changing it still clears that view.
 `visualizations.reactive.db_range`
@@ -1061,24 +1087,26 @@ changes reset the scene, while switching to an inactive tab preserves it.
 See link:23_visuals.adoc[Visualization Rendering Design] for signal and rendering
 mechanisms.
 
-The effect parameters below accept finite values in these ranges (integer for
-`bar_glow_layers`). Keys are relative to `[visualizations]`:
+The effect parameters below accept finite values in these ranges.
+Keys are relative to `[visualizations]`:
 
 [cols="2,1,1",options="header"]
 |===
 |Key |Range |Default
-|`general.sensitivity` |0–5 |1.5
+|`reactive.sensitivity` |0–5 |1.5
 |`radial.rotation_speed` |0–10 |0.5
 |`radial.bar_width` |0–2 |0.6
-|`radial.bar_glow_layers` |0–4 |2
 |`radial.ring_opacity` |0–1 |0.8
-|`general.bloom_intensity` |0–2 |0.5
+|`reactive.bloom_intensity` |0–2 |0.5
 |`radial.inner_diameter` |0–2 |0.7
 |===
 
+Radial bar glow uses two fixed rendering passes. `reactive.bloom_intensity`
+controls its strength, with zero disabling the glow.
+
 `visualizations.radial.fade_when_idle` defaults to `false` and applies only to stopped playback; pause
-always preserves the last displayed frame. `visualizations.general.primary_color` and
-`visualizations.general.secondary_color` default to `"#7AA2F7"` and `"#BB9AF7"`. These parameters remain saved even when the
+always preserves the last displayed frame. `visualizations.effects.primary_color` and
+`visualizations.effects.secondary_color` default to `"#7AA2F7"` and `"#BB9AF7"`. These parameters remain saved even when the
 selected instance style does not use them.
 
 == Configuration schema

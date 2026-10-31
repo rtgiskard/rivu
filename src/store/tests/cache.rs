@@ -67,7 +67,7 @@ fn track_cache_refreshes_hits_before_lru_eviction() {
         ]))
         .unwrap();
     let ids: Vec<_> = all_tracks(&store).iter().map(|track| track.id).collect();
-    store.set_track_cache_page_size(1); // capacity is two tracks
+    store.set_track_cache_query_batch_size(1); // capacity is two tracks
     store.track(ids[0]).unwrap();
     store.track(ids[1]).unwrap();
     store.track(ids[0]).unwrap(); // refresh A's LRU age
@@ -104,12 +104,12 @@ fn track_cache_resize_shrinks_and_does_not_cache_misses() {
         ]))
         .unwrap();
     let ids: Vec<_> = all_tracks(&store).iter().map(|track| track.id).collect();
-    store.set_track_cache_page_size(2); // capacity is four tracks
+    store.set_track_cache_query_batch_size(2); // capacity is four tracks
     for id in &ids {
         store.track(*id).unwrap();
     }
     store.track(ids[0]).unwrap(); // retain A when shrinking
-    store.set_track_cache_page_size(1); // capacity is two tracks
+    store.set_track_cache_query_batch_size(1); // capacity is two tracks
     let cache = store.track_cache.borrow();
     assert_eq!(cache.capacity, 2);
     assert_eq!(cache.entries.len(), 2);
@@ -118,7 +118,7 @@ fn track_cache_resize_shrinks_and_does_not_cache_misses() {
     assert!(cache.entries.len() <= cache.capacity);
     drop(cache);
 
-    store.set_track_cache_page_size(0);
+    store.set_track_cache_query_batch_size(0);
     assert!(store.track_cache.borrow().entries.is_empty());
     assert!(store.track(999).unwrap().is_none());
     assert!(store.track_cache.borrow().entries.is_empty());
@@ -264,7 +264,7 @@ fn bitrate_commit_patches_only_cached_pair_after_commit() {
             10.0,
         )]))
         .unwrap();
-    store.set_track_cache_page_size(2);
+    store.set_track_cache_query_batch_size(2);
     let track = all_tracks(&store).remove(0);
     let source = store.playback_source(&track).unwrap().unwrap();
     assert_eq!(store.track(track.id).unwrap().unwrap(), track);

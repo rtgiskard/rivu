@@ -26,7 +26,7 @@ fn pending_query_preserves_pipelined_responses_and_disconnected_clients_release_
     let directory = socket_test_directory();
     let config_path = directory.path().join("config.toml");
     crate::config::Config {
-        media_read_buffer_mb: 1,
+        media_read_buffer_mib: 1,
         ffmpeg_enabled: false,
         ..Default::default()
     }
@@ -116,7 +116,7 @@ fn configuration_only_change_wakes_ipc_watch_and_selective_read_omits_runtime() 
     let directory = socket_test_directory();
     let config_path = directory.path().join("config.toml");
     crate::config::Config {
-        media_read_buffer_mb: 1,
+        media_read_buffer_mib: 1,
         ffmpeg_enabled: false,
         ..Default::default()
     }
@@ -184,7 +184,7 @@ fn app_commands_route_over_ipc_without_changing_business_state() {
     let directory = socket_test_directory();
     let config_path = directory.path().join("config.toml");
     crate::config::Config {
-        media_read_buffer_mb: 1,
+        media_read_buffer_mib: 1,
         ffmpeg_enabled: false,
         ..Default::default()
     }
@@ -256,7 +256,7 @@ fn malformed_request_during_watch_receives_invalid_request_response() {
     let directory = socket_test_directory();
     let config_path = directory.path().join("config.toml");
     crate::config::Config {
-        media_read_buffer_mb: 1,
+        media_read_buffer_mib: 1,
         ffmpeg_enabled: false,
         ..Default::default()
     }
@@ -343,7 +343,7 @@ fn library_root_queries_run_through_real_owner_and_ipc_session() {
     let config_path = directory.path().join("config.toml");
     Config {
         library_roots: vec![root.clone(), empty.clone()],
-        media_read_buffer_mb: 1,
+        media_read_buffer_mib: 1,
         ..Config::default()
     }
     .save(&config_path)
@@ -448,7 +448,7 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
     drop(connection);
     let config_path = directory.path().join("config.toml");
     Config {
-        media_read_buffer_mb: 1,
+        media_read_buffer_mib: 1,
         ffmpeg_enabled: false,
         ..Config::default()
     }
@@ -1128,7 +1128,7 @@ fn filtered_occurrence_continuations_round_trip_and_reject_stale_ipc_scopes() {
     drop(connection);
     let config_path = directory.path().join("config.toml");
     crate::config::Config {
-        media_read_buffer_mb: 1,
+        media_read_buffer_mib: 1,
         ffmpeg_enabled: false,
         ..Default::default()
     }

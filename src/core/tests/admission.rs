@@ -35,7 +35,7 @@ fn external_admission_appends_valid_subset_without_roots_autoplay_or_playlist_ch
     Arc::make_mut(&mut core.state.configuration.config)
         .library_roots
         .clear();
-    Arc::make_mut(&mut core.state.configuration.config).scan_min_duration_secs = 60;
+    Arc::make_mut(&mut core.state.configuration.config).scan_min_duration_seconds = 60;
     let config = Arc::clone(&core.state.configuration.config);
     let before_queue = core.store.queue_ids().unwrap();
     let before_playback = core.state.playback.clone();

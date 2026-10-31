@@ -99,7 +99,8 @@ impl Core {
         }
         // Persistence and logging have committed the desired settings.
         // Audio delivery may partially succeed; never roll this state back.
-        self.store.set_track_cache_page_size(config.page_size);
+        self.store
+            .set_track_cache_query_batch_size(config.query_batch_size);
         self.state.system.selected_device = config.output_device.clone();
         self.state.playback.volume = config.volume;
         self.set_shuffle(config.shuffle);
@@ -118,7 +119,7 @@ impl Core {
                 config.visualization_enabled,
             ))?;
             self.engine
-                .send(AudioCommand::MediaReadBuffer(config.media_read_buffer_mb))?;
+                .send(AudioCommand::MediaReadBuffer(config.media_read_buffer_mib))?;
             self.engine.send(AudioCommand::Volume(config.volume))?;
             self.engine
                 .send(AudioCommand::AnalysisSettings(config.as_ref().into()))?;

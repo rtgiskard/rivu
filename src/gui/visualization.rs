@@ -23,7 +23,7 @@ pub(super) const AUDIO_VISUALIZER_STYLES: [AudioVisualizerStyle; 11] = [
     AudioVisualizerStyle::Oscilloscope,
 ];
 
-pub(super) fn audio_visualizer_style_id(style: AudioVisualizerStyle) -> &'static str {
+pub(super) fn visualization_style_id(style: AudioVisualizerStyle) -> &'static str {
     match style {
         AudioVisualizerStyle::Waveform => "settings-waveform",
         AudioVisualizerStyle::Spectrum => "settings-spectrum",
@@ -39,8 +39,8 @@ pub(super) fn audio_visualizer_style_id(style: AudioVisualizerStyle) -> &'static
     }
 }
 
-pub(super) fn audio_visualizer_style_label(i18n: &Localizer, style: AudioVisualizerStyle) -> &str {
-    i18n.text(audio_visualizer_style_id(style))
+pub(super) fn visualization_style_label(i18n: &Localizer, style: AudioVisualizerStyle) -> &str {
+    i18n.text(visualization_style_id(style))
 }
 
 pub(super) fn visual_labels(i18n: &Localizer) -> Arc<VisualLabels> {

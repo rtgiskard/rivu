@@ -116,7 +116,7 @@ pub(super) fn run(
                 end_seconds: cue.end_seconds(),
             }),
             track.decoder_hint,
-            config.media_read_buffer_mb,
+            config.media_read_buffer_mib,
             config.ffmpeg_enabled,
             cancel,
         )?;

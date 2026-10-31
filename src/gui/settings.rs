@@ -6,21 +6,19 @@ mod pages;
 
 use model::{Completion, PanelApply, SettingsModel, Submission, Target};
 
-use super::{
-    album_artwork::album_artwork_style_label, visualization::audio_visualizer_style_label,
-};
+use super::{album_artwork::album_artwork_style_label, visualization::visualization_style_label};
 use crate::{
     artwork::{ArtworkCacheReport, ArtworkManager},
     config::{
         AlbumArtworkDirection, AlbumArtworkMode, AlbumArtworkOptions, AlbumArtworkStyle,
-        AnalysisWindow, AudioVisualizerStyle, Config, ConfigPatch, LogLevel, RgbColor,
+        AnalysisWindow, AudioVisualizerStyle, Config, ConfigPatch, LogLevel, SpectrumBarLayout,
         SpectrumStyle, VisualizationPalette, VisualizationSignal,
     },
     core::CoreHandle,
     i18n::Localizer,
     theme::Theme,
 };
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use gpui::{prelude::*, *};
 use rivu_ui::{
     ButtonTooltip, ChoiceAction, ChoiceItem, ChoiceMode, ChoicePopup, ChoiceState, Dialog,
@@ -41,8 +39,9 @@ enum SettingChoice {
     Font(usize),
     CustomFont,
     SpectrumStyle(SpectrumStyle),
+    SpectrumLayout(SpectrumLayoutMode),
     Fft(u32),
-    AudioVisualizerStyle(AudioVisualizerStyle),
+    DefaultVisualizerStyle(AudioVisualizerStyle),
     Palette(VisualizationPalette),
     LogLevel(LogLevel),
     Window(AnalysisWindow),
@@ -71,8 +70,9 @@ impl SettingChoice {
                 i18n.text("settings-counterclockwise").to_owned()
             }
             Self::SpectrumStyle(value) => spectrum_style_label(i18n, value).to_owned(),
-            Self::AudioVisualizerStyle(value) => {
-                audio_visualizer_style_label(i18n, value).to_owned()
+            Self::SpectrumLayout(value) => i18n.text(value.label_id()).to_owned(),
+            Self::DefaultVisualizerStyle(value) => {
+                visualization_style_label(i18n, value).to_owned()
             }
             Self::Palette(value) => visualization_palette_label(i18n, value).to_owned(),
             Self::Fft(value) => value.to_string(),
@@ -95,97 +95,194 @@ impl SettingChoice {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SpectrumLayoutMode {
+    Automatic,
+    Fixed,
+}
+
+impl SpectrumLayoutMode {
+    fn from_layout(layout: SpectrumBarLayout) -> Self {
+        match layout {
+            SpectrumBarLayout::Automatic { .. } => Self::Automatic,
+            SpectrumBarLayout::Fixed { .. } => Self::Fixed,
+        }
+    }
+
+    fn label_id(self) -> &'static str {
+        match self {
+            Self::Automatic => "settings-spectrum-layout-automatic",
+            Self::Fixed => "settings-spectrum-layout-fixed",
+        }
+    }
+
+    fn initial_layout(self) -> SpectrumBarLayout {
+        match self {
+            Self::Automatic => SpectrumBarLayout::Automatic { width: 3.0 },
+            Self::Fixed => SpectrumBarLayout::Fixed { count: 64 },
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Field {
     ScanMaxDepth,
-    ScanMinDuration,
+    ScanMinDurationSeconds,
     Volume,
     PlayCountThreshold,
     LogRetentionWeeks,
-    MediaReadBuffer,
-    ArtworkFileLimit,
-    ArtworkDecodeBudget,
-    GpuMaterialBudget,
+    MediaReadBufferMib,
+    ArtworkFileLimitMib,
+    ArtworkDecodeBudgetMib,
+    GpuMaterialBudgetMib,
     Font,
-    FontSize,
+    FontSizePt,
     Scale,
     LayoutSnapGrid,
-    Fps,
-    VisualizationFps,
-    Background,
-    VisualizationDb,
-    AudioVisualizerSensitivity,
-    AudioVisualizerRotationSpeed,
-    AudioVisualizerBarWidth,
-    AudioVisualizerBarGlowLayers,
-    AudioVisualizerRingOpacity,
-    AudioVisualizerBloomIntensity,
-    AudioVisualizerInnerDiameter,
-    AudioVisualizerPrimaryColor,
-    AudioVisualizerSecondaryColor,
-    AudioVisualizerDb,
-    SpectrumDb,
-    SpectrumBarWidth,
-    SpectrumBars,
+    AnalysisRateHz,
+    VisualizationAnimationFps,
+    VisualizationBackground,
+    VisualizationDbRange,
+    ReactiveSensitivity,
+    RadialRotationSpeed,
+    RadialBarWidth,
+    RadialRingOpacity,
+    ReactiveBloomIntensity,
+    RadialInnerDiameter,
+    EffectPrimaryColor,
+    EffectSecondaryColor,
+    ReactiveDbRange,
+    SpectrumDbRange,
+    SpectrumAutoWidth,
+    SpectrumFixedCount,
     SpectrumGap,
     SpectrumHold,
     SpectrumGravity,
     SpectrumBarHold,
     SpectrumBarGravity,
     SpectrumSmoothing,
-    SpectrogramDb,
+    SpectrogramDbRange,
     SpectrogramHistory,
-    SpectrogramFlowSpeed,
-    SpectrogramAccumulation,
-    SpectrogramSamplingPointsScale,
-    SpectrogramInterpolationPoints,
-    CursorColor,
-    Glow,
+    SpectrogramStartupExpansionSpeed,
+    SpectrogramOutflowThresholdPercent,
+    WaveformCursorColor,
+    WaveformGlow,
     WaveformRmsGain,
     WaveformPeakGain,
     WaveformPeakGamma,
-    OscilloscopeTimeSpan,
+    OscilloscopeTimeSpanMs,
     OscilloscopeGain,
-    AlbumArtworkPeriod,
+    AlbumArtworkPeriodSeconds,
     AlbumArtworkFps,
 }
+#[derive(Debug)]
+struct FieldIssue {
+    field: Field,
+    message: String,
+}
+
+impl std::fmt::Display for FieldIssue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for FieldIssue {}
+
 impl Field {
+    fn config_key(self) -> &'static str {
+        match self {
+            Self::ScanMaxDepth => "library.scan_max_depth",
+            Self::ScanMinDurationSeconds => "library.scan_min_duration_seconds",
+            Self::Volume => "playback.volume_percent",
+            Self::PlayCountThreshold => "playback.play_count_threshold_percent",
+            Self::LogRetentionWeeks => "logging.retention_weeks",
+            Self::MediaReadBufferMib => "playback.media_read_buffer_mib",
+            Self::ArtworkFileLimitMib => "interface.artwork_file_limit_mib",
+            Self::ArtworkDecodeBudgetMib => "interface.artwork_decode_budget_mib",
+            Self::GpuMaterialBudgetMib => "interface.gpu_material_budget_mib",
+            Self::Font => "interface.font",
+            Self::FontSizePt => "interface.font_size_pt",
+            Self::Scale => "interface.scale",
+            Self::LayoutSnapGrid => "interface.layout_snap_grid_px",
+            Self::AnalysisRateHz => "visualizations.general.analysis_rate_hz",
+            Self::VisualizationAnimationFps => "visualizations.general.animation_fps",
+            Self::VisualizationBackground => "visualizations.general.background",
+            Self::VisualizationDbRange => "visualizations.general.db_range",
+            Self::ReactiveSensitivity => "visualizations.reactive.sensitivity",
+            Self::ReactiveBloomIntensity => "visualizations.reactive.bloom_intensity",
+            Self::ReactiveDbRange => "visualizations.reactive.db_range",
+            Self::EffectPrimaryColor => "visualizations.effects.primary_color",
+            Self::EffectSecondaryColor => "visualizations.effects.secondary_color",
+            Self::RadialRotationSpeed => "visualizations.radial.rotation_speed",
+            Self::RadialBarWidth => "visualizations.radial.bar_width",
+            Self::RadialRingOpacity => "visualizations.radial.ring_opacity",
+            Self::RadialInnerDiameter => "visualizations.radial.inner_diameter",
+            Self::SpectrumDbRange => "visualizations.spectrum.db_range",
+            Self::SpectrumAutoWidth => "visualizations.spectrum.bar_layout.width",
+            Self::SpectrumFixedCount => "visualizations.spectrum.bar_layout.count",
+            Self::SpectrumGap => "visualizations.spectrum.gap",
+            Self::SpectrumHold => "visualizations.spectrum.peak_hold_ms",
+            Self::SpectrumGravity => "visualizations.spectrum.peak_gravity",
+            Self::SpectrumBarHold => "visualizations.spectrum.bar_hold_ms",
+            Self::SpectrumBarGravity => "visualizations.spectrum.bar_gravity",
+            Self::SpectrumSmoothing => "visualizations.spectrum.smoothing_ms",
+            Self::SpectrogramDbRange => "visualizations.spectrogram.db_range",
+            Self::SpectrogramHistory => "visualizations.spectrogram.history_seconds",
+            Self::SpectrogramStartupExpansionSpeed => {
+                "visualizations.spectrogram.startup_expansion_speed"
+            }
+            Self::SpectrogramOutflowThresholdPercent => {
+                "visualizations.spectrogram.outflow_threshold_percent"
+            }
+            Self::WaveformCursorColor => "visualizations.waveform.cursor_color",
+            Self::WaveformGlow => "visualizations.waveform.glow",
+            Self::WaveformRmsGain => "visualizations.waveform.rms_gain",
+            Self::WaveformPeakGain => "visualizations.waveform.peak_gain",
+            Self::WaveformPeakGamma => "visualizations.waveform.peak_gamma",
+            Self::OscilloscopeTimeSpanMs => "visualizations.oscilloscope.time_span_ms",
+            Self::OscilloscopeGain => "visualizations.oscilloscope.gain",
+            Self::AlbumArtworkPeriodSeconds => "interface.album_artwork.period_seconds",
+            Self::AlbumArtworkFps => "interface.album_artwork.fps",
+        }
+    }
     fn precision(self) -> Option<usize> {
         match self {
             Self::Volume => Some(0),
             Self::PlayCountThreshold
-            | Self::VisualizationDb
-            | Self::AudioVisualizerDb
-            | Self::SpectrumDb
-            | Self::SpectrogramDb
+            | Self::VisualizationDbRange
+            | Self::ReactiveDbRange
+            | Self::SpectrumDbRange
+            | Self::SpectrogramDbRange
             | Self::SpectrumGravity
             | Self::SpectrumBarGravity => Some(1),
             Self::Scale
-            | Self::AudioVisualizerSensitivity
-            | Self::AudioVisualizerRotationSpeed
-            | Self::AudioVisualizerBarWidth
-            | Self::AudioVisualizerRingOpacity
-            | Self::AudioVisualizerBloomIntensity
-            | Self::AudioVisualizerInnerDiameter
-            | Self::SpectrumBarWidth
+            | Self::ReactiveSensitivity
+            | Self::RadialRotationSpeed
+            | Self::RadialBarWidth
+            | Self::RadialRingOpacity
+            | Self::ReactiveBloomIntensity
+            | Self::RadialInnerDiameter
+            | Self::SpectrumAutoWidth
             | Self::SpectrumGap
-            | Self::SpectrogramFlowSpeed
-            | Self::SpectrogramSamplingPointsScale
-            | Self::Glow
+            | Self::SpectrogramStartupExpansionSpeed
+            | Self::WaveformGlow
             | Self::WaveformRmsGain
             | Self::WaveformPeakGain
             | Self::WaveformPeakGamma
-            | Self::OscilloscopeTimeSpan
+            | Self::OscilloscopeTimeSpanMs
             | Self::OscilloscopeGain
-            | Self::AlbumArtworkPeriod => Some(2),
+            | Self::AlbumArtworkPeriodSeconds => Some(2),
             _ => None,
         }
     }
 
     fn enabled(self, config: &Config) -> bool {
         match self {
-            Self::AlbumArtworkPeriod => config.album_artwork_mode == AlbumArtworkMode::Rotating,
-            Self::SpectrumBars | Self::SpectrumBarWidth | Self::SpectrumGap => {
+            Self::AlbumArtworkPeriodSeconds => {
+                config.album_artwork_mode == AlbumArtworkMode::Rotating
+            }
+            Self::SpectrumAutoWidth | Self::SpectrumFixedCount | Self::SpectrumGap => {
                 config.spectrum_style != SpectrumStyle::Solid
             }
             Self::SpectrumHold | Self::SpectrumGravity => config.spectrum_peaks,
@@ -196,35 +293,34 @@ impl Field {
     fn label_id(self) -> &'static str {
         match self {
             Self::ScanMaxDepth => "settings-maximum-scan-depth",
-            Self::ScanMinDuration => "settings-minimum-scan-duration-secs",
+            Self::ScanMinDurationSeconds => "settings-minimum-scan-duration-secs",
             Self::Volume => "settings-volume",
             Self::PlayCountThreshold => "settings-play-count-threshold",
             Self::LogRetentionWeeks => "settings-log-retention-weeks",
-            Self::MediaReadBuffer => "settings-media-read-buffer-mib",
-            Self::ArtworkFileLimit => "settings-artwork-file-limit-mib",
-            Self::ArtworkDecodeBudget => "settings-artwork-decode-budget-mib",
-            Self::GpuMaterialBudget => "settings-gpu-material-budget-mib",
+            Self::MediaReadBufferMib => "settings-media-read-buffer-mib",
+            Self::ArtworkFileLimitMib => "settings-artwork-file-limit-mib",
+            Self::ArtworkDecodeBudgetMib => "settings-artwork-decode-budget-mib",
+            Self::GpuMaterialBudgetMib => "settings-gpu-material-budget-mib",
             Self::Font => "settings-font-family",
-            Self::FontSize => "settings-base-font-size-pt",
+            Self::FontSizePt => "settings-base-font-size-pt",
             Self::Scale => "settings-interface-scale",
             Self::LayoutSnapGrid => "settings-layout-grid-spacing-px",
-            Self::Fps => "settings-analysis-rate-hz",
-            Self::VisualizationFps => "settings-animation-rate-fps",
-            Self::Background => "settings-background-color",
-            Self::VisualizationDb => "settings-default-display-range-db",
-            Self::AudioVisualizerSensitivity => "settings-sensitivity",
-            Self::AudioVisualizerRotationSpeed => "settings-rotation-speed",
-            Self::AudioVisualizerBarWidth => "settings-bar-width",
-            Self::AudioVisualizerBarGlowLayers => "settings-bar-glow-layers",
-            Self::AudioVisualizerRingOpacity => "settings-ring-opacity",
-            Self::AudioVisualizerBloomIntensity => "settings-bloom-intensity",
-            Self::AudioVisualizerInnerDiameter => "settings-inner-diameter",
-            Self::AudioVisualizerPrimaryColor => "settings-primary-color",
-            Self::AudioVisualizerSecondaryColor => "settings-secondary-color",
-            Self::SpectrumDb | Self::AudioVisualizerDb => "settings-display-range-db",
-            Self::SpectrogramDb => "settings-color-range-db",
-            Self::SpectrumBarWidth => "settings-automatic-bar-width-px",
-            Self::SpectrumBars => "settings-bar-count",
+            Self::AnalysisRateHz => "settings-analysis-rate-hz",
+            Self::VisualizationAnimationFps => "settings-animation-rate-fps",
+            Self::VisualizationBackground => "settings-background-color",
+            Self::VisualizationDbRange => "settings-default-display-range-db",
+            Self::ReactiveSensitivity => "settings-sensitivity",
+            Self::RadialRotationSpeed => "settings-rotation-speed",
+            Self::RadialBarWidth => "settings-bar-width",
+            Self::RadialRingOpacity => "settings-ring-opacity",
+            Self::ReactiveBloomIntensity => "settings-bloom-intensity",
+            Self::RadialInnerDiameter => "settings-inner-diameter",
+            Self::EffectPrimaryColor => "settings-primary-color",
+            Self::EffectSecondaryColor => "settings-secondary-color",
+            Self::SpectrumDbRange | Self::ReactiveDbRange => "settings-display-range-db",
+            Self::SpectrogramDbRange => "settings-color-range-db",
+            Self::SpectrumAutoWidth => "settings-automatic-bar-width-px",
+            Self::SpectrumFixedCount => "settings-bar-count",
             Self::SpectrumGap => "settings-bar-gap-px",
             Self::SpectrumHold => "settings-peak-hold-ms",
             Self::SpectrumGravity => "settings-peak-gravity-db-s",
@@ -232,18 +328,20 @@ impl Field {
             Self::SpectrumBarGravity => "settings-bar-gravity-db-s",
             Self::SpectrumSmoothing => "settings-release-smoothing-ms",
             Self::SpectrogramHistory => "settings-history-limit-s",
-            Self::SpectrogramFlowSpeed => "settings-spectrogram-flow-speed",
-            Self::SpectrogramAccumulation => "settings-spectrogram-accumulation",
-            Self::SpectrogramSamplingPointsScale => "settings-source-row-scale",
-            Self::SpectrogramInterpolationPoints => "settings-maximum-frequency-rows",
-            Self::CursorColor => "settings-waterline-color",
-            Self::Glow => "settings-glow-strength",
+            Self::SpectrogramStartupExpansionSpeed => {
+                "settings-spectrogram-startup-expansion-speed"
+            }
+            Self::SpectrogramOutflowThresholdPercent => {
+                "settings-spectrogram-outflow-threshold-percent"
+            }
+            Self::WaveformCursorColor => "settings-waterline-color",
+            Self::WaveformGlow => "settings-glow-strength",
             Self::WaveformRmsGain => "settings-rms-gain",
             Self::WaveformPeakGain => "settings-peak-gain",
             Self::WaveformPeakGamma => "settings-peak-gamma",
-            Self::OscilloscopeTimeSpan => "settings-oscilloscope-time-span-ms",
+            Self::OscilloscopeTimeSpanMs => "settings-oscilloscope-time-span-ms",
             Self::OscilloscopeGain => "settings-oscilloscope-gain-x",
-            Self::AlbumArtworkPeriod => "settings-seconds-per-circle",
+            Self::AlbumArtworkPeriodSeconds => "settings-seconds-per-circle",
             Self::AlbumArtworkFps => "settings-animation-rate-fps",
         }
     }
@@ -254,10 +352,14 @@ impl Field {
 
     fn hint(self, settings: &Settings) -> SharedString {
         match self {
-            Self::AlbumArtworkPeriod if !self.enabled(&settings.model.draft) => {
-                settings.tr("settings-artwork-recovery")
+            Self::AlbumArtworkPeriodSeconds if !self.enabled(&settings.model.draft) => {
+                settings.tr(if matches!(settings.model.target(), Target::Artwork(_)) {
+                    "settings-artwork-panel-recovery"
+                } else {
+                    "settings-artwork-recovery"
+                })
             }
-            Self::SpectrumBars | Self::SpectrumBarWidth | Self::SpectrumGap
+            Self::SpectrumAutoWidth | Self::SpectrumFixedCount | Self::SpectrumGap
                 if !self.enabled(&settings.model.draft) =>
             {
                 settings.tr("settings-spectrum-style-recovery")
@@ -265,7 +367,7 @@ impl Field {
             Self::SpectrumHold | Self::SpectrumGravity if !self.enabled(&settings.model.draft) => {
                 settings.tr("settings-spectrum-peaks-recovery")
             }
-            Self::AlbumArtworkPeriod => settings.tr("settings-artwork-period-hint"),
+            Self::AlbumArtworkPeriodSeconds => settings.tr("settings-artwork-period-hint"),
             Self::AlbumArtworkFps => format!(
                 "{} {}",
                 settings.tr("settings-animation-fps-hint"),
@@ -273,56 +375,53 @@ impl Field {
             )
             .into(),
             Self::ScanMaxDepth => settings.tr("settings-scan-depth-hint"),
-            Self::ScanMinDuration => settings.tr("settings-scan-duration-hint"),
+            Self::ScanMinDurationSeconds => settings.tr("settings-scan-duration-hint"),
             Self::Volume => "0–100.".into(),
             Self::PlayCountThreshold => settings.tr("settings-play-count-threshold-hint"),
             Self::LogRetentionWeeks => "1–520.".into(),
-            Self::MediaReadBuffer => settings.tr("settings-media-buffer-hint"),
-            Self::ArtworkFileLimit => settings.tr("settings-artwork-file-limit-hint"),
-            Self::ArtworkDecodeBudget => settings.tr("settings-artwork-decode-budget-hint"),
-            Self::GpuMaterialBudget => settings.tr("settings-gpu-material-budget-hint"),
+            Self::MediaReadBufferMib => settings.tr("settings-media-buffer-hint"),
+            Self::ArtworkFileLimitMib => settings.tr("settings-artwork-file-limit-hint"),
+            Self::ArtworkDecodeBudgetMib => settings.tr("settings-artwork-decode-budget-hint"),
+            Self::GpuMaterialBudgetMib => settings.tr("settings-gpu-material-budget-hint"),
             Self::Font => settings.tr("settings-font-hint"),
-            Self::FontSize => "8–18 pt".into(),
+            Self::FontSizePt => "8–18 pt".into(),
             Self::Scale => "0.75–2.".into(),
             Self::LayoutSnapGrid => settings.tr("settings-layout-grid-hint"),
-            Self::Fps => settings.tr("settings-analysis-rate-hint"),
-            Self::VisualizationFps => settings.tr("settings-visualization-fps-hint"),
-            Self::Background => settings.tr("settings-background-hint"),
-            Self::AudioVisualizerPrimaryColor | Self::AudioVisualizerSecondaryColor => {
+            Self::AnalysisRateHz => settings.tr("settings-analysis-rate-hint"),
+            Self::VisualizationAnimationFps => settings.tr("settings-visualization-fps-hint"),
+            Self::VisualizationBackground => settings.tr("settings-background-hint"),
+            Self::EffectPrimaryColor | Self::EffectSecondaryColor => {
                 settings.tr("settings-colors-hint")
             }
-            Self::CursorColor => settings.tr("settings-waterline-hint"),
-            Self::VisualizationDb => settings.tr("settings-visualizer-db-hint"),
+            Self::WaveformCursorColor => settings.tr("settings-waterline-hint"),
+            Self::VisualizationDbRange => settings.tr("settings-visualizer-db-hint"),
             // These controls attach a live inherited-range tooltip in Settings::field.
-            Self::SpectrumDb | Self::AudioVisualizerDb | Self::SpectrogramDb => "".into(),
-            Self::AudioVisualizerSensitivity => "0–5.".into(),
-            Self::AudioVisualizerRotationSpeed => "0–10.".into(),
-            Self::AudioVisualizerBarWidth
-            | Self::AudioVisualizerBloomIntensity
-            | Self::WaveformPeakGain => "0–2.".into(),
-            Self::AudioVisualizerBarGlowLayers => "0–4.".into(),
-            Self::AudioVisualizerRingOpacity => "0–1.".into(),
-            Self::AudioVisualizerInnerDiameter => settings.tr("settings-visualizer-diameter-hint"),
-            Self::SpectrumBarWidth => settings.tr("settings-spectrum-bar-width-hint"),
-            Self::SpectrumBars => settings.tr("settings-spectrum-bar-count-hint"),
+            Self::SpectrumDbRange | Self::ReactiveDbRange | Self::SpectrogramDbRange => "".into(),
+            Self::ReactiveSensitivity => "0–5.".into(),
+            Self::RadialRotationSpeed => "0–10.".into(),
+            Self::RadialBarWidth | Self::ReactiveBloomIntensity | Self::WaveformPeakGain => {
+                "0–2.".into()
+            }
+            Self::RadialRingOpacity => "0–1.".into(),
+            Self::RadialInnerDiameter => settings.tr("settings-visualizer-diameter-hint"),
+            Self::SpectrumAutoWidth => settings.tr("settings-spectrum-bar-width-hint"),
+            Self::SpectrumFixedCount => settings.tr("settings-spectrum-bar-count-hint"),
             Self::SpectrumGap => "0–8.".into(),
             Self::SpectrumHold | Self::SpectrumBarHold => "0–2000.".into(),
             Self::SpectrumGravity => "0–500.".into(),
             Self::SpectrumBarGravity => settings.tr("settings-spectrum-bar-gravity-hint"),
             Self::SpectrumSmoothing => settings.tr("settings-spectrum-smoothing-hint"),
             Self::SpectrogramHistory => settings.tr("settings-spectrogram-history-hint"),
-            Self::SpectrogramFlowSpeed => settings.tr("settings-spectrogram-flow-speed-hint"),
-            Self::SpectrogramAccumulation => settings.tr("settings-spectrogram-accumulation-hint"),
-            Self::SpectrogramSamplingPointsScale => {
-                settings.tr("settings-spectrogram-source-scale-hint")
+            Self::SpectrogramStartupExpansionSpeed => {
+                settings.tr("settings-spectrogram-startup-expansion-speed-hint")
             }
-            Self::SpectrogramInterpolationPoints => {
-                settings.tr("settings-spectrogram-frequency-rows-hint")
+            Self::SpectrogramOutflowThresholdPercent => {
+                settings.tr("settings-spectrogram-outflow-threshold-percent-hint")
             }
-            Self::Glow => settings.tr("settings-waveform-glow-hint"),
+            Self::WaveformGlow => settings.tr("settings-waveform-glow-hint"),
             Self::WaveformRmsGain => settings.tr("settings-waveform-rms-hint"),
             Self::WaveformPeakGamma => settings.tr("settings-waveform-gamma-hint"),
-            Self::OscilloscopeTimeSpan => settings.tr("settings-oscilloscope-time-span-hint"),
+            Self::OscilloscopeTimeSpanMs => settings.tr("settings-oscilloscope-time-span-hint"),
             Self::OscilloscopeGain => settings.tr("settings-oscilloscope-gain-hint"),
         }
     }
@@ -336,7 +435,7 @@ impl Field {
             .when(!hint.is_empty(), |control| {
                 control.tooltip(rivu_ui::text_tooltip(hint))
             });
-        if self == Self::ArtworkDecodeBudget {
+        if self == Self::ArtworkDecodeBudgetMib {
             return column()
                 .w_full()
                 .flex_shrink_0()
@@ -388,8 +487,8 @@ fn visual_switch(
         "settings-tray" => i18n.text("settings-restart-hint"),
         "settings-visualization-disabled" => i18n.text("settings-visualization-disabled-hint"),
         "audio-visualizer-fade-idle" => i18n.text("settings-visualizer-fade-hint"),
-        "audio-visualizer-grid" => i18n.text("settings-visualizer-guides-hint"),
-        "oscilloscope-shared-grid" => i18n.text("settings-oscilloscope-shared-axes-hint"),
+        "default-visualizer-reference-lines" => i18n.text("settings-visualizer-guides-hint"),
+        "oscilloscope-overlay-channels" => i18n.text("settings-oscilloscope-overlay-channels-hint"),
         _ => "",
     };
     let label: SharedString = if hint.is_empty() {
@@ -408,6 +507,7 @@ fn visual_switch(
     .into();
     rivu_ui::toggle_button(id, icon, hint, enabled, cx, move |this, cx| {
         toggle(&mut this.model.draft);
+        this.model.edited();
         this.sync_field_enabled(cx);
     })
 }
@@ -481,39 +581,36 @@ enum SettingsPage {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum VisualPage {
     Common,
+    SharedEffects,
+    Defaults,
     Waveform,
     Spectrum,
     Spectrogram,
     BarsRings,
-    StereoDensity,
-    SpatialSpectrum,
-    Fractal,
     Oscilloscope,
 }
 
 impl VisualPage {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 8] = [
         Self::Common,
+        Self::SharedEffects,
+        Self::Defaults,
         Self::Waveform,
         Self::Spectrum,
         Self::Spectrogram,
         Self::BarsRings,
-        Self::StereoDensity,
-        Self::SpatialSpectrum,
-        Self::Fractal,
         Self::Oscilloscope,
     ];
 
     fn label_id(self) -> &'static str {
         match self {
             Self::Common => "settings-shared-settings",
+            Self::SharedEffects => "settings-shared-effects",
+            Self::Defaults => "settings-new-panel-defaults",
             Self::Waveform => "settings-waveform",
             Self::Spectrum => "settings-spectrum",
             Self::Spectrogram => "settings-spectrogram",
             Self::BarsRings => "settings-bars-rings-family",
-            Self::StereoDensity => "settings-stereo-density",
-            Self::SpatialSpectrum => "settings-spatial-spectrum",
-            Self::Fractal => "settings-fractal-family",
             Self::Oscilloscope => "settings-oscilloscope",
         }
     }
@@ -521,13 +618,12 @@ impl VisualPage {
     fn scroll_id(self) -> &'static str {
         match self {
             Self::Common => "settings-common-scroll",
+            Self::SharedEffects => "settings-shared-effects-scroll",
+            Self::Defaults => "settings-defaults-scroll",
             Self::Waveform => "settings-waveform-scroll",
             Self::Spectrum => "settings-spectrum-scroll",
             Self::Spectrogram => "settings-spectrogram-scroll",
             Self::BarsRings => "settings-bars-rings-scroll",
-            Self::StereoDensity => "settings-stereo-density-scroll",
-            Self::SpatialSpectrum => "settings-spatial-spectrum-scroll",
-            Self::Fractal => "settings-fractal-scroll",
             Self::Oscilloscope => "settings-oscilloscope-scroll",
         }
     }
@@ -552,7 +648,8 @@ enum Measured {
     Device,
     SettingsFont,
     SettingsStyle,
-    AudioVisualizerStyle,
+    SpectrumLayout,
+    DefaultVisualizerStyle,
     SettingsFft,
     SettingsLogLevel,
     SettingsWindow,
@@ -590,6 +687,7 @@ struct SubmittedInput {
 struct SettingsSubmission {
     model: Submission,
     inputs: HashMap<Field, SubmittedInput>,
+    layout_revision: u64,
 }
 
 /// Unsaved preferences stay independent from live playback snapshots.
@@ -608,7 +706,7 @@ pub(super) struct Settings {
     ffmpeg_status: String,
     mpris_status: String,
     ui_scale: f32,
-    ui_font_size: u32,
+    ui_font_size_pt: u32,
     scope: FocusScope,
     active: bool,
     measured: Rc<RefCell<HashMap<Measured, Bounds<Pixels>>>>,
@@ -618,6 +716,8 @@ pub(super) struct Settings {
     model: SettingsModel,
     inputs: HashMap<Field, Entity<Input>>,
     numeric_inputs: HashMap<Field, NumericInput>,
+    layout_revision: u64,
+    layout_switch_error: Option<String>,
     initialized: bool,
     dropdown: ChoiceState<SettingChoice>,
     font_options: Vec<FontOption>,
@@ -684,7 +784,7 @@ impl Settings {
             ffmpeg_status,
             mpris_status,
             ui_scale,
-            ui_font_size: config.ui_font_size,
+            ui_font_size_pt: config.ui_font_size_pt,
             scope: FocusScope::new(cx),
             active: false,
             measured: Rc::new(RefCell::new(HashMap::new())),
@@ -694,6 +794,8 @@ impl Settings {
             model: SettingsModel::new(&config),
             inputs: HashMap::new(),
             numeric_inputs: HashMap::new(),
+            layout_revision: 0,
+            layout_switch_error: None,
             initialized: false,
             dropdown: ChoiceState::default(),
             font_options: Vec::new(),
@@ -710,11 +812,11 @@ impl Settings {
         ffmpeg_status: &str,
         mpris_status: &str,
         ui_scale: f32,
-        ui_font_size: u32,
+        ui_font_size_pt: u32,
         cx: &mut Context<Self>,
     ) {
         let devices_changed = !Arc::ptr_eq(&self.devices, devices) && self.devices != *devices;
-        let scale_changed = self.ui_scale != ui_scale || self.ui_font_size != ui_font_size;
+        let scale_changed = self.ui_scale != ui_scale || self.ui_font_size_pt != ui_font_size_pt;
         let changed = devices_changed
             || self.ffmpeg_status != ffmpeg_status
             || self.mpris_status != mpris_status
@@ -728,7 +830,7 @@ impl Settings {
         self.mpris_status.clear();
         self.mpris_status.push_str(mpris_status);
         self.ui_scale = ui_scale;
-        self.ui_font_size = ui_font_size;
+        self.ui_font_size_pt = ui_font_size_pt;
         if scale_changed || (devices_changed && self.dropdown_anchor == Measured::Device) {
             self.dropdown.close();
         }
@@ -793,55 +895,52 @@ impl Settings {
         }
         self.inputs = [
             Field::ScanMaxDepth,
-            Field::ScanMinDuration,
+            Field::ScanMinDurationSeconds,
             Field::Volume,
             Field::PlayCountThreshold,
             Field::LogRetentionWeeks,
-            Field::MediaReadBuffer,
-            Field::ArtworkFileLimit,
-            Field::ArtworkDecodeBudget,
-            Field::GpuMaterialBudget,
+            Field::MediaReadBufferMib,
+            Field::ArtworkFileLimitMib,
+            Field::ArtworkDecodeBudgetMib,
+            Field::GpuMaterialBudgetMib,
             Field::Font,
-            Field::FontSize,
+            Field::FontSizePt,
             Field::Scale,
             Field::LayoutSnapGrid,
-            Field::Fps,
-            Field::VisualizationFps,
-            Field::Background,
-            Field::VisualizationDb,
-            Field::AudioVisualizerSensitivity,
-            Field::AudioVisualizerRotationSpeed,
-            Field::AudioVisualizerBarWidth,
-            Field::AudioVisualizerBarGlowLayers,
-            Field::AudioVisualizerRingOpacity,
-            Field::AudioVisualizerBloomIntensity,
-            Field::AudioVisualizerInnerDiameter,
-            Field::AudioVisualizerPrimaryColor,
-            Field::AudioVisualizerSecondaryColor,
-            Field::AudioVisualizerDb,
-            Field::SpectrumDb,
-            Field::SpectrumBarWidth,
-            Field::SpectrumBars,
+            Field::AnalysisRateHz,
+            Field::VisualizationAnimationFps,
+            Field::VisualizationBackground,
+            Field::VisualizationDbRange,
+            Field::ReactiveSensitivity,
+            Field::RadialRotationSpeed,
+            Field::RadialBarWidth,
+            Field::RadialRingOpacity,
+            Field::ReactiveBloomIntensity,
+            Field::RadialInnerDiameter,
+            Field::EffectPrimaryColor,
+            Field::EffectSecondaryColor,
+            Field::ReactiveDbRange,
+            Field::SpectrumDbRange,
+            Field::SpectrumAutoWidth,
+            Field::SpectrumFixedCount,
             Field::SpectrumGap,
             Field::SpectrumHold,
             Field::SpectrumGravity,
             Field::SpectrumBarHold,
             Field::SpectrumBarGravity,
             Field::SpectrumSmoothing,
-            Field::SpectrogramDb,
+            Field::SpectrogramDbRange,
             Field::SpectrogramHistory,
-            Field::SpectrogramFlowSpeed,
-            Field::SpectrogramAccumulation,
-            Field::SpectrogramSamplingPointsScale,
-            Field::SpectrogramInterpolationPoints,
-            Field::CursorColor,
-            Field::Glow,
+            Field::SpectrogramStartupExpansionSpeed,
+            Field::SpectrogramOutflowThresholdPercent,
+            Field::WaveformCursorColor,
+            Field::WaveformGlow,
             Field::WaveformRmsGain,
             Field::WaveformPeakGain,
             Field::WaveformPeakGamma,
-            Field::OscilloscopeTimeSpan,
+            Field::OscilloscopeTimeSpanMs,
             Field::OscilloscopeGain,
-            Field::AlbumArtworkPeriod,
+            Field::AlbumArtworkPeriodSeconds,
             Field::AlbumArtworkFps,
         ]
         .into_iter()
@@ -849,19 +948,18 @@ impl Settings {
             let input = cx.new(|cx| {
                 let placeholder = self.tr(match field {
                     Field::Font => "settings-font-search-placeholder",
-                    Field::SpectrumDb | Field::SpectrogramDb | Field::AudioVisualizerDb => {
+                    Field::SpectrumDbRange | Field::SpectrogramDbRange | Field::ReactiveDbRange => {
                         "settings-inherit-placeholder"
                     }
-                    Field::Background
-                    | Field::AudioVisualizerPrimaryColor
-                    | Field::AudioVisualizerSecondaryColor
-                    | Field::CursorColor => "settings-color-placeholder",
-                    Field::MediaReadBuffer => "settings-buffer-placeholder",
-                    Field::SpectrumBars => "settings-auto-zero-placeholder",
-                    Field::AlbumArtworkFps | Field::VisualizationFps => {
+                    Field::VisualizationBackground
+                    | Field::EffectPrimaryColor
+                    | Field::EffectSecondaryColor
+                    | Field::WaveformCursorColor => "settings-color-placeholder",
+                    Field::MediaReadBufferMib => "settings-buffer-placeholder",
+                    Field::AlbumArtworkFps | Field::VisualizationAnimationFps => {
                         "settings-display-fps-placeholder"
                     }
-                    Field::ScanMinDuration => "settings-duration-placeholder",
+                    Field::ScanMinDurationSeconds => "settings-duration-placeholder",
                     _ => field.label_id(),
                 });
                 let input = Input::new(self.tr(field.label_id()), "", placeholder, cx);
@@ -924,9 +1022,9 @@ impl Settings {
         let input = self.inputs[&field].clone();
         if matches!(
             field,
-            Field::SpectrumDb | Field::AudioVisualizerDb | Field::SpectrogramDb
+            Field::SpectrumDbRange | Field::ReactiveDbRange | Field::SpectrogramDbRange
         ) {
-            let common = self.inputs[&Field::VisualizationDb].clone();
+            let common = self.inputs[&Field::VisualizationDbRange].clone();
             let fallback = self.model.draft.visualization_db_range;
             let i18n = Arc::clone(&self.i18n);
             return field.form(
@@ -973,23 +1071,194 @@ impl Settings {
         )
     }
 
-    fn field_state(&self, field: Field, cx: &App) -> Div {
-        self.field(field, cx).min_w(rems(180. / 16.))
+    fn spectrum_layout_field_state(&self, cx: &mut Context<Self>) -> Div {
+        self.field_state(self.spectrum_layout_field(), cx)
+            .when_some(self.layout_switch_error.as_ref(), |control, error| {
+                control.child(status_message(
+                    palette(cx),
+                    error.clone(),
+                    StatusKind::Error,
+                ))
+            })
+    }
+
+    fn spectrum_layout_field(&self) -> Field {
+        match self.model.draft.spectrum_bar_layout {
+            SpectrumBarLayout::Automatic { .. } => Field::SpectrumAutoWidth,
+            SpectrumBarLayout::Fixed { .. } => Field::SpectrumFixedCount,
+        }
+    }
+
+    fn fill_spectrum_layout(
+        &mut self,
+        unchanged: Option<&HashMap<Field, SubmittedInput>>,
+        cx: &mut App,
+    ) {
+        match self.model.draft.spectrum_bar_layout {
+            SpectrumBarLayout::Automatic { width } => {
+                self.set_float(Field::SpectrumAutoWidth, Some(width), unchanged, cx);
+            }
+            SpectrumBarLayout::Fixed { count } => {
+                self.set_value(Field::SpectrumFixedCount, count.to_string(), unchanged, cx);
+            }
+        }
+    }
+
+    fn parse_spectrum_layout(&self, cx: &App) -> Result<SpectrumBarLayout> {
+        let field = self.spectrum_layout_field();
+        let layout = match self.model.draft.spectrum_bar_layout {
+            SpectrumBarLayout::Automatic { width } => SpectrumBarLayout::Automatic {
+                width: self.float(field, width, cx)?,
+            },
+            SpectrumBarLayout::Fixed { .. } => SpectrumBarLayout::Fixed {
+                count: self.number(field, cx)?,
+            },
+        };
+        let valid = match layout {
+            SpectrumBarLayout::Automatic { width } => {
+                width.is_finite() && (1.0..=20.0).contains(&width)
+            }
+            SpectrumBarLayout::Fixed { count } => (1..=512).contains(&count),
+        };
+        if !valid {
+            return Err(FieldIssue {
+                field,
+                message: format!(
+                    "{}: {}",
+                    field.label(&self.i18n),
+                    self.i18n.text(match layout {
+                        SpectrumBarLayout::Automatic { .. } => "settings-spectrum-bar-width-hint",
+                        SpectrumBarLayout::Fixed { .. } => "settings-spectrum-bar-count-hint",
+                    })
+                ),
+            }
+            .into());
+        }
+        Ok(layout)
+    }
+
+    fn select_spectrum_layout(&mut self, mode: SpectrumLayoutMode, cx: &mut Context<Self>) {
+        if SpectrumLayoutMode::from_layout(self.model.draft.spectrum_bar_layout) == mode {
+            self.dropdown.close();
+            cx.notify();
+            return;
+        }
+        if let Err(error) = self.parse_spectrum_layout(cx) {
+            self.reveal_field(self.spectrum_layout_field());
+            self.layout_switch_error = Some(self.i18n.format(
+                "settings-spectrum-layout-invalid",
+                &[("error", format!("{error:#}").into())],
+            ));
+            cx.notify();
+            return;
+        }
+        // Even a switch away and back to identical text is newer than an Apply
+        // snapshot. Fence both editors before initializing the new active value.
+        for field in [Field::SpectrumAutoWidth, Field::SpectrumFixedCount] {
+            let state = self.numeric_inputs.entry(field).or_default();
+            state.revision = state.revision.wrapping_add(1);
+        }
+        self.layout_revision = self.layout_revision.wrapping_add(1);
+        self.layout_switch_error = None;
+        self.model.draft.spectrum_bar_layout = mode.initial_layout();
+        self.fill_spectrum_layout(None, cx);
+        self.model.edited();
+        self.dropdown.close();
+        self.sync_field_enabled(cx);
+        cx.notify();
+    }
+
+    fn field_enabled(&self, field: Field, _: &App) -> bool {
+        field.enabled(&self.model.draft)
+    }
+
+    fn field_state(&self, field: Field, cx: &mut Context<Self>) -> Div {
+        column()
+            .min_w(rems(180. / 16.))
+            .gap_1()
+            .child(self.field(field, cx))
+            .when(
+                !self.field_enabled(field, cx)
+                    && match field {
+                        Field::SpectrumFixedCount => {
+                            !matches!(self.model.draft.spectrum_bar_layout,
+                                SpectrumBarLayout::Fixed { count }
+                                    if self.inputs[&field].read(cx).text().trim().parse::<u32>() == Ok(count))
+                        }
+                        Field::SpectrumHold => {
+                            self.inputs[&field].read(cx).text().trim().parse::<u32>()
+                                != Ok(self.model.draft.spectrum_peak_hold_ms)
+                        }
+                        _ => !self.numeric_untouched(field, cx),
+                    },
+                |control| {
+                    control
+                        .child(div().text_xs().child(field.hint(self)))
+                        .child(
+                            div()
+                                .id(("settings-reset-field-help", field as usize))
+                                .child(rivu_ui::button(
+                                    ("settings-reset-field", field as usize),
+                                    self.tr("settings-reset-field-text"),
+                                    cx,
+                                    move |this, _, cx| this.restore_field_text(field, cx),
+                                ))
+                                .tooltip(rivu_ui::text_tooltip(
+                                    self.tr("settings-reset-field-hint"),
+                                )),
+                        )
+                },
+            )
+    }
+
+    fn restore_field_text(&mut self, field: Field, cx: &mut Context<Self>) {
+        match field {
+            Field::AlbumArtworkPeriodSeconds => self.set_float(
+                field,
+                Some(self.model.draft.album_artwork_period_seconds),
+                None,
+                cx,
+            ),
+            Field::SpectrumAutoWidth | Field::SpectrumFixedCount => {
+                self.fill_spectrum_layout(None, cx);
+                self.layout_switch_error = None;
+            }
+            Field::SpectrumGap => {
+                self.set_float(field, Some(self.model.draft.spectrum_gap), None, cx)
+            }
+            Field::SpectrumGravity => self.set_float(
+                field,
+                Some(self.model.draft.spectrum_peak_gravity),
+                None,
+                cx,
+            ),
+            Field::SpectrumHold => {
+                self.set_value(
+                    field,
+                    self.model.draft.spectrum_peak_hold_ms.to_string(),
+                    None,
+                    cx,
+                );
+            }
+            _ => unreachable!("only conditionally disabled fields expose text recovery"),
+        }
+        self.sync_field_enabled(cx);
+        self.model.edited();
+        cx.notify();
     }
 
     fn sync_field_enabled(&self, cx: &mut App) {
         for field in [
-            Field::AlbumArtworkPeriod,
-            Field::SpectrumBars,
-            Field::SpectrumBarWidth,
+            Field::AlbumArtworkPeriodSeconds,
+            Field::SpectrumAutoWidth,
+            Field::SpectrumFixedCount,
             Field::SpectrumGap,
             Field::SpectrumHold,
             Field::SpectrumGravity,
         ] {
             if let Some(input) = self.inputs.get(&field) {
-                input.update(cx, |input, cx| {
-                    input.set_enabled(field.enabled(&self.model.draft), cx)
-                });
+                let enabled = self.field_enabled(field, cx);
+                input.update(cx, |input, cx| input.set_enabled(enabled, cx));
             }
         }
     }
@@ -1072,10 +1341,13 @@ impl Settings {
     where
         T::Err: std::fmt::Display,
     {
-        self.value(field, cx)
-            .trim()
-            .parse()
-            .map_err(|error| anyhow::anyhow!("{}: {error}", field.label(&self.i18n)))
+        self.value(field, cx).trim().parse().map_err(|error| {
+            FieldIssue {
+                field,
+                message: format!("{}: {error}", field.label(&self.i18n)),
+            }
+            .into()
+        })
     }
 
     fn optional_number<T: FromStr>(&self, field: Field, cx: &App) -> Result<Option<T>>
@@ -1086,11 +1358,13 @@ impl Settings {
         if value.trim().is_empty() {
             Ok(None)
         } else {
-            value
-                .trim()
-                .parse()
-                .map(Some)
-                .map_err(|error| anyhow::anyhow!("{}: {error}", field.label(&self.i18n)))
+            value.trim().parse().map(Some).map_err(|error| {
+                FieldIssue {
+                    field,
+                    message: format!("{}: {error}", field.label(&self.i18n)),
+                }
+                .into()
+            })
         }
     }
 
@@ -1121,6 +1395,7 @@ impl Settings {
     }
 
     fn fill(&mut self, cx: &mut App) {
+        self.layout_switch_error = None;
         self.fill_unchanged(None, cx);
     }
 
@@ -1132,8 +1407,8 @@ impl Settings {
             cx,
         );
         self.set_value(
-            Field::ScanMinDuration,
-            self.model.draft.scan_min_duration_secs.to_string(),
+            Field::ScanMinDurationSeconds,
+            self.model.draft.scan_min_duration_seconds.to_string(),
             unchanged,
             cx,
         );
@@ -1156,34 +1431,34 @@ impl Settings {
             cx,
         );
         self.set_value(
-            Field::MediaReadBuffer,
-            self.model.draft.media_read_buffer_mb.to_string(),
+            Field::MediaReadBufferMib,
+            self.model.draft.media_read_buffer_mib.to_string(),
             unchanged,
             cx,
         );
         self.set_value(
-            Field::ArtworkFileLimit,
-            self.model.draft.artwork_file_limit_mb.to_string(),
+            Field::ArtworkFileLimitMib,
+            self.model.draft.artwork_file_limit_mib.to_string(),
             unchanged,
             cx,
         );
         self.set_value(
-            Field::ArtworkDecodeBudget,
-            self.model.draft.artwork_decode_budget_mb.to_string(),
+            Field::ArtworkDecodeBudgetMib,
+            self.model.draft.artwork_decode_budget_mib.to_string(),
             unchanged,
             cx,
         );
         self.set_value(
-            Field::GpuMaterialBudget,
-            self.model.draft.gpu_material_budget_mb.to_string(),
+            Field::GpuMaterialBudgetMib,
+            self.model.draft.gpu_material_budget_mib.to_string(),
             unchanged,
             cx,
         );
         self.font_value = self.model.draft.ui_font.clone();
         self.set_value(Field::Font, self.model.draft.ui_font.clone(), unchanged, cx);
         self.set_value(
-            Field::FontSize,
-            self.model.draft.ui_font_size.to_string(),
+            Field::FontSizePt,
+            self.model.draft.ui_font_size_pt.to_string(),
             unchanged,
             cx,
         );
@@ -1195,97 +1470,85 @@ impl Settings {
             cx,
         );
         self.set_value(
-            Field::Fps,
-            self.model.draft.analysis_fps.to_string(),
+            Field::AnalysisRateHz,
+            self.model.draft.analysis_rate_hz.to_string(),
             unchanged,
             cx,
         );
         self.set_value(
-            Field::VisualizationFps,
+            Field::VisualizationAnimationFps,
             self.model.draft.visualization_fps.to_string(),
             unchanged,
             cx,
         );
         self.set_value(
-            Field::Background,
-            self.model.draft.visual_background.to_string(),
+            Field::VisualizationBackground,
+            self.model.draft.visualization_background.to_string(),
             unchanged,
             cx,
         );
         self.set_float(
-            Field::VisualizationDb,
+            Field::VisualizationDbRange,
             Some(self.model.draft.visualization_db_range),
             unchanged,
             cx,
         );
         self.set_float(
-            Field::AudioVisualizerSensitivity,
-            Some(self.model.draft.audio_visualizer_sensitivity),
+            Field::ReactiveSensitivity,
+            Some(self.model.draft.reactive_sensitivity),
             unchanged,
             cx,
         );
         self.set_float(
-            Field::AudioVisualizerRotationSpeed,
-            Some(self.model.draft.audio_visualizer_rotation_speed),
+            Field::RadialRotationSpeed,
+            Some(self.model.draft.radial_rotation_speed),
             unchanged,
             cx,
         );
         self.set_float(
-            Field::AudioVisualizerBarWidth,
-            Some(self.model.draft.audio_visualizer_bar_width),
+            Field::RadialBarWidth,
+            Some(self.model.draft.radial_bar_width),
+            unchanged,
+            cx,
+        );
+        self.set_float(
+            Field::RadialRingOpacity,
+            Some(self.model.draft.radial_ring_opacity),
+            unchanged,
+            cx,
+        );
+        self.set_float(
+            Field::ReactiveBloomIntensity,
+            Some(self.model.draft.reactive_bloom_intensity),
+            unchanged,
+            cx,
+        );
+        self.set_float(
+            Field::RadialInnerDiameter,
+            Some(self.model.draft.radial_inner_diameter),
             unchanged,
             cx,
         );
         self.set_value(
-            Field::AudioVisualizerBarGlowLayers,
-            self.model
-                .draft
-                .audio_visualizer_bar_glow_layers
-                .to_string(),
-            unchanged,
-            cx,
-        );
-        self.set_float(
-            Field::AudioVisualizerRingOpacity,
-            Some(self.model.draft.audio_visualizer_ring_opacity),
-            unchanged,
-            cx,
-        );
-        self.set_float(
-            Field::AudioVisualizerBloomIntensity,
-            Some(self.model.draft.audio_visualizer_bloom_intensity),
-            unchanged,
-            cx,
-        );
-        self.set_float(
-            Field::AudioVisualizerInnerDiameter,
-            Some(self.model.draft.audio_visualizer_inner_diameter),
+            Field::EffectPrimaryColor,
+            self.model.draft.effect_primary_color.to_string(),
             unchanged,
             cx,
         );
         self.set_value(
-            Field::AudioVisualizerPrimaryColor,
-            self.model.draft.audio_visualizer_primary_color.to_string(),
-            unchanged,
-            cx,
-        );
-        self.set_value(
-            Field::AudioVisualizerSecondaryColor,
-            self.model
-                .draft
-                .audio_visualizer_secondary_color
-                .to_string(),
+            Field::EffectSecondaryColor,
+            self.model.draft.effect_secondary_color.to_string(),
             unchanged,
             cx,
         );
         self.set_float(
-            Field::AudioVisualizerDb,
-            self.model.draft.audio_visualizer_db_range,
+            Field::ReactiveDbRange,
+            self.model.draft.reactive_db_range,
             unchanged,
             cx,
         );
         self.set_float(
-            Field::SpectrumDb,
+            Field::SpectrumDbRange,
             self.model.draft.spectrum_db_range,
             unchanged,
             cx,
@@ -1326,20 +1589,9 @@ impl Settings {
             unchanged,
             cx,
         );
+        self.fill_spectrum_layout(unchanged, cx);
         self.set_float(
-            Field::SpectrumBarWidth,
-            Some(self.model.draft.spectrum_bar_width),
-            unchanged,
-            cx,
-        );
-        self.set_value(
-            Field::SpectrumBars,
-            self.model.draft.spectrum_bars.to_string(),
-            unchanged,
-            cx,
-        );
-        self.set_float(
-            Field::SpectrogramDb,
+            Field::SpectrogramDbRange,
             self.model.draft.spectrogram_db_range,
             unchanged,
             cx,
@@ -1351,40 +1603,28 @@ impl Settings {
             cx,
         );
         self.set_float(
-            Field::SpectrogramFlowSpeed,
-            Some(self.model.draft.spectrogram_flow_speed),
+            Field::SpectrogramStartupExpansionSpeed,
+            Some(self.model.draft.spectrogram_startup_expansion_speed),
             unchanged,
             cx,
         );
         self.set_value(
-            Field::SpectrogramAccumulation,
-            self.model.draft.spectrogram_accumulation.to_string(),
-            unchanged,
-            cx,
-        );
-        self.set_float(
-            Field::SpectrogramSamplingPointsScale,
-            Some(self.model.draft.spectrogram_sampling_points_scale),
-            unchanged,
-            cx,
-        );
-        self.set_value(
-            Field::SpectrogramInterpolationPoints,
+            Field::SpectrogramOutflowThresholdPercent,
             self.model
                 .draft
-                .spectrogram_interpolation_points
+                .spectrogram_outflow_threshold_percent
                 .to_string(),
             unchanged,
             cx,
         );
         self.set_value(
-            Field::CursorColor,
+            Field::WaveformCursorColor,
             self.model.draft.waveform_cursor_color.to_string(),
             unchanged,
             cx,
         );
         self.set_float(
-            Field::Glow,
+            Field::WaveformGlow,
             Some(self.model.draft.waveform_glow),
             unchanged,
             cx,
@@ -1408,7 +1648,7 @@ impl Settings {
             cx,
         );
         self.set_float(
-            Field::OscilloscopeTimeSpan,
+            Field::OscilloscopeTimeSpanMs,
             Some(self.model.draft.oscilloscope_time_span_ms),
             unchanged,
             cx,
@@ -1420,7 +1660,7 @@ impl Settings {
             cx,
         );
         self.set_float(
-            Field::AlbumArtworkPeriod,
+            Field::AlbumArtworkPeriodSeconds,
             Some(self.model.draft.album_artwork_period_seconds),
             unchanged,
             cx,
@@ -1437,7 +1677,7 @@ impl Settings {
     fn parse(&self, cx: &App) -> Result<Config> {
         let mut config = self.model.draft.clone();
         config.scan_max_depth = self.number(Field::ScanMaxDepth, cx)?;
-        config.scan_min_duration_secs = self.number(Field::ScanMinDuration, cx)?;
+        config.scan_min_duration_seconds = self.number(Field::ScanMinDurationSeconds, cx)?;
         if !self.numeric_untouched(Field::Volume, cx) {
             config.volume = self.number::<f32>(Field::Volume, cx)? / 100.;
         }
@@ -1447,78 +1687,64 @@ impl Settings {
             cx,
         )?;
         config.log_retention_weeks = self.number(Field::LogRetentionWeeks, cx)?;
-        config.media_read_buffer_mb = self.number(Field::MediaReadBuffer, cx)?;
-        config.artwork_file_limit_mb = self.number(Field::ArtworkFileLimit, cx)?;
-        config.artwork_decode_budget_mb = self.number(Field::ArtworkDecodeBudget, cx)?;
-        config.gpu_material_budget_mb = self.number(Field::GpuMaterialBudget, cx)?;
+        config.media_read_buffer_mib = self.number(Field::MediaReadBufferMib, cx)?;
+        config.artwork_file_limit_mib = self.number(Field::ArtworkFileLimitMib, cx)?;
+        config.artwork_decode_budget_mib = self.number(Field::ArtworkDecodeBudgetMib, cx)?;
+        config.gpu_material_budget_mib = self.number(Field::GpuMaterialBudgetMib, cx)?;
         config.ui_font = self.value(Field::Font, cx).trim().to_owned();
         if config.ui_font.is_empty() {
             config.ui_font = "monospace".to_owned();
         }
-        config.ui_font_size = self.number(Field::FontSize, cx)?;
+        config.ui_font_size_pt = self.number(Field::FontSizePt, cx)?;
         config.ui_scale = self.float(Field::Scale, self.model.draft.ui_scale, cx)?;
         config.layout_snap_grid_px = self.number(Field::LayoutSnapGrid, cx)?;
-        config.analysis_fps = self.number(Field::Fps, cx)?;
-        config.visualization_fps = self.number(Field::VisualizationFps, cx)?;
+        config.analysis_rate_hz = self.number(Field::AnalysisRateHz, cx)?;
+        config.visualization_fps = self.number(Field::VisualizationAnimationFps, cx)?;
         config.visualization_db_range = self.float(
-            Field::VisualizationDb,
+            Field::VisualizationDbRange,
             self.model.draft.visualization_db_range,
             cx,
         )?;
-        config.visual_background = self
-            .value(Field::Background, cx)
-            .trim()
-            .parse::<RgbColor>()
-            .context(self.tr("settings-visualization-background"))?;
-        config.audio_visualizer_sensitivity = self.float(
-            Field::AudioVisualizerSensitivity,
-            self.model.draft.audio_visualizer_sensitivity,
+        config.visualization_background = self.number(Field::VisualizationBackground, cx)?;
+        config.reactive_sensitivity = self.float(
+            Field::ReactiveSensitivity,
+            self.model.draft.reactive_sensitivity,
             cx,
         )?;
-        config.audio_visualizer_rotation_speed = self.float(
-            Field::AudioVisualizerRotationSpeed,
-            self.model.draft.audio_visualizer_rotation_speed,
+        config.radial_rotation_speed = self.float(
+            Field::RadialRotationSpeed,
+            self.model.draft.radial_rotation_speed,
             cx,
         )?;
-        config.audio_visualizer_bar_width = self.float(
-            Field::AudioVisualizerBarWidth,
-            self.model.draft.audio_visualizer_bar_width,
+        config.radial_bar_width =
+            self.float(Field::RadialBarWidth, self.model.draft.radial_bar_width, cx)?;
+        config.radial_ring_opacity = self.float(
+            Field::RadialRingOpacity,
+            self.model.draft.radial_ring_opacity,
             cx,
         )?;
-        config.audio_visualizer_bar_glow_layers =
-            self.number(Field::AudioVisualizerBarGlowLayers, cx)?;
-        config.audio_visualizer_ring_opacity = self.float(
-            Field::AudioVisualizerRingOpacity,
-            self.model.draft.audio_visualizer_ring_opacity,
+        config.reactive_bloom_intensity = self.float(
+            Field::ReactiveBloomIntensity,
+            self.model.draft.reactive_bloom_intensity,
             cx,
         )?;
-        config.audio_visualizer_bloom_intensity = self.float(
-            Field::AudioVisualizerBloomIntensity,
-            self.model.draft.audio_visualizer_bloom_intensity,
+        config.radial_inner_diameter = self.float(
+            Field::RadialInnerDiameter,
+            self.model.draft.radial_inner_diameter,
             cx,
         )?;
-        config.audio_visualizer_inner_diameter = self.float(
-            Field::AudioVisualizerInnerDiameter,
-            self.model.draft.audio_visualizer_inner_diameter,
+        config.effect_primary_color = self.number(Field::EffectPrimaryColor, cx)?;
+        config.effect_secondary_color = self.number(Field::EffectSecondaryColor, cx)?;
+        config.reactive_db_range = self.optional_float(
+            Field::ReactiveDbRange,
+            self.model.draft.reactive_db_range,
             cx,
         )?;
-        config.audio_visualizer_primary_color = self
-            .value(Field::AudioVisualizerPrimaryColor, cx)
-            .trim()
-            .parse::<RgbColor>()
-            .context(self.tr("settings-audio-visualizer-primary-color"))?;
-        config.audio_visualizer_secondary_color = self
-            .value(Field::AudioVisualizerSecondaryColor, cx)
-            .trim()
-            .parse::<RgbColor>()
-            .context(self.tr("settings-audio-visualizer-secondary-color"))?;
-        config.audio_visualizer_db_range = self.optional_float(
-            Field::AudioVisualizerDb,
-            self.model.draft.audio_visualizer_db_range,
+        config.spectrum_db_range = self.optional_float(
+            Field::SpectrumDbRange,
+            self.model.draft.spectrum_db_range,
             cx,
         )?;
-        config.spectrum_db_range =
-            self.optional_float(Field::SpectrumDb, self.model.draft.spectrum_db_range, cx)?;
         config.spectrum_gap = self.float(Field::SpectrumGap, self.model.draft.spectrum_gap, cx)?;
         config.spectrum_peak_hold_ms = self.number(Field::SpectrumHold, cx)?;
         config.spectrum_peak_gravity = self.float(
@@ -1533,37 +1759,23 @@ impl Settings {
             cx,
         )?;
         config.spectrum_smoothing_ms = self.number(Field::SpectrumSmoothing, cx)?;
-        config.spectrum_bar_width = self.float(
-            Field::SpectrumBarWidth,
-            self.model.draft.spectrum_bar_width,
-            cx,
-        )?;
-        config.spectrum_bars = self.number(Field::SpectrumBars, cx)?;
+        config.spectrum_bar_layout = self.parse_spectrum_layout(cx)?;
         config.spectrogram_db_range = self.optional_float(
-            Field::SpectrogramDb,
+            Field::SpectrogramDbRange,
             self.model.draft.spectrogram_db_range,
             cx,
         )?;
         config.spectrogram_history_seconds = self.number(Field::SpectrogramHistory, cx)?;
-        config.spectrogram_flow_speed = self.float(
-            Field::SpectrogramFlowSpeed,
-            self.model.draft.spectrogram_flow_speed,
+        config.spectrogram_startup_expansion_speed = self.float(
+            Field::SpectrogramStartupExpansionSpeed,
+            self.model.draft.spectrogram_startup_expansion_speed,
             cx,
         )?;
-        config.spectrogram_accumulation = self.number(Field::SpectrogramAccumulation, cx)?;
-        config.spectrogram_sampling_points_scale = self.float(
-            Field::SpectrogramSamplingPointsScale,
-            self.model.draft.spectrogram_sampling_points_scale,
-            cx,
-        )?;
-        config.spectrogram_interpolation_points =
-            self.number(Field::SpectrogramInterpolationPoints, cx)?;
-        config.waveform_cursor_color = self
-            .value(Field::CursorColor, cx)
-            .trim()
-            .parse::<RgbColor>()
-            .context(self.tr("settings-waveform-waterline-color"))?;
-        config.waveform_glow = self.float(Field::Glow, self.model.draft.waveform_glow, cx)?;
+        config.spectrogram_outflow_threshold_percent =
+            self.number(Field::SpectrogramOutflowThresholdPercent, cx)?;
+        config.waveform_cursor_color = self.number(Field::WaveformCursorColor, cx)?;
+        config.waveform_glow =
+            self.float(Field::WaveformGlow, self.model.draft.waveform_glow, cx)?;
         config.waveform_rms_gain = self.float(
             Field::WaveformRmsGain,
             self.model.draft.waveform_rms_gain,
@@ -1580,7 +1792,7 @@ impl Settings {
             cx,
         )?;
         config.oscilloscope_time_span_ms = self.float(
-            Field::OscilloscopeTimeSpan,
+            Field::OscilloscopeTimeSpanMs,
             self.model.draft.oscilloscope_time_span_ms,
             cx,
         )?;
@@ -1590,12 +1802,22 @@ impl Settings {
             cx,
         )?;
         config.album_artwork_period_seconds = self.float(
-            Field::AlbumArtworkPeriod,
+            Field::AlbumArtworkPeriodSeconds,
             self.model.draft.album_artwork_period_seconds,
             cx,
         )?;
         config.album_artwork_fps = self.number(Field::AlbumArtworkFps, cx)?;
-        config.validate()?;
+        config.validate().map_err(|error| {
+            let message = error.to_string();
+            self.inputs
+                .keys()
+                .find(|field| {
+                    message
+                        .strip_prefix(field.config_key())
+                        .is_some_and(|rest| rest.starts_with(' '))
+                })
+                .map_or(error, |&field| FieldIssue { field, message }.into())
+        })?;
         Ok(config)
     }
 
@@ -1656,20 +1878,24 @@ impl Settings {
         }
         self.initialize(cx);
         for (&field, input) in &self.inputs {
-            if field.precision().is_some() {
-                self._subscriptions
-                    .push(cx.subscribe(input, move |this, _, event, _| {
-                        // set_text emits Changed too; its user:false event must not
-                        // turn a programmatic rebase/reset into an explicit edit.
-                        if matches!(event, InputEvent::Changed { user: true, .. }) {
+            self._subscriptions
+                .push(cx.subscribe(input, move |this, _, event, cx| {
+                    // Programmatic rebase/reset events must not become user edits.
+                    if matches!(event, InputEvent::Changed { user: true, .. }) {
+                        if matches!(field, Field::SpectrumAutoWidth | Field::SpectrumFixedCount) {
+                            this.layout_switch_error = None;
+                        }
+                        if field.precision().is_some() {
                             let state = this.numeric_inputs.entry(field).or_default();
                             state.edited = true;
-                            // A same-text replacement is still intentional, and must
-                            // also survive completion of an in-flight Apply.
+                            // Same-text replacement is intentional and survives Apply.
                             state.revision = state.revision.wrapping_add(1);
                         }
-                    }));
-            }
+                        this.model.edited();
+                        this.sync_field_enabled(cx);
+                        cx.notify();
+                    }
+                }));
         }
         self._subscriptions.push(
             cx.subscribe(&self.inputs[&Field::Font], |this, _, event, cx| {
@@ -1803,7 +2029,7 @@ impl Settings {
         self.artwork_cache_error = None;
         self.fill(cx);
         self.active = true;
-        self.root_stats.reopen();
+        self.root_stats.retry();
         self.sync_library_stats(cx);
         self.scope.focus(window, cx);
         cx.notify();
@@ -1822,6 +2048,78 @@ impl Settings {
         self.show_session(window, cx);
     }
 
+    fn reveal_field(&mut self, field: Field) {
+        let (page, visual_page) = match field {
+            Field::ScanMaxDepth
+            | Field::ScanMinDurationSeconds
+            | Field::ArtworkFileLimitMib
+            | Field::ArtworkDecodeBudgetMib => (SettingsPage::Library, None),
+            Field::Volume | Field::PlayCountThreshold | Field::MediaReadBufferMib => {
+                (SettingsPage::Playback, None)
+            }
+            Field::Font
+            | Field::FontSizePt
+            | Field::Scale
+            | Field::LayoutSnapGrid
+            | Field::LogRetentionWeeks
+            | Field::AlbumArtworkPeriodSeconds
+            | Field::AlbumArtworkFps => (SettingsPage::Interface, None),
+            Field::EffectPrimaryColor
+            | Field::EffectSecondaryColor
+            | Field::ReactiveDbRange
+            | Field::ReactiveSensitivity
+            | Field::ReactiveBloomIntensity => (
+                SettingsPage::Visualizations,
+                Some(VisualPage::SharedEffects),
+            ),
+            Field::RadialRotationSpeed
+            | Field::RadialBarWidth
+            | Field::RadialRingOpacity
+            | Field::RadialInnerDiameter => {
+                (SettingsPage::Visualizations, Some(VisualPage::BarsRings))
+            }
+            Field::SpectrumDbRange
+            | Field::SpectrumAutoWidth
+            | Field::SpectrumFixedCount
+            | Field::SpectrumGap
+            | Field::SpectrumHold
+            | Field::SpectrumGravity
+            | Field::SpectrumBarHold
+            | Field::SpectrumBarGravity
+            | Field::SpectrumSmoothing => {
+                (SettingsPage::Visualizations, Some(VisualPage::Spectrum))
+            }
+            Field::SpectrogramDbRange
+            | Field::SpectrogramHistory
+            | Field::SpectrogramStartupExpansionSpeed
+            | Field::SpectrogramOutflowThresholdPercent => {
+                (SettingsPage::Visualizations, Some(VisualPage::Spectrogram))
+            }
+            Field::WaveformCursorColor
+            | Field::WaveformGlow
+            | Field::WaveformRmsGain
+            | Field::WaveformPeakGain
+            | Field::WaveformPeakGamma => {
+                (SettingsPage::Visualizations, Some(VisualPage::Waveform))
+            }
+            Field::OscilloscopeTimeSpanMs | Field::OscilloscopeGain => {
+                (SettingsPage::Visualizations, Some(VisualPage::Oscilloscope))
+            }
+            Field::GpuMaterialBudgetMib
+            | Field::AnalysisRateHz
+            | Field::VisualizationAnimationFps
+            | Field::VisualizationBackground
+            | Field::VisualizationDbRange => {
+                (SettingsPage::Visualizations, Some(VisualPage::Common))
+            }
+        };
+        self.page = page;
+        if let Some(visual_page) = visual_page {
+            self.visual_page = visual_page;
+        }
+        self.dropdown.close();
+    }
+
     fn apply_settings(&mut self, cx: &mut Context<Self>) {
         if self.model.applying() {
             return;
@@ -1829,7 +2127,7 @@ impl Settings {
         if matches!(self.model.target(), Target::Artwork(_)) {
             let period = self
                 .float(
-                    Field::AlbumArtworkPeriod,
+                    Field::AlbumArtworkPeriodSeconds,
                     self.model.draft.album_artwork_period_seconds,
                     cx,
                 )
@@ -1856,6 +2154,9 @@ impl Settings {
         let config = match self.parse(cx) {
             Ok(config) => config,
             Err(error) => {
+                if let Some(issue) = error.downcast_ref::<FieldIssue>() {
+                    self.reveal_field(issue.field);
+                }
                 self.model.reject_input(self.i18n.format(
                     "settings-invalid",
                     &[("error", format!("{error:#}").into())],
@@ -1894,6 +2195,7 @@ impl Settings {
         let (patch, model) = self.model.begin_apply(config)?;
         let submission = SettingsSubmission {
             model,
+            layout_revision: self.layout_revision,
             inputs: self
                 .inputs
                 .iter()
@@ -1918,6 +2220,8 @@ impl Settings {
         result: std::result::Result<(), String>,
         cx: &mut Context<Self>,
     ) {
+        let newer_layout = (self.layout_revision != submission.layout_revision)
+            .then_some(self.model.draft.spectrum_bar_layout);
         match self
             .model
             .complete_apply(submission.model, committed, result)
@@ -1925,9 +2229,20 @@ impl Settings {
             Completion::Stale => return,
             Completion::Failed => {}
             Completion::Committed => {
+                if let Some(layout) = newer_layout {
+                    self.model.draft.spectrum_bar_layout = layout;
+                }
                 // Preserve invalid/partial input and its caret, not just parsed edits.
                 self.fill_unchanged(Some(&submission.inputs), cx);
                 self.font_value = self.value(Field::Font, cx);
+                if self.inputs.iter().any(|(field, input)| {
+                    submission.inputs.get(field).is_some_and(|submitted| {
+                        input.read(cx).text() != submitted.text
+                            || self.numeric_revision(*field) != submitted.revision
+                    })
+                }) {
+                    self.model.clear_success();
+                }
             }
         }
         self.sync_library_stats(cx);
@@ -1969,10 +2284,14 @@ impl Settings {
                 self.select_font(value, cx);
             }
             SettingChoice::SpectrumStyle(value) => self.model.draft.spectrum_style = value,
-            SettingChoice::AudioVisualizerStyle(value) => {
-                self.model.draft.audio_visualizer_style = value;
+            SettingChoice::SpectrumLayout(value) => {
+                self.select_spectrum_layout(value, cx);
+                return;
             }
-            SettingChoice::Palette(value) => self.model.draft.visual_palette = value,
+            SettingChoice::DefaultVisualizerStyle(value) => {
+                self.model.draft.default_visualizer_style = value;
+            }
+            SettingChoice::Palette(value) => self.model.draft.visualization_palette = value,
             SettingChoice::Fft(value) => self.model.draft.analysis_fft_size = value,
             SettingChoice::LogLevel(value) => self.model.draft.log_level = value,
             SettingChoice::Window(value) => self.model.draft.analysis_window = value,
@@ -1983,6 +2302,7 @@ impl Settings {
                 self.model.draft.album_artwork_direction = value
             }
         }
+        self.model.edited();
         self.dropdown.select_index(index);
         self.dropdown.close();
         self.sync_field_enabled(cx);
@@ -1996,11 +2316,12 @@ impl Settings {
                 SettingChoice::Theme(_) => Measured::Theme,
                 SettingChoice::Font(_) | SettingChoice::CustomFont => Measured::SettingsFont,
                 SettingChoice::SpectrumStyle(_) => Measured::SettingsStyle,
+                SettingChoice::SpectrumLayout(_) => Measured::SpectrumLayout,
                 SettingChoice::Fft(_) => Measured::SettingsFft,
                 SettingChoice::LogLevel(_) => Measured::SettingsLogLevel,
                 SettingChoice::Window(_) => Measured::SettingsWindow,
                 SettingChoice::Signal(_) => Measured::SettingsSignal,
-                SettingChoice::AudioVisualizerStyle(_) => Measured::AudioVisualizerStyle,
+                SettingChoice::DefaultVisualizerStyle(_) => Measured::DefaultVisualizerStyle,
                 SettingChoice::Palette(_) => Measured::SettingsStyle,
                 SettingChoice::Device(_) => Measured::Device,
                 SettingChoice::AlbumArtworkStyle(_) => Measured::AlbumArtworkStyle,
@@ -2536,8 +2857,8 @@ mod tests {
         });
         cx.update_window(window.into(), |_, window, cx| {
             settings.update(cx, |this, cx| {
-                this.set_value(Field::AlbumArtworkPeriod, "1e", None, cx);
-                let input = this.inputs[&Field::AlbumArtworkPeriod].clone();
+                this.set_value(Field::AlbumArtworkPeriodSeconds, "1e", None, cx);
+                let input = this.inputs[&Field::AlbumArtworkPeriodSeconds].clone();
                 this.open_setting_dropdown(
                     vec![ChoiceItem::new(
                         SettingChoice::AlbumArtworkMode(AlbumArtworkMode::Static),
@@ -2549,8 +2870,8 @@ mod tests {
                 input.update(cx, |input, cx| {
                     input.replace_text_in_range(Some(0..2), "99", window, cx);
                 });
-                assert_eq!(this.value(Field::AlbumArtworkPeriod, cx), "1e");
-                assert_eq!(this.inputs[&Field::AlbumArtworkPeriod], input);
+                assert_eq!(this.value(Field::AlbumArtworkPeriodSeconds, cx), "1e");
+                assert_eq!(this.inputs[&Field::AlbumArtworkPeriodSeconds], input);
                 this.open_setting_dropdown(
                     vec![ChoiceItem::new(
                         SettingChoice::AlbumArtworkMode(AlbumArtworkMode::Rotating),
@@ -2559,11 +2880,11 @@ mod tests {
                     0,
                 );
                 this.choose_setting(0, cx);
-                assert_eq!(this.value(Field::AlbumArtworkPeriod, cx), "1e");
+                assert_eq!(this.value(Field::AlbumArtworkPeriodSeconds, cx), "1e");
                 input.update(cx, |input, cx| {
                     input.replace_text_in_range(Some(0..2), "12", window, cx);
                 });
-                assert_eq!(this.value(Field::AlbumArtworkPeriod, cx), "12");
+                assert_eq!(this.value(Field::AlbumArtworkPeriodSeconds, cx), "12");
             });
         })
         .unwrap();
@@ -2578,9 +2899,8 @@ mod tests {
             this.model.draft.spectrum_peaks = false;
             this.sync_field_enabled(cx);
             for field in [
-                Field::AlbumArtworkPeriod,
-                Field::SpectrumBars,
-                Field::SpectrumBarWidth,
+                Field::AlbumArtworkPeriodSeconds,
+                Field::SpectrumAutoWidth,
                 Field::SpectrumGap,
                 Field::SpectrumHold,
                 Field::SpectrumGravity,
@@ -2603,21 +2923,20 @@ mod tests {
             play_count_threshold_percent: 23.456789123456,
             ui_scale: 1.234567,
             visualization_db_range: 81.23456,
-            audio_visualizer_sensitivity: 1.234567,
-            audio_visualizer_rotation_speed: 0.456789,
-            audio_visualizer_bar_width: 0.678912,
-            audio_visualizer_ring_opacity: 0.789123,
-            audio_visualizer_bloom_intensity: 0.456789,
-            audio_visualizer_inner_diameter: 0.789123,
-            audio_visualizer_db_range: Some(82.34567),
+            reactive_sensitivity: 1.234567,
+            radial_rotation_speed: 0.456789,
+            radial_bar_width: 0.678912,
+            radial_ring_opacity: 0.789123,
+            reactive_bloom_intensity: 0.456789,
+            radial_inner_diameter: 0.789123,
+            reactive_db_range: Some(82.34567),
             spectrum_db_range: Some(83.45678),
             spectrum_gap: 2.345678,
             spectrum_peak_gravity: 81.23456,
             spectrum_bar_gravity: 41.23456,
-            spectrum_bar_width: 4.567891,
+            spectrum_bar_layout: SpectrumBarLayout::Automatic { width: 4.567891 },
             spectrogram_db_range: Some(84.56789),
-            spectrogram_flow_speed: 0.456789,
-            spectrogram_sampling_points_scale: 0.789123,
+            spectrogram_startup_expansion_speed: 0.456789,
             waveform_glow: 0.456789,
             waveform_rms_gain: 1.234567,
             waveform_peak_gain: 1.234567,
@@ -2633,21 +2952,23 @@ mod tests {
             config.play_count_threshold_percent.to_bits(),
             u64::from(config.ui_scale.to_bits()),
             u64::from(config.visualization_db_range.to_bits()),
-            u64::from(config.audio_visualizer_sensitivity.to_bits()),
-            u64::from(config.audio_visualizer_rotation_speed.to_bits()),
-            u64::from(config.audio_visualizer_bar_width.to_bits()),
-            u64::from(config.audio_visualizer_ring_opacity.to_bits()),
-            u64::from(config.audio_visualizer_bloom_intensity.to_bits()),
-            u64::from(config.audio_visualizer_inner_diameter.to_bits()),
-            u64::from(config.audio_visualizer_db_range.map_or(0, f32::to_bits)),
+            u64::from(config.reactive_sensitivity.to_bits()),
+            u64::from(config.radial_rotation_speed.to_bits()),
+            u64::from(config.radial_bar_width.to_bits()),
+            u64::from(config.radial_ring_opacity.to_bits()),
+            u64::from(config.reactive_bloom_intensity.to_bits()),
+            u64::from(config.radial_inner_diameter.to_bits()),
+            u64::from(config.reactive_db_range.map_or(0, f32::to_bits)),
             u64::from(config.spectrum_db_range.map_or(0, f32::to_bits)),
             u64::from(config.spectrum_gap.to_bits()),
             u64::from(config.spectrum_peak_gravity.to_bits()),
             u64::from(config.spectrum_bar_gravity.to_bits()),
-            u64::from(config.spectrum_bar_width.to_bits()),
+            u64::from(match config.spectrum_bar_layout {
+                SpectrumBarLayout::Automatic { width } => width.to_bits(),
+                SpectrumBarLayout::Fixed { .. } => panic!("precision fixture uses automatic width"),
+            }),
             u64::from(config.spectrogram_db_range.map_or(0, f32::to_bits)),
-            u64::from(config.spectrogram_flow_speed.to_bits()),
-            u64::from(config.spectrogram_sampling_points_scale.to_bits()),
+            u64::from(config.spectrogram_startup_expansion_speed.to_bits()),
             u64::from(config.waveform_glow.to_bits()),
             u64::from(config.waveform_rms_gain.to_bits()),
             u64::from(config.waveform_peak_gain.to_bits()),
@@ -2665,39 +2986,36 @@ mod tests {
             ),
             (Field::Scale, config.ui_scale.to_string()),
             (
-                Field::VisualizationDb,
+                Field::VisualizationDbRange,
                 config.visualization_db_range.to_string(),
             ),
             (
-                Field::AudioVisualizerSensitivity,
-                config.audio_visualizer_sensitivity.to_string(),
+                Field::ReactiveSensitivity,
+                config.reactive_sensitivity.to_string(),
             ),
             (
-                Field::AudioVisualizerRotationSpeed,
-                config.audio_visualizer_rotation_speed.to_string(),
+                Field::RadialRotationSpeed,
+                config.radial_rotation_speed.to_string(),
+            ),
+            (Field::RadialBarWidth, config.radial_bar_width.to_string()),
+            (
+                Field::RadialRingOpacity,
+                config.radial_ring_opacity.to_string(),
             ),
             (
-                Field::AudioVisualizerBarWidth,
-                config.audio_visualizer_bar_width.to_string(),
+                Field::ReactiveBloomIntensity,
+                config.reactive_bloom_intensity.to_string(),
             ),
             (
-                Field::AudioVisualizerRingOpacity,
-                config.audio_visualizer_ring_opacity.to_string(),
+                Field::RadialInnerDiameter,
+                config.radial_inner_diameter.to_string(),
             ),
             (
-                Field::AudioVisualizerBloomIntensity,
-                config.audio_visualizer_bloom_intensity.to_string(),
+                Field::ReactiveDbRange,
+                config.reactive_db_range.unwrap().to_string(),
             ),
             (
-                Field::AudioVisualizerInnerDiameter,
-                config.audio_visualizer_inner_diameter.to_string(),
-            ),
-            (
-                Field::AudioVisualizerDb,
-                config.audio_visualizer_db_range.unwrap().to_string(),
-            ),
-            (
-                Field::SpectrumDb,
+                Field::SpectrumDbRange,
                 config.spectrum_db_range.unwrap().to_string(),
             ),
             (Field::SpectrumGap, config.spectrum_gap.to_string()),
@@ -2710,22 +3028,23 @@ mod tests {
                 config.spectrum_bar_gravity.to_string(),
             ),
             (
-                Field::SpectrumBarWidth,
-                config.spectrum_bar_width.to_string(),
+                Field::SpectrumAutoWidth,
+                match config.spectrum_bar_layout {
+                    SpectrumBarLayout::Automatic { width } => width.to_string(),
+                    SpectrumBarLayout::Fixed { .. } => {
+                        panic!("precision fixture uses automatic width")
+                    }
+                },
             ),
             (
-                Field::SpectrogramDb,
+                Field::SpectrogramDbRange,
                 config.spectrogram_db_range.unwrap().to_string(),
             ),
             (
-                Field::SpectrogramFlowSpeed,
-                config.spectrogram_flow_speed.to_string(),
+                Field::SpectrogramStartupExpansionSpeed,
+                config.spectrogram_startup_expansion_speed.to_string(),
             ),
-            (
-                Field::SpectrogramSamplingPointsScale,
-                config.spectrogram_sampling_points_scale.to_string(),
-            ),
-            (Field::Glow, config.waveform_glow.to_string()),
+            (Field::WaveformGlow, config.waveform_glow.to_string()),
             (Field::WaveformRmsGain, config.waveform_rms_gain.to_string()),
             (
                 Field::WaveformPeakGain,
@@ -2736,7 +3055,7 @@ mod tests {
                 config.waveform_peak_gamma.to_string(),
             ),
             (
-                Field::AlbumArtworkPeriod,
+                Field::AlbumArtworkPeriodSeconds,
                 config.album_artwork_period_seconds.to_string(),
             ),
         ]
@@ -2777,7 +3096,7 @@ mod tests {
             assert_eq!(this.value(Field::Volume, cx), "12");
             assert_eq!(this.value(Field::PlayCountThreshold, cx), "23.5");
             assert_eq!(this.value(Field::Scale, cx), "1.23");
-            assert_eq!(this.value(Field::SpectrumDb, cx), "83.5");
+            assert_eq!(this.value(Field::SpectrumDbRange, cx), "83.5");
             assert_eq!(this.value(Field::SpectrumGravity, cx), "81.2");
             assert_eq!(
                 numeric_bits(&this.parse(cx).unwrap()),
@@ -2862,9 +3181,9 @@ mod tests {
         edit_input(&settings, window, Field::Scale, "1.23", cx);
         edit_input(&settings, window, Field::Volume, "12", cx);
         for field in [
-            Field::AudioVisualizerDb,
-            Field::SpectrumDb,
-            Field::SpectrogramDb,
+            Field::ReactiveDbRange,
+            Field::SpectrumDbRange,
+            Field::SpectrogramDbRange,
         ] {
             edit_input(&settings, window, field, "", cx);
         }
@@ -2872,19 +3191,19 @@ mod tests {
             let parsed = this.parse(cx).unwrap();
             assert_eq!(parsed.ui_scale.to_bits(), 1.23_f32.to_bits());
             assert_eq!(parsed.volume.to_bits(), 0.12_f32.to_bits());
-            assert_eq!(parsed.audio_visualizer_db_range, None);
+            assert_eq!(parsed.reactive_db_range, None);
             assert_eq!(parsed.spectrum_db_range, None);
             assert_eq!(parsed.spectrogram_db_range, None);
         });
         let (patch, submission) = submit(&settings, cx);
         let (committed, result) = execute(&runtime, patch);
         assert!(result.is_ok());
-        assert_eq!(committed.audio_visualizer_db_range, None);
+        assert_eq!(committed.reactive_db_range, None);
         assert_eq!(committed.spectrum_db_range, None);
         assert_eq!(committed.spectrogram_db_range, None);
         settings.update(cx, |this, cx| {
             this.complete_settings_apply(submission, committed, result, cx);
-            assert!(this.value(Field::SpectrumDb, cx).is_empty());
+            assert!(this.value(Field::SpectrumDbRange, cx).is_empty());
             assert_eq!(this.parse(cx).unwrap().spectrum_db_range, None);
             // Programmatic fills are not edits, even after earlier user input.
             this.reset(&precise, cx);
@@ -2916,12 +3235,12 @@ mod tests {
         assert!(result.is_ok());
         edit_input(&settings, window, Field::Scale, "1.23", cx);
         edit_input(&settings, window, Field::WaveformPeakGamma, "1e", cx);
-        edit_input(&settings, window, Field::SpectrumDb, "", cx);
+        edit_input(&settings, window, Field::SpectrumDbRange, "", cx);
         settings.update(cx, |this, cx| {
             this.complete_settings_apply(submission, committed, result, cx);
             assert_eq!(this.value(Field::Scale, cx), "1.23");
             assert_eq!(this.value(Field::WaveformPeakGamma, cx), "1e");
-            assert!(this.value(Field::SpectrumDb, cx).is_empty());
+            assert!(this.value(Field::SpectrumDbRange, cx).is_empty());
             assert!(this.parse(cx).is_err());
         });
         edit_input(&settings, window, Field::WaveformPeakGamma, "1.876543", cx);
@@ -2946,18 +3265,15 @@ mod tests {
     ) {
         let (_directory, _runtime, settings) = fixture(cx);
         settings.update(cx, |this, cx| {
-            this.model.draft.audio_visualizer_rotation_speed = -0.0;
-            this.model.draft.audio_visualizer_sensitivity = 1.5;
+            this.model.draft.radial_rotation_speed = -0.0;
+            this.model.draft.reactive_sensitivity = 1.5;
             this.model.draft.visualization_db_range = 80.0;
             this.fill(cx);
-            assert_eq!(this.value(Field::AudioVisualizerRotationSpeed, cx), "0");
-            assert_eq!(this.value(Field::AudioVisualizerSensitivity, cx), "1.5");
-            assert_eq!(this.value(Field::VisualizationDb, cx), "80");
+            assert_eq!(this.value(Field::RadialRotationSpeed, cx), "0");
+            assert_eq!(this.value(Field::ReactiveSensitivity, cx), "1.5");
+            assert_eq!(this.value(Field::VisualizationDbRange, cx), "80");
             assert_eq!(
-                this.parse(cx)
-                    .unwrap()
-                    .audio_visualizer_rotation_speed
-                    .to_bits(),
+                this.parse(cx).unwrap().radial_rotation_speed.to_bits(),
                 (-0.0_f32).to_bits()
             );
         });
@@ -2993,7 +3309,13 @@ mod tests {
         settings.update(cx, |this, cx| {
             this.complete_panel_apply(this.model.session(), Ok(()), cx);
         });
-        edit_input(&settings, window, Field::AlbumArtworkPeriod, "23.46", cx);
+        edit_input(
+            &settings,
+            window,
+            Field::AlbumArtworkPeriodSeconds,
+            "23.46",
+            cx,
+        );
         settings.update(cx, |this, cx| this.apply_settings(cx));
         assert_eq!(periods.borrow()[1], 23.46_f32.to_bits());
     }
@@ -3304,26 +3626,310 @@ mod tests {
     fn scan_min_duration_accepts_only_u32_seconds_and_applies(cx: &mut TestAppContext) {
         let (_directory, runtime, settings) = fixture(cx);
         settings.update(cx, |this, cx| {
-            assert_eq!(this.value(Field::ScanMinDuration, cx), "0");
+            assert_eq!(this.value(Field::ScanMinDurationSeconds, cx), "0");
             for value in ["-1", "1.5", "4294967296", ""] {
-                this.set_value(Field::ScanMinDuration, value, None, cx);
+                this.set_value(Field::ScanMinDurationSeconds, value, None, cx);
                 assert!(this.parse(cx).is_err(), "accepted {value}");
             }
-            this.set_value(Field::ScanMinDuration, u32::MAX.to_string(), None, cx);
-            assert_eq!(this.parse(cx).unwrap().scan_min_duration_secs, u32::MAX);
+            this.set_value(
+                Field::ScanMinDurationSeconds,
+                u32::MAX.to_string(),
+                None,
+                cx,
+            );
+            assert_eq!(this.parse(cx).unwrap().scan_min_duration_seconds, u32::MAX);
         });
         for seconds in [30, 0] {
             settings.update(cx, |this, cx| {
-                this.set_value(Field::ScanMinDuration, seconds.to_string(), None, cx);
+                this.set_value(Field::ScanMinDurationSeconds, seconds.to_string(), None, cx);
             });
             let (patch, submission) = submit(&settings, cx);
             let (committed, result) = execute(&runtime, patch);
             assert!(result.is_ok());
-            assert_eq!(committed.scan_min_duration_secs, seconds);
+            assert_eq!(committed.scan_min_duration_seconds, seconds);
             settings.update(cx, |this, cx| {
                 this.complete_settings_apply(submission, committed, result, cx);
-                assert_eq!(this.parse(cx).unwrap().scan_min_duration_secs, seconds);
+                assert_eq!(this.parse(cx).unwrap().scan_min_duration_seconds, seconds);
             });
         }
+    }
+
+    #[gpui::test]
+    fn successful_feedback_clears_on_text_edits_and_later_apply_edits(cx: &mut TestAppContext) {
+        let (_directory, runtime, settings) = fixture(cx);
+        let window = cx.add_window({
+            let settings = settings.clone();
+            move |_, _| SettingsWindow(settings)
+        });
+        let (patch, submission) = submit(&settings, cx);
+        let (committed, result) = execute(&runtime, patch);
+        settings.update(cx, |this, cx| {
+            this.complete_settings_apply(submission, committed, result, cx);
+            assert_eq!(this.model.feedback(), &Some(Ok(())));
+        });
+        edit_input(&settings, window, Field::ScanMaxDepth, "7", cx);
+        settings.read_with(cx, |this, _| assert!(this.model.feedback().is_none()));
+        let (patch, submission) = submit(&settings, cx);
+        let (committed, result) = execute(&runtime, patch);
+        edit_input(&settings, window, Field::Scale, "1e", cx);
+        settings.update(cx, |this, cx| {
+            this.complete_settings_apply(submission, committed, result, cx);
+            assert!(this.model.feedback().is_none());
+            assert_eq!(this.value(Field::Scale, cx), "1e");
+        });
+    }
+
+    #[gpui::test]
+    fn invalid_disabled_drafts_route_to_owner_and_reset_only_that_field(cx: &mut TestAppContext) {
+        let (_directory, _runtime, settings) = fixture(cx);
+        settings.update(cx, |this, cx| {
+            this.model.draft.spectrum_style = SpectrumStyle::Solid;
+            this.sync_field_enabled(cx);
+            this.set_value(Field::SpectrumAutoWidth, "invalid", None, cx);
+            this.set_value(Field::Font, "custom-font", None, cx);
+            this.page = SettingsPage::Playback;
+            this.apply_settings(cx);
+            assert!(this.page == SettingsPage::Visualizations);
+            assert_eq!(this.visual_page, VisualPage::Spectrum);
+            assert_eq!(this.value(Field::SpectrumAutoWidth, cx), "invalid");
+            this.restore_field_text(Field::SpectrumAutoWidth, cx);
+            assert_eq!(this.value(Field::Font, cx), "custom-font");
+            assert!(this.parse(cx).is_ok());
+            this.set_value(Field::AlbumArtworkPeriodSeconds, "0", None, cx);
+            let error = this.parse(cx).unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<FieldIssue>().unwrap().field,
+                Field::AlbumArtworkPeriodSeconds
+            );
+            this.restore_field_text(Field::AlbumArtworkPeriodSeconds, cx);
+            assert!(this.parse(cx).is_ok());
+        });
+    }
+
+    #[gpui::test]
+    fn spectrum_layout_parses_only_active_value_and_validates_boundaries(cx: &mut TestAppContext) {
+        let (_directory, _runtime, settings) = fixture(cx);
+        settings.update(cx, |this, cx| {
+            this.set_value(
+                Field::SpectrumFixedCount,
+                "invalid inactive count",
+                None,
+                cx,
+            );
+            for text in ["1", "20", "3.1234567"] {
+                this.set_value(Field::SpectrumAutoWidth, text, None, cx);
+                assert_eq!(
+                    this.parse(cx).unwrap().spectrum_bar_layout,
+                    SpectrumBarLayout::Automatic {
+                        width: text.parse().unwrap()
+                    }
+                );
+            }
+            for text in ["", "1e", "NaN", "inf", "0", "20.01"] {
+                this.set_value(Field::SpectrumAutoWidth, text, None, cx);
+                assert_eq!(
+                    this.parse(cx)
+                        .unwrap_err()
+                        .downcast_ref::<FieldIssue>()
+                        .unwrap()
+                        .field,
+                    Field::SpectrumAutoWidth
+                );
+            }
+            this.restore_field_text(Field::SpectrumAutoWidth, cx);
+            this.select_spectrum_layout(SpectrumLayoutMode::Fixed, cx);
+            this.set_value(Field::SpectrumAutoWidth, "invalid inactive width", None, cx);
+            for text in ["1", "64", "512"] {
+                this.set_value(Field::SpectrumFixedCount, text, None, cx);
+                assert_eq!(
+                    this.parse(cx).unwrap().spectrum_bar_layout,
+                    SpectrumBarLayout::Fixed {
+                        count: text.parse().unwrap()
+                    }
+                );
+            }
+            for text in ["", "0", "513", "1.5", "-1"] {
+                this.set_value(Field::SpectrumFixedCount, text, None, cx);
+                assert_eq!(
+                    this.parse(cx)
+                        .unwrap_err()
+                        .downcast_ref::<FieldIssue>()
+                        .unwrap()
+                        .field,
+                    Field::SpectrumFixedCount
+                );
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn spectrum_mode_switch_rejects_invalid_edits_and_same_mode_keeps_precision(
+        cx: &mut TestAppContext,
+    ) {
+        let (_directory, _runtime, settings) = fixture(cx);
+        settings.update(cx, |this, cx| {
+            this.model.draft.spectrum_style = SpectrumStyle::Bars;
+            this.sync_field_enabled(cx);
+        });
+        let window = cx.add_window({
+            let settings = settings.clone();
+            move |_, _| SettingsWindow(settings)
+        });
+        edit_input(&settings, window, Field::SpectrumAutoWidth, "1e", cx);
+        settings.update(cx, |this, cx| {
+            this.open_setting_dropdown(
+                vec![ChoiceItem::new(
+                    SettingChoice::SpectrumLayout(SpectrumLayoutMode::Fixed),
+                    "Fixed count",
+                )],
+                0,
+            );
+            this.choose_setting(0, cx);
+            assert_eq!(this.spectrum_layout_field(), Field::SpectrumAutoWidth);
+            assert_eq!(this.value(Field::SpectrumAutoWidth, cx), "1e");
+            assert!(this.layout_switch_error.is_some());
+            this.select_spectrum_layout(SpectrumLayoutMode::Automatic, cx);
+            assert_eq!(this.value(Field::SpectrumAutoWidth, cx), "1e");
+        });
+        edit_input(&settings, window, Field::SpectrumAutoWidth, "3.1234567", cx);
+        settings.update(cx, |this, cx| {
+            this.select_spectrum_layout(SpectrumLayoutMode::Automatic, cx);
+            assert_eq!(this.value(Field::SpectrumAutoWidth, cx), "3.1234567");
+            let SpectrumBarLayout::Automatic { width } =
+                this.parse(cx).unwrap().spectrum_bar_layout
+            else {
+                panic!("automatic layout");
+            };
+            assert_eq!(width.to_bits(), 3.1234567_f32.to_bits());
+            this.select_spectrum_layout(SpectrumLayoutMode::Fixed, cx);
+            assert_eq!(
+                this.parse(cx).unwrap().spectrum_bar_layout,
+                SpectrumBarLayout::Fixed { count: 64 }
+            );
+            this.set_value(Field::SpectrumFixedCount, "0", None, cx);
+            this.select_spectrum_layout(SpectrumLayoutMode::Automatic, cx);
+            assert_eq!(this.spectrum_layout_field(), Field::SpectrumFixedCount);
+            assert_eq!(this.value(Field::SpectrumFixedCount, cx), "0");
+            this.restore_field_text(Field::SpectrumFixedCount, cx);
+            assert_eq!(this.value(Field::SpectrumFixedCount, cx), "64");
+            this.select_spectrum_layout(SpectrumLayoutMode::Automatic, cx);
+            assert_eq!(
+                this.parse(cx).unwrap().spectrum_bar_layout,
+                SpectrumBarLayout::Automatic { width: 3.0 }
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn spectrum_mode_switch_during_apply_preserves_new_mode_and_later_partial_text(
+        cx: &mut TestAppContext,
+    ) {
+        let (_directory, runtime, settings) = fixture(cx);
+        settings.update(cx, |this, cx| {
+            this.model.draft.spectrum_style = SpectrumStyle::Bars;
+            this.sync_field_enabled(cx);
+        });
+        let window = cx.add_window({
+            let settings = settings.clone();
+            move |_, _| SettingsWindow(settings)
+        });
+        edit_input(&settings, window, Field::SpectrumAutoWidth, "4.567891", cx);
+        let (patch, submission) = submit(&settings, cx);
+        let (committed, result) = execute(&runtime, patch);
+        settings.update(cx, |this, cx| {
+            this.select_spectrum_layout(SpectrumLayoutMode::Fixed, cx);
+        });
+        edit_input(&settings, window, Field::SpectrumFixedCount, "127", cx);
+        settings.update(cx, |this, cx| {
+            this.complete_settings_apply(submission, committed, result, cx);
+            assert_eq!(
+                this.model.baseline().spectrum_bar_layout,
+                SpectrumBarLayout::Automatic { width: 4.567891 }
+            );
+            assert_eq!(
+                this.parse(cx).unwrap().spectrum_bar_layout,
+                SpectrumBarLayout::Fixed { count: 127 }
+            );
+            assert!(this.model.feedback().is_none());
+        });
+        let (patch, submission) = submit(&settings, cx);
+        let (committed, result) = execute(&runtime, patch);
+        settings.update(cx, |this, cx| {
+            this.select_spectrum_layout(SpectrumLayoutMode::Automatic, cx);
+        });
+        edit_input(&settings, window, Field::SpectrumAutoWidth, "1e", cx);
+        settings.update(cx, |this, cx| {
+            this.select_spectrum_layout(SpectrumLayoutMode::Fixed, cx);
+            assert!(this.layout_switch_error.is_some());
+            this.complete_settings_apply(submission, committed, result, cx);
+            assert_eq!(
+                this.model.baseline().spectrum_bar_layout,
+                SpectrumBarLayout::Fixed { count: 127 }
+            );
+            assert_eq!(
+                this.model.draft.spectrum_bar_layout,
+                SpectrumBarLayout::Automatic { width: 3.0 }
+            );
+            assert_eq!(this.value(Field::SpectrumAutoWidth, cx), "1e");
+            assert!(this.parse(cx).is_err());
+            assert!(this.layout_switch_error.is_some());
+            this.restore_field_text(Field::SpectrumAutoWidth, cx);
+            assert!(this.layout_switch_error.is_none());
+            assert_eq!(
+                this.parse(cx).unwrap().spectrum_bar_layout,
+                SpectrumBarLayout::Automatic { width: 3.0 }
+            );
+        });
+        let (patch, submission) = submit(&settings, cx);
+        let (committed, result) = execute(&runtime, patch);
+        settings.update(cx, |this, cx| {
+            this.complete_settings_apply(submission, committed, result, cx);
+            assert_eq!(this.model.feedback(), &Some(Ok(())));
+        });
+    }
+
+    #[gpui::test]
+    fn spectrum_switch_back_fences_identical_text_and_discard_fences_completion(
+        cx: &mut TestAppContext,
+    ) {
+        let (_directory, runtime, settings) = fixture(cx);
+        let (patch, submission) = submit(&settings, cx);
+        let (committed, result) = execute(&runtime, patch);
+        settings.update(cx, |this, cx| {
+            this.select_spectrum_layout(SpectrumLayoutMode::Fixed, cx);
+            this.select_spectrum_layout(SpectrumLayoutMode::Automatic, cx);
+            let mut external = committed.as_ref().clone();
+            external.spectrum_bar_layout = SpectrumBarLayout::Fixed { count: 99 };
+            this.complete_settings_apply(submission, Arc::new(external), result, cx);
+            assert_eq!(
+                this.model.baseline().spectrum_bar_layout,
+                SpectrumBarLayout::Fixed { count: 99 }
+            );
+            assert_eq!(
+                this.parse(cx).unwrap().spectrum_bar_layout,
+                SpectrumBarLayout::Automatic { width: 3.0 }
+            );
+            assert_eq!(this.value(Field::SpectrumAutoWidth, cx), "3");
+        });
+        let (patch, submission) = submit(&settings, cx);
+        let (committed, result) = execute(&runtime, patch);
+        settings.update(cx, |this, cx| {
+            this.reset(&Arc::clone(&committed), cx);
+            this.select_spectrum_layout(SpectrumLayoutMode::Fixed, cx);
+            this.complete_settings_apply(submission, committed, result, cx);
+            assert_eq!(
+                this.parse(cx).unwrap().spectrum_bar_layout,
+                SpectrumBarLayout::Fixed { count: 64 }
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn empty_font_editor_selects_monospace(cx: &mut TestAppContext) {
+        let (_directory, _runtime, settings) = fixture(cx);
+        settings.update(cx, |this, cx| {
+            this.set_value(Field::Font, "  ", None, cx);
+            assert_eq!(this.parse(cx).unwrap().ui_font, "monospace");
+        });
     }
 }

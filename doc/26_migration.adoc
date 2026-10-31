@@ -96,16 +96,6 @@ and file I/O retain their distinct causes. The tool never rewrites configuration
 creates its backup, or takes a configuration writer lock. See
 link:01_config.adoc#_saving_configuration[Saving configuration] for persistence.
 
-The restoration control formerly named `noise_floor_db` is now
-`spectral_gain_floor_db` in `[denoise]`, processing-graph denoise node
-configurations, and CLI JSON patches. Rename that key while preserving its numeric
-value; the old key is rejected, with no compatibility alias or automatic rewrite.
-The current configuration schema remains `1`: this is a same-value naming cutover,
-not a new configuration layout. IPC remains version `10` because its postcard
-encoding uses field positions, and this rename leaves field order, types and values
-unchanged. See link:27_audio_processing.adoc#_restoration[Restoration] for the
-control's meaning.
-
 == Persistent summaries and runtime authority
 
 `albums` and `album_artists` are persistent derived summaries maintained by four

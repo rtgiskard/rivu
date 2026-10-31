@@ -328,7 +328,7 @@ impl WindowView {
                 for panel in panels.iter().filter(|_| show_tab_bar) {
                     let panel_id = panel.id;
                     let title = if let Some(options) = panel.audio_visualizer {
-                        self.tr(visualization::audio_visualizer_style_id(options.style))
+                        self.tr(visualization::visualization_style_id(options.style))
                     } else {
                         panel_spec(&panel.kind).map_or_else(
                             || SharedString::from(panel.kind.clone()),

@@ -28,11 +28,9 @@ pub(super) struct Spectrogram {
     pub(super) draws: Vec<(Bounds<f32>, Arc<GpuFrame>)>,
     pub(super) db_range: f32,
     pub(super) interpolate: bool,
-    pub(super) interpolation_points: u32,
-    pub(super) sampling_points_scale: f32,
     pub(super) history_seconds: u32,
-    pub(super) flow_speed: f32,
-    pub(super) accumulation: u32,
+    pub(super) startup_expansion_speed: f32,
+    pub(super) outflow_threshold_percent: u32,
     pub(super) flow: SpectrogramFlow,
     pub(super) history_limit_seconds: f64,
     pub(super) history_columns: usize,
@@ -58,11 +56,9 @@ impl Spectrogram {
             draws: Vec::new(),
             db_range: config.spectrogram_db_range(),
             interpolate: config.spectrogram_interpolate,
-            interpolation_points: config.spectrogram_interpolation_points,
-            sampling_points_scale: config.spectrogram_sampling_points_scale,
             history_seconds: config.spectrogram_history_seconds,
-            flow_speed: config.spectrogram_flow_speed,
-            accumulation: config.spectrogram_accumulation,
+            startup_expansion_speed: config.spectrogram_startup_expansion_speed,
+            outflow_threshold_percent: config.spectrogram_outflow_threshold_percent,
             flow: SpectrogramFlow::default(),
             history_limit_seconds: config.spectrogram_history_seconds as f64,
             history_columns: 0,
@@ -100,29 +96,27 @@ pub(super) struct SpectrogramPresentation {
     pub(super) labels: [SharedString; 2],
 }
 
-pub(super) fn history_column_count(history_seconds: u32, analysis_fps: u32) -> usize {
+pub(super) fn history_column_count(history_seconds: u32, analysis_rate_hz: u32) -> usize {
     usize::try_from(history_seconds)
         .unwrap_or(usize::MAX)
-        .saturating_mul(analysis_fps as usize)
+        .saturating_mul(analysis_rate_hz as usize)
         .max(2)
 }
 pub(super) fn history_columns_for_width(
     history_seconds: u32,
-    analysis_fps: u32,
+    analysis_rate_hz: u32,
     width: usize,
 ) -> usize {
-    history_column_count(history_seconds, analysis_fps).min(width.max(2))
+    history_column_count(history_seconds, analysis_rate_hz).min(width.max(2))
 }
-pub(super) fn spectrogram_source_height(
-    panel_height: usize,
-    source_rows: usize,
-    max_rows: u32,
-    scale: f32,
-) -> usize {
-    let pixel_rows = ((panel_height as f32) * scale).ceil() as usize;
+const SPECTROGRAM_FREQUENCY_ROW_SCALE: f32 = 0.5;
+const SPECTROGRAM_MAX_FREQUENCY_ROWS: usize = 1024;
+
+pub(super) fn spectrogram_source_height(panel_height: usize, source_rows: usize) -> usize {
+    let pixel_rows = ((panel_height as f32) * SPECTROGRAM_FREQUENCY_ROW_SCALE).ceil() as usize;
     pixel_rows
         .max(source_rows.max(1))
-        .min(usize::try_from(max_rows.max(1)).unwrap_or(usize::MAX))
+        .min(SPECTROGRAM_MAX_FREQUENCY_ROWS)
 }
 
 // Half the shared budget remains available for other content and placements.
@@ -161,8 +155,8 @@ impl FrequencyState {
             now,
             self.spectrogram.columns[latest].interval_start,
             self.spectrogram.history_limit_seconds,
-            self.spectrogram.flow_speed,
-            self.spectrogram.accumulation,
+            self.spectrogram.startup_expansion_speed,
+            self.spectrogram.outflow_threshold_percent,
         );
     }
 
@@ -191,8 +185,11 @@ impl FrequencyState {
             .map(|size| size.1)
             .max()
             .unwrap_or(0);
-        let columns =
-            history_columns_for_width(self.spectrogram.history_seconds, self.analysis_fps, width);
+        let columns = history_columns_for_width(
+            self.spectrogram.history_seconds,
+            self.analysis_rate_hz,
+            width,
+        );
         self.resize_history(columns);
         previous
             != (
@@ -260,7 +257,7 @@ impl FrequencyState {
     }
     pub(super) fn resize_history(&mut self, requested_columns: usize) {
         let new_columns = requested_columns.max(2);
-        let limit = (new_columns as f64 / self.analysis_fps.max(1) as f64)
+        let limit = (new_columns as f64 / self.analysis_rate_hz.max(1) as f64)
             .min(self.spectrogram.history_seconds as f64);
         if self.spectrogram.history_limit_seconds != limit {
             self.spectrogram.history_limit_seconds = limit;
@@ -355,17 +352,13 @@ impl FrequencyState {
         }
         let start_time = mapping.visible_start(latest_time);
         let source_rows = last.saturating_sub(first) + 1;
-        let height = spectrogram_source_height(
-            self.spectrogram.panel_height,
-            source_rows,
-            self.spectrogram.interpolation_points,
-            self.spectrogram.sampling_points_scale,
-        )
-        .min(spectrogram_budget_rows(
-            self.spectrogram.history_columns,
-            self.material_budget_bytes
-                .expect("configured visualization budget"),
-        ));
+        let height = spectrogram_source_height(self.spectrogram.panel_height, source_rows).min(
+            spectrogram_budget_rows(
+                self.spectrogram.history_columns,
+                self.material_budget_bytes
+                    .expect("configured visualization budget"),
+            ),
+        );
         if self.spectrogram.sample_height != height
             || self.spectrogram.heat_sample_generation != self.stream_generation
         {
@@ -504,7 +497,7 @@ impl FrequencyState {
             .get(&panel_id)
             .map(|presentation| &presentation.labels)
             .unwrap_or(&self.spectrogram.frequency_labels);
-        let left_margin = axis_label_margin(options.label, labels);
+        let left_margin = axis_label_margin(options.labels, labels);
         let plot = Bounds::new(
             point(bounds.left() + px(left_margin), bounds.top() + px(6.0)),
             size(
@@ -530,7 +523,7 @@ impl FrequencyState {
             }
             Ok::<(), String>(())
         })?;
-        if options.label {
+        if options.labels {
             paint_aligned_label(
                 presentation.labels[1].clone(),
                 point(plot.left() - px(5.0), plot.top()),

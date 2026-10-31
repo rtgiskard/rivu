@@ -269,8 +269,6 @@ no configuration payload. Both section schemas are versioned positional contract
 collection lengths and optional fields are encoded in the message body.
 Library information-column selection is encoded in WireConfig as five booleans
 in Artist, Album, Duration, Codec, and Bitrate order; all false means no columns.
-Protocol version `9` removes the visualization-cache field from `WireConfig`;
-there is no compatibility schema for its former positional layout.
 
 Library, Queue, album-member, and playlist-entry rows carry source paths, CUE
 track numbers, and cached audio specifications, including bitrate certainty.

@@ -36,9 +36,9 @@ impl Default for Budget {
 }
 
 impl Budget {
-    pub(super) const fn new(retained_mb: u32) -> Self {
+    pub(super) const fn new(retained_mib: u32) -> Self {
         Self {
-            retained: retained_mb as u64 * MIB,
+            retained: retained_mib as u64 * MIB,
             workspace: 64 * MIB,
             max_side: 4096,
         }
@@ -338,9 +338,9 @@ pub(super) mod tests {
 
     #[test]
     fn configured_retained_budget_keeps_workspace_and_dimension_caps_fixed() {
-        for retained_mb in [1, 64, 1024] {
-            let budget = Budget::new(retained_mb);
-            assert_eq!(budget.retained, u64::from(retained_mb) * MIB);
+        for retained_mib in [1, 64, 1024] {
+            let budget = Budget::new(retained_mib);
+            assert_eq!(budget.retained, u64::from(retained_mib) * MIB);
             assert_eq!(budget.workspace, 64 * MIB);
             assert_eq!(budget.max_side, 4096);
         }

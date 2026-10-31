@@ -222,7 +222,7 @@ fn typography_uses_the_root_font_across_snapshot_and_size_changes(cx: &mut TestA
         this.set_ui_font(root_font.clone(), cx);
         assert_eq!(this.ui_font, root_font);
         let mut state = (*this.state).clone();
-        Arc::make_mut(&mut state.system.config).ui_font_size += 1;
+        Arc::make_mut(&mut state.system.config).ui_font_size_pt += 1;
         this.reconcile(Rc::new(state), cx);
         assert_eq!(this.ui_font, root_font);
         this.set_ui_font(root_font.clone(), cx);

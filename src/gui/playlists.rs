@@ -147,7 +147,7 @@ impl Playlists {
             }),
         ];
         let mut browser = model::PlaylistModel::default();
-        browser.configure_page_size(state.system.config.page_size as usize);
+        browser.configure_page_size(state.system.config.query_batch_size as usize);
         Self {
             context,
             state,
@@ -184,7 +184,7 @@ impl Playlists {
         let selected = self.browser.playlists().selected();
         let changed = changes.summaries
             || changes.entries
-            || self.state.system.config.page_size != state.system.config.page_size
+            || self.state.system.config.query_batch_size != state.system.config.query_batch_size
             || self.state.library.playlist_total != state.library.playlist_total
             || self.state.current_track().map(|track| track.id)
                 != state.current_track().map(|track| track.id)
@@ -195,7 +195,7 @@ impl Playlists {
             || self.state.system.scan_message != state.system.scan_message
             || self.state.system.shutting_down != state.system.shutting_down;
         self.browser
-            .configure_page_size(state.system.config.page_size as usize);
+            .configure_page_size(state.system.config.query_batch_size as usize);
         self.browser.playlists.reconcile_selection();
         if self
             .browser

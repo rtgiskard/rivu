@@ -419,14 +419,14 @@ This applies to Library, Queue, playlists, history, metadata, and overflowing
 Playback content. Hidden or closed views cannot remain keyboard targets.
 Settings uses these keys for its current page or open dropdown; text inputs
 retain editing behavior. About and open menus prevent background paging.
-`interface.page_size` controls query batch size, not the visible viewport or total results;
+`interface.query_batch_size` controls query batch size, not the visible viewport or total results;
 see link:01_config.adoc[Configuration] for its range. In the TUI,
 PageUp/PageDown moves the selection by one screen; returning from a directory or
 playlist detail restores the parent selection and viewport. Exiting the TUI
 does not have to wait for a stalled query.
 
 CLI `library list`, `queue list`, `playlist list`, and `playlist show` include all
-matching rows, independently of `interface.page_size`. If relevant data changes while a listing
+matching rows, independently of `interface.query_batch_size`. If relevant data changes while a listing
 is being read, the command stops, prints a `Listing incomplete` notice on stderr,
 and exits with status 1. Already emitted text may be incomplete, and JSON may be
 invalid; discard it and retry. GUI/TUI refresh stale query results automatically.
@@ -575,7 +575,7 @@ nested scan has its own boundary, even when an enclosing walk skipped it.
 
 === Minimum duration for new tracks
 
-`library.scan_min_duration_secs` is a new-track admission policy, not a constraint
+`library.scan_min_duration_seconds` is a new-track admission policy, not a constraint
 on library contents. It applies to ordinary audio discovered by directory scans,
 direct requests, forced scans, and playlist imports. `0` disables it; otherwise
 only new tracks with a known, finite, positive duration strictly less than the

@@ -19,6 +19,7 @@ pub(super) enum PanelApply {
 pub(super) struct Submission {
     session: u64,
     config: Config,
+    edit_revision: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,6 +38,8 @@ pub(super) struct SettingsModel {
     target: Target,
     applying: bool,
     feedback: Option<Result<(), String>>,
+    edit_revision: u64,
+    submitted_revision: u64,
 }
 
 impl SettingsModel {
@@ -48,6 +51,8 @@ impl SettingsModel {
             target: Target::Global,
             applying: false,
             feedback: None,
+            edit_revision: 0,
+            submitted_revision: 0,
         }
     }
 
@@ -79,6 +84,8 @@ impl SettingsModel {
         self.target = Target::Global;
         self.applying = false;
         self.feedback = None;
+        self.edit_revision = 0;
+        self.submitted_revision = 0;
     }
 
     pub(super) fn reset_artwork(
@@ -93,6 +100,17 @@ impl SettingsModel {
         self.draft.album_artwork_mode = options.mode;
         self.draft.album_artwork_direction = options.direction;
         self.draft.album_artwork_period_seconds = options.period_seconds;
+    }
+
+    pub(super) fn edited(&mut self) {
+        self.edit_revision = self.edit_revision.wrapping_add(1);
+        self.feedback = None;
+    }
+
+    pub(super) fn clear_success(&mut self) {
+        if matches!(self.feedback, Some(Ok(()))) {
+            self.feedback = None;
+        }
     }
 
     pub(super) fn reject_input(&mut self, error: String) {
@@ -115,6 +133,7 @@ impl SettingsModel {
             Submission {
                 session: self.session,
                 config,
+                edit_revision: self.edit_revision,
             },
         ))
     }
@@ -131,6 +150,7 @@ impl SettingsModel {
                 if !period_seconds.is_finite() || period_seconds <= 0.0 {
                     return None;
                 }
+                self.draft.album_artwork_period_seconds = period_seconds;
                 PanelApply::Artwork {
                     panel_id,
                     options: AlbumArtworkOptions {
@@ -144,6 +164,7 @@ impl SettingsModel {
             }
         };
         self.applying = true;
+        self.submitted_revision = self.edit_revision;
         self.feedback = None;
         Some(request)
     }
@@ -167,7 +188,11 @@ impl SettingsModel {
         } else {
             Completion::Failed
         };
-        self.feedback = Some(result);
+        self.feedback = if result.is_ok() && self.edit_revision != submission.edit_revision {
+            None
+        } else {
+            Some(result)
+        };
         completion
     }
 
@@ -180,7 +205,11 @@ impl SettingsModel {
             return false;
         }
         self.applying = false;
-        self.feedback = Some(result);
+        self.feedback = if result.is_ok() && self.edit_revision != self.submitted_revision {
+            None
+        } else {
+            Some(result)
+        };
         true
     }
 }
@@ -284,5 +313,37 @@ mod tests {
         assert_eq!(options.mode, AlbumArtworkMode::Static);
         assert_eq!(options.period_seconds, 30.0);
         assert!(model.feedback().is_none());
+    }
+
+    #[test]
+    fn later_edits_hide_success_for_global_and_panel_submissions() {
+        let config = Arc::new(Config::default());
+        let mut model = SettingsModel::new(&config);
+        let (_, submission) = model.begin_apply(model.draft.clone()).unwrap();
+        assert_eq!(
+            model.complete_apply(submission, Arc::clone(&config), Ok(())),
+            Completion::Committed
+        );
+        assert_eq!(model.feedback(), &Some(Ok(())));
+        model.edited();
+        assert!(model.feedback().is_none());
+        let (_, submission) = model.begin_apply(model.draft.clone()).unwrap();
+        model.draft.tray_enabled = !model.draft.tray_enabled;
+        model.edited();
+        assert_eq!(
+            model.complete_apply(submission, Arc::clone(&config), Ok(())),
+            Completion::Committed
+        );
+        assert!(model.feedback().is_none());
+        assert_ne!(model.draft.tray_enabled, config.tray_enabled);
+        model.reset_artwork(&config, 1, AlbumArtworkOptions::from(config.as_ref()));
+        let Some(PanelApply::Artwork { session, .. }) = model.begin_panel_apply(Some(20.0)) else {
+            panic!("expected panel apply");
+        };
+        model.draft.album_artwork_mode = AlbumArtworkMode::Rotating;
+        model.edited();
+        assert!(model.complete_panel_apply(session, Ok(())));
+        assert!(model.feedback().is_none());
+        assert_eq!(model.draft.album_artwork_mode, AlbumArtworkMode::Rotating);
     }
 }

@@ -83,7 +83,7 @@ execution failure stops playback rather than resuming uncertain decoder state.
 === Ingestion and publication
 
 Audio arrival wakes analysis to ingest a finite queued prefix independently of
-display requests. `analysis_fps` limits FFT transforms and publications, not PCM
+display requests. `analysis_rate_hz` limits FFT transforms and publications, not PCM
 ingestion. Requests coalesce into one permit, retained until a complete fresh
 window and its publication deadline are available. The worker publishes one
 latest shared frame, not a result backlog; hidden, paused and disabled gates
@@ -147,9 +147,9 @@ snapshot with newer metrics.
 === Presentation scheduling and visibility
 
 One window-local `VisualizerRuntime` shares visual models and staging across panels.
-Its analysis timer requests frames at `analysis_fps`; native window callbacks
+Its analysis timer requests frames at `analysis_rate_hz`; native window callbacks
 consume the latest publication and advance animation independently.
-`visualizations.general.fps` caps Spectrum, Spectrogram and Audio Visualizer animation:
+`visualizations.general.animation_fps` caps Spectrum, Spectrogram and Audio Visualizer animation:
 `0` follows window frames, and `1`–`240` limits requests per second. It does not
 throttle analysis, Waveform or artwork. Artwork and audio visualization share one
 window-local native-frame gate and one cancellable deadline timer, while retaining
@@ -213,7 +213,7 @@ destruction releases all of them; no cross-window snapshot cache or additional
 clock is introduced. Switching one panel never suspends unaffected visible panels.
 Loss of focus alone never disables analysis. Without a reliable visibility
 notification, compositor throttling limits native animation callbacks but not
-the independent analysis timer; analysis remains bounded by `analysis_fps` and
+the independent analysis timer; analysis remains bounded by `analysis_rate_hz` and
 retains only the latest publication until visibility is revoked.
 
 == Visualization enablement
@@ -339,6 +339,12 @@ link:25_gpu_rendering.adoc#_admission_and_retirement[GPU material budget].
 
 == Spectrum
 
+For non-Solid styles, bar layout is either automatic width or a fixed count;
+the configuration carries only that mode's parameter. Automatic layout derives
+the count from plot width, requested bar width and gap. Solid uses the drawable
+logical-pixel width. All modes remain bounded by the renderer's slot limit and
+available width; layout does not change FFT resolution.
+
 Spectrum Bars and LED submit compact GPU rectangle instances: one rectangle per
 visible display slot. LED uses a bottom-aligned 3-pixel segment and 2-pixel gap
 pattern in logical coordinates, including the partial segment at the body's top,
@@ -412,6 +418,10 @@ clock. Repainting, resizing or replaying unchanged audio does not advance state.
 Mapping changes can initialize from compatible retained input without inventing
 audio time. Idle fade is a separate wall-clock overlay; radial styles have no
 reusable rendering cache.
+
+Bar glow uses two fixed widening translucent passes. Bloom intensity scales
+their opacity; zero skips both passes. Pass count is renderer policy, while
+rotation, geometry, opacity and intensity remain presentation settings.
 
 === Oscilloscope
 
@@ -527,10 +537,12 @@ changes to the effective history window still reproject retained columns
 immediately, without advancing fill or release progress. Clearing or releasing
 history also resets the flow.
 
-History width and sampling resolution bound retained resources. Increasing display
-resolution does not create additional FFT information. Multiple panels share
-history rather than maintaining competing copies; the cache document describes
-capacity changes and numerical publication lifetime.
+History width and sampling resolution bound retained resources. Sampling targets
+`ceil(panel_height * 0.5)` rows with a floor at the visible source-frequency count,
+then applies an internal 1024-row cap and the shared material budget. Increasing
+display resolution does not create additional FFT information. Multiple panels
+share history rather than maintaining competing copies; the cache document
+describes capacity changes and numerical publication lifetime.
 
 == Generative light
 

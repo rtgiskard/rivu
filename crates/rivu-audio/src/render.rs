@@ -47,12 +47,12 @@ impl SourceRenderer {
         path: &Path,
         range: Option<PlaybackRange>,
         decoder_hint: DecoderHint,
-        media_read_buffer_mb: u32,
+        media_read_buffer_mib: u32,
         ffmpeg_enabled: bool,
         cancelled: &AtomicBool,
     ) -> Result<Self> {
         check_cancelled(Some(cancelled)).context("Audio render cancelled")?;
-        let buffer_len = usize::try_from(media_read_buffer_mb)
+        let buffer_len = usize::try_from(media_read_buffer_mib)
             .context("Audio render media buffer size does not fit usize")?
             .checked_mul(super::BYTES_PER_MEBIBYTE)
             .context("Audio render media buffer size overflows")?;

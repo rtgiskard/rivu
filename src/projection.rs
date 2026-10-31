@@ -148,7 +148,7 @@ pub struct TuiSystemSnapshot {
     pub revision: u64,
     pub shutting_down: bool,
     pub library_roots: Arc<Vec<std::path::PathBuf>>,
-    pub page_size: u32,
+    pub query_batch_size: u32,
     pub ui_theme: crate::theme::Theme,
 }
 
@@ -163,7 +163,7 @@ impl Default for TuiSystemSnapshot {
             revision: 0,
             shutting_down: false,
             library_roots: Arc::default(),
-            page_size: crate::config::DEFAULT_PAGE_SIZE,
+            query_batch_size: crate::config::DEFAULT_QUERY_BATCH_SIZE,
             ui_theme: crate::theme::Theme::default(),
         }
     }
@@ -203,7 +203,7 @@ impl TuiSnapshot {
                     })
                     .map(|previous| Arc::clone(&previous.system.library_roots))
                     .unwrap_or_else(|| Arc::new(state.configuration.config.library_roots.clone())),
-                page_size: state.configuration.config.page_size,
+                query_batch_size: state.configuration.config.query_batch_size,
                 ui_theme: state.configuration.config.ui_theme,
             },
         }

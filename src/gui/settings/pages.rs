@@ -1,7 +1,7 @@
 //! Settings page composition; session transitions and control text remain with the owner.
 use super::{
-    Field, Measured, SettingChoice, Settings, SettingsEvent, SettingsPage, VisualPage,
-    dropdown_button, ffmpeg_hint, model::Target, settings_card, settings_group,
+    Field, Measured, SettingChoice, Settings, SettingsEvent, SettingsPage, SpectrumLayoutMode,
+    VisualPage, dropdown_button, ffmpeg_hint, model::Target, settings_card, settings_group,
     spectrum_style_label, visual_switch, visualization_palette_label,
 };
 use crate::{
@@ -11,7 +11,7 @@ use crate::{
     },
     gui::{
         album_artwork::ALBUM_ARTWORK_STYLES,
-        visualization::{AUDIO_VISUALIZER_STYLES, audio_visualizer_style_label},
+        visualization::{AUDIO_VISUALIZER_STYLES, visualization_style_label},
     },
     theme::Theme,
 };
@@ -103,7 +103,11 @@ impl Settings {
         );
         content = column()
             .gap_2()
-            .child(self.pair(Field::ArtworkFileLimit, Field::ArtworkDecodeBudget, cx))
+            .child(self.pair(
+                Field::ArtworkFileLimitMib,
+                Field::ArtworkDecodeBudgetMib,
+                cx,
+            ))
             .child(content);
         if let Some((days, clean)) = self.artwork_cache_busy {
             content = content.child(status_message(
@@ -273,6 +277,7 @@ impl Settings {
                             cx,
                             move |this, _, cx| {
                                 this.model.draft.library_roots.remove(index);
+                                this.model.edited();
                                 this.sync_library_stats(cx);
                                 cx.notify();
                             },
@@ -298,7 +303,19 @@ impl Settings {
                                     .hover(|style| style.opacity(1.)),
                             )
                             .tooltip(text_tooltip(self.tr("settings-library-folders-add-hint"))),
-                    ),
+                    )
+                    .when(self.root_stats_error().is_some(), |header| {
+                        header.child(button(
+                            "settings-root-stats-retry",
+                            self.tr("settings-retry-statistics"),
+                            cx,
+                            |this, _, cx| {
+                                this.root_stats.retry();
+                                this.sync_library_stats(cx);
+                                cx.notify();
+                            },
+                        ))
+                    }),
             )
             .child(paths)
     }
@@ -310,7 +327,7 @@ impl Settings {
             column()
                 .gap_2()
                 .child(self.library_roots(cx))
-                .child(self.pair(Field::ScanMaxDepth, Field::ScanMinDuration, cx)),
+                .child(self.pair(Field::ScanMaxDepth, Field::ScanMinDurationSeconds, cx)),
         );
         column()
             .gap_3()
@@ -419,7 +436,7 @@ impl Settings {
                         .gap_3()
                         .child(device.flex_1().min_w(rems(260. / 16.)))
                         .child(
-                            self.field(Field::MediaReadBuffer, cx)
+                            self.field(Field::MediaReadBufferMib, cx)
                                 .flex_1()
                                 .min_w(rems(240. / 16.)),
                         ),
@@ -456,6 +473,7 @@ impl Settings {
                             cx,
                             |this, _| {
                                 this.model.draft.ffmpeg_enabled = !this.model.draft.ffmpeg_enabled;
+                                this.model.edited();
                             },
                         ))
                         .child(visual_switch(
@@ -545,7 +563,7 @@ impl Settings {
                 ))
                 .child(two_column(
                     self.font_control(cx).min_w(rems(180. / 16.)),
-                    self.field(Field::FontSize, cx).min_w(rems(180. / 16.)),
+                    self.field(Field::FontSizePt, cx).min_w(rems(180. / 16.)),
                 ))
                 .child(two_column(
                     self.field(Field::Scale, cx).min_w(rems(180. / 16.)),
@@ -606,6 +624,7 @@ impl Settings {
                     cx,
                     |this, _| {
                         this.model.draft.mpris_enabled = !this.model.draft.mpris_enabled;
+                        this.model.edited();
                     },
                 ))
                 .child(visual_switch(
@@ -836,9 +855,9 @@ impl Settings {
             .child(settings_group(
                 colors,
                 settings.tr(if matches!(settings.model.target(), Target::Artwork(_)) {
-                    "settings-this-instance"
+                    "settings-this-panel"
                 } else {
-                    "settings-new-instance-defaults"
+                    "settings-new-panel-defaults"
                 }),
                 row().child(
                     FormField::new(colors, settings.tr("settings-style"), style)
@@ -868,7 +887,7 @@ impl Settings {
                         ),
                     ))
                     .child(two_column(
-                        settings.field_state(Field::AlbumArtworkPeriod, cx),
+                        settings.field_state(Field::AlbumArtworkPeriodSeconds, cx),
                         column().when(
                             !matches!(settings.model.target(), Target::Artwork(_)),
                             |column| {
@@ -885,22 +904,22 @@ impl Settings {
     fn visualizer_display_settings(&self, cx: &mut Context<Self>) -> Div {
         let draft = &self.model.draft;
         let style = dropdown_button(
-            "audio-visualizer-style",
+            "default-visualizer-style",
             self.tr("settings-style"),
-            audio_visualizer_style_label(&self.i18n, draft.audio_visualizer_style),
-            self.dropdown.is_open() && self.dropdown_anchor == Measured::AudioVisualizerStyle,
+            visualization_style_label(&self.i18n, draft.default_visualizer_style),
+            self.dropdown.is_open() && self.dropdown_anchor == Measured::DefaultVisualizerStyle,
             cx,
             |this, _, _| {
                 let values = AUDIO_VISUALIZER_STYLES;
                 let selected = values
                     .iter()
-                    .position(|value| *value == this.model.draft.audio_visualizer_style)
+                    .position(|value| *value == this.model.draft.default_visualizer_style)
                     .unwrap_or(0);
                 this.open_setting_dropdown(
                     values
                         .into_iter()
                         .map(|value| {
-                            let choice = SettingChoice::AudioVisualizerStyle(value);
+                            let choice = SettingChoice::DefaultVisualizerStyle(value);
                             ChoiceItem::new(choice, choice.label(&this.i18n))
                         })
                         .collect(),
@@ -909,12 +928,12 @@ impl Settings {
             },
         )
         .relative()
-        .child(self.measurement(Measured::AudioVisualizerStyle, cx));
+        .child(self.measurement(Measured::DefaultVisualizerStyle, cx));
         settings_card(
             palette(cx),
             self.info_label(
                 palette(cx),
-                self.tr("settings-new-instance-defaults"),
+                self.tr("settings-new-panel-defaults"),
                 "settings-visualizer-defaults-help",
             ),
             column()
@@ -934,46 +953,57 @@ impl Settings {
                         .gap_2()
                         .when(
                             !matches!(
-                                draft.audio_visualizer_style,
+                                draft.default_visualizer_style,
                                 AudioVisualizerStyle::Waveform | AudioVisualizerStyle::Spectrogram
                             ),
                             |controls| {
                                 controls.child(visual_switch(
                                     &self.i18n,
-                                    "audio-visualizer-grid",
+                                    "default-visualizer-reference-lines",
                                     "",
                                     self.tr("settings-reference-lines"),
-                                    draft.audio_visualizer_grid,
+                                    draft.default_visualizer_reference_lines,
                                     cx,
                                     |draft| {
-                                        draft.audio_visualizer_grid = !draft.audio_visualizer_grid
+                                        draft.default_visualizer_reference_lines =
+                                            !draft.default_visualizer_reference_lines
                                     },
                                 ))
                             },
                         )
                         .child(visual_switch(
                             &self.i18n,
-                            "audio-visualizer-labels",
+                            "default-visualizer-labels",
                             "",
                             self.tr("settings-labels"),
-                            draft.audio_visualizer_labels,
+                            draft.default_visualizer_labels,
                             cx,
-                            |draft| draft.audio_visualizer_labels = !draft.audio_visualizer_labels,
+                            |draft| {
+                                draft.default_visualizer_labels = !draft.default_visualizer_labels
+                            },
                         )),
                 ),
         )
     }
 
-    fn visualizer_response_settings(&self, cx: &mut Context<Self>) -> Div {
+    fn shared_response_settings(&self, cx: &mut Context<Self>) -> Div {
         settings_card(
             palette(cx),
-            self.tr("settings-response-motion"),
+            self.tr("settings-reactive-response"),
             column()
                 .gap_2()
-                .child(self.single(Field::AudioVisualizerDb, cx))
+                .child(caption(
+                    palette(cx),
+                    self.tr("settings-reactive-range-scope"),
+                ))
+                .child(self.single(Field::ReactiveDbRange, cx))
+                .child(caption(
+                    palette(cx),
+                    self.tr("settings-reactive-response-scope"),
+                ))
                 .child(self.pair(
-                    Field::AudioVisualizerSensitivity,
-                    Field::AudioVisualizerBloomIntensity,
+                    Field::ReactiveSensitivity,
+                    Field::ReactiveBloomIntensity,
                     cx,
                 )),
         )
@@ -983,11 +1013,13 @@ impl Settings {
         settings_card(
             palette(cx),
             self.tr("settings-colors"),
-            self.pair(
-                Field::AudioVisualizerPrimaryColor,
-                Field::AudioVisualizerSecondaryColor,
-                cx,
-            ),
+            column()
+                .gap_2()
+                .child(caption(
+                    palette(cx),
+                    self.tr("settings-effect-colors-scope"),
+                ))
+                .child(self.pair(Field::EffectPrimaryColor, Field::EffectSecondaryColor, cx)),
         )
     }
 
@@ -995,21 +1027,18 @@ impl Settings {
         let settings = &*self;
         let draft = &settings.model.draft;
         let title = settings.tr(settings.visual_page.label_id());
-        let scope = match settings.visual_page {
-            VisualPage::StereoDensity => {
-                settings.info_label(palette(cx), title, "settings-stereo-density-hint")
-            }
-            VisualPage::SpatialSpectrum => {
-                settings.info_label(palette(cx), title, "settings-spatial-spectrum-hint")
-            }
-            _ => div().text_sm().child(title),
-        };
+        let scope = div().text_sm().child(title);
         let content = match settings.visual_page {
+            VisualPage::Defaults => settings.visualizer_display_settings(cx),
+            VisualPage::SharedEffects => column()
+                .gap_3()
+                .child(settings.visualizer_color_settings(cx))
+                .child(settings.shared_response_settings(cx)),
             VisualPage::Common => {
                 let palette_control = dropdown_button(
                     "visual-palette",
                     self.tr("settings-color-scheme"),
-                    visualization_palette_label(&self.i18n, draft.visual_palette),
+                    visualization_palette_label(&self.i18n, draft.visualization_palette),
                     self.dropdown.is_open() && self.dropdown_anchor == Measured::SettingsStyle,
                     cx,
                     |this, _, _| {
@@ -1019,7 +1048,7 @@ impl Settings {
                         ];
                         let selected = values
                             .iter()
-                            .position(|value| *value == this.model.draft.visual_palette)
+                            .position(|value| *value == this.model.draft.visualization_palette)
                             .unwrap_or(0);
                         this.open_setting_dropdown(
                             values
@@ -1124,7 +1153,6 @@ impl Settings {
                 .child(self.measurement(Measured::SettingsSignal, cx));
                 column()
                     .gap_3()
-                    .child(settings.visualizer_display_settings(cx))
                     .child(settings_card(
                         palette(cx),
                         settings.tr("settings-appearance"),
@@ -1132,7 +1160,7 @@ impl Settings {
                             .gap_2()
                             .child(two_column(
                                 settings
-                                    .field(Field::Background, cx)
+                                    .field(Field::VisualizationBackground, cx)
                                     .min_w(rems(180. / 16.)),
                                 FormField::new(
                                     palette(cx),
@@ -1145,8 +1173,8 @@ impl Settings {
                             .id("settings-appearance-help")
                             .tooltip(text_tooltip(settings.tr("settings-appearance-help")))
                             .child(settings.pair(
-                                Field::VisualizationDb,
-                                Field::VisualizationFps,
+                                Field::VisualizationDbRange,
+                                Field::VisualizationAnimationFps,
                                 cx,
                             ))
                             .child(two_column(
@@ -1163,7 +1191,7 @@ impl Settings {
                                         settings.tr("settings-visualization-signal-hint"),
                                     )),
                                 ),
-                                settings.field(Field::GpuMaterialBudget, cx),
+                                settings.field(Field::GpuMaterialBudgetMib, cx),
                             ))
                             .child(row().child(visual_switch(
                                 &self.i18n,
@@ -1196,7 +1224,7 @@ impl Settings {
                                 .into_div()
                                 .min_w(rems(180. / 16.)),
                             ))
-                            .child(settings.single(Field::Fps, cx))
+                            .child(settings.single(Field::AnalysisRateHz, cx))
                             .id("settings-analysis-help")
                             .tooltip(text_tooltip(settings.tr("settings-analysis-help"))),
                     ))
@@ -1236,6 +1264,38 @@ impl Settings {
                 )
                 .relative()
                 .child(self.measurement(Measured::SettingsStyle, cx));
+                let mode = SpectrumLayoutMode::from_layout(draft.spectrum_bar_layout);
+                let layout = dropdown_button(
+                    "spectrum-bar-layout",
+                    self.tr("settings-spectrum-bar-layout"),
+                    self.tr(mode.label_id()),
+                    self.dropdown.is_open() && self.dropdown_anchor == Measured::SpectrumLayout,
+                    cx,
+                    |this, _, _| {
+                        let values = [SpectrumLayoutMode::Automatic, SpectrumLayoutMode::Fixed];
+                        let mode =
+                            SpectrumLayoutMode::from_layout(this.model.draft.spectrum_bar_layout);
+                        this.open_setting_dropdown(
+                            values
+                                .into_iter()
+                                .map(|value| {
+                                    ChoiceItem::new(
+                                        SettingChoice::SpectrumLayout(value),
+                                        this.tr(value.label_id()),
+                                    )
+                                })
+                                .collect(),
+                            usize::from(mode == SpectrumLayoutMode::Fixed),
+                        );
+                    },
+                )
+                .relative()
+                .child(self.measurement(Measured::SpectrumLayout, cx));
+                let layout = disabled_control(
+                    palette(cx),
+                    layout,
+                    draft.spectrum_style == SpectrumStyle::Solid,
+                );
                 column()
                     .gap_3()
                     .child(settings_card(
@@ -1247,13 +1307,19 @@ impl Settings {
                                 FormField::new(palette(cx), settings.tr("settings-style"), style)
                                     .into_div()
                                     .min_w(rems(180. / 16.)),
-                                settings.field_state(Field::SpectrumBars, cx),
+                                FormField::new(
+                                    palette(cx),
+                                    settings.tr("settings-spectrum-bar-layout"),
+                                    layout,
+                                )
+                                .into_div()
+                                .min_w(rems(180. / 16.)),
                             ))
                             .child(two_column(
-                                settings.field_state(Field::SpectrumBarWidth, cx),
+                                settings.spectrum_layout_field_state(cx),
                                 settings.field_state(Field::SpectrumGap, cx),
                             ))
-                            .child(settings.single(Field::SpectrumDb, cx))
+                            .child(settings.single(Field::SpectrumDbRange, cx))
                             .child(row().flex_wrap().child(visual_switch(
                                 &self.i18n,
                                 "spectrum-interpolate",
@@ -1296,125 +1362,85 @@ impl Settings {
                             )),
                     ))
             }
-            VisualPage::Spectrogram => column()
-                .gap_3()
-                .child(settings_card(
-                    palette(cx),
-                    settings.tr("settings-display"),
-                    column()
-                        .gap_2()
-                        .child(settings.pair(Field::SpectrogramDb, Field::SpectrogramHistory, cx))
-                        .child(settings.pair(
-                            Field::SpectrogramFlowSpeed,
-                            Field::SpectrogramAccumulation,
-                            cx,
-                        )),
-                ))
-                .child(settings_card(
-                    palette(cx),
-                    settings.tr("settings-frequency-sampling"),
-                    column()
-                        .gap_2()
-                        .child(settings.pair(
-                            Field::SpectrogramSamplingPointsScale,
-                            Field::SpectrogramInterpolationPoints,
-                            cx,
-                        ))
-                        .child(row().child(visual_switch(
-                            &self.i18n,
-                            "spectrogram-interpolate",
-                            "",
-                            settings.tr("settings-frequency-interpolation"),
-                            draft.spectrogram_interpolate,
-                            cx,
-                            |draft| draft.spectrogram_interpolate = !draft.spectrogram_interpolate,
-                        ))),
-                )),
-            VisualPage::BarsRings => column()
-                .gap_3()
-                .child(settings.visualizer_response_settings(cx))
-                .child(settings_card(
-                    palette(cx),
-                    settings.tr("settings-bars-rings-section"),
-                    column()
-                        .gap_2()
-                        .child(settings.pair(
-                            Field::AudioVisualizerInnerDiameter,
-                            Field::AudioVisualizerRotationSpeed,
-                            cx,
-                        ))
-                        .child(settings.pair(
-                            Field::AudioVisualizerBarWidth,
-                            Field::AudioVisualizerBarGlowLayers,
-                            cx,
-                        ))
-                        .child(settings.single(Field::AudioVisualizerRingOpacity, cx))
-                        .child(row().child(visual_switch(
-                            &self.i18n,
-                            "audio-visualizer-fade-idle",
-                            "",
-                            settings.tr("settings-fade-when-idle"),
-                            draft.audio_visualizer_fade_when_idle,
-                            cx,
-                            |draft| {
-                                draft.audio_visualizer_fade_when_idle =
-                                    !draft.audio_visualizer_fade_when_idle
-                            },
-                        )))
-                        .id("settings-bars-rings-help")
-                        .tooltip(text_tooltip(
-                            settings.tr("settings-visualizer-bars-rings-help"),
-                        )),
-                ))
-                .child(settings.visualizer_color_settings(cx)),
-            VisualPage::StereoDensity => column()
-                .gap_3()
-                .child(settings.visualizer_color_settings(cx)),
-            VisualPage::SpatialSpectrum => column()
-                .gap_3()
-                .child(settings_card(
-                    palette(cx),
-                    settings.tr("settings-display-range"),
-                    settings.single(Field::AudioVisualizerDb, cx),
-                ))
-                .child(settings.visualizer_color_settings(cx)),
-            VisualPage::Fractal => column()
-                .gap_3()
-                .child(settings.visualizer_response_settings(cx))
-                .child(settings.visualizer_color_settings(cx)),
+            VisualPage::Spectrogram => column().gap_3().child(settings_card(
+                palette(cx),
+                settings.tr("settings-display"),
+                column()
+                    .gap_2()
+                    .child(settings.pair(Field::SpectrogramDbRange, Field::SpectrogramHistory, cx))
+                    .child(settings.pair(
+                        Field::SpectrogramStartupExpansionSpeed,
+                        Field::SpectrogramOutflowThresholdPercent,
+                        cx,
+                    ))
+                    .child(row().child(visual_switch(
+                        &self.i18n,
+                        "spectrogram-interpolate",
+                        "",
+                        settings.tr("settings-frequency-interpolation"),
+                        draft.spectrogram_interpolate,
+                        cx,
+                        |draft| draft.spectrogram_interpolate = !draft.spectrogram_interpolate,
+                    ))),
+            )),
+            VisualPage::BarsRings => column().gap_3().child(settings_card(
+                palette(cx),
+                settings.tr("settings-bars-rings-section"),
+                column()
+                    .gap_2()
+                    .child(settings.pair(
+                        Field::RadialInnerDiameter,
+                        Field::RadialRotationSpeed,
+                        cx,
+                    ))
+                    .child(settings.pair(Field::RadialBarWidth, Field::RadialRingOpacity, cx))
+                    .child(row().child(visual_switch(
+                        &self.i18n,
+                        "audio-visualizer-fade-idle",
+                        "",
+                        settings.tr("settings-fade-when-idle"),
+                        draft.radial_fade_when_idle,
+                        cx,
+                        |draft| draft.radial_fade_when_idle = !draft.radial_fade_when_idle,
+                    )))
+                    .id("settings-bars-rings-help")
+                    .tooltip(text_tooltip(
+                        settings.tr("settings-visualizer-bars-rings-help"),
+                    )),
+            )),
             VisualPage::Oscilloscope => column()
                 .gap_3()
                 .child(settings_card(
                     palette(cx),
                     settings.info_label(
                         palette(cx),
-                        settings.tr("settings-new-instance-defaults"),
+                        settings.tr("settings-new-panel-defaults"),
                         "settings-oscilloscope-defaults-help",
                     ),
                     row()
                         .child(visual_switch(
                             &settings.i18n,
-                            "oscilloscope-shared-grid",
+                            "oscilloscope-overlay-channels",
                             "",
-                            settings.tr("settings-oscilloscope-shared-axes"),
-                            draft.oscilloscope_shared_grid,
+                            settings.tr("settings-oscilloscope-overlay-channels"),
+                            draft.oscilloscope_overlay_channels,
                             cx,
                             |draft| {
-                                draft.oscilloscope_shared_grid = !draft.oscilloscope_shared_grid
+                                draft.oscilloscope_overlay_channels =
+                                    !draft.oscilloscope_overlay_channels
                             },
                         ))
                         .child(
                             div()
                                 .text_sm()
-                                .child(settings.tr("settings-oscilloscope-shared-axes")),
+                                .child(settings.tr("settings-oscilloscope-overlay-channels")),
                         ),
                 ))
                 .child(settings_card(
                     palette(cx),
                     settings.tr("settings-display"),
-                    settings.pair(Field::OscilloscopeTimeSpan, Field::OscilloscopeGain, cx),
-                ))
-                .child(settings.visualizer_color_settings(cx)),
+                    settings.pair(Field::OscilloscopeTimeSpanMs, Field::OscilloscopeGain, cx),
+                )),
             VisualPage::Waveform => column()
                 .gap_3()
                 .child(settings_card(
@@ -1422,7 +1448,7 @@ impl Settings {
                     settings.tr("settings-appearance-interaction"),
                     column()
                         .gap_2()
-                        .child(settings.pair(Field::CursorColor, Field::Glow, cx))
+                        .child(settings.pair(Field::WaveformCursorColor, Field::WaveformGlow, cx))
                         .child(row().flex_wrap().gap_2().child(visual_switch(
                             &self.i18n,
                             "waveform-seek",

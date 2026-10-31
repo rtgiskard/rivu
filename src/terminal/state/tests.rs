@@ -274,7 +274,7 @@ fn notices_preserve_actionable_failures_across_playback_updates() {
 fn queue_pages_keep_global_navigation_and_duplicate_occurrence_actions() {
     let mut state = TuiSnapshot::default();
     state.queue.total = 200_000;
-    state.system.page_size = 3;
+    state.system.query_batch_size = 3;
     let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
     tui.ui.page_size = 4;
     tui.ui.queue.selection.select(Some(50_000));
@@ -313,7 +313,7 @@ fn queue_pages_keep_global_navigation_and_duplicate_occurrence_actions() {
 fn queue_rejects_delayed_pages_and_selection_lookups_after_navigation() {
     let mut state = TuiSnapshot::default();
     state.queue.total = 30;
-    state.system.page_size = 3;
+    state.system.query_batch_size = 3;
     let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
     let delayed = tui.ui.query_request(&state).unwrap();
     assert!(matches!(
@@ -544,7 +544,7 @@ pub(in crate::terminal) fn playlist_view(playlist_id: i64) -> View {
 
 pub(in crate::terminal) fn query_snapshot() -> TuiSnapshot {
     let mut state = TuiSnapshot::default();
-    state.system.page_size = 3;
+    state.system.query_batch_size = 3;
     state.queue.total = 12;
     state.queue.revision = 5;
     state.library.revision = 6;
@@ -788,7 +788,7 @@ fn hidden_pages_follow_page_size_and_library_root_changes() {
     tui.ui.key_action(KeyEvent::from(KeyCode::Tab), &state);
     let old = tui.ui.query_request(&state).unwrap();
     let mut next = state.clone();
-    next.system.page_size = 5;
+    next.system.query_batch_size = 5;
     next.system.library_roots = Arc::new(vec!["/two".into()]);
     tui.apply_snapshot(next.clone());
     let View::Playlists(playlists) = tui.ui.cached_playlists.as_ref().unwrap() else {
@@ -1052,7 +1052,7 @@ fn terminal_page_demand_does_not_change_projection_but_page_size_does() {
     assert_eq!(first.generation, second.generation);
     assert_eq!(first.stamp, second.stamp);
     let mut next = state.clone();
-    next.system.page_size = 5;
+    next.system.query_batch_size = 5;
     tui.apply_snapshot(next.clone());
     assert!(
         !tui.ui
@@ -1108,7 +1108,7 @@ fn failed_playlist_pages_ignore_retry_keys_and_recover_after_reopening() {
 #[test]
 fn playlist_reorder_preserves_unrelated_terminal_views() {
     let mut snapshot = TuiSnapshot::default();
-    snapshot.system.page_size = 3;
+    snapshot.system.query_batch_size = 3;
     Arc::make_mut(&mut snapshot.library.playlist_entry_revisions).insert(2, 0);
     for view in [
         View::Search(LibrarySearch::default()),
@@ -1143,7 +1143,7 @@ fn playlist_reorder_preserves_unrelated_terminal_views() {
 #[test]
 fn terminal_playlist_reorder_relocates_identity_and_rejects_stale_results() {
     let mut snapshot = TuiSnapshot::default();
-    snapshot.system.page_size = 1;
+    snapshot.system.query_batch_size = 1;
     Arc::make_mut(&mut snapshot.library.playlist_entry_revisions).insert(1, 0);
     let mut tui = TuiState::new(snapshot, Arc::new(Localizer::new("en-US")));
     tui.ui.view = View::PlaylistDetail {
@@ -1207,7 +1207,7 @@ fn terminal_playlist_reorder_relocates_identity_and_rejects_stale_results() {
 #[test]
 fn every_queried_view_renders_across_batches_without_resetting_scroll() {
     let mut state = TuiSnapshot::default();
-    state.system.page_size = 3;
+    state.system.query_batch_size = 3;
     Arc::make_mut(&mut state.library.playlist_entry_revisions).insert(7, 0);
     let views = [
         View::Search(LibrarySearch {
@@ -1440,7 +1440,7 @@ fn other_tracks_selection_survives_changes_between_locate_and_page() {
 #[test]
 fn tree_top_level_has_other_tracks_then_configured_roots_and_restores_parent() {
     let mut state = TuiSnapshot::default();
-    state.system.page_size = 1;
+    state.system.query_batch_size = 1;
     for roots in [
         vec![],
         vec![PathBuf::from("/music")],
@@ -1509,7 +1509,7 @@ fn tree_top_level_has_other_tracks_then_configured_roots_and_restores_parent() {
 #[test]
 fn stale_revisions_do_not_stall_navigation() {
     let mut state = TuiSnapshot::default();
-    state.system.page_size = 3;
+    state.system.query_batch_size = 3;
     let mut ui = UiState {
         view: View::Playlists(PagedList::default()),
         ..UiState::default()
@@ -1745,7 +1745,7 @@ fn help_scrolls_every_binding_without_touching_the_underlying_queue() {
 fn boundary_navigation_queries_unloaded_pages_and_rejects_old_demands() {
     let mut state = TuiSnapshot::default();
     state.queue.total = 100;
-    state.system.page_size = 3;
+    state.system.query_batch_size = 3;
     let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
     let old = tui.ui.query_request(&state).unwrap();
     tui.ui.key_action(KeyEvent::from(KeyCode::End), &state);

@@ -349,7 +349,7 @@ impl Queue {
         if !self.visible {
             return;
         }
-        let limit = self.state.system.config.page_size as usize;
+        let limit = self.state.system.config.query_batch_size as usize;
         let Some((query, generation)) = self.model.demand_page(range, limit) else {
             return;
         };

@@ -406,7 +406,7 @@ mod tests {
     fn runtime_and_configuration_reads_preserve_omitted_state_and_unread_tokens() {
         let mut snapshot = ClientSnapshot::default();
         snapshot.configuration.config_path = "/existing/config.toml".into();
-        Arc::make_mut(&mut snapshot.configuration.config).page_size = 37;
+        Arc::make_mut(&mut snapshot.configuration.config).query_batch_size = 37;
         let retained_config = Arc::clone(&snapshot.configuration.config);
         let mut applied = StateRevisions::default();
         let current = StateRevisions {
@@ -447,7 +447,7 @@ mod tests {
             },
             configuration: Some(ConfigurationState {
                 config: Arc::new(rivu_format::config::Config {
-                    page_size: 91,
+                    query_batch_size: 91,
                     ..Default::default()
                 }),
                 config_path: "/new/config.toml".into(),
@@ -457,7 +457,7 @@ mod tests {
         let next = configuration.revisions;
         applied.apply_sections(next, configuration.sections());
         configuration.apply_to(&mut snapshot);
-        assert_eq!(snapshot.configuration.config.page_size, 91);
+        assert_eq!(snapshot.configuration.config.query_batch_size, 91);
         assert_eq!(
             snapshot.system.selected_device.as_deref(),
             Some("runtime output")

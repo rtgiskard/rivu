@@ -112,8 +112,8 @@ impl History {
             .sync(&state.library.history, Self::playback(&state));
         // Status/loaded-track changes affect labels independently of visible order.
         let labels_changed = Self::current_playback(&self.state) != Self::current_playback(&state);
-        let typography_changed = self.state.system.config.ui_font_size
-            != state.system.config.ui_font_size
+        let typography_changed = self.state.system.config.ui_font_size_pt
+            != state.system.config.ui_font_size_pt
             || self.state.system.config.ui_scale != state.system.config.ui_scale;
         if typography_changed
             || !std::sync::Arc::ptr_eq(&self.state.library.history, &state.library.history)

@@ -35,7 +35,7 @@ impl Store {
             revision_owned_counts: false,
             track_cache: RefCell::new(TrackCache {
                 entries: HashMap::new(),
-                capacity: (crate::config::DEFAULT_PAGE_SIZE as usize).saturating_mul(2),
+                capacity: (crate::config::DEFAULT_QUERY_BATCH_SIZE as usize).saturating_mul(2),
                 clock: 0,
             }),
             count_cache: RefCell::new(None),

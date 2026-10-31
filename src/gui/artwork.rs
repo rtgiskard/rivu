@@ -36,15 +36,15 @@ struct ArtworkImageRegistryState {
 pub(super) struct ArtworkImageRegistry(Rc<RefCell<ArtworkImageRegistryState>>);
 
 impl ArtworkImageRegistry {
-    pub(super) fn new(retained_mb: u32) -> Self {
+    pub(super) fn new(retained_mib: u32) -> Self {
         Self(Rc::new(RefCell::new(ArtworkImageRegistryState {
-            budget: decode::Budget::new(retained_mb),
+            budget: decode::Budget::new(retained_mib),
             ..ArtworkImageRegistryState::default()
         })))
     }
 
-    pub(super) fn set_decode_budget_mb(&self, retained_mb: u32, cx: &mut App) -> bool {
-        self.set_decode_budget(decode::Budget::new(retained_mb), cx)
+    pub(super) fn set_decode_budget_mib(&self, retained_mib: u32, cx: &mut App) -> bool {
+        self.set_decode_budget(decode::Budget::new(retained_mib), cx)
     }
 
     fn set_decode_budget(&self, budget: decode::Budget, cx: &mut App) -> bool {
@@ -1378,7 +1378,7 @@ mod tests {
             )
         });
         cx.update(|cx| {
-            assert!(images.set_decode_budget_mb(128, cx));
+            assert!(images.set_decode_budget_mib(128, cx));
             assert!(cache.read(cx).item.is_none());
             assert!(!cache.read(cx).replaced.is_empty());
         });

@@ -74,7 +74,7 @@ impl CoreHandle {
 #[test]
 fn cancelled_queued_read_skips_store_and_does_not_cancel_another_owner() {
     let (directory, core) = fixture_with_database(Some(10.0));
-    core.store.set_track_cache_page_size(0);
+    core.store.set_track_cache_query_batch_size(0);
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     connection
         .execute("UPDATE tracks SET channels='unreadable' WHERE id=1", [])

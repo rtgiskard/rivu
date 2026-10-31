@@ -84,12 +84,12 @@ fn display_changed(previous: &GuiSnapshot, next: &GuiSnapshot) -> bool {
     previous.library.revision != next.library.revision
         || previous.library.structure_revision != next.library.structure_revision
         || previous_config.library_roots != next_config.library_roots
-        || previous_config.page_size != next_config.page_size
+        || previous_config.query_batch_size != next_config.query_batch_size
         || previous_config.library_columns != next_config.library_columns
         || previous_config.ui_theme != next_config.ui_theme
         || previous_config.ui_font != next_config.ui_font
         || previous_config.ui_scale != next_config.ui_scale
-        || previous_config.ui_font_size != next_config.ui_font_size
+        || previous_config.ui_font_size_pt != next_config.ui_font_size_pt
         || previous.current_track().map(|track| track.id)
             != next.current_track().map(|track| track.id)
         || previous.playback.status != next.playback.status
@@ -111,7 +111,7 @@ impl Library {
             this.apply_library_search(query.clone(), cx);
         });
         let mut library = LibraryBrowser::default();
-        library.refresh_tree(state.system.config.page_size as usize);
+        library.refresh_tree(state.system.config.query_batch_size as usize);
         library.sync_projection(state.query_revisions(None));
         library.sync_root_counts(
             &state.system.config.library_roots,
@@ -142,7 +142,7 @@ impl Library {
             self.library.roots_changed();
         }
         self.library
-            .refresh_tree(state.system.config.page_size as usize);
+            .refresh_tree(state.system.config.query_batch_size as usize);
         let projection_changed = self.library.sync_projection(state.query_revisions(None));
         if projection_changed {
             self.requests.cancel_directory_demand();

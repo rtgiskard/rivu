@@ -502,7 +502,7 @@ fn localized_playlist_rendering_preserves_user_metadata() {
 fn queue_mutations_relocate_selected_occurrence_and_clamp_deleted_selection() {
     let mut state = TuiSnapshot::default();
     state.queue.total = 12;
-    state.system.page_size = 3;
+    state.system.query_batch_size = 3;
     let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
     tui.ui.queue.selection.select(Some(8));
     load_queue(&mut tui.ui, &state);

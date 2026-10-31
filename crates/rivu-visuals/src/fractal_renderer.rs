@@ -100,14 +100,14 @@ impl FractalRenderer {
                 guide_labels: None,
                 style,
                 visible: true,
-                background: config.visual_background.rgb(),
+                background: config.visualization_background.rgb(),
                 colors: [
-                    config.audio_visualizer_primary_color.rgb(),
-                    config.audio_visualizer_secondary_color.rgb(),
+                    config.effect_primary_color.rgb(),
+                    config.effect_secondary_color.rgb(),
                 ],
-                sensitivity: config.audio_visualizer_sensitivity,
-                db_range: config.audio_visualizer_db_range(),
-                bloom: config.audio_visualizer_bloom_intensity,
+                sensitivity: config.reactive_sensitivity,
+                db_range: config.reactive_db_range(),
+                bloom: config.reactive_bloom_intensity,
                 settings: config.analysis_settings(),
                 source: None,
                 last_time: None,
@@ -133,25 +133,25 @@ impl FractalRenderer {
             || data.settings.window != settings.window
             || data.settings.signal != settings.signal;
         let colors = [
-            config.audio_visualizer_primary_color.rgb(),
-            config.audio_visualizer_secondary_color.rgb(),
+            config.effect_primary_color.rgb(),
+            config.effect_secondary_color.rgb(),
         ];
         let appearance_changed =
-            data.colors != colors || data.bloom != config.audio_visualizer_bloom_intensity;
+            data.colors != colors || data.bloom != config.reactive_bloom_intensity;
         let changed = reset
             || appearance_changed
-            || data.background != config.visual_background.rgb()
-            || data.sensitivity != config.audio_visualizer_sensitivity
-            || data.db_range != config.audio_visualizer_db_range();
+            || data.background != config.visualization_background.rgb()
+            || data.sensitivity != config.reactive_sensitivity
+            || data.db_range != config.reactive_db_range();
         if appearance_changed {
             data.gpu_palette = None;
         }
         data.settings = settings;
         data.colors = colors;
-        data.background = config.visual_background.rgb();
-        data.sensitivity = config.audio_visualizer_sensitivity;
-        data.db_range = config.audio_visualizer_db_range();
-        data.bloom = config.audio_visualizer_bloom_intensity;
+        data.background = config.visualization_background.rgb();
+        data.sensitivity = config.reactive_sensitivity;
+        data.db_range = config.reactive_db_range();
+        data.bloom = config.reactive_bloom_intensity;
         if reset {
             data.reset();
         } else if appearance_changed {
@@ -556,7 +556,7 @@ fn paint_scene_guides(
     window: &mut Window,
     cx: &mut App,
 ) {
-    if !options.grid && !options.label {
+    if !options.reference_lines && !options.labels {
         return;
     }
     let side = (bounds.size.width / px(1.0)).min(bounds.size.height / px(1.0));
@@ -568,7 +568,7 @@ fn paint_scene_guides(
         bounds.top() + bounds.size.height * 0.5,
     );
     let scale = px(side * 0.47);
-    if options.grid {
+    if options.reference_lines {
         for coordinate in [-1.0, -0.5, 0.0, 0.5, 1.0] {
             let color = rgb(0xb1bbc5).alpha(if coordinate == 0.0 { 0.30 } else { 0.14 });
             window.paint_quad(fill(
@@ -587,7 +587,7 @@ fn paint_scene_guides(
             ));
         }
     }
-    if !options.label || side < 180.0 {
+    if !options.labels || side < 180.0 {
         return;
     }
     // Static text and the exact same transform as the scene; no per-frame format.
@@ -716,7 +716,7 @@ mod tests {
                 // reset motion nor treat changed payload values as another onset.
                 if tick == 4 {
                     visual.configure_config(&Config {
-                        audio_visualizer_primary_color: "#ff0000".parse().unwrap(),
+                        effect_primary_color: "#ff0000".parse().unwrap(),
                         ..Config::default()
                     });
                     next.rms_left = 1.0;
@@ -801,21 +801,21 @@ mod tests {
             for (config, changes_drive) in [
                 (
                     Config {
-                        visual_background: "#123456".parse().unwrap(),
+                        visualization_background: "#123456".parse().unwrap(),
                         ..Config::default()
                     },
                     false,
                 ),
                 (
                     Config {
-                        audio_visualizer_sensitivity: 0.25,
+                        reactive_sensitivity: 0.25,
                         ..Config::default()
                     },
                     true,
                 ),
                 (
                     Config {
-                        audio_visualizer_db_range: Some(40.0),
+                        reactive_db_range: Some(40.0),
                         ..Config::default()
                     },
                     true,
@@ -840,7 +840,7 @@ mod tests {
                 assert!(Arc::ptr_eq(&before, &publication(&visual)));
                 {
                     let data = visual.data.borrow();
-                    assert_eq!(data.background, config.visual_background.rgb());
+                    assert_eq!(data.background, config.visualization_background.rgb());
                     assert_eq!(data.segments(), geometry);
                     assert_eq!(data.last_time, Some(paused.sample_time));
                     assert_eq!(data.drive.bands, drive.bands);
@@ -887,10 +887,10 @@ mod tests {
             for change in 0..4 {
                 let before = publication(&visual);
                 match change {
-                    0 => config.audio_visualizer_primary_color = "#ff0000".parse().unwrap(),
-                    1 => config.audio_visualizer_secondary_color = "#0000ff".parse().unwrap(),
-                    2 => config.audio_visualizer_bloom_intensity = 0.9,
-                    _ => config.audio_visualizer_bloom_intensity = 0.0,
+                    0 => config.effect_primary_color = "#ff0000".parse().unwrap(),
+                    1 => config.effect_secondary_color = "#0000ff".parse().unwrap(),
+                    2 => config.reactive_bloom_intensity = 0.9,
+                    _ => config.reactive_bloom_intensity = 0.0,
                 }
                 assert!(visual.configure_config(&config));
                 let after = publication(&visual);
@@ -902,7 +902,7 @@ mod tests {
                     let gpui::GpuContent::Segments { layers, .. } = after.content() else {
                         panic!("expected fractal segments");
                     };
-                    if config.audio_visualizer_bloom_intensity == 0.0 {
+                    if config.reactive_bloom_intensity == 0.0 {
                         assert_eq!(layers.len(), 1);
                         assert_eq!(layers[0].width, 1.0);
                         assert_eq!(layers[0].palette_offset, 18);
@@ -944,13 +944,13 @@ mod tests {
                 let visual = plot(style);
                 accept(&visual, &frame(50));
                 let old = publication(&visual);
-                config.audio_visualizer_primary_color = "#ff0000".parse().unwrap();
+                config.effect_primary_color = "#ff0000".parse().unwrap();
                 assert!(visual.configure_config(&config));
                 assert!(visual.data.borrow().gpu_frame.is_none());
                 assert!(visual.data.borrow().segments().is_empty());
                 accept(&visual, &frame(50));
                 assert!(visual.data.borrow().last_time.is_none());
-                config.audio_visualizer_secondary_color = "#0000ff".parse().unwrap();
+                config.effect_secondary_color = "#0000ff".parse().unwrap();
                 assert!(visual.configure_config(&config));
                 assert!(visual.data.borrow().gpu_frame.is_none());
                 let mut accepted = frame(50);
@@ -981,7 +981,7 @@ mod tests {
         let before = visual.data.borrow().segments().to_vec();
         let accepted_time = visual.data.borrow().last_time;
         let config = Config {
-            audio_visualizer_primary_color: "#ff0000".parse().unwrap(),
+            effect_primary_color: "#ff0000".parse().unwrap(),
             ..Config::default()
         };
         assert!(visual.configure_config(&config));
@@ -1206,7 +1206,7 @@ mod tests {
                     assert!(visual.data.borrow().segments().is_empty());
                     // Material changes cannot resurrect a reset scene before audio arrives.
                     visual.configure_config(&Config {
-                        audio_visualizer_bloom_intensity: 0.9,
+                        reactive_bloom_intensity: 0.9,
                         ..Config::default()
                     });
                     assert!(visual.data.borrow().gpu_frame.is_none());
@@ -1264,7 +1264,7 @@ mod tests {
             assert!(visual.data.borrow().last_time.is_none());
             visual.set_activity(true, true);
             visual.configure_config(&Config {
-                audio_visualizer_style: style,
+                default_visualizer_style: style,
                 analysis_fft_size: 4096,
                 ..Config::default()
             });
@@ -1291,7 +1291,7 @@ mod tests {
         assert!(flow_before.iter().any(|s| s.strength > 0.05));
         assert_ne!(beams_before, flow_before);
         let config = Config {
-            audio_visualizer_style: AudioVisualizerStyle::StereoDensity,
+            default_visualizer_style: AudioVisualizerStyle::StereoDensity,
             ..Config::default()
         };
         assert!(!beams.configure_config(&config));

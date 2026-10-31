@@ -69,7 +69,7 @@ impl Playlists {
             .schedule(cx, |this| &mut this.loading_text);
     }
     pub(in crate::gui) fn view_page_size(&self) -> usize {
-        self.state.system.config.page_size as usize
+        self.state.system.config.query_batch_size as usize
     }
 
     fn request_view(&mut self, prepared: ViewRequest, cx: &mut Context<Self>) {

@@ -99,12 +99,7 @@ impl RadialMapping {
 }
 const TWO_PI: f32 = PI * 2.0;
 const IDLE_FADE_DURATION: Duration = Duration::from_secs(2);
-const BAR_GLOW_PASSES: [(f32, f32, f32); 4] = [
-    (0.05, 3.5, 0.18),
-    (0.025, 2.0, 0.32),
-    (0.012, 1.5, 0.42),
-    (0.006, 1.2, 0.55),
-];
+const BAR_GLOW_PASSES: [(f32, f32, f32); 2] = [(0.05, 3.5, 0.18), (0.025, 2.0, 0.32)];
 
 pub(super) struct RadialRenderer {
     data: Rc<RefCell<RadialState>>,
@@ -116,7 +111,6 @@ struct RadialState {
     sensitivity: f32,
     rotation_speed: f32,
     bar_width: f32,
-    bar_glow_layers: u32,
     ring_opacity: f32,
     bloom_intensity: f32,
     inner_diameter: f32,
@@ -146,18 +140,17 @@ impl RadialRenderer {
         Self {
             data: Rc::new(RefCell::new(RadialState {
                 guide_labels: None,
-                background: config.visual_background.rgb(),
-                sensitivity: config.audio_visualizer_sensitivity,
-                rotation_speed: config.audio_visualizer_rotation_speed,
-                bar_width: config.audio_visualizer_bar_width,
-                bar_glow_layers: config.audio_visualizer_bar_glow_layers,
-                ring_opacity: config.audio_visualizer_ring_opacity,
-                bloom_intensity: config.audio_visualizer_bloom_intensity,
-                inner_diameter: config.audio_visualizer_inner_diameter,
-                fade_when_idle: config.audio_visualizer_fade_when_idle,
-                primary_color: config.audio_visualizer_primary_color.rgb(),
-                secondary_color: config.audio_visualizer_secondary_color.rgb(),
-                db_range: config.audio_visualizer_db_range(),
+                background: config.visualization_background.rgb(),
+                sensitivity: config.reactive_sensitivity,
+                rotation_speed: config.radial_rotation_speed,
+                bar_width: config.radial_bar_width,
+                ring_opacity: config.radial_ring_opacity,
+                bloom_intensity: config.reactive_bloom_intensity,
+                inner_diameter: config.radial_inner_diameter,
+                fade_when_idle: config.radial_fade_when_idle,
+                primary_color: config.effect_primary_color.rgb(),
+                secondary_color: config.effect_secondary_color.rgb(),
+                db_range: config.reactive_db_range(),
                 visible: true,
                 displayed: Vec::with_capacity(FANCY_BANDS),
                 targets: Vec::with_capacity(FANCY_BANDS),
@@ -178,38 +171,36 @@ impl RadialRenderer {
 
     pub(super) fn configure(&mut self, config: &VisualParameters) -> bool {
         let mut data = self.data.borrow_mut();
-        let db_range = config.audio_visualizer_db_range();
+        let db_range = config.reactive_db_range();
         let incompatible = data.fft_size != config.analysis_fft_size
             || data.window != config.analysis_window
             || data.signal != config.visualization_signal;
         let remap = data.db_range != db_range;
-        let changed = data.background != config.visual_background.rgb()
-            || data.sensitivity != config.audio_visualizer_sensitivity
-            || data.rotation_speed != config.audio_visualizer_rotation_speed
-            || data.bar_width != config.audio_visualizer_bar_width
-            || data.bar_glow_layers != config.audio_visualizer_bar_glow_layers
-            || data.ring_opacity != config.audio_visualizer_ring_opacity
-            || data.bloom_intensity != config.audio_visualizer_bloom_intensity
-            || data.inner_diameter != config.audio_visualizer_inner_diameter
-            || data.fade_when_idle != config.audio_visualizer_fade_when_idle
-            || data.primary_color != config.audio_visualizer_primary_color.rgb()
-            || data.secondary_color != config.audio_visualizer_secondary_color.rgb()
+        let changed = data.background != config.visualization_background.rgb()
+            || data.sensitivity != config.reactive_sensitivity
+            || data.rotation_speed != config.radial_rotation_speed
+            || data.bar_width != config.radial_bar_width
+            || data.ring_opacity != config.radial_ring_opacity
+            || data.bloom_intensity != config.reactive_bloom_intensity
+            || data.inner_diameter != config.radial_inner_diameter
+            || data.fade_when_idle != config.radial_fade_when_idle
+            || data.primary_color != config.effect_primary_color.rgb()
+            || data.secondary_color != config.effect_secondary_color.rgb()
             || remap
             || incompatible;
         if !changed {
             return false;
         }
-        data.background = config.visual_background.rgb();
-        data.sensitivity = config.audio_visualizer_sensitivity;
-        data.rotation_speed = config.audio_visualizer_rotation_speed;
-        data.bar_width = config.audio_visualizer_bar_width;
-        data.bar_glow_layers = config.audio_visualizer_bar_glow_layers;
-        data.ring_opacity = config.audio_visualizer_ring_opacity;
-        data.bloom_intensity = config.audio_visualizer_bloom_intensity;
-        data.inner_diameter = config.audio_visualizer_inner_diameter;
-        data.fade_when_idle = config.audio_visualizer_fade_when_idle;
-        data.primary_color = config.audio_visualizer_primary_color.rgb();
-        data.secondary_color = config.audio_visualizer_secondary_color.rgb();
+        data.background = config.visualization_background.rgb();
+        data.sensitivity = config.reactive_sensitivity;
+        data.rotation_speed = config.radial_rotation_speed;
+        data.bar_width = config.radial_bar_width;
+        data.ring_opacity = config.radial_ring_opacity;
+        data.bloom_intensity = config.reactive_bloom_intensity;
+        data.inner_diameter = config.radial_inner_diameter;
+        data.fade_when_idle = config.radial_fade_when_idle;
+        data.primary_color = config.effect_primary_color.rgb();
+        data.secondary_color = config.effect_secondary_color.rgb();
         data.db_range = db_range;
         data.fft_size = config.analysis_fft_size;
         data.window = config.analysis_window;
@@ -539,7 +530,7 @@ fn paint_guides(
     window: &mut Window,
     cx: &mut App,
 ) {
-    if !options.grid && !options.label {
+    if !options.reference_lines && !options.labels {
         return;
     }
     let side = (bounds.size.width / px(1.0)).min(bounds.size.height / px(1.0));
@@ -557,7 +548,7 @@ fn paint_guides(
         (1.0, labels[2].clone()),
     ] {
         let radius = bar_level_radius(scale, level);
-        if options.grid {
+        if options.reference_lines {
             paint_arc(
                 window,
                 center,
@@ -569,7 +560,7 @@ fn paint_guides(
             );
         }
         // Keep 18px between labels and omit them rather than overlap tiny panels.
-        if !options.label || side < 144.0 {
+        if !options.labels || side < 144.0 {
             continue;
         }
         let mut style = window.text_style();
@@ -624,9 +615,7 @@ fn paint_bars(bounds: Bounds<gpui::Pixels>, data: &RadialState, window: &mut Win
         let color = fancy_bar_color(data, value);
         if data.bloom_intensity > 0.01 && value > 0.005 {
             let glow = data.bloom_intensity.clamp(0.0, 2.0);
-            for &(spread, width_scale, alpha_scale) in
-                BAR_GLOW_PASSES.iter().take(data.bar_glow_layers as usize)
-            {
+            for &(spread, width_scale, alpha_scale) in &BAR_GLOW_PASSES {
                 let halo = radial_bar(
                     center,
                     (inner - scale * spread).max(1.0),
@@ -960,9 +949,9 @@ mod tests {
             )
         };
         radial.configure(&VisualParameters::from(&Config {
-            audio_visualizer_primary_color: "#ff0000".parse().unwrap(),
-            audio_visualizer_bar_width: 0.9,
-            audio_visualizer_sensitivity: 2.0,
+            effect_primary_color: "#ff0000".parse().unwrap(),
+            radial_bar_width: 0.9,
+            reactive_sensitivity: 2.0,
             ..Config::default()
         }));
         {
@@ -977,7 +966,7 @@ mod tests {
         // peak, not attempt to invert the clipped display value.
         for (range, expected) in [(20.0, 0.0), (100.0, 0.65)] {
             radial.configure(&VisualParameters::from(&Config {
-                audio_visualizer_db_range: Some(range),
+                reactive_db_range: Some(range),
                 ..Config::default()
             }));
             let data = radial.data.borrow();
@@ -1349,7 +1338,7 @@ mod tests {
         let mut audio = frame();
         accept(&mut radial, &audio);
         assert!(radial.configure(&VisualParameters::from(&Config {
-            audio_visualizer_db_range: Some(50.0),
+            reactive_db_range: Some(50.0),
             ..Config::default()
         })));
         assert_eq!(radial.data.borrow().displayed, vec![0.3; 4]);
@@ -1440,9 +1429,9 @@ mod tests {
         ] {
             coordinator.retain_presentations([AudioVisualizerOptions {
                 style,
-                grid: false,
-                label: false,
-                oscilloscope_shared_grid: false,
+                reference_lines: false,
+                labels: false,
+                oscilloscope_overlay_channels: false,
             }]);
             let data = coordinator.radial.data.borrow();
             assert!(!data.visible);
@@ -1455,9 +1444,9 @@ mod tests {
         let presentation_time = coordinator.radial.data.borrow().last_presentation_time;
         coordinator.retain_presentations([AudioVisualizerOptions {
             style: AudioVisualizerStyle::BarsRings,
-            grid: false,
-            label: false,
-            oscilloscope_shared_grid: false,
+            reference_lines: false,
+            labels: false,
+            oscilloscope_overlay_channels: false,
         }]);
         assert_eq!(coordinator.radial.data.borrow().targets, targets);
         assert_eq!(
@@ -1493,7 +1482,7 @@ mod tests {
         for range_override in [None, Some(70.0)] {
             let mut radial = RadialRenderer::new();
             let mut config = Config {
-                audio_visualizer_db_range: range_override,
+                reactive_db_range: range_override,
                 ..Config::default()
             };
             radial.configure(&VisualParameters::from(&config));
@@ -1514,7 +1503,7 @@ mod tests {
         radial.configure(&VisualParameters::from(&Config {
             visualization_db_range: 100.0,
             spectrum_db_range: Some(40.0),
-            audio_visualizer_db_range: Some(50.0),
+            reactive_db_range: Some(50.0),
             ..Config::default()
         }));
         let data = radial.data.borrow();

@@ -132,7 +132,7 @@ fn committed_track_deletions_invalidate_before_failed_refresh() {
         let also_affected = core.state.playlist_query_revisions(2);
         let unchanged = core.state.playlist_query_revisions(3);
         // The injected change targets a surviving row, not a deletion-cache entry.
-        core.store.set_track_cache_page_size(0);
+        core.store.set_track_cache_query_batch_size(0);
         core.state.queue.current_id = Some(1);
         core.state.current_track = Some(Arc::new(core.track(1).unwrap()));
         core.save_queue().unwrap();

@@ -1117,7 +1117,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let config = directory.path().join("config.toml");
         crate::config::Config {
-            media_read_buffer_mb: 1,
+            media_read_buffer_mib: 1,
             ffmpeg_enabled: false,
             mpris_enabled: false,
             ..Default::default()

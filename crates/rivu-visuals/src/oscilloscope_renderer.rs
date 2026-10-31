@@ -47,10 +47,10 @@ impl OscilloscopeRenderer {
             time_span_ms: config.oscilloscope_time_span_ms,
             gain: config.oscilloscope_gain,
             sweep_span_ms: None,
-            background: config.visual_background.rgb(),
+            background: config.visualization_background.rgb(),
             colors: [
-                config.audio_visualizer_primary_color.rgb(),
-                config.audio_visualizer_secondary_color.rgb(),
+                config.effect_primary_color.rgb(),
+                config.effect_secondary_color.rgb(),
             ],
             label: None,
             label_template: None,
@@ -61,12 +61,12 @@ impl OscilloscopeRenderer {
         let mut data = self.0.borrow_mut();
         let settings = config.analysis_settings();
         let colors = [
-            config.audio_visualizer_primary_color.rgb(),
-            config.audio_visualizer_secondary_color.rgb(),
+            config.effect_primary_color.rgb(),
+            config.effect_secondary_color.rgb(),
         ];
         let changed = data.visible != visible
             || data.settings != settings
-            || data.background != config.visual_background.rgb()
+            || data.background != config.visualization_background.rgb()
             || data.colors != colors
             || data.time_span_ms != config.oscilloscope_time_span_ms
             || data.gain != config.oscilloscope_gain;
@@ -80,7 +80,7 @@ impl OscilloscopeRenderer {
         data.gain = config.oscilloscope_gain;
         data.visible = visible;
         data.settings = settings;
-        data.background = config.visual_background.rgb();
+        data.background = config.visualization_background.rgb();
         data.colors = colors;
         changed
     }
@@ -124,7 +124,7 @@ impl OscilloscopeRenderer {
         options: AudioVisualizerOptions,
     ) -> AnyElement {
         let data = Rc::clone(&self.0);
-        if options.label {
+        if options.labels {
             let template = &i18n.oscilloscope_scale;
             let mut data = data.borrow_mut();
             if data.label_template.as_ref() != Some(template) || data.label.is_none() {
@@ -159,14 +159,14 @@ impl OscilloscopeRenderer {
                             return;
                         }
                         window.paint_quad(gpui::fill(bounds, rgb(data.background)));
-                        if options.grid {
-                            for channel in 0..if options.oscilloscope_shared_grid {
+                        if options.reference_lines {
+                            for channel in 0..if options.oscilloscope_overlay_channels {
                                 1
                             } else {
                                 2
                             } {
                                 let (center, amplitude) =
-                                    channel_axis(options.oscilloscope_shared_grid, channel);
+                                    channel_axis(options.oscilloscope_overlay_channels, channel);
                                 for division in 1..10 {
                                     let mut guide = gpui::outline(
                                         gpui::Bounds::new(
@@ -210,7 +210,7 @@ impl OscilloscopeRenderer {
                         // the FFT size when the panel is narrower than the sweep.
                         for channel in 0..2 {
                             let (center, amplitude) =
-                                channel_axis(options.oscilloscope_shared_grid, channel);
+                                channel_axis(options.oscilloscope_overlay_channels, channel);
                             let mut path = PathBuilder::stroke(px(1.2));
                             let mut connected = false;
                             let mut has_points = false;
@@ -244,7 +244,7 @@ impl OscilloscopeRenderer {
                         }
                         // Measure the actual localized label rather than imposing a
                         // guessed minimum width on small or translated panels.
-                        if options.label
+                        if options.labels
                             && height >= 100.0
                             && let Some(label) = &data.label
                         {
@@ -633,7 +633,7 @@ mod tests {
             );
         }
         scope.update(&valid);
-        config.audio_visualizer_primary_color = "#123456".parse().unwrap();
+        config.effect_primary_color = "#123456".parse().unwrap();
         scope.configure_config(&config, true);
         assert_eq!(scope.0.borrow().points[0], [0.25, -0.5]);
         scope.clear();

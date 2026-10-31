@@ -61,7 +61,7 @@ fn page(request: &QueryRequest, first_id: i64) -> QueryResult {
 
 fn fixture() -> (UiState, TuiSnapshot, Instant) {
     let mut state = TuiSnapshot::default();
-    state.system.page_size = 2;
+    state.system.query_batch_size = 2;
     let mut ui = UiState {
         view: View::Search(LibrarySearch::default()),
         ..UiState::default()

@@ -302,11 +302,8 @@ impl WindowView {
                             "shell-style-menu",
                             &[(
                                 "style",
-                                visualization::audio_visualizer_style_label(
-                                    &self.i18n,
-                                    options.style,
-                                )
-                                .into(),
+                                visualization::visualization_style_label(&self.i18n, options.style)
+                                    .into(),
                             )],
                         ),
                         cx,
@@ -330,13 +327,15 @@ impl WindowView {
                                 menu.child(checked_menu_item(
                                     "audio-visualizer-grid",
                                     self.tr("shell-reference-lines"),
-                                    options.grid,
+                                    options.reference_lines,
                                     MenuIndicator::Check,
                                     cx,
                                     move |this, _, cx| {
                                         this.update_visualizer_options(
                                             state.panel_id,
-                                            |options| options.grid = !options.grid,
+                                            |options| {
+                                                options.reference_lines = !options.reference_lines
+                                            },
                                             cx,
                                         );
                                     },
@@ -346,13 +345,13 @@ impl WindowView {
                         .child(checked_menu_item(
                             "audio-visualizer-labels",
                             self.tr("shell-labels"),
-                            options.label,
+                            options.labels,
                             MenuIndicator::Check,
                             cx,
                             move |this, _, cx| {
                                 this.update_visualizer_options(
                                     state.panel_id,
-                                    |options| options.label = !options.label,
+                                    |options| options.labels = !options.labels,
                                     cx,
                                 );
                             },
@@ -363,15 +362,15 @@ impl WindowView {
                                 menu.child(checked_menu_item(
                                     "oscilloscope-shared-grid",
                                     self.tr("shell-oscilloscope-shared-axes"),
-                                    options.oscilloscope_shared_grid,
+                                    options.oscilloscope_overlay_channels,
                                     MenuIndicator::Check,
                                     cx,
                                     move |this, _, cx| {
                                         this.update_visualizer_options(
                                             state.panel_id,
                                             |options| {
-                                                options.oscilloscope_shared_grid =
-                                                    !options.oscilloscope_shared_grid
+                                                options.oscilloscope_overlay_channels =
+                                                    !options.oscilloscope_overlay_channels
                                             },
                                             cx,
                                         );
@@ -600,7 +599,7 @@ impl WindowView {
                         let selected = options.style == style;
                         menu = menu.child(checked_menu_item(
                             ("audio-visualizer-style", style as usize),
-                            self.tr(visualization::audio_visualizer_style_id(style)),
+                            self.tr(visualization::visualization_style_id(style)),
                             selected,
                             MenuIndicator::Radio,
                             cx,

@@ -527,7 +527,7 @@ impl WindowView {
             .map(|error| i18n.format("shell-load-layouts-error", &[("error", error.into())]));
         workspace.save_error = error.clone();
         let ui_font = appearance::fonts::resolve(&state.system.config.ui_font, cx);
-        appearance::fonts::publish(&ui_font, state.system.config.ui_font_size, cx);
+        appearance::fonts::publish(&ui_font, state.system.config.ui_font_size_pt, cx);
         let layout_name = cx.new(|cx| {
             Input::new(
                 i18n.text("shell-layout-name").to_owned(),
@@ -741,7 +741,7 @@ impl WindowView {
         let default_album = cx.new(|cx| artwork::DefaultArtwork::new(&i18n, cx));
         let album_default = default_album.read(cx).circular();
         let artwork_images =
-            artwork::ArtworkImageRegistry::new(state.system.config.artwork_decode_budget_mb);
+            artwork::ArtworkImageRegistry::new(state.system.config.artwork_decode_budget_mib);
         let feature_context = feature::FeatureContext {
             snapshots: Rc::clone(&snapshots),
             i18n: Arc::clone(&i18n),
@@ -963,7 +963,7 @@ impl WindowView {
             || self.state.system.ffmpeg_status != state.system.ffmpeg_status
             || self.state.system.mpris_status != state.system.mpris_status
             || self.state.system.config.ui_scale != state.system.config.ui_scale
-            || self.state.system.config.ui_font_size != state.system.config.ui_font_size
+            || self.state.system.config.ui_font_size_pt != state.system.config.ui_font_size_pt
         {
             self.settings.update(cx, |settings, cx| {
                 settings.sync_runtime(
@@ -971,7 +971,7 @@ impl WindowView {
                     &state.system.ffmpeg_status,
                     &state.system.mpris_status,
                     state.system.config.ui_scale,
-                    state.system.config.ui_font_size,
+                    state.system.config.ui_font_size_pt,
                     cx,
                 );
             });
@@ -986,7 +986,7 @@ impl WindowView {
             != state.system.config.visualization_enabled;
         let font_changed = self.state.system.config.ui_font != state.system.config.ui_font;
         let font_size_changed =
-            self.state.system.config.ui_font_size != state.system.config.ui_font_size;
+            self.state.system.config.ui_font_size_pt != state.system.config.ui_font_size_pt;
         let appearance_changed = font_changed
             || font_size_changed
             || self.state.system.config.ui_theme != state.system.config.ui_theme;
@@ -994,7 +994,7 @@ impl WindowView {
             self.ui_font = appearance::fonts::resolve(&state.system.config.ui_font, cx);
         }
         if font_changed || font_size_changed {
-            appearance::fonts::publish(&self.ui_font, state.system.config.ui_font_size, cx);
+            appearance::fonts::publish(&self.ui_font, state.system.config.ui_font_size_pt, cx);
         }
         if self.state.system.config.ui_theme != state.system.config.ui_theme {
             appearance::theme::set_theme(state.system.config.ui_theme, cx);
@@ -1008,7 +1008,7 @@ impl WindowView {
         }
         if self
             .artwork_images
-            .set_decode_budget_mb(self.state.system.config.artwork_decode_budget_mb, cx)
+            .set_decode_budget_mib(self.state.system.config.artwork_decode_budget_mib, cx)
         {
             self.album_artwork.update(cx, |_, cx| cx.notify());
             for albums in self.album_browsers.values() {
@@ -1036,7 +1036,7 @@ impl WindowView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let page_size = self.state.system.config.page_size as usize;
+        let page_size = self.state.system.config.query_batch_size as usize;
         let albums = self.album_browsers.entry(id).or_insert_with(|| {
             let albums = cx.new(|cx| {
                 album_browser::AlbumBrowser::new(
@@ -1094,7 +1094,7 @@ impl WindowView {
         let panels = &self.workspace.panels;
         let visible = self.window_visible && !self.state.system.shutting_down;
         let revisions = self.state.query_revisions(None);
-        let page_size = self.state.system.config.page_size as usize;
+        let page_size = self.state.system.config.query_batch_size as usize;
         let current_track = self.state.current_track().map(|track| track.id);
         let playback_status = self.state.playback.status;
         self.album_browsers.retain(|id, albums| {

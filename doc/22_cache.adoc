@@ -47,9 +47,9 @@ can substitute for physical-worker completion.
 
 === Core-owned lookup retention
 
-Core's interactive track-ID LRU holds at most twice `interface.page_size`: 128
+Core's interactive track-ID LRU holds at most twice `interface.query_batch_size`: 128
 entries by default, at most 512. Hits refresh age, misses are not retained, and a
-smaller page size trims immediately. Metadata changes invalidate affected entries;
+smaller query batch trims immediately. Metadata changes invalidate affected entries;
 playback statistics and committed bitrate changes patch existing entries. Scans
 clear it only for display impacts. This bounds entries, not string bytes. The
 background query owner and export do not populate this LRU or assemble pages from it.
@@ -310,9 +310,9 @@ link:23_visuals.adoc#_spectrogram[Spectrogram].
 
 Drawable panels share one history sized for the largest requested plot width,
 capped by history seconds times analysis FPS, with at least two columns.
-Sampling height uses the largest drawable panel's height times the configured
-sampling scale, with a floor at the visible source-frequency count, then caps it
-by configured rows and the startup shared GPU budget. Resizing preserves newest
+Sampling height automatically targets half the largest drawable panel's logical
+height, rounded up, with a floor at the visible source-frequency count. It is
+capped at 1024 rows and by the startup shared GPU budget. Resizing preserves newest
 chronological columns; narrow/wide panels do not fight to resize shared history
 while painting.
 
@@ -351,7 +351,7 @@ capped sampling height, in addition to the frequency data needed to preserve his
 The renderer's shared GPU-material admission budget additionally covers charged
 buffer capacity, including retained upload generations; it is not a cap on CPU
 payloads, textures, or total GPU memory. Rivu sets
-`interface.gpu_material_budget_mb` when creating its GUI and retains that startup
+`interface.gpu_material_budget_mib` when creating its GUI and retains that startup
 value for Spectrogram sampling until restart. Byte, allocation, draw-record and
 in-flight limits, including pressure behavior, are documented in
 link:25_gpu_rendering.adoc#_internal_led_vertical_slice[GPU rendering].
@@ -420,7 +420,7 @@ workload evidence, not assumed hit rates or submission counts.
 Native playback, probes, and full-waveform reads retain tags but skip embedded
 visuals before their payload buffers are allocated. Artwork extraction owns a
 separate budget: its encoded single-image limit defaults to 16 MiB and follows
-`interface.artwork_file_limit_mb` (1–64 MiB, applied after restart). Its aggregate
+`interface.artwork_file_limit_mib` (1–64 MiB, applied after restart). Its aggregate
 visual-frame allowance is twice that limit; encoded staging admits three times
 the sum of that limit and 64 KiB of framing allowance. Base64 and unsynchronised
 pictures check decoded size before allocating their payload buffers.
@@ -532,7 +532,7 @@ before reuse; mismatches fail without overwriting the existing file.
 Identical bytes reuse an existing file, independent of track identity; files
 provide paths for GPUI and URLs for external MPRIS consumers. Embedded and directory
 images share byte-sniffed, content-hash storage. Each encoded image is limited by
-the session's active `interface.artwork_file_limit_mb` (default 16 MiB, range
+the session's active `interface.artwork_file_limit_mib` (default 16 MiB, range
 1–64 MiB). The manager captures it at startup; changing or drafting the setting
 does not change admission until restart. Published artwork leases carry that
 immutable limit through GUI reads, independently of decoded-image budgets. A
@@ -616,7 +616,7 @@ window owns an independent decode.
 Revisiting an image after its last consumer retires decodes it again; there is
 no idle decoded-image cache across selections or windows. A still-live consumer
 can supply the shared decode. Each real-cover decode uses
-`interface.artwork_decode_budget_mb` (default `64`, range `1`–`1024` MiB),
+`interface.artwork_decode_budget_mib` (default `64`, range `1`–`1024` MiB),
 including cumulative BGRA pixels and conservative frame/vector overhead. The
 budget includes every composited GIF/WebP animation frame; even tiny frames
 incur an overhead charge. It applies per immutable content path per window, not

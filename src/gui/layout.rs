@@ -140,9 +140,9 @@ impl LayoutTemplate {
                         show_tab_bar,
                         audio_visualizer: Some(AudioVisualizerOptions {
                             style,
-                            grid: false,
-                            label: false,
-                            oscilloscope_shared_grid: false,
+                            reference_lines: false,
+                            labels: false,
+                            oscilloscope_overlay_channels: false,
                         }),
                         album_artwork: None,
                     })
@@ -305,11 +305,11 @@ mod serialized {
         #[serde(skip_serializing_if = "Option::is_none")]
         style: Option<AudioVisualizerStyle>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        grid: Option<bool>,
+        reference_lines: Option<bool>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        label: Option<bool>,
+        labels: Option<bool>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        oscilloscope_shared_grid: Option<bool>,
+        oscilloscope_overlay_channels: Option<bool>,
         #[serde(skip_serializing_if = "Option::is_none")]
         album_artwork: Option<AlbumArtworkOptions>,
     }
@@ -320,11 +320,13 @@ mod serialized {
                 kind: &panel.kind,
                 show_tab_bar: panel.show_tab_bar,
                 style: panel.audio_visualizer.map(|options| options.style),
-                grid: panel.audio_visualizer.map(|options| options.grid),
-                label: panel.audio_visualizer.map(|options| options.label),
-                oscilloscope_shared_grid: panel
+                reference_lines: panel
                     .audio_visualizer
-                    .map(|options| options.oscilloscope_shared_grid),
+                    .map(|options| options.reference_lines),
+                labels: panel.audio_visualizer.map(|options| options.labels),
+                oscilloscope_overlay_channels: panel
+                    .audio_visualizer
+                    .map(|options| options.oscilloscope_overlay_channels),
                 album_artwork: panel.album_artwork,
             }
         }
@@ -523,11 +525,11 @@ mod serialized {
         #[serde(default, deserialize_with = "present")]
         style: Option<AudioVisualizerStyle>,
         #[serde(default, deserialize_with = "present")]
-        grid: Option<bool>,
+        reference_lines: Option<bool>,
         #[serde(default, deserialize_with = "present")]
-        label: Option<bool>,
+        labels: Option<bool>,
         #[serde(default, deserialize_with = "present")]
-        oscilloscope_shared_grid: Option<bool>,
+        oscilloscope_overlay_channels: Option<bool>,
         #[serde(default, deserialize_with = "present")]
         album_artwork: Option<AlbumArtworkOptions>,
     }
@@ -573,10 +575,10 @@ mod serialized {
                 }
                 Self::Tabs { panels, active } => {
                     let panels = panels.into_iter().map(|panel| {
-                        let audio_visualizer = match (panel.style, panel.grid, panel.label, panel.oscilloscope_shared_grid) {
+                        let audio_visualizer = match (panel.style, panel.reference_lines, panel.labels, panel.oscilloscope_overlay_channels) {
                             (None, None, None, None) => None,
-                            (Some(style), Some(grid), Some(label), shared_grid) if panel.kind == "audio_visualizer" =>
-                                Some(AudioVisualizerOptions { style, grid, label, oscilloscope_shared_grid: shared_grid.unwrap_or(false) }),
+                            (Some(style), Some(reference_lines), Some(labels), overlay_channels) if panel.kind == "audio_visualizer" =>
+                                Some(AudioVisualizerOptions { style, reference_lines, labels, oscilloscope_overlay_channels: overlay_channels.unwrap_or(false) }),
                             _ => return Err(anyhow!("visualizer options must be complete and belong to an audio_visualizer")),
                         };
                         if let Some(options) = panel.album_artwork
@@ -1796,7 +1798,7 @@ mod tests {
             "type":"split", "axis":"horizontal", "boundaries":[0.4],
             "children":[
                 {"type":"tabs", "active":1, "panels":[
-                    {"kind":"audio_visualizer", "style":"bars", "grid":true, "label":false},
+                    {"kind":"audio_visualizer", "style":"bars", "reference_lines":true, "labels":false},
                     {"kind":"album_artwork", "album_artwork":artwork}
                 ]},
                 {"type":"tabs", "panels":[{"kind":"library"}]}
@@ -1806,23 +1808,23 @@ mod tests {
     }
 
     #[test]
-    fn legacy_visualizer_mode_defaults_separate_and_rejects_incomplete_options() {
+    fn omitted_visualizer_overlay_defaults_separate_and_rejects_incomplete_options() {
         let value = one_layout(json!({
             "type": "tabs", "panels": [{
-                "kind": "audio_visualizer", "style": "oscilloscope", "grid": true, "label": true
+                "kind": "audio_visualizer", "style": "oscilloscope", "reference_lines": true, "labels": true
             }]
         }));
-        let legacy = decoded(value).unwrap();
+        let layout = decoded(value).unwrap();
         assert!(
-            !legacy.current().panels()[0]
+            !layout.current().panels()[0]
                 .audio_visualizer
                 .unwrap()
-                .oscilloscope_shared_grid
+                .oscilloscope_overlay_channels
         );
         for panel in [
-            json!({"kind": "library", "oscilloscope_shared_grid": true}),
-            json!({"kind": "audio_visualizer", "oscilloscope_shared_grid": false}),
-            json!({"kind": "audio_visualizer", "style": "oscilloscope", "grid": true, "oscilloscope_shared_grid": true}),
+            json!({"kind": "library", "oscilloscope_overlay_channels": true}),
+            json!({"kind": "audio_visualizer", "oscilloscope_overlay_channels": false}),
+            json!({"kind": "audio_visualizer", "style": "oscilloscope", "reference_lines": true, "oscilloscope_overlay_channels": true}),
         ] {
             assert!(decoded(one_layout(json!({"type": "tabs", "panels": [panel]}))).is_err());
         }
@@ -1871,9 +1873,9 @@ mod tests {
             (format!("{root}/children/0/panels/0/kind"), json!("custom")),
             (format!("{root}/children/0/panels/1/show_tab_bar"), json!(false)),
             (format!("{root}/children/0/panels/0/style"), json!("rings")),
-            (format!("{root}/children/0/panels/0/grid"), json!(false)),
-            (format!("{root}/children/0/panels/0/label"), json!(true)),
-            (format!("{root}/children/0/panels/0/oscilloscope_shared_grid"), json!(true)),
+            (format!("{root}/children/0/panels/0/reference_lines"), json!(false)),
+            (format!("{root}/children/0/panels/0/labels"), json!(true)),
+            (format!("{root}/children/0/panels/0/oscilloscope_overlay_channels"), json!(true)),
             (format!("{root}/children/0/panels/1/album_artwork/period_seconds"), json!(value["layouts"]["Work"]["root"]["children"][0]["panels"][1]["album_artwork"]["period_seconds"].as_f64().unwrap() + 1.0)),
             (format!("{root}/children/0/panels/1/album_artwork/style"), json!("vinyl")),
             (root.to_owned(), Value::Null),
@@ -1892,7 +1894,12 @@ mod tests {
                 let panel = changed["layouts"]["Work"]["root"]["children"][0]["panels"][0]
                     .as_object_mut()
                     .unwrap();
-                for key in ["style", "grid", "label", "oscilloscope_shared_grid"] {
+                for key in [
+                    "style",
+                    "reference_lines",
+                    "labels",
+                    "oscilloscope_overlay_channels",
+                ] {
                     panel.remove(key);
                 }
             }
@@ -1921,7 +1928,12 @@ mod tests {
         for (panel_index, fields) in [
             (
                 0,
-                &["style", "grid", "label", "oscilloscope_shared_grid"][..],
+                &[
+                    "style",
+                    "reference_lines",
+                    "labels",
+                    "oscilloscope_overlay_channels",
+                ][..],
             ),
             (1, &["album_artwork"][..]),
         ] {
@@ -2338,9 +2350,9 @@ mod tests {
         let c = layout.add("c", None);
         let options = AudioVisualizerOptions {
             style: AudioVisualizerStyle::Bars,
-            grid: true,
-            label: false,
-            oscilloscope_shared_grid: false,
+            reference_lines: true,
+            labels: false,
+            oscilloscope_overlay_channels: false,
         };
         assert!(layout.set_audio_visualizer_options(b, options));
         assert!(layout.set_tab_bar_visible(b, false));
@@ -2482,9 +2494,9 @@ mod tests {
         let destination = layout.add("audio_visualizer", Some(1));
         let options = AudioVisualizerOptions {
             style: AudioVisualizerStyle::Rings,
-            grid: false,
-            label: true,
-            oscilloscope_shared_grid: false,
+            reference_lines: false,
+            labels: true,
+            oscilloscope_overlay_channels: false,
         };
         assert!(layout.set_audio_visualizer_options(source, options));
         assert!(layout.set_tab_bar_visible(source, false));
@@ -2643,8 +2655,8 @@ mod tests {
                 "boundaries": boundaries,
                 "children": [
                     wire_tabs("queue"),
-                    {"type": "tabs", "panels": [{"kind": "audio_visualizer", "style": "spectrum", "grid": false, "label": false}]},
-                    {"type": "tabs", "panels": [{"kind": "audio_visualizer", "style": "spectrogram", "grid": false, "label": false}]}
+                    {"type": "tabs", "panels": [{"kind": "audio_visualizer", "style": "spectrum", "reference_lines": false, "labels": false}]},
+                    {"type": "tabs", "panels": [{"kind": "audio_visualizer", "style": "spectrogram", "reference_lines": false, "labels": false}]}
                 ]
             }));
             let reopened = decoded(saved.clone()).unwrap();
@@ -2847,15 +2859,15 @@ mod tests {
         let second = set.current_mut().add("audio_visualizer", None);
         let saved = AudioVisualizerOptions {
             style: AudioVisualizerStyle::Oscilloscope,
-            grid: false,
-            label: true,
-            oscilloscope_shared_grid: true,
+            reference_lines: false,
+            labels: true,
+            oscilloscope_overlay_channels: true,
         };
         let defaults = AudioVisualizerOptions {
             style: AudioVisualizerStyle::FractalFlow,
-            grid: true,
-            label: false,
-            oscilloscope_shared_grid: false,
+            reference_lines: true,
+            labels: false,
+            oscilloscope_overlay_channels: false,
         };
         assert!(set.current_mut().set_audio_visualizer_options(first, saved));
         assert!(set.current_mut().set_tab_bar_visible(first, false));
@@ -2872,10 +2884,10 @@ mod tests {
         let panels = &value["layouts"]["Default"]["root"]["panels"];
         assert_eq!(panels[0]["style"], "oscilloscope");
         assert_eq!(panels[1]["style"], "fractal_flow");
-        assert_eq!(panels[0]["grid"], false);
-        assert_eq!(panels[0]["label"], true);
-        assert_eq!(panels[0]["oscilloscope_shared_grid"], true);
-        assert_eq!(panels[1]["oscilloscope_shared_grid"], false);
+        assert_eq!(panels[0]["reference_lines"], false);
+        assert_eq!(panels[0]["labels"], true);
+        assert_eq!(panels[0]["oscilloscope_overlay_channels"], true);
+        assert_eq!(panels[1]["oscilloscope_overlay_channels"], false);
         assert!(panels[0].get("audio_visualizer").is_none());
         let reopened = decoded(value.clone()).unwrap();
         assert_eq!(encoded(&reopened), value);
@@ -3029,7 +3041,7 @@ mod tests {
             json!({"type":"tabs", "panels":[{"kind":"a", "show_tabs":true}]}),
             json!({"type":"tabs", "panels":[{}]}),
             json!({"type":"tabs", "panels":[{"kind":"audio_visualizer", "style":"bars"}]}),
-            json!({"type":"tabs", "panels":[{"kind":"a", "style":"bars", "grid":true, "label":true}]}),
+            json!({"type":"tabs", "panels":[{"kind":"a", "style":"bars", "reference_lines":true, "labels":true}]}),
             json!({"type":"tabs", "panels":[{"kind":"audio_visualizer", "style":null}]}),
             json!({"type":"tabs", "panels":[{"kind":"album_artwork", "album_artwork":null}]}),
             json!({"type":"split", "axis":"horizontal", "children":[leaf.clone()]}),

@@ -29,7 +29,7 @@ fn missing_save_writes_only_overrides_and_clears_optional_keys() {
     assert!(saved.get("logging").is_none());
     assert_eq!(Config::load(&path).unwrap(), config);
 
-    let original = "# Keep explicit defaults and unrelated formatting\n[playback]\nvolume_percent=25 # chosen volume\noutput_device = 'USB DAC'\n[interface]\npage_size = 64 # explicit default\n";
+    let original = "# Keep explicit defaults and unrelated formatting\n[playback]\nvolume_percent=25 # chosen volume\noutput_device = 'USB DAC'\n[interface]\nquery_batch_size = 64 # explicit default\n";
     fs::write(&path, original).unwrap();
     config = Config::load(&path).unwrap();
     config.output_device = None;
@@ -54,7 +54,7 @@ fn invalid_existing_files_are_rejected_without_being_rewritten() {
         "schema_version = 2\n",
         "schema_version = '1'\n",
         "[interface]\ntheme = 'unknown'\n",
-        "[interface]\npage_size = 0\n",
+        "[interface]\nquery_batch_size = 0\n",
         "[playback]\nvolume_percent = 101\n",
         "volume = 0.25\n",
         "[interface",
@@ -75,13 +75,13 @@ fn unversioned_current_files_load_without_being_rewritten() {
         assert_eq!(Config::load(&path).unwrap(), Config::default());
         assert_eq!(fs::read(&path).unwrap(), contents.as_bytes());
     }
-    let contents = "# Hand-edited settings\n[playback]\nvolume_percent = 25\nrepeat = 'one'\n[interface]\nlanguage = 'ZH_cn'\npage_size = 42\n";
+    let contents = "# Hand-edited settings\n[playback]\nvolume_percent = 25\nrepeat = 'one'\n[interface]\nlanguage = 'ZH_cn'\nquery_batch_size = 42\n";
     fs::write(&path, contents).unwrap();
     let config = Config::load(&path).unwrap();
     assert_eq!(config.volume, 0.25);
     assert_eq!(config.repeat, RepeatMode::One);
     assert_eq!(config.ui_language, "zh-CN");
-    assert_eq!(config.page_size, 42);
+    assert_eq!(config.query_batch_size, 42);
     assert_eq!(fs::read(&path).unwrap(), contents.as_bytes());
     config.save(&path).unwrap();
     assert_eq!(fs::read_to_string(&path).unwrap(), contents);
@@ -93,27 +93,27 @@ fn artwork_file_limit_round_trips_and_rejects_out_of_range_values() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
     write_current_config(&path, "[interface]\n").unwrap();
-    assert_eq!(Config::load(&path).unwrap().artwork_file_limit_mb, 16);
+    assert_eq!(Config::load(&path).unwrap().artwork_file_limit_mib, 16);
     for limit in [1, 16, 32, 64] {
         write_current_config(
             &path,
-            format!("[interface]\nartwork_file_limit_mb = {limit}\n"),
+            format!("[interface]\nartwork_file_limit_mib = {limit}\n"),
         )
         .unwrap();
         let config = Config::load(&path).unwrap();
-        assert_eq!(config.artwork_file_limit_mb, limit);
+        assert_eq!(config.artwork_file_limit_mib, limit);
         config.save(&path).unwrap();
         assert_eq!(Config::load(&path).unwrap(), config);
     }
     for limit in [0, 65, u32::MAX] {
         let config = Config {
-            artwork_file_limit_mb: limit,
+            artwork_file_limit_mib: limit,
             ..Config::default()
         };
         assert!(config.validate().is_err());
         write_current_config(
             &path,
-            format!("[interface]\nartwork_file_limit_mb = {limit}\n"),
+            format!("[interface]\nartwork_file_limit_mib = {limit}\n"),
         )
         .unwrap();
         assert!(Config::load(&path).is_err());
@@ -125,27 +125,27 @@ fn artwork_decode_budget_round_trips_and_rejects_out_of_range_values() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
     write_current_config(&path, "[interface]\n").unwrap();
-    assert_eq!(Config::load(&path).unwrap().artwork_decode_budget_mb, 64);
+    assert_eq!(Config::load(&path).unwrap().artwork_decode_budget_mib, 64);
     for budget in [1, 64, 257, 1024] {
         write_current_config(
             &path,
-            format!("[interface]\nartwork_decode_budget_mb = {budget}\n"),
+            format!("[interface]\nartwork_decode_budget_mib = {budget}\n"),
         )
         .unwrap();
         let config = Config::load(&path).unwrap();
-        assert_eq!(config.artwork_decode_budget_mb, budget);
+        assert_eq!(config.artwork_decode_budget_mib, budget);
         config.save(&path).unwrap();
         assert_eq!(Config::load(&path).unwrap(), config);
     }
     for budget in [0, 1025, u32::MAX] {
         let config = Config {
-            artwork_decode_budget_mb: budget,
+            artwork_decode_budget_mib: budget,
             ..Config::default()
         };
         assert!(config.validate().is_err());
         write_current_config(
             &path,
-            format!("[interface]\nartwork_decode_budget_mb = {budget}\n"),
+            format!("[interface]\nartwork_decode_budget_mib = {budget}\n"),
         )
         .unwrap();
         assert!(Config::load(&path).is_err());
@@ -156,26 +156,26 @@ fn artwork_decode_budget_round_trips_and_rejects_out_of_range_values() {
 fn artwork_decode_budget_patch_preserves_concurrent_unedited_fields() {
     let baseline = Config::default();
     let draft = Config {
-        artwork_decode_budget_mb: 128,
+        artwork_decode_budget_mib: 128,
         ..baseline.clone()
     };
     let mut latest = Config {
         volume: 0.25,
         album_artwork_fps: 30,
-        artwork_file_limit_mb: 32,
+        artwork_file_limit_mib: 32,
         ..baseline.clone()
     };
     let expected = Config {
-        artwork_decode_budget_mb: 128,
+        artwork_decode_budget_mib: 128,
         ..latest.clone()
     };
     ConfigPatch::between(&baseline, &draft).apply_to(&mut latest);
     assert_eq!(latest, expected);
 
-    latest.artwork_decode_budget_mb = 256;
+    latest.artwork_decode_budget_mib = 256;
     ConfigPatch::between(&baseline, &baseline).apply_to(&mut latest);
-    assert_eq!(latest.artwork_decode_budget_mb, 256);
-    assert_eq!(latest.artwork_file_limit_mb, 32);
+    assert_eq!(latest.artwork_decode_budget_mib, 256);
+    assert_eq!(latest.artwork_file_limit_mib, 32);
 }
 
 #[test]
@@ -211,6 +211,45 @@ fn patch_sets_and_clears_optional_fields_without_overwriting_unedited_values() {
     };
     ConfigPatch::between(&draft, &baseline).apply_to(&mut latest);
     assert_eq!(latest, expected);
+}
+
+#[test]
+fn spectrum_layout_patch_replaces_whole_variant_and_preserves_other_edits() {
+    for (before, after, concurrent) in [
+        (
+            SpectrumBarLayout::Automatic { width: 4.25 },
+            SpectrumBarLayout::Fixed { count: 73 },
+            SpectrumBarLayout::Automatic { width: 8.5 },
+        ),
+        (
+            SpectrumBarLayout::Fixed { count: 73 },
+            SpectrumBarLayout::Automatic { width: 5.75 },
+            SpectrumBarLayout::Fixed { count: 121 },
+        ),
+    ] {
+        let baseline = Config {
+            spectrum_bar_layout: before,
+            ..Config::default()
+        };
+        let draft = Config {
+            spectrum_bar_layout: after,
+            ..baseline.clone()
+        };
+        let mut latest = Config {
+            spectrum_bar_layout: concurrent,
+            volume: 0.25,
+            spectrum_gap: 2.5,
+            ..baseline.clone()
+        };
+        ConfigPatch::between(&baseline, &draft).apply_to(&mut latest);
+        assert_eq!(latest.spectrum_bar_layout, after);
+        assert_eq!(latest.volume, 0.25);
+        assert_eq!(latest.spectrum_gap, 2.5);
+        let unchanged = ConfigPatch::between(&draft, &draft);
+        latest.spectrum_bar_layout = concurrent;
+        unchanged.apply_to(&mut latest);
+        assert_eq!(latest.spectrum_bar_layout, concurrent);
+    }
 }
 
 #[test]
@@ -459,7 +498,7 @@ fn grouped_file_defaults_partial_tables_and_font_normalization() {
         write_current_config(&path, contents).unwrap();
         assert_eq!(Config::load(&path).unwrap(), Config::default());
     }
-    write_current_config(&path, "[playback]\nshuffle = true\nrepeat = 'one'\n[interface]\nfont = ''\n[visualizations.general]\ndb_range = 95\n[visualizations.spectrum]\nbars = 42\n[visualizations.waveform]\nseek_enabled = false\n").unwrap();
+    write_current_config(&path, "[playback]\nshuffle = true\nrepeat = 'one'\n[interface]\nfont = ''\n[visualizations.general]\ndb_range = 95\n[visualizations.spectrum.bar_layout]\nmode = 'fixed'\ncount = 42\n[visualizations.waveform]\nseek_enabled = false\n").unwrap();
     let config = Config::load(&path).unwrap();
     assert_eq!(
         config,
@@ -467,14 +506,14 @@ fn grouped_file_defaults_partial_tables_and_font_normalization() {
             shuffle: true,
             repeat: RepeatMode::One,
             visualization_db_range: 95.0,
-            spectrum_bars: 42,
+            spectrum_bar_layout: SpectrumBarLayout::Fixed { count: 42 },
             waveform_seek_enabled: false,
             ..Config::default()
         }
     );
     assert_eq!(config.spectrum_db_range(), 95.0);
     assert_eq!(config.spectrogram_db_range(), 95.0);
-    assert_eq!(config.audio_visualizer_db_range(), 95.0);
+    assert_eq!(config.reactive_db_range(), 95.0);
 }
 
 #[test]
@@ -487,35 +526,42 @@ fn spectrogram_flow_defaults_nested_round_trip_and_boundaries() {
     )
     .unwrap();
     let old = Config::load(&path).unwrap();
-    assert_eq!(old.spectrogram_flow_speed, 0.75);
-    assert_eq!(old.spectrogram_accumulation, 75);
+    assert_eq!(old.spectrogram_startup_expansion_speed, 0.75);
+    assert_eq!(old.spectrogram_outflow_threshold_percent, 75);
     assert_eq!(old.spectrogram_history_seconds, 30);
 
-    for (speed, accumulation) in [(0.1, 10), (0.75, 75), (2.0, 95)] {
+    for (speed, outflow_threshold_percent) in [(0.1, 10), (0.75, 75), (2.0, 95)] {
         write_current_config(
             &path,
-            format!("[visualizations.spectrogram]\nflow_speed = {speed}\naccumulation = {accumulation}\n"),
+            format!("[visualizations.spectrogram]\nstartup_expansion_speed = {speed}\noutflow_threshold_percent = {outflow_threshold_percent}\n"),
         )
         .unwrap();
         let config = Config::load(&path).unwrap();
-        assert_eq!(config.spectrogram_flow_speed, speed);
-        assert_eq!(config.spectrogram_accumulation, accumulation);
+        assert_eq!(config.spectrogram_startup_expansion_speed, speed);
+        assert_eq!(
+            config.spectrogram_outflow_threshold_percent,
+            outflow_threshold_percent
+        );
         config.save(&path).unwrap();
         assert_eq!(Config::load(&path).unwrap(), config);
         let saved = fs::read_to_string(&path).unwrap();
         let table: toml::Value = toml::from_str(&saved).unwrap();
         let nested = &table["visualizations"]["spectrogram"];
-        let flow_speed = nested["flow_speed"]
+        let startup_expansion_speed = nested["startup_expansion_speed"]
             .as_float()
-            .or_else(|| nested["flow_speed"].as_integer().map(|value| value as f64))
+            .or_else(|| {
+                nested["startup_expansion_speed"]
+                    .as_integer()
+                    .map(|value| value as f64)
+            })
             .unwrap();
-        assert_eq!(flow_speed as f32, speed);
+        assert_eq!(startup_expansion_speed as f32, speed);
         assert_eq!(
-            nested["accumulation"].as_integer(),
-            Some(i64::from(accumulation))
+            nested["outflow_threshold_percent"].as_integer(),
+            Some(i64::from(outflow_threshold_percent))
         );
-        assert!(table.get("spectrogram_flow_speed").is_none());
-        assert!(table.get("spectrogram_accumulation").is_none());
+        assert!(table.get("spectrogram_startup_expansion_speed").is_none());
+        assert!(table.get("spectrogram_outflow_threshold_percent").is_none());
 
         for speed in [
             f32::NAN,
@@ -526,36 +572,41 @@ fn spectrogram_flow_defaults_nested_round_trip_and_boundaries() {
             2.001,
         ] {
             let invalid = Config {
-                spectrogram_flow_speed: speed,
+                spectrogram_startup_expansion_speed: speed,
                 ..config.clone()
             };
             let error = invalid.save(&path).unwrap_err();
-            assert!(format!("{error:#}").contains("visualizations.spectrogram.flow_speed"));
+            assert!(
+                format!("{error:#}").contains("visualizations.spectrogram.startup_expansion_speed")
+            );
             assert_eq!(fs::read_to_string(&path).unwrap(), saved);
         }
-        for accumulation in [0, 9, 96, u32::MAX] {
+        for outflow_threshold_percent in [0, 9, 96, u32::MAX] {
             let invalid = Config {
-                spectrogram_accumulation: accumulation,
+                spectrogram_outflow_threshold_percent: outflow_threshold_percent,
                 ..config.clone()
             };
             let error = invalid.save(&path).unwrap_err();
-            assert!(format!("{error:#}").contains("visualizations.spectrogram.accumulation"));
+            assert!(
+                format!("{error:#}")
+                    .contains("visualizations.spectrogram.outflow_threshold_percent")
+            );
             assert_eq!(fs::read_to_string(&path).unwrap(), saved);
         }
     }
 
     for invalid in [
-        "flow_speed = nan",
-        "flow_speed = inf",
-        "flow_speed = -inf",
-        "flow_speed = 0.099",
-        "flow_speed = 2.001",
-        "flow_speed = '0.75'",
-        "accumulation = 9",
-        "accumulation = 96",
-        "accumulation = -1",
-        "accumulation = 75.5",
-        "accumulation = '75'",
+        "startup_expansion_speed = nan",
+        "startup_expansion_speed = inf",
+        "startup_expansion_speed = -inf",
+        "startup_expansion_speed = 0.099",
+        "startup_expansion_speed = 2.001",
+        "startup_expansion_speed = '0.75'",
+        "outflow_threshold_percent = 9",
+        "outflow_threshold_percent = 96",
+        "outflow_threshold_percent = -1",
+        "outflow_threshold_percent = 75.5",
+        "outflow_threshold_percent = '75'",
     ] {
         write_current_config(&path, format!("[visualizations.spectrogram]\n{invalid}\n")).unwrap();
         assert!(Config::load(&path).is_err(), "accepted {invalid}");
@@ -566,33 +617,33 @@ fn spectrogram_flow_defaults_nested_round_trip_and_boundaries() {
 fn spectrogram_flow_patch_preserves_unedited_and_concurrent_values() {
     let baseline = Config::default();
     let draft = Config {
-        spectrogram_flow_speed: 1.5,
+        spectrogram_startup_expansion_speed: 1.5,
         ..baseline.clone()
     };
     let mut latest = Config {
-        spectrogram_flow_speed: 0.5,
-        spectrogram_accumulation: 90,
+        spectrogram_startup_expansion_speed: 0.5,
+        spectrogram_outflow_threshold_percent: 90,
         spectrogram_history_seconds: 40,
         ..baseline.clone()
     };
     let expected = Config {
-        spectrogram_flow_speed: 1.5,
+        spectrogram_startup_expansion_speed: 1.5,
         ..latest.clone()
     };
     ConfigPatch::between(&baseline, &draft).apply_to(&mut latest);
     assert_eq!(latest, expected);
 
     let accumulation_draft = Config {
-        spectrogram_accumulation: 10,
+        spectrogram_outflow_threshold_percent: 10,
         ..draft.clone()
     };
-    latest.spectrogram_flow_speed = 2.0;
+    latest.spectrogram_startup_expansion_speed = 2.0;
     ConfigPatch::between(&draft, &accumulation_draft).apply_to(&mut latest);
-    assert_eq!(latest.spectrogram_flow_speed, 2.0);
-    assert_eq!(latest.spectrogram_accumulation, 10);
+    assert_eq!(latest.spectrogram_startup_expansion_speed, 2.0);
+    assert_eq!(latest.spectrogram_outflow_threshold_percent, 10);
     ConfigPatch::between(&accumulation_draft, &baseline).apply_to(&mut latest);
-    assert_eq!(latest.spectrogram_flow_speed, 0.75);
-    assert_eq!(latest.spectrogram_accumulation, 75);
+    assert_eq!(latest.spectrogram_startup_expansion_speed, 0.75);
+    assert_eq!(latest.spectrogram_outflow_threshold_percent, 75);
     assert_eq!(latest.spectrogram_history_seconds, 40);
     ConfigPatch::between(&baseline, &baseline).apply_to(&mut latest);
     assert_eq!(latest.spectrogram_history_seconds, 40);
@@ -783,7 +834,7 @@ fn save_reload_replaces_file_and_leaves_no_temporary_files() {
             PathBuf::from("音楽"),
         ],
         scan_max_depth: 32,
-        scan_min_duration_secs: 45,
+        scan_min_duration_seconds: 45,
         output_device: Some("USB DAC".to_owned()),
         volume: 0.25,
         shuffle: true,
@@ -803,7 +854,7 @@ fn save_reload_replaces_file_and_leaves_no_temporary_files() {
             bitrate: true,
         },
         ui_font: "Noto Sans".to_owned(),
-        ui_font_size: 18,
+        ui_font_size_pt: 18,
         ui_language: "zh-CN".to_owned(),
         ui_theme: Theme::TokyoNight,
         ui_scale: 1.5,
@@ -811,22 +862,21 @@ fn save_reload_replaces_file_and_leaves_no_temporary_files() {
         layout_snap_grid_px: 12,
         visualization_enabled: false,
         visualization_signal: crate::config::VisualizationSignal::Before,
-        analysis_fps: 30,
+        analysis_rate_hz: 30,
         visualization_fps: 120,
         visualization_db_range: 90.0,
         spectrum_db_range: Some(80.0),
-        audio_visualizer_db_range: Some(60.0),
-        media_read_buffer_mb: 8,
+        reactive_db_range: Some(60.0),
+        media_read_buffer_mib: 8,
         ffmpeg_enabled: true,
         pipewire_auto_mix: false,
         spectrum_style: SpectrumStyle::Solid,
-        visual_palette: VisualizationPalette::TokyoNight,
-        visual_background: "#101820".parse().unwrap(),
+        visualization_palette: VisualizationPalette::TokyoNight,
+        visualization_background: "#101820".parse().unwrap(),
         analysis_fft_size: 16384,
         analysis_window: AnalysisWindow::Hann,
         spectrum_interpolate: false,
-        spectrum_bar_width: 4.0,
-        spectrum_bars: 48,
+        spectrum_bar_layout: SpectrumBarLayout::Fixed { count: 48 },
         spectrum_gap: 0.5,
         spectrum_peaks: false,
         spectrum_peak_hold_ms: 500,
@@ -834,26 +884,23 @@ fn save_reload_replaces_file_and_leaves_no_temporary_files() {
         spectrum_bar_hold_ms: 100,
         spectrum_bar_gravity: 25.0,
         spectrum_smoothing_ms: 120,
-        audio_visualizer_style: AudioVisualizerStyle::Rings,
-        audio_visualizer_grid: true,
-        audio_visualizer_labels: true,
-        audio_visualizer_sensitivity: 2.0,
-        audio_visualizer_rotation_speed: 1.0,
-        audio_visualizer_bar_width: 0.8,
-        audio_visualizer_bar_glow_layers: 3,
-        audio_visualizer_ring_opacity: 0.7,
-        audio_visualizer_bloom_intensity: 1.0,
-        audio_visualizer_inner_diameter: 0.8,
-        audio_visualizer_fade_when_idle: true,
-        audio_visualizer_primary_color: "#123456".parse().unwrap(),
-        audio_visualizer_secondary_color: "#654321".parse().unwrap(),
+        default_visualizer_style: AudioVisualizerStyle::Rings,
+        default_visualizer_reference_lines: true,
+        default_visualizer_labels: true,
+        reactive_sensitivity: 2.0,
+        radial_rotation_speed: 1.0,
+        radial_bar_width: 0.8,
+        radial_ring_opacity: 0.7,
+        reactive_bloom_intensity: 1.0,
+        radial_inner_diameter: 0.8,
+        radial_fade_when_idle: true,
+        effect_primary_color: "#123456".parse().unwrap(),
+        effect_secondary_color: "#654321".parse().unwrap(),
         spectrogram_interpolate: false,
-        spectrogram_interpolation_points: 2048,
-        spectrogram_sampling_points_scale: 1.0,
         spectrogram_db_range: Some(100.0),
         spectrogram_history_seconds: 30,
-        spectrogram_flow_speed: 1.25,
-        spectrogram_accumulation: 85,
+        spectrogram_startup_expansion_speed: 1.25,
+        spectrogram_outflow_threshold_percent: 85,
         waveform_seek_enabled: false,
         waveform_cursor_color: "#eeaa66".parse().unwrap(),
         waveform_glow: 0.0,
@@ -862,16 +909,16 @@ fn save_reload_replaces_file_and_leaves_no_temporary_files() {
         waveform_peak_gamma: 1.25,
         oscilloscope_time_span_ms: 25.0,
         oscilloscope_gain: 2.0,
-        oscilloscope_shared_grid: true,
+        oscilloscope_overlay_channels: true,
         album_artwork_style: AlbumArtworkStyle::Glass,
         album_artwork_mode: AlbumArtworkMode::Rotating,
         album_artwork_period_seconds: 12.5,
         album_artwork_direction: AlbumArtworkDirection::Counterclockwise,
         album_artwork_fps: 120,
-        artwork_decode_budget_mb: 128,
-        artwork_file_limit_mb: 32,
-        gpu_material_budget_mb: 64,
-        page_size: 32,
+        artwork_decode_budget_mib: 128,
+        artwork_file_limit_mib: 32,
+        gpu_material_budget_mib: 64,
+        query_batch_size: 32,
         equalizer: Default::default(),
         denoise: Default::default(),
         neural: Default::default(),
@@ -916,19 +963,26 @@ fn scan_min_duration_defaults_round_trips_and_rejects_non_u32_values() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
     write_current_config(&path, "[library]\n").unwrap();
-    assert_eq!(Config::load(&path).unwrap().scan_min_duration_secs, 0);
+    assert_eq!(Config::load(&path).unwrap().scan_min_duration_seconds, 0);
 
     for seconds in [0, 1, 45, u32::MAX] {
         let config = Config {
-            scan_min_duration_secs: seconds,
+            scan_min_duration_seconds: seconds,
             ..Config::default()
         };
         config.save(&path).unwrap();
-        assert_eq!(Config::load(&path).unwrap().scan_min_duration_secs, seconds);
+        assert_eq!(
+            Config::load(&path).unwrap().scan_min_duration_seconds,
+            seconds
+        );
     }
 
     for value in ["-1", "1.5", "4294967296", "\"30\""] {
-        write_current_config(&path, format!("library.scan_min_duration_secs = {value}\n")).unwrap();
+        write_current_config(
+            &path,
+            format!("library.scan_min_duration_seconds = {value}\n"),
+        )
+        .unwrap();
         assert!(Config::load(&path).is_err(), "accepted {value}");
     }
     directory.close().unwrap();
@@ -938,7 +992,7 @@ fn scan_min_duration_defaults_round_trips_and_rejects_non_u32_values() {
 fn scan_min_duration_patch_preserves_concurrent_unedited_settings() {
     let baseline = Config::default();
     let draft = Config {
-        scan_min_duration_secs: 30,
+        scan_min_duration_seconds: 30,
         ..baseline.clone()
     };
     let mut latest = Config {
@@ -946,11 +1000,11 @@ fn scan_min_duration_patch_preserves_concurrent_unedited_settings() {
         ..baseline.clone()
     };
     ConfigPatch::between(&baseline, &draft).apply_to(&mut latest);
-    assert_eq!(latest.scan_min_duration_secs, 30);
+    assert_eq!(latest.scan_min_duration_seconds, 30);
     assert_eq!(latest.scan_max_depth, 7);
 
     ConfigPatch::between(&draft, &baseline).apply_to(&mut latest);
-    assert_eq!(latest.scan_min_duration_secs, 0);
+    assert_eq!(latest.scan_min_duration_seconds, 0);
     assert_eq!(latest.scan_max_depth, 7);
 }
 
@@ -961,7 +1015,7 @@ fn base_font_size_defaults_round_trips_and_rejects_invalid_values() {
 
     for size in [8, 11, 18] {
         let config = Config {
-            ui_font_size: size,
+            ui_font_size_pt: size,
             ui_scale: 1.5,
             ..Config::default()
         };
@@ -970,22 +1024,22 @@ fn base_font_size_defaults_round_trips_and_rejects_invalid_values() {
         let saved = fs::read_to_string(&path).unwrap();
         let document: toml::Value = toml::from_str(&saved).unwrap();
         assert_eq!(
-            document["interface"]["font_size"].as_integer(),
+            document["interface"]["font_size_pt"].as_integer(),
             Some(i64::from(size))
         );
         for invalid_size in [0, 7, 19, u32::MAX] {
             let invalid = Config {
-                ui_font_size: invalid_size,
+                ui_font_size_pt: invalid_size,
                 ..config.clone()
             };
             let error = invalid.save(&path).unwrap_err();
-            assert!(format!("{error:#}").contains("interface.font_size"));
+            assert!(format!("{error:#}").contains("interface.font_size_pt"));
             assert_eq!(fs::read_to_string(&path).unwrap(), saved);
         }
     }
 
     for value in ["7", "19", "-1", "11.5", "'11'", "true", "4294967296"] {
-        write_current_config(&path, format!("interface.font_size = {value}\n")).unwrap();
+        write_current_config(&path, format!("interface.font_size_pt = {value}\n")).unwrap();
         assert!(Config::load(&path).is_err(), "accepted font size {value}");
     }
 }
@@ -994,7 +1048,7 @@ fn base_font_size_defaults_round_trips_and_rejects_invalid_values() {
 fn base_font_size_patch_preserves_owner_changes() {
     let baseline = Config::default();
     let draft = Config {
-        ui_font_size: 18,
+        ui_font_size_pt: 18,
         ..baseline.clone()
     };
     let mut latest = Config {
@@ -1004,13 +1058,13 @@ fn base_font_size_patch_preserves_owner_changes() {
         ..baseline.clone()
     };
     let expected = Config {
-        ui_font_size: 18,
+        ui_font_size_pt: 18,
         ..latest.clone()
     };
     ConfigPatch::between(&baseline, &draft).apply_to(&mut latest);
     assert_eq!(latest, expected);
     ConfigPatch::between(&draft, &baseline).apply_to(&mut latest);
-    assert_eq!(latest.ui_font_size, baseline.ui_font_size);
+    assert_eq!(latest.ui_font_size_pt, baseline.ui_font_size_pt);
     assert_eq!(latest.ui_scale, 1.5);
     assert_eq!(latest.ui_font, "Noto Sans");
     assert_eq!(latest.volume, 0.25);
@@ -1069,15 +1123,15 @@ fn malformed_unknown_and_invalid_values_are_rejected() {
         "interface.scale = 2.01",
         "interface.scale = nan",
         "interface.scale = inf",
-        "visualizations.general.analysis_fps = 4",
-        "visualizations.general.analysis_fps = 61",
-        "visualizations.general.analysis_fps = -1",
-        "visualizations.general.analysis_fps = 5.5",
-        "visualizations.general.fps = -1",
-        "visualizations.general.fps = 241",
-        "visualizations.general.fps = 65536",
-        "visualizations.general.fps = 1.5",
-        "visualizations.general.fps = '60'",
+        "visualizations.general.analysis_rate_hz = 4",
+        "visualizations.general.analysis_rate_hz = 61",
+        "visualizations.general.analysis_rate_hz = -1",
+        "visualizations.general.analysis_rate_hz = 5.5",
+        "visualizations.general.animation_fps = -1",
+        "visualizations.general.animation_fps = 241",
+        "visualizations.general.animation_fps = 65536",
+        "visualizations.general.animation_fps = 1.5",
+        "visualizations.general.animation_fps = '60'",
         "visualizations.spectrum.db_range = 0",
         "visualizations.spectrum.db_range = 161",
         "visualizations.spectrogram.db_range = inf",
@@ -1089,16 +1143,15 @@ fn malformed_unknown_and_invalid_values_are_rejected() {
         "visualizations.general.signal = 'unknown'",
         "visualization_signal = 'before'",
         "visualizations.spectrum.signal = 'before'",
-        "visualizations.spectrum.bar_width = 0.9",
-        "visualizations.spectrum.bar_width = 21",
-        "visualizations.spectrum.bar_width = nan",
-        "visualizations.spectrum.bars = 513",
+        "visualizations.spectrum.bar_layout = { mode = 'automatic', width = 0.9 }",
+        "visualizations.spectrum.bar_layout = { mode = 'automatic', width = 21 }",
+        "visualizations.spectrum.bar_layout = { mode = 'automatic', width = nan }",
+        "visualizations.spectrum.bar_layout = { mode = 'fixed', count = 513 }",
         "visualizations.spectrum.gap = -1",
         "visualizations.spectrum.gap = 9",
         "visualizations.spectrum.gap = nan",
-        "visualizations.general.sensitivity = -1",
-        "visualizations.general.sensitivity = 6",
-        "visualizations.radial.bar_glow_layers = 5",
+        "visualizations.reactive.sensitivity = -1",
+        "visualizations.reactive.sensitivity = 6",
         "visualizations.radial.ring_opacity = 2",
         "visualizations.spectrum.peak_hold_ms = 2001",
         "visualizations.spectrum.peak_gravity = -1",
@@ -1199,16 +1252,16 @@ fn visualization_signal_patch_preserves_unrelated_concurrent_changes() {
     draft.visualization_signal = VisualizationSignal::Before;
     let patch = ConfigPatch::between(&baseline, &draft);
     let mut current = baseline.clone();
-    current.analysis_fps = 30;
+    current.analysis_rate_hz = 30;
     patch.apply_to(&mut current);
     assert_eq!(current.visualization_signal, VisualizationSignal::Before);
-    assert_eq!(current.analysis_fps, 30);
+    assert_eq!(current.analysis_rate_hz, 30);
 
     let mut draft = baseline.clone();
-    draft.analysis_fps = 40;
+    draft.analysis_rate_hz = 40;
     ConfigPatch::between(&baseline, &draft).apply_to(&mut current);
     assert_eq!(current.visualization_signal, VisualizationSignal::Before);
-    assert_eq!(current.analysis_fps, 40);
+    assert_eq!(current.analysis_rate_hz, 40);
 }
 
 #[test]
@@ -1221,7 +1274,7 @@ fn visualization_ranges_inherit_and_preserve_explicit_overrides() {
     };
     assert_eq!(config.spectrum_db_range(), 85.0);
     assert_eq!(config.spectrogram_db_range(), 85.0);
-    assert_eq!(config.audio_visualizer_db_range(), 85.0);
+    assert_eq!(config.reactive_db_range(), 85.0);
     config.save(&path).unwrap();
     let saved: toml::Table = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
     for view in ["spectrum", "spectrogram", "reactive"] {
@@ -1240,11 +1293,11 @@ fn visualization_ranges_inherit_and_preserve_explicit_overrides() {
     config = Config::load(&path).unwrap();
     assert_eq!(config.spectrum_db_range, Some(70.0));
     assert_eq!(config.spectrogram_db_range, Some(110.0));
-    assert_eq!(config.audio_visualizer_db_range, Some(85.0));
+    assert_eq!(config.reactive_db_range, Some(85.0));
     config.visualization_db_range = 95.0;
     assert_eq!(config.spectrum_db_range(), 70.0);
     assert_eq!(config.spectrogram_db_range(), 110.0);
-    assert_eq!(config.audio_visualizer_db_range(), 85.0);
+    assert_eq!(config.reactive_db_range(), 85.0);
     config.save(&path).unwrap();
     assert_eq!(Config::load(&path).unwrap(), config);
     config.spectrum_db_range = None;
@@ -1290,23 +1343,23 @@ fn visual_parameter_boundaries_round_trip() {
             visualization_db_range: if high { 160.0 } else { 1.0 },
             spectrum_db_range: Some(if high { 160.0 } else { 1.0 }),
             spectrogram_db_range: Some(if high { 1.0 } else { 160.0 }),
-            audio_visualizer_db_range: Some(if high { 160.0 } else { 1.0 }),
+            reactive_db_range: Some(if high { 160.0 } else { 1.0 }),
             spectrum_gap: if high { 8.0 } else { 0.0 },
             spectrum_peak_hold_ms: if high { 2000 } else { 0 },
             analysis_fft_size: if high { 32768 } else { 512 },
-            spectrum_bar_width: if high { 20.0 } else { 1.0 },
-            spectrum_bars: if high { 512 } else { 1 },
+            spectrum_bar_layout: SpectrumBarLayout::Automatic {
+                width: if high { 20.0 } else { 1.0 },
+            },
             spectrum_peak_gravity: if high { 500.0 } else { 0.0 },
             spectrum_bar_hold_ms: if high { 2000 } else { 0 },
             spectrum_bar_gravity: if high { 500.0 } else { 0.0 },
             spectrum_smoothing_ms: if high { 1000 } else { 0 },
             spectrogram_history_seconds: if high { 60 } else { 1 },
-            spectrogram_interpolation_points: if high { 4096 } else { 64 },
             waveform_glow: if high { 2.0 } else { 0.0 },
             waveform_rms_gain: if high { 3.0 } else { 0.0 },
             waveform_peak_gain: if high { 2.0 } else { 0.0 },
             waveform_peak_gamma: if high { 3.0 } else { 0.25 },
-            visual_background: if high {
+            visualization_background: if high {
                 "#ffffff".parse().unwrap()
             } else {
                 "#000000".parse().unwrap()
@@ -1324,7 +1377,7 @@ fn gpu_budget_and_history_limits_validate_and_round_trip() {
     let path = directory.path().join("config.toml");
     for budget in [16, 64, 1024] {
         let config = Config {
-            gpu_material_budget_mb: budget,
+            gpu_material_budget_mib: budget,
             spectrogram_history_seconds: 60,
             ..Config::default()
         };
@@ -1334,7 +1387,7 @@ fn gpu_budget_and_history_limits_validate_and_round_trip() {
     for budget in [0, 15, 1025, u32::MAX] {
         assert!(
             Config {
-                gpu_material_budget_mb: budget,
+                gpu_material_budget_mib: budget,
                 ..Config::default()
             }
             .validate()
@@ -1357,11 +1410,11 @@ fn boundary_values_round_trip() {
     let path = directory.path().join("config.toml");
     for volume in [0.0, 1.0] {
         for ui_scale in [0.75, 2.0] {
-            for analysis_fps in [5, 60] {
+            for analysis_rate_hz in [5, 60] {
                 let config = Config {
                     volume,
                     ui_scale,
-                    analysis_fps,
+                    analysis_rate_hz,
                     ..Config::default()
                 };
                 config.save(&path).unwrap();
@@ -1552,18 +1605,29 @@ fn log_retention_weeks_must_be_bounded() {
 }
 
 #[test]
-fn page_size_round_trips_and_rejects_out_of_range_values() {
+fn query_batch_size_round_trips_and_rejects_out_of_range_values() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
-    for page_size in [20, 64, 256] {
-        write_current_config(&path, format!("interface.page_size = {page_size}\n")).unwrap();
+    for query_batch_size in [20, 64, 256] {
+        write_current_config(
+            &path,
+            format!("interface.query_batch_size = {query_batch_size}\n"),
+        )
+        .unwrap();
         let config = Config::load(&path).unwrap();
-        assert_eq!(config.page_size, page_size);
+        assert_eq!(config.query_batch_size, query_batch_size);
         config.save(&path).unwrap();
-        assert_eq!(Config::load(&path).unwrap().page_size, page_size);
+        assert_eq!(
+            Config::load(&path).unwrap().query_batch_size,
+            query_batch_size
+        );
     }
-    for page_size in [0, 19, 257, u32::MAX] {
-        write_current_config(&path, format!("interface.page_size = {page_size}\n")).unwrap();
+    for query_batch_size in [0, 19, 257, u32::MAX] {
+        write_current_config(
+            &path,
+            format!("interface.query_batch_size = {query_batch_size}\n"),
+        )
+        .unwrap();
         assert!(Config::load(&path).is_err());
     }
 }

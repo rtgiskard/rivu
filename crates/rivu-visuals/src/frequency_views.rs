@@ -9,7 +9,7 @@
 //! Hidden panels release history and numerical working data, retaining only their
 //! last bounded drawable publications. Range and axis changes remap cached levels while paused;
 //! unchanged buckets reuse immutable GPU fields. Sampling rows follow panel height
-//! and visible frequency points, capped by configuration and the startup GPU budget.
+//! and visible frequency points, capped by renderer policy and the startup GPU budget.
 //! Accepted audio alone changes history; native display ticks evolve Spectrum
 //! envelopes and the clipped Spectrogram cursor without rebuilding cached tiles.
 
@@ -45,7 +45,7 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc, time::Duration
 use rivu_audio::analysis::AnalysisFrame;
 use rivu_format::config::{AnalysisWindow, VisualizationSignal};
 #[cfg(test)]
-use rivu_format::config::{SpectrumStyle, VisualizationPalette};
+use rivu_format::config::{SpectrumBarLayout, SpectrumStyle, VisualizationPalette};
 
 #[derive(Clone, Copy)]
 struct HeatSample {
@@ -72,12 +72,12 @@ struct FrequencyState {
     material_budget_bytes: Option<u64>,
     latest_levels: Vec<f32>,
     display_time: Option<Duration>,
-    visual_background: u32,
+    visualization_background: u32,
     palette_lut: Rc<PaletteLut>,
     analysis_fft_size: u32,
     analysis_window: AnalysisWindow,
     visualization_signal: VisualizationSignal,
-    analysis_fps: u32,
+    analysis_rate_hz: u32,
     stream_generation: u64,
     source_generation: Option<u64>,
     latest_sample_time: Option<Duration>,
@@ -112,12 +112,12 @@ impl FrequencyViews {
                 material_budget_bytes: None,
                 latest_levels: Vec::new(),
                 display_time: None,
-                palette_lut: active_palette_lut(config.visual_palette),
-                visual_background: config.visual_background.rgb(),
+                palette_lut: active_palette_lut(config.visualization_palette),
+                visualization_background: config.visualization_background.rgb(),
                 analysis_fft_size: config.analysis_fft_size,
                 analysis_window: config.analysis_window,
                 visualization_signal: config.visualization_signal,
-                analysis_fps: config.analysis_fps,
+                analysis_rate_hz: config.analysis_rate_hz,
                 stream_generation: 0,
                 source_generation: None,
                 latest_sample_time: None,
@@ -179,14 +179,14 @@ impl FrequencyViews {
             .get_or_insert(config.gpu_material_budget_bytes());
         let spectrum_db_range = config.spectrum_db_range();
         let spectrogram_db_range = config.spectrogram_db_range();
-        let palette_changed = data.palette_lut.palette != config.visual_palette;
+        let palette_changed = data.palette_lut.palette != config.visualization_palette;
         let history_missing =
             data.enabled && data.spectrogram.visible && data.spectrogram.history_columns == 0;
         let settings_changed = palette_changed
-            || data.visual_background != config.visual_background.rgb()
+            || data.visualization_background != config.visualization_background.rgb()
             || data.spectrum.db_range != spectrum_db_range
             || data.spectrogram.db_range != spectrogram_db_range
-            || data.spectrum.bars != config.spectrum_bars
+            || data.spectrum.bar_layout != config.spectrum_bar_layout
             || data.spectrum.style != config.spectrum_style
             || data.spectrum.gap != config.spectrum_gap
             || data.spectrum.show_peaks != config.spectrum_peaks
@@ -195,44 +195,41 @@ impl FrequencyViews {
             || data.spectrum.bar_hold_ms != config.spectrum_bar_hold_ms
             || data.spectrum.bar_gravity != config.spectrum_bar_gravity
             || data.spectrum.smoothing_ms != config.spectrum_smoothing_ms
-            || data.spectrum.bar_width != config.spectrum_bar_width
             || data.spectrum.interpolate != config.spectrum_interpolate
             || data.analysis_fft_size != config.analysis_fft_size
             || data.analysis_window != config.analysis_window
             || data.visualization_signal != config.visualization_signal
             || data.spectrogram.interpolate != config.spectrogram_interpolate
-            || data.spectrogram.interpolation_points != config.spectrogram_interpolation_points
-            || data.spectrogram.sampling_points_scale != config.spectrogram_sampling_points_scale
             || data.spectrogram.history_seconds != config.spectrogram_history_seconds
-            || data.spectrogram.flow_speed != config.spectrogram_flow_speed
-            || data.spectrogram.accumulation != config.spectrogram_accumulation
-            || data.analysis_fps != config.analysis_fps;
+            || data.spectrogram.startup_expansion_speed
+                != config.spectrogram_startup_expansion_speed
+            || data.spectrogram.outflow_threshold_percent
+                != config.spectrogram_outflow_threshold_percent
+            || data.analysis_rate_hz != config.analysis_rate_hz;
         let changed = history_missing || settings_changed;
         if !changed {
             return false;
         }
         let history_changed = history_missing
             || data.spectrogram.history_seconds != config.spectrogram_history_seconds
-            || data.analysis_fps != config.analysis_fps;
+            || data.analysis_rate_hz != config.analysis_rate_hz;
         let analysis_changed = data.analysis_fft_size != config.analysis_fft_size
             || data.analysis_window != config.analysis_window
             || data.visualization_signal != config.visualization_signal;
         let heat_changed = palette_changed
             || data.spectrogram.db_range != spectrogram_db_range
-            || data.spectrogram.interpolate != config.spectrogram_interpolate
-            || data.spectrogram.interpolation_points != config.spectrogram_interpolation_points
-            || data.spectrogram.sampling_points_scale != config.spectrogram_sampling_points_scale;
+            || data.spectrogram.interpolate != config.spectrogram_interpolate;
         // Allocation of missing visible history is not a settings change.
         if settings_changed {
             data.spectrum.presentations.clear();
             data.spectrogram.presentations.clear();
         }
         if palette_changed {
-            data.palette_lut = active_palette_lut(config.visual_palette);
+            data.palette_lut = active_palette_lut(config.visualization_palette);
         }
-        data.visual_background = config.visual_background.rgb();
+        data.visualization_background = config.visualization_background.rgb();
         data.spectrum.db_range = spectrum_db_range;
-        data.spectrum.bars = config.spectrum_bars;
+        data.spectrum.bar_layout = config.spectrum_bar_layout;
         data.spectrum.style = config.spectrum_style;
         data.spectrum.gap = config.spectrum_gap;
         data.spectrum.show_peaks = config.spectrum_peaks;
@@ -241,23 +238,20 @@ impl FrequencyViews {
         data.spectrum.bar_hold_ms = config.spectrum_bar_hold_ms;
         data.spectrum.bar_gravity = config.spectrum_bar_gravity;
         data.spectrum.smoothing_ms = config.spectrum_smoothing_ms;
-        data.spectrum.bar_width = config.spectrum_bar_width;
         data.spectrum.interpolate = config.spectrum_interpolate;
         data.spectrogram.interpolate = config.spectrogram_interpolate;
-        data.spectrogram.interpolation_points = config.spectrogram_interpolation_points;
-        data.spectrogram.sampling_points_scale = config.spectrogram_sampling_points_scale;
-        data.spectrogram.flow_speed = config.spectrogram_flow_speed;
-        data.spectrogram.accumulation = config.spectrogram_accumulation;
+        data.spectrogram.startup_expansion_speed = config.spectrogram_startup_expansion_speed;
+        data.spectrogram.outflow_threshold_percent = config.spectrogram_outflow_threshold_percent;
         data.analysis_fft_size = config.analysis_fft_size;
         data.analysis_window = config.analysis_window;
         data.visualization_signal = config.visualization_signal;
         data.spectrogram.db_range = spectrogram_db_range;
         data.spectrogram.history_seconds = config.spectrogram_history_seconds;
-        data.analysis_fps = config.analysis_fps;
+        data.analysis_rate_hz = config.analysis_rate_hz;
         if data.enabled && data.spectrogram.visible && history_changed {
             data.resize_history(history_column_count(
                 config.spectrogram_history_seconds,
-                config.analysis_fps,
+                config.analysis_rate_hz,
             ));
         }
         if analysis_changed {
@@ -583,13 +577,13 @@ impl FrequencyViews {
             FrequencyKind::Spectrum => "spectrum",
             FrequencyKind::Spectrogram => "spectrogram",
         };
-        let visual_background = self.data.borrow().visual_background;
+        let visualization_background = self.data.borrow().visualization_background;
         gpui::container_query(move |available, _, _| {
             if !prepaint_data.borrow_mut().prepaint_panel_with_labels(
                 panel_id,
                 mode,
                 available,
-                options.label,
+                options.labels,
             ) {
                 return div()
                     .id((kind, panel_id))
@@ -597,7 +591,7 @@ impl FrequencyViews {
                     .min_w_0()
                     .min_h_0()
                     .overflow_hidden()
-                    .bg(rgb(visual_background))
+                    .bg(rgb(visualization_background))
                     .into_any_element();
             }
             div()
@@ -607,13 +601,13 @@ impl FrequencyViews {
                 .min_w_0()
                 .min_h_0()
                 .overflow_hidden()
-                .bg(rgb(visual_background))
+                .bg(rgb(visualization_background))
                 .child(
                     canvas(
                         |_, _, _| (),
                         move |bounds, _, window, cx| {
                             let mut data = data.borrow_mut();
-                            window.paint_quad(fill(bounds, rgb(data.visual_background)));
+                            window.paint_quad(fill(bounds, rgb(data.visualization_background)));
                             if !visual_canvas_has_room(bounds.size) {
                                 return;
                             }
@@ -885,7 +879,7 @@ mod tests {
     fn native_ticks_release_and_scroll_without_reaccepting_audio() {
         let mut visuals = configured_visuals();
         visuals.configure_config(&Config {
-            analysis_fps: 5,
+            analysis_rate_hz: 5,
             spectrum_peak_hold_ms: 0,
             spectrum_bar_hold_ms: 0,
             ..Config::default()
@@ -1003,10 +997,10 @@ mod tests {
         let mut config = Config::default();
         visuals.data.borrow_mut().resize_history(100);
         visuals.update(&frame(10.010, -10.0), Duration::from_secs_f64(10.010));
-        config.visual_background = "#202020".parse().unwrap();
+        config.visualization_background = "#202020".parse().unwrap();
         config.spectrogram_db_range = Some(100.0);
-        config.spectrogram_flow_speed = 1.25;
-        config.spectrogram_accumulation = 90;
+        config.spectrogram_startup_expansion_speed = 1.25;
+        config.spectrogram_outflow_threshold_percent = 90;
         visuals.configure_config(&config);
         visuals.update(&frame(10.020, -60.0), Duration::from_secs_f64(10.020));
         let data = visuals.data.borrow();
@@ -1042,8 +1036,7 @@ mod tests {
         let bars = spectrum_bar_count(
             width,
             data.spectrum.style == SpectrumStyle::Solid,
-            data.spectrum.bars,
-            data.spectrum.bar_width,
+            data.spectrum.bar_layout,
             data.spectrum.gap,
         );
         data.prepare_spectrum_body(
@@ -1075,7 +1068,7 @@ mod tests {
                         spectrum_style: style,
                         spectrum_interpolate: interpolate,
                         spectrum_db_range: Some(100.0),
-                        spectrum_bars: 4,
+                        spectrum_bar_layout: SpectrumBarLayout::Fixed { count: 4 },
                         ..Config::default()
                     });
                     visuals.update(&frame(1.0, level), Duration::from_secs_f64(1.0));
@@ -1143,7 +1136,7 @@ mod tests {
             visuals.configure_config(&Config {
                 spectrum_style: SpectrumStyle::Outline,
                 spectrum_db_range: Some(100.0),
-                spectrum_bars: 4,
+                spectrum_bar_layout: SpectrumBarLayout::Fixed { count: 4 },
                 spectrum_gap: 2.0,
                 ..Config::default()
             });
@@ -1192,6 +1185,38 @@ mod tests {
     }
 
     #[test]
+    fn gpu_spectrum_layout_changes_publish_matching_bar_geometry() {
+        let mut visuals = configured_visuals();
+        for (layout, expected_count) in [
+            (SpectrumBarLayout::Automatic { width: 3.0 }, 20),
+            (SpectrumBarLayout::Fixed { count: 4 }, 4),
+            (SpectrumBarLayout::Automatic { width: 8.0 }, 10),
+            (SpectrumBarLayout::Fixed { count: 1 }, 1),
+        ] {
+            visuals.configure_config(&Config {
+                spectrum_style: SpectrumStyle::Bars,
+                spectrum_bar_layout: layout,
+                spectrum_gap: 2.0,
+                spectrum_interpolate: true,
+                spectrum_db_range: Some(100.0),
+                ..Config::default()
+            });
+            visuals.update(&frame(1.0, 0.0), Duration::from_secs(1));
+            let body = rectangle_frame(prepared_body(&visuals, 1, 100.0, 100.0));
+            let gpui::GpuContent::Rectangles { rectangles, .. } = body.content() else {
+                unreachable!()
+            };
+            assert_eq!(rectangles.len(), expected_count);
+            let stride = 100.0 / expected_count as f32;
+            for (bar, rectangle) in rectangles.iter().enumerate() {
+                let [x, _, width, _] = rectangle.bounds;
+                assert!((x * 100.0 - (bar as f32 * stride + 1.0)).abs() < 1e-5);
+                assert!((width * 100.0 - (stride - 2.0)).abs() < 1e-5);
+            }
+        }
+    }
+
+    #[test]
     fn gpu_spectrum_preserves_nonzero_heights_and_led_partial_cells() {
         for style in [SpectrumStyle::Bars, SpectrumStyle::Led] {
             for height in [0.0, 0.125, 1.0, 2.75, 3.0, 4.5, 5.0, 5.25, 8.0, 100.0] {
@@ -1199,7 +1224,7 @@ mod tests {
                 visuals.configure_config(&Config {
                     spectrum_style: style,
                     spectrum_db_range: Some(100.0),
-                    spectrum_bars: 4,
+                    spectrum_bar_layout: SpectrumBarLayout::Fixed { count: 4 },
                     spectrum_gap: 2.0,
                     ..Config::default()
                 });
@@ -1258,7 +1283,7 @@ mod tests {
             let mut visuals = configured_visuals();
             visuals.configure_config(&Config {
                 spectrum_style: SpectrumStyle::Outline,
-                spectrum_bars: u32::MAX,
+                spectrum_bar_layout: SpectrumBarLayout::Fixed { count: u32::MAX },
                 spectrum_gap: 10.0,
                 spectrum_interpolate: true,
                 ..Config::default()
@@ -1286,7 +1311,7 @@ mod tests {
             let mut visuals = configured_visuals();
             visuals.configure_config(&Config {
                 spectrum_style: SpectrumStyle::Bars,
-                spectrum_bars: u32::MAX,
+                spectrum_bar_layout: SpectrumBarLayout::Fixed { count: u32::MAX },
                 spectrum_gap: 10.0,
                 spectrum_interpolate: true,
                 ..Config::default()
@@ -1589,7 +1614,7 @@ mod tests {
             let mut visuals = FrequencyViews::new();
             visuals.retain_spectrogram_panels(&[1]);
             visuals.configure_config(&Config {
-                analysis_fps: fps,
+                analysis_rate_hz: fps,
                 spectrogram_history_seconds: 60,
                 ..Config::default()
             });
@@ -1645,7 +1670,7 @@ mod tests {
 
         visuals.retain_spectrogram_panels(&[]);
         {
-            config.analysis_fps += 1;
+            config.analysis_rate_hz += 1;
             visuals.configure_config(&config);
             visuals.update(&frame(2.0, -40.0), Duration::from_secs_f64(2.0));
             let data = visuals.data.borrow();
@@ -1741,8 +1766,18 @@ mod tests {
         {
             let mut data = visuals.data.borrow_mut();
             let (_, _, low, high) = data.spectrum_render_range().unwrap();
-            let narrow = spectrum_bar_count(120.0, false, 0, 8.0, 2.0);
-            let wide = spectrum_bar_count(800.0, false, 0, 8.0, 2.0);
+            let narrow = spectrum_bar_count(
+                120.0,
+                false,
+                SpectrumBarLayout::Automatic { width: 8.0 },
+                2.0,
+            );
+            let wide = spectrum_bar_count(
+                800.0,
+                false,
+                SpectrumBarLayout::Automatic { width: 8.0 },
+                2.0,
+            );
             assert_ne!(narrow, wide);
             data.prepare_spectrum_bins(1, narrow, low, high);
             let narrow_bins: Vec<_> = (0..narrow).map(|bar| data.spectrum_bin(1, bar)).collect();
@@ -1789,7 +1824,7 @@ mod tests {
         for config in [
             Config::default(),
             Config {
-                analysis_fps: 5,
+                analysis_rate_hz: 5,
                 spectrogram_history_seconds: 60,
                 ..Config::default()
             },
@@ -1821,6 +1856,32 @@ mod tests {
             assert_eq!(data.spectrum.peaks, vec![-60.0; 4]);
             assert_eq!(data.spectrum.bar_levels, vec![-60.0; 4]);
             assert_eq!(data.spectrum.smoothed_levels, vec![-60.0; 4]);
+        }
+    }
+
+    #[test]
+    fn spectrogram_publication_sampling_respects_panel_history_and_budget() {
+        for (height, columns, budget, expected) in [
+            (320, 400, 64 * 1024 * 1024, 160),
+            (700, 400, 64 * 1024 * 1024, 350),
+            (3000, 400, 64 * 1024 * 1024, 1024),
+            (3000, 3600, 64 * 1024 * 1024, 580),
+            (3000, 3600, 16 * 1024 * 1024, 143),
+            (0, 400, 64 * 1024 * 1024, 4),
+        ] {
+            let mut visuals = configured_visuals();
+            {
+                let mut data = visuals.data.borrow_mut();
+                data.material_budget_bytes = Some(budget);
+                data.resize_history(columns);
+                data.spectrogram.panel_height = height;
+            }
+            visuals.update(&frame(1.0, -20.0), Duration::from_secs(1));
+            visuals.update(&frame(1.1, -20.0), Duration::from_millis(1100));
+            let mut data = visuals.data.borrow_mut();
+            data.prepare_spectrogram_presentation(1).unwrap();
+            assert_eq!(data.spectrogram.sample_height, expected);
+            assert_eq!(data.spectrogram.heat_samples.len(), expected);
         }
     }
 
@@ -2074,7 +2135,7 @@ mod tests {
         let mut visuals = configured_visuals();
         visuals.update(&frame(1.0, -30.0), Duration::from_secs_f64(1.0));
         visuals.configure_config(&Config {
-            audio_visualizer_db_range: Some(40.0),
+            reactive_db_range: Some(40.0),
             ..Config::default()
         });
         let data = visuals.data.borrow();
@@ -2129,13 +2190,15 @@ mod tests {
     }
 
     #[test]
-    fn spectrogram_source_uses_configured_scale_and_source_floor() {
-        assert_eq!(spectrogram_source_height(320, 140, 1024, 0.5), 160);
-        assert_eq!(spectrogram_source_height(700, 140, 1024, 0.5), 350);
-        assert_eq!(spectrogram_source_height(1400, 140, 1024, 0.5), 700);
-        assert_eq!(spectrogram_source_height(1400, 140, 512, 0.5), 512);
-        assert_eq!(spectrogram_source_height(80, 140, 1024, 0.5), 140);
-        assert_eq!(spectrogram_source_height(320, 140, 1024, 1.4), 448);
+    fn spectrogram_source_follows_panel_scale_source_floor_and_hard_cap() {
+        assert_eq!(spectrogram_source_height(320, 140), 160);
+        assert_eq!(spectrogram_source_height(700, 140), 350);
+        assert_eq!(spectrogram_source_height(1400, 140), 700);
+        assert_eq!(spectrogram_source_height(3000, 140), 1024);
+        assert_eq!(spectrogram_source_height(80, 140), 140);
+        assert_eq!(spectrogram_source_height(321, 0), 161);
+        assert_eq!(spectrogram_source_height(0, 0), 1);
+        assert_eq!(spectrogram_source_height(80, 2048), 1024);
     }
 
     #[test]
@@ -2622,12 +2685,15 @@ mod tests {
 
     #[test]
     fn dense_counts_are_bounded_by_pixels_not_old_marker_capacity() {
-        assert_eq!(spectrum_bar_count(1200.0, false, 0, 3.0, 1.0), 300);
-        assert_eq!(spectrum_bar_count(4096.0, false, 0, 3.0, 1.0), 1024);
-        assert_eq!(spectrum_bar_count(1200.0, false, 512, 20.0, 8.0), 512);
-        assert_eq!(spectrum_bar_count(7.0, false, 512, 3.0, 1.0), 7);
-        assert_eq!(spectrum_bar_count(0.0, false, 0, 3.0, 1.0), 1);
-        assert_eq!(spectrum_bar_count(1200.0, true, 1, 3.0, 1.0), 1200);
+        let automatic = SpectrumBarLayout::Automatic { width: 3.0 };
+        let fixed = SpectrumBarLayout::Fixed { count: 512 };
+        assert_eq!(spectrum_bar_count(1200.0, false, automatic, 1.0), 300);
+        assert_eq!(spectrum_bar_count(4096.0, false, automatic, 1.0), 1024);
+        assert_eq!(spectrum_bar_count(1200.0, false, fixed, 8.0), 512);
+        assert_eq!(spectrum_bar_count(7.0, false, fixed, 1.0), 7);
+        assert_eq!(spectrum_bar_count(0.0, false, automatic, 1.0), 1);
+        assert_eq!(spectrum_bar_count(1200.0, true, fixed, 1.0), 1200);
+        assert_eq!(spectrum_bar_count(1200.0, true, automatic, 1.0), 1200);
     }
 
     #[test]

@@ -91,8 +91,8 @@ impl StereoRenderer {
         let config = VisualParameters::default();
         let palette = field_palette(
             style,
-            config.audio_visualizer_primary_color.rgb(),
-            config.audio_visualizer_secondary_color.rgb(),
+            config.effect_primary_color.rgb(),
+            config.effect_secondary_color.rgb(),
         );
         let gpu = palette.as_ref().map(|_| {
             let (width, height) = field_dimensions(style);
@@ -111,11 +111,11 @@ impl StereoRenderer {
                 labels_source: None,
                 style,
                 visible: true,
-                background: config.visual_background.rgb(),
-                primary: config.audio_visualizer_primary_color.rgb(),
-                secondary: config.audio_visualizer_secondary_color.rgb(),
+                background: config.visualization_background.rgb(),
+                primary: config.effect_primary_color.rgb(),
+                secondary: config.effect_secondary_color.rgb(),
                 palette,
-                db_range: config.audio_visualizer_db_range(),
+                db_range: config.reactive_db_range(),
                 settings: config.analysis_settings(),
                 generation: None,
                 sample_rate: 0,
@@ -143,16 +143,16 @@ impl StereoRenderer {
         let reset = settings.fft_size != data.settings.fft_size
             || settings.window != data.settings.window
             || settings.signal != data.settings.signal;
-        let colors_changed = data.primary != config.audio_visualizer_primary_color.rgb()
-            || data.secondary != config.audio_visualizer_secondary_color.rgb();
-        let recolor = colors_changed || data.db_range != config.audio_visualizer_db_range();
-        let changed = reset || recolor || data.background != config.visual_background.rgb();
-        if data.db_range != config.audio_visualizer_db_range() {
+        let colors_changed = data.primary != config.effect_primary_color.rgb()
+            || data.secondary != config.effect_secondary_color.rgb();
+        let recolor = colors_changed || data.db_range != config.reactive_db_range();
+        let changed = reset || recolor || data.background != config.visualization_background.rgb();
+        if data.db_range != config.reactive_db_range() {
             data.range_label = "".into();
         }
         data.settings = settings;
-        data.primary = config.audio_visualizer_primary_color.rgb();
-        data.secondary = config.audio_visualizer_secondary_color.rgb();
+        data.primary = config.effect_primary_color.rgb();
+        data.secondary = config.effect_secondary_color.rgb();
         if colors_changed {
             data.palette = field_palette(data.style, data.primary, data.secondary);
             if data.palette.is_none()
@@ -161,8 +161,8 @@ impl StereoRenderer {
                 gpu.clear();
             }
         }
-        data.background = config.visual_background.rgb();
-        data.db_range = config.audio_visualizer_db_range();
+        data.background = config.visualization_background.rgb();
+        data.db_range = config.reactive_db_range();
         if reset {
             data.clear();
         } else if recolor && !data.field().is_empty() {
@@ -462,7 +462,7 @@ impl StereoState {
         if width < 24.0 || height < 24.0 || !self.visible {
             return;
         }
-        let labels = options.label && width >= 250.0 && height >= 155.0;
+        let labels = options.labels && width >= 250.0 && height >= 155.0;
         let density = self.style == AudioVisualizerStyle::StereoDensity;
         let left = if labels { 49.0 } else { 6.0 };
         let top = if labels { 25.0 } else { 6.0 };
@@ -495,7 +495,7 @@ impl StereoState {
         {
             self.publication_failed("paint", &error);
         }
-        if options.grid {
+        if options.reference_lines {
             for fraction in [0.0, 0.25, 0.5, 0.75, 1.0] {
                 let alpha = if fraction == 0.5 { 0.26 } else { 0.10 };
                 window.paint_quad(fill(
@@ -522,7 +522,7 @@ impl StereoState {
                 }
             }
         }
-        if !density && (options.grid || labels) {
+        if !density && (options.reference_lines || labels) {
             let high = high_frequency(if self.sample_rate == 0 {
                 48_000
             } else {
@@ -539,7 +539,7 @@ impl StereoState {
                 }
                 let fraction = 1.0 - (hz / 20.0).ln() / log_span;
                 let y = plot.top() + plot.size.height * fraction;
-                if options.grid {
+                if options.reference_lines {
                     window.paint_quad(fill(
                         Bounds::new(point(plot.left(), y), size(plot.size.width, px(1.0))),
                         rgb(0xb1bbc5).alpha(0.10),
@@ -965,8 +965,8 @@ mod tests {
         ] {
             let plot = plot(style);
             let mut config = Config {
-                audio_visualizer_primary_color: "#ff3300".parse().unwrap(),
-                audio_visualizer_secondary_color: "#ff7700".parse().unwrap(),
+                effect_primary_color: "#ff3300".parse().unwrap(),
+                effect_secondary_color: "#ff7700".parse().unwrap(),
                 ..Config::default()
             };
             plot.configure_config(&config);
@@ -987,7 +987,7 @@ mod tests {
             assert_eq!(
                 params.mapping,
                 GpuValueMapping::Logarithmic {
-                    db_range: config.audio_visualizer_db_range(),
+                    db_range: config.reactive_db_range(),
                 }
             );
             let bytes = field_colors(style, 0xff3300, 0xff7700);
@@ -996,7 +996,7 @@ mod tests {
             }
             assert_eq!(first.palette().colors()[0][3], 0.0);
             assert!(first.palette().colors()[128][0] > first.palette().colors()[128][2]);
-            config.audio_visualizer_db_range = Some(50.0);
+            config.reactive_db_range = Some(50.0);
             plot.configure_config(&config);
             let remapped = publication(&plot).unwrap();
             assert!(!Arc::ptr_eq(&first, &remapped));
@@ -1014,8 +1014,8 @@ mod tests {
                 params.mapping,
                 GpuValueMapping::Logarithmic { db_range: 50.0 }
             );
-            config.audio_visualizer_primary_color = "#0033ff".parse().unwrap();
-            config.audio_visualizer_secondary_color = "#0077ff".parse().unwrap();
+            config.effect_primary_color = "#0033ff".parse().unwrap();
+            config.effect_secondary_color = "#0077ff".parse().unwrap();
             plot.configure_config(&config);
             let recolored = publication(&plot).unwrap();
             assert!(!Arc::ptr_eq(remapped.palette(), recolored.palette()));
@@ -1161,7 +1161,7 @@ mod tests {
         plot.update(&frame);
         assert!(publication(&plot).is_some());
         plot.configure_config(&Config {
-            audio_visualizer_style: AudioVisualizerStyle::SpatialSpectrum,
+            default_visualizer_style: AudioVisualizerStyle::SpatialSpectrum,
             analysis_fft_size: 16384,
             ..Config::default()
         });
@@ -1174,7 +1174,7 @@ mod tests {
         assert!(plot.data.borrow().field.is_empty());
         plot.set_visible(true);
         plot.configure_config(&Config {
-            audio_visualizer_style: AudioVisualizerStyle::StereoDensity,
+            default_visualizer_style: AudioVisualizerStyle::StereoDensity,
             ..Config::default()
         });
         plot.update(&frame);
@@ -1448,8 +1448,8 @@ mod tests {
             assert_eq!(plot.data.borrow().spatial_next.capacity(), 0);
             assert_eq!(plot.data.borrow().spatial_mapping.rows.capacity(), 0);
             plot.configure_config(&Config {
-                audio_visualizer_style: style,
-                audio_visualizer_db_range: Some(50.0),
+                default_visualizer_style: style,
+                reactive_db_range: Some(50.0),
                 ..Config::default()
             });
             plot.update(&frame(style));
@@ -1481,7 +1481,7 @@ mod tests {
         let density_slot = Arc::clone(density.data.borrow().gpu.as_ref().unwrap());
         let spatial_publication = publication(&spatial).unwrap();
         let config = Config {
-            audio_visualizer_style: AudioVisualizerStyle::FractalFlow,
+            default_visualizer_style: AudioVisualizerStyle::FractalFlow,
             ..Config::default()
         };
         assert!(!density.configure_config(&config));
