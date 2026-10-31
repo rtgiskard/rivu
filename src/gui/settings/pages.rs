@@ -994,9 +994,16 @@ impl Settings {
     pub(super) fn visual_settings(&mut self, cx: &mut Context<Settings>) -> Div {
         let settings = &*self;
         let draft = &settings.model.draft;
-        let scope = div()
-            .text_sm()
-            .child(settings.tr(settings.visual_page.label_id()));
+        let title = settings.tr(settings.visual_page.label_id());
+        let scope = match settings.visual_page {
+            VisualPage::StereoDensity => {
+                settings.info_label(palette(cx), title, "settings-stereo-density-hint")
+            }
+            VisualPage::SpatialSpectrum => {
+                settings.info_label(palette(cx), title, "settings-spatial-spectrum-hint")
+            }
+            _ => div().text_sm().child(title),
+        };
         let content = match settings.visual_page {
             VisualPage::Common => {
                 let palette_control = dropdown_button(
@@ -1142,24 +1149,22 @@ impl Settings {
                                 Field::VisualizationFps,
                                 cx,
                             ))
-                            .child(
-                                row().child(
+                            .child(two_column(
+                                div().child(
                                     FormField::new(
                                         palette(cx),
                                         settings.tr("settings-visualization-signal"),
                                         signal,
                                     )
                                     .into_div()
-                                    .w(gpui::relative(0.5))
                                     .min_w(rems(180. / 16.))
-                                    .pr_2()
                                     .id("settings-visualization-signal-help")
                                     .tooltip(text_tooltip(
                                         settings.tr("settings-visualization-signal-hint"),
                                     )),
                                 ),
-                            )
-                            .child(settings.single(Field::GpuMaterialBudget, cx))
+                                settings.field(Field::GpuMaterialBudget, cx),
+                            ))
                             .child(row().child(visual_switch(
                                 &self.i18n,
                                 "settings-visualization-disabled",
@@ -1364,19 +1369,9 @@ impl Settings {
                 .child(settings.visualizer_color_settings(cx)),
             VisualPage::StereoDensity => column()
                 .gap_3()
-                .child(
-                    div()
-                        .text_sm()
-                        .child(settings.tr("settings-stereo-density-hint")),
-                )
                 .child(settings.visualizer_color_settings(cx)),
             VisualPage::SpatialSpectrum => column()
                 .gap_3()
-                .child(
-                    div()
-                        .text_sm()
-                        .child(settings.tr("settings-spatial-spectrum-hint")),
-                )
                 .child(settings_card(
                     palette(cx),
                     settings.tr("settings-display-range"),
