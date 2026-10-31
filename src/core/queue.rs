@@ -44,10 +44,6 @@ impl Core {
     // Runtime selection remains authoritative until its write succeeds. Queue
     // mutations commit independently and are never replayed by this recovery gate.
     pub(in crate::core) fn save_queue(&mut self) -> Result<()> {
-        ensure!(
-            !self.database_unavailable,
-            "Database outcome is uncertain; restart Rivu before saving"
-        );
         self.queue_current_pending = true;
         self.refresh_queue_projection()
     }
@@ -79,7 +75,11 @@ impl Core {
         Ok(())
     }
 
-    fn persist_queue_current(&mut self) -> Result<()> {
+    pub(in crate::core) fn persist_queue_current(&mut self) -> Result<()> {
+        ensure!(
+            !self.database_unavailable,
+            "Database outcome is uncertain; restart Rivu before saving"
+        );
         if self.queue_current_pending {
             self.store.set_queue_current(self.state.queue.current_id)?;
             self.queue_current_pending = false;

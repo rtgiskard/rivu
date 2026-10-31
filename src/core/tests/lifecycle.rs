@@ -301,6 +301,83 @@ fn final_queue_failure_still_attempts_config_and_retains_all_failures() {
 }
 
 #[test]
+fn failed_initial_load_preserves_saved_selection_through_recovery_and_shutdown() {
+    for recover in [false, true] {
+        let (directory, mut core) = fixture();
+        let _audio = recording_audio(&mut core);
+        core.store.set_queue_current(Some(3)).unwrap();
+        // Recreate the unpublished startup projection, not a new selection intent.
+        core.state.queue = QueueState::default();
+        let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+        connection
+            .execute_batch("ALTER TABLE playlists RENAME COLUMN name TO unavailable_name")
+            .unwrap();
+        assert!(core.load_initial_state().is_err());
+        connection
+            .execute_batch("ALTER TABLE playlists RENAME COLUMN unavailable_name TO name")
+            .unwrap();
+        if recover {
+            core.command(Command::Enqueue { track_ids: vec![4] })
+                .unwrap();
+            assert_eq!(core.state.queue.current_id, Some(3));
+            assert_eq!(core.state.current_track().unwrap().id, 2);
+        }
+        let (handle, control, worker, _) = navigation_runtime(core);
+        assert!(
+            futures::executor::block_on(
+                control.shutdown_ack_async(|| handle.publication_revision())
+            )
+            .is_success()
+        );
+        let core = worker.join().unwrap();
+        assert!(control.take_error().is_none());
+        assert_eq!(
+            core.store.queue_ids().unwrap(),
+            if recover {
+                vec![1, 2, 3, 4, 5, 6]
+            } else {
+                vec![1, 2, 3, 4, 5]
+            }
+        );
+        drop(core);
+        let store = Store::open(&directory.path().join("library.db")).unwrap();
+        assert_eq!(store.queue_state().unwrap().current_id, Some(3));
+    }
+}
+
+#[test]
+fn shutdown_retries_a_failed_runtime_selection_save() {
+    let (directory, mut core) = fixture();
+    let _audio = recording_audio(&mut core);
+    core.store.set_queue_current(Some(1)).unwrap();
+    core.refresh_queue_tracks().unwrap();
+    let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER reject_queue_selection BEFORE UPDATE OF current_queue_entry_id ON rivu_meta
+             BEGIN SELECT RAISE(ABORT,'selection rejected'); END;",
+        )
+        .unwrap();
+    assert!(
+        core.start_with_status(3, false, PlaybackStatus::Stopped)
+            .is_err()
+    );
+    assert_eq!(core.state.queue.current_id, Some(3));
+    assert_eq!(core.store.queue_state().unwrap().current_id, Some(1));
+    connection
+        .execute_batch("DROP TRIGGER reject_queue_selection")
+        .unwrap();
+    let (handle, control, worker, _) = navigation_runtime(core);
+    assert!(
+        futures::executor::block_on(control.shutdown_ack_async(|| handle.publication_revision()))
+            .is_success()
+    );
+    let core = worker.join().unwrap();
+    assert!(control.take_error().is_none());
+    assert_eq!(core.store.queue_state().unwrap().current_id, Some(3));
+}
+
+#[test]
 fn accepted_shutdown_reports_stop_failure_without_rejecting_the_request() {
     let (directory, mut core) = fixture_with_database(Some(10.0));
     let _audio = recording_audio(&mut core);

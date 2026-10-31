@@ -514,6 +514,8 @@ impl Drop for Core {
 }
 impl Core {
     fn load_initial_state(&mut self) -> Result<()> {
+        // Any earlier startup read can fail before the queue projection is reached.
+        self.queue_projection_stale = true;
         self.state.library.track_total = self.store.track_count()?;
         self.state.library.playlist_total = self.store.playlist_summary_page(None, 0, 0)?.total;
         for playlist_id in self.store.playlist_ids()? {

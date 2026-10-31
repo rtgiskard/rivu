@@ -146,3 +146,15 @@ enabled: capture, shrink until undrawable, grow while still held, release withou
 a seek, then seek through a fresh press. Configured labels remained enabled and
 returned on larger surfaces. Current sizing belongs in
 link:24_layout.adoc#_geometry_and_constrained_viewports[Geometry and constrained viewports].
+
+=== Saved queue selection after startup read failure
+
+Status: resolved in implementation, 2026-10-31.
+
+A startup read failure before queue restoration left the runtime's default empty
+selection eligible for writeback at shutdown. A regression reproduced loss of the
+saved occurrence. Acceptance covered failed startup followed by shutdown, recovery
+before an append, and retry of a genuinely failed runtime selection save. An
+isolated headless instance with invalid historical metadata preserved the selected
+duplicate occurrence through shutdown and recovered it before an append after
+repair. Current behavior is documented in link:04_playback.adoc#_queue[Queue].

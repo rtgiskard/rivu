@@ -332,7 +332,9 @@ impl Core {
             .flush_deferred_playback()
             .context("Saving deferred playback statistics");
         let playback = self.stop().context("Saving play count");
-        let queue = self.save_queue().context("Saving queue");
+        // Retry only an admitted runtime selection; an uninitialized projection
+        // is not an intent to clear the database's saved occurrence.
+        let queue = self.persist_queue_current().context("Saving queue");
         let config = self
             .flush_config()
             .map(|_| ())

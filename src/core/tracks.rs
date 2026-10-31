@@ -308,8 +308,8 @@ impl Core {
         self.invalidate_scan_impacts(impacts);
         let playlists = self.invalidate_playlist_members(affected_playlists);
         let catalog = self.refresh_scan_catalog(impacts);
-        // Only a fresh ID set can supply the queue projection's total. Retain
-        // the previous queue snapshot if reading the committed IDs fails.
+        // Recover the committed scalar projection and selected track; a failed
+        // refresh keeps dependent queue controls gated until recovery succeeds.
         let queue = if queue_changed {
             self.reload_queue()
         } else {

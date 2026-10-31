@@ -99,6 +99,9 @@ sync, or window close.
 If a committed queue edit cannot be refreshed, later selection and edit operations
 retry recovery before using it. A failed selection save must also recover before
 operations that depend on that selection. Pause and Stop remain available.
+If startup loading fails before queue restoration, dependent operations retry
+queue recovery too. Exiting without a new selection preserves the saved occurrence;
+shutdown retries only an unsaved runtime selection.
 
 Desktop Queue rows use the shared
 link:02_library.adoc#_track_information[track information and hover rules].

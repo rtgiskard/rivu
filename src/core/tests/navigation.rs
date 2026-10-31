@@ -860,8 +860,8 @@ fn mpris_over_end_seek_is_occurrence_bound_next_with_tail_noop() {
 #[test]
 fn stale_queue_toggle_recovers_before_stopped_selection() {
     let (directory, mut core) = navigation_fixture(PlaybackStatus::Stopped);
-    // Select a surviving occurrence; the old cache still includes both removed
-    // duplicates and must not supply the total saved by Toggle's Resume path.
+    // Select a surviving occurrence; Toggle's Resume path must recover the
+    // committed queue projection before selecting or opening a track.
     core.state.queue.current_id = Some(1);
     core.save_queue().unwrap();
     core.refresh_queue_tracks().unwrap();

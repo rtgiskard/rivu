@@ -426,7 +426,6 @@ fn queue_save_failure_does_not_prevent_final_config_save() {
     core.command(Command::Volume { value: 0.25 }).unwrap();
     core.update_gui_config(GuiConfigChange::ToggleWaveformSeek)
         .unwrap();
-    core.state.queue.current_id = Some(core.store.queue_id_at(0).unwrap().unwrap());
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     connection
         .execute_batch(
@@ -434,6 +433,11 @@ fn queue_save_failure_does_not_prevent_final_config_save() {
          BEGIN SELECT RAISE(FAIL, 'queue save blocked'); END;",
         )
         .unwrap();
+    let queue_id = core.store.queue_id_at(0).unwrap().unwrap();
+    assert!(
+        core.start_with_status(queue_id, false, PlaybackStatus::Stopped)
+            .is_err()
+    );
     let (sender, receiver) = async_channel::bounded(1);
     drop(sender);
     core = run_until_disconnected(core, receiver);
