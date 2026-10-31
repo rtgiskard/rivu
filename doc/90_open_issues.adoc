@@ -174,3 +174,24 @@ after. These are operation counts, not latency or RSS measurements. An isolated
 headless scan of 1,000 absent files also exercised bounded-diagnostic truncation:
 the scan transaction committed, while all 1,000 identities remained protected from
 missing detection. See link:02_library.adoc#_errors_and_partial_results[Errors and partial results].
+
+=== Repeated playlist import identity resolution
+
+Status: resolved in implementation, 2026-10-31.
+
+Import saving queried the database and normalized paths for every occurrence,
+including repeated files and CUE subtracks. It now reuses preparation's normalized
+paths and keeps eligibility plus lazy resolution in one borrowed identity table.
+Positive and negative results are reused only within that import; occurrence order,
+multiplicity, admission policy, and separate scan/playlist commits are unchanged.
+The table and input items are released before playlist creation.
+
+A temporary probe on the default-feature debug binary observed five identity
+queries across two real CLI imports: 10,000 repetitions of one audio file, followed
+by seven mixed ordinary/CUE occurrences with four unique identities. A third import
+with 1,000 rejected short-file occurrences and two accepted existing-file
+occurrences made two identity queries and retained only the accepted pair.
+Database reads verified the full saved order and multiplicity. These are query
+counts, not latency or RSS measurements; the probe was removed after observation.
+Current import behavior is documented in
+link:03_playlist.adoc#_commit_and_export_lifecycle[Commit and export lifecycle].

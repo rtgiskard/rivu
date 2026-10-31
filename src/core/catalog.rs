@@ -1,5 +1,6 @@
 use super::*;
 use anyhow::{bail, ensure};
+use std::collections::HashMap;
 
 pub(super) struct ScanFinished {
     pub(super) id: u64,
@@ -208,27 +209,46 @@ fn save_scan(
     );
     if let Some((name, items)) = scan.import {
         let playlist = (|| -> Result<i64> {
-            let accessible: HashSet<_> = result
+            enum IdentityState {
+                Unresolved,
+                Resolved(Option<i64>),
+            }
+            // Borrow scan identities; one table owns eligibility and resolution,
+            // including negative results for tracks excluded during admission.
+            let mut identities: HashMap<_, _> = result
                 .tracks()
-                .map(|record| match &record.cue {
-                    Some(cue) => crate::store::TrackIdentity::Cue(cue.sheet, cue.number),
-                    None => crate::store::TrackIdentity::File(&record.source.path),
+                .map(|record| {
+                    let identity = match &record.cue {
+                        Some(cue) => crate::store::TrackIdentity::Cue(cue.sheet, cue.number),
+                        None => crate::store::TrackIdentity::File(&record.source.path),
+                    };
+                    (identity, IdentityState::Unresolved)
                 })
                 .collect();
             let mut ids = Vec::with_capacity(items.len());
-            for item in items {
-                let path = library::logical_path(&item.path)?;
+            for item in &items {
+                // Import preparation already normalized both files and CUE sheets.
                 let identity = match item.cue_track {
-                    Some(number) => crate::store::TrackIdentity::Cue(&path, number),
-                    None => crate::store::TrackIdentity::File(&path),
+                    Some(number) => crate::store::TrackIdentity::Cue(&item.path, number),
+                    None => crate::store::TrackIdentity::File(&item.path),
                 };
-                if !accessible.contains(&identity) {
+                let Some(state) = identities.get_mut(&identity) else {
                     continue;
-                }
-                if let Some(id) = store.track_id_for_identity(identity)? {
+                };
+                let id = match *state {
+                    IdentityState::Unresolved => {
+                        let id = store.track_id_for_identity(identity)?;
+                        *state = IdentityState::Resolved(id);
+                        id
+                    }
+                    IdentityState::Resolved(id) => id,
+                };
+                if let Some(id) = id {
                     ids.push(id);
                 }
             }
+            drop(identities);
+            drop(items);
             ensure!(
                 !ids.is_empty(),
                 "Playlist contains no supported, accessible audio tracks"

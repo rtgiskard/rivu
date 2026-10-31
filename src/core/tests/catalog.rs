@@ -965,7 +965,7 @@ fn duration_threshold_playlist_import_keeps_existing_tracks_and_uses_accepted_sn
             std::fs::write(&path,
                 "TITLE \"Imported album\"\nFILE \"new.wav\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"Updated segment\"\n    INDEX 01 00:00:00\n  TRACK 02 AUDIO\n    INDEX 01 00:01:00\n").unwrap();
         } else {
-            std::fs::write(&path, "1.wav\nnew.wav\n").unwrap();
+            std::fs::write(&path, "1.wav\nnew.wav\n./new.wav\n./1.wav\n").unwrap();
         }
         let expected = if extension == "cue" {
             core.store
@@ -997,7 +997,7 @@ fn duration_threshold_playlist_import_keeps_existing_tracks_and_uses_accepted_sn
         } else {
             None
         };
-        let expected_ids = second.map_or_else(|| vec![expected], |id| vec![expected, id]);
+        let expected_ids = second.map_or_else(|| vec![expected, expected], |id| vec![expected, id]);
         assert_eq!(
             core.store.playlist_track_ids(playlist, 10).unwrap(),
             expected_ids
@@ -1942,7 +1942,7 @@ fn m3u_playlist_and_queue_preserve_occurrence_order() {
         write_pcm(&core.track(track_id).unwrap().path);
     }
     let path = directory.path().join("duplicates.m3u");
-    std::fs::write(&path, "2.wav\n1.wav\n2.wav\n3.wav\n1.wav\n").unwrap();
+    std::fs::write(&path, "2.wav\n./1.wav\nsub/../2.wav\n3.wav\n./1.wav\n").unwrap();
     core.command(Command::ImportPlaylist {
         path,
         name: Some("Repeated occurrences".into()),

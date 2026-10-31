@@ -32,7 +32,7 @@ use rivu_protocol::{
     },
 };
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::VecDeque,
     path::{Path, PathBuf},
     sync::Arc,
     thread::{self, JoinHandle},
