@@ -5099,7 +5099,7 @@ dependencies = [
 
 [[package]]
 name = "rivu"
-version = "0.2.2"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "ashpd",
