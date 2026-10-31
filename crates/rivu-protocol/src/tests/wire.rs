@@ -8,6 +8,80 @@ use crate::{
 use std::{path::PathBuf, sync::Arc};
 
 #[test]
+fn exact_playlist_summary_round_trips_ids_and_optional_results() {
+    use crate::{model::PlaylistSummary, response::ViewResponse};
+    let mut encoded = Vec::new();
+    for playlist_id in [i64::MIN, 0, 42, i64::MAX] {
+        let query = Query::PlaylistSummary { playlist_id };
+        encode_request_frame_into(
+            &WireRequest::Query(WireQuery::from(query.clone())),
+            &mut encoded,
+        )
+        .unwrap();
+        let WireRequest::Query(wire) = decode_request_frame(&encoded[4..]).unwrap() else {
+            panic!("expected playlist summary query");
+        };
+        assert_eq!(Query::try_from(wire).unwrap(), query);
+        for summary in [
+            None,
+            Some(PlaylistSummary {
+                id: playlist_id,
+                name: "Été playlist".into(),
+                entry_count: 3,
+            }),
+        ] {
+            let response = QueryResponse {
+                revisions: Default::default(),
+                result: Ok(ViewResponse::PlaylistSummary(summary.clone())),
+            };
+            encode_response_frame_into(&WireResponse::Query(response), &mut encoded).unwrap();
+            let WireResponse::Query(decoded) = decode_response_frame(&encoded[4..]).unwrap() else {
+                panic!("expected playlist summary response");
+            };
+            let ViewResponse::PlaylistSummary(decoded) = decoded.result.unwrap() else {
+                panic!("expected optional playlist summary");
+            };
+            assert_eq!(decoded, summary);
+        }
+    }
+}
+
+#[test]
+fn exact_playlist_summary_identity_and_stamp_select_catalog() {
+    use crate::response::QueryRevisions;
+    let query = Query::PlaylistSummary { playlist_id: 42 };
+    assert_eq!(
+        query.identity(),
+        Query::PlaylistSummary { playlist_id: 42 }.identity()
+    );
+    assert_ne!(
+        query.identity(),
+        Query::PlaylistSummary { playlist_id: 43 }.identity()
+    );
+    let revisions = QueryRevisions {
+        playlist: 7,
+        library: 8,
+        bitrate: 9,
+        queue: 10,
+        ..Default::default()
+    };
+    assert_eq!(
+        query.stamp(revisions).revisions(),
+        QueryRevisions {
+            playlist: 7,
+            ..Default::default()
+        }
+    );
+    assert_ne!(
+        query.stamp(revisions),
+        query.stamp(QueryRevisions {
+            playlist: 8,
+            ..revisions
+        })
+    );
+}
+
+#[test]
 fn scan_task_query_and_cancel_wire_round_trip_preserve_id() {
     for id in [0, 42, u64::MAX] {
         let mut encoded = Vec::new();
@@ -235,6 +309,36 @@ fn optional_search_queries_round_trip() {
                 panic!("expected query");
             };
             assert_eq!(Query::try_from(decoded).unwrap(), expected);
+        }
+    }
+}
+
+#[test]
+fn playlist_catalog_move_requests_round_trip_ids_anchors_and_revision_boundaries() {
+    let mut encoded = Vec::new();
+    for playlist_id in [1, i64::MAX] {
+        for before_playlist_id in [None, Some(1), Some(i64::MAX)] {
+            for after in [false, true] {
+                for expected_revision in [0, u64::MAX] {
+                    let command = Command::MovePlaylist {
+                        playlist_id,
+                        before_playlist_id,
+                        after,
+                        expected_revision,
+                    };
+                    let expected = serde_json::to_value(&command).unwrap();
+                    encode_request_frame_into(&WireRequest::Command(command.into()), &mut encoded)
+                        .unwrap();
+                    let WireRequest::Command(wire) = decode_request_frame(&encoded[4..]).unwrap()
+                    else {
+                        panic!("expected catalog move command");
+                    };
+                    assert_eq!(
+                        serde_json::to_value(Command::try_from(wire).unwrap()).unwrap(),
+                        expected
+                    );
+                }
+            }
         }
     }
 }

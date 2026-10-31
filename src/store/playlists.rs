@@ -104,6 +104,24 @@ impl Store {
         )
     }
 
+    pub fn playlist_summary(&self, playlist_id: i64) -> Result<Option<PlaylistSummary>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT p.id,p.name,(SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries e WHERE e.playlist_id=p.id)
+                 FROM playlists p WHERE p.id=?1 AND p.id>0",
+                [playlist_id],
+                |row| {
+                    Ok(PlaylistSummary {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        entry_count: row.get::<_, i64>(2)? as usize,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
     pub fn playlist_summary_page(
         &self,
         query: Option<&str>,
@@ -124,7 +142,7 @@ impl Store {
         }
         let mut stmt = self.conn.prepare(
             "SELECT p.id,p.name,(SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries e WHERE e.playlist_id=p.id)
-             FROM playlists p WHERE p.id>0 AND (?1 IS NULL OR instr(lower(p.name),?1)>0) ORDER BY p.id LIMIT ?2 OFFSET ?3",
+             FROM playlists p WHERE p.id>0 AND (?1 IS NULL OR instr(lower(p.name),?1)>0) ORDER BY p.position,p.id LIMIT ?2 OFFSET ?3",
         )?;
         let rows = stmt
             .query_map(
@@ -182,14 +200,14 @@ impl Store {
         let limit = batch_limit(limit)?;
         let query = search_query(query);
         let cursor = if after.is_some() {
-            "p.id>?2"
+            "(p.position,p.id)>(SELECT position,id FROM playlists WHERE id=?2 AND id>0)"
         } else {
             "?2 IS NULL"
         };
         let mut stmt = self.conn.prepare(&format!(
             "SELECT p.id,p.name,
                     (SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries e WHERE e.playlist_id=p.id)
-             FROM playlists p WHERE p.id>0 AND (?1 IS NULL OR instr(lower(p.name),?1)>0) AND {cursor} ORDER BY p.id LIMIT ?3",
+             FROM playlists p WHERE p.id>0 AND (?1 IS NULL OR instr(lower(p.name),?1)>0) AND {cursor} ORDER BY p.position,p.id LIMIT ?3",
         ))?;
         let mut db_rows = stmt.query(params![query, after, limit + 1])?;
         let mut rows = Vec::with_capacity(limit as usize);
@@ -469,6 +487,48 @@ impl Store {
         tx.commit()?;
         Ok(updated != 0)
     }
+    /// Reorder the catalog without touching playlist occurrences or the queue.
+    pub fn move_playlist(
+        &self,
+        playlist_id: i64,
+        before_playlist_id: Option<i64>,
+        after: bool,
+    ) -> Result<bool> {
+        let tx = self.conn.unchecked_transaction()?;
+        exists_playlist(&tx, playlist_id)?;
+        if let Some(target) = before_playlist_id {
+            exists_playlist(&tx, target)?;
+        }
+        if before_playlist_id == Some(playlist_id) {
+            return Ok(false);
+        }
+        // Rank in SQLite so deletion gaps and stable-ID tie breaks have exactly
+        // the same meaning here as in catalog queries, without loading the catalog.
+        let updated = tx.execute(
+            "WITH ranked AS MATERIALIZED (
+                SELECT id,row_number() OVER (ORDER BY position,id)-1 AS position
+                FROM playlists WHERE id>0
+             ), boundary AS MATERIALIZED (
+                SELECT (SELECT position FROM ranked WHERE id=?1) AS old,
+                    CASE WHEN ?2 IS NULL THEN (SELECT COUNT(*) FROM ranked)
+                         ELSE (SELECT position FROM ranked WHERE id=?2)+?3 END AS target
+             ), bounds AS MATERIALIZED (
+                SELECT old,target-(old<target) AS insertion FROM boundary
+             ), moved AS (
+                SELECT id,CASE
+                    WHEN id=?1 THEN insertion
+                    WHEN old<insertion AND position>old AND position<=insertion THEN position-1
+                    WHEN old>insertion AND position>=insertion AND position<old THEN position+1
+                    ELSE position END AS position
+                FROM ranked CROSS JOIN bounds WHERE old<>insertion
+             ) UPDATE playlists SET position=moved.position FROM moved
+               WHERE playlists.id=moved.id AND playlists.position<>moved.position",
+            params![playlist_id, before_playlist_id, i64::from(after)],
+        )?;
+        tx.commit()?;
+        Ok(updated != 0)
+    }
+
     /// Returns whether the committed deletion removed any playlist members.
     pub fn delete_playlist(&self, id: i64) -> Result<bool> {
         anyhow::ensure!(id > 0, "Playlist not found");

@@ -86,6 +86,12 @@ pub(in crate::gui) struct PlaylistContentMenu {
     pub(in crate::gui) remove: Option<Command>,
 }
 
+#[derive(Clone)]
+struct PlaylistCatalogDrag {
+    playlist_id: i64,
+    revision: u64,
+}
+
 pub(in crate::gui) struct Playlists {
     context: FeatureContext,
     state: Rc<GuiSnapshot>,
@@ -112,6 +118,32 @@ pub(in crate::gui) struct Playlists {
 impl EventEmitter<PlaylistEvent> for Playlists {}
 
 impl Playlists {
+    fn can_move_catalog(&self, drag: &PlaylistCatalogDrag) -> bool {
+        self.browser.playlists().summaries().query.is_none()
+            && self.state.library.playlist_revision == drag.revision
+    }
+
+    fn move_catalog(
+        &mut self,
+        drag: &PlaylistCatalogDrag,
+        target: Option<i64>,
+        after: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.refresh(cx);
+        if self.can_move_catalog(drag) && target != Some(drag.playlist_id) {
+            self.send(
+                Command::MovePlaylist {
+                    playlist_id: drag.playlist_id,
+                    before_playlist_id: target,
+                    after,
+                    expected_revision: drag.revision,
+                },
+                cx,
+            );
+        }
+    }
+
     pub(in crate::gui) fn new(context: FeatureContext, cx: &mut Context<Self>) -> Self {
         let i18n = context.i18n.clone();
         let state = context.snapshot();
@@ -1177,6 +1209,8 @@ impl Playlists {
                         let play_name = name.clone();
                         let menu_name = name.clone();
                         let context_name = name.clone();
+                        let drag_label = name.clone();
+                        let catalog_revision = this.state.library.playlist_revision;
                         let playable = p.entry_count > 0;
                         list_row(
                             theme,
@@ -1277,6 +1311,15 @@ impl Playlists {
                             this.select_playlist_container(id, name.to_string(), index, cx);
                             cx.notify();
                         }))
+                        .when(this.browser.playlists().summaries().query.is_none(), |row| {
+                            row.on_drag(
+                                PlaylistCatalogDrag { playlist_id: id, revision: catalog_revision },
+                                move |_, _, window, cx| {
+                                    rivu_ui::begin_list_drag(window, cx);
+                                    cx.new(|_| rivu_ui::ListDragPreview { label: drag_label.clone() })
+                                },
+                            )
+                        })
                         .on_drop(cx.listener(move |this, drag: &LibraryDrag, window, cx| {
                             window.prevent_default();
                             cx.stop_propagation();
@@ -1310,12 +1353,48 @@ impl Playlists {
                             style.bg(rgb(theme.highlight))
                         })
                         .drag_over::<ListDrag>(|style, _, _, _| style.bg(rgb(theme.highlight)))
+                        .children([false, true].into_iter().map(|after| {
+                            let owner = cx.weak_entity();
+                            let highlight_owner = owner.clone();
+                            rivu_ui::list_drop_target(
+                                (if after { "catalog-insert-after" } else { "catalog-insert-before" }, id as u64),
+                                after,
+                            )
+                            .can_drop(move |value, _, cx| {
+                                value.downcast_ref::<PlaylistCatalogDrag>().is_some_and(|drag| {
+                                    owner.upgrade().is_some_and(|owner| owner.read(cx).can_move_catalog(drag))
+                                })
+                            })
+                            .on_drop(cx.listener(move |this, drag: &PlaylistCatalogDrag, window, cx| {
+                                window.prevent_default();
+                                cx.stop_propagation();
+                                this.move_catalog(drag, Some(id), after, cx);
+                            }))
+                            .drag_over::<PlaylistCatalogDrag>(move |style, drag, _, cx| {
+                                if drag.playlist_id != id && highlight_owner.upgrade().is_some_and(|owner| owner.read(cx).can_move_catalog(drag)) {
+                                    style.border_color(rgb(theme.accent))
+                                } else {
+                                    style
+                                }
+                            })
+                        }))
                         .into_any_element()
                     })
                     .collect::<Vec<_>>()
             }),
         )
         .on_viewport_deferred(cx.weak_entity(), Self::ensure_playlist_range)
+        .on_drop(cx.listener(|this, drag: &PlaylistCatalogDrag, window, cx| {
+            window.prevent_default();
+            cx.stop_propagation();
+            this.move_catalog(drag, None, false, cx);
+        }))
+        .can_drop({
+            let owner = cx.weak_entity();
+            move |value, _, cx| value.downcast_ref::<PlaylistCatalogDrag>().is_some_and(|drag| {
+                owner.upgrade().is_some_and(|owner| owner.read(cx).can_move_catalog(drag))
+            })
+        })
         .h_full()
         .min_h_0()
         .w_full();

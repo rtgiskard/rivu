@@ -210,6 +210,7 @@ pub enum ViewResponse {
     RelocationTask(crate::model::RelocationTaskStatus),
     PlaylistEntryLocations(Vec<PlaylistEntryLocation>),
     ProcessingTask(Option<Box<crate::model::ProcessingTaskStatus>>),
+    PlaylistSummary(Option<PlaylistSummary>),
 }
 /// Final task status, returned only after the owner commits its outcome.
 #[derive(Debug, Clone, Serialize, Deserialize)]

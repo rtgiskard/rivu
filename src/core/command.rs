@@ -437,6 +437,14 @@ impl Core {
                 }
             }
             Command::DeletePlaylist { playlist_id } => self.delete_playlist(playlist_id)?,
+            Command::MovePlaylist {
+                playlist_id,
+                before_playlist_id,
+                after,
+                expected_revision,
+            } => {
+                self.move_playlist(playlist_id, before_playlist_id, after, expected_revision)?;
+            }
             Command::AddPlaylist {
                 playlist_id,
                 track_ids,

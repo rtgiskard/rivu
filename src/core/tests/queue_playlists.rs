@@ -1,6 +1,280 @@
 use super::*;
 
 #[test]
+fn exact_playlist_summary_finds_id_after_catalog_reorder_and_missing_ids() {
+    let (_directory, mut core) = fixture();
+    for (name, track_ids) in [("one", vec![1]), ("two", vec![2, 3]), ("three", vec![4])] {
+        core.command(Command::CreatePlaylistWithTracks {
+            name: name.into(),
+            track_ids,
+        })
+        .unwrap();
+    }
+    core.publish();
+    let query = Query::PlaylistSummary { playlist_id: 2 };
+    let before = core.query_response(&query);
+    core.command(Command::MovePlaylist {
+        playlist_id: 3,
+        before_playlist_id: Some(1),
+        after: false,
+        expected_revision: core.state.query_revisions().playlist,
+    })
+    .unwrap();
+    core.publish();
+    assert_eq!(
+        core.store
+            .playlist_summary_page(None, 0, 3)
+            .unwrap()
+            .rows
+            .iter()
+            .map(|summary| summary.id)
+            .collect::<Vec<_>>(),
+        [3, 1, 2]
+    );
+    let response = core.query_response(&query);
+    assert_ne!(
+        query.stamp(before.revisions),
+        query.stamp(response.revisions)
+    );
+    let ViewResponse::PlaylistSummary(Some(summary)) = response.result.unwrap() else {
+        panic!("expected exact playlist summary");
+    };
+    assert_eq!(summary.id, 2);
+    assert_eq!(summary.name, "two");
+    assert_eq!(summary.entry_count, 2);
+    for playlist_id in [-1, 0, 4, i64::MAX] {
+        assert!(matches!(
+            core.view(&Query::PlaylistSummary { playlist_id }).unwrap(),
+            ViewResponse::PlaylistSummary(None)
+        ));
+    }
+}
+
+#[test]
+fn playlist_catalog_moves_change_only_catalog_order_and_its_revision() {
+    let (_directory, mut core) = fixture();
+    for (name, track_ids) in [
+        ("zebra", vec![1, 2, 1]),
+        ("alpha", vec![2, 3]),
+        ("middle", vec![4]),
+    ] {
+        core.command(Command::CreatePlaylistWithTracks {
+            name: name.into(),
+            track_ids,
+        })
+        .unwrap();
+    }
+    pending(&mut core, 3);
+    core.record_queue_history(3);
+    let audio = recording_audio(&mut core);
+    core.publish();
+    let initial = core.state.clone();
+    let queue = queue_entries(&core);
+    let contents: Vec<_> = (1..=3)
+        .map(|playlist_id| {
+            serde_json::to_value(
+                core.store
+                    .playlist_entries_page(playlist_id, None, 0, 20)
+                    .unwrap(),
+            )
+            .unwrap()
+        })
+        .collect();
+    let entry_queries: Vec<_> = (1..=3)
+        .map(|playlist_id| Query::PlaylistEntryBatch {
+            query: None,
+            playlist_id,
+            after: None,
+            limit: 1,
+            expected: Some(core.state.playlist_query_revisions(playlist_id)),
+        })
+        .collect();
+    for (playlist_id, before_playlist_id, after, order) in [
+        (3, Some(1), false, [3, 1, 2]),
+        (3, Some(2), true, [1, 2, 3]),
+        (1, None, false, [2, 3, 1]),
+    ] {
+        let before = core.state.query_revisions();
+        let sections = core.state.revisions;
+        core.command(Command::MovePlaylist {
+            playlist_id,
+            before_playlist_id,
+            after,
+            expected_revision: before.playlist,
+        })
+        .unwrap();
+        core.publish();
+        let mut expected = before;
+        expected.playlist = expected.playlist.wrapping_add(1);
+        assert_eq!(core.state.query_revisions(), expected);
+        assert_eq!(
+            core.state.revisions.changed_since(sections),
+            StateSections {
+                library: true,
+                ..StateSections::default()
+            }
+        );
+        assert_eq!(
+            core.store
+                .playlist_summary_page(None, 0, 20)
+                .unwrap()
+                .rows
+                .iter()
+                .map(|playlist| playlist.id)
+                .collect::<Vec<_>>(),
+            order
+        );
+        assert_eq!(core.state.library.playlist_total, 3);
+        assert!(Arc::ptr_eq(
+            &initial.library.playlist_entry_revisions,
+            &core.state.library.playlist_entry_revisions
+        ));
+        assert!(Arc::ptr_eq(
+            &initial.library.metadata_revisions,
+            &core.state.library.metadata_revisions
+        ));
+        assert_eq!(core.state.queue, initial.queue);
+        assert_eq!(queue_entries(&core), queue);
+        assert_eq!(core.state.playback, initial.playback);
+        assert_eq!(core.state.source_generation, initial.source_generation);
+        assert!(Arc::ptr_eq(
+            core.state.current_track.as_ref().unwrap(),
+            initial.current_track.as_ref().unwrap()
+        ));
+        for (index, query) in entry_queries.iter().enumerate() {
+            assert!(core.view(query).is_ok());
+            assert_eq!(
+                serde_json::to_value(
+                    core.store
+                        .playlist_entries_page(index as i64 + 1, None, 0, 20)
+                        .unwrap()
+                )
+                .unwrap(),
+                contents[index]
+            );
+        }
+        assert_eq!(
+            core.view(&Query::PlaylistSummaryBatch {
+                query: None,
+                after: Some(1),
+                limit: 1,
+                expected: Some(before),
+            })
+            .unwrap_err(),
+            QueryError::RevisionChanged
+        );
+    }
+    assert!(audio.try_iter().next().is_none());
+}
+
+#[test]
+fn playlist_catalog_move_noops_and_invalid_identities_preserve_all_revisions() {
+    let (_directory, mut core) = fixture();
+    for name in ["one", "two", "three"] {
+        core.command(Command::CreatePlaylist { name: name.into() })
+            .unwrap();
+    }
+    core.publish();
+    let baseline = core.state.query_revisions();
+    let sections = core.state.revisions;
+    let summaries =
+        serde_json::to_value(core.store.playlist_summary_page(None, 0, 20).unwrap()).unwrap();
+    for (playlist_id, before_playlist_id, after) in [
+        (2, Some(2), false),
+        (2, Some(2), true),
+        (1, Some(2), false),
+        (2, Some(1), true),
+        (3, None, false),
+        (3, None, true),
+    ] {
+        core.command(Command::MovePlaylist {
+            playlist_id,
+            before_playlist_id,
+            after,
+            expected_revision: baseline.playlist,
+        })
+        .unwrap();
+        core.publish();
+        assert_eq!(core.state.query_revisions(), baseline);
+        assert_eq!(core.state.revisions, sections);
+    }
+    for (playlist_id, before_playlist_id) in [
+        (0, None),
+        (i64::MAX, None),
+        (1, Some(0)),
+        (1, Some(i64::MAX)),
+    ] {
+        assert!(
+            core.command(Command::MovePlaylist {
+                playlist_id,
+                before_playlist_id,
+                after: false,
+                expected_revision: baseline.playlist,
+            })
+            .is_err()
+        );
+        core.publish();
+        assert_eq!(core.state.query_revisions(), baseline);
+        assert_eq!(core.state.revisions, sections);
+    }
+    assert_eq!(
+        serde_json::to_value(core.store.playlist_summary_page(None, 0, 20).unwrap()).unwrap(),
+        summaries
+    );
+}
+
+#[test]
+fn playlist_catalog_moves_reject_stale_intents_before_noops_or_storage_validation() {
+    let (_directory, mut core) = fixture();
+    for name in ["one", "two"] {
+        core.command(Command::CreatePlaylist { name: name.into() })
+            .unwrap();
+    }
+    for mutation in [
+        Command::RenamePlaylist {
+            playlist_id: 1,
+            name: "renamed".into(),
+        },
+        Command::CreatePlaylist {
+            name: "three".into(),
+        },
+        Command::DeletePlaylist { playlist_id: 2 },
+    ] {
+        let stale = core.state.library.playlist_revision;
+        core.command(mutation).unwrap();
+        core.publish();
+        let baseline = core.state.query_revisions();
+        let sections = core.state.revisions;
+        let summaries =
+            serde_json::to_value(core.store.playlist_summary_page(None, 0, 20).unwrap()).unwrap();
+        for (playlist_id, before_playlist_id) in
+            [(1, None), (1, Some(1)), (2, Some(1)), (i64::MAX, Some(0))]
+        {
+            let error = core
+                .command(Command::MovePlaylist {
+                    playlist_id,
+                    before_playlist_id,
+                    after: true,
+                    expected_revision: stale,
+                })
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("Playlist catalog revision changed")
+            );
+            core.publish();
+            assert_eq!(core.state.query_revisions(), baseline);
+            assert_eq!(core.state.revisions, sections);
+        }
+        assert_eq!(
+            serde_json::to_value(core.store.playlist_summary_page(None, 0, 20).unwrap()).unwrap(),
+            summaries
+        );
+    }
+}
+
+#[test]
 fn indexed_playlist_sources_and_after_moves_update_only_the_target_projection() {
     let (_directory, mut core) = fixture();
     for name in ["target", "other"] {

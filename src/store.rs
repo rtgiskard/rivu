@@ -93,7 +93,7 @@ impl Store {
     pub(crate) fn playlist_ids(&self) -> Result<Vec<i64>> {
         Ok(self
             .conn
-            .prepare("SELECT id FROM playlists WHERE id>0 ORDER BY id")?
+            .prepare("SELECT id FROM playlists WHERE id>0 ORDER BY position,id")?
             .query_map([], |row| row.get(0))?
             .collect::<rusqlite::Result<_>>()?)
     }

@@ -164,6 +164,9 @@ pub enum Query {
     ProcessingTask {
         id: u64,
     },
+    PlaylistSummary {
+        playlist_id: i64,
+    },
 }
 
 /// Selected equality tokens, owned by the query rather than its consumers.
@@ -254,6 +257,7 @@ pub enum QueryIdentity<'a> {
     RelocationTask(u64),
     DuplicateMemberSelection(&'a str, &'a [i64]),
     ProcessingTask(u64),
+    PlaylistSummary(i64),
 }
 
 impl Query {
@@ -286,7 +290,9 @@ impl Query {
             Self::LibraryRootCounts { .. } | Self::OtherTracksCount => {
                 stamp.structure = revisions.structure;
             }
-            Self::PlaylistSummaries { .. } | Self::PlaylistSummaryBatch { .. } => {
+            Self::PlaylistSummaries { .. }
+            | Self::PlaylistSummaryBatch { .. }
+            | Self::PlaylistSummary { .. } => {
                 stamp.playlist = revisions.playlist;
             }
             Self::PlaylistEntries { playlist_id, .. }
@@ -398,6 +404,7 @@ impl Query {
                 ..
             } => QueryIdentity::DirectoryPage(path, query, *favorite, *missing),
             Self::PlaylistSummaries { query, .. } => QueryIdentity::PlaylistSummaries(query),
+            Self::PlaylistSummary { playlist_id } => QueryIdentity::PlaylistSummary(*playlist_id),
             Self::PlaylistEntries {
                 playlist_id, query, ..
             } => QueryIdentity::PlaylistEntries(*playlist_id, query),

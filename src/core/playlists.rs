@@ -32,6 +32,27 @@ impl Core {
         self.playlist_deleted(playlist_id, had_members)
     }
 
+    pub(in crate::core) fn move_playlist(
+        &mut self,
+        playlist_id: i64,
+        before_playlist_id: Option<i64>,
+        after: bool,
+        expected_revision: u64,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.state.library.playlist_revision == expected_revision,
+            "Playlist catalog revision changed"
+        );
+        if self
+            .store
+            .move_playlist(playlist_id, before_playlist_id, after)?
+        {
+            self.state.library.playlist_revision =
+                self.state.library.playlist_revision.wrapping_add(1);
+        }
+        Ok(())
+    }
+
     pub(in crate::core) fn add_playlist(
         &mut self,
         playlist_id: i64,

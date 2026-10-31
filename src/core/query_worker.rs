@@ -251,6 +251,9 @@ impl ReadView<'_> {
                 *offset,
                 *limit,
             )?),
+            Query::PlaylistSummary { playlist_id } => {
+                ViewResponse::PlaylistSummary(self.store.playlist_summary(*playlist_id)?)
+            }
             Query::PlaylistSummaries {
                 query,
                 offset,

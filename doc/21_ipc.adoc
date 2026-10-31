@@ -417,8 +417,16 @@ The Library section carries the summary catalog token `playlist_revision` and
 playlists. Each value is a content/lifetime equality token issued independently
 of the catalog. Creation registers a fresh token; deletion removes it. A missing
 key means the playlist is unavailable, never a fallback to the catalog token.
-Actual membership changes and reorders advance only the owning content token;
-membership also changes summary counts. Rename changes only the summary token.
+Actual membership changes and track reorders advance only the owning content token;
+membership also changes summary counts. Rename and catalog reordering change only
+the summary token. `MovePlaylist` takes `playlist_id`, optional `before_playlist_id`,
+`after`, and `expected_revision` (the catalog token). A missing anchor appends;
+otherwise `after` selects the side of the anchor. Stale catalog tokens and unknown
+or system-playlist identities are rejected. A self-target or an unchanged position
+is a no-op. Summary pages, including search results, follow the saved catalog order.
+`PlaylistSummary { playlist_id }` returns one optional summary by exact identity;
+it uses the catalog token and is independent of catalog position. Batch `after`
+values are traversal cursors, not numeric-ID lower bounds.
 Core issues content/lifetime tokens from one in-memory sequence after confirmed
 commits. Deleting and recreating a playlist, even with the same ID, cannot revive
 an old token within that Core instance. Retention is bounded by extant playlists;

@@ -282,7 +282,7 @@ pub struct LibrarySnapshot {
     pub structure_revision: u64,
     /// Core-owned album membership/order/query token, shared with transfers.
     pub album_revision: u64,
-    /// Playlist summaries: identity, name, or member count. Not a content epoch.
+    /// Playlist summaries: identity, name, order, or member count. Not a content epoch.
     pub playlist_revision: u64,
     /// Content/lifetime tokens for every extant playlist; absence means deletion.
     pub playlist_entry_revisions: Arc<BTreeMap<i64, u64>>,
@@ -768,6 +768,12 @@ pub enum Command {
     },
     DeletePlaylist {
         playlist_id: i64,
+    },
+    MovePlaylist {
+        playlist_id: i64,
+        before_playlist_id: Option<i64>,
+        after: bool,
+        expected_revision: u64,
     },
     AddPlaylist {
         playlist_id: i64,

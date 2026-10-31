@@ -252,6 +252,9 @@ pub enum WireQuery {
         sort: crate::model::LibrarySort,
     },
     OtherTracksCount,
+    PlaylistSummary {
+        playlist_id: i64,
+    },
 }
 
 /// Binary command wire format. Variant order belongs to the versioned wire schema.
@@ -522,6 +525,12 @@ pub enum WireCommand {
         playlist_id: i64,
         expected_revision: u64,
     },
+    MovePlaylist {
+        playlist_id: i64,
+        before_playlist_id: Option<i64>,
+        after: bool,
+        expected_revision: u64,
+    },
 }
 
 pub fn wire_usize(value: u64, field: &str) -> Result<usize> {
@@ -571,6 +580,7 @@ impl From<Query> for WireQuery {
                 offset: offset as u64,
                 limit: limit as u64,
             },
+            Query::PlaylistSummary { playlist_id } => Self::PlaylistSummary { playlist_id },
             Query::AlbumTracks {
                 key,
                 query,
@@ -1030,6 +1040,7 @@ impl TryFrom<WireQuery> for Query {
             },
             WireQuery::RelocationTask { id } => Self::RelocationTask { id },
             WireQuery::ProcessingTask { id } => Self::ProcessingTask { id },
+            WireQuery::PlaylistSummary { playlist_id } => Self::PlaylistSummary { playlist_id },
         })
     }
 }
@@ -1159,6 +1170,17 @@ impl From<Command> for WireCommand {
                 Self::RenamePlaylist { playlist_id, name }
             }
             Command::DeletePlaylist { playlist_id } => Self::DeletePlaylist { playlist_id },
+            Command::MovePlaylist {
+                playlist_id,
+                before_playlist_id,
+                after,
+                expected_revision,
+            } => Self::MovePlaylist {
+                playlist_id,
+                before_playlist_id,
+                after,
+                expected_revision,
+            },
             Command::AddPlaylist {
                 playlist_id,
                 track_ids,
@@ -1432,6 +1454,17 @@ impl TryFrom<WireCommand> for Command {
                 Self::RenamePlaylist { playlist_id, name }
             }
             WireCommand::DeletePlaylist { playlist_id } => Self::DeletePlaylist { playlist_id },
+            WireCommand::MovePlaylist {
+                playlist_id,
+                before_playlist_id,
+                after,
+                expected_revision,
+            } => Self::MovePlaylist {
+                playlist_id,
+                before_playlist_id,
+                after,
+                expected_revision,
+            },
             WireCommand::AddPlaylist {
                 playlist_id,
                 track_ids,

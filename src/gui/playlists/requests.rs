@@ -21,7 +21,7 @@ impl ViewRequestKind {
         Some(match query {
             Query::PlaylistSummaries { .. } => Self::Summaries,
             Query::PlaylistEntries { .. } => Self::Entries,
-            Query::PlaylistSummaryBatch { .. } => Self::Selection,
+            Query::PlaylistSummary { .. } => Self::Selection,
             _ => return None,
         })
     }
@@ -265,7 +265,7 @@ impl PlaylistModel {
         }
     }
 
-    /// The first row after `id - 1` proves existence without scanning other pages.
+    /// Resolve selection by identity independently of catalog order and pagination.
     pub(in crate::gui::playlists) fn accept_playlist_lookup(
         &mut self,
         id: i64,
@@ -481,12 +481,7 @@ impl PlaylistModel {
 
     fn playlist_lookup(&self, revisions: QueryRevisions) -> Option<(Query, SelectionKey)> {
         let id = self.playlists.selected()?;
-        let query = Query::PlaylistSummaryBatch {
-            query: None,
-            after: id.checked_sub(1),
-            limit: 1,
-            expected: None,
-        };
+        let query = Query::PlaylistSummary { playlist_id: id };
         let key = (
             self.playlists.selection_generation(),
             query.stamp(revisions),
@@ -688,11 +683,11 @@ impl PlaylistModel {
                 self.playlists.accept_entries(page);
                 None
             }
-            Ok(ViewResponse::PlaylistSummaryBatch(batch))
+            Ok(ViewResponse::PlaylistSummary(summary))
                 if read.kind == ViewRequestKind::Selection =>
             {
                 if let Some(id) = read.selected_playlist {
-                    self.accept_playlist_lookup(id, batch.rows.into_iter().next());
+                    self.accept_playlist_lookup(id, summary);
                 }
                 None
             }
@@ -902,12 +897,7 @@ mod tests {
     fn lookup_success(revisions: QueryRevisions, id: i64, count: usize) -> QueryResponse {
         QueryResponse {
             revisions,
-            result: Ok(ViewResponse::PlaylistSummaryBatch(
-                rivu_protocol::model::Batch {
-                    rows: vec![summary(id, count)],
-                    next: None,
-                },
-            )),
+            result: Ok(ViewResponse::PlaylistSummary(Some(summary(id, count)))),
         }
     }
 
