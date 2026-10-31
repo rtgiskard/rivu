@@ -62,9 +62,9 @@ Waveform uses stereo numerical columns. Spectrum Peaks remain ordinary GPUI
 quads, and radial styles and artwork retain their independent rendering paths.
 
 The definitions live in
-https://github.com/rtgiskard/gpui-wgpu/blob/90825c290a1b78b8ef6a42706c2ee8e788fab947/crates/gpui/src/gpu.rs[`gpui::gpu`];
+https://github.com/rtgiskard/gpui-wgpu/blob/bd54c4c1e00046d2b7aff7355c7fc0fe8a78d9f2/crates/gpui/src/gpu.rs[`gpui::gpu`];
 the device-local implementation is
-https://github.com/rtgiskard/gpui-wgpu/blob/90825c290a1b78b8ef6a42706c2ee8e788fab947/crates/gpui_wgpu/src/gpu_material.rs[`gpu_material`]. These publication
+https://github.com/rtgiskard/gpui-wgpu/blob/bd54c4c1e00046d2b7aff7355c7fc0fe8a78d9f2/crates/gpui_wgpu/src/gpu_material.rs[`gpu_material`]. These publication
 handles contain CPU content, not device allocations or an attached-window
 identity. They can be recorded in different windows; each renderer independently
 uploads and budgets the content it uses. Attached-window state and explicit import
@@ -561,10 +561,11 @@ preserve that ownership rather than recreate application-specific retirement que
 
 Hide guarantees no draw. Stop demand and detach cached-scene references for
 discarded content; model release alone cannot release replay-held data. Static
-caches may remain. Reclamation waits for a later draw or renderer destruction,
-with retained capacity still charged. Resume reconciles resources even with no
+caches may remain. Preserve the bounded completion maintenance described in
+<<_admission_and_retirement>>: in-flight storage stays charged until completion,
+without requiring another presentation. Resume reconciles resources even with no
 visualizers; close revokes scene ownership without invalidating in-flight work.
-No cleanup-render or polling loop is added.
+No cleanup-render or permanent polling loop is added.
 
 ==== Device and surface changes
 
@@ -666,10 +667,9 @@ automatically. No GUI or benchmark rerun is implied by maintaining this document
 
 === Capacity-neutral regrouping comparison (2026-10-30)
 
-Rejected; candidate code and candidate-specific tests removed. The area-sensitive
-implementation remains active. On Radeon 780M, capacity-neutral regrouping benefited
-specific sparse layouts but added a small measured cost to the ordinary mixed
-layout; the gains did not justify the additional planning and composite bookkeeping.
+Capacity-neutral regrouping was rejected. On Radeon 780M it benefited specific
+sparse layouts but added a small measured cost to the ordinary mixed layout;
+the gains did not justify the additional planning and composite bookkeeping.
 
 === Shared local MSAA comparison (2026-10-23)
 

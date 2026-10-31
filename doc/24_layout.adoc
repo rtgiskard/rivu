@@ -431,9 +431,8 @@ restoration. One ordered surface inventory drives composition, keyboard authorit
 and background blocking. Feature confirmations can cover a surface without
 discarding its draft. Deferred focus requests carry a generation so an obsolete
 callback cannot focus a replacement surface. Workspace activation validates the
-target before cancelling an interaction and rolls back a live split against the
-outgoing tree,
-never against reused IDs in the incoming tree.
+target before cancelling an interaction; rollback follows the outgoing-tree rule
+in <<_dragging_and_snapping>>.
 
 GPUI owns actual control focus and key dispatch; the shell coordinates surface
 scopes and restoration, while each feature keeps selection and keyboard targets

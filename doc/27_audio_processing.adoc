@@ -659,7 +659,7 @@ is durable. Source files are not modified.
 Core owns committed configuration and result admission. Editors retain drafts
 and interaction state, submitting typed, validated edits; graph commits require
 the expected revision. Failed validation leaves committed settings unchanged.
-JSON is the IPC/import format, not a second configuration owner.
+JSON is a command-line/import representation, not a second configuration owner.
 
 Restoration and neural field descriptors supply labels, choices, input kinds and
 steps to both page and graph editors. Page edits remain sparse patches; graph

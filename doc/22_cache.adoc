@@ -433,9 +433,9 @@ the figures are payload capacities, not total process-memory limits.
 Density and Spatial Spectrum use revocable GPU slots: 256 KiB and 128 KiB per
 numeric publication respectively, with a shared 4 KiB palette per style. Unchanged
 fields and resize reuse them. Hiding clears slot/source ownership; captured frames
-may finish safely. Renderer buffers retire after completion on a later draw or
-renderer destruction, not an application cleanup frame. These are payload bounds,
-not total memory or physical VRAM limits.
+may finish safely. Renderer buffers remain charged until completion; hidden
+residency retires through the completion maintenance described above, without
+another draw. These are payload bounds, not total memory or physical VRAM limits.
 
 === Design tradeoffs
 

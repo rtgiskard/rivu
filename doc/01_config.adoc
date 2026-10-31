@@ -252,8 +252,6 @@ Orderly shutdown attempts to drain pending records; forced termination can lose
 them. Changing only the log level does not trigger retention cleanup. If creating
 the writer or saving configuration fails, the previous logging settings stay active.
 
-Color settings use quoted `"#RRGGBB"` values.
-
 === Audio processing defaults
 
 Audio processing additionally uses top-level `[equalizer]`, `[denoise]`, and
@@ -765,10 +763,11 @@ analysis and animation; switching one panel does not interrupt other visible vie
 Stop, seek, source replacement, incompatible analysis settings, and disabling visualizations
 clear stale results, including while hidden or paused. Closing the window releases
 its presentation; reopening does not restore old frames. Waveform keeps its track
-preview when hidden but discards it when visualizations are disabled. Retention details are in
-link:22_cache.adoc#_visualization_caching[Visualization caching].
+preview when hidden but discards it when visualizations are disabled.
 
 `visualizations.general.palette` accepts `tokyo_night` or `deadbeef` (default `deadbeef`).
+Color settings use quoted `"#RRGGBB"` values.
+
 Visualization caches are always enabled within their resource bounds. Spectrum
 reuses frequency mappings but rebuilds its body on each panel render. Rendering
 reuse and resource budgets are described in

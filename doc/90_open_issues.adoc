@@ -61,10 +61,10 @@ Exclusive ownership identifies the data-directory inode, not the database inode.
 Distinct directories whose `library.db` aliases the same file can therefore
 coexist. SQLite locking does not establish the application's offline migration
 precondition. A fix must define supported database aliases and involve both the
-host and maintenance tool; a maintenance-only lock is insufficient. Current
-migration CLI Apply validates rather than executing registered transformations.
-Revisit before enabling such transformations or supporting shared-file aliases;
-see link:26_migration.adoc[Migration ownership and backups].
+host and maintenance tool; a maintenance-only lock is insufficient. Format `2` to
+`4` migration performs its database transformation under this data-directory
+exclusion. Database-file alias protection remains unresolved; see
+link:26_migration.adoc[Migration ownership and backups].
 
 == Resolved investigations
 

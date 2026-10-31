@@ -460,8 +460,8 @@ next request; disconnect or server shutdown terminates the wait.
 Query responses contain the requested projection and its data revisions, not a
 full client state or queue snapshot. Core captures collection tokens with each
 serialized query; the save gate prevents reads before background commit facts
-have been applied. Publication sequence, four state-section tokens, query-data
-tokens, and consumer request generations have distinct responsibilities.
+have been applied. Publication sequence, state-section tokens, query-data tokens,
+and consumer request generations have distinct responsibilities.
 
 `Query::stamp` selects query-dependent freshness for scheduling, projection
 identity, result acceptance, and batch validation. Library pages use library
