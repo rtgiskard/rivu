@@ -371,6 +371,7 @@ impl ChoicePopup {
         )
         .h_full()
         .w_full()
+        .edge_fade_color(palette(cx).control)
         .scrollbar(self.scrollbar_id);
         deferred(
             anchored()

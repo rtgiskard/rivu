@@ -15,6 +15,7 @@ use gpui::{
 pub struct VirtualList {
     list: UniformList,
     scroll: UniformListScrollHandle,
+    edge_fade_color: Option<u32>,
 }
 
 impl VirtualList {
@@ -27,6 +28,7 @@ impl VirtualList {
         Self {
             list: uniform_list(id, count, render).track_scroll(scroll),
             scroll: scroll.clone(),
+            edge_fade_color: None,
         }
     }
 
@@ -58,6 +60,12 @@ impl VirtualList {
         self
     }
 
+    /// Match edge fades to the host's opaque surface; defaults to the panel color.
+    pub fn edge_fade_color(mut self, color: u32) -> Self {
+        self.edge_fade_color = Some(color);
+        self
+    }
+
     /// Adds the standard reserved scrollbar gutter, using the owner's stable interaction ID.
     pub fn scrollbar(self, id: impl Into<ElementId>) -> impl IntoElement {
         self.scrollbar_with(id, |list| list)
@@ -71,7 +79,9 @@ impl VirtualList {
         wrap: impl FnOnce(Self) -> E,
     ) -> impl IntoElement {
         let scroll = self.scroll.clone();
-        crate::scrollbar::scrollable_list(id, wrap(self), &scroll).into_any_element()
+        let edge_fade_color = self.edge_fade_color;
+        crate::scrollbar::scrollable_list(id, wrap(self), &scroll, edge_fade_color)
+            .into_any_element()
     }
 }
 

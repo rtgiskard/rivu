@@ -600,6 +600,9 @@ Shared list viewport shells retain horizontal clearance but no vertical inset:
 scrollable content and edge fades meet the shell's top and bottom. Content-sized
 playlist viewports therefore use row heights directly, without extra vertical
 padding compensation.
+Edge fades default to the panel surface color. Elevated Choice lists supply their
+control surface color through `VirtualList::edge_fade_color`, so the fade blends
+into its host without changing popup borders, insets or scroll geometry.
 
 List, tree, dropdown and paged-loading rows require an explicit resolved height.
 Range renderers resolve it once per batch and reuse it for records and placeholders,

@@ -51,6 +51,7 @@ pub fn scrollable_area(
             .overflow_y_scroll()
             .track_scroll(scroll),
         ScrollSource::Area(scroll.clone()),
+        None,
     )
 }
 
@@ -58,14 +59,21 @@ pub(super) fn scrollable_list(
     id: impl Into<ElementId>,
     child: impl IntoElement,
     scroll: &UniformListScrollHandle,
+    edge_fade_color: Option<u32>,
 ) -> impl IntoElement {
-    scrollable(id, child, ScrollSource::List(scroll.clone()))
+    scrollable(
+        id,
+        child,
+        ScrollSource::List(scroll.clone()),
+        edge_fade_color,
+    )
 }
 
 fn scrollable(
     id: impl Into<ElementId>,
     child: impl IntoElement,
     scroll: ScrollSource,
+    edge_fade_color: Option<u32>,
 ) -> impl IntoElement {
     div()
         .id(id)
@@ -88,7 +96,10 @@ fn scrollable(
         )
         // Keep this after the list: its prepaint reads this frame's list metrics,
         // including wheel offsets, deferred scroll requests and shrink clamping.
-        .child(Scrollbar { scroll })
+        .child(Scrollbar {
+            scroll,
+            edge_fade_color,
+        })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -152,13 +163,8 @@ impl Geometry {
 }
 
 // Paint after the list has resolved scrolling, without a hitbox or an offscreen
-// content texture. The solid surface color deliberately matches docked panels.
-fn paint_scroll_edges(
-    theme: &'static crate::theme::Palette,
-    geometry: Geometry,
-    offset: Pixels,
-    window: &mut Window,
-) {
+// content texture. The opaque endpoint matches the host surface.
+fn paint_scroll_edges(color: u32, geometry: Geometry, offset: Pixels, window: &mut Window) {
     let viewport = geometry.viewport;
     let height = (window.rem_size() * 0.75).min(viewport.size.height / 4.);
     if geometry.max_offset <= px(0.) || height <= px(0.) || viewport.size.width <= px(0.) {
@@ -175,7 +181,7 @@ fn paint_scroll_edges(
     ] {
         let opacity = (distance / height).clamp(0., 1.);
         if opacity > 0. {
-            let color = rgb(theme.panel);
+            let color = rgb(color);
             window.paint_quad(fill(
                 Bounds::new(point(viewport.left(), y), size(viewport.size.width, height)),
                 linear_gradient(
@@ -260,6 +266,7 @@ impl ScrollbarState {
 
 struct Scrollbar {
     scroll: ScrollSource,
+    edge_fade_color: Option<u32>,
 }
 
 struct FrameState {
@@ -365,7 +372,12 @@ impl Element for Scrollbar {
         {
             let state = frame.state.read(cx);
             let offset = self.scroll.handle().offset().y;
-            paint_scroll_edges(theme, state.geometry, offset, window);
+            paint_scroll_edges(
+                self.edge_fade_color.unwrap_or(theme.panel),
+                state.geometry,
+                offset,
+                window,
+            );
             if let Some(mut thumb) = state.geometry.thumb(offset) {
                 let expanded = state.gesture.is_some() || state.hovered;
                 let width = px(if expanded {
