@@ -824,8 +824,6 @@ fn configuration_wire_adapter_preserves_optional_fields_and_library_columns() {
     ] {
         let config = Arc::new(rivu_format::config::Config {
             scan_min_duration_seconds: if output_device.is_some() { u32::MAX } else { 0 },
-            spectrogram_startup_expansion_speed: if output_device.is_some() { 2.0 } else { 0.1 },
-            spectrogram_outflow_threshold_percent: if output_device.is_some() { 95 } else { 10 },
             output_device,
             library_columns,
             ui_theme: rivu_format::config::Theme::TokyoNight,
@@ -956,8 +954,6 @@ fn configure_request_round_trip_preserves_optional_config_field_and_library_colu
             default_visualizer_labels: output_device.is_none(),
             oscilloscope_overlay_channels: output_device.is_some(),
             scan_min_duration_seconds: if output_device.is_some() { u32::MAX } else { 0 },
-            spectrogram_startup_expansion_speed: if output_device.is_some() { 2.0 } else { 0.1 },
-            spectrogram_outflow_threshold_percent: if output_device.is_some() { 95 } else { 10 },
             output_device,
             library_columns,
             ui_theme: rivu_format::config::Theme::TokyoNightDay,
@@ -1556,8 +1552,6 @@ fn processing_commands_and_configuration_use_current_positional_contract() {
     config.denoise.spectral_gain_floor_db = -31.5;
     config.neural.speech_manifest = Some("/models/speech.json".into());
     config.neural.separation_overlap = 0.5;
-    config.spectrogram_startup_expansion_speed = 1.25;
-    config.spectrogram_outflow_threshold_percent = 85;
     let wire = WireConfig::from(&config);
     let bytes = postcard::to_allocvec(&wire).unwrap();
     let decoded: WireConfig = postcard::from_bytes(&bytes).unwrap();

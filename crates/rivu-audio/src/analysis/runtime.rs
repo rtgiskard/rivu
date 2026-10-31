@@ -21,6 +21,8 @@ pub struct VisualizerDemand {
     pub band_energy: bool,
     /// Unwindowed stereo samples for the oscilloscope.
     pub pcm: bool,
+    /// Full-resolution non-DC FFT bins for the spectrogram.
+    pub spectrogram: bool,
 }
 
 impl VisualizerDemand {
@@ -30,6 +32,7 @@ impl VisualizerDemand {
             spatial_spectrum: bits & 2 != 0,
             band_energy: bits & 4 != 0,
             pcm: bits & 16 != 0,
+            spectrogram: bits & 32 != 0,
         }
     }
 
@@ -38,6 +41,7 @@ impl VisualizerDemand {
             | (u64::from(self.spatial_spectrum) << 1)
             | (u64::from(self.band_energy) << 2)
             | (u64::from(self.pcm) << 4)
+            | (u64::from(self.spectrogram) << 5)
     }
 }
 
@@ -49,7 +53,7 @@ pub struct DisplayDemand {
 }
 
 impl DisplayDemand {
-    const MASK: u64 = 31;
+    const MASK: u64 = 63;
     // Lower bits carry flags and a revision for every request transition;
     // upper bits fence PCM only when display capture is disabled/re-enabled.
     const CAPTURE_SHIFT: u32 = 32;
@@ -97,6 +101,32 @@ impl From<Vec<f32>> for DensitySnapshot {
     }
 }
 
+/// Immutable coherent-gain-calibrated stereo dB amplitudes, floored at -140 dB,
+/// for FFT bins `1..=fft_size / 2`. Bin k is at k * sample_rate / fft_size Hz.
+/// An empty snapshot is unavailable; clones share one bounded analyzer-owned
+/// slot. Use the publication's sample rate and settings to identify the axis.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SpectrumSnapshot(Option<Arc<Vec<f32>>>);
+
+impl std::ops::Deref for SpectrumSnapshot {
+    type Target = [f32];
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_deref().map_or(&[], Vec::as_slice)
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl From<Vec<f32>> for SpectrumSnapshot {
+    fn from(bins: Vec<f32>) -> Self {
+        Self(Some(Arc::new(bins)))
+    }
+}
+
+// At FFT32768, three reusable slots retain at most 192 KiB of sample storage.
+// Retained publications never cause this optional pool to grow.
+const SPECTRUM_SNAPSHOT_COUNT: usize = 3;
+
 #[derive(Clone, Copy, Debug)]
 pub struct SpatialBin {
     pub frequency_hz: f32,
@@ -140,6 +170,7 @@ pub struct VisualizerFrame {
     pub density: DensitySnapshot,
     pub spatial: Vec<SpatialBin>,
     pub pcm: PcmSnapshot,
+    pub spectrogram: SpectrumSnapshot,
     pub correlation: Option<f32>,
     pub balance: Option<f32>,
     pub side_ratio: Option<f32>,
@@ -170,6 +201,11 @@ impl Clone for VisualizerFrame {
             self.pcm.clone_from(&source.pcm);
         } else {
             self.pcm = PcmSnapshot::default();
+        }
+        if source.demand.spectrogram {
+            self.spectrogram.clone_from(&source.spectrogram);
+        } else {
+            self.spectrogram = SpectrumSnapshot::default();
         }
         self.correlation = source.correlation;
         self.balance = source.balance;
@@ -707,6 +743,7 @@ struct SpectrumAnalyzer {
     visualizer: VisualizerFrame,
     density: Option<DensityField>,
     pcm_snapshots: Option<[Arc<Vec<[f32; 2]>>; PCM_SNAPSHOT_COUNT]>,
+    spectrogram_snapshots: Option<[Arc<Vec<f32>>; SPECTRUM_SNAPSHOT_COUNT]>,
 }
 
 impl SpectrumAnalyzer {
@@ -775,6 +812,7 @@ impl SpectrumAnalyzer {
             visualizer: VisualizerFrame::default(),
             density: None,
             pcm_snapshots: None,
+            spectrogram_snapshots: None,
         }
     }
 
@@ -796,6 +834,7 @@ impl SpectrumAnalyzer {
         self.visualizer.side_ratio = None;
         self.visualizer.band_rms = [0.0; 3];
         self.visualizer.pcm = PcmSnapshot::default();
+        self.visualizer.spectrogram = SpectrumSnapshot::default();
     }
 
     fn set_visualizer_demand(&mut self, demand: VisualizerDemand) {
@@ -830,7 +869,19 @@ impl SpectrumAnalyzer {
             self.visualizer.pcm = PcmSnapshot::default();
             self.pcm_snapshots = None;
         }
+        self.set_spectrogram_demand(demand.spectrogram);
         self.visualizer.demand = demand;
+    }
+
+    fn set_spectrogram_demand(&mut self, demanded: bool) {
+        if demanded {
+            self.spectrogram_snapshots.get_or_insert_with(|| {
+                std::array::from_fn(|_| Arc::new(vec![-140.0; self.rolling.len() / 2]))
+            });
+        } else {
+            self.visualizer.spectrogram = SpectrumSnapshot::default();
+            self.spectrogram_snapshots = None;
+        }
     }
 
     fn push(&mut self, samples: [f32; 2]) {
@@ -936,6 +987,9 @@ impl SpectrumAnalyzer {
                 });
             }
         }
+        if self.visualizer.demand.spectrogram {
+            self.snapshot_spectrogram();
+        }
         for (level, &(first, last)) in self.levels.iter_mut().zip(&self.bands) {
             let mut power = 0.0_f32;
             for bin in first..last {
@@ -948,6 +1002,33 @@ impl SpectrumAnalyzer {
             *level = (power.sqrt() * self.normalization).max(1e-7).log10() * 20.0;
         }
         [(rms[0] / n as f32).sqrt(), (rms[1] / n as f32).sqrt()]
+    }
+
+    fn snapshot_spectrogram(&mut self) {
+        // Only mutate a uniquely owned slot, after releasing our old handle.
+        self.visualizer.spectrogram = SpectrumSnapshot::default();
+        let Some(slots) = &mut self.spectrogram_snapshots else {
+            return;
+        };
+        for slot in slots {
+            if let Some(levels) = Arc::get_mut(slot) {
+                let n = self.frequency.len();
+                for (bin, level) in (1..=n / 2).zip(levels) {
+                    // The packed FFT's conjugate pair yields mean channel
+                    // power even for opposite-phase stereo. Match the base
+                    // spectrum's coherent gain and single-sided Nyquist gain.
+                    let endpoint_gain = if bin == n / 2 { 0.25 } else { 1.0 };
+                    let power = (self.frequency[bin].norm_sqr()
+                        + self.frequency[n - bin].norm_sqr())
+                        * 0.25
+                        * endpoint_gain;
+                    *level = (power.sqrt() * self.normalization).max(1e-7).log10() * 20.0;
+                }
+                self.visualizer.spectrogram = SpectrumSnapshot(Some(Arc::clone(slot)));
+                return;
+            }
+        }
+        // Slow consumers retain every slot: omit only the optional full FFT.
     }
 
     fn snapshot_pcm(&mut self) {
@@ -1186,6 +1267,11 @@ fn analyze(
         }
         runtime.settings = settings;
         runtime.sample_rate = sample_rate;
+        if runtime.demand.spectrogram && !demand.spectrogram {
+            // A plot-only transition need not publish another FFT. Relinquish
+            // the previous shared handle even with no fresh audio or permit.
+            shared.write().visualizer.spectrogram = SpectrumSnapshot::default();
+        }
         runtime.demand = demand;
         let semantic_reset = current_continuity != continuity;
         let capture_changed = current_epoch != epoch
@@ -1211,8 +1297,14 @@ fn analyze(
         continuity = current_continuity;
         demand_token = current_demand_token;
         let active = control.accepts_audio_for(current_demand_token);
-        if active && let Some(analyzer) = &mut runtime.analyzer {
-            analyzer.set_visualizer_demand(demand);
+        if let Some(analyzer) = &mut runtime.analyzer {
+            if active {
+                analyzer.set_visualizer_demand(demand);
+            } else if !demand.spectrogram {
+                // Demand can disappear while paused/hidden, with no new PCM
+                // to prepare the analyzer. Release this optional pool now.
+                analyzer.set_spectrogram_demand(false);
+            }
         }
         if !visualization_enabled {
             consumer.clear();
@@ -1410,30 +1502,43 @@ mod tests {
         spatial_spectrum: false,
         band_energy: false,
         pcm: false,
+        spectrogram: false,
     };
     const SPATIAL_DEMAND: VisualizerDemand = VisualizerDemand {
         stereo_density: false,
         spatial_spectrum: true,
         band_energy: false,
         pcm: false,
+        spectrogram: false,
     };
     const BAND_ENERGY_DEMAND: VisualizerDemand = VisualizerDemand {
         stereo_density: false,
         spatial_spectrum: false,
         band_energy: true,
         pcm: false,
+        spectrogram: false,
     };
     const PCM_DEMAND: VisualizerDemand = VisualizerDemand {
         stereo_density: false,
         spatial_spectrum: false,
         band_energy: false,
         pcm: true,
+        spectrogram: false,
     };
     const ALL_DEMAND: VisualizerDemand = VisualizerDemand {
         stereo_density: true,
         spatial_spectrum: true,
         band_energy: true,
         pcm: true,
+        spectrogram: true,
+    };
+
+    const SPECTROGRAM_DEMAND: VisualizerDemand = VisualizerDemand {
+        stereo_density: false,
+        spatial_spectrum: false,
+        band_energy: false,
+        pcm: false,
+        spectrogram: true,
     };
 
     fn visualizer_settings() -> AnalysisSettings {
@@ -1449,6 +1554,259 @@ mod tests {
         let mut analyzer = SpectrumAnalyzer::new(visualizer_settings(), 5120);
         analyzer.set_visualizer_demand(demand);
         analyzer
+    }
+
+    #[test]
+    fn spectrogram_resolves_two_tones_inside_one_musical_band() {
+        let settings = AnalysisSettings {
+            fft_size: 32768,
+            window: AnalysisWindow::Hann,
+            ..visualizer_settings()
+        };
+        let mut analyzer = SpectrumAnalyzer::new(settings, 32768);
+        analyzer.set_visualizer_demand(SPECTROGRAM_DEMAND);
+        let bins = [1000, 1010];
+        assert!(
+            analyzer
+                .bands
+                .iter()
+                .any(|&(first, last)| { first <= bins[0] && bins[1] < last })
+        );
+        for i in 0..settings.fft_size {
+            let tone = bins
+                .iter()
+                .map(|bin| {
+                    0.25 * (std::f32::consts::TAU * *bin as f32 * i as f32
+                        / settings.fft_size as f32)
+                        .sin()
+                })
+                .sum::<f32>();
+            analyzer.push([tone, tone]);
+        }
+        let rms = analyzer.transform();
+        let mut frame = AnalysisFrame::default();
+        analyzer.publish(&mut frame, rms, Duration::from_secs(1));
+        let full = &frame.visualizer.spectrogram;
+        assert_eq!(full.len(), 16384);
+        let expected_db = 20.0 * 0.25_f32.log10();
+        for bin in bins {
+            assert!((full[bin - 1] - expected_db).abs() < 0.01);
+            assert!(full[bin - 1] > full[bin - 2]);
+            assert!(full[bin - 1] > full[bin]);
+        }
+        assert!(full[1005 - 1] < -80.0);
+        assert_eq!(frame.sample_rate, 32768);
+        assert_eq!(frame.settings, Some(settings));
+    }
+
+    #[test]
+    fn spectrogram_calibrates_stereo_phase_windows_and_fft_sizes() {
+        for fft_size in [512, 32768] {
+            for window in [
+                AnalysisWindow::None,
+                AnalysisWindow::Hann,
+                AnalysisWindow::BlackmanHarris,
+            ] {
+                for channels in [[1.0, 1.0], [1.0, -1.0], [1.0, 0.0], [0.0, 1.0]] {
+                    let mut analyzer = SpectrumAnalyzer::new(
+                        AnalysisSettings {
+                            fft_size,
+                            window,
+                            ..visualizer_settings()
+                        },
+                        48000,
+                    );
+                    analyzer.set_visualizer_demand(SPECTROGRAM_DEMAND);
+                    for i in 0..fft_size {
+                        let tone =
+                            0.5 * (std::f32::consts::TAU * 32.0 * i as f32 / fft_size as f32).sin();
+                        analyzer.push(channels.map(|gain| gain * tone));
+                    }
+                    analyzer.transform();
+                    let mean_power = (channels[0] * channels[0] + channels[1] * channels[1]) * 0.5;
+                    let expected_db = 20.0 * (0.5 * mean_power.sqrt()).log10();
+                    assert!((analyzer.visualizer.spectrogram[31] - expected_db).abs() < 0.01);
+                    assert_eq!(analyzer.visualizer.spectrogram.len(), fft_size as usize / 2);
+                }
+            }
+        }
+        let mut analyzer = visualizer_analyzer(SPECTROGRAM_DEMAND);
+        for i in 0..512 {
+            let sample = if i % 2 == 0 { 0.25 } else { -0.25 };
+            analyzer.push([sample, -sample]);
+        }
+        analyzer.transform();
+        assert!((analyzer.visualizer.spectrogram[255] - 20.0 * 0.25_f32.log10()).abs() < 0.01);
+        for _ in 0..512 {
+            analyzer.push([0.25, -0.25]);
+        }
+        analyzer.transform();
+        assert!(
+            analyzer
+                .visualizer
+                .spectrogram
+                .iter()
+                .all(|db| *db <= -139.0)
+        );
+    }
+
+    #[test]
+    fn spectrogram_pool_exhaustion_preserves_base_analysis_and_reuses_slots() {
+        let mut analyzer = SpectrumAnalyzer::new(
+            AnalysisSettings {
+                fft_size: 32768,
+                ..visualizer_settings()
+            },
+            32768,
+        );
+        assert!(analyzer.spectrogram_snapshots.is_none());
+        analyzer.set_visualizer_demand(SPECTROGRAM_DEMAND);
+        let pointers = analyzer
+            .spectrogram_snapshots
+            .as_ref()
+            .unwrap()
+            .each_ref()
+            .map(|slot| slot.as_ptr());
+        let fft = Arc::clone(&analyzer.fft);
+        let frequency = analyzer.frequency.as_ptr();
+        let mut frame = AnalysisFrame::default();
+        let mut retained = Vec::new();
+        for (index, pointer) in pointers.iter().enumerate() {
+            let amplitude = 0.125 * (index + 1) as f32;
+            for i in 0..32768 {
+                let sample = amplitude * (std::f32::consts::TAU * i as f32 / 32.0).sin();
+                analyzer.push([sample, -sample]);
+            }
+            let rms = analyzer.transform();
+            analyzer.publish(&mut frame, rms, Duration::from_secs(index as u64 + 1));
+            assert_eq!(frame.visualizer.spectrogram.as_ptr(), *pointer);
+            let staged = frame.clone();
+            assert!(Arc::ptr_eq(
+                frame.visualizer.spectrogram.0.as_ref().unwrap(),
+                staged.visualizer.spectrogram.0.as_ref().unwrap()
+            ));
+            retained.push((staged, 20.0 * amplitude.log10()));
+        }
+        let previous_sequence = frame.sequence;
+        for _ in 0..32768 {
+            analyzer.push([0.75, -0.5]);
+        }
+        let rms = analyzer.transform();
+        analyzer.publish(&mut frame, rms, Duration::from_secs(4));
+        assert!(frame.visualizer.spectrogram.is_empty());
+        assert_eq!(frame.visualizer.demand, SPECTROGRAM_DEMAND);
+        assert_eq!(frame.sequence, previous_sequence + 1);
+        assert_eq!(frame.sample_time, Duration::from_secs(4));
+        assert_eq!(frame.spectrum_db, analyzer.levels);
+        assert!(!frame.spectrum_db.is_empty());
+        assert_eq!([frame.rms_left, frame.rms_right], [0.75, 0.5]);
+        for (snapshot, expected_db) in &retained {
+            assert!((snapshot.visualizer.spectrogram[1023] - expected_db).abs() < 0.01);
+        }
+        let released = retained.remove(0).0.visualizer.spectrogram.as_ptr();
+        let rms = analyzer.transform();
+        analyzer.publish(&mut frame, rms, Duration::from_secs(5));
+        assert_eq!(frame.visualizer.spectrogram.as_ptr(), released);
+        assert!(frame.visualizer.spectrogram.iter().all(|db| *db <= -139.0));
+        assert_eq!(
+            analyzer
+                .spectrogram_snapshots
+                .as_ref()
+                .unwrap()
+                .each_ref()
+                .map(|slot| slot.as_ptr()),
+            pointers
+        );
+        assert!(Arc::ptr_eq(&analyzer.fft, &fft));
+        assert_eq!(analyzer.frequency.as_ptr(), frequency);
+
+        let weak = analyzer
+            .spectrogram_snapshots
+            .as_ref()
+            .unwrap()
+            .each_ref()
+            .map(Arc::downgrade);
+        analyzer.reset();
+        assert!(analyzer.visualizer.spectrogram.is_empty());
+        assert_eq!(analyzer.filled, 0);
+        for (snapshot, expected_db) in &retained {
+            assert!((snapshot.visualizer.spectrogram[1023] - expected_db).abs() < 0.01);
+        }
+        analyzer.set_visualizer_demand(VisualizerDemand::default());
+        frame.visualizer.clone_from(&analyzer.visualizer);
+        assert!(frame.visualizer.spectrogram.is_empty());
+        assert!(analyzer.spectrogram_snapshots.is_none());
+        retained.clear();
+        assert!(weak.iter().all(|slot| slot.upgrade().is_none()));
+
+        // A staging clone cannot retain data belonging to a disabled style.
+        let stale = VisualizerFrame {
+            spectrogram: vec![-12.0; 256].into(),
+            ..VisualizerFrame::default()
+        };
+        frame.visualizer.clone_from(&stale);
+        assert!(frame.visualizer.spectrogram.is_empty());
+        analyzer.set_visualizer_demand(SPECTROGRAM_DEMAND);
+        assert_eq!(analyzer.spectrogram_snapshots.as_ref().unwrap().len(), 3);
+        assert_eq!(analyzer.filled, 0);
+        assert!(analyzer.visualizer.spectrogram.is_empty());
+    }
+
+    #[test]
+    fn spectrogram_demand_drop_active_or_paused_releases_slots_without_new_audio() {
+        let shared = Arc::new(RwLock::new(AnalysisFrame::default()));
+        let worker = AnalysisWorker::new(shared.clone()).unwrap();
+        worker.configure(visualizer_settings());
+        worker.control.set_display_demand(DisplayDemand {
+            enabled: true,
+            visualizer: SPECTROGRAM_DEMAND,
+        });
+        set_test_playback(&worker, true);
+        let mut producer = worker.producer();
+        push_window(
+            &mut producer,
+            worker.control.epoch.load(Ordering::Acquire),
+            worker.control.display_token(),
+            [0.25, -0.25],
+        );
+        worker.control.request_frame();
+        wait_for_frame(&shared, |frame| !frame.visualizer.spectrogram.is_empty());
+        let slot = Arc::downgrade(shared.read().visualizer.spectrogram.0.as_ref().unwrap());
+        worker.control.set_display_demand(DisplayDemand {
+            enabled: true,
+            visualizer: VisualizerDemand::default(),
+        });
+        wait_until(|| slot.upgrade().is_none());
+        assert!(shared.read().visualizer.spectrogram.is_empty());
+        assert!(shared.read().settings.is_some());
+        assert!(!shared.read().spectrum_db.is_empty());
+
+        // Start an independent capture for the paused-release case.
+        worker.control.set_display_enabled(false);
+        worker.control.set_display_demand(DisplayDemand {
+            enabled: true,
+            visualizer: SPECTROGRAM_DEMAND,
+        });
+        push_window(
+            &mut producer,
+            worker.control.epoch.load(Ordering::Acquire),
+            worker.control.display_token(),
+            [0.125, -0.125],
+        );
+        worker.control.request_frame();
+        wait_for_frame(&shared, |frame| !frame.visualizer.spectrogram.is_empty());
+        let slot = Arc::downgrade(shared.read().visualizer.spectrogram.0.as_ref().unwrap());
+        worker.set_playback_active(false);
+        wait_for_frame(&shared, |frame| frame.settings.is_none());
+        assert!(shared.read().visualizer.spectrogram.is_empty());
+        assert!(slot.upgrade().is_some());
+        worker.control.set_display_demand(DisplayDemand {
+            enabled: true,
+            visualizer: VisualizerDemand::default(),
+        });
+        wait_until(|| slot.upgrade().is_none());
+        assert!(shared.read().visualizer.spectrogram.is_empty());
+        assert!(shared.read().settings.is_none());
     }
 
     #[test]
@@ -1638,7 +1996,10 @@ mod tests {
             worker.configure(settings);
             worker.control.set_display_demand(DisplayDemand {
                 enabled: true,
-                visualizer: PCM_DEMAND,
+                visualizer: VisualizerDemand {
+                    spectrogram: true,
+                    ..PCM_DEMAND
+                },
             });
             set_test_playback(&worker, true);
             let mut producer = worker.producer();
@@ -1649,6 +2010,8 @@ mod tests {
             wait_for_frame(&shared, |frame| frame.settings.is_some());
             let retired = shared.read().clone();
             let old_slot = Arc::downgrade(retired.visualizer.pcm.0.as_ref().unwrap());
+            let old_spectrum_slot =
+                Arc::downgrade(retired.visualizer.spectrogram.0.as_ref().unwrap());
 
             match transition {
                 "hide" => {
@@ -1684,6 +2047,7 @@ mod tests {
                 frame.display_token == token && frame.settings.is_none()
             });
             assert!(shared.read().visualizer.pcm.is_empty());
+            assert!(shared.read().visualizer.spectrogram.is_empty());
             push_window(&mut producer, old_epoch, old_token, [1.0, -1.0]);
             let samples = [0.125, -0.375];
             let count = worker.settings().fft_size as usize;
@@ -1703,6 +2067,7 @@ mod tests {
             wait_until(|| producer.occupied_len() == 0);
             assert_eq!(shared.read().settings, None);
             assert!(shared.read().visualizer.pcm.is_empty());
+            assert!(shared.read().visualizer.spectrogram.is_empty());
             assert!(
                 producer
                     .try_push(TapFrame {
@@ -1724,6 +2089,14 @@ mod tests {
             );
             assert_eq!(frame.visualizer.pcm.len(), count);
             assert!(frame.visualizer.pcm.iter().all(|actual| *actual == samples));
+            assert_eq!(frame.visualizer.spectrogram.len(), count / 2);
+            assert!(
+                retired
+                    .visualizer
+                    .spectrogram
+                    .iter()
+                    .all(|db| *db <= -139.0)
+            );
             assert!(
                 retired
                     .visualizer
@@ -1739,6 +2112,7 @@ mod tests {
                 old_slot.upgrade().is_none(),
                 matches!(transition, "reset" | "settings")
             );
+            assert_eq!(old_spectrum_slot.upgrade().is_none(), transition != "pause");
         }
     }
 
@@ -1884,6 +2258,29 @@ mod tests {
             ..AnalysisFrame::default()
         };
         assert!(!control.frame_is_current(&retired));
+
+        // Request-revision overflow must not spill into the capture fence.
+        let wrapped = (7 << DisplayDemand::CAPTURE_SHIFT)
+            | (DisplayDemand::REQUEST_MASK & !DisplayDemand::MASK)
+            | DisplayDemand {
+                enabled: true,
+                visualizer: VisualizerDemand::default(),
+            }
+            .bits();
+        control.display_demand.store(wrapped, Ordering::Release);
+        control.set_display_demand(DisplayDemand {
+            enabled: true,
+            visualizer: SPECTROGRAM_DEMAND,
+        });
+        let token = control.display_token();
+        assert_eq!(DisplayDemand::capture_token(token), 7);
+        assert_eq!(token & DisplayDemand::REQUEST_MASK, 8 | 32);
+        control.set_display_enabled(false);
+        assert_eq!(DisplayDemand::capture_token(control.display_token()), 8);
+        assert_eq!(
+            DisplayDemand::from_bits(control.display_token()).visualizer,
+            SPECTROGRAM_DEMAND
+        );
     }
 
     #[test]
@@ -1913,12 +2310,16 @@ mod tests {
         );
         let fft = Arc::clone(&runtime.analyzer.as_ref().unwrap().fft);
         control.request_frame();
+        let demand = VisualizerDemand {
+            spectrogram: true,
+            ..PCM_DEMAND
+        };
         control.set_display_demand(DisplayDemand {
             enabled: true,
-            visualizer: PCM_DEMAND,
+            visualizer: demand,
         });
         assert!(control.frame_requested.load(Ordering::Acquire));
-        runtime.demand = PCM_DEMAND;
+        runtime.demand = demand;
         assert!(
             producer
                 .try_push(TapFrame {
@@ -1941,6 +2342,9 @@ mod tests {
         analyzer.publish(&mut frame, rms, Duration::from_millis(100));
         assert!(frame.rms_left > 0.25);
         assert_eq!(frame.visualizer.pcm.last(), Some(&[0.75; 2]));
+        assert_eq!(frame.visualizer.spectrogram.len(), 256);
+        let expected_db = 20.0 * (1.0_f32 / 512.0).log10();
+        assert!((frame.visualizer.spectrogram[0] - expected_db).abs() < 0.01);
     }
 
     #[test]
@@ -1958,6 +2362,7 @@ mod tests {
             SPATIAL_DEMAND,
             BAND_ENERGY_DEMAND,
             PCM_DEMAND,
+            SPECTROGRAM_DEMAND,
         ]
         .map(|demand| {
             let mut analyzer = SpectrumAnalyzer::new(settings, 32768);
@@ -2015,6 +2420,10 @@ mod tests {
             separate[1].visualizer.spatial.len()
         );
         assert_eq!(frame.visualizer.band_rms, separate[2].visualizer.band_rms);
+        assert_eq!(
+            frame.visualizer.spectrogram,
+            separate[4].visualizer.spectrogram
+        );
         let mut pcm_frame = AnalysisFrame::default();
         separate[3].publish(&mut pcm_frame, rms, Duration::from_millis(125));
         assert_eq!(frame.visualizer.pcm, pcm_frame.visualizer.pcm);
@@ -2080,8 +2489,10 @@ mod tests {
             analyzer.set_visualizer_demand(BAND_ENERGY_DEMAND);
             frame.visualizer.clone_from(&analyzer.visualizer);
             assert!(analyzer.density.is_none());
+            assert!(analyzer.spectrogram_snapshots.is_none());
             for payload in [&analyzer.visualizer, &frame.visualizer] {
                 assert!(payload.density.is_empty());
+                assert!(payload.spectrogram.is_empty());
                 assert_eq!(payload.spatial.capacity(), 0);
                 assert_eq!(payload.correlation, None);
                 assert_eq!(payload.balance, None);
@@ -3076,7 +3487,10 @@ mod tests {
             push_window(&mut producer, old_epoch, old_token, [0.25; 2]);
             push_window(&mut producer, epoch, token, [0.75; 2]);
             let mut runtime = AnalysisRuntime::new(visualizer_settings(), 5120);
-            runtime.demand = BAND_ENERGY_DEMAND;
+            runtime.demand = VisualizerDemand {
+                spectrogram: true,
+                ..BAND_ENERGY_DEMAND
+            };
             assert_eq!(
                 runtime.ingest_available(
                     &mut consumer,
@@ -3100,6 +3514,8 @@ mod tests {
             assert_eq!(frame.settings, Some(analyzer.settings));
             assert!((frame.rms_left - 0.75).abs() < 0.0001);
             assert!((frame.rms_right - 0.75).abs() < 0.0001);
+            assert_eq!(frame.visualizer.spectrogram.len(), 256);
+            assert!(frame.visualizer.spectrogram.iter().all(|db| *db <= -139.0));
             assert_eq!(consumer.occupied_len(), 0);
         }
     }

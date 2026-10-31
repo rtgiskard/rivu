@@ -894,6 +894,7 @@ mod tests {
                     spatial_spectrum: style == AudioVisualizerStyle::SpatialSpectrum,
                     band_energy: false,
                     pcm: false,
+                    spectrogram: false,
                 },
                 spatial: vec![SpatialBin {
                     frequency_hz: 1000.0,

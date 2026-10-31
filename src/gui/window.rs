@@ -1407,6 +1407,7 @@ mod state_tests {
                 spatial_spectrum: true,
                 band_energy: true,
                 pcm: true,
+                spectrogram: true,
             },
         };
         worker.control.set_display_demand(all);
@@ -1477,6 +1478,10 @@ mod state_tests {
                 pcm: true,
                 ..Default::default()
             },
+            VisualizerDemand {
+                spectrogram: true,
+                ..Default::default()
+            },
         ] {
             let mut staging = AnalysisFrame::default();
             let mut sequence = 0;
@@ -1496,6 +1501,7 @@ mod state_tests {
             let density = staging.visualizer.density.as_ptr();
             let spatial = staging.visualizer.spatial.as_ptr();
             let pcm = staging.visualizer.pcm.as_ptr();
+            let spectrogram = staging.visualizer.spectrogram.as_ptr();
             retain_analysis_staging(
                 &mut staging,
                 DisplayDemand {
@@ -1528,6 +1534,11 @@ mod state_tests {
                 assert_eq!(staging.visualizer.pcm.as_ptr(), pcm);
             } else {
                 assert!(staging.visualizer.pcm.is_empty());
+            }
+            if survivor.spectrogram {
+                assert_eq!(staging.visualizer.spectrogram.as_ptr(), spectrogram);
+            } else {
+                assert!(staging.visualizer.spectrogram.is_empty());
             }
             assert_eq!(
                 staging.visualizer.band_rms,

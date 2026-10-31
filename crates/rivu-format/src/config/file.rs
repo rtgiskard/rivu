@@ -158,8 +158,6 @@ file_group!(Spectrogram, SpectrogramView {
     #[serde(skip_serializing_if = "Option::is_none")]
     db_range => spectrogram_db_range: Option<f32>,
     history_seconds => spectrogram_history_seconds: u32,
-    startup_expansion_speed => spectrogram_startup_expansion_speed: f32,
-    outflow_threshold_percent => spectrogram_outflow_threshold_percent: u32,
 });
 
 file_group!(Radial, RadialView {

@@ -473,10 +473,6 @@ macro_rules! config_fields {
         pub reactive_db_range: Option<f32>,
         /// Maximum continuous audio history shown by Spectrogram.
         pub spectrogram_history_seconds: u32,
-        /// Transient flow speed in panel-widths per second; audio-time scroll is unchanged.
-        pub spectrogram_startup_expansion_speed: f32,
-        /// Percentage of effective history accumulated before outflow begins.
-        pub spectrogram_outflow_threshold_percent: u32,
         pub waveform_cursor_color: RgbColor,
         pub waveform_glow: f32,
         pub waveform_rms_gain: f32,
@@ -583,8 +579,6 @@ impl Default for Config {
             spectrogram_db_range: None,
             reactive_db_range: None,
             spectrogram_history_seconds: 20,
-            spectrogram_startup_expansion_speed: 0.75,
-            spectrogram_outflow_threshold_percent: 75,
             waveform_cursor_color: RgbColor(0x73daca),
             waveform_glow: 1.0,
             waveform_rms_gain: 0.94,
@@ -860,15 +854,6 @@ impl Config {
         ensure!(
             (1..=60).contains(&self.spectrogram_history_seconds),
             "visualizations.spectrogram.history_seconds must be between 1 and 60 seconds"
-        );
-        ensure!(
-            self.spectrogram_startup_expansion_speed.is_finite()
-                && (0.1..=2.0).contains(&self.spectrogram_startup_expansion_speed),
-            "visualizations.spectrogram.startup_expansion_speed must be finite and between 0.1 and 2.0 panel-widths/s"
-        );
-        ensure!(
-            (10..=95).contains(&self.spectrogram_outflow_threshold_percent),
-            "visualizations.spectrogram.outflow_threshold_percent must be between 10 and 95 percent"
         );
         ensure!(
             self.waveform_glow.is_finite() && (0.0..=2.0).contains(&self.waveform_glow),

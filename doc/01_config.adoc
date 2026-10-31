@@ -961,33 +961,24 @@ continuous or stepped boundary. `line` always connects valid body points
 continuously and skips empty slots rather than drawing them at the floor.
 Peak indicators remain discrete in every style.
 
-Spectrogram shows recent frequency history; unavailable history stays blank.
+Spectrogram shows recent frequency history at a fixed audio-time scale. New audio
+enters at the right; startup and unavailable history remain blank rather than
+stretching the available audio across the panel.
 Its `visualizations.spectrogram.*` settings include:
 
 * `interpolate`: default `true`; controls interpolation between source rows.
-* `history_seconds`: `1`–`60`, default `20`; retained history also depends on panel
-  width and analysis rate.
-* `startup_expansion_speed` (Startup expansion speed): `0.1`–`2.0` panel-widths per second, default `0.75`;
-  limits the transient filling front, not steady scrolling, which follows audio time.
-* `outflow_threshold_percent` (Outflow threshold): `10`–`95` percent, default `75`; the minimum
-  effective-history fraction before outflow. Filling and speed limits can delay
-  release further; changing the threshold does not restart a release already underway.
+* `history_seconds`: `1`–`60`, default `20`; sets the displayed audio-time span.
 
-Sampling resolution follows panel height and available source-frequency rows,
-with an internal limit of 1024 rows and the shared material budget described below.
-It applies with or without interpolation and does not change FFT size or add
-measured frequency detail.
-
-These two flow controls apply globally to Spectrogram panels. Changing them
-preserves retained history; Settings uses the usual Apply / Discard workflow.
-Motion smoothing is fixed, with no separate setting.
+Spectrogram uses the full non-DC FFT bins rather than semitone display bands.
+Frequency rows and time buckets preserve peaks when multiple source values map
+to one display cell. Sampling follows physical panel pixels and available FFT
+detail, bounded by internal resource limits and the shared material budget.
+Interpolation does not change FFT size or create measured frequency detail.
 
 [source,toml]
 ----
 [visualizations.spectrogram]
 history_seconds = 20
-startup_expansion_speed = 0.75
-outflow_threshold_percent = 75
 ----
 
 `interface.gpu_material_budget_mib` accepts `16`–`1024` MiB, default `64`. Change it

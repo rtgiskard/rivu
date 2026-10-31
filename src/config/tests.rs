@@ -517,133 +517,26 @@ fn grouped_file_defaults_partial_tables_and_font_normalization() {
 }
 
 #[test]
-fn spectrogram_flow_defaults_nested_round_trip_and_boundaries() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("config.toml");
-    write_current_config(
-        &path,
-        "[visualizations.spectrogram]\nhistory_seconds = 30\n",
-    )
-    .unwrap();
-    let old = Config::load(&path).unwrap();
-    assert_eq!(old.spectrogram_startup_expansion_speed, 0.75);
-    assert_eq!(old.spectrogram_outflow_threshold_percent, 75);
-    assert_eq!(old.spectrogram_history_seconds, 30);
-
-    for (speed, outflow_threshold_percent) in [(0.1, 10), (0.75, 75), (2.0, 95)] {
-        write_current_config(
-            &path,
-            format!("[visualizations.spectrogram]\nstartup_expansion_speed = {speed}\noutflow_threshold_percent = {outflow_threshold_percent}\n"),
-        )
-        .unwrap();
-        let config = Config::load(&path).unwrap();
-        assert_eq!(config.spectrogram_startup_expansion_speed, speed);
-        assert_eq!(
-            config.spectrogram_outflow_threshold_percent,
-            outflow_threshold_percent
-        );
-        config.save(&path).unwrap();
-        assert_eq!(Config::load(&path).unwrap(), config);
-        let saved = fs::read_to_string(&path).unwrap();
-        let table: toml::Value = toml::from_str(&saved).unwrap();
-        let nested = &table["visualizations"]["spectrogram"];
-        let startup_expansion_speed = nested["startup_expansion_speed"]
-            .as_float()
-            .or_else(|| {
-                nested["startup_expansion_speed"]
-                    .as_integer()
-                    .map(|value| value as f64)
-            })
-            .unwrap();
-        assert_eq!(startup_expansion_speed as f32, speed);
-        assert_eq!(
-            nested["outflow_threshold_percent"].as_integer(),
-            Some(i64::from(outflow_threshold_percent))
-        );
-        assert!(table.get("spectrogram_startup_expansion_speed").is_none());
-        assert!(table.get("spectrogram_outflow_threshold_percent").is_none());
-
-        for speed in [
-            f32::NAN,
-            f32::INFINITY,
-            f32::NEG_INFINITY,
-            0.0,
-            0.099,
-            2.001,
-        ] {
-            let invalid = Config {
-                spectrogram_startup_expansion_speed: speed,
-                ..config.clone()
-            };
-            let error = invalid.save(&path).unwrap_err();
-            assert!(
-                format!("{error:#}").contains("visualizations.spectrogram.startup_expansion_speed")
-            );
-            assert_eq!(fs::read_to_string(&path).unwrap(), saved);
-        }
-        for outflow_threshold_percent in [0, 9, 96, u32::MAX] {
-            let invalid = Config {
-                spectrogram_outflow_threshold_percent: outflow_threshold_percent,
-                ..config.clone()
-            };
-            let error = invalid.save(&path).unwrap_err();
-            assert!(
-                format!("{error:#}")
-                    .contains("visualizations.spectrogram.outflow_threshold_percent")
-            );
-            assert_eq!(fs::read_to_string(&path).unwrap(), saved);
-        }
-    }
-
-    for invalid in [
-        "startup_expansion_speed = nan",
-        "startup_expansion_speed = inf",
-        "startup_expansion_speed = -inf",
-        "startup_expansion_speed = 0.099",
-        "startup_expansion_speed = 2.001",
-        "startup_expansion_speed = '0.75'",
-        "outflow_threshold_percent = 9",
-        "outflow_threshold_percent = 96",
-        "outflow_threshold_percent = -1",
-        "outflow_threshold_percent = 75.5",
-        "outflow_threshold_percent = '75'",
-    ] {
-        write_current_config(&path, format!("[visualizations.spectrogram]\n{invalid}\n")).unwrap();
-        assert!(Config::load(&path).is_err(), "accepted {invalid}");
-    }
-}
-
-#[test]
-fn spectrogram_flow_patch_preserves_unedited_and_concurrent_values() {
+fn spectrogram_patch_preserves_unedited_and_concurrent_values() {
     let baseline = Config::default();
     let draft = Config {
-        spectrogram_startup_expansion_speed: 1.5,
+        spectrogram_db_range: Some(100.0),
         ..baseline.clone()
     };
     let mut latest = Config {
-        spectrogram_startup_expansion_speed: 0.5,
-        spectrogram_outflow_threshold_percent: 90,
+        spectrogram_interpolate: false,
         spectrogram_history_seconds: 40,
         ..baseline.clone()
     };
     let expected = Config {
-        spectrogram_startup_expansion_speed: 1.5,
+        spectrogram_db_range: Some(100.0),
         ..latest.clone()
     };
     ConfigPatch::between(&baseline, &draft).apply_to(&mut latest);
     assert_eq!(latest, expected);
-
-    let accumulation_draft = Config {
-        spectrogram_outflow_threshold_percent: 10,
-        ..draft.clone()
-    };
-    latest.spectrogram_startup_expansion_speed = 2.0;
-    ConfigPatch::between(&draft, &accumulation_draft).apply_to(&mut latest);
-    assert_eq!(latest.spectrogram_startup_expansion_speed, 2.0);
-    assert_eq!(latest.spectrogram_outflow_threshold_percent, 10);
-    ConfigPatch::between(&accumulation_draft, &baseline).apply_to(&mut latest);
-    assert_eq!(latest.spectrogram_startup_expansion_speed, 0.75);
-    assert_eq!(latest.spectrogram_outflow_threshold_percent, 75);
+    ConfigPatch::between(&draft, &baseline).apply_to(&mut latest);
+    assert_eq!(latest.spectrogram_db_range, baseline.spectrogram_db_range);
+    assert!(!latest.spectrogram_interpolate);
     assert_eq!(latest.spectrogram_history_seconds, 40);
     ConfigPatch::between(&baseline, &baseline).apply_to(&mut latest);
     assert_eq!(latest.spectrogram_history_seconds, 40);
@@ -899,8 +792,6 @@ fn save_reload_replaces_file_and_leaves_no_temporary_files() {
         spectrogram_interpolate: false,
         spectrogram_db_range: Some(100.0),
         spectrogram_history_seconds: 30,
-        spectrogram_startup_expansion_speed: 1.25,
-        spectrogram_outflow_threshold_percent: 85,
         waveform_seek_enabled: false,
         waveform_cursor_color: "#eeaa66".parse().unwrap(),
         waveform_glow: 0.0,

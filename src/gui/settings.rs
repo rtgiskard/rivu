@@ -163,8 +163,6 @@ enum Field {
     SpectrumSmoothing,
     SpectrogramDbRange,
     SpectrogramHistory,
-    SpectrogramStartupExpansionSpeed,
-    SpectrogramOutflowThresholdPercent,
     WaveformCursorColor,
     WaveformGlow,
     WaveformRmsGain,
@@ -229,12 +227,6 @@ impl Field {
             Self::SpectrumSmoothing => "visualizations.spectrum.smoothing_ms",
             Self::SpectrogramDbRange => "visualizations.spectrogram.db_range",
             Self::SpectrogramHistory => "visualizations.spectrogram.history_seconds",
-            Self::SpectrogramStartupExpansionSpeed => {
-                "visualizations.spectrogram.startup_expansion_speed"
-            }
-            Self::SpectrogramOutflowThresholdPercent => {
-                "visualizations.spectrogram.outflow_threshold_percent"
-            }
             Self::WaveformCursorColor => "visualizations.waveform.cursor_color",
             Self::WaveformGlow => "visualizations.waveform.glow",
             Self::WaveformRmsGain => "visualizations.waveform.rms_gain",
@@ -265,7 +257,6 @@ impl Field {
             | Self::RadialInnerDiameter
             | Self::SpectrumAutoWidth
             | Self::SpectrumGap
-            | Self::SpectrogramStartupExpansionSpeed
             | Self::WaveformGlow
             | Self::WaveformRmsGain
             | Self::WaveformPeakGain
@@ -328,12 +319,6 @@ impl Field {
             Self::SpectrumBarGravity => "settings-bar-gravity-db-s",
             Self::SpectrumSmoothing => "settings-release-smoothing-ms",
             Self::SpectrogramHistory => "settings-history-limit-s",
-            Self::SpectrogramStartupExpansionSpeed => {
-                "settings-spectrogram-startup-expansion-speed"
-            }
-            Self::SpectrogramOutflowThresholdPercent => {
-                "settings-spectrogram-outflow-threshold-percent"
-            }
             Self::WaveformCursorColor => "settings-waterline-color",
             Self::WaveformGlow => "settings-glow-strength",
             Self::WaveformRmsGain => "settings-rms-gain",
@@ -412,12 +397,6 @@ impl Field {
             Self::SpectrumBarGravity => settings.tr("settings-spectrum-bar-gravity-hint"),
             Self::SpectrumSmoothing => settings.tr("settings-spectrum-smoothing-hint"),
             Self::SpectrogramHistory => settings.tr("settings-spectrogram-history-hint"),
-            Self::SpectrogramStartupExpansionSpeed => {
-                settings.tr("settings-spectrogram-startup-expansion-speed-hint")
-            }
-            Self::SpectrogramOutflowThresholdPercent => {
-                settings.tr("settings-spectrogram-outflow-threshold-percent-hint")
-            }
             Self::WaveformGlow => settings.tr("settings-waveform-glow-hint"),
             Self::WaveformRmsGain => settings.tr("settings-waveform-rms-hint"),
             Self::WaveformPeakGamma => settings.tr("settings-waveform-gamma-hint"),
@@ -931,8 +910,6 @@ impl Settings {
             Field::SpectrumSmoothing,
             Field::SpectrogramDbRange,
             Field::SpectrogramHistory,
-            Field::SpectrogramStartupExpansionSpeed,
-            Field::SpectrogramOutflowThresholdPercent,
             Field::WaveformCursorColor,
             Field::WaveformGlow,
             Field::WaveformRmsGain,
@@ -1602,21 +1579,6 @@ impl Settings {
             unchanged,
             cx,
         );
-        self.set_float(
-            Field::SpectrogramStartupExpansionSpeed,
-            Some(self.model.draft.spectrogram_startup_expansion_speed),
-            unchanged,
-            cx,
-        );
-        self.set_value(
-            Field::SpectrogramOutflowThresholdPercent,
-            self.model
-                .draft
-                .spectrogram_outflow_threshold_percent
-                .to_string(),
-            unchanged,
-            cx,
-        );
         self.set_value(
             Field::WaveformCursorColor,
             self.model.draft.waveform_cursor_color.to_string(),
@@ -1766,13 +1728,6 @@ impl Settings {
             cx,
         )?;
         config.spectrogram_history_seconds = self.number(Field::SpectrogramHistory, cx)?;
-        config.spectrogram_startup_expansion_speed = self.float(
-            Field::SpectrogramStartupExpansionSpeed,
-            self.model.draft.spectrogram_startup_expansion_speed,
-            cx,
-        )?;
-        config.spectrogram_outflow_threshold_percent =
-            self.number(Field::SpectrogramOutflowThresholdPercent, cx)?;
         config.waveform_cursor_color = self.number(Field::WaveformCursorColor, cx)?;
         config.waveform_glow =
             self.float(Field::WaveformGlow, self.model.draft.waveform_glow, cx)?;
@@ -2089,10 +2044,7 @@ impl Settings {
             | Field::SpectrumSmoothing => {
                 (SettingsPage::Visualizations, Some(VisualPage::Spectrum))
             }
-            Field::SpectrogramDbRange
-            | Field::SpectrogramHistory
-            | Field::SpectrogramStartupExpansionSpeed
-            | Field::SpectrogramOutflowThresholdPercent => {
+            Field::SpectrogramDbRange | Field::SpectrogramHistory => {
                 (SettingsPage::Visualizations, Some(VisualPage::Spectrogram))
             }
             Field::WaveformCursorColor
@@ -2936,7 +2888,6 @@ mod tests {
             spectrum_bar_gravity: 41.23456,
             spectrum_bar_layout: SpectrumBarLayout::Automatic { width: 4.567891 },
             spectrogram_db_range: Some(84.56789),
-            spectrogram_startup_expansion_speed: 0.456789,
             waveform_glow: 0.456789,
             waveform_rms_gain: 1.234567,
             waveform_peak_gain: 1.234567,
@@ -2968,7 +2919,6 @@ mod tests {
                 SpectrumBarLayout::Fixed { .. } => panic!("precision fixture uses automatic width"),
             }),
             u64::from(config.spectrogram_db_range.map_or(0, f32::to_bits)),
-            u64::from(config.spectrogram_startup_expansion_speed.to_bits()),
             u64::from(config.waveform_glow.to_bits()),
             u64::from(config.waveform_rms_gain.to_bits()),
             u64::from(config.waveform_peak_gain.to_bits()),
@@ -3039,10 +2989,6 @@ mod tests {
             (
                 Field::SpectrogramDbRange,
                 config.spectrogram_db_range.unwrap().to_string(),
-            ),
-            (
-                Field::SpectrogramStartupExpansionSpeed,
-                config.spectrogram_startup_expansion_speed.to_string(),
             ),
             (Field::WaveformGlow, config.waveform_glow.to_string()),
             (Field::WaveformRmsGain, config.waveform_rms_gain.to_string()),

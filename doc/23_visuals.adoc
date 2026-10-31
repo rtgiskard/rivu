@@ -132,15 +132,15 @@ the rolling waveform. Active audition visualization uses the actual audible
 source and admitted processing graph, not an arbitrary persisted graph recipe.
 
 GUI analysis demand follows visible views. Stereo density, spatial spectrum,
-integrated band energy, and PCM are independent requests combined across panels;
-one accepted audio window and stereo FFT supply all requested payloads. Optional
+integrated band energy, PCM, and full-bin Spectrogram data are independent requests
+combined across panels; one accepted audio window and stereo FFT supply them all. Optional
 demand changes preserve the sampling window, continuity generation, and surviving
 consumers' display clocks. Only losing all demand fences capture, including a quick
 hide/show that the worker did not observe as a steady state.
 
-Demand is not payload readiness. Exhausting a bounded Density or PCM snapshot pool
-omits that payload from the next frame, without blocking Spectrum, RMS, band power,
-or other available payloads. The affected renderer keeps its last drawing and
+Demand is not payload readiness. Exhausting a bounded Density, PCM, or Spectrogram
+snapshot pool omits that payload from the next frame, without blocking Spectrum,
+RMS, band power, or other available payloads. The affected renderer keeps its last drawing and
 matching readouts until a usable replacement arrives; it never pairs an old
 snapshot with newer metrics.
 
@@ -504,45 +504,34 @@ the benefit is removing CPU coloring, not automatically reducing upload bytes.
 
 == Spectrogram
 
-Spectrogram maps retained frequency history to colored columns. Stable
-history is a natural reuse boundary: newly accepted audio changes recent
-columns without requiring the entire visible history to be rebuilt. Frames that
-share a time bucket are max-pooled rather than averaged, retaining short
-transients without storing every frame. Display mapping can recolor compatible
-retained frequency data without re-running audio analysis. A gap starts a new
-interval instead of drawing new audio across the missing time.
+Spectrogram maps calibrated non-DC FFT bins to colored columns, independently of
+Spectrum's musical display bands. Opposite-phase stereo channels retain their
+power. Stable history is a natural reuse boundary: newly accepted audio changes
+recent columns without requiring the entire visible history to be rebuilt.
+Frequency-row reduction and frames sharing a time bucket use maximum pooling
+rather than averaging, retaining narrow peaks and short transients. Display
+mapping can recolor compatible retained data without re-running audio analysis.
+A gap starts a new interval instead of drawing new audio across missing time.
 
 Only accepted analysis frames write or pool history. Native display ticks move
 the time cursor and tile placements without rebuilding unchanged numerical
 publications; portions newer than the display cursor remain clipped.
 
-Flow is a display transform, not a second audio queue. A viewport-relative
-quintic fill progressively stretches history from the right toward the left.
-At the far edge it stops expanding; continued input compacts the same retained
-columns. Once the accumulation threshold is reached, an integrated quintic
-gradually opens the outflow and converges to the existing history time span.
-This preserves chronological order and gaps, with no reverse motion or added
-steady-state delay. Very short histories may fill their retention capacity
-during the initial reveal and proceed directly to audio-time scrolling.
+The horizontal scale is fixed by the configured history duration. New audio
+enters at the right and scrolls left with accepted audio time; startup history
+occupies only its actual duration, leaving the rest blank. No expansion or
+release stage stretches retained columns. Paused or stalled display time freezes
+placement, and resizing reprojects the same chronological intervals.
 
-Flow speed bounds the transient filling front in panel-widths per second;
-steady scrolling remains one second of audio per second. The accumulation
-threshold is a fraction of the effective history capacity, subject to the
-filling and speed limits. Editing controls does not clear history; a release
-already in progress keeps its threshold to avoid pulling outgoing content back.
-All panels project the same normalized motion into their own viewport sizes.
-Only scalar display state is added: unchanged GPU tiles and pooled audio
-columns remain reusable. Paused or stalled display time freezes the motion;
-changes to the effective history window still reproject retained columns
-immediately, without advancing fill or release progress. Clearing or releasing
-history also resets the flow.
-
-History width and sampling resolution bound retained resources. Sampling targets
-`ceil(panel_height * 0.5)` rows with a floor at the visible source-frequency count,
-then applies an internal 1024-row cap and the shared material budget. Increasing
-display resolution does not create additional FFT information. Multiple panels
-share history rather than maintaining competing copies; the cache document
-describes capacity changes and numerical publication lifetime.
+History width and sampling resolution bound retained resources. Complete FFT
+snapshots are reduced to a logarithmic grid of at most 1024 retained rows, further
+bounded by the shared material budget and history capacity. Presentation targets
+one row per physical panel pixel, capped by that retained grid. Reduction preserves
+peaks; optional interpolation smooths between known samples without lowering them.
+Narrowing the time grid coalesces compatible buckets instead of shortening the
+configured duration. Resizing cannot recover details already pooled at a coarser
+resolution. Multiple panels share history; the cache document describes capacity
+changes and numerical publication lifetime.
 
 == Generative light
 

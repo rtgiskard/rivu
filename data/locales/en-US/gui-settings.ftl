@@ -87,11 +87,7 @@ settings-spectrum-bar-width-hint = 1–20 logical pixels; bar count follows avai
 settings-spectrum-bar-count-hint = 1–512 whole bars
 settings-spectrum-bar-gravity-hint = 0–500; 0 snaps after hold without smoothing; rise is immediate
 settings-spectrum-smoothing-hint = 0–1000; bypassed at gravity 0; rise is immediate
-settings-spectrogram-history-hint = 1–60; limited by panel width and analysis rate
-settings-spectrogram-startup-expansion-speed = Startup expansion speed
-settings-spectrogram-startup-expansion-speed-hint = 0.1–2 panel-widths/s; default 0.75; limits initial spreading speed; steady scrolling follows audio time
-settings-spectrogram-outflow-threshold-percent = Outflow threshold (%)
-settings-spectrogram-outflow-threshold-percent-hint = 10–95%; default 75%; outflow is allowed after at least this fraction of effective history has accumulated; higher values delay release
+settings-spectrogram-history-hint = 1–60; fixed audio-time span; unavailable history stays blank
 settings-waveform-glow-hint = 0–2; 0 = off
 settings-waveform-rms-hint = 0–3; display only
 settings-waveform-gamma-hint = 0.25–3; >1 lowers small peaks, <1 raises them; display only

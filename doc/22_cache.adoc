@@ -308,18 +308,28 @@ resize retention and start a new pooling interval; appearance changes and unrela
 Spectrum settings do not rebucket audio. Pooling semantics are defined in
 link:23_visuals.adoc#_spectrogram[Spectrogram].
 
-Drawable panels share one history sized for the largest requested plot width,
-capped by history seconds times analysis FPS, with at least two columns.
-Sampling height automatically targets half the largest drawable panel's logical
-height, rounded up, with a floor at the visible source-frequency count. It is
-capped at 1024 rows and by the startup shared GPU budget. Resizing preserves newest
-chronological columns; narrow/wide panels do not fight to resize shared history
-while painting.
+Drawable panels share one bounded history sized for the largest requested
+physical plot width, capped by history seconds times analysis FPS, with at least
+two columns. Its retained logarithmic frequency grid has at most 1024 rows,
+further limited by the startup shared GPU budget against the complete history
+capacity. Presentation targets one row per physical plot pixel, capped by that
+grid. FFT-bin reduction preserves peaks before retention; raw full-bin snapshots
+are not retained per historical column. Logical rows with equivalent sampling
+share one stored value through a window-local 16-bit index map. New audio samples
+directly into the retained column, including peak pooling within a time bucket.
+Reprojection shares rows only when both their future FFT sampling and retained
+historical sampling are equivalent, so a new axis cannot merge distinct old peaks.
+Sample storage is four bytes per distinct row per column, plus two bytes per
+logical row for the shared map, excluding axes, vector metadata and allocator
+capacity. Numerical GPU tiles retain the full presentation grid and are charged
+separately by the shared material admission budget.
+Resizing coalesces compatible chronological buckets and keeps gaps without
+changing the configured time span; panels do not resize history while painting.
 
 Panels update measured demand when size or visibility changes. A too-small panel
-withdraws only its own request; when all are too small, shared history keeps its
-newest two columns and sampling height becomes zero. Enlargement resumes normal
-retention without losing them. This does not change analysis demand; see
+withdraws only its own request; when all are too small, shared history keeps two
+columns without a drawable plot. Enlargement resumes normal retention from those
+coarsened intervals. This does not change analysis demand; see
 link:24_layout.adoc[GUI layout] for drawable geometry.
 
 When no Spectrogram panel is visible, including when the window is hidden,
@@ -398,6 +408,15 @@ other ready analysis continues. The renderer keeps the prior drawing and matchin
 readouts, never pairs old Density with newer metrics. PCM snapshots have the same
 readiness rule. Losing Density demand releases its pool without resetting a
 surviving Spatial Spectrum consumer or the shared FFT window.
+
+Spectrogram full-bin analysis uses three reusable immutable slots, each holding
+`analysis_fft_size / 2` calibrated dB values. Their sample storage totals 48 KiB
+for FFT 8192 and at most 192 KiB for FFT 32768. Staging shares these arrays, not
+copies; exhaustion omits only this optional payload. Dropping the last visible
+Spectrogram demand releases the analyzer pool and staging handle even while
+paused. Existing external snapshots remain valid until their owners release them.
+This storage is separate from bounded logarithmic CPU history and GPU tiles;
+the figures are payload capacities, not total process-memory limits.
 
 Density and Spatial Spectrum use revocable GPU slots: 256 KiB and 128 KiB per
 numeric publication respectively, with a shared 4 KiB palette per style. Unchanged

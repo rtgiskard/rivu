@@ -333,7 +333,10 @@ impl VisualizerRuntime {
             spectrum_restored = self
                 .frequency_views
                 .set_spectrum_visible(!spectrum_ids.is_empty());
-            let mut visualizer = VisualizerDemand::default();
+            let mut visualizer = VisualizerDemand {
+                spectrogram: !spectrogram_ids.is_empty(),
+                ..Default::default()
+            };
             for kind in self.panels.values().filter(|_| enabled) {
                 if let PanelKind::Audio(options) = kind {
                     match options.style {
@@ -726,6 +729,10 @@ pub(in crate::gui) fn retain_analysis_staging(frame: &mut AnalysisFrame, demand:
     if !demand.visualizer.pcm {
         visualizer.demand.pcm = false;
         visualizer.pcm = rivu_audio::analysis::PcmSnapshot::default();
+    }
+    if !demand.visualizer.spectrogram {
+        visualizer.demand.spectrogram = false;
+        visualizer.spectrogram = rivu_audio::analysis::SpectrumSnapshot::default();
     }
 }
 

@@ -8,7 +8,6 @@ mod oscilloscope_renderer;
 mod palette;
 mod parameters;
 mod radial_renderer;
-mod spectrogram_flow;
 mod stereo_renderer;
 mod style_coordinator;
 mod waveform;
