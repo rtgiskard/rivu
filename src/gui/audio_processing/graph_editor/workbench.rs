@@ -901,8 +901,13 @@ impl AudioProcessing {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    if !this.graph_editor.workbenches.contains_key(&panel) {
+                        return;
+                    }
                     this.cancel_pointer(cx);
-                    let state = this.graph_editor.workbenches.entry(panel).or_default();
+                    let Some(state) = this.graph_editor.workbenches.get_mut(&panel) else {
+                        return;
+                    };
                     state.resize = Some((
                         event.position.x,
                         state.inspector_width,
@@ -917,7 +922,9 @@ impl AudioProcessing {
                     "right" => -1.,
                     _ => return,
                 };
-                let state = this.graph_editor.workbenches.entry(panel).or_default();
+                let Some(state) = this.graph_editor.workbenches.get_mut(&panel) else {
+                    return;
+                };
                 state.inspector_width = (state.inspector_width + change).clamp(16., 42.);
                 this.cancel_pointer(cx);
                 cx.stop_propagation();
@@ -932,19 +939,18 @@ impl AudioProcessing {
                 return;
             }
             let _ = moved.update(cx, |this, cx| {
-                let zoom_drag = this.graph_editor.workbenches[&panel].zoom_drag;
-                if let Some(geometry) = zoom_drag {
+                // A removed panel can still have listeners in the last rendered frame.
+                let Some(state) = this.graph_editor.workbenches.get_mut(&panel) else {
+                    return;
+                };
+                if let Some(geometry) = state.zoom_drag {
                     if event.pressed_button != Some(MouseButton::Left)
                         || !window.is_window_active()
                         || geometry
                             != WindowGeometry::current(window, this.state.system.config.ui_scale)
                     {
-                        this.graph_editor
-                            .workbenches
-                            .get_mut(&panel)
-                            .unwrap()
-                            .zoom_drag = None;
-                    } else if let Some(value) = this.graph_editor.workbenches[&panel]
+                        state.zoom_drag = None;
+                    } else if let Some(value) = state
                         .zoom_bounds
                         .get()
                         .and_then(|b| Slider::value_at(b, event.position))
@@ -955,7 +961,6 @@ impl AudioProcessing {
                     cx.notify();
                     return;
                 }
-                let state = this.graph_editor.workbenches.entry(panel).or_default();
                 let Some((start, width, geometry)) = state.resize else {
                     return;
                 };
@@ -978,7 +983,9 @@ impl AudioProcessing {
         window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
             if phase == DispatchPhase::Capture {
                 let _ = released.update(cx, |this, cx| {
-                    let state = this.graph_editor.workbenches.entry(panel).or_default();
+                    let Some(state) = this.graph_editor.workbenches.get_mut(&panel) else {
+                        return;
+                    };
                     let active = state.resize.take().is_some() | state.zoom_drag.take().is_some();
                     if active {
                         cx.notify();
@@ -989,7 +996,9 @@ impl AudioProcessing {
         window.on_mouse_event(move |_: &MouseExitEvent, phase, _, cx| {
             if phase == DispatchPhase::Capture {
                 let _ = owner.update(cx, |this, cx| {
-                    let state = this.graph_editor.workbenches.entry(panel).or_default();
+                    let Some(state) = this.graph_editor.workbenches.get_mut(&panel) else {
+                        return;
+                    };
                     let active = state.resize.take().is_some() | state.zoom_drag.take().is_some();
                     if active {
                         cx.notify();
@@ -1010,6 +1019,9 @@ impl AudioProcessing {
         )
         .dragging(state.zoom_drag.is_some())
         .render(cx, move |this, input, window, cx| {
+            if !this.graph_editor.workbenches.contains_key(&panel) {
+                return;
+            }
             this.cancel_pointer(cx);
             let zoom = match input {
                 SliderInput::PointerDown { position, .. } => {
@@ -1017,11 +1029,10 @@ impl AudioProcessing {
                     else {
                         return;
                     };
-                    this.graph_editor
-                        .workbenches
-                        .get_mut(&panel)
-                        .unwrap()
-                        .zoom_drag = Some(WindowGeometry::current(
+                    let Some(state) = this.graph_editor.workbenches.get_mut(&panel) else {
+                        return;
+                    };
+                    state.zoom_drag = Some(WindowGeometry::current(
                         window,
                         this.state.system.config.ui_scale,
                     ));

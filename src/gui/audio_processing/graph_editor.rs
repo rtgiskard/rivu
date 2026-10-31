@@ -1348,6 +1348,57 @@ mod tests {
     }
 
     #[gpui::test]
+    fn removed_workbench_ignores_events_from_its_last_frame(cx: &mut TestAppContext) {
+        use gpui::InputEvent as _;
+
+        struct WorkbenchWindow(Entity<AudioProcessing>);
+        impl Render for WorkbenchWindow {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                self.0
+                    .update(cx, |this, cx| this.graph_workspace(PANEL, window, cx))
+            }
+        }
+
+        let (_directory, _runtime, processing, _) = fixture(cx);
+        let workbench = cx.add_window({
+            let processing = processing.clone();
+            move |_, _| WorkbenchWindow(processing)
+        });
+        let handle = workbench.into();
+        draw(cx, handle);
+        cx.update_window(handle, |_, window, cx| {
+            processing.update(cx, |this, cx| {
+                this.sync_panels(&Default::default(), true, cx);
+                assert!(!this.graph_editor.workbenches.contains_key(&PANEL));
+            });
+            // Keep the rendered frame: these are the listeners from the removed panel.
+            window.dispatch_event(
+                MouseMoveEvent {
+                    position: point(px(40.), px(40.)),
+                    pressed_button: Some(MouseButton::Left),
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+            window.dispatch_event(
+                MouseUpEvent {
+                    button: MouseButton::Left,
+                    position: point(px(40.), px(40.)),
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+            processing.read_with(cx, |this, _| {
+                assert!(!this.graph_editor.workbenches.contains_key(&PANEL));
+                assert_eq!(this.graph_editor.zoom, 1.);
+            });
+        })
+        .unwrap();
+    }
+
+    #[gpui::test]
     fn ordinary_ack_keeps_retyped_draft_and_ignores_programmatic_sync(cx: &mut TestAppContext) {
         let (_directory, _runtime, processing, handle) = fixture(cx);
         let key = FieldKey::Neural(NeuralField::Threads);

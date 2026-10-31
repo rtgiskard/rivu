@@ -83,6 +83,9 @@ panels switch between canvas and parameters. The separator also supports
 Left/Right when focused. Working areas scroll independently of execution controls
 and the footer. Multiple panels share graph drafts and committed settings, but
 retain independent input focus, cursor geometry and parameter-view scroll state.
+Removing a panel discards its local interaction state. Input still delivered to
+that panel's previous frame is ignored; it cannot resume zoom/resize or recreate
+the removed panel's state.
 
 Enter or Apply this field commits a parameter draft, except for the live EQ
 numeric controls below. Apply all node drafts validates and commits that node
