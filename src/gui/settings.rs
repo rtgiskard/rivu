@@ -565,9 +565,7 @@ enum SettingsPage {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum VisualPage {
-    Common,
-    SharedEffects,
-    Defaults,
+    General,
     Waveform,
     Spectrum,
     Spectrogram,
@@ -576,10 +574,8 @@ enum VisualPage {
 }
 
 impl VisualPage {
-    const ALL: [Self; 8] = [
-        Self::Common,
-        Self::SharedEffects,
-        Self::Defaults,
+    const ALL: [Self; 6] = [
+        Self::General,
         Self::Waveform,
         Self::Spectrum,
         Self::Spectrogram,
@@ -589,9 +585,7 @@ impl VisualPage {
 
     fn label_id(self) -> &'static str {
         match self {
-            Self::Common => "settings-shared-settings",
-            Self::SharedEffects => "settings-shared-effects",
-            Self::Defaults => "settings-new-panel-defaults",
+            Self::General => "settings-general",
             Self::Waveform => "settings-waveform",
             Self::Spectrum => "settings-spectrum",
             Self::Spectrogram => "settings-spectrogram",
@@ -602,9 +596,7 @@ impl VisualPage {
 
     fn scroll_id(self) -> &'static str {
         match self {
-            Self::Common => "settings-common-scroll",
-            Self::SharedEffects => "settings-shared-effects-scroll",
-            Self::Defaults => "settings-defaults-scroll",
+            Self::General => "settings-general-scroll",
             Self::Waveform => "settings-waveform-scroll",
             Self::Spectrum => "settings-spectrum-scroll",
             Self::Spectrogram => "settings-spectrogram-scroll",
@@ -787,7 +779,7 @@ impl Settings {
             font_value: config.ui_font.clone(),
             dropdown_anchor: Measured::Device,
             page: SettingsPage::Library,
-            visual_page: VisualPage::Common,
+            visual_page: VisualPage::General,
         }
     }
 
@@ -2029,10 +2021,9 @@ impl Settings {
             | Field::EffectSecondaryColor
             | Field::ReactiveDbRange
             | Field::ReactiveSensitivity
-            | Field::ReactiveBloomIntensity => (
-                SettingsPage::Visualizations,
-                Some(VisualPage::SharedEffects),
-            ),
+            | Field::ReactiveBloomIntensity => {
+                (SettingsPage::Visualizations, Some(VisualPage::General))
+            }
             Field::RadialRotationSpeed
             | Field::RadialBarWidth
             | Field::RadialRingOpacity
@@ -2068,7 +2059,7 @@ impl Settings {
             | Field::VisualizationAnimationFps
             | Field::VisualizationBackground
             | Field::VisualizationDbRange => {
-                (SettingsPage::Visualizations, Some(VisualPage::Common))
+                (SettingsPage::Visualizations, Some(VisualPage::General))
             }
         };
         self.page = page;
@@ -2702,7 +2693,7 @@ mod tests {
             move |_, _| SettingsWindow(settings)
         });
         cx.update_window(window.into(), |_, window, cx| {
-            window.set_rem_size(px(32.));
+            window.set_rem_size(px(40.));
             window.draw(cx).clear(cx);
         })
         .unwrap();

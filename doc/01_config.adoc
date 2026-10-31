@@ -814,9 +814,10 @@ Each frequency view has a range override; leave it empty to inherit General,
 or clear an explicit value to restore inheritance. See
 <<_visualization_db_ranges,Visualization dB ranges>> for the configuration contract.
 
-Settings → Visualizations separates General controls, Shared effects, New panel
-defaults, and view-specific controls. Shared effects has one editor for the colors
-used by radial, stereo-analysis, fractal, and Oscilloscope styles, one range override
+Settings → Visualizations groups shared controls, shared effects, and New panel
+defaults under General, with separate pages for view-specific controls. General
+has one shared editor for the colors used by radial, stereo-analysis, fractal, and
+Oscilloscope styles, one range override
 for radial, stereo-analysis, and fractal styles, and sensitivity and Bloom for
 radial and fractal styles. These are shared values, not separate preferences per
 view. View-specific pages contain only independent parameters.

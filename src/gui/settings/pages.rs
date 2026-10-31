@@ -1045,12 +1045,7 @@ impl Settings {
         let title = settings.tr(settings.visual_page.label_id());
         let scope = div().text_sm().child(title);
         let content = match settings.visual_page {
-            VisualPage::Defaults => settings.visualizer_display_settings(cx),
-            VisualPage::SharedEffects => column()
-                .gap_3()
-                .child(settings.visualizer_color_settings(cx))
-                .child(settings.shared_response_settings(cx)),
-            VisualPage::Common => {
+            VisualPage::General => {
                 let palette_control = dropdown_button(
                     "visual-palette",
                     self.tr("settings-color-scheme"),
@@ -1244,6 +1239,9 @@ impl Settings {
                             .id("settings-analysis-help")
                             .tooltip(text_tooltip(settings.tr("settings-analysis-help"))),
                     ))
+                    .child(settings.visualizer_color_settings(cx))
+                    .child(settings.shared_response_settings(cx))
+                    .child(settings.visualizer_display_settings(cx))
             }
             VisualPage::Spectrum => {
                 let style = dropdown_button(
