@@ -323,7 +323,7 @@ impl Settings {
     pub(super) fn library_settings(&mut self, cx: &mut Context<Self>) -> Div {
         let library = settings_card(
             palette(cx),
-            self.tr("settings-library"),
+            self.tr("shell-panel-library"),
             column()
                 .gap_2()
                 .child(self.library_roots(cx))
@@ -407,7 +407,7 @@ impl Settings {
         let remix = self.model.draft.pipewire_auto_mix;
         let playback = settings_card(
             palette(cx),
-            self.tr("settings-playback"),
+            self.tr("shell-panel-playback"),
             column()
                 .gap_2()
                 .child(self.pair(Field::Volume, Field::PlayCountThreshold, cx))
@@ -722,7 +722,7 @@ impl Settings {
             .border_color(rgb(palette(cx).border));
         sidebar = sidebar.child(self.tab_button(
             "nav-library",
-            self.tr("settings-library"),
+            self.tr("shell-panel-library"),
             self.page == SettingsPage::Library,
             cx,
             |settings| settings.page = SettingsPage::Library,
@@ -961,7 +961,7 @@ impl Settings {
                                     &self.i18n,
                                     "default-visualizer-reference-lines",
                                     "",
-                                    self.tr("settings-reference-lines"),
+                                    self.tr("shell-reference-lines"),
                                     draft.default_visualizer_reference_lines,
                                     cx,
                                     |draft| {
@@ -975,7 +975,7 @@ impl Settings {
                             &self.i18n,
                             "default-visualizer-labels",
                             "",
-                            self.tr("settings-labels"),
+                            self.tr("shell-labels"),
                             draft.default_visualizer_labels,
                             cx,
                             |draft| {
@@ -1417,7 +1417,7 @@ impl Settings {
                             &settings.i18n,
                             "oscilloscope-overlay-channels",
                             "",
-                            settings.tr("settings-oscilloscope-overlay-channels"),
+                            settings.tr("shell-oscilloscope-shared-axes"),
                             draft.oscilloscope_overlay_channels,
                             cx,
                             |draft| {
@@ -1428,7 +1428,7 @@ impl Settings {
                         .child(
                             div()
                                 .text_sm()
-                                .child(settings.tr("settings-oscilloscope-overlay-channels")),
+                                .child(settings.tr("shell-oscilloscope-shared-axes")),
                         ),
                 ))
                 .child(settings_card(
@@ -1448,7 +1448,7 @@ impl Settings {
                             &self.i18n,
                             "waveform-seek",
                             "",
-                            settings.tr("settings-click-and-drag-to-seek"),
+                            settings.tr("shell-waveform-seek"),
                             draft.waveform_seek_enabled,
                             cx,
                             |draft| draft.waveform_seek_enabled = !draft.waveform_seek_enabled,

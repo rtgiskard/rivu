@@ -273,7 +273,7 @@ impl AlbumBrowser {
             "gl-album-tracks-no-matches",
             "gl-album-sort-artist",
             "gl-album-sort-title",
-            "gl-albums",
+            "shell-panel-albums",
             "gl-albums-empty",
             "gl-albums-no-matches",
             "gl-back-albums",
@@ -574,7 +574,7 @@ impl AlbumBrowser {
             .child(
                 caption(
                     theme,
-                    error.unwrap_or(self.i18n.text("gl-loading")).to_owned(),
+                    error.unwrap_or(self.i18n.text("shell-loading")).to_owned(),
                 )
                 .when(track_row, |text| text.flex_1().min_w_0().truncate())
                 .when(!self.loading_text.show(&(), error.is_some()), |text| {
@@ -1075,7 +1075,7 @@ impl Render for AlbumBrowser {
         } else {
             let heading = rivu_ui::list_panel_header(
                 theme,
-                self.tr("gl-albums"),
+                self.tr("shell-panel-albums"),
                 total.map_or_else(
                     || "—".to_owned(),
                     |count| {

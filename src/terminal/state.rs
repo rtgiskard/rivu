@@ -612,7 +612,7 @@ impl UiState {
         let (target, source_label, container) = match &self.view {
             View::Queue => (
                 self.queue.selected().map(|row| row.track.id),
-                "terminal-queue",
+                "shell-panel-queue",
                 None,
             ),
             View::Search(search) => (
@@ -622,14 +622,14 @@ impl UiState {
             ),
             View::PlaylistDetail { detail, .. } => (
                 detail.entries.selected().map(|entry| entry.track_id),
-                "terminal-playlists",
+                "shell-panel-playlists",
                 None,
             ),
             View::Tree(tree) => match tree.entries.selected() {
-                Some(DirectoryRow::Track(track)) => (Some(track.id), "terminal-library", None),
+                Some(DirectoryRow::Track(track)) => (Some(track.id), "shell-panel-library", None),
                 Some(DirectoryRow::Directory { path }) => (
                     None,
-                    "terminal-library",
+                    "shell-panel-library",
                     Some(path.to_string_lossy().into_owned()),
                 ),
                 Some(DirectoryRow::OtherTracks) => (
@@ -637,11 +637,11 @@ impl UiState {
                     "library-other",
                     Some(self.i18n.text("library-other").into()),
                 ),
-                None => (None, "terminal-library", None),
+                None => (None, "shell-panel-library", None),
             },
             View::Playlists(playlists) => (
                 None,
-                "terminal-playlists",
+                "shell-panel-playlists",
                 playlists.selected().map(|playlist| playlist.name.clone()),
             ),
         };

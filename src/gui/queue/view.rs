@@ -147,7 +147,7 @@ impl Queue {
         let selection_count = self.model.len();
         let header = list_panel_header(
             theme,
-            self.tr("gl-queue"),
+            self.tr("shell-panel-queue"),
             self.context.i18n.format(
                 "gl-queue-count",
                 &[

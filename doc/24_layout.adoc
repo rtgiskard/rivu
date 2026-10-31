@@ -249,6 +249,11 @@ toolbars may opt into wrapping, but heading actions do not reflow or enlarge
 saved panel proportions. Track details retains full editor status in a tooltip;
 the metadata session still owns its meaning and action availability.
 
+Panel tabs, panel catalogs and content headings share the same localized names;
+settings navigation and TUI headings reuse those names for the same concepts.
+Field names and generic actions also share messages, while scope explanations
+and lifecycle-specific actions remain independent.
+
 Header icon hit areas follow typography and interface scale. Search reserves
 the same single-line height collapsed or expanded, and its editable region can
 shrink inside the action allocation. At extremely narrow widths, panel clipping

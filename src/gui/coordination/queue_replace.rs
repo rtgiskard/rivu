@@ -75,13 +75,17 @@ impl WindowView {
                             .flex_shrink_0()
                             .justify_end()
                             .child(
-                                IconButton::new("queue-replace-cancel", "", self.tr("gl-cancel"))
-                                    .build(
-                                        IconButtonStyle::Surface,
-                                        IconButtonDensity::Regular,
-                                        cx,
-                                        |this, window, cx| this.dismiss_queue_replace(window, cx),
-                                    ),
+                                IconButton::new(
+                                    "queue-replace-cancel",
+                                    "",
+                                    self.tr("shell-cancel"),
+                                )
+                                .build(
+                                    IconButtonStyle::Surface,
+                                    IconButtonDensity::Regular,
+                                    cx,
+                                    |this, window, cx| this.dismiss_queue_replace(window, cx),
+                                ),
                             )
                             .child(danger_control(
                                 theme,

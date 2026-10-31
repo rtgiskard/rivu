@@ -817,7 +817,7 @@ impl Playlists {
                     theme,
                     rivu_ui::menu_item(
                         "playlist-row-deduplicate",
-                        self.tr("gl-deduplicate-playlist"),
+                        self.tr("shell-remove-duplicates"),
                         cx,
                         move |this, window, cx| {
                             let Some(revision) = entry_revision else {
@@ -892,7 +892,7 @@ impl Playlists {
                                 IconButton::new(
                                     "playlist-action-cancel",
                                     "",
-                                    self.tr("gl-cancel"),
+                                    self.tr("shell-cancel"),
                                 )
                                 .build(
                                     IconButtonStyle::Surface,
@@ -944,7 +944,7 @@ impl Playlists {
         let message = if let Some(error) = rows_error {
             error
         } else if pending {
-            self.i18n.text("gl-loading")
+            self.i18n.text("shell-loading")
         } else if kind == ViewRequestKind::Entries
             && self.browser.playlists().selected_total().is_none()
         {
@@ -1854,7 +1854,7 @@ impl Playlists {
             .child(panel_heading_row(
                 list_panel_header(
                     theme,
-                    self.tr("gl-playlists"),
+                    self.tr("shell-panel-playlists"),
                     if let Some(total) = self.browser.playlists().summaries().rows.total() {
                         self.i18n
                             .format(
@@ -1869,7 +1869,7 @@ impl Playlists {
                             )
                             .into()
                     } else {
-                        self.tr("gl-loading")
+                        self.tr("shell-loading")
                     },
                 )
                 .on_mouse_down(

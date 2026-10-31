@@ -658,7 +658,7 @@ impl WindowView {
                 cx.notify();
             }));
         if state.loading {
-            menu = menu.child(caption(theme, self.tr("gl-loading")));
+            menu = menu.child(caption(theme, self.tr("shell-loading")));
         } else if let Some(target) = state.confirm_remove {
             let (description, label, action) = match target {
                 RemoveTarget::Selection => (
@@ -676,7 +676,7 @@ impl WindowView {
                 .child(caption(theme, self.tr(description)))
                 .child(menu_item(
                     "content-cancel-remove",
-                    self.tr("gl-cancel"),
+                    self.tr("shell-cancel"),
                     cx,
                     |this, _, cx| {
                         this.replace_content_menu(None, cx);

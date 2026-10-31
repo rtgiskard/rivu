@@ -262,7 +262,7 @@ impl Library {
                                                 .h_full()
                                                 .pl(gpui::rems(depth as f32 * 1.25))
                                                 .child(
-                                                    rivu_ui::caption(theme, this.tr(if failed { "gl-unavailable" } else { "gl-loading" }))
+                                                    rivu_ui::caption(theme, this.tr(if failed { "gl-unavailable" } else { "shell-loading" }))
                                                         .when(!this.loading_text.show(&branch, failed), |text| text.invisible())
                                                         .min_w_0()
                                                         .truncate(),
@@ -298,7 +298,7 @@ impl Library {
                                     )
                                 };
                                 let detail = match visible.status {
-                                    BranchStatus::Loading => this.i18n.text("gl-loading").to_owned(),
+                                    BranchStatus::Loading => this.i18n.text("shell-loading").to_owned(),
                                     BranchStatus::Empty => this.i18n.text("gl-empty").to_owned(),
                                     BranchStatus::Error => this.i18n.text("gl-unavailable").to_owned(),
                                     BranchStatus::Unloaded | BranchStatus::Ready => {
@@ -690,11 +690,15 @@ impl Library {
             self.i18n
                 .format("gl-entry-count", &[("count", (total).into())])
         } else {
-            self.i18n.text("gl-loading").to_owned()
+            self.i18n.text("shell-loading").to_owned()
         };
-        let heading = list_panel_header(theme, self.tr("gl-library"), selection_label.clone())
-            .id(("library-selection-count", panel_id))
-            .tooltip(rivu_ui::text_tooltip(selection_label));
+        let heading = list_panel_header(
+            theme,
+            self.tr("shell-panel-library"),
+            selection_label.clone(),
+        )
+        .id(("library-selection-count", panel_id))
+        .tooltip(rivu_ui::text_tooltip(selection_label));
         let tools = rivu_ui::panel_header_actions()
             .child(self.library_search.clone())
             .child(
@@ -787,7 +791,12 @@ impl Library {
                 ),
             )
             .child(
-                IconButton::new(("library-add-root", panel_id), "󰐕", self.tr("gl-add-root")).build(
+                IconButton::new(
+                    ("library-add-root", panel_id),
+                    "󰐕",
+                    self.tr("shell-add-library-folder"),
+                )
+                .build(
                     IconButtonStyle::Surface,
                     IconButtonDensity::Regular,
                     cx,

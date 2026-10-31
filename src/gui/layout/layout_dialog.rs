@@ -192,7 +192,7 @@ impl WindowView {
                 )));
             } else {
                 content = content.child(
-                    FormField::new(theme, self.tr("shell-name"), self.layout_name.clone())
+                    FormField::new(theme, self.tr("gl-name"), self.layout_name.clone())
                         .into_div()
                         .px_2(),
                 );

@@ -13,12 +13,10 @@ terminal-keys = Keys
 terminal-startup-help = Tab / Shift+Tab: switch tabs · F1 / ?: help
 terminal-page-loading = { $title } — loading
 terminal-page-empty = { $title } — empty
-terminal-playlists = Playlists
 terminal-playlist-count = { $name }  ({ $count ->
     [one] { $count } track
    *[other] { $count } tracks
     })
-terminal-library = Library
 terminal-library-tree = Library tree
 keyboard-help = Toggle help
 keyboard-cancel = Go back
@@ -38,7 +36,6 @@ keyboard-select-all = Select all
 keyboard-backspace = Delete character
 keyboard-library-search = Search library
 keyboard-query-input = Type to search
-terminal-queue = Queue
 terminal-search = Search
 terminal-folders = Folders
 terminal-details = Details
@@ -67,5 +64,4 @@ terminal-help-exit = Help / exit
 terminal-help-footer = Esc: back · ↑↓ / PgUp/PgDn: scroll
 terminal-other-tracks-help = / search · Alt+f favorites · Alt+m missing · Alt+s sort · Alt+c check · Alt+Shift+c force reread · Alt+x cancel · e enqueue selection · Alt+e enqueue collection
 terminal-sort-id = Added order
-terminal-sort-album = Album
 terminal-sort-most-played = Most played

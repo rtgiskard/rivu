@@ -17,7 +17,7 @@ fn details_loading_and_errors_preserve_scroll_until_fresh_track_is_rendered() {
     let colors = TerminalColors::new(crate::theme::Theme::default());
     let mut details = Details {
         target: Some(2),
-        source_label: "terminal-queue",
+        source_label: "shell-panel-queue",
         state: DetailState::Ready(Box::new(full_track(2))),
         scroll: 4,
         ..Details::default()
@@ -84,7 +84,7 @@ fn details_preserve_missing_paths_unknowns_zeroes_and_responsive_order() {
     for width in [40, 73, 74, 96, 120] {
         let mut details = Details {
             target: Some(2),
-            source_label: "terminal-queue",
+            source_label: "shell-panel-queue",
             state: DetailState::Ready(Box::new(full_track(2))),
             ..Details::default()
         };

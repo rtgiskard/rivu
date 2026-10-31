@@ -88,7 +88,6 @@ gl-favorite = 收藏
 
 gl-selecting = 正在选择…
 
-gl-library = 音乐库
 
 gl-flat-view = 切换为平铺列表
 
@@ -98,7 +97,6 @@ gl-filter-favorites = 筛选收藏
 
 gl-filter-missing = 筛选缺失文件
 
-gl-add-root = 添加音乐文件夹
 
 gl-force-on = 强制扫描：开
 
@@ -108,7 +106,6 @@ gl-enqueue-selected = 加入队列
 
 gl-remove-library-selected = 从音乐库移除
 
-gl-queue = 播放队列
 
 gl-remove-queue-selected = 移除所选队列项
 
@@ -126,7 +123,6 @@ gl-entry-down = 下移
 
 gl-add-current = 添加当前曲目
 
-gl-deduplicate-playlist = 去重
 
 gl-rename = 重命名…
 
@@ -134,13 +130,11 @@ gl-delete = 删除…
 
 gl-delete-playlist-note = 仅删除播放列表，不会改动音乐文件
 
-gl-cancel = 取消
 
 gl-delete-playlist = 删除播放列表
 
 gl-replace-playlist = 替换队列并播放
 
-gl-loading = 正在加载…
 
 gl-playlist-empty = 此播放列表为空
 
@@ -164,7 +158,6 @@ gl-play-track = 播放此曲目
 
 gl-remove-playlist = 从播放列表移除
 
-gl-playlists = 播放列表
 
 gl-new-playlist = 新建播放列表…
 
@@ -187,7 +180,6 @@ gl-metadata-edit-note = 仅保存到 Rivu，不修改音频文件；清空并保
 
 gl-unsaved = 有未保存的更改
 
-gl-track-details = 曲目详情
 gl-copy-value = 复制值
 
 gl-file-path = 源路径
@@ -259,7 +251,6 @@ gl-artist-missing = 艺人信息缺失
 
 gl-album-missing = 专辑信息缺失
 
-gl-recent-tracks = 最近播放
 
 gl-untitled = 无标题
 
@@ -275,7 +266,6 @@ gl-enqueue-album = 将专辑加入队列
 
 gl-back-albums = 返回专辑
 
-gl-albums = 专辑
 
 gl-album-sort-title = 按标题排序；切换为艺人
 

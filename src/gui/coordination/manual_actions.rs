@@ -334,7 +334,7 @@ impl WindowView {
                                     IconButton::new(
                                         "metadata-confirmation-cancel",
                                         "",
-                                        self.tr("gl-cancel"),
+                                        self.tr("shell-cancel"),
                                     )
                                     .build(
                                         IconButtonStyle::Surface,

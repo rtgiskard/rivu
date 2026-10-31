@@ -88,7 +88,6 @@ gl-favorite = Add to favorites
 
 gl-selecting = Selecting…
 
-gl-library = Library
 
 gl-flat-view = Switch to flat list view
 
@@ -98,7 +97,6 @@ gl-filter-favorites = Toggle favorites filter
 
 gl-filter-missing = Toggle missing filter
 
-gl-add-root = Add library folder
 
 gl-force-on = Force rescans: on
 
@@ -108,7 +106,6 @@ gl-enqueue-selected = Append to queue
 
 gl-remove-library-selected = Remove from library
 
-gl-queue = Queue
 
 gl-remove-queue-selected = Remove selected queue entries
 
@@ -126,7 +123,6 @@ gl-entry-down = Move this entry down
 
 gl-add-current = Add current track
 
-gl-deduplicate-playlist = Remove duplicates
 
 gl-rename = Rename…
 
@@ -134,13 +130,11 @@ gl-delete = Delete…
 
 gl-delete-playlist-note = Only the playlist is deleted. Music files are not touched
 
-gl-cancel = Cancel
 
 gl-delete-playlist = Delete playlist
 
 gl-replace-playlist = Replace queue and play
 
-gl-loading = Loading…
 
 gl-playlist-empty = This playlist is empty
 
@@ -164,7 +158,6 @@ gl-play-track = Play track
 
 gl-remove-playlist = Remove from playlist
 
-gl-playlists = Playlists
 
 gl-new-playlist = New playlist…
 
@@ -187,7 +180,6 @@ gl-metadata-edit-note = Changes are saved only in Rivu, not to audio files. Clea
 
 gl-unsaved = Unsaved changes
 
-gl-track-details = Track details
 gl-copy-value = Copy value
 
 gl-file-path = Source path
@@ -259,7 +251,6 @@ gl-artist-missing = Artist unavailable
 
 gl-album-missing = Album unavailable
 
-gl-recent-tracks = Recent tracks
 
 gl-untitled = Untitled
 
@@ -275,7 +266,6 @@ gl-enqueue-album = Add album to queue
 
 gl-back-albums = Back to albums
 
-gl-albums = Albums
 
 gl-album-sort-title = Sorted by title; switch to artist
 

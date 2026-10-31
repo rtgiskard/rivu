@@ -284,7 +284,7 @@ impl History {
                 panel_heading_row(
                     list_panel_header(
                         theme,
-                        self.tr("gl-recent-tracks"),
+                        self.tr("shell-panel-history"),
                         self.context.i18n
                             .format("gl-track-count", &[("count", history_total.into())]),
                     ),

@@ -97,9 +97,9 @@ impl Metadata {
         let mut inputs = HashMap::new();
         let mut subscriptions = Vec::new();
         for (field, placeholder) in [
-            (Field::Title, "shell-title"),
-            (Field::Artist, "shell-artist"),
-            (Field::Album, "shell-album"),
+            (Field::Title, "gl-title"),
+            (Field::Artist, "gl-artist"),
+            (Field::Album, "gl-album"),
         ] {
             let input =
                 cx.new(|cx| Input::new(context.tr(placeholder), "", context.tr(placeholder), cx));
@@ -762,7 +762,7 @@ impl Metadata {
             status
         };
         let heading = self.metadata.selected().or(id).map_or_else(
-            || self.context.i18n.text("gl-track-details").to_owned(),
+            || self.context.i18n.text("shell-panel-metadata").to_owned(),
             |id| {
                 self.context
                     .i18n

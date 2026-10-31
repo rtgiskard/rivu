@@ -455,7 +455,7 @@ finite minimum and maximum amplitudes in each channel instead of dropping peaks.
 Invalid amplitudes are omitted. `visualizations.oscilloscope.gain` (0.1–10,
 default 1) scales drawing before clipping, without modifying retained PCM or
 playback volume. Left and right use solid primary/secondary colors, with separate
-vertical centers by default. Overlay traces uses shared time and amplitude axes;
+vertical centers by default. Overlay channels mode uses shared time and amplitude axes;
 the panel-local mode changes drawing only, not PCM or trigger selection. Its
 new-instance default and controls are described in
 link:01_config.adoc#_audio_visualizer[Audio Visualizer]. The label reports input amplitude limits of ±1/gain

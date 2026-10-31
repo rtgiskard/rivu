@@ -548,10 +548,12 @@ fn help_order(action: Action) -> u8 {
 fn draw_help(frame: &mut ratatui::Frame<'_>, area: Rect, ui: &mut UiState, colors: TerminalColors) {
     let context = ui.keyboard_context();
     let context_label = match context {
-        KeyboardContext::TuiQueue => "terminal-queue",
-        KeyboardContext::TuiPlaylists | KeyboardContext::TuiPlaylistTracks => "terminal-playlists",
+        KeyboardContext::TuiQueue => "shell-panel-queue",
+        KeyboardContext::TuiPlaylists | KeyboardContext::TuiPlaylistTracks => {
+            "shell-panel-playlists"
+        }
         KeyboardContext::TuiSearchQuery | KeyboardContext::TuiSearchResults => "terminal-search",
-        _ => "terminal-library",
+        _ => "shell-panel-library",
     };
     let title = format!(
         "{} — {}",
@@ -719,9 +721,9 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut
     let active_tab = ui.view.tab();
     let mut tabs = Vec::new();
     for (tab, label) in [
-        (TopTab::Queue, "terminal-queue"),
-        (TopTab::Playlists, "terminal-playlists"),
-        (TopTab::Library, "terminal-library"),
+        (TopTab::Queue, "shell-panel-queue"),
+        (TopTab::Playlists, "shell-panel-playlists"),
+        (TopTab::Library, "shell-panel-library"),
     ] {
         let style = if tab == active_tab {
             Style::default()
@@ -1204,7 +1206,7 @@ fn draw_queue(
     draw_paged_list(
         frame,
         area,
-        i18n.text("terminal-queue").into(),
+        i18n.text("shell-panel-queue").into(),
         queue,
         |row| {
             let mut content = RowContent::track(&row.track);
@@ -1352,7 +1354,7 @@ fn draw_playlists(
     draw_paged_list(
         frame,
         area,
-        i18n.text("terminal-playlists").into(),
+        i18n.text("shell-panel-playlists").into(),
         playlists,
         |playlist| {
             RowContent::label(
@@ -1429,7 +1431,7 @@ fn draw_search(
     draw_paged_list(
         frame,
         rows[1],
-        i18n.text("terminal-library").into(),
+        i18n.text("shell-panel-library").into(),
         &mut search.results,
         |track| RowContent::track(track),
         i18n,
@@ -1457,7 +1459,7 @@ fn draw_tree(
             i18n.text("library-other"),
             i18n.text(match tree.sort {
                 rivu_protocol::model::LibrarySort::Id => "terminal-sort-id",
-                rivu_protocol::model::LibrarySort::Album => "terminal-sort-album",
+                rivu_protocol::model::LibrarySort::Album => "gl-album",
                 rivu_protocol::model::LibrarySort::MostPlayed => "terminal-sort-most-played",
             }),
             if tree.favorite.is_some() { " ♥" } else { "" },
