@@ -2,15 +2,10 @@
 :toc:
 :toclevels: 2
 
-Playlists are ordered collections of library track occurrences. A track may appear
-more than once; each occurrence has its own entry ID and position. Explicit track
-additions, imports, queue saves, and collection transfers preserve duplicates and
-source order, as does the link:04_playback.adoc#_queue[playback queue].
-
-The queue is a separate system-managed collection, excluded from ordinary
-playlist management. Loading a playlist into the queue and saving a queue create
-independent copies, not live links. Playback follows queue occurrences; editing
-the source playlist does not change an already loaded queue.
+Playlists are ordered collections of library tracks; repeated tracks have distinct
+entry IDs. Additions, imports, queue saves, and transfers preserve order and duplicates.
+The link:04_playback.adoc#_queue[queue] is separate: loading a playlist or saving a
+queue creates an independent copy, not a live link.
 
 == Management
 
@@ -24,25 +19,23 @@ renaming, saving a queue, and importing reject an existing name. Comparison is
 exact, including case and whitespace: CLI/API names retain outer whitespace,
 while the desktop name dialog trims it.
 
-Use `rivu playlist` for command-line management. `playlist list` shows collection
-IDs and summaries; `playlist show PLAYLIST_ID` lists that collection's entries.
-Entry IDs identify individual occurrences for removal or movement, even when they
-share a track ID. Move indices start at zero.
+Use `playlist list` for playlist IDs and `playlist show PLAYLIST_ID` for entry IDs.
+Add library track IDs; remove or move entry IDs. Move indices start at zero.
+Removing entries or deleting a playlist leaves library tracks and already loaded
+queues intact.
 
 [source,sh]
 ----
 rivu playlist create "Mix"
-rivu playlist import mix.m3u8 --name "Imported mix" --wait
 rivu playlist list
 rivu playlist show PLAYLIST_ID
 rivu playlist add PLAYLIST_ID TRACK_ID...
 rivu playlist move ENTRY_ID 0
-rivu playlist remove ENTRY_ID
-rivu playlist play PLAYLIST_ID
 ----
 
-Adding a track always creates another occurrence. Saving a queue as a playlist
-is atomic: failure does not leave a newly created empty playlist.
+Saving a queue as a playlist is atomic: failure leaves no newly created empty
+playlist. For whole-playlist versus individual-track playback, confirmation, and
+queue replacement failures, see link:04_playback.adoc#_transport_and_timing[Playback].
 
 == Desktop UI
 
@@ -61,18 +54,12 @@ across restarts, and new playlists append. Reordering does not change playlist
 contents, track selection, or the playback queue. If the catalog changes during
 the drag, the old ordering request is rejected.
 
-Hover a catalog row for Play and its actions menu. These actions target that row,
-not the selected playlist. Play replaces the queue with the complete saved order
-and starts playback; Append copies it without changing current playback. There
-is no playlist or queue-size cap. Empty or unknown playlists leave the queue
-unchanged.
-
-Append fails if the playlist's contents change before copying, rather than
-copying a stale or partial list.
-
-When the queue is nonempty, the GUI asks before replacing it by default. Cancel
-or Esc keeps queue and playback untouched. Configure this shared album/playlist
-preference under link:01_config.adoc#_volume_and_playback_controls[Volume and playback controls].
+Hover a catalog row for Play and its actions menu; they target that row, not the
+selected playlist. Play loads the complete saved order; Append copies it without
+changing playback. Empty or unknown playlists leave Queue unchanged. Append
+rejects changed contents rather than copying a stale or partial list. Playback
+and queue-replacement behavior are described under
+link:04_playback.adoc#_transport_and_timing[Playback].
 
 The row menu also offers Add current track, Remove duplicates, Rename, and Delete.
 Add current track uses the playback track, not Library selection, and requires a
@@ -126,13 +113,10 @@ tracks without changing the source collection. This selector also works when
 the Playlists panel is not visible. Track menus follow the
 link:02_library.adoc#_desktop_selection_and_directory_tree[shared selection rules].
 
-Use Queue → Save queue as playlist for a nonempty queue. The name dialog suggests
-an editable `Queue_YYYYMMDD_HHMMSS` name, independent of presentation language.
-Every queue occurrence is saved in queue order, including repeated tracks.
-Saving does not change the queue, and later edits to either collection do not
-change the other. The dialog uses the same
-background-save and failure-retry behavior as New playlist and Rename. Loading
-or failed queue selection shows status; Retry remains available after failure.
+For a nonempty queue, use Queue → Save queue as playlist. The editable default
+name is `Queue_YYYYMMDD_HHMMSS`. Every occurrence is saved in queue order without
+changing Queue. The dialog shares New playlist and Rename's background-save and
+failure-retry behavior; loading or failed queue selection shows status and Retry.
 
 === Loading and selection recovery
 
@@ -154,12 +138,10 @@ can navigate again. Failed group removal does not partially remove entries.
 
 === Playlist query validity
 
-If this playlist's membership or order changes during a listing, restart it.
-Renames and changes to other playlists do not interrupt the listing. Metadata
-edits preserve entry identity and position but can invalidate displayed results.
-Stale group edits are rejected rather than partially applied. Export uses one
-consistent snapshot. See link:21_ipc.adoc#_query_results_and_pagination[IPC query
-validity] for the protocol contract.
+Listings restart if this playlist's membership or order changes, not on renames
+or changes to other playlists. Metadata edits may invalidate displayed results
+without changing entry identity. Stale group edits are rejected; exports use a
+consistent snapshot. Protocol details: link:21_ipc.adoc#_query_results_and_pagination[IPC query validity].
 
 == Import and export
 
@@ -169,8 +151,11 @@ below support the same exchange formats and whole-playlist semantics.
 
 === Import workflow
 
-CLI paths are relative to the invoking client's working directory. Referenced
-media and CUE sheets must lie within configured logical roots; see
+CLI input and export paths use the invoking client's working directory, as
+described under link:02_library.adoc[Library]; paths inside an imported document
+instead resolve relative to that document. An M3U/M3U8 document itself need not
+be inside a library root. All audio and CUE paths, including a directly imported
+CUE sheet, must lie within configured logical roots; see
 link:02_library.adoc#_scan_policies_and_recovery[Library scan boundaries and errors].
 Imports scan referenced sources before creating the playlist and may create
 partial playlists: `--wait` reports scan errors even when readable tracks were
@@ -182,35 +167,23 @@ sheet in the same import; excluded new tracks do not enter the playlist.
 Import fails if no entries resolve successfully. Without `--name`, the playlist
 name comes from the imported file's name without its extension. Both explicit
 and default names are validated before a scan starts or any scan data is saved.
-Imports share one media-task slot with scans, Other checks, and external-file
-queue additions; another request is rejected while one is active.
-
-An accepted import returns a task ID, not proof of completion. Use `--wait` to
-observe the result. Desktop progress, completion, failure, and cancellation appear
-in Playlists; a rejected request does not replace the accepted task's feedback.
-Status queries, result dismissal, cancellation, and shutdown are described under
-link:02_library.adoc#_cancellation[Library cancellation]. Preparation can be
-cancelled without saving tracks or creating a playlist; cancellation is refused
-once Saving begins.
+Imports use the shared media-task slot; accepted-task feedback appears in Playlists,
+separately from rejected-request errors. Use `--wait` for completion. Preparation
+can be cancelled without saving; Saving cannot. Status, dismissal, and shutdown:
+link:02_library.adoc#_cancellation[Library cancellation].
 
 === Input limits and cancellation
 
-Import inputs must be ordinary files, including CUE sheets referenced by M3U;
-directories, devices, and FIFOs are rejected without waiting for a writer.
-Referenced directories are never recursively imported; directory discovery belongs
-to `rivu library scan`. Input decoding, CUE parsing, out-of-root M3U entry or
-CUE-sheet paths, and non-regular M3U source checks belong to preparation: failure
-there aborts the import without saving tracks or creating a playlist. Partial
-results apply to later source scanning, not to an invalid input document.
-M3U input is limited to 16 MiB, each CUE sheet to 1 MiB,
-and aggregate input to 64 MiB (each distinct CUE sheet is read once). Expansion is
-limited to 100,000 entries, counting repeated occurrences.
+Import documents and referenced sources must be ordinary files, not directories,
+devices, or FIFOs. Referenced directories are never recursively imported; use
+`library scan` for discovery. Input decoding, CUE parsing, out-of-root paths, and
+non-regular M3U source checks run before source scanning: failure aborts without
+saving tracks or creating a playlist. Partial results apply only to later scans.
 
-Preparation also limits retained entry, sheet, and source data to prevent
-unbounded expansion. Exceeding an input or preparation limit aborts before saving
-tracks or creating a playlist. These are import limits, not playlist-size caps.
-See link:21_ipc.adoc#_core_and_client_boundary[Core and client boundary] for resource
-accounting. A cancelled task must finish retiring before another media task starts.
+Limits are 16 MiB per M3U, 1 MiB per CUE, 64 MiB aggregate input (distinct sheets
+read once), and 100,000 expanded occurrences. Exceeding input or retained-data
+limits aborts before saving; these are not playlist-size caps. Resource accounting:
+link:21_ipc.adoc#_core_and_client_boundary[Core and client boundary].
 
 === Commit and export lifecycle
 
@@ -222,10 +195,8 @@ not delete it. Task results retain `library_committed` and `playlist_id` for
 confirmed commits, including failures of later steps. The import is not replayed
 automatically; inspect the result before retrying a missing step.
 
-Imports retain every successfully resolved input occurrence in expanded input
-order, including repeated audio paths, CUE sheets, and CUE subtracks. Export writes
-every representable occurrence in saved order, preserving multiplicity on an M3U
-round trip subject to the CUE export restrictions below.
+Imports retain resolved occurrences in expanded input order, including repeats.
+Export preserves saved order and multiplicity, subject to CUE restrictions below.
 
 Listings and exports include every entry, not only visible rows. For listing
 changes and retries, see link:02_library.adoc#_paged_views[Paged views]. Only one
@@ -240,7 +211,6 @@ Wait for completion and inspect the destination before retrying.
 [source,sh]
 ----
 rivu playlist import mix.m3u8 --name "Mix" --wait
-rivu playlist import album.cue --wait
 rivu playlist export PLAYLIST_ID exported/mix.m3u8
 ----
 

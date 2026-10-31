@@ -22,6 +22,30 @@ an empty queue is an error. Stop resets the position to zero but retains queue
 selection. Pause only changes playing playback; it does not select or open a
 track while stopped.
 
+To play a library track, use `rivu playback play TRACK_ID`. This starts the first
+existing occurrence of that track in queue order, or appends one if the track is
+not queued. It does not replace the queue. Use `rivu queue play QUEUE_ID` when a
+particular occurrence matters; track IDs and queue occurrence IDs are not
+interchangeable. Desktop Play actions on Library, album tracks, Recent tracks,
+and playlist tracks use library-track playback; Queue rows use occurrence playback.
+
+Whole-album and whole-playlist Play replace the queue with the complete saved
+order and start its first entry; Append adds the complete collection without
+changing playback. CLI `rivu playlist play PLAYLIST_ID` does not ask for confirmation.
+The GUI asks before replacing a nonempty queue by default; Cancel or Esc preserves
+queue and playback. Configure `interface.confirm_queue_replace` under
+link:01_config.adoc#_volume_and_playback_controls[Volume and playback controls].
+
+[source,sh]
+----
+rivu queue add TRACK_ID TRACK_ID
+rivu queue list
+rivu queue play QUEUE_ID
+rivu playback pause
+rivu playback play
+rivu playback seek 30
+----
+
 Keyboard volume steps, repeat cycling, and shuffle toggles accumulate against
 the core's current state, even before the display updates. Ctrl+Left/Right and
 seek-slider arrows seek by five seconds; slider Home/End and terminal
@@ -29,19 +53,20 @@ Ctrl+Home/End seek to zero or the known duration. A delayed seek cannot affect a
 different queue occurrence. Pointer dragging and CLI seek/volume specify absolute
 targets.
 
-Selecting a missing source manually leaves the current track running and reports
-an error. If the next entry cannot be opened at natural end, playback stops.
+Manually opening an unreadable source leaves active playback running, but does not
+undo earlier queue edits: an occurrence appended by library-track Play stays queued.
+Whole-album and whole-playlist Play save the replacement queue before opening the
+first source. If that open fails, the new queue remains and playback stops; the
+old queue is not restored. Inspect Queue and play another entry after correcting
+or skipping the source. Failure to open the next entry at natural end stops playback.
 
 The desktop Playback panel shows title, artist, album, progress, transport, and
 volume. Blank artist or album metadata uses the same symbol placeholders and
 missing-field tooltips as playlist entries. Its favorite button changes the current
 track's library favorite, not the browsing selection. Use the separate Album
 artwork panel for covers.
-Hover the volume icon or slider to see its current percentage. The same value
-remains visible while dragging the slider or using it with keyboard focus.
-The crosshair beside its title (*Locate playing entry in Queue*) reveals the
-Queue tab and locates the current occurrence, subject to layout locking;
-see <<_queue,Queue>>.
+Hover or focus the volume control to see its percentage. The title's crosshair
+locates the current queue occurrence; see <<_queue,Queue>>.
 
 Repeat cycles Off, All, and One. Previous restarts the current entry when its
 position exceeds three seconds; at or before three seconds it navigates back,
@@ -59,10 +84,8 @@ Positions and seeks are relative to the subtrack; pregap directives do not
 synthesize silence absent from the source.
 Ordinary audio plays to actual decoder EOF; an estimated metadata duration is
 not a playback cutoff. An explicit CUE subtrack end remains a hard playback bound.
-A rescan can update the catalog's CUE source and boundaries without replacing
-the source already loaded for playback. The active track retains its loaded
-path, range and duration while editable metadata continues to refresh. Seeking
-uses that active range; the next explicit playback start adopts the new catalog source.
+A rescan does not replace an already loaded CUE source or bounds. Seeking uses
+the loaded range; the next explicit playback start adopts catalog changes.
 
 Seek targets must be finite, non-negative, and representable on the source
 timeline. Invalid targets report an error without stopping playback, including
@@ -108,10 +131,11 @@ link:02_library.adoc#_track_information[track information and hover rules].
 
 Use `rivu queue list` to find occurrence IDs for `queue play`, `queue remove`,
 and `queue move`. Move positions start at zero. `queue add TRACK_ID...` appends
-occurrences; `queue clear` empties the queue and stops playback. `queue list --json`
-returns a streamed JSON array of occurrence rows with absolute zero-based positions
-and display metadata. Listings stop on concurrent queue content changes; repeat
-the listing to obtain a consistent new traversal.
+every supplied occurrence in argument order without starting playback;
+`queue clear` empties the queue and stops playback. Removing queue occurrences
+does not unregister their library tracks. JSON listings contain occurrence rows
+with zero-based positions and display metadata. Discard incomplete listings after
+concurrent changes and retry; see link:02_library.adoc#_paged_views[Paged views].
 
 === Adding local files
 
@@ -162,17 +186,12 @@ to the matching occurrences; repeated tracks remain distinct queue entries.
 Background refreshes preserve the browsing position with or without a search
 filter; a shorter result set clamps scrolling only when its new total arrives.
 
-
-Use the crosshair button (*Locate playing entry in Queue*) in the Queue toolbar
-or beside the Playback title to scroll to the current occurrence and briefly
-emphasize it. The Playback button reveals an existing Queue tab first, or adds a
-Queue panel when the layout is unlocked; it reports an error rather than adding
-a missing panel to a locked layout. Duplicate tracks are located by occurrence,
-not by their shared track identity. Both buttons also work while paused and are
-unavailable without a current occurrence. Locating never changes selection,
-playback, or an unsaved Track details draft, and playback changes do not
-automatically scroll the queue. A removed occurrence is not replaced by another
-duplicate.
+Use *Locate playing entry in Queue* in the toolbar or Playback title to reveal and
+emphasize the current occurrence, including while paused. The Playback button
+opens an existing Queue tab or adds one if the layout is unlocked; it reports an
+error if a locked layout has none. Location changes neither selection, playback,
+nor Details drafts and does not automatically follow playback changes. Without
+a current occurrence it is disabled; a removed entry is not replaced by a duplicate.
 
 Hover a row for Favorite, Play, Remove, Move up, and Move down. These actions
 target that occurrence without changing selection; Favorite updates the library
@@ -258,20 +277,14 @@ PipeWire sinks only. Omit the setting for the default PipeWire sink, or use
 `PipeWire: <node.name>` for a named sink. PipeWire must be running; there is no
 direct ALSA output or fallback to a different backend.
 
-PipeWire handles device-rate conversion. Playback stays bound to its selected
-sink; invalid or disappearing routes fail explicitly instead of silently
-rerouting. Select an available sink and start playback again to recover.
-Changing to an invalid or unavailable sink stops playback and keeps the newly
-requested setting. Subsequent playback attempts still target that sink; neither
-the previous selection nor the default sink is substituted automatically.
-Device-application failures are reported even while stopped; reapplying the same
-settings validates them again. Choose an available sink, then explicitly restart
-playback if the failure stopped it.
-Changing the sink or remixing setting rebuilds output at the current position and
-preserves paused state. It does not reopen the decoder or apply a newly saved
-Decoder hint or read-buffer size.
-Recovery uses the old output's final confirmed audible position after retirement,
-so audio confirmed during output closure is not replayed.
+Playback stays bound to the selected sink. Invalid or disappearing routes fail
+instead of rerouting; a failed device change stops playback and retains the
+requested setting. Select an available sink and explicitly restart playback to
+recover. Reapplying the same setting validates it again, even while stopped.
+
+Changing sink or remixing rebuilds output at the final confirmed audible position,
+preserving pause without reopening the decoder. It does not apply a newly saved
+Decoder hint or read-buffer size. PipeWire handles device-rate conversion.
 
 Multichannel output preserves speaker identities. `playback.pipewire_auto_mix` is enabled
 by default and permits PipeWire remixing with channel-level normalization to prevent
@@ -298,12 +311,10 @@ remain effective with remixing disabled.
 Unusable output formats or insufficient audio-buffer memory report a playback
 error rather than switching routes.
 
-Opening a selection can require decoding forward when seeking is unavailable or
-duration is unknown. This work is cancellable, but a distant target can require
-reading to EOF. Estimated duration is only a seek aid, not a playback cutoff.
-A valid selection exhausted at open returns EOF; a source with no decodable audio
-fails. Seekable native Matroska supports backward seeking, including after EOF;
-unseekable sources retain forward-only scanning.
+When seeking is unavailable or duration unknown, opening a selection may decode
+forward, potentially to EOF. This is cancellable. A valid exhausted selection
+returns EOF; a source with no decodable audio fails. Native Matroska supports
+backward seeking when seekable; unseekable sources scan forward only.
 
 
 == Optional FFmpeg decoder
@@ -383,18 +394,12 @@ printable characters, including playback shortcuts and `?`; F1 still opens help.
 Text edits use the shared
 link:02_library.adoc#_desktop_list_search[delayed application and immediate clearing].
 
-Library also offers link:02_library.adoc#_other[Other], a flat collection of
-registered tracks outside configured folders (all tracks when no folders are
-configured). Within Other, `/` edits its own search, applying text changes
-immediately; `Alt+f` and `Alt+m` toggle
-favorite-only and missing-only filters, and `Alt+s` cycles ID, album, and most-played
-sorting. Selection follows the same track ID through sort/filter changes and
-library refreshes while that track remains in the results, including when another
-change arrives before relocation or page loading finishes. Obsolete results cannot
-move selection back. `e` appends the selected track; `Alt+e` appends the complete
-Other collection independently of filters. `Alt+c` checks its registered files;
-`Alt+Shift+c` forces metadata rereading. The collection-wide Alt actions also work
-on the Other header.
+Library's link:02_library.adoc#_other[Other] has its own immediate `/` search.
+`Alt+f` / `Alt+m` toggle favorite-only / missing-only filters; `Alt+s` cycles ID,
+album, and most-played sorting. Selection follows its track through changes while
+that track remains in the results. `e` appends the selected track; `Alt+e` appends
+the complete collection regardless of filters. `Alt+c` checks registered files;
+`Alt+Shift+c` forces rereading. Collection-wide Alt actions also work on its header.
 
 Outside the query editor, `m` toggles the selected track's favorite in Queue,
 Library, Search, or playlist entries. It never changes a whole directory or
@@ -410,9 +415,8 @@ and estimated bitrates `≈`. Loading, query failure, removal, and no selection 
 distinct states. This is not a tag editor or decoder control.
 
 Scroll details with arrows, PageUp/PageDown, or Home/End; Esc closes it and restores
-the source selection and scroll position. Help and details keep navigation inside
-the overlay, preventing playback, activation, tab switching, or removal from
-operating the underlying list. Details is an overlay, not a fourth top-level tab.
+the source position. Help and details own navigation while open; actions do not
+reach the underlying list.
 
 The bottom area keeps position, duration, volume, shuffle, and repeat available
 while browsing. Notifications distinguish warnings and errors; ordinary playback
@@ -426,8 +430,7 @@ from every view, including editors, overlays, and connection setup. `SIGINT` and
 `SIGTERM` also close only the client. All these exits restore terminal mode,
 screen, and cursor, leaving the core running.
 
-A shutdown snapshot exits normally, even during first load. A Watch connection
-ending without shutdown state is an error, but still restores the terminal.
+Core shutdown exits normally; a lost connection without shutdown state reports an error.
 
 == Desktop tray and window lifecycle
 
@@ -504,23 +507,18 @@ and desktop metadata when ready. Cache failures do not prevent playback.
 Use link:01_config.adoc#_artwork_cache_maintenance[Settings artwork maintenance]
 to inspect disk usage and manually clean expired, unprotected cover files.
 
-MPRIS supports transport, volume, shuffle, and repeat; only rate `1.0` is supported.
-Relative `Seek` accumulates against Core's position at execution time and stays
-bound to the originating queue occurrence. It preserves pause and does nothing
-after that occurrence is replaced or playback stops. Strictly exceeding a known
-end advances when a next occurrence is available; the exact endpoint seeks within
-the current occurrence, and the queue tail is unchanged when no next item exists.
-Seeks within the current occurrence remain available during scan or external-file
-Saving and database isolation, just like `SetPosition`. Only an over-end seek
-that needs Next is rejected by database admission; ignored stale/stopped requests
-and tail no-ops do not touch the database or change deferred navigation intent.
-Out-of-range `SetPosition` is ignored. `OpenUri` is rejected: import media first.
-`Raise` is unavailable for a headless core, while `Quit` remains available.
-Next and Previous preserve paused or stopped state when used through MPRIS.
-Stopped navigation selects an occurrence without opening its decoder; paused
-navigation loads it paused. CLI, TUI, and GUI Next/Previous instead start playback
-when navigating to another occurrence.
-`SetPosition` for an occurrence other than the current one is ignored.
+MPRIS supports transport, volume, shuffle, and repeat at rate `1.0`. Relative Seek
+accumulates against the current position and stays bound to its queue occurrence;
+stale or stopped requests are ignored. Seeking strictly beyond a known end advances
+if another occurrence exists; the exact endpoint stays within the current one,
+and seeking beyond the queue tail does nothing. Out-of-range or stale `SetPosition`
+is ignored. `OpenUri` is rejected: import media first. `Raise` requires a graphical
+host; `Quit` also works headlessly.
+
+MPRIS Next/Previous preserve paused or stopped state; stopped navigation selects
+without opening a decoder. CLI, TUI, and GUI navigation instead starts playback
+when moving to another occurrence. Protocol and database-admission details:
+link:21_ipc.adoc[IPC].
 
 == Equalizer and processed audition
 
@@ -534,10 +532,6 @@ and are lost when the core exits.
 
 == Audio runtime crate
 
-The `rivu-audio` crate provides decoding, probing, output, and playback workers.
-`ProbeResult` reports the actual probing and decoding implementations independently
-using `AudioBackend`; these results are distinct from the requested `DecoderHint`.
-Application ownership is described in
-link:21_ipc.adoc#_core_and_client_boundary[IPC]; build and runtime prerequisites
-are in link:../readme.adoc[README].
+Runtime ownership and backend contracts: link:21_ipc.adoc#_core_and_client_boundary[IPC].
+Build and runtime prerequisites: link:../readme.adoc[README].
 

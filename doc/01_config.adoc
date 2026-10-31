@@ -54,45 +54,36 @@ enabled = true
 
 == Saving configuration
 
-Rivu writes `config.toml` on desktop Settings Apply, an explicit IPC Configure
-command, accepted processing-configuration edits (graph, Monitor EQ, presets/A/B,
-restoration or neural settings), or an orderly application exit. Processing edits
-save immediately; they do not wait for the desktop Settings editor or layout sync.
-A save is skipped when the effective configuration matches the last successful
-save or the configuration loaded at startup. Starting Rivu does not rewrite an
-existing file; a missing file is created on the first such save or orderly exit.
+Rivu saves `config.toml` on Settings Apply, IPC Configure, accepted processing edits
+(graph, Monitor EQ, presets/A/B, restoration or neural settings), and orderly exit.
+Processing edits save immediately. Other controls, including playback, output,
+visualization enablement, Waveform seeking, Library columns and folder changes,
+update memory; the next save includes their current values. Closing the window
+does not exit the core. A crash can lose changes since the last successful save.
 
-Saves patch only fields whose effective values changed since startup or the last
-successful save. Untouched values, comments, and formatting are retained, and
-omitted default-valued fields stay absent. Explicitly written defaults are not
-pruned; changing a field back to its default writes that value explicitly.
-Clearing an optional setting removes its key. Changed arrays, including arrays of
-tables, may be replaced as a unit rather than preserving their internal formatting
-and comments. A new or recreated file contains only overrides of the defaults.
+Saves patch values changed since startup or the last successful save, preserving
+untouched values, comments and formatting. Omitted defaults stay absent; explicitly
+written defaults remain, and returning a field to its default writes it explicitly.
+Clearing an optional setting removes its key. Changed arrays may be replaced as
+a unit, including their internal comments and formatting. New files contain only
+default overrides.
 
-Playback controls and desktop shortcuts, including output selection, visualization enablement,
-Waveform seeking, Library columns, and library-folder changes, take effect in
-memory without writing the configuration file. A later configuration save includes
-these current values together with its explicit edits. Closing the desktop window is not application
-exit: the core keeps running. A crash or forced termination can lose changes
-since the last successful save. Database and layout persistence are independent.
+Unchanged configuration needs no write. Startup leaves an existing file untouched;
+a missing file is created on the first save or orderly exit. Database and layout
+persistence are independent of configuration saving.
 
-Apply rejects a candidate that cannot be saved and retains the settings draft;
-earlier runtime changes remain active. Saving errors appear in logs, `rivu status`,
-and the desktop error notice. Retry after correcting the cause. Exit makes one
-final save attempt but does not wait for a successful retry. Atomic replacement
-protects against incomplete writes, not power loss.
+=== Apply and validation
 
-Invalid field values keep Apply from saving, including text entered before a
-control became inactive. Settings opens the field's page; inactive controls explain
-how to re-enable them and offer Reset field text to restore only that field's last
-accepted value. Other draft edits remain intact. Editing after a successful Apply
-clears its success notice; edits made while Apply is pending remain unsaved.
+Apply retains the draft on validation or save failure; earlier runtime changes
+remain active. Invalid text blocks Apply even in an inactive control: Settings
+opens the affected page, and Reset field text restores only that field's accepted
+value. Other edits remain intact. Edits made during Apply await the next Apply;
+editing after success clears its notice.
 
-An audio-application failure after a successful save does not roll back the saved
-configuration. Resolve the audio error before retrying or restarting.
-Configuration and layout persistence are independent: Apply does not save a
-layout, and layout sync does not save configuration.
+Save failures appear in logs, `rivu status` and the desktop notice. Correct the
+cause and retry; exit makes one final attempt. Atomic replacement prevents partial
+writes, not power loss. An audio-application failure after a successful save does
+not roll back the saved configuration.
 
 === File access and external editors
 
@@ -304,53 +295,31 @@ semantics, shared and isolated Python environments, licensing, CLI examples and 
 
 == Desktop settings
 
-Add library folders from the Library view. In Settings, folders are listed
-individually; use a row's close icon to remove it from the draft. Long paths are
-shortened in the middle; hover to see the full path. The list scrolls within the
-editor. Paths retain semicolons and trailing spaces; they are not entered as
-delimited text. Removals take effect only on Apply; Discard drops them.
-The sidebar has four groups: Library, Playback & Audio, Interface, and
-Visualizations. Library includes scan settings, Covers & cache, and maintenance;
-Playback & Audio contains playback, output, decoding, and read buffering. Interface contains basic
-preferences, layout, album artwork, desktop integration, and diagnostic logging.
-Interface presents these sections together on one scrollable page, without
-separate sidebar subpages. Panel-specific artwork settings remain a focused editor.
-Logging is application-wide, including headless operation, and remains in `[logging]`.
-Visualizations has a General page and style-specific pages. General groups
-display and processing controls in Appearance, with frequency analysis in its
-own card. The sidebar groups related styles without flattening their individual
-pages. New-instance defaults have their own info icon and affect only
-subsequently created panels.
-Long sidebar labels are shortened to one line; hover over a category to read its full name.
-When expanded groups exceed the dialog height, scroll the sidebar independently
-with the mouse wheel or its scrollbar to reach the remaining pages.
-Dropdown keys: <<_desktop_keyboard_navigation,Desktop keyboard navigation>>.
-Empty inputs show inheritance, format, or special-value cues where relevant;
-hover for complete ranges and application timing. Clearing a field does not apply
-its placeholder: settings still require Apply and their usual validation.
+Settings groups Library, Playback & Audio, Interface, and Visualizations.
+Interface uses one scrollable page; Visualizations has General and style-specific
+pages. General separates Appearance from Frequency analysis. New-panel defaults
+affect only subsequently created instances. Sidebar groups scroll when needed;
+hover truncated labels, fields and errors for their full text, accepted ranges
+and application timing. Errors also provide Copy. See
+<<_desktop_keyboard_navigation,Desktop keyboard navigation>> for dropdown controls.
 
-Settings may display fewer decimal places than TOML stores. Applying an untouched
-field preserves its original precision; inputs accept additional decimal places
-within their valid ranges. Clearing an optional numeric override restores
-inheritance on Apply.
+Add folders from Library; Settings lists them individually for removal. Paths are
+literal, not delimited text, and retain semicolons and trailing spaces. Removal
+changes only the draft until Apply. Empty field hints are not submitted values;
+clearing an optional numeric override restores inheritance on Apply. Untouched
+numbers retain their TOML precision even if Settings displays fewer decimal places.
 
-Media read buffering applies to future source opens, including full waveform
-scans; it does not reopen the current track. The application menu's Visualizations
-toggle changes visualization enablement immediately without saving configuration. See
-<<_visualization_enablement,Visualization enablement>> for what stops and which results are discarded.
+Settings keeps a baseline and draft. Apply merges edited fields into the latest
+configuration, preserving unrelated changes from other controls and clients.
+An edited field wins over a concurrent change to that field; folder edits replace
+the roots list. Media read buffering affects future opens, including waveform
+scans, without reopening the current track. The application-menu Visualizations
+toggle applies immediately; see <<_visualization_enablement,Visualization enablement>>.
 
-Settings edits a draft. Apply merges only fields changed since opening or the
-last successful Apply into the latest configuration, preserving unrelated
-changes from playback controls and other clients. An edited field wins over a
-concurrent change to that same field; editing folders replaces the entire roots
-list. See <<_saving_configuration,Saving configuration>> for save failures and
-the saved-but-audio-failed case.
-
-Edits made while Apply is pending remain for the next Apply. Failed Apply keeps
-the draft for correction. Discard and Escape cannot close the editor while Apply
-is pending: closing cannot revoke a submitted operation. After completion,
-Discard closes the editor and drops any remaining unsubmitted edits. Completions
-from a replaced edit session cannot change the new session's draft or feedback.
+While Apply is pending, later edits remain for the next submission and the editor
+cannot close. After completion, Discard closes it and drops unsubmitted edits.
+Completions from a replaced session cannot alter its successor. Save failures and
+saved-but-audio-failed behavior are in <<_saving_configuration,Saving configuration>>.
 
 Interface → Layout includes Layout snapping and Layout grid spacing. These save
 `interface.layout_snap_enabled` (default `true`) and `interface.layout_snap_grid_px` (default `16`,
@@ -371,19 +340,10 @@ default cover rather than a partial animation. Increasing the budget does not
 remove other image-admission limits. See
 link:22_cache.adoc#_artwork_lookup_retention[Artwork resource boundaries].
 
-Hover settings fields for accepted ranges and input syntax; inactive fields explain
-which setting enables them. Apply errors retain the specific cause; hover to read
-the full message or use Copy to copy it.
-Single-line desktop text fields scroll horizontally to keep the caret visible.
-Use Left/Right to navigate long values or Home/End to reach either end.
-Shift+Left/Right extends a selection beyond the visible text; Shift+Home/End
-selects to the beginning/end while preserving the selection anchor.
 
-Interface → Album artwork edits the defaults for new panels: style, mode,
-seconds per circle, and direction. Animation frame rate remains shared.
-Apply and Discard follow the same draft rules as the other global settings.
-Changing defaults does not change existing panels. Use a panel's right-click
-Artwork settings entry to edit that instance. Static mode retains rotation parameters.
+Interface → Album artwork sets new-panel style, mode, period and direction;
+animation FPS remains shared. Existing panels use their own right-click Artwork
+settings editor. Static mode retains rotation parameters.
 
 === Appearance and library display
 
@@ -556,110 +516,67 @@ Track details' full, static preview does not use the Album artwork FPS cap.
 
 == Layout
 
-The desktop stores named layouts and the current selection in `layout.json` in
-the data directory. Each layout has its own panel tree, relative sizes, tab
-order and selection, tab-bar visibility, and instance options. Edit locks are
-window-local, not saved; every newly opened window starts locked.
+`layout.json` in the data directory stores named panel trees, sizes, tabs and
+instance preferences, plus the selected layout. Locks are window-local; each
+newly opened window starts locked. Layouts do not contain separate browsing or
+editing sessions. Switching keeps playback, queue, global settings, window
+placement and the Track details draft.
 
-All layout state, including the active layout, stays in memory until manual sync
-or an orderly application exit writes it to `layout.json`. Closing and reopening
-the desktop window keeps the latest in-memory layouts; it does not write them.
-An abnormal exit loses changes made since the last successful write. Panel
-settings Apply takes effect immediately for this session only; it does not write
-the layout file.
+Open `Menu > Layouts` to switch, duplicate, rename or delete layouts. Names must
+be nonempty and unique after trimming. To delete the active layout, switch first;
+at least one layout must remain. Hover a row or Tab to its Delete button to reveal
+the action. Finish or discard Settings edits before switching; Escape closes
+the manager. `Default` sorts first when present, followed by names in name order.
 
-Sync and orderly exit skip unchanged valid content. A missing file is initialized
-at the next sync or orderly exit, even without layout edits. An existing file
-that cannot be loaded is preserved until explicit manual sync authorizes replacement;
-ordinary layout edits and orderly exit do not overwrite that recovery material.
+Without a saved collection, Rivu supplies editable `Default`, `Album` and `Visual`
+templates. Default combines browsing, Queue, Track details, cover art, Spectrum
+and playback controls; Album emphasizes albums and artwork, Visual the audio
+visualizations. Duplicate the active layout to create another. Renamed or deleted
+templates are not restored on restart.
 
-Without a saved collection, Rivu provides `Default`, `Album`, and `Visual` layouts.
-Default combines Library and Queue with alternative browsing tabs, Track details,
-cover art, Spectrum, and playback controls. Album emphasizes album browsing and
-cover art; Visual emphasizes the audio visualizations. All use the same global
-configuration and start locked.
+Edits, panel-settings Apply and layout selection update session memory. Use
+Sync layouts to file beside Rename to persist the collection, or quit orderly.
+Window close/reopen preserves session layouts without writing; an abnormal exit
+loses unsynced changes. Sync cancels drag/resize previews and captures the current
+collection; later edits require another sync. Progress and completion appear in
+the manager. Failure preserves the file and session edits and appears there or,
+after closing it, in the footer. Press Sync to retry; ordinary edits do not retry.
 
-To make another layout, duplicate one and edit the copy. Built-in layouts are
-editable templates; renaming or deleting one does not restore it on restart.
+Sync and orderly exit skip unchanged valid content and initialize a missing file.
+If an existing file cannot load, Rivu reports the error and uses defaults, preserving
+the failed input until explicit Sync authorizes replacement. Exit before external
+file edits: layouts load once per GUI session and saves do not merge outside changes.
 
-The layout list places `Default` first when present, followed by other names in
-name order. This does not change the active layout.
+Unlock with the bottom-right layout button's context menu to add, remove, move,
+resize or reorder panels. Left-click opens the catalog: drag an item onto the
+workspace, including an empty workspace, to add it. Clicks and keyboard activation
+do not insert panels. Playback, tab selection, layout management and the panel
+context menu's tab-bar toggle remain available while locked; separators are inert.
 
-Open `Menu > Layouts` to switch layouts, duplicate the current layout under a new
-name, rename it, or delete another layout after confirmation. Hover the layout's
-row or focus its Delete button with Tab to reveal Delete. Names must be
-nonempty and unique after trimming surrounding whitespace. To delete the current
-layout, switch to another one first; the collection always retains a layout.
-Use the Sync layouts to file icon beside Rename to write the current collection.
-Sync cancels any active layout interaction before capturing the collection, so
-drag and resize previews are not saved. The panel shows sync progress and confirms
-completion, including when no write is needed. A write failure leaves session
-layouts unchanged. The error appears in the panel while open, or in the footer
-after closing it. Press Sync again to retry; further layout edits do not
-automatically retry a failed write.
+Drag a panel to an edge to split its region, its center to merge tabs, or a visible
+tab bar to reorder/transfer tabs; the unused tail appends. The shaded preview marks
+the committed destination. An invalid drop or `Cannot dock here` leaves the tree
+unchanged. Escape, deactivation, menus/dialogs or locking cancel a panel drag;
+after resize or scale changes, wait for a fresh preview before dropping.
 
-Switching or duplicating a layout keeps playback, queue, global settings, window
-placement, and the Track details draft. Layouts do not save separate browsing or
-editing sessions. Finish or discard Settings edits before switching. `Escape`
-closes the layout manager.
+Separator drags resize their two neighboring regions; removing a region gives its
+space to a neighbor without changing other sizes. Escape, deactivation, resize
+or scale changes cancel a separator drag and restore its starting proportions.
+Queue-entry drags never dock panels.
 
-While unlocked, panels can be added, removed, moved, resized, and reordered.
-Right-click a panel to toggle its tab bar, even while locked. Right-click the
-bottom-right layout button to toggle the lock, or left-click it to open the panel
-catalog. Drag a catalog item into the workspace to add a new instance; single-click
-and double-click do not add panels, and there is no keyboard insertion action.
-An empty workspace accepts a drop to create its first tab group. Cancelling or
-releasing outside a valid target creates nothing.
-Playback, tab selection, and layout management remain available while locked.
-Locked separators have no resize cursor or hover highlight.
+Snapping aligns separators with other separators, equal pane sizes or the configured
+grid while respecting minimum sizes. Hold Alt to invert snapping for that gesture.
+Layouts permit at most 32 splits along a path; tab groups do not count, and there
+is no sibling/tab-count limit. A drop exceeding the depth limit changes nothing.
 
-Drag a separator to resize its two neighboring regions. Edge docking splits a
-region; removing a region gives its space to a neighbor. Other pane sizes stay
-unchanged.
+Layout input must be a regular file; FIFOs, including symlink targets, are rejected
+without waiting. Invalid names and operations leave the UI unchanged. Geometry,
+persistence and editing invariants are in link:24_layout.adoc[Desktop Layout Design].
 
-Drag onto a panel edge to split its region, or its center to merge tabs. The label,
-outline, and shaded preview identify the destination and final position. Panel
-catalog drags use the same targets as moves; release to apply the preview.
-
-Drop into a visible tab bar to reorder or transfer tabs; its unused tail appends.
-`Cannot dock here` means release leaves the layout unchanged. `Escape`, window
-deactivation, opening a dialog or menu, or locking the layout cancels a panel drag.
-After a window resize or scale change, wait for a new preview before dropping.
-
-`Escape`, window deactivation, window resizing, or scale changes cancel a separator
-resize and restore its starting proportions. Queue-entry drags never dock panels.
-
-Layout snapping aligns separator drags with other separators, equal pane sizes,
-or the configured grid while respecting minimum pane sizes. Hold Alt to invert
-the snapping preference for the current gesture without changing saved settings.
-
-Layouts support up to 32 nested rows or columns along any path; tab groups do
-not add to this depth. Docking that would exceed this limit leaves the layout
-unchanged. This is not a limit on the number of sibling regions or tabs.
-
-If `layout.json` cannot be read or validated at startup, Rivu reports the error
-and opens the default collection. Only regular files are admitted; a FIFO or a
-link to one is rejected without waiting for a writer. Invalid names or operations
-leave the UI unchanged. Sync captures the current layouts; later edits are not
-included in that request. A failed write preserves the old file and session edits.
-Retry with manual sync, not another layout edit or instance-settings Apply.
-Orderly exit writes the latest layouts, except when preserving an input that
-failed to load and has not been explicitly replaced through Sync.
-Application errors appear in the footer; accepted media tasks show progress and
-results in their owning Library, Queue, or Playlists panel. See
-link:02_library.adoc#_cancellation[Library cancellation] and
-link:03_playlist.adoc#_import_workflow[Playlist import]. Use the footer copy action
-to copy complete notification text, including text truncated on screen. Errors
-also provide a dismiss action; these actions remain visible without hovering.
-Drag the empty footer area
-with the left mouse button to move the window using the window manager's native
-move operation. Notification text and controls do not start a window move.
-Menus and dialogs suppress footer dragging.
-Exit Rivu before editing `layout.json` manually: it is loaded once per GUI session,
-and later saves replace it rather than merging external changes.
-
-See link:24_layout.adoc[Desktop Layout Design] for geometry, ownership, and
-editing invariants.
+The footer reports application errors, with Copy for full text and Dismiss for
+errors; media-task progress stays in its Library, Queue or Playlists panel.
+Drag empty footer space with the left button to move the window; text and controls
+do not start a move. Open menus or dialogs disable footer dragging.
 
 
 === Layout file
@@ -740,30 +657,43 @@ belong only to `audio_visualizer` panels. Animation FPS remains global.
 
 == Visualizations
 
-Live analysis runs during playback only when visualizations are enabled, the application
-window is visible, and a style requiring live analysis is visible. Waveform uses
-the independent progressive or explicitly requested track-preview path.
-`visualizations.general.analysis_rate_hz` accepts `5`–`60` and defaults to `28`; it limits FFT
-analysis, not display animation. `visualizations.general.animation_fps` defaults to `0`, following
-native window frames; `1`–`240` caps the shared animation rate for Spectrum,
-Spectrogram, and Audio Visualizer. It does not affect Waveform or album artwork.
-Set it under Settings → Visualizations → General → Animation, separately from
-Frequency analysis. Spectrum release, Spectrogram scrolling, radial motion, and
-generative light advance between accepted audio updates at this display cadence.
-Display time never advances beyond received audio. Pause stops analysis and
-audio-driven animation, preserving the last displayed frame in every style.
-The optional idle fade applies only to stopped playback, not pause.
-Hidden windows and disabled visualizations stop both clocks; losing focus alone does not.
-Stereo Density and Spatial Spectrum refresh from the latest analysis result,
-bounded by the display cap rather than replaying skipped publications.
+Live analysis requires playback, enabled visualizations, and a visible live-analysis
+style. Waveform instead uses progressive decoding or an explicitly requested
+track preview. Analysis and presentation have independent rates:
 
-Switching tabs or temporarily hiding the window preserves the last visualization
-until fresh audio is ready, without replaying hidden time. Inactive views stop
-analysis and animation; switching one panel does not interrupt other visible views.
-Stop, seek, source replacement, incompatible analysis settings, and disabling visualizations
-clear stale results, including while hidden or paused. Closing the window releases
-its presentation; reopening does not restore old frames. Waveform keeps its track
-preview when hidden but discards it when visualizations are disabled.
+[cols="2,1,3",options="header"]
+|===
+|`visualizations.general.*` key |Range / default |Controls
+|`analysis_rate_hz`
+|`5`–`60` / `28`
+|Maximum FFT transform and publication rate, not PCM ingestion or animation.
+|`animation_fps`
+|`0`–`240` / `0`
+|Spectrum, Spectrogram, and Audio Visualizer display cadence. `0` follows native
+window frames; positive values cap updates per second. Waveform and album artwork
+are independent.
+|===
+
+Set Animation FPS under Settings → Visualizations → General → Appearance;
+Analysis rate is in Frequency analysis. Spectrum release, Spectrogram scrolling,
+radial motion, and generative light can advance between analysis publications,
+but display time never advances beyond accepted audio. Stereo Density and Spatial
+Spectrum use the latest result rather than replaying skipped publications.
+
+Pause freezes the last displayed frame without running analysis or audio-driven
+animation. Stop retires analysis results; the optional radial idle fade may keep
+the last drawing briefly. Seek, source replacement, incompatible analysis settings,
+and disabling visualizations clear stale results even while hidden or paused.
+
+Inactive tabs and reliably reported hidden windows suspend their demand, retaining
+the last drawing until fresh audio is ready without replaying hidden time.
+Switching one panel does not interrupt other visible views; losing focus alone
+does not suspend analysis. If the platform does not report visibility reliably,
+compositor throttling can slow animation while the independent analysis timer
+continues. Closing the window releases its presentation; reopening does not
+restore old frames. Waveform keeps its track preview when hidden but discards it
+when visualizations are disabled. Scheduling and continuity details are in
+link:23_visuals.adoc#_presentation_scheduling_and_visibility[Presentation scheduling and visibility].
 
 `visualizations.general.palette` accepts `tokyo_night` or `deadbeef` (default `deadbeef`).
 Color settings use quoted `"#RRGGBB"` values.
@@ -805,10 +735,9 @@ Shared visualization settings apply as follows:
   FFT size accepts powers of two from `512` to `32768` and defaults to `8192`.
   Window accepts `hann`, `blackman_harris` (default), or `none`.
   Changing size or window clears visualization history.
-  `visualizations.general.analysis_rate_hz` is the maximum analysis rate, independent of
-  `visualizations.general.animation_fps` and compositor-throttled display callbacks.
-  Changing only this rate preserves compatible visualization content and the
-  current analysis window; small FFT windows at low rates can miss short transients.
+  Changing only the analysis rate preserves compatible visualization content and
+  the current analysis window. Small FFT windows at low rates can miss short
+  transients; increasing animation FPS cannot recover unobserved audio.
 * Disabling visualizations stops visualization processing and discards results; see <<_visualization_enablement,Visualization enablement>>.
   This is independent of rendering reuse and media read buffering.
   In Settings → Visualizations → General → Appearance, its switch sits

@@ -124,11 +124,11 @@ The data directory contains `library.db` (library and playback state),
 Shared-state persistence is independent of client lifetime. See
 link:doc/01_config.adoc#_saving_configuration[configuration saving] and
 link:doc/04_playback.adoc#_queue[queue restoration] for their independent guarantees.
-Stop the core before operating on `library.db`; external writes while Rivu runs
-are unsupported. See link:doc/02_library.adoc#_sqlite_maintenance[SQLite maintenance]
-for supported formats and offline inspection, and
-link:doc/26_migration.adoc[the independent migration tool] for its ownership contract.
-Client access and wire schemas are described in link:doc/21_ipc.adoc[IPC].
+Stop Rivu before link:doc/02_library.adoc#_sqlite_maintenance[database maintenance];
+external writes while it runs are unsupported. Keep `rivu-migrate` installed with
+`rivu` for link:doc/26_migration.adoc#_application_invocation[automatic startup migration].
+Unsupported formats or migration failure stop startup without resetting data.
+Client and wire contracts are in link:doc/21_ipc.adoc[IPC].
 
 == Documentation
 

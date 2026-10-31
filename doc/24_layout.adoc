@@ -4,35 +4,35 @@
 
 == Scope and ownership
 
-The window's workspace owns named docking trees, docking interactions, and
-panel-local scroll state. The GUI session owns the layout writer so accepted
-saves outlive a window. The playback core owns playback, queue state, global
-configuration, and audio analysis; layout edits must not replace that ownership.
-User operations and file syntax are documented in
+Ownership follows lifetime rather than the visible panel tree:
+
+[cols="1,2,2",options="header"]
+|===
+|Owner |State |Lifetime boundary
+|Playback core
+|Playback, queue, global configuration and audio analysis
+|Independent of desktop panels and layout edits
+|GUI session
+|Latest published layout collection and its single persistence worker
+|Survives window close; orderly application teardown flushes accepted state
+|Window workspace
+|Editable named trees, docking interactions, measurements and panel scroll positions
+|Recreated on window reopen from session memory, without transient edit state
+|Window feature owners
+|Business selections, drafts, reads and presentation resources
+|Shared by panels of the same feature; not copied into named layouts
+|===
+
+Layout management is desktop-local, not a Core IPC or CLI API. User controls,
+file syntax and Settings exclusion are in
 link:01_config.adoc#_layout[Configuration and layout].
-Layout management is a desktop-local surface: select, duplicate, rename and delete
-operate on the session collection; Sync requests persistence. These are GUI
-actions, not `rivu` CLI subcommands or Core IPC commands. Closing Settings is
-required before layout management can proceed.
 
-This chapter follows tree geometry and editing through persistence, then connects
-panel visibility to feature ownership and shared input controls. These are
-current desktop contracts, not a replacement GUI architecture.
-
-Switching or duplicating a saved layout replaces the panel tree inside the
-existing window and GUI session. Existing owners retain their state naturally;
-switching does not introduce snapshots, state migration, restoration machinery,
-or a separate UI-session state copy for each named layout. Layouts describe panel
-structure and instance preferences, not complete workspace sessions. View-local
-state need not be restored if its owner is replaced.
-
-Playback and accepted business operations keep their independent lifetimes.
-The current editor and in-flight metadata save remain alive even if Details is
-no longer visible. Switching cancels obsolete interactions and invalidates old
-geometry, reconciles visible-panel demand, and retires unused rendering resources
-through their existing owners. It does not preserve hidden graphics merely to
-restore them on a later switch. Renaming the active layout or deleting an
-inactive one does not replace the active panel tree.
+Switching or duplicating replaces the active tree, cancels interactions,
+invalidates geometry and reconciles panel demand. Layouts hold structure and
+instance preferences, not business-state or scroll snapshots. Playback, metadata
+drafts and accepted saves retain their independent owners; unused graphics retire
+rather than forming a hidden-layout cache. Renaming the active layout or deleting
+an inactive one does not replace the tree.
 
 === Initial layouts
 
@@ -277,53 +277,43 @@ Serialization borrows runtime data and writes one strict format. Unknown fields,
 duplicate layout names, invalid boundaries, malformed trees, and excess depth
 are errors. Runtime IDs and edit locking are omitted.
 
-One desktop-session save owner receives immutable in-memory snapshots of all
-layout edits. Named layouts share trees until editing copies the affected tree.
-The GUI neither validates/encodes the whole collection nor performs save I/O.
+=== Session snapshots and explicit sync
 
-Only manual sync or an orderly application exit writes layout state to disk;
-the user controls are documented in link:01_config.adoc#_layout[Configuration and layout].
-A sync first cancels and rolls back active interactions, then captures the committed
-collection. Drag and separator previews never enter that snapshot. Panel-settings
-Apply publishes its session-only change without requesting or awaiting a file write.
+The desktop-session owner retains immutable snapshots of layout edits; named
+layouts share trees until an edit copies the affected tree. Validation, encoding
+and file I/O stay off the GUI. Manual sync cancels previews and captures committed
+state; panel-settings Apply publishes only to session memory.
 
-The worker writes serially, retaining at most one in-flight snapshot and one
-replaceable pending sync snapshot. A sync captures the latest published
-collection at the time of the request. Subsequent in-memory edits neither change
-that captured snapshot nor suppress its success or failure feedback. A newer sync
-request supersedes visible feedback from an older request and replaces pending
-work, not the running write; superseded failures are still logged. A slow old write
-cannot overwrite a newer completed write. There is no unbounded task or request queue.
+The writer serializes one in-flight and one replaceable pending sync snapshot.
+Later edits do not alter a captured request or suppress its feedback. A newer
+sync replaces pending work and visible feedback, not the running write;
+superseded failures remain logged. Serialization prevents an older write from
+overwriting a newer completed one without an unbounded request queue.
 
-The worker compares persisted content with its last successful snapshot before
-encoding. Equal content still validates but needs no write; runtime IDs and edit
-locks do not affect equality. Success advances the baseline only to the captured
-request, not newer session memory. Failure preserves it. A missing startup file
-has no baseline and is initialized on sync or orderly exit. Existing input that
-failed to load is preserved through edits and exit until an explicit sync request
-authorizes replacement. This comparison does not watch external file changes.
+=== Baseline, replacement and failure
 
-The worker validates before writing a unique sibling temporary file and renaming
-it over the destination. Failed validation, encoding, or I/O preserves the
-existing destination; this is atomic replacement, not a claim of power-loss
-durability. The latest sync request publishes visible save success or failure.
-A successful sync clears only its own earlier save error, not an unrelated GUI
-error. Named operations validate their names and preserve a valid selected layout
-immediately. A failed sync does not roll back any session changes. The failure
-is reported in the footer; manual sync retries the latest collection, while
-further layout modifications do not retry automatically. There is no automatic
-retry loop on a persistently failing destination.
+The writer validates unchanged content but skips encoding and I/O against its
+last successful snapshot; runtime IDs and locks do not affect equality. Only the
+captured successful request advances this baseline. Missing input is initialized
+on sync or exit; failed startup input remains protected until explicit Sync.
+External file changes are not watched or merged.
 
-The session reads the file once at initialization through ordinary-file admission;
-FIFOs, including symlink targets, are rejected without waiting for a writer.
-Closing a window neither writes layouts nor destroys their in-memory state.
-Reopening uses the latest in-memory snapshot and resets transient edit mode to
-locked. Normal Quit and other orderly shutdowns flush the latest dirty collection
-unless preserving failed startup input without an explicit sync. They wait for
-the writer after the GPUI event loop returns, outside its deadline-limited quit
-observer, and propagate a final save failure. This application-teardown
-boundary can wait for filesystem I/O; individual interactions, layout switches,
-window closes, and reopens do not. An abnormal exit loses unsynced changes.
+Validation precedes a unique sibling temporary file and atomic rename. Failure
+preserves the destination, baseline and session edits; atomicity does not promise
+power-loss durability. The latest request reports success or failure; success
+clears only its own save error. Manual Sync retries the latest collection, not
+ordinary layout edits or an automatic retry loop. Named operations preserve a
+valid selected layout independently of file writes.
+
+=== Initialization and teardown
+
+Initialization reads once with ordinary-file admission, rejecting FIFOs and links
+to them without waiting. Close/reopen retains session memory without writing and
+resets the window to locked. Orderly teardown flushes dirty state unless preserving
+failed startup input, joins the writer after the GPUI loop rather than inside its
+deadline-limited quit observer, and propagates save failure. Only teardown can
+wait for file I/O; interactions and window close/reopen do not. Abnormal exit loses
+unsynced changes.
 
 == Rationale and alternatives
 
@@ -376,15 +366,10 @@ coordinates explicit cross-feature actions and metadata confirmation, not a
 second aggregate browser model or query dispatcher. See
 link:22_cache.adoc#_query_projection_retention[Query projection retention].
 
-The panel catalog includes `audio_processing` (Audio processing). Wide graphs
-place the canvas and inspector side by side; narrow graphs use working-area tabs.
-The source/audition footer and task state remain outside the scrolling forms.
-Its configuration and jobs belong to
-the core, not the saved docking tree. Hiding the panel or switching layouts does
-not disable EQ or cancel a file job. Obsolete graph pointer gestures are cancelled
-when layout geometry changes; numerical drafts and response inspection do not
-constitute a separate authoritative DSP configuration. See
-link:27_audio_processing.adoc[Audio processing usage and acceptance].
+Audio processing configuration and jobs belong to Core, not the docking tree.
+Hiding its panel does not disable EQ or cancel work; geometry changes cancel
+pointer gestures without discarding numerical drafts. Its UI and execution
+contract are in link:27_audio_processing.adoc[Audio processing].
 
 
 === Feature state and commits
@@ -395,27 +380,18 @@ row collections. Core serializes business commits and persistence; GUI refresh
 failure cannot undo an accepted commit. See
 link:21_ipc.adoc#_business_ownership_and_transactions[Business ownership and transactions].
 
-`list_interaction` owns shared drag-transfer descriptions and source-validity
-checks against the immutable Core snapshot, without depending on `WindowView`.
-Source features freeze identities and selections, retain their own
-occurrence-reordering rules, and resolve Library nodes asynchronously. Targets
-decide acceptance and insertion position. `coordination` owns window-bound
-content-menu execution, manual-intent arbitration, and queue replacement;
-these implementations do not become shared interaction contracts.
-Copying tracks and reordering occurrences remain distinct.
-`coordination::collection` owns album pagination and the collection worker gate:
-cancellation invalidates results immediately, but only worker completion releases
-the physical slot. Content-menu rendering and window updates remain separate.
+Shared list interactions freeze source identities and ordered selections against
+the Core snapshot; features keep occurrence-reordering rules and asynchronous
+Library resolution. Targets decide acceptance and insertion position. The window
+coordinator owns content menus, manual-intent arbitration, queue replacement and
+album-menu resolution, not feature listing models. Copying tracks and reordering
+occurrences are distinct. Query cancellation, acceptance and physical-slot rules
+are authoritative in link:22_cache.adoc#_query_projection_retention[Query projection retention].
 
 Settings owns its baseline, draft, target and submission identity independently
 of controls. Inputs own editable text/caret. Successful completion rebases later
 edits onto committed configuration; failure or obsolete completion cannot erase
 new input. Panel settings share this boundary, not artwork-cache maintenance.
-
-Albums owns logical listing state and its physical read slot. Visibility, query
-identity and revisions control acceptance; logical cancellation does not free
-the worker. The GPUI owner handles execution, search, artwork and scroll anchors
-without duplicating the listing model.
 
 Relative selection uses each feature's latest desired cursor. The feature
 prepares and validates its target; the window arbitrates newest manual intent
@@ -442,6 +418,12 @@ keyboard. Closing a surface validates its invoking control against the next draw
 tree; a missing origin falls back to the layout, and a newer workspace focus
 choice supersedes deferred restoration. Panel removal hands focus back when its
 removed control owned it and routes panel commands to a surviving active panel.
+
+Monitor EQ popovers have one panel owner and shared keyboard scope. Dismissal
+restores the live trigger only while the popup still owns focus; outside presses
+do not activate underlying controls. Hiding or invalidating owner geometry
+retires the popup, and disabled EQ removes preset actions from traversal.
+Popup/name changes invalidate affected editors rather than every processing view.
 
 Queue and Playlist owners resolve an operation into one ordered occurrence
 snapshot before dispatch. Menu and drag payloads retain that snapshot, including
@@ -581,12 +563,6 @@ internal scrolling. FormField and label/value rows share presentation only.
 NumericInput groups an existing editor with optional unit and step controls,
 preserving owner-provided unit widths; callers retain parsing, validation,
 formatting, drafts and submission.
-
-Monitor EQ popovers have one panel owner and shared keyboard scope. Dismissal
-restores the live trigger only while the popup still owns focus; outside presses
-do not activate underlying controls. Hiding or invalidating owner geometry
-retires the popup, and disabled EQ removes preset actions from traversal.
-Popup/name changes invalidate affected editors rather than every processing view.
 
 ==== Lists and scrolling
 

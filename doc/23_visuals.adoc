@@ -21,30 +21,16 @@ consumer behavior is described here; a proposal there does not change it.
 
 == Analysis boundary
 
-`rivu-visuals` owns visual models, rendering, and track-preview rendering events.
-It receives immutable analysis frames, typed `VisualParameters`, and localized
-`VisualLabels`; it does not depend on the application root, layout tree,
-localizer, or playback commands. The GUI presentation owner reconciles demand,
-accepts current source/seek identities, and owns the shared scheduling clock.
-The host routes Waveform seek, full-scan, and decoder-hint events through its
-existing playback and scan owners. Moving rendering into this crate does not
-introduce another analysis worker, PCM pool, or animation loop.
-Renderer constructors use the same `VisualParameters` defaults as configuration
-projection; they do not maintain independent initial style, interpolation, or
-envelope settings. History and GPU material allocation remain demand-driven.
-
-`FrequencyViews` accepts shared analysis frames and coordinates the frequency
-plots. Its `spectrum` module owns `Spectrum` state, envelopes, bin mapping, and
-GPU publications; its `spectrogram` module owns `Spectrogram` state, bounded
-history, sampling, and tiled publications. Palette lookup and text painting are
-shared with Waveform through the `palette` and `labels` modules.
-`StyleCoordinator` reconciles style visibility and layout retention, then routes
-borrowed frames to `RadialRenderer`, `StereoRenderer`, `FractalRenderer`, and
-`OscilloscopeRenderer`. Each concrete renderer owns its numerical state and
-drawing. The six layout-retention slots live inline in the coordinator; radial
-canvas closures continue sharing the original single UI-thread state owner,
-without another heap allocation or frame copy. `Waveform` owns the track-preview
-view.
+`rivu-visuals` receives immutable analysis frames, typed `VisualParameters`, and
+localized `VisualLabels`, without depending on the application root, layout tree,
+localizer or playback commands. The GUI presentation owner reconciles demand,
+accepts source/seek identities and owns scheduling; the host routes Waveform seek,
+scan and decoder-hint events through existing playback and scan owners. Rendering
+introduces no additional analysis worker, PCM pool or animation loop. Constructors
+share configuration-projection defaults; history and GPU allocation are demand-driven.
+Frequency views share analysis while each style owns its rendering state.
+Resource capacities and release points belong to
+link:22_cache.adoc#_visualization_caching[Visualization caching].
 
 Visualization analysis is separate from audio output and observes samples before
 master volume gain. One global `visualizations.general.signal` setting selects `before`
@@ -95,11 +81,9 @@ from Spectrum, Spectrogram, RMS and band-energy drive. This is a music-animation
 sampling policy, not continuous metering; display interpolation cannot recover
 unobserved audio. Density instead accumulates samples during ingestion.
 
-FFT plans and working storage are prepared only when eligible audio arrives with
-active playback and display demand. They remain reusable across suspension;
-configuration changes alone do not allocate an analyzer. Pause or loss of demand
+Analysis preparation and retained analyzer capacity follow
+link:22_cache.adoc#_resource_boundaries[Resource boundaries]. Pause or loss of demand
 clears capture input; disabling visualizations also breaks semantic continuity.
-
 Backpressure never blocks playback. A stalled worker drops stale queued input
 and marks a continuity break; fresh audio wakes recovery without polling. A
 ready replacement and its generation publish together. Until then, invalidation
@@ -154,6 +138,8 @@ snapshot with newer metrics.
 
 === Presentation scheduling and visibility
 
+==== Independent analysis and display clocks
+
 One window-local `VisualizerRuntime` shares visual models and staging across panels.
 Its analysis timer requests frames at `analysis_rate_hz`; native window callbacks
 consume the latest publication and advance animation independently.
@@ -176,25 +162,33 @@ also integrates the previous target up to the current display time before accept
 replacement levels. Release therefore advances even when every display tick consumes
 new analysis, without applying the new target retroactively to the elapsed interval.
 If the producer stalls, display time stops at the accepted boundary rather than
-inventing audio. Generation/sample-rate changes and clock rewinds reset continuity; the
-producer marks real sample gaps independently of publication cadence. Pause
-cancels analysis and audio-driven animation, preserving the last displayed frame
-in every visualization style. The presentation owner does not dispatch the worker's
-pause-reset publication to renderers, including during resume before fresh input
-is ready. Resumption reanchors display time rather than replaying the suspension.
-A paused business update can request one refresh, but does not advance animation
-or start the optional Audio Visualizer idle fade; that fade applies only to stopped
-playback.
-Source replacement, seek intent, FFT/window/signal changes and disabling visualizations
-clear incompatible retained results even while paused or hidden. These semantic
-facts are independent of producer continuity generation and seek previews.
+inventing audio. Generation/sample-rate changes and clock rewinds reset continuity;
+the producer marks real sample gaps independently of publication cadence.
+
+==== Pause, Stop, and semantic invalidation
+
+Pause cancels analysis and audio-driven animation, preserving the last displayed
+frame in every visualization style. The presentation owner does not dispatch the
+worker's pause-reset publication to renderers, including during resume before
+fresh input is ready. Resumption reanchors display time rather than replaying the
+suspension. A paused business update can request one refresh, but does not advance
+animation or start the optional Audio Visualizer idle fade.
+
 Stop retires all analysis input. With `fade_when_idle` enabled, an ordinary Stop
 on the same actual playback track can fade the last bounded radial drawing for
 two seconds, then release it; no worker audio is consumed while stopped.
 Clearing the queue or changing the playback track clears that drawing immediately,
 even if Metadata still displays the same track. Additional source/seek boundaries
 observed together with Stop also clear it rather than preserve an uncertain fade.
-Disabling visualizations discards the views rather than freezing them.
+
+Source replacement, seek intent, FFT/window/signal changes and disabling visualizations
+clear incompatible retained results even while paused or hidden. These semantic
+facts are independent of producer continuity generation and seek previews.
+Disabling visualizations discards the views rather than freezing them; its
+waveform and re-enablement consequences are in <<_visualization_enablement,Visualization enablement>>.
+
+==== Appearance changes without new audio
+
 Radial color, geometry, sensitivity, and rotation-speed edits preserve the frozen
 signal and animation time. A dB-range edit remaps the last accepted band peaks
 without consuming another audio publication or advancing smoothing. Narrowing
@@ -207,9 +201,8 @@ range and axis settings invalidate only affected retained drawings and rebuild
 from compatible working levels/history. Shared palette and background changes
 affect both views. A suspended panel whose working data has been
 released cannot reconstruct that data from its final drawing. It waits for fresh
-input after an incompatible mapping change. Source/seek and FFT/window/signal
-changes instead clear incompatible signal state, including when paused; they
-must not redraw the prior source under the new identity.
+input after an incompatible mapping change; a final drawing cannot authorize
+redrawing the prior source under a new source/seek or analysis identity.
 
 Only affected visual panel entities are invalidated by analysis or waveform
 updates. Cached scenes retain their measured panel dimensions until geometry or
@@ -217,14 +210,13 @@ visibility changes. Shared Spectrogram geometry changes invalidate sibling
 scenes so every panel uses the current history dimensions. Scene caching is always
 enabled. Playback, commands, and shutdown remain independent of presentation.
 
+==== Visibility and layout retention
+
 A reliable Hidden notification cancels both clocks and disables analysis.
-The last drawable presentation survives temporary hide and tab changes until a
-current drawable replacement is accepted. Layout membership bounds its lifetime;
-inactive tabs do not accumulate analysis history or run simulations. Fractal tabs
-retain their bounded scene to resume trajectories; hiding the window instead
-releases that scene and staging, retaining only final drawing data. Actual window
-destruction releases all of them; no cross-window snapshot cache or additional
-clock is introduced. Switching one panel never suspends unaffected visible panels.
+Reveal waits for a current drawable replacement without replaying hidden audio;
+switching one panel never suspends unaffected visible panels. Final drawings,
+inactive-tab state and audio-worker pools have distinct lifetimes defined in
+link:22_cache.adoc#_resource_boundaries[Resource boundaries].
 Loss of focus alone never disables analysis. Without a reliable visibility
 notification, compositor throttling limits native animation callbacks but not
 the independent analysis timer; analysis remains bounded by `analysis_rate_hz` and
@@ -338,18 +330,13 @@ These are visual choices, not amplitude or renderer limits.
 Peak is a thin, solid marker at the channel's peak level. Color compression
 does not change the height represented by the amplitude mapping.
 
-A single shared vertical gradient would be cheaper to batch, but would assign
-the same color to equal heights across columns and weaken those differences.
-Each panel publishes numerical left/right RMS and Peak columns. The GPU expands
-them into two RMS fills and two thin Peak markers; unknown components draw
-nothing, while known silence retains a minimum-height fill. A shared palette
-keeps floating-point center/endpoint pairs. Each fill blends its own endpoints,
-not intervening palette colors; Peak uses its endpoint directly. Logical column
-boundaries and ceil-height geometry preserve one-logical-pixel markers through
-resize and physical scaling. Placement does not change numerical identity;
-cursor and glow remain dynamic. There are no derived image or rectangle tiles.
-Buffer admission and completion-aware retirement use the shared
-link:25_gpu_rendering.adoc#_admission_and_retirement[GPU material budget].
+Each panel supplies numerical stereo RMS and Peak columns: unknown components
+draw nothing, while known silence retains a minimum-height fill. Each RMS fill
+blends its own floating-point center/endpoint colors rather than using one shared
+vertical gradient; Peak uses its endpoint directly. Logical column boundaries and
+ceil-height geometry preserve one-logical-pixel markers through resize and scaling.
+Cursor and glow remain dynamic. The closed GPU interface is defined in
+link:25_gpu_rendering.adoc#_internal_led_vertical_slice[Publication and drawing API].
 
 == Spectrum
 
@@ -386,23 +373,12 @@ or amplitude geometry.
 
 Peak markers are discrete, solid-colored markers drawn separately from the body.
 They are not connected into a curve, preserving their transient-marker meaning.
-Spectrum rebuilds body geometry on each panel render while reusing compatible
-frequency mappings; retained scenes can replay without another panel render.
 
-Spectrum shares one 1024-entry palette across panels and repaints, independently
-of body generation. Its cubic colors use 8-bit channel quantization, unlike
-Waveform's floating-point endpoints. Range, size and style change geometry or
-mapping, not palette identity.
-
-Rectangle coverage uses the shared MSAA intermediate: overlapping alpha ramps
-would darken adjacent zero-gap columns. Upload or paint failure reports an error
-rather than changing the fill. The closed GPU API and resource lifecycle are in
-link:25_gpu_rendering.adoc#_implemented_fixed_schema_slices[Implemented fixed-schema slices]
-and link:22_cache.adoc#_resource_boundaries[Resource boundaries].
-
-More display slots still increase aggregation, geometry and fragment work;
-more LED segments do not increase CPU body geometry. A shared gradient avoids
-per-palette-interval submissions, but those counts alone prove no timing gain.
+Rectangle coverage uses shared MSAA to avoid darkening adjacent zero-gap columns.
+Upload or paint failure reports an error rather than changing the fill. Geometry
+reuse and capacity belong to link:22_cache.adoc#_spectrum[Spectrum caching];
+transport and admission belong to
+link:25_gpu_rendering.adoc#_implemented_fixed_schema_slices[GPU rendering].
 
 == Audio Visualizer ownership
 
@@ -410,15 +386,11 @@ All eleven styles use one `audio_visualizer` panel kind. Layout instances retain
 style, reference lines, and labels, while style-specific global parameters keep
 their existing configuration groups. Titles resolve from each instance's style.
 
-Panel instances own presentation options, while analysis and simulation results
-are shared by rendering style. Multiple panels of one style do not duplicate its
-field or advance its simulation independently; distinct styles do not overwrite
-each other's state. Overlay toggles are paint-only and do not reset analysis or
-simulation. Hidden styles release working fields and PCM while retaining bounded
-final drawing data until fresh drawable output is accepted. Fractal scenes have
-the tab/window distinction described under Generative light below. Physical
-reclamation follows the renderer lifecycle described in
-link:22_cache.adoc[Caching and Resource Lifecycles].
+Analysis and simulation results are shared by style, not panel: multiple panels
+do not duplicate a field or advance simulation independently, and distinct styles
+do not overwrite each other's state. Overlay toggles are paint-only. Retention
+across tab changes, hiding and destruction is defined in
+link:22_cache.adoc#_resource_boundaries[Resource boundaries].
 
 === Radial styles
 
@@ -537,17 +509,11 @@ occupies only its actual duration, leaving the rest blank. No expansion or
 release stage stretches retained columns. Paused or stalled display time freezes
 placement, and resizing reprojects the same chronological intervals.
 
-History width and sampling resolution bound retained resources. Complete FFT
-snapshots are reduced to a logarithmic grid of at most 1024 retained rows, further
-bounded by the shared material budget and history capacity. Configuration changes
-size history against the widest measured panel before resampling; a cadence edit
-that leaves this capacity unchanged preserves the retained frequency grid.
-Presentation targets one row per physical panel pixel, capped by that grid. Reduction preserves
-peaks; optional interpolation smooths between known samples without lowering them.
-Narrowing the time grid coalesces compatible buckets instead of shortening the
-configured duration. Resizing cannot recover details already pooled at a coarser
-resolution. Multiple panels share history; the cache document describes capacity
-changes and numerical publication lifetime.
+Frequency reduction preserves peaks; interpolation smooths known samples without
+lowering them. Resizing reprojects chronological intervals but cannot recover
+details already pooled at coarser resolution. Shared history capacity, sampling
+resolution and resizing policy are defined in
+link:22_cache.adoc#_spectrogram[Spectrogram caching].
 
 == Generative light
 
@@ -564,24 +530,18 @@ Both styles take band power from the stereo FFT bins with window-energy normaliz
 not from summed dB values or maximum-pooled display bands. Opposite-phase
 channels retain their energy.
 
-A first valid frame seeds visible geometry; subsequent simulation advances on
-native display ticks toward the latest accepted band-power targets. Accepted
-energy rises inject each onset once, not once per display tick. Simulation and
-publications remain shared across visible panels. Paint and resize never advance
-the scene. Discontinuities reset simulation. Pause and inactive tabs freeze their
-bounded scene, drive and trajectories. The first fresh frame reanchors input and
-display time without catch-up or a synthetic onset. Inactive styles do not request
-optional band-power analysis. Hiding the window releases the scene and retains
-only the last bounded immutable segment publication. Removing a style from the
-layout or crossing a semantic boundary clears both, including inactive styles.
-Glow uses batched, widening translucent strokes rather than image feedback
-history or a blur post-pass. This bounds retained scene storage and submissions,
-at the cost of approximating light spread. Fixed topology, particle histories,
-pulse slots and segment publications bound storage. Three ordered stroke layers
-share segment endpoints rather than rebuilding CPU paths for every light layer.
-Flow uses bounded integration substeps and rebuilds drawing segments only from
-the final state. Real sample gaps reset through producer continuity; sparse
-publications alone do not.
+A first valid frame seeds geometry; display ticks advance simulation toward the
+latest accepted band-power targets. Each energy rise injects one onset, not one
+per tick. Paint and resize never advance the scene. After a pause or inactive tab,
+fresh input reanchors time without catch-up or a synthetic onset. Inactive styles
+do not request band-power analysis. Real sample gaps reset simulation; sparse
+publications alone do not. Scene and final-drawing retention follow
+link:22_cache.adoc#_resource_boundaries[Resource boundaries].
+
+Glow uses widening translucent strokes, not image feedback or blur. Three ordered
+layers share segment endpoints. Fixed topology, particle history and pulse slots
+bound storage; Flow integrates with bounded substeps and rebuilds segments only
+from the final state.
 
 FFT/window or signal changes revoke scenes until compatible audio arrives.
 Color and Bloom republish material without advancing geometry; background only
@@ -600,15 +560,11 @@ frame-pacing changes preserve the rotation angle. Style controls, per-panel
 persistence, defaults, and the frame-rate range are documented in
 link:01_config.adoc#_album_artwork[Album artwork].
 
-Zero frame-rate cap follows display callbacks without a timer throttle; positive
-values cap animation requests per second independently of the analysis rate.
-Rotation and animated source covers share one artwork demand across panels;
-individual images do not create a second animation loop. The window gate batches
-due artwork and audio-visualization updates before drawing, without making one
-effect inherit the other's FPS limit. Playback position, input and other business
-updates can still cause additional window submissions, so these limits are not
-an overall window FPS cap. Lower caps drop displayed source frames rather than
-slowing the source timeline. Cursor catch-up
+Artwork uses the shared window frame gate described under
+<<_independent_analysis_and_display_clocks,Independent analysis and display clocks>>,
+but retains its own FPS cap. This caps animation requests, not overall window
+submissions from playback or input. Rotation and animated covers share one demand;
+lower caps drop source frames rather than slowing their timeline. Cursor catch-up
 is bounded by frame count even after a long delay; all-zero-delay sources advance
 one frame per redraw. Each element retains its own cursor over shared decoded data.
 Pausing or static mode stops rotation, but a visible animated source can continue.
@@ -616,9 +572,7 @@ Hiding or reduced motion cancels pending animation work. Focus loss alone does
 not stop rotation; the artwork FPS cap and native frame delivery still limit it.
 Animated source images retain GPUI's focus-based playback policy; source animation
 alone does not keep the artwork owner ticking while the window is inactive.
-Resuming rotation does not replay suspended time. Disabling visualizations affects only audio
-visualizations, not artwork. Styles introduce neither per-frame CPU geometry
-rotation nor a new application cache system.
+Resuming rotation does not replay suspended time. Visualization enablement does not affect artwork.
 
 == Failure boundaries
 

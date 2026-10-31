@@ -256,13 +256,29 @@ mapping, or playback state. Settings and display controls are documented in
 link:01_config.adoc[Configuration and layout]; signal continuity and rendering
 rationale are explained in link:23_visuals.adoc[Visualization Rendering Design].
 
-Waveform retains display columns and numerical publications, and Spectrogram
-retains numerical column publications. Spectrum reuses frequency mappings but
-rebuilds its body on each panel render. Radial Audio Visualizer styles do not
-retain reusable graphics, stereo analysis styles retain numerical publications
-in revocable GPU slots, and generative styles retain simulation state. Album
-artwork and font caches have their own owners and lifetimes. Submitted
-publications remain alive while their scenes reference them.
+The ownership layers have different retirement boundaries:
+
+[cols="1,3",options="header"]
+|===
+|Owner |Retained data and boundary
+|Audio analysis worker
+|Reusable FFT machinery and bounded optional snapshot pools. Suspending capture
+clears accepted input, not necessarily prepared allocation capacity; see
+<<_resource_boundaries,Resource boundaries>>.
+|Window presentation owner
+|The latest accepted staging frame, shared by visible consumers. Removing demand
+releases the corresponding staging payloads; this is not a history cache.
+|View models
+|Waveform columns, Spectrum mappings, Spectrogram history, stereo publications,
+and generative simulations. Suspension may replace working state with a bounded
+final drawing; the per-view rules below distinguish those lifetimes.
+|Renderer
+|Uploads and submitted publications. A scene can retain a publication after the
+view releases it; completion-aware retirement is independent of logical demand.
+|===
+
+Album artwork and font caches have separate owners and lifetimes, independently
+of visualization enablement.
 
 Disabling visualizations is a destructive suspension, not another cache policy: it stops
 visualization demand and discards results as well as derived graphics. Its
@@ -293,13 +309,13 @@ link:23_visuals.adoc#_waveform[Waveform].
 
 ==== Spectrum
 
-Spectrum retains frequency mappings per panel, so differently sized panels do
-not replace each other's state. New levels reuse compatible mappings; panel
-geometry, frequency grouping, or display mapping changes rebuild them. Each panel
-render rebuilds the body from current display levels, including on background,
-grid, or label repaints. Bars/Outline/LED publish rectangles and Line/Solid publish
-Paths; LED segments do not require individual CPU contours. Peak markers remain
-separate from the body.
+Spectrum retains frequency mappings per panel; levels reuse compatible mappings,
+while geometry, grouping or display-mapping changes rebuild them. Each panel render
+rebuilds its body, though retained scenes can replay without a render.
+One shared 1024-entry palette uses cubic colors quantized to 8-bit channels;
+range, size and style do not change its identity. Waveform instead uses floating-point
+endpoints. Body representation belongs to
+link:25_gpu_rendering.adoc#_consumer_cutover_contracts[GPU consumer contracts].
 
 Suspension retains the final immutable body, normalized peak markers, and display
 labels for each current layout panel. Envelopes, frequency mappings, and scratch
@@ -310,15 +326,13 @@ link:23_visuals.adoc#_spectrum[Spectrum rendering].
 
 ==== Spectrogram
 
-Spectrogram retains frequency history and numerical GPU field tiles of at most
-32 columns. Changed buckets rebuild their tile; scrolling changes placement.
-Palette, range, frequency mapping, and sampling-size changes rebuild affected
-publications without discarding compatible history. FFT-size/window changes
-discard history because its analysis meaning changed; changing the Before/After
-signal selection also discards incompatible history. History duration/rate changes
-resize retention and start a new pooling interval; appearance changes and unrelated
-Spectrum settings do not rebucket audio. Pooling semantics are defined in
-link:23_visuals.adoc#_spectrogram[Spectrogram].
+Spectrogram retains frequency history and numerical GPU tiles. Appearance,
+frequency mapping and sampling-size changes rebuild affected publications without
+discarding compatible history. FFT/window or signal changes discard incompatible
+history; duration/rate changes resize retention and start a new pooling interval.
+Unrelated Spectrum settings do not rebucket audio. Pooling semantics belong to
+link:23_visuals.adoc#_spectrogram[Spectrogram]; tile publication belongs to
+link:25_gpu_rendering.adoc#_spectrogram_column_fields[GPU column fields].
 
 Drawable panels share one bounded history sized for the largest requested
 physical plot width, capped by history seconds times analysis FPS, with at least
@@ -354,12 +368,10 @@ it does not replay frames received while hidden.
 
 === Resource boundaries
 
-Caches are local to current panel owners or bounded shared history, not an
-unbounded record of earlier render states. Hiding a window releases visualization
-working state, Spectrogram history and stereo/generative simulation resources,
-while bounded final drawings follow the suspension rules above. Base waveform
-previews retain their independent bounded lifetime; see
-link:23_visuals.adoc#_waveform[Waveform].
+Hiding releases GUI working state, Spectrogram history and stereo/generative
+simulation resources while retaining bounded final drawings as described below.
+Audio-worker analyzer capacity has a separate lifetime. Base waveform previews
+retain their independent bounded lifetime; see <<_waveform,Waveform caching>>.
 Waveform numerical payloads grow with effective display-column count and panel
 count, not panel pixel area: four f32 values (16 bytes) per column, at most 1024
 columns per panel, plus the shared paired-color palette and publication metadata.
@@ -370,28 +382,19 @@ fragment work rather than the number of stored body rectangles.
 Spectrogram numerical publication memory grows with bounded history capacity and
 capped sampling height, in addition to the frequency data needed to preserve history.
 
-The renderer's shared GPU-material admission budget additionally covers charged
-buffer capacity, including retained upload generations; it is not a cap on CPU
-payloads, textures, or total GPU memory. Rivu sets
-`interface.gpu_material_budget_mib` when creating its GUI and retains that startup
-value for Spectrogram sampling until restart. Byte, allocation, draw-record and
-in-flight limits, including pressure behavior, are documented in
-link:25_gpu_rendering.adoc#_internal_led_vertical_slice[GPU rendering].
+Renderer admission is separate from CPU retention; its startup budget also limits
+Spectrogram sampling. Accounting, limits and pressure behavior belong to
+link:25_gpu_rendering.adoc#_admission_and_retirement[GPU admission and retirement].
 
-These are CPU and renderer resources: publication payload alone does not describe
-total process or GPU memory. Removed panel entries are pruned. Window suspension
-retains only final drawing data: radial styles have at most 32 levels and rotation,
-stereo styles keep their immutable fixed-size field, fractals keep their bounded
-segment publication rather than their simulation, and Oscilloscope retains at most
-2048 normalized stereo sweep points (16 KiB), never its PCM owner. Pause and
-inactive fractal tabs instead retain the existing bounded scene per style without
-running it; layout removal and semantic invalidation release it. There is no
-general screenshot cache. Destroying the window releases all these publications.
-GPU uploads remain charged through completion. Hidden material residency is then
-retired without requiring another frame; visible-idle drawings retain useful
-uploads. This is not a promise of immediate VRAM release. Completion maintenance
-and its bounded task lifetime are defined in
-link:25_gpu_rendering.adoc#_admission_and_retirement[GPU rendering].
+Removed panel entries are pruned. Window suspension retains only final drawing
+data: radial styles keep at most 32 levels and rotation; stereo styles keep their
+immutable fixed-size field; fractals keep bounded segments, not simulation; and
+Oscilloscope keeps at most 2048 normalized stereo sweep points (16 KiB), never
+its PCM owner. Pause and inactive fractal tabs instead retain the bounded scene
+without running it. Layout removal, semantic invalidation and window destruction
+release these publications. There is no general screenshot cache. Physical GPU
+retirement is defined in
+link:25_gpu_rendering.adoc#_admission_and_retirement[GPU admission and retirement].
 
 The GUI staging frame releases optional Density, Spatial Spectrum, metrics, and
 band-energy payloads when their last display demand disappears; losing all
@@ -402,14 +405,10 @@ Source/seek identity and analysis settings govern semantic invalidation even whi
 hidden or paused. The continuity contract belongs to
 link:23_visuals.adoc[Visualization Rendering Design].
 
-The audio worker's processed Before tap owns a separate stereo FIFO for
-source-aligned input awaiting output admission. Its frame count is bounded by
-the graph's retained latency plus one converted PCM fragment, not by panel dimensions.
-Capture-identity changes and inactive analysis discard
-both its samples and allocation; refill checks retire it even when output admits
-no new PCM. Exhausting the output span also releases it. This is distinct from
-the bounded analysis ring and waveform preview retention. Admission, continuity,
-and signal-selection rules are defined in
+The processed Before tap's source-aligned FIFO is separate from the analysis ring
+and waveform retention. Capture-identity changes, inactive analysis or exhaustion
+of its output span release samples and allocation, including on refills admitting
+no new PCM. Its capacity and admission contract are defined in
 link:23_visuals.adoc#_pcm_admission[PCM admission].
 
 Density owns one 256 × 256 accumulation field and three immutable snapshot slots:
@@ -418,8 +417,12 @@ Worker, GUI staging, and source model share a slot's payload. If consumers pin a
 three, Density is omitted from that publication rather than allocating or blocking;
 other ready analysis continues. The renderer keeps the prior drawing and matching
 readouts, never pairs old Density with newer metrics. PCM snapshots have the same
-readiness rule. Losing Density demand releases its pool without resetting a
-surviving Spatial Spectrum consumer or the shared FFT window.
+readiness rule. During active capture, losing Density or PCM demand releases the
+corresponding analyzer pool without resetting surviving consumers or the shared
+FFT window. During suspension those prepared pools can remain allocated until
+active demand is reconciled again or the analyzer is replaced or destroyed;
+their accepted samples and GUI staging are not retained as current input. The
+five-slot PCM pool retains at most 160 KiB of stereo sample storage per analyzer.
 
 Spectrogram full-bin analysis uses three reusable immutable slots, each holding
 `analysis_fft_size / 2` calibrated dB values. Their sample storage totals 48 KiB
@@ -430,21 +433,17 @@ paused. Existing external snapshots remain valid until their owners release them
 This storage is separate from bounded logarithmic CPU history and GPU tiles;
 the figures are payload capacities, not total process-memory limits.
 
-Density and Spatial Spectrum use revocable GPU slots: 256 KiB and 128 KiB per
-numeric publication respectively, with a shared 4 KiB palette per style. Unchanged
-fields and resize reuse them. Hiding clears slot/source ownership; captured frames
-may finish safely. Renderer buffers remain charged until completion; hidden
-residency retires through the completion maintenance described above, without
-another draw. These are payload bounds, not total memory or physical VRAM limits.
+Density and Spatial Spectrum retain revocable numerical GPU publications of
+256 KiB and 128 KiB respectively, plus a shared 4 KiB palette per style.
+Unchanged fields and resize reuse them; hiding clears application ownership.
+Captured frames and device storage follow
+link:25_gpu_rendering.adoc#_admission_and_retirement[GPU retirement].
 
 === Design tradeoffs
 
-Caching avoids repeated aggregation and publication for reusable Waveform and
-Spectrogram data, not scene submission or rendering. Spectrum reuses frequency
-mappings but rebuilds body geometry: Line/Solid need curves and tessellation,
-while rectangle styles need bounded payloads. Bounded shared immutable
-publications avoid a second geometry representation; further consolidation needs
-workload evidence, not assumed hit rates or submission counts.
+Waveform and Spectrogram reuse aggregation and publications, not rendering work.
+Spectrum reuses mappings but rebuilds bodies. Shared immutable publications avoid
+a second geometry representation; further consolidation needs workload evidence.
 
 == Native metadata admission
 

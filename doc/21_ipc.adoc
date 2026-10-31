@@ -193,10 +193,12 @@ admitting a client to its bounded session set. This protects commands and state,
 not availability: another user can occupy the public abstract name and prevent
 startup, but cannot impersonate the server to a client.
 
-Startup binds the listener before database, configuration-write, or audio work;
-only successful binding grants ownership. App retains it through teardown and
-partial startup failures. The kernel releases the address when the last listening
-descriptor closes, including on process death; there is no stale-file cleanup.
+Startup binds the listener before database, configuration-write or audio work;
+binding grants ownership through teardown and partial startup failure. The
+link:26_migration.adoc#_application_invocation[automatic migration handoff] temporarily
+releases it to the tool, then reacquires and verifies before startup continues.
+The kernel releases the address when the last listener closes, including on
+process death; no stale-file cleanup is needed.
 
 Ownership is scoped to a Linux network namespace. Instances in different network
 namespaces must not share a data directory.

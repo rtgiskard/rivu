@@ -2,46 +2,40 @@
 :toc:
 :toclevels: 2
 
-The library is shared by the desktop GUI, CLI, and TUI. Add individual audio files
-by dropping them into Queue, or configure a music folder and scan it. Browse
-registered tracks, albums, or recent activity and send tracks to the queue or a
-link:03_playlist.adoc[playlist]. Registration, scanning, and edits change Rivu's
-database, not the audio files.
+The library is shared by the desktop GUI, CLI, and TUI. Register local files by
+dropping them into Queue, or configure a music folder and scan it for directory
+browsing and CUE discovery. Registration does not itself start playback. Browse
+tracks, albums, or recent activity to build a queue or a
+link:03_playlist.adoc[playlist]. Registration, scanning, and metadata edits change
+Rivu's database, not the audio files.
 
 CLI paths are relative to the invoking client's working directory; absolute paths
-are accepted. Except for the local `library probe` and independent migration tool,
-library commands address the running host for the selected data directory.
+are accepted. Rivu does not expand `~` or shell variables inside a path: use shell
+expansion (for example, `"$HOME/Music"`), not a quoted `"~/Music"`. Except for the
+local `library probe` and independent migration tool, library commands address the
+running host for the selected data directory.
 
 == Other
 
-In the desktop Library, `Other` appears after configured music folders and is
-hidden when it contains no registered tracks. It contains tracks whose paths are
-outside every configured folder; with no configured folders, it contains all registered tracks. Adding or
-removing a folder changes where its tracks appear, without changing tracks, user
-edits, or saved references. It is a view of the shared library, not a separate
-library or a temporary queue.
+`Other` contains registered tracks outside configured music folders, or all tracks
+when no folders are configured. It appears after the folders and is hidden when
+empty. Adding or removing a folder changes this grouping, not tracks or saved data.
 
 Tracks appear in a flat list; hover a track for its full source path. Search,
 favorite and missing-file filters, sorting, selection, and track actions work within this
 collection. Dragging its header adds the complete collection, not only search
 matches. To add local files, see link:04_playback.adoc#_adding_local_files[Adding local files].
 
-Hover its header for `Check files`, or use the commands below. Checking visits
-only registered audio files: it neither searches their parent folders nor discovers
-new tracks. Confirmed absence marks a track missing; permission and read errors do
-not. Restoring a file clears its missing state on the next successful check.
-`Force reread` refreshes unchanged audio metadata too. Both operations preserve
-track identities, user edits, favorites, listening history, and queue/playlist
-references; neither relocates or deletes tracks. Checking does not reimport CUE sheets.
-CUE subtracks keep their registered labels, track/disc numbers, release dates and
-source bounds while sharing refreshed audio properties; their durations are
-recalculated from those bounds and the source duration.
+Hover its header for `Check files`. Checking visits registered audio files without
+discovering new tracks or reimporting CUE sheets. Confirmed absence marks a track
+missing; permission and read errors do not. A successful check clears missing state.
+`Force reread` also refreshes unchanged metadata. Both preserve identities, user
+data, and queue/playlist references. CUE labels and source bounds are retained;
+audio properties and durations are refreshed from the source.
 
 [source,sh]
 ----
 rivu library other list --query "artist"
-rivu library other count
-rivu library other locate TRACK_ID
 rivu library other check --wait
 rivu library other check --force --wait
 ----
@@ -63,45 +57,35 @@ yet scanned. Saving roots does not scan or enqueue music. Use a root's scan acti
 or choose `Scan paths` in Library.
 
 Configured roots must not overlap after logical path normalization: duplicate
-paths and parent/child roots are rejected. For example, `/Music` and `/Music/Jazz`
-conflict, while `/Music` and `/Music2` do not. Symlink targets are not resolved;
-distinct logical aliases remain distinct roots. Existing overlapping configurations
-must be corrected before starting the host or saving settings.
+and parent/child paths are rejected. Symlink targets are not resolved, so logical
+aliases remain distinct. Correct existing overlaps before starting the host or
+saving settings.
 
-To stop managing a root, right-click its header and choose `Remove library folder...`,
-then confirm. This removes only the configured root; indexed tracks, their user
-data, playlist and queue entries, and files on disk are kept. Cancel leaves the
-configuration unchanged.
+To stop managing a root, right-click its header, choose `Remove library folder...`,
+and confirm. Only the configured root is removed; indexed tracks, user data,
+queue/playlist references, and audio files are kept.
 
 To scan from the command line, run:
 
 [source,sh]
 ----
 rivu library scan ~/Music --wait
-rivu library scan ~/Music --force --wait
 ----
 
-The desktop does not scan configured roots during startup. Scanning runs in the
-background without stopping playback. Scans, Other checks, playlist imports, and
-external-file queue additions share one media-task slot; a second request is
-rejected while one is active. `--wait` waits for completion and reports scan errors
-even when readable tracks were saved.
-`--force` rereads unchanged audio metadata. CUE sheets are always reread.
-Requested paths must be inside a configured logical root. A failed scan may still
-save readable tracks; fix errors and rescan before cleaning missing records.
-See <<_scan_policies_and_recovery,Scan policies and recovery>> for depth and
-duration admission, source checks, and the point after which cancellation is refused.
+The desktop does not scan roots at startup. Scans run in the background without
+stopping playback. `--force` rereads unchanged audio metadata; CUE sheets are always
+reread. A failed scan may still save readable tracks: fix errors and rescan before
+cleaning missing records. See <<_scan_policies_and_recovery,Scan policies and recovery>>
+for path and admission rules.
 
-Library scans and Other checks keep progress and results in Library; playlist
-imports use Playlists and external-file queue additions use Queue. See
-<<_cancellation,Cancellation>> for shared task feedback, status queries, and shutdown.
-A rejected Library request is a separate dismissible error, not a replacement for
-an already accepted task's progress or outcome. Dismissing that request error
-leaves the accepted task and its result unchanged.
+Scans, Other checks, playlist imports, and external-file queue additions share one
+media-task slot; another request is rejected while one is active. Library shows
+scan and check results, Playlists shows imports, and Queue shows file additions.
+Rejected requests have separate dismissible errors and do not replace accepted
+task feedback. See <<_cancellation,Cancellation>> for waiting, status, and shutdown.
 
-Cancelling a desktop file chooser leaves configuration, commands, and existing
-errors unchanged. This also applies to
-link:03_playlist.adoc#_import_and_export[playlist import and export] choosers.
+Cancelling a desktop file chooser changes neither configuration nor existing
+errors; this also applies to playlist import and export.
 
 == CUE library tracks
 
@@ -149,10 +133,9 @@ full metadata or paths, even when their information columns are hidden. Director
 loading, empty, and unavailable states remain visible independently of the columns.
 
 Root totals include missing files and recursively count unloaded or collapsed
-tracks. Active filters show matching / total counts, as described in
-<<_desktop_list_search,Desktop list search>>. If a count fails, the directory action
-stays visible and retries the count instead of rescanning; after recovery it
-returns to Rescan.
+tracks; filter counts are described in <<_desktop_list_search,Desktop list search>>.
+If a count fails, the directory action stays visible and retries the count instead
+of rescanning; after recovery it returns to Rescan.
 
 Dragging a directory adds its full contents, not only tracks matching the
 display filter. To add only matching, favorite, or missing tracks, select and drag the track rows.
@@ -163,7 +146,7 @@ range. Changing the endpoint keeps the original anchor. Range selection includes
 unloaded rows; selection actions and dragging are disabled while it loads.
 Changing search, favorites, or the missing filter cancels a loading range; its old
 results cannot change the selection for the new filters.
-Batch track actions and library dragging identify tracks by stable library IDs.
+Batch actions and dragging use library track IDs.
 
 Right-clicking a selected track preserves its group; right-clicking an unselected
 track selects that track alone. Track menus offer Play, Append to queue,
@@ -174,19 +157,13 @@ states. Library removal deletes records and references, never audio files.
 Panel and background menus contain panel or collection operations, not actions
 on a previously selected track group.
 
-Dragging a selected row carries the selection at drag start; dragging an
-unselected row carries that row alone. The dragged set stays fixed for the
-gesture even if the underlying selection changes. Press Esc to cancel a drag
-without adding tracks to its destination.
+Dragging carries the selection at drag start, or only the dragged row if it was
+unselected. That set stays fixed for the gesture; Esc cancels it.
 
-For root removal and its retained data, see <<_roots_and_scanning,Roots and scanning>>.
-
-Configured roots are identified by path. Changing or clearing search preserves
-unrelated expansion choices.
-Shift selection in the grouped list includes root headers as well as tracks,
-including ranges that cross groups or unloaded pages. Selected root headers
-support directory rescanning and dragging with the same recursive semantics
-as tree directories; actions deduplicate overlapping track identities.
+In the grouped list, Shift selection can include root headers across groups and
+unloaded pages. Selected headers support recursive rescanning and dragging;
+overlapping sources contribute each track once. Search changes preserve unrelated
+expansion choices. For root removal, see <<_roots_and_scanning,Roots and scanning>>.
 
 Scans refresh affected views, including previously empty expanded folders;
 collapsed folders load current contents when reopened. Unchanged scans preserve
@@ -194,30 +171,19 @@ existing views.
 
 == Desktop list search
 
-Use a list's Search button, or Ctrl+F with that list focused, to open and focus its
-search field. Once open, the Search button focuses the field without closing it.
-An empty search field folds automatically when it loses focus.
-Each list keeps its own search condition. A nonempty search stays visible; use
-the field's Clear search button to restore the complete list without closing the
-field. From list focus, Esc clears that list's search first and folds an empty
-field on the next press. Leaving a focused editor or dismissing an active popup
-or composition takes precedence. Ctrl+F retains the already focused search field,
-including when playlist names and playlist entries have different searches.
-The placeholder identifies the list's search scope; hover over its Search button
-for the fields it searches.
-While the search field is open, counts inside its right edge show matches and the
-unfiltered total; counts are hidden when it is folded. No matches is distinct from an empty
-collection. Searching changes the view, not the saved contents or playback order.
+Use a list's Search button or Ctrl+F with that list focused. Each list keeps its
+own query; the placeholder and Search tooltip identify its scope and fields.
+An empty field folds on losing focus. A nonempty field stays visible; Clear search
+restores the complete list without closing it. From list focus, Esc first clears
+the query, then folds an empty field; editors, popups, and composition take precedence.
 
-Albums and album track lists display available results without waiting for the
-unfiltered total. Until that total is available, the search counter is omitted;
-a total-query failure does not turn the displayed results into a page error.
+The open field shows matches / total; a pending or failed total does not hide
+available album results. No matches is distinct from an empty collection. Search
+changes the view, not saved contents or playback order.
 
-Desktop list searches and the terminal Search view apply nonempty edits after
-150 ms without further input. Until then, the previous query and results remain
-active. Leading and trailing whitespace is ignored; clearing the text or leaving
-only whitespace restores the unfiltered query immediately. Enter does not bypass
-the delay. The terminal Other view applies its text edits immediately.
+Desktop searches and terminal Search apply nonempty edits after 150 ms without
+input; Enter does not bypass the delay. Surrounding whitespace is ignored, and
+clearing applies immediately. Terminal Other applies every edit immediately.
 
 Library searches title, artist, and the full source path, combined with its
 favorite and missing-file filters; it does not search album metadata. Albums
@@ -243,19 +209,14 @@ track, use the explicit clear-and-locate action to reveal it.
 
 == Locate the playing track
 
-Use Library's `Locate playing track in Library` control to reveal the current
-track, including while paused. With no current track, the control is disabled.
-Tree view expands its configured root and parent directories; flat view uses the
-current sort within the configured root. The exact library identity is revealed,
-including separate CUE entries sharing a source file and logical symlink aliases.
-The row is scrolled into view and briefly emphasized without changing selection,
-playback, or unsaved Details edits. Track changes do not automatically follow.
+Use `Locate playing track in Library` to reveal the current track, also while paused.
+It expands the root and parent directories in tree view or uses the current flat
+sort, scrolls to the exact library identity, and briefly emphasizes it. Selection,
+playback, and Details drafts are unchanged; track changes do not automatically follow.
 
-If search, favorites, or missing-only filters hide the track, Library offers
-`Clear filters and locate`; only that explicit action clears the filters.
-Tracks outside configured folders are located in Other. A track no longer in the
-library is reported rather than substituted with a different row. Location queries run in the
-background; changed tracks, views, roots, or library revisions discard stale results.
+If filters hide the track, only the explicit `Clear filters and locate` action
+clears them. Tracks outside roots are located in Other. The control is disabled
+without a current track; a removed track is reported, not replaced by another identity.
 
 == Track information
 
@@ -275,23 +236,13 @@ shows its complete path.
 
 == Albums
 
-Add the dockable `Albums` panel to browse a continuously scrolling cover grid.
-Double-click an album card to browse its continuously scrolling tracks; use Back
-to return to the grid. Both views load automatically while scrolling, without
-page controls. Clicking once does not open the album; its title is plain text.
-Hover an album card to reveal `Play album` and `Add to queue` over its cover.
-Use Tab to focus either action and Enter or Space to activate it without hovering.
-After activation, the actions hide until the pointer leaves and re-enters the card.
-`Play album` replaces the queue with the complete album and starts its first
-track. `Add to queue` appends the complete album without changing current playback.
-With the default `interface.confirm_queue_replace = true`, GUI album playback
-asks before replacing a non-empty queue. Cancel or Esc preserves queue and playback.
-The preference is available in Settings under Playback & Audio and also applies
-to playlist playback; adding to the queue does not require this confirmation.
-These buttons do not open album details. Double-click a track row to play that
-track individually; a single click does not start playback. Track rows also
-offer individual playback and queue actions. Album actions include tracks beyond
-the currently loaded rows.
+Add the dockable `Albums` panel to browse the cover grid. Double-click a card to
+open its tracks; Back returns to the grid. Both views load while scrolling.
+Hover a card, or use Tab, to reach `Play album` and `Add to queue`; Enter or Space
+activates the focused action without opening details. Both target the complete
+album, including unloaded tracks. For queue replacement and confirmation, see
+link:04_playback.adoc#_transport_and_timing[Playback]. Double-clicking a track plays
+only that track.
 
 Missing artists use `-` in album cards and the shared person symbol in track rows.
 
@@ -311,29 +262,18 @@ order and the next action. Searches and sort changes return to the top.
 Each Albums panel keeps its own search, sort, detail view, and scrolling position;
 resizing or navigating one panel does not change another panel.
 
-Back preserves the grid's browsing position and visible album; changing grid
-width preserves that album as the scroll anchor. Hiding and reopening the panel
-retains its browsing position. Playback and background data refreshes retain the
-grid and track list's scroll offset; refreshed results only clamp it when the
-collection actually becomes shorter. Unloaded positions show a loading placeholder;
-failed loads offer a retry action without replacing the rest of the list.
-Track rows show duration, missing-file status, and the current track's playback
-state.
-The current-track marker identifies the library track, not a particular queue
-occurrence when the same track appears more than once.
+Back, resizing, hiding the panel, playback, and refreshes preserve browsing position;
+shorter results may clamp it. Unloaded rows show placeholders and failed loads
+offer Retry without replacing the rest of the list. Track rows show duration,
+missing-file status, and playback state by library track, not queue occurrence.
 
-Albums use the exact effective album title and immediate parent directory.
-Only titles containing a non-whitespace character form albums; empty or entirely
-Unicode-whitespace titles do not. An explicit metadata override takes precedence
-even when empty. Nonblank titles retain their exact spelling and whitespace;
-there is no directory-name or `Unknown album` fallback. These tracks remain in
-the Library, directory tree, queue, and playlists, with their normal track actions.
-Same-name albums in different directories remain separate; different artists
-within one directory form a compilation. Disc subdirectories are not inferred
-to be one album. Missing artist metadata does not prevent album membership;
-for its display, see above. Albums with multiple distinct nonempty artists show
-`Various artists`. Members are ordered by disc number, track number (unknown
-numbers last), title, then library ID. Metadata overrides affect grouping.
+Albums group tracks by exact effective album title and immediate parent directory.
+Blank titles, including empty overrides, form no album; those tracks remain in
+Library and other collections. Titles retain spelling and whitespace. Same-name
+albums in different directories stay separate; disc subdirectories are not merged.
+Different artists within one group form a compilation labeled `Various artists`.
+Members sort by disc number, track number (unknown last), title, then library ID.
+Metadata overrides affect grouping.
 
 == Recent tracks
 
@@ -369,15 +309,10 @@ A successful playback start creates or updates one recent entry per track,
 ordered newest first. Paused time and failed loads do not advance activity.
 History records the last playback activity, not necessarily a counted play;
 it is not a per-play log. Timestamps are Unix seconds in JSON.
-Recent entries reflect edited titles and current play counts without reopening
-the view. Crossing the counting threshold refreshes the recent entry while
-playback continues; editing its title does not change its activity timestamp or
-recency order.
-In the GUI, Last played sorting uses the same live playback timestamp shown for
-the current playing or paused track. Equal-second timestamps place the current
-track first when sorting newest first; title and play-count sorting are unaffected.
-The retained snapshot contains up to 256 recent tracks both after startup and
-after subsequent activity or catalog refreshes.
+Recent entries reflect edited titles and current counts. Crossing the counting
+threshold refreshes activity; editing a title does not. GUI Last played sorting
+uses the current playing or paused track's live timestamp, placing it first among
+equal-second timestamps when newest-first. Up to 256 recent tracks are retained.
 
 If saving final listening statistics fails, Rivu keeps the pending facts in memory
 and retries on playback transitions and orderly shutdown, without double-counting
@@ -397,14 +332,9 @@ descendant expansion choices
 for reopening. Loading more rows does not clear selections or metadata drafts.
 Failed GUI loads offer a retry button that reloads data without rescanning files;
 TUI loads can be requested again by leaving and reopening the view.
-A desktop query reports a waiting error after 12 seconds. Retry after a timeout
-or failure; late results cannot replace newer results or the error. Pending
-keyboard navigation is cancelled when data, filters, or batch size change.
-GUI row-navigation and selection keys belong to the explicitly targeted visible
-panel. Library, Queue and playlist tracks support row navigation, including
-Home/End. Clicking Albums, a playlist catalog, Recent or any other panel never
-forwards unsupported row actions to an earlier selection in another panel.
-Hidden or removed panels cannot own these actions.
+Desktop queries time out after 12 seconds; retry without rescanning. Row-navigation
+and selection keys target the explicitly focused visible panel, never an earlier
+selection in another panel. Library, Queue, and playlist tracks support Home/End.
 
 The TUI Library tree starts with Other, followed by configured roots in their
 configured order, including empty roots. With no roots, Other remains available;
@@ -412,18 +342,13 @@ no filesystem-root entry is inferred from stored tracks. Terminal browsing and
 collection actions are documented in
 link:04_playback.adoc#_terminal_client[Terminal client].
 
-In the GUI, unmodified `PageUp` / `PageDown` scroll one viewport height without
-changing selected rows. They target the last-clicked visible scroll viewport;
-after clicking elsewhere, the viewport under the pointer is used instead.
-This applies to Library, Queue, playlists, history, metadata, and overflowing
-Playback content. Hidden or closed views cannot remain keyboard targets.
-Settings uses these keys for its current page or open dropdown; text inputs
-retain editing behavior. About and open menus prevent background paging.
-`interface.query_batch_size` controls query batch size, not the visible viewport or total results;
-see link:01_config.adoc[Configuration] for its range. In the TUI,
-PageUp/PageDown moves the selection by one screen; returning from a directory or
-playlist detail restores the parent selection and viewport. Exiting the TUI
-does not have to wait for a stalled query.
+In the GUI, PageUp/PageDown scrolls a viewport without changing selection. It uses
+the last-clicked visible viewport, or the one under the pointer after clicking
+elsewhere. Editors, Settings, About, and open menus retain their own key behavior.
+`interface.query_batch_size` controls query batches, not viewport size or total
+results; see link:01_config.adoc[Configuration]. In the TUI, these keys move the
+selection by one screen; returning to a parent restores selection and viewport.
+Exiting the TUI does not wait for stalled queries.
 
 CLI `library list`, `queue list`, `playlist list`, and `playlist show` include all
 matching rows, independently of `interface.query_batch_size`. If relevant data changes while a listing
@@ -470,14 +395,10 @@ rivu library clean-missing
 === Track details drafts
 
 Edit title, artist, album, and Decoder hint in Track details, then Save to commit
-the changed fields together. Background refreshes preserve the draft. Edits made
-during a save remain unsaved; failure preserves them for correction or retry.
-A successful save advances the submitted baseline and adopts newer loaded values
-only when no later edits remain. It cannot overwrite a newer draft or a different
-track's details.
-Hover the info icon after the Tags heading for the save-scope and clearing note:
-saves affect only Rivu, not audio files; clearing and saving a field clears its
-displayed text.
+changed fields together. Background refreshes preserve drafts. Edits made during
+a save stay unsaved; failure preserves them for correction or retry. A completed
+save cannot overwrite later edits or another track's details. Clearing and saving
+a field clears its displayed text, not the audio file's tags.
 
 Only one track's draft is retained. Unsaved or saving details stay on that track
 instead of following playback. To abandon the draft, select another track, clear
@@ -487,14 +408,10 @@ or deleting a playlist or entry does not discard it. In playback-follow mode,
 restoring every edited field to its saved value resumes follow once no save or
 manual action is pending; an explicitly selected track does not follow playback.
 
-Escape first leaves a focused input; from the layout it requests selection
-clearing with the same draft protection. The latest selection, clear, reload,
-window-close, or quit request takes precedence over pending navigation. A range
-selection waits for all its rows and any confirmation before replacing the old
-selection. Failed loads or Cancel change neither selection nor draft. If the
-target collection changes during confirmation, select the target again; Recent
-tracks also rejects a target after a library structure change, but not after
-metadata edits or sorting.
+Escape leaves a focused input before requesting selection clearing. The latest
+navigation or close request takes precedence. Range selection waits for all rows
+and draft confirmation; failed loads or Cancel preserve selection and draft.
+If the target changes during confirmation, select it again.
 
 User-initiated window closing and GUI quitting ask before discarding a draft.
 Drafts are not persisted across restarts: external shutdown commands, termination
@@ -541,18 +458,13 @@ the action with keyboard focus. It copies the complete value even when the
 display is truncated; File path copies the original path even for a missing
 file. Empty, unknown, and unloaded values have no copy action.
 
-`bitrate_bps` describes the encoded audio stream, not decoded PCM or the whole
-container. `bitrate_exact` distinguishes reliable fixed-encoding values and
-complete-playback measured averages from scan estimates (`≈` in human output).
-Scans do not read an entire stream solely to measure bitrate. Unknown values stay
-unknown, and measurements can differ slightly between decoder backends.
-Unchanged-source scans preserve confirmed values; changed sources invalidate
-their previous precision. See
-link:04_playback.adoc#_playback_metadata_updates[Playback metadata updates].
+`bitrate_bps` describes the encoded audio stream. `bitrate_exact` distinguishes
+confirmed values from estimates (`≈`); scans do not read whole streams just to
+measure bitrate. Unchanged sources retain confirmed values, while changed sources
+invalidate precision. See link:04_playback.adoc#_playback_metadata_updates[Playback metadata updates].
 
 [source,sh]
 ----
-rivu library probe album.wav --enhanced
 rivu --json library probe album.wav --enhanced
 ----
 
@@ -598,23 +510,17 @@ and has no playback effect.
 
 === Errors and partial results
 
-Readable tracks are saved even when other paths fail. Depth exclusions and
-filesystem, traversal, probe, or CUE errors protect affected existing tracks:
-they are not newly marked missing or considered relocation candidates. A failed
-sheet protects all its owned tracks, while readable whole sources may still be
-imported. Invalid UTF-8 audio or CUE paths are local errors, not a reason to reject
-unrelated readable tracks.
+Readable tracks are saved even when other paths fail. Depth exclusions and scan
+errors protect affected existing tracks from being newly marked missing or used
+for relocation. A failed CUE sheet protects its owned tracks; readable whole-file
+sources may still be imported. Invalid UTF-8 paths are local errors, not grounds
+to reject unrelated readable tracks.
 
-Requested scopes must also be UTF-8 after normalization. An invalid scope has no
-reconciliation coverage; valid scopes in the same request still run. A failing
-child does not remove its valid parent's coverage, and an explicitly requested
-nested directory has its own coverage despite an enclosing exclusion.
-
-A requested path initially reported `NotFound` is confirmed absent and can mark
-its tracks missing. Disappearance during traversal or reading is uncertain until
-a later scan establishes absence. If bounded diagnostics omit uncertainty details,
-missing detection and relocation are disabled for that scan. Fix reported errors
-and rescan before cleaning missing records.
+An initially `NotFound` requested path is confirmed absent and can mark tracks
+missing. Disappearance during reading is uncertain until a later scan. Invalid
+scopes or bounded diagnostics may also restrict missing detection and relocation.
+Fix reported errors and rescan before cleaning missing records. Detailed coverage
+rules: link:21_ipc.adoc#_scanning_and_metadata_ownership[Scanning and metadata ownership].
 
 === Rereading sources
 
@@ -661,15 +567,11 @@ rivu task status scan INSTANCE:TASK_ID
 rivu task cancel scan INSTANCE:TASK_ID
 ----
 
-The running core retains the latest 32 media-task results, not persistent history.
-Use the instance-qualified reference printed by the command. Bare numeric IDs
-are not accepted by task status or cancellation; a reference from a stopped
-instance is rejected before a request can address a replacement instance's task.
-A successful status query means the result was retrieved, not that the task
-succeeded; inspect its phase and error. Later tasks do not change a retained result.
-`--wait` uses one completion request on the startup session rather than periodic
-status queries. Closing the waiting client stops waiting, not the accepted task;
-use the explicit cancellation command to request that the task stop.
+Use the instance-qualified reference printed by the command, not a bare numeric
+ID. References from a stopped instance are rejected. The core retains its latest
+32 media-task results, not persistent history. Status success confirms retrieval,
+not task success: inspect phase and error. Closing a waiting client stops waiting,
+not the task; request cancellation explicitly.
 
 In the desktop, the owning panel shows phase, counts, current path, and message.
 Completed, failed, and cancelled results stay visible until dismissed or replaced
@@ -677,22 +579,18 @@ by a later accepted media task. Dismissal hides progress and message, without
 undoing saved data, clearing a separate request error, or deleting the retained
 task result. Closing the desktop window does not cancel a task.
 
-Cancel during preparation to discard its results, including tracks already read.
-Application shutdown also cancels preparation. Cancellation is cooperative; an
-active audio probe must return and started work must join before the task retires.
+Cancel during preparation to discard all prepared results. Shutdown also cancels
+preparation. Cancellation is cooperative: an active probe must return and work
+must retire before another media task starts.
 
-Before entering Saving, Rivu recovers the queue state and persists any pending
-playback selection. If recovery fails, the scan ends without saving its results;
-existing playback is not rolled back.
+Saving requires queue recovery and persistence of pending playback selection.
+If recovery fails, the task saves nothing; existing playback is not rolled back.
 
-Once the task enters Saving, cancellation is refused. The database commit and any
-playlist creation finish in the background; published status and existing-playback
-controls remain available, while database reads and edits report maintenance in
-progress. Shutdown waits for the actual result. A failed task may still report
-committed changes: inspect its result before retrying. A new media task is admitted
-only after the previous task has released its resources, not merely after
-cancellation was requested. Import commits have the separate boundaries described
-in link:03_playlist.adoc#_commit_and_export_lifecycle[Commit and export lifecycle].
+Once Saving begins, cancellation is refused. Database reads and edits report
+maintenance in progress; published status and existing-playback controls remain
+available. Shutdown waits for the result. A failed task may have committed changes:
+inspect its result before retrying. Playlist imports have additional
+link:03_playlist.adoc#_commit_and_export_lifecycle[commit boundaries].
 
 == Same files and relocation
 
@@ -796,11 +694,8 @@ the last connection closes; external connections can defer that cleanup.
 After an abrupt exit such as `SIGKILL`, keep any remaining WAL with the database
 so SQLite can recover committed transactions on the next open.
 
-Rivu uses SQLite WAL mode with `synchronous=NORMAL`. Committed transactions survive
-an application crash, but a power failure or operating-system crash can roll back
-recent commits. This trades power-loss durability for fewer commit-time disk
-syncs; it does not make playlists, favorites, overrides, or playback statistics
-reconstructible by scanning. Keep backups of user state. See
+SQLite WAL with `synchronous=NORMAL` protects commits against application crashes,
+but power or operating-system failure can roll back recent commits. See
 https://sqlite.org/pragma.html#pragma_synchronous[SQLite synchronous modes].
 
 To reclaim database/WAL space and refresh SQLite query statistics, ensure
@@ -843,52 +738,30 @@ failures, `status`. No Core revision or task ID is invented for an uncertain
 transport result. Argument/usage errors retain Clap diagnostics and exit status 2;
 runtime failures exit 1. A successful command exits 0.
 
-List results stream directly with bounded batches. A failed traversal can leave
-partial JSON on stdout; discard that output and check the exit status before
-consuming it. See <<_paged_views,Paged views>>.
+Listings can leave partial or invalid JSON after failure: check the exit status
+and discard incomplete output. See <<_paged_views,Paged views>>.
 
 Result shapes follow the queried resource:
 
-* `library list` returns an array of full track records; `queue list` returns
-  occurrence rows. `playlist list` returns summaries with `id`, `name`, and
-  `entry_count`; `playlist show PLAYLIST_ID` returns that playlist's entry array.
-* `status` returns the instance state with `revisions`, `playback`, `queue`,
-  `library`, `system`, and `configuration`. Effective `config` and `config_path`
-  belong to `configuration`; `system` contains runtime status. `library history`
-  returns a history array, limited by `--limit` in the same retained order as text output.
-* Ordinary command acknowledgements, including `library optimize`, contain
-  `status`, `error`, `revision`,
-  `scan_id`, `relocation_id`, `processing_id`, and `database_optimization`. Status is `Succeeded`, `Failed`,
-  `NotAdmitted`, or `Unknown`. Failed authoritative acknowledgements are printed
-  before an unsuccessful exit. `Failed` does not guarantee rollback; `Unknown`
-  must not be automatically retried.
-  Successful optimization replies carry their own size report in
-  `database_optimization`; failed or unknown replies do not claim a report.
-  The System snapshot retains the latest successful report for observation,
-  not for correlating command results.
-* `scan_id` identifies media-task startup: scanning, Other checks, playlist import,
-  or external-file queue admission. `task status scan INSTANCE:ID` and media commands
-  with `--wait` return `{id, progress, message, library_committed, playlist_id, error}`
-  together with `instance_id` and the reusable `task_ref` string.
-  Confirmed commits survive later refresh failures; lack of confirmation after an
-  uncertain worker failure is not proof of zero effects.
-* `relocation_id` identifies relocation verification. `task status relocation INSTANCE:ID`
-  and `library relocate --wait` return `{id, source_id, target_id, phase, error}`
-  together with `instance_id` and `task_ref`;
-  phases are `verifying`, `completed`, `cancelled`, or `failed`.
-* `processing_id` identifies audio-processing work. `task status processing INSTANCE:ID`
-  and processing commands with `--wait` return the full processing task object,
-  including its phase, captured settings, outputs, optional error, `instance_id`
-  and `task_ref`.
-* Task-start acknowledgements add `instance_id` and `task_refs`, whose `scan`,
-  `relocation`, and `processing` fields contain the accepted task references when
-  present. References use nonzero decimal `INSTANCE:ID`; obtain them from output
-  rather than constructing them from a current instance and an old numeric ID.
-* A successful task-status query confirms retrieval, not task success. Inspect
-  its phase/error. By contrast, `--wait` exits unsuccessfully for failed or
-  cancelled tasks, while retaining the terminal result on stdout. Use
-  `task cancel scan|relocation|processing INSTANCE:ID` to request cancellation; acceptance
-  is not proof that work has already retired and never undoes a committed result.
+* `library list` returns full track records; `queue list` returns occurrence rows.
+  `playlist list` returns summaries (`id`, `name`, `entry_count`);
+  `playlist show PLAYLIST_ID` returns entries. `library history` returns retained
+  history rows up to `--limit`.
+* `status` returns instance state; effective `config` and `config_path` are under
+  `configuration`. Field contracts: link:21_ipc.adoc[IPC].
+* Command acknowledgements report `Succeeded`, `Failed`, `NotAdmitted`, or
+  `Unknown`, including failed authoritative results on stdout. Failure need not
+  mean rollback; an unknown outcome requires inspecting state before retrying.
+  See link:21_ipc.adoc#_request_failures_and_completion[IPC request failures and completion].
+* Task acknowledgements and results supply instance-qualified references. Reuse
+  those references rather than constructing them from numeric IDs. `--wait` exits
+  unsuccessfully for failed or cancelled tasks while retaining terminal results
+  on stdout. Inspect the operation's commit boundaries before retrying. See
+  <<_cancellation,Cancellation>>, <<_same_files_and_relocation,Relocation>>, and
+  link:27_audio_processing.adoc[Audio processing].
+* Successful `library optimize` acknowledgements include that operation's size
+  report in `database_optimization`. The latest successful report in System
+  status is observational and must not be mistaken for a failed command's result.
 * `library other list` and both `library duplicates` variants return one
   `{total, rows}` page. `--fingerprint` selects duplicate members instead of group
   summaries. Page size is `0..256`, default 100; `--offset` defaults to zero.
