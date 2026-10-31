@@ -743,7 +743,7 @@ belong only to `audio_visualizer` panels. Animation FPS remains global.
 Live analysis runs during playback only when visualizations are enabled, the application
 window is visible, and a style requiring live analysis is visible. Waveform uses
 the independent progressive or explicitly requested track-preview path.
-`visualizations.general.analysis_rate_hz` accepts `5`–`60` and defaults to `20`; it limits FFT
+`visualizations.general.analysis_rate_hz` accepts `5`–`60` and defaults to `28`; it limits FFT
 analysis, not display animation. `visualizations.general.animation_fps` defaults to `0`, following
 native window frames; `1`–`240` caps the shared animation rate for Spectrum,
 Spectrogram, and Audio Visualizer. It does not affect Waveform or album artwork.
@@ -956,7 +956,7 @@ The remaining `visualizations.spectrum.*` settings are:
 |`peak_hold_ms` |`0`–`2000` ms |`400`
 |`peak_gravity` |`0`–`500` dB/s² |`50.0`
 |`bar_hold_ms` |`0`–`2000` ms |`0`
-|`bar_gravity` |`0`–`500` dB/s² |`200.0`
+|`bar_gravity` |`0`–`500` dB/s² |`400.0`
 |`smoothing_ms` |`0`–`1000` ms |`80`
 |===
 

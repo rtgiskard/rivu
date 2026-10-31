@@ -1971,7 +1971,7 @@ impl Playlists {
                     .child(
                         IconButton::new(
                             ("playlist-import", panel_id),
-                            "",
+                            "",
                             self.tr("gl-import-m3u"),
                         )
                         .build(
@@ -1984,7 +1984,7 @@ impl Playlists {
                     .child(
                         IconButton::new(
                             ("playlist-export", panel_id),
-                            "",
+                            "",
                             self.tr("gl-export-playlist"),
                         )
                         .enabled(playlist_id.is_some())
