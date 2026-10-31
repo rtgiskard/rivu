@@ -940,10 +940,9 @@ impl Store {
                 && ((if exact_sources {
                     requested_roots.contains(owner)
                 } else {
-                    result
-                        .roots
-                        .iter()
-                        .any(|root| owner == root || owner.starts_with(root))
+                    owner
+                        .ancestors()
+                        .any(|ancestor| requested_roots.contains(ancestor))
                 }) || absent_ordinary.contains(&o.id))
                 && !unconfirmed(o)
                 && let Some((queue, albums)) = mark_missing

@@ -158,3 +158,19 @@ before an append, and retry of a genuinely failed runtime selection save. An
 isolated headless instance with invalid historical metadata preserved the selected
 duplicate occurrence through shutdown and recovered it before an append after
 repair. Current behavior is documented in link:04_playback.adoc#_queue[Queue].
+
+=== Multi-root scan missing reconciliation
+
+Status: resolved in implementation, 2026-10-31.
+
+Missing reconciliation compared every absent identity against requested roots
+linearly, despite already having a borrowed root hash set. Ancestor membership
+now reuses that set; CUE ownership, exact-source checks, and incomplete-scan
+protection retain their existing behavior.
+
+A deterministic probe with 1,000 distinct file roots and their 1,000 absent
+identities counted 500,500 root predicates before and 1,000 ancestor hash lookups
+after. These are operation counts, not latency or RSS measurements. An isolated
+headless scan of 1,000 absent files also exercised bounded-diagnostic truncation:
+the scan transaction committed, while all 1,000 identities remained protected from
+missing detection. See link:02_library.adoc#_errors_and_partial_results[Errors and partial results].
