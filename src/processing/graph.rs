@@ -773,17 +773,7 @@ pub(super) fn execute(
             Ok(())
         })();
         if let Err(error) = outcome {
-            node_event(
-                status,
-                id,
-                if cancel.load(Ordering::Acquire) {
-                    ProcessingPhase::Cancelled
-                } else {
-                    ProcessingPhase::Failed
-                },
-                Some(format!("{error:#}")),
-                tx,
-            );
+            node_failure(status, id, &error, cancel, tx);
             return Err(error);
         }
         if matches!(
@@ -801,14 +791,20 @@ pub(super) fn execute(
             boundaries.retain(|port, _| retained.contains(port));
         }
     }
-    let mut engine = Engine::new(input);
-    let index = engine.compile(&graph, target, &boundaries, &profiles, cancel)?;
-    // The engine owns only boundaries reachable from this target; obsolete model
-    // ancestors are released before allocating the final retained output.
-    drop(boundaries);
-    drop(profiles);
-    let output = engine.render(index, budget, cancel)?;
-    publish(output, input.frames(), target, order, status, tx)
+    let outcome = (|| {
+        let mut engine = Engine::new(input);
+        let index = engine.compile(&graph, target, &boundaries, &profiles, cancel)?;
+        // The engine owns only boundaries reachable from this target; obsolete model
+        // ancestors are released before allocating the final retained output.
+        drop(boundaries);
+        drop(profiles);
+        let output = engine.render(index, budget, cancel)?;
+        publish(output, input.frames(), target, order, status, tx)
+    })();
+    if let Err(error) = &outcome {
+        node_failure(status, target.node, error, cancel, tx);
+    }
+    outcome
 }
 
 fn publish(
@@ -1021,19 +1017,29 @@ pub(super) fn execute_native(
     if let Err(error) = &outcome
         && let Some(id) = active_node
     {
-        node_event(
-            status,
-            id,
-            if cancel.load(Ordering::Acquire) {
-                ProcessingPhase::Cancelled
-            } else {
-                ProcessingPhase::Failed
-            },
-            Some(format!("{error:#}")),
-            tx,
-        );
+        node_failure(status, id, error, cancel, tx);
     }
     outcome
+}
+
+fn node_failure(
+    status: &mut ProcessingTaskStatus,
+    node: u64,
+    error: &anyhow::Error,
+    cancel: &AtomicBool,
+    tx: &Sender<Event>,
+) {
+    node_event(
+        status,
+        node,
+        if cancel.load(Ordering::Acquire) {
+            ProcessingPhase::Cancelled
+        } else {
+            ProcessingPhase::Failed
+        },
+        Some(format!("{error:#}")),
+        tx,
+    );
 }
 
 fn node_event(

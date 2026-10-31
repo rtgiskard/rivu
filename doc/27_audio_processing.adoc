@@ -461,6 +461,10 @@ does not accumulate behind a slow consumer. Phase changes, graph-node stages and
 terminal results remain reliable; a progress counter is a snapshot, not one
 notification per decoder or inference block.
 
+Node-specific preparation errors identify that node. Failures or cancellations
+during final graph compilation, rendering or output publication identify the
+requested output node; an earlier node-specific error is not reported again.
+
 Preparation and backend validation run on a worker, so accepted starts can fail
 asynchronously. Queued can include waiting for retired audio to release its
 reservation. Failure or unwinding reaches a terminal task result; neural children

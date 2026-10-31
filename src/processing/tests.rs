@@ -558,6 +558,104 @@ fn native_graph_decode_budget_failure_reports_requested_output_once() {
 }
 
 #[test]
+fn retained_graph_failures_report_the_responsible_node_once() {
+    use rivu_dsp::equalizer::config::{EqBand, EqualizerConfig};
+
+    let eq = |frequency_hz| GraphNodeKind::Equalizer {
+        config: EqualizerConfig {
+            enabled: true,
+            bands: vec![EqBand {
+                frequency_hz,
+                gain_db: 1.0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        implementation: EqImplementation::Iir,
+    };
+    for (kind, limit, failed_node, expected_error) in [
+        (eq(10_000.0), MEMORY_LIMIT, 2, "rate-dependent maximum"),
+        (eq(1_000.0), 1, 2, "PCM memory budget exceeded"),
+        (
+            GraphNodeKind::Denoise {
+                config: Default::default(),
+                profile: Some(NoiseSelection {
+                    start_seconds: 0.0,
+                    end_seconds: 1.0,
+                }),
+            },
+            MEMORY_LIMIT,
+            3,
+            "outside the source",
+        ),
+    ] {
+        let (_directory, service, _track, _) = fixture();
+        let retained = &service.results[0];
+        let input = retained.outputs.vocals.as_ref().unwrap();
+        let mut status = retained.status.clone();
+        let target = GraphPort { node: 2, port: 0 };
+        let config = graph_config(vec![kind]);
+        let graph = &config.processing_graph;
+        status.operation = ProcessingOperation::Graph;
+        status.settings.graph = Some(graph.clone());
+        status.settings.graph_target = Some(target);
+        status.settings.graph_mode = Some(GraphExecutionMode::Offline);
+        status.graph_nodes = graph
+            .ancestors(target)
+            .unwrap()
+            .into_iter()
+            .map(|node| GraphNodeStatus {
+                node,
+                phase: ProcessingPhase::Queued,
+                error: None,
+                model_id: None,
+                model_sha256: None,
+            })
+            .collect();
+        let budget = audio::PcmBudget::new(limit);
+        let (tx, rx) = async_channel::unbounded();
+        let mut progress = ProgressReporter::new(&tx, status.id);
+        // Exercise the retained-PCM executor directly, without model weights or Python.
+        let error = graph::execute(
+            input,
+            Arc::clone(&budget),
+            &mut status,
+            &AtomicBool::new(false),
+            &mut progress,
+        )
+        .err()
+        .expect("graph unexpectedly succeeded");
+        let error = format!("{error:#}");
+        assert!(error.contains(expected_error), "{error}");
+        let mut terminal_nodes = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let Event::GraphNode { status, .. } = event
+                && status.phase.is_terminal()
+            {
+                terminal_nodes.push(status);
+            }
+        }
+        assert_eq!(
+            terminal_nodes.len(),
+            1,
+            "missing or duplicate terminal nodes"
+        );
+        let failed = &terminal_nodes[0];
+        assert_eq!(failed.node, failed_node);
+        assert_eq!(failed.phase, ProcessingPhase::Failed);
+        assert_eq!(failed.error.as_deref(), Some(error.as_str()));
+        assert_eq!(
+            status
+                .graph_nodes
+                .iter()
+                .find(|node| node.node == failed_node),
+            Some(failed)
+        );
+        assert_eq!(budget.used_bytes(), 0);
+    }
+}
+
+#[test]
 fn standalone_native_speech_dispatch_does_not_require_python_resources() {
     let (directory, mut service, track, mut config) = fixture();
     let mut writer = hound::WavWriter::create(
