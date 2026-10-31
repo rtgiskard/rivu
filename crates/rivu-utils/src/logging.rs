@@ -275,10 +275,10 @@ fn subscriber(routing: Arc<RoutingState>) -> impl Subscriber + Send + Sync {
     let stderr_level = routing
         .level_override
         .unwrap_or(level_code(LogLevel::Warning));
+    let stderr_ansi = stderr_ansi();
     let stderr_layer = fmt::layer()
-        .event_format(LineFormatter {
-            ansi: stderr_ansi(),
-        })
+        .event_format(LineFormatter { ansi: stderr_ansi })
+        .with_ansi(stderr_ansi)
         .with_writer(io::stderr)
         .with_filter(
             dynamic_filter_fn(move |metadata, _| level_enabled(stderr_level, metadata.level()))
@@ -287,6 +287,7 @@ fn subscriber(routing: Arc<RoutingState>) -> impl Subscriber + Send + Sync {
     let sink = routing.sink.clone();
     let file_layer = fmt::layer()
         .event_format(LineFormatter { ansi: false })
+        .with_ansi(false)
         .with_writer(SharedSink(sink))
         .with_filter(
             dynamic_filter_fn(move |metadata, _| {
@@ -596,6 +597,30 @@ mod tests {
             tracing::debug!(target: "logging_test", "debug {message}");
             tracing::error!(target: "logging_test", "error {message}");
         });
+    }
+
+    #[test]
+    fn file_logs_keep_structured_fields_free_of_ansi() {
+        let (routing, dispatch) = harness();
+        let directory = tempfile::tempdir().unwrap();
+        let mut session =
+            Session::start_with_routing(directory.path(), &file_options(LogLevel::Error), routing)
+                .unwrap();
+        tracing::dispatcher::with_default(&dispatch, || {
+            tracing::error!(target: "logging_test", operation = "scan", "operation failed");
+        });
+        session.shutdown();
+        let contents = log_contents(directory.path());
+        assert!(
+            contents.contains("operation failed operation=\"scan\""),
+            "{contents:?}"
+        );
+        assert!(
+            contents
+                .chars()
+                .all(|character| !character.is_control() || character == '\n'),
+            "{contents:?}"
+        );
     }
 
     #[test]

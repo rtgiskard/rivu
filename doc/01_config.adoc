@@ -234,7 +234,10 @@ process's lifetime.
 
 `logging.to_file` defaults to `false`; enabling it writes weekly logs under the
 data directory. `logging.retention_weeks` accepts `1`–`520` and defaults to `4`.
-`NO_COLOR` or `RIVU_COLOR=never` disables stderr colors.
+Stderr colors are enabled only for a terminal by default. `RIVU_COLOR=always`
+forces colors even when redirected; `NO_COLOR` takes precedence over it, and
+`NO_COLOR` or `RIVU_COLOR=never` disables colors for both levels and fields.
+File logs never include generated ANSI styling.
 
 File logging starts after configuration is loaded. Records may be dropped under
 load; forced termination can lose pending records.

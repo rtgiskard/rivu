@@ -5,15 +5,21 @@ use std::{fs, path::Path, process::Command};
 const HOSTILE: &str = "path\u{1b}[2J\n\r\t\u{009b}end";
 const ESCAPED: &str = "path\\x1b[2J\\n\\r\\t\\u{009b}end";
 
-fn invoke(data: &Path, config: &Path) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_rivu-migrate"))
+fn command(data: &Path, config: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_rivu-migrate"));
+    command
+        .env_remove("NO_COLOR")
+        .env_remove("RIVU_COLOR")
         .arg("--data-dir")
         .arg(data)
         .arg("--config")
         .arg(config)
-        .arg("apply")
-        .output()
-        .unwrap()
+        .arg("apply");
+    command
+}
+
+fn invoke(data: &Path, config: &Path) -> std::process::Output {
+    command(data, config).output().unwrap()
 }
 
 fn assert_terminal_safe(bytes: &[u8]) -> String {
@@ -90,5 +96,46 @@ fn preflight_error_paths_are_escaped_at_final_cli_output() {
     assert_eq!(output.status.code(), Some(2));
     let stderr = assert_terminal_safe(&output.stderr);
     assert!(stderr.contains(&format!("{ESCAPED}.toml")), "{stderr}");
+    assert_eq!(fs::read_to_string(&config).unwrap(), "[broken");
+}
+
+#[test]
+fn stderr_color_policy_applies_to_levels_and_structured_fields() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = directory.path().join(format!("{HOSTILE}.toml"));
+    fs::write(&config, "[broken").unwrap();
+    for (color, no_color, expected_ansi) in [
+        (None, false, false),
+        (Some("never"), false, false),
+        (Some("always"), false, true),
+        (Some("always"), true, false),
+    ] {
+        let mut command = command(directory.path(), &config);
+        if let Some(color) = color {
+            command.env("RIVU_COLOR", color);
+        }
+        if no_color {
+            command.env("NO_COLOR", "1");
+        }
+        let output = command.output().unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains(&format!("{ESCAPED}.toml")), "{stderr:?}");
+        assert!(!stderr.contains(HOSTILE), "{stderr:?}");
+        if expected_ansi {
+            let (prefix, fields) = stderr.split_once("Migration failed ").unwrap();
+            assert!(prefix.contains("\x1b["), "{stderr:?}");
+            assert!(
+                fields.lines().next().unwrap().contains("\x1b["),
+                "{stderr:?}"
+            );
+        } else {
+            assert_terminal_safe(stderr.as_bytes());
+            assert!(
+                stderr.contains("error=Preflighting configuration"),
+                "{stderr}"
+            );
+        }
+    }
     assert_eq!(fs::read_to_string(&config).unwrap(), "[broken");
 }
