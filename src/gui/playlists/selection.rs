@@ -558,7 +558,7 @@ impl EntrySelection {
 
     fn finish_navigation(
         &mut self,
-        query: Option<String>,
+        filtered: bool,
         unexpected_response: &str,
         job: EntryNavigationJob,
         scope: Option<EntryNavigationScope>,
@@ -583,7 +583,7 @@ impl EntrySelection {
             return EntryNavigationEffect::None;
         }
         self.navigation = None;
-        let response = entry_query_result(response, job.scope, query);
+        let response = entry_query_result(response, job.scope, filtered);
         match response {
             Ok(Some(ViewResponse::PlaylistEntries(page))) => {
                 let Some(row) = page.rows.first() else {
@@ -679,17 +679,19 @@ impl EntryRangePages {
 fn entry_query_result(
     response: rivu_protocol::response::QueryResponse,
     scope: EntryNavigationScope,
-    filter: Option<String>,
+    filtered: bool,
 ) -> Result<Option<ViewResponse>, rivu_protocol::response::QueryError> {
     let result = response.result?;
+    // Stamps select metadata for filtered locations by presence, not search text.
+    // Query identity and selection generation own the actual filter value.
     let query = match &result {
         ViewResponse::PlaylistEntryLocations(_) => Query::PlaylistEntryLocations {
-            query: filter,
+            query: filtered.then(String::new),
             playlist_id: scope.playlist_id,
             entry_ids: Vec::new(),
         },
         _ => Query::PlaylistEntries {
-            query: filter,
+            query: None,
             playlist_id: scope.playlist_id,
             offset: 0,
             limit: 1,
@@ -982,7 +984,7 @@ impl Playlists {
                             metadata: library,
                             bitrate: 0,
                         },
-                        filter.clone(),
+                        filter.is_some(),
                     ) {
                         Ok(result) => result,
                         Err(error) => {
@@ -1188,7 +1190,7 @@ impl Playlists {
                         },
                     )
                     .await;
-                    let result = entry_query_result(response, scope, filter.clone())
+                    let result = entry_query_result(response, scope, filter.is_some())
                         .map_err(|error| error.to_string())?;
                     let Some(ViewResponse::PlaylistEntries(page)) = result else {
                         return Err(i18n.text("gl-playlist-range-changed").into());
@@ -1320,9 +1322,9 @@ impl Playlists {
             let _ = this.update(cx, |this, cx| {
                 this.refresh(cx);
                 let scope = this.playlist_navigation_scope();
-                let query = this.browser.playlists().entries().query.clone();
+                let filtered = this.browser.playlists().entries().query.is_some();
                 let effect = this.browser.playlist_selection_mut().finish_navigation(
-                    query,
+                    filtered,
                     this.i18n.text("gl-playlist-navigation-response"),
                     job,
                     scope,
@@ -1523,7 +1525,7 @@ mod tests {
             let first = selection.take_navigation().unwrap();
             assert!(matches!(
                 selection.finish_navigation(
-                    None,
+                    false,
                     "unexpected",
                     first,
                     Some(scope),
@@ -1645,7 +1647,7 @@ mod tests {
         assert!(selection.take_navigation().is_none());
         assert_eq!(
             selection.finish_navigation(
-                None,
+                false,
                 "unexpected",
                 running,
                 Some(scope),
@@ -1812,7 +1814,7 @@ mod tests {
         assert!(selection.take_navigation().is_none());
         assert_eq!(
             selection.finish_navigation(
-                None,
+                false,
                 "Unexpected playlist navigation response",
                 old,
                 Some(current),
@@ -1827,7 +1829,7 @@ mod tests {
         assert!(selection.take_navigation().is_none());
         assert!(matches!(
             selection.finish_navigation(
-                None,
+                false,
                 "Unexpected playlist navigation response",
                 retry,
                 Some(current),
@@ -1861,7 +1863,7 @@ mod tests {
         let mut owner = super::super::model::PlaylistBrowser::default();
         owner.prepare_entries(scope.playlist_id);
         owner.search_entries(Some("needle".into()));
-        let query = owner.entries().query.clone();
+        let query = owner.entries().query.is_some();
         let selection = &mut owner.track_selection;
         selection.select(
             EntryIdentity {
@@ -1916,7 +1918,7 @@ mod tests {
             let stale = selection.take_navigation().unwrap();
             assert_eq!(
                 selection.finish_navigation(
-                    None,
+                    false,
                     "Unexpected playlist navigation response",
                     stale,
                     Some(changed),
@@ -1944,7 +1946,7 @@ mod tests {
             let target = identity(1, 1);
             assert_eq!(
                 selection.finish_navigation(
-                    None,
+                    false,
                     "Unexpected playlist navigation response",
                     retry,
                     Some(changed),
@@ -2008,7 +2010,7 @@ mod tests {
         assert!(selection.take_navigation().is_none());
         assert_eq!(
             selection.finish_navigation(
-                None,
+                false,
                 "Unexpected playlist navigation response",
                 stale,
                 Some(changed),
@@ -2026,7 +2028,7 @@ mod tests {
         assert!(latest.shift && latest.multi);
         assert_eq!(
             selection.finish_navigation(
-                None,
+                false,
                 "Unexpected playlist navigation response",
                 latest,
                 Some(changed),
@@ -2062,7 +2064,7 @@ mod tests {
         assert!(selection.ordered_ids().is_empty());
         assert_eq!(
             selection.finish_navigation(
-                None,
+                false,
                 "Unexpected playlist navigation response",
                 first,
                 Some(scope),
@@ -2077,7 +2079,7 @@ mod tests {
         assert!(selection.take_navigation().is_none());
         assert_eq!(
             selection.finish_navigation(
-                None,
+                false,
                 "Unexpected playlist navigation response",
                 latest,
                 Some(scope),
@@ -2110,7 +2112,7 @@ mod tests {
         let first = selection.take_navigation().unwrap();
         assert_eq!(first.offset, 0);
         selection.finish_navigation(
-            None,
+            false,
             "Unexpected playlist navigation response",
             first,
             Some(scope),
@@ -2133,7 +2135,7 @@ mod tests {
         }
         assert_eq!(
             selection.finish_navigation(
-                None,
+                false,
                 "Unexpected playlist navigation response",
                 first,
                 Some(scope),
@@ -2148,7 +2150,7 @@ mod tests {
             assert!(selection.take_navigation().is_none());
         }
         selection.finish_navigation(
-            None,
+            false,
             "Unexpected playlist navigation response",
             last,
             Some(scope),
@@ -2175,7 +2177,7 @@ mod tests {
             assert!(navigate(&mut selection, scope, 20, true, shift, multi));
             assert_eq!(
                 selection.finish_navigation(
-                    None,
+                    false,
                     "Unexpected playlist navigation response",
                     first,
                     Some(scope),
@@ -2186,7 +2188,7 @@ mod tests {
             assert!(selection.error.is_none());
             let latest = selection.take_navigation().unwrap();
             let effect = selection.finish_navigation(
-                None,
+                false,
                 "Unexpected playlist navigation response",
                 latest,
                 Some(scope),
@@ -2258,7 +2260,7 @@ mod tests {
         assert!(selection.take_navigation().is_none());
         assert_eq!(
             selection.finish_navigation(
-                None,
+                false,
                 "Unexpected playlist navigation response",
                 old,
                 Some(scope),
@@ -2298,7 +2300,7 @@ mod tests {
             } else {
                 navigation_response(old, 10)
             };
-            let query = owner.entries().query.clone();
+            let query = owner.entries().query.is_some();
             assert_eq!(
                 owner.track_selection.finish_navigation(
                     query,
@@ -2323,7 +2325,7 @@ mod tests {
             ));
             let latest = owner.track_selection.take_navigation().unwrap();
             assert_eq!(latest.offset, 0);
-            let query = owner.entries().query.clone();
+            let query = owner.entries().query.is_some();
             assert!(matches!(
                 owner.track_selection.finish_navigation(
                     query,
@@ -2367,7 +2369,7 @@ mod tests {
         assert!(selection.take_range().is_none());
         assert_eq!(
             selection.finish_navigation(
-                None,
+                false,
                 "Unexpected playlist navigation response",
                 old,
                 Some(scope),
@@ -2399,7 +2401,7 @@ mod tests {
         assert_eq!(job.offset, 0);
         assert_eq!(
             selection.finish_navigation(
-                None,
+                false,
                 "Unexpected playlist navigation response",
                 job,
                 Some(scope),
@@ -2480,7 +2482,7 @@ mod tests {
             assert!(selection.take_navigation().is_none());
             assert_eq!(
                 selection.finish_navigation(
-                    None,
+                    false,
                     "Unexpected playlist navigation response",
                     old,
                     Some(scope),
@@ -2495,7 +2497,7 @@ mod tests {
             assert_eq!(latest.offset, base.position + 1);
             assert!(selection.take_navigation().is_none());
             selection.finish_navigation(
-                None,
+                false,
                 "Unexpected playlist navigation response",
                 latest,
                 Some(scope),
@@ -2524,7 +2526,7 @@ mod tests {
         };
         assert_eq!(
             selection.finish_navigation(
-                None,
+                false,
                 "Unexpected playlist navigation response",
                 job,
                 Some(changed),
@@ -2559,7 +2561,7 @@ mod tests {
             response.result = Err(QueryError::Message("unavailable".into()));
             assert_eq!(
                 selection.finish_navigation(
-                    None,
+                    false,
                     "Unexpected playlist navigation response",
                     job,
                     Some(scope),
@@ -2592,7 +2594,7 @@ mod tests {
         assert!(navigate(&mut selection, scope, 30, true, false, false));
         let job = selection.take_navigation().unwrap();
         selection.finish_navigation(
-            None,
+            false,
             "Unexpected playlist navigation response",
             job,
             Some(scope),
@@ -2611,7 +2613,7 @@ mod tests {
         let job = selection.take_navigation().unwrap();
         assert_eq!(
             selection.finish_navigation(
-                None,
+                false,
                 "Unexpected playlist navigation response",
                 job,
                 Some(scope),
@@ -2625,7 +2627,7 @@ mod tests {
         assert!(navigate(&mut selection, scope, 3, true, false, false));
         let job = selection.take_navigation().unwrap();
         selection.finish_navigation(
-            None,
+            false,
             "Unexpected playlist navigation response",
             job,
             Some(scope),
@@ -2699,7 +2701,7 @@ mod tests {
             }
             assert_eq!(
                 selection.finish_navigation(
-                    None,
+                    false,
                     "Unexpected playlist navigation response",
                     job,
                     Some(scope),
@@ -2738,7 +2740,7 @@ mod tests {
             };
             assert_eq!(
                 selection.finish_navigation(
-                    None,
+                    false,
                     "Unexpected playlist navigation response",
                     job,
                     Some(scope),
@@ -2765,7 +2767,7 @@ mod tests {
             revisions: QueryRevisions::default(),
             result: Err(QueryError::Message("core unavailable".into())),
         };
-        let error = super::entry_query_result(response, navigation_scope(), None).unwrap_err();
+        let error = super::entry_query_result(response, navigation_scope(), false).unwrap_err();
         selection.fail(error.to_string());
         assert!(!selection.busy);
         assert!(selection.error.is_some());
@@ -2828,7 +2830,7 @@ mod tests {
                 result: Ok(ViewResponse::PlaylistEntries(page(0, 1, 1))),
             };
             assert!(
-                super::entry_query_result(response, navigation_scope(), None)
+                super::entry_query_result(response, navigation_scope(), false)
                     .unwrap()
                     .is_none()
             );
@@ -2838,7 +2840,7 @@ mod tests {
             result: Ok(ViewResponse::PlaylistEntries(page(0, 1, 1))),
         };
         let Some(ViewResponse::PlaylistEntries(page)) =
-            super::entry_query_result(response, navigation_scope(), None).unwrap()
+            super::entry_query_result(response, navigation_scope(), false).unwrap()
         else {
             panic!("current payload rejected");
         };
@@ -2858,7 +2860,7 @@ mod tests {
                     })),
                 },
                 navigation_scope(),
-                None
+                false
             )
             .unwrap()
             .is_some()
@@ -2875,7 +2877,7 @@ mod tests {
                     result: Ok(ViewResponse::PlaylistEntryLocations(Vec::new())),
                 },
                 navigation_scope(),
-                None
+                false
             )
             .unwrap()
             .is_some()
