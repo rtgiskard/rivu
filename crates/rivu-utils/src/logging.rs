@@ -500,6 +500,9 @@ mod tests {
         }
     }
 
+    // Keep each session's dispatch as the thread default through reconfiguration
+    // and shutdown: tracing's single-dispatch fast path rebuilds callsite interests
+    // against the current default, not merely every live Dispatch.
     fn harness() -> (Arc<RoutingState>, tracing::Dispatch) {
         let (subscriber, routing) = subscriber(None);
         let dispatch = tracing::Dispatch::new(subscriber);
@@ -541,6 +544,7 @@ mod tests {
         for override_level in [LogLevel::Debug, LogLevel::Error] {
             let (subscriber, routing) = subscriber(Some(override_level));
             let dispatch = tracing::Dispatch::new(subscriber);
+            let _default = tracing::dispatcher::set_default(&dispatch);
             let directory = tempfile::tempdir().unwrap();
             let mut session = Session::start_with_routing(
                 directory.path(),
@@ -643,6 +647,7 @@ mod tests {
     #[test]
     fn live_reconfiguration_preserves_filtering_and_defers_count_changes() {
         let (routing, dispatch) = harness();
+        let _default = tracing::dispatcher::set_default(&dispatch);
         let directory = tempfile::tempdir().unwrap();
         let logs = directory.path().join("logs");
         let mut session =
@@ -700,6 +705,7 @@ mod tests {
     #[test]
     fn session_ownership_survives_failures_and_releases_after_shutdown_or_drop() {
         let (routing, dispatch) = harness();
+        let _default = tracing::dispatcher::set_default(&dispatch);
         let first_dir = tempfile::tempdir().unwrap();
         let second_dir = tempfile::tempdir().unwrap();
         let config = file_options(LogLevel::Debug);
@@ -780,6 +786,7 @@ mod tests {
     #[test]
     fn failed_preparation_does_not_persist_and_can_retry() {
         let (routing, dispatch) = harness();
+        let _default = tracing::dispatcher::set_default(&dispatch);
         let directory = tempfile::tempdir().unwrap();
         fs::write(directory.path().join("logs"), "not a directory").unwrap();
         let enabled = file_options(LogLevel::Debug);

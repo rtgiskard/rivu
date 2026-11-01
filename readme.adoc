@@ -227,6 +227,10 @@ tests with no features, logging only, terminal only, and both features
 
 Rust tests use `Cargo.lock`. Install the build/font prerequisites and `dbus`;
 tests use private session buses and require no display server or audio device.
+Logging session tests keep their thread-local subscriber active across startup,
+reconfiguration, and shutdown so tracing rebuilds callsite filters against the
+correct subscriber, independently of other tests' execution order.
+
 Python tests require NumPy, SciPy, soundfile, and jsonschema:
 `sudo pacman -S --needed python python-numpy python-scipy python-soundfile python-jsonschema`.
 Use `PYTHON=/path/to/python` to select a prepared interpreter. Real-model checks
