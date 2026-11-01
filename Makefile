@@ -27,6 +27,10 @@ test-rust:
 	cargo test --locked --workspace --no-default-features
 	cargo test --locked -p rivu-dsp --no-default-features
 	cargo test --locked -p rivu-format --no-default-features
+	cargo test --locked -p rivu-utils --no-default-features
+	cargo test --locked -p rivu-utils --no-default-features --features logging
+	cargo test --locked -p rivu-utils --no-default-features --features terminal
+	cargo test --locked -p rivu-utils --all-features
 
 test-python:
 	$(PYTHON) -c 'import numpy, scipy, soundfile, jsonschema'

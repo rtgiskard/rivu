@@ -10,7 +10,7 @@ use super::{
 };
 use anyhow::{Context, Result, anyhow, bail};
 use rivu_format::decoder_hint::DecoderHint;
-use rivu_format::regular_file::open_regular_file;
+use rivu_utils::regular_file::open_regular_file;
 use std::{
     fs::File,
     io::Seek,

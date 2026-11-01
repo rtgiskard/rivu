@@ -66,8 +66,19 @@ Both executables use this authority.
 
 The application owns runtime connections, caches, configuration I/O and Core/UI
 state. The tool owns offline preflight, backups and historical conversions; these
-do not enter normal decoding or SQL. `rivu-utils` shares logging and terminal
-diagnostics without depending on configuration or database formats.
+do not enter normal decoding or SQL.
+
+`rivu-utils` owns general-purpose mechanisms without application state,
+configuration or database format dependencies. Its default feature set is empty;
+`regular_file::open_regular_file` provides descriptor-based ordinary-file admission
+without pulling in diagnostic dependencies. It follows ordinary symbolic links,
+rejects non-regular opened objects, and opens nonblocking so a FIFO cannot wait
+for a writer. Format, audio and metadata consumers use this shared mechanism.
+
+The optional `logging` and `terminal` features enable process logging and terminal
+diagnostics independently. Both executables explicitly enable them; low-level
+consumers leave them disabled, subject to Cargo feature unification. Configuration
+mapping, query semantics and application executor lifetimes stay with their owners.
 
 Run `cargo test -p rivu-format --no-default-features` for configuration contracts;
 add `--features database` for schema and trigger behavior.

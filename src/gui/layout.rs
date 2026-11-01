@@ -1725,7 +1725,7 @@ impl LayoutSet {
     }
 
     pub fn load(path: &Path) -> Result<Self> {
-        let file = rivu_format::regular_file::open_regular_file(path)
+        let file = rivu_utils::regular_file::open_regular_file(path)
             .with_context(|| format!("opening layout {}", path.display()))?;
         let input: serialized::Input = serde_json::from_reader(BufReader::new(file))
             .with_context(|| format!("decoding layout {}", path.display()))?;

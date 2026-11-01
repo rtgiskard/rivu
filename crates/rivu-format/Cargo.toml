@@ -13,6 +13,7 @@ anyhow = "1"
 directories = "6"
 libc = "0.2"
 rivu-dsp = { path = "../rivu-dsp", default-features = false }
+rivu-utils = { path = "../rivu-utils", default-features = false }
 rusqlite = { version = "0.41.0", features = ["bundled", "functions"], optional = true }
 serde = { version = "1", features = ["derive"] }
 toml = "1.1.8"

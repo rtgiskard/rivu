@@ -485,7 +485,7 @@ impl ArtworkManager {
         });
         let mut bytes = Vec::new();
         for (_, candidate) in candidates {
-            let Ok(file) = rivu_format::regular_file::open_regular_file(&candidate) else {
+            let Ok(file) = rivu_utils::regular_file::open_regular_file(&candidate) else {
                 continue;
             };
             let Ok(metadata) = file.metadata() else {
@@ -507,7 +507,7 @@ impl ArtworkManager {
     }
 
     fn embedded_uri(&self, path: &Path, limit: usize) -> Result<Option<Arc<ArtworkFile>>, ()> {
-        let file = rivu_format::regular_file::open_regular_file(path).map_err(|_| ())?;
+        let file = rivu_utils::regular_file::open_regular_file(path).map_err(|_| ())?;
         let mut hint = Hint::new();
         if let Some(extension) = path.extension().and_then(|value| value.to_str()) {
             hint.with_extension(extension);
@@ -666,7 +666,7 @@ fn reuse_image(path: &Path, data: &[u8]) -> io::Result<String> {
     if !metadata.is_file() || metadata.len() != data.len() as u64 {
         return Err(mismatch());
     }
-    let file = rivu_format::regular_file::open_regular_file(path)?;
+    let file = rivu_utils::regular_file::open_regular_file(path)?;
     // Stream at most the expected length plus one byte, including if the file
     // grows after metadata. Comparison uses fixed stack space, not a second image.
     let mut reader = file.take(data.len() as u64 + 1);

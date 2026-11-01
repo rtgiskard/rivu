@@ -19,7 +19,7 @@ pub(super) async fn read_input_async(
     let (file, bytes) = workers
         .execute(move || -> Result<_> {
             admission_cancellation.check()?;
-            let file = rivu_format::regular_file::open_regular_file(&path)?;
+            let file = rivu_utils::regular_file::open_regular_file(&path)?;
             let metadata = file.metadata()?;
             ensure!(
                 metadata.len() <= limit as u64,

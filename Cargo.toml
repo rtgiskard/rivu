@@ -19,7 +19,7 @@ embed-nerd-font = []
 
 [dependencies]
 rivu-format = { path = "crates/rivu-format", default-features = false, features = ["database"] }
-rivu-utils = { path = "crates/rivu-utils" }
+rivu-utils = { path = "crates/rivu-utils", default-features = false, features = ["logging", "terminal"] }
 rivu-audio = { path = "crates/rivu-audio", default-features = false }
 rivu-ui = { path = "crates/rivu-ui" }
 rivu-dsp = { path = "crates/rivu-dsp", default-features = false, features = ["execution"] }

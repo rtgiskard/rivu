@@ -217,7 +217,8 @@ Run `make test` for all behavior suites, or select a suite:
 |Command |Coverage
 |`make test-rust`
 |Workspace tests with default, all, and no default features; standalone
-`rivu-dsp` and `rivu-format` tests without default features
+`rivu-dsp` and `rivu-format` tests without default features; standalone `rivu-utils`
+tests with no features, logging only, terminal only, and both features
 |`make test-python`
 |Audio-processing worker and evaluation tests with synthetic inputs; no model downloads
 |===

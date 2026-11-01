@@ -11,6 +11,7 @@ ffmpeg = ["dep:bindgen", "dep:libloading"]
 test-support = []
 
 [dependencies]
+rivu-utils = { path = "../rivu-utils", default-features = false }
 rivu-dsp = { path = "../rivu-dsp", default-features = false, features = ["execution"] }
 rivu-format = { path = "../rivu-format", default-features = false }
 anyhow = "1"
