@@ -260,7 +260,7 @@ pub(super) enum LibraryAction {
         #[arg(long, action = clap::ArgAction::Set)]
         missing: Option<bool>,
     },
-    /// Edit library metadata.
+    /// Edit database-only library metadata without changing the source file.
     Edit {
         track_id: i64,
         #[arg(long)]
@@ -297,6 +297,19 @@ pub(super) enum LibraryAction {
         /// Explicitly load FFmpeg for enhanced probing, regardless of the saved setting.
         #[arg(long)]
         enhanced: bool,
+    },
+    /// Read source-file tags offline, or write supplied fields with a backup.
+    Tags {
+        path: PathBuf,
+        /// Replace the source-file title; an empty string explicitly clears it.
+        #[arg(long)]
+        title: Option<String>,
+        /// Replace the source-file artist; an empty string explicitly clears it.
+        #[arg(long)]
+        artist: Option<String>,
+        /// Replace the source-file album; an empty string explicitly clears it.
+        #[arg(long)]
+        album: Option<String>,
     },
     /// Reclaim database space and refresh query statistics; stop playback and scans first.
     Optimize,

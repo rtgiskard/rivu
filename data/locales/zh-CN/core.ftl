@@ -50,8 +50,19 @@ core-probe = { $path }
       探测后端：{ $probe }
       解码后端：{ $decoder }
       FFmpeg 扩展音频解码：{ $ffmpeg }
+core-tags = 源文件标签：{ $path }
+      标题：{ $title }
+      艺人：{ $artist }
+      专辑：{ $album }
+      曲目编号：{ $track }
+      碟片编号：{ $disc }
+      发行日期：{ $date }
+core-tags-written = 已更新源文件标签：{ $path }
+    原文件备份：{ $backup }
+    未更改音乐库数据库中的覆盖值。
+core-tags-unchanged = 源文件标签未变：{ $path }（未创建备份）
 core-help-about = 安静、以本地为先的音乐播放器
-core-help-long = 不带命令启动桌面界面。gui 和 serve 为每个数据目录运行一个共享核心；控制命令连接该实例。列出输出设备和探测文件不会启动实例。
+core-help-long = 不带命令启动桌面界面。gui 和 serve 为每个数据目录运行一个共享核心；控制命令连接该实例。列出输出设备、探测文件和读写源文件标签均可离线运行，无需实例。
 core-help-usage = 用法：
 core-help-commands = 命令
 core-help-options = 选项
@@ -92,13 +103,17 @@ core-help-playback-device = 按完整名称选择输出设备，省略名称则�
 core-help-library-scan = 导入音频文件、CUE 文件或目录
 core-help-library-other = 浏览已注册但不在配置根目录内的曲目；未配置根目录时包含全部已注册曲目
 core-help-library-list = 列出音乐库曲目，可按文本、收藏或缺失状态筛选
-core-help-library-edit = 编辑音乐库元数据
+core-help-library-edit = 仅编辑数据库中的音乐库元数据，不修改源文件
 core-help-library-remove = 移除音乐库记录及引用
 core-help-library-favorite = 收藏或取消收藏
 core-help-library-clean-missing = 清理缺失记录及引用
 core-help-library-stats = 显示音乐库规模和累计播放次数
 core-help-library-history = 显示最近播放的曲目，每首仅列一次
 core-help-library-probe = 读取元数据并检查解码支持，不启动实例
+core-help-library-tags = 离线读取源文件标签。提供 --title、--artist 或 --album 时，将指定字段写入源文件并备份原文件；无需服务器，不更新音乐库数据库。值未改变时不创建备份。
+core-help-library-tags-title = 写入源文件标题；空字符串表示明确清空
+core-help-library-tags-artist = 写入源文件艺人；空字符串表示明确清空
+core-help-library-tags-album = 写入源文件专辑；空字符串表示明确清空
 core-help-library-optimize = 回收数据库空间并更新查询统计；请先停止播放和扫描
 core-help-library-duplicates = 只读查看历史内容相同的分组；缓存哈希不代表重新验证
 core-help-library-relocate = 在重新验证的目标路径保留缺失曲目的身份

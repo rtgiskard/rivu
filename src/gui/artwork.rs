@@ -1142,19 +1142,7 @@ mod tests {
     const VINYL: &[u8] = include_bytes!("../../data/artwork/vinyl.svg");
 
     fn cover_wave(path: &Path, image: &[u8]) {
-        let mut picture = b"\0image/gif\0\x03\0".to_vec();
-        picture.extend_from_slice(image);
-        let mut frame = b"APIC".to_vec();
-        frame.extend_from_slice(&(picture.len() as u32).to_be_bytes());
-        frame.extend_from_slice(&[0, 0]);
-        frame.extend_from_slice(&picture);
-        let mut bytes = b"ID3\x03\0\0".to_vec();
-        for shift in [21, 14, 7, 0] {
-            bytes.push(((frame.len() >> shift) & 0x7f) as u8);
-        }
-        bytes.extend_from_slice(&frame);
-        bytes.extend_from_slice(b"RIFF\x26\0\0\0WAVEfmt \x10\0\0\0\x01\0\x01\0\x40\x1f\0\0\x80\x3e\0\0\x02\0\x10\0data\x02\0\0\0\0\x40");
-        std::fs::write(path, bytes).unwrap();
+        crate::artwork::tests::pictures_wav(path, 3, &[(image, image.len(), 3)]);
     }
 
     fn loaded_cover(bytes: &[u8]) -> (tempfile::TempDir, LoadedArtwork) {

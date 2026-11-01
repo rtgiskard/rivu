@@ -10,6 +10,7 @@ use super::{
 };
 use anyhow::{Context, Result, bail};
 use libloading::Library;
+use rivu_metadata::Tags;
 use std::{
     ffi::{CStr, CString, c_char, c_int},
     fs::File,
@@ -123,12 +124,6 @@ type FFlush = unsafe extern "C" fn(*mut AVCodecContext);
 type FFrameAlloc = unsafe extern "C" fn() -> *mut AVFrame;
 type FFrameFree = unsafe extern "C" fn(*mut *mut AVFrame);
 type FFrameUnref = unsafe extern "C" fn(*mut AVFrame);
-type FDictGet = unsafe extern "C" fn(
-    *const AVDictionary,
-    *const c_char,
-    *const AVDictionaryEntry,
-    c_int,
-) -> *const AVDictionaryEntry;
 type FDictSet =
     unsafe extern "C" fn(*mut *mut AVDictionary, *const c_char, *const c_char, c_int) -> c_int;
 type FDictFree = unsafe extern "C" fn(*mut *mut AVDictionary);
@@ -163,7 +158,6 @@ struct Functions {
     frame_alloc: FFrameAlloc,
     frame_free: FFrameFree,
     frame_unref: FFrameUnref,
-    dict_get: FDictGet,
     dict_set: FDictSet,
     dict_free: FDictFree,
     opt_set_q: FOptSetQ,
@@ -274,7 +268,6 @@ fn load_runtime() -> Result<Runtime> {
         frame_alloc: s!(&util, "av_frame_alloc", FFrameAlloc),
         frame_free: s!(&util, "av_frame_free", FFrameFree),
         frame_unref: s!(&util, "av_frame_unref", FFrameUnref),
-        dict_get: s!(&util, "av_dict_get", FDictGet),
         dict_set: s!(&util, "av_dict_set", FDictSet),
         dict_free: s!(&util, "av_dict_free", FDictFree),
         opt_set_q: s!(&util, "av_opt_set_q", FOptSetQ),
@@ -385,15 +378,6 @@ fn cstr(ptr: *const c_char) -> String {
         unsafe { CStr::from_ptr(ptr) }
             .to_string_lossy()
             .into_owned()
-    }
-}
-fn tag(rt: &Runtime, dict: *const AVDictionary, key: &str) -> Option<String> {
-    let key = CString::new(key).ok()?;
-    let entry = unsafe { (rt.f.dict_get)(dict, key.as_ptr(), ptr::null(), 0) };
-    if entry.is_null() {
-        None
-    } else {
-        Some(cstr(unsafe { (*entry).value }))
     }
 }
 fn rational_seconds(value: i64, q: AVRational) -> Option<f64> {
@@ -576,14 +560,19 @@ impl Decoder {
     pub(super) fn from_file(
         path: &Path,
         file: File,
+        tags: Tags,
         cancelled: Option<&AtomicBool>,
     ) -> Result<Self> {
         check_cancelled(cancelled)?;
         let path = rivu_format::config::logical_path(path)?;
         let input = Input::from_file(path, file, runtime()?)?;
-        Self::from_input(input, cancelled)
+        Self::from_input(input, tags, cancelled)
     }
-    pub(super) fn from_input(mut input: Input, cancelled: Option<&AtomicBool>) -> Result<Self> {
+    pub(super) fn from_input(
+        mut input: Input,
+        tags: Tags,
+        cancelled: Option<&AtomicBool>,
+    ) -> Result<Self> {
         check_cancelled(cancelled)?;
         let rt = input.rt;
         let path = &input.path;
@@ -667,33 +656,6 @@ impl Decoder {
                 Some(d as f64 / AV_TIME_BASE as f64)
             }
         });
-        let container_metadata = unsafe { (*format).metadata };
-        let title = tag(rt, stream_ref.metadata, "title")
-            .or_else(|| tag(rt, container_metadata, "title"))
-            .unwrap_or_else(|| {
-                path.file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned()
-            });
-        let artist = tag(rt, stream_ref.metadata, "artist")
-            .or_else(|| tag(rt, container_metadata, "artist"))
-            .unwrap_or_default();
-        let album = tag(rt, stream_ref.metadata, "album")
-            .or_else(|| tag(rt, container_metadata, "album"))
-            .unwrap_or_default();
-        let read_tag =
-            |key| tag(rt, stream_ref.metadata, key).or_else(|| tag(rt, container_metadata, key));
-        let number_tag = |key| {
-            read_tag(key)
-                .and_then(|value| value.split('/').next()?.trim().parse::<u32>().ok())
-                .filter(|value| *value > 0)
-        };
-        let track_number = number_tag("track");
-        let disc_number = number_tag("disc");
-        let release_date = read_tag("date")
-            .filter(|value| !value.trim().is_empty())
-            .or_else(|| read_tag("year").filter(|value| !value.trim().is_empty()));
         let pcm = codec_name.starts_with("pcm_");
         let lossless = matches!(
             codec_name.as_str(),
@@ -723,10 +685,10 @@ impl Decoder {
         } else {
             None
         };
-        let info = MediaInfo {
-            title,
-            artist,
-            album,
+        let mut info = MediaInfo {
+            title: String::new(),
+            artist: String::new(),
+            album: String::new(),
             duration,
             bitrate_bps: pcm_bitrate.or_else(|| {
                 u64::try_from(p.bit_rate)
@@ -735,14 +697,15 @@ impl Decoder {
             }),
             // Only encoded PCM width × channels × sample rate is reliable here.
             bitrate_exact: pcm_bitrate.is_some(),
-            track_number,
-            disc_number,
+            track_number: None,
+            disc_number: None,
             bits_per_sample,
-            release_date,
+            release_date: None,
             codec: codec_text,
             channels: 0,
             sample_rate: 0,
         };
+        info.apply_tags(tags, path);
         let decoder = Self {
             rt,
             identity: input.identity,
@@ -1039,7 +1002,15 @@ impl Decoder {
                 .try_clone()
                 .context("Retaining FFmpeg seek source")?;
             let input = Input::from_file(self.path.clone(), file, self.rt)?;
-            let mut replacement = Self::from_input(input, cancelled)?;
+            let tags = Tags {
+                title: Some(self.info.title.clone()),
+                artist: Some(self.info.artist.clone()),
+                album: Some(self.info.album.clone()),
+                track_number: self.info.track_number,
+                disc_number: self.info.disc_number,
+                release_date: self.info.release_date.clone(),
+            };
+            let mut replacement = Self::from_input(input, tags, cancelled)?;
             replacement.packet_stats.invalidate();
             *self = replacement;
             return Ok(());
@@ -1255,7 +1226,7 @@ mod tests {
         let (completed, receive) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
             let input = Input::from_file(path, file, runtime().unwrap()).unwrap();
-            let mut decoder = Decoder::from_input(input, None).unwrap();
+            let mut decoder = Decoder::from_input(input, Tags::default(), None).unwrap();
             let mut frames = Vec::new();
             let mut samples = 0;
             loop {
@@ -1290,8 +1261,13 @@ mod tests {
     #[test]
     fn complete_ffmpeg_decode_counts_selected_packets_not_pcm_or_other_streams() {
         let file = pcm_file();
-        let mut decoder =
-            Decoder::from_file(file.path(), open_regular_file(file.path()).unwrap(), None).unwrap();
+        let mut decoder = Decoder::from_file(
+            file.path(),
+            open_regular_file(file.path()).unwrap(),
+            Tags::default(),
+            None,
+        )
+        .unwrap();
         assert_eq!(decoder.completed_bitrate(), None);
         let mut frames = Vec::new();
         let mut injected = false;
@@ -1340,9 +1316,13 @@ mod tests {
     fn ffmpeg_missing_packet_duration_and_corrupt_packet_never_become_exact() {
         let file = pcm_file();
         for corrupt in [false, true] {
-            let mut decoder =
-                Decoder::from_file(file.path(), open_regular_file(file.path()).unwrap(), None)
-                    .unwrap();
+            let mut decoder = Decoder::from_file(
+                file.path(),
+                open_regular_file(file.path()).unwrap(),
+                Tags::default(),
+                None,
+            )
+            .unwrap();
             let read = decoder.rt.f.read_frame;
             let mut frames = Vec::new();
             loop {
@@ -1372,8 +1352,13 @@ mod tests {
     #[test]
     fn skipped_ffmpeg_packets_yield_without_cancellation_or_eof() {
         let file = pcm_file();
-        let mut decoder =
-            Decoder::from_file(file.path(), open_regular_file(file.path()).unwrap(), None).unwrap();
+        let mut decoder = Decoder::from_file(
+            file.path(),
+            open_regular_file(file.path()).unwrap(),
+            Tags::default(),
+            None,
+        )
+        .unwrap();
         decoder.seek(0.0, None).unwrap();
         let mut frames = Vec::new();
         let mut budget = 3;
@@ -1404,9 +1389,13 @@ mod tests {
         use std::sync::atomic::Ordering;
         let file = pcm_file();
         for skip in [false, true] {
-            let mut decoder =
-                Decoder::from_file(file.path(), open_regular_file(file.path()).unwrap(), None)
-                    .unwrap();
+            let mut decoder = Decoder::from_file(
+                file.path(),
+                open_regular_file(file.path()).unwrap(),
+                Tags::default(),
+                None,
+            )
+            .unwrap();
             decoder.seek(1.25, None).unwrap();
             let cancelled = AtomicBool::new(false);
             let mut packets = 0;

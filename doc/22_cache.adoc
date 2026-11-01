@@ -453,27 +453,31 @@ Waveform and Spectrogram reuse aggregation and publications, not rendering work.
 Spectrum reuses mappings but rebuilds bodies. Shared immutable publications avoid
 a second geometry representation; further consolidation needs workload evidence.
 
-== Native metadata admission
+[[native-metadata-admission]]
+== Metadata admission
 
-Native playback, probes, and full-waveform reads retain tags but skip embedded
-visuals before their payload buffers are allocated. Artwork extraction owns a
-separate budget: its encoded single-image limit defaults to 16 MiB and follows
-`interface.artwork_file_limit_mib` (1–64 MiB, applied after restart). Its aggregate
-visual-frame allowance is twice that limit; encoded staging admits three times
-the sum of that limit and 64 KiB of framing allowance. Base64 and unsynchronised
-pictures check decoded size before allocating their payload buffers.
-Text admission is capped at 1 MiB per encoded item and a 4 MiB aggregate charge
-that includes decoding/copy allowance and per-operation overhead. At most 4096
-admission operations are allowed, including frames, decoded strings, and packet
-fragments; this is not an exact retained-tag count. Other metadata readers keep
-the fixed 24 MiB encoded-staging allowance; nested metadata is limited to eight
-levels. Oversized metadata is skipped without rejecting otherwise decodable audio;
-these limits do not guarantee complete tags or chapters for such files.
+Lofty exclusively owns descriptive tags and embedded artwork. It is used as an
+unmodified upstream dependency, without application-specific cumulative text,
+picture, object-count, or nesting budgets. Summary reads do not request pictures
+or audio properties. Unsupported containers have no decoder-based metadata fallback.
+Read-only conversion drops format-specific remainders used only for tag writeback;
+explicit source edits retain native tag structures instead.
 
-One native source keeps its allowance across probing, packet reads, and seeks;
-artwork probing has a separate allowance. Nested synchronous parsers share it.
-The pinned Symphonia metadata/container patches enforce admission before payload
-allocation, not after decoding complete metadata.
+Lofty's public single-allocation limit is set to 128 MiB to accommodate the
+configured cover sizes and container overhead. Embedded cover selection checks
+the encoded image size after parsing: the default is 16 MiB, following
+`interface.artwork_file_limit_mib` (1–64 MiB, applied after restart). Unusable
+front covers do not hide other usable pictures. These limits do not bound total
+parser memory; upstream readers may buffer a complete tag before selecting images.
+
+Native audio decoding has a separate Symphonia metadata allowance and does not
+publish descriptive tags. Playback, PCM rendering, and waveform scans do not run
+an additional Lofty tag pass. Native readers skip embedded visuals before payload
+allocation. Their text admission is capped at 1 MiB per encoded item and a 4 MiB
+aggregate charge, with at most 4096 admission operations, eight nesting levels,
+and a 24 MiB encoded-staging allowance. One native source keeps its allowance
+across probing, packet reads, and seeks; nested synchronous parsers share it.
+Oversized metadata may be skipped while retaining otherwise usable audio.
 
 Matroska DocType and CodecId are structural identifiers, independent of the
 exhaustible metadata allowance. Their encoded payloads have a separate 1 KiB

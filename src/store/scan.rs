@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 // Bump when probing semantics change; fingerprints remain reusable.
-pub(super) const PROBE_VERSION: i64 = 1;
+pub(super) const PROBE_VERSION: i64 = 3;
 
 /// Semantic facts and admission counts from one committed scan transaction.
 ///

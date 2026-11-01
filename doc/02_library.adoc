@@ -6,14 +6,15 @@ The library is shared by the desktop GUI, CLI, and TUI. Register local files by
 dropping them into Queue, or configure a music folder and scan it for directory
 browsing and CUE discovery. Registration does not itself start playback. Browse
 tracks, albums, or recent activity to build a queue or a
-link:03_playlist.adoc[playlist]. Registration, scanning, and metadata edits change
-Rivu's database, not the audio files.
+link:03_playlist.adoc[playlist]. Registration, scanning, and ordinary metadata edits
+change Rivu's database, not the audio files. Explicit <<source-file-tags,source tag
+editing>> is a separate offline operation.
 
 CLI paths are relative to the invoking client's working directory; absolute paths
 are accepted. Rivu does not expand `~` or shell variables inside a path: use shell
 expansion (for example, `"$HOME/Music"`), not a quoted `"~/Music"`. Except for the
-local `library probe` and independent migration tool, library commands address the
-running host for the selected data directory.
+local `library probe`, `library tags`, and independent migration tool, library
+commands address the running host for the selected data directory.
 
 == Other
 
@@ -369,10 +370,11 @@ Query limits, revisions, and batch contracts: link:21_ipc.adoc[IPC].
 
 === Database edits
 
-Title, artist, album, favorite, play-count, and decoder-hint edits change Rivu's database only;
-media files, tags, and CUE sheets are never rewritten. Rescans preserve matching IDs,
-overrides, favorites, decoder hints, counts, and last-played timestamps. `library remove` and
-`library clean-missing` atomically remove records and their queue/playlist
+Title, artist, album, favorite, play-count, and decoder-hint edits in the library
+change Rivu's database only; they do not rewrite media files, tags, or CUE sheets.
+Rescans preserve matching IDs, overrides, favorites, decoder hints, counts, and
+last-played timestamps. `library remove` and `library clean-missing` atomically
+remove records and their queue/playlist
 references, compacting positions without changing surviving occurrence identities
 or relative order. They never delete media files. Missing rows remain visible in
 playlist views until removed or cleaned.
@@ -397,6 +399,55 @@ rivu library favorite on 12 34
 rivu library edit 12 --title "New title" --artist "Artist" --album "Album"
 rivu library clean-missing
 ----
+
+[[source-file-tags]]
+=== Source-file tags
+
+`rivu library tags PATH` reads source tags without opening a player instance or
+loading its configuration. Supplying `--title`, `--artist`, or `--album` explicitly
+writes those fields to the source file. Omitted fields remain untouched; an empty
+string clears the selected field. This is distinct from `library edit ID`, which
+only records database overrides.
+
+[source,sh]
+----
+rivu --json library tags /path/to/track.flac
+rivu library tags /path/to/track.flac --title "New title" --artist "Artist"
+----
+
+Source editing preserves an independent original-file backup and reports its
+path. An unchanged edit does not rewrite the source or create a backup. Writes
+edit a same-directory temporary copy, verify the resulting metadata, and validate
+the source identity before atomic replacement. Audio movement uses bounded buffers;
+the temporary copy and backup still require space for two complete files.
+Stop other file writers before editing; the lock is advisory. Keep the reported
+backup until the result has been checked.
+
+Symlinks and multiply linked files are rejected. Replacement must preserve ownership,
+permissions, and extended attributes, including POSIX ACLs; inability to preserve
+them fails the edit. Native tag structures retain non-target fields and artwork.
+Upstream Lofty may normalize tag representations; parsing and encoding follow its
+allocation limits.
+ID3v2.2 edits requiring a version conversion are rejected. Clearing a field also
+fails if a secondary tag would make the old value reappear, rather than silently
+deleting that secondary tag.
+
+This offline command does not update the running library. Rescan the affected
+source afterward; matching IDs, user overrides, favorites, history, and list
+references remain intact. Existing overrides still take precedence over newly
+read source fields. Restoring a backup also requires a rescan.
+
+Tags, dates, track/disc numbers, and embedded artwork use Lofty exclusively.
+Containers outside its metadata coverage may still play, but do not acquire tags
+or embedded artwork from the audio backend. Source-tag inspection reports an
+unsupported container separately from a supported file with no tags. Technical
+properties needed for decoding, exact timing, and measured bitrate remain owned
+by the audio backend. Source tag editing does not transcode audio or change CUE
+segment boundaries.
+
+Lofty follows the format's declared encoding; it does not automatically repair
+GBK or other legacy bytes incorrectly marked as Latin-1. This command is not an
+automatic encoding-normalization operation and cannot reconstruct lost text.
 
 === Inline Track details edits
 
@@ -555,9 +606,9 @@ before another media task can start; see <<cancellation,Cancellation>>.
 Worker and resource contracts are described in
 link:21_ipc.adoc#scanning-and-metadata-ownership[Scanning and metadata ownership].
 
-Native probing can skip oversized tags and embedded images while retaining usable
-audio; some metadata may therefore be absent. See
-link:22_cache.adoc#native-metadata-admission[Native metadata admission]. Force a
+Descriptive tags use upstream Lofty; native audio parsing has separate metadata
+limits and may skip oversized fields while retaining usable audio. See
+link:22_cache.adoc#native-metadata-admission[Metadata admission]. Force a
 scan to refresh metadata already stored in the library.
 
 === Cancellation

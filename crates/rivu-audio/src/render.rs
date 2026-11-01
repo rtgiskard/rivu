@@ -66,6 +66,7 @@ impl SourceRenderer {
             buffer_len,
             decoder_hint,
             ffmpeg_enabled,
+            false,
             SourceSelection { range, start: 0.0 },
             Some(cancelled),
         )?;

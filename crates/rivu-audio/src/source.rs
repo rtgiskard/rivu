@@ -10,6 +10,7 @@ use super::{
 };
 use anyhow::{Context, Result, anyhow, bail};
 use rivu_format::decoder_hint::DecoderHint;
+use rivu_metadata::{Tags, read_tags};
 use rivu_utils::regular_file::open_regular_file;
 use std::{
     fs::File,
@@ -37,7 +38,7 @@ use symphonia::{
         },
         formats::{FormatOptions, FormatReader, SeekMode, SeekTo, Track, TrackType, probe::Hint},
         io::{MediaSourceStream, MediaSourceStreamOptions},
-        meta::{Metadata, MetadataOptions, StandardTag},
+        meta::MetadataOptions,
         units::{Time, TimeBase},
     },
     default::{get_codecs, get_probe},
@@ -71,16 +72,12 @@ pub(super) fn reserve_pcm(output: &mut Vec<f32>, frames: usize, channels: usize)
 }
 
 /// Share one admission budget across probing and all later metadata revisions.
-/// Playback/probe retain tags only; artwork explicitly opts into visual bytes.
-pub fn metadata_budget(visuals: bool) -> symphonia_metadata::budget::MetadataBudget {
+/// Native audio reads never retain embedded pictures.
+fn metadata_budget() -> symphonia_metadata::budget::MetadataBudget {
     use symphonia::core::common::Limit;
-    symphonia_metadata::budget::MetadataBudget::new(MetadataOptions::default().limit_visual_bytes(
-        Limit::Maximum(if visuals {
-            symphonia_metadata::budget::MAX_VISUAL_BYTES
-        } else {
-            0
-        }),
-    ))
+    symphonia_metadata::budget::MetadataBudget::new(
+        MetadataOptions::default().limit_visual_bytes(Limit::Maximum(0)),
+    )
 }
 
 /// Content version of an opened file or an immutable retained PCM span.
@@ -196,6 +193,7 @@ pub fn probe_with_cancel(
         PROBE_BUFFER_LEN,
         DecoderHint::Auto,
         ffmpeg_enabled,
+        true,
         SourceSelection::default(),
         Some(cancelled),
     )?
@@ -213,6 +211,7 @@ pub fn probe_file(path: &Path, mut file: File, ffmpeg_enabled: bool) -> Result<M
         PROBE_BUFFER_LEN,
         DecoderHint::Auto,
         ffmpeg_enabled,
+        true,
         SourceSelection::default(),
         None,
     )?
@@ -241,42 +240,6 @@ pub fn probe_details(path: &Path, ffmpeg_enabled: bool, enhanced: bool) -> Resul
     })
 }
 
-fn metadata_tags(mut metadata: Metadata<'_>, track: u32, info: &mut MediaInfo) {
-    while let Some(revision) = metadata.current() {
-        let track_tags = revision
-            .per_track
-            .iter()
-            .filter(|metadata| metadata.track_id == u64::from(track))
-            .flat_map(|metadata| &metadata.metadata.tags);
-        for tag in revision.media.tags.iter().chain(track_tags) {
-            match tag.std.as_ref() {
-                Some(StandardTag::TrackTitle(value)) => info.title = value.as_ref().clone(),
-                Some(StandardTag::Artist(value)) => info.artist = value.as_ref().clone(),
-                Some(StandardTag::Album(value)) => info.album = value.as_ref().clone(),
-                Some(StandardTag::TrackNumber(value)) => {
-                    info.track_number = u32::try_from(*value).ok().filter(|value| *value > 0);
-                }
-                Some(StandardTag::DiscNumber(value)) => {
-                    info.disc_number = u32::try_from(*value).ok().filter(|value| *value > 0);
-                }
-                Some(StandardTag::ReleaseDate(value) | StandardTag::RecordingDate(value))
-                    if !value.trim().is_empty() =>
-                {
-                    info.release_date = Some(value.trim().to_owned());
-                }
-                Some(StandardTag::ReleaseYear(value) | StandardTag::RecordingYear(value))
-                    if *value > 0 && info.release_date.is_none() =>
-                {
-                    info.release_date = Some(value.to_string());
-                }
-                _ => (),
-            }
-        }
-        if metadata.pop().is_none() {
-            break;
-        }
-    }
-}
 fn seconds(time: Time) -> f64 {
     time.as_secs_f64()
 }
@@ -509,7 +472,7 @@ impl Source {
         Ok(Self {
             identity,
             format: None,
-            metadata_budget: metadata_budget(false),
+            metadata_budget: metadata_budget(),
             track: 0,
             decode: Decode::Memory { pcm, position },
             time_base: TimeBase::try_new(1, rate).unwrap(),
@@ -559,6 +522,7 @@ impl Source {
             buffer_len,
             decoder_hint,
             ffmpeg_enabled,
+            true,
             SourceSelection::default(),
             None,
         )
@@ -579,6 +543,7 @@ impl Source {
             buffer_len,
             decoder_hint,
             ffmpeg_enabled,
+            false,
             None,
         )?;
         source.select(selection, None)?;
@@ -590,6 +555,7 @@ impl Source {
         buffer_len: usize,
         decoder_hint: DecoderHint,
         ffmpeg_enabled: bool,
+        descriptive: bool,
         selection: SourceSelection,
         cancelled: Option<&AtomicBool>,
     ) -> Result<Self> {
@@ -600,17 +566,20 @@ impl Source {
             buffer_len,
             decoder_hint,
             ffmpeg_enabled,
+            descriptive,
             selection,
             cancelled,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn open_file_with_cancel(
         path: &Path,
         file: File,
         buffer_len: usize,
         decoder_hint: DecoderHint,
         ffmpeg_enabled: bool,
+        descriptive: bool,
         selection: SourceSelection,
         cancelled: Option<&AtomicBool>,
     ) -> Result<Self> {
@@ -620,6 +589,7 @@ impl Source {
             buffer_len,
             decoder_hint,
             ffmpeg_enabled,
+            descriptive,
             cancelled,
         )?;
         source.select(selection, cancelled)?;
@@ -629,24 +599,44 @@ impl Source {
 
     fn open_file_unprimed(
         path: &Path,
-        file: File,
+        mut file: File,
         buffer_len: usize,
         decoder_hint: DecoderHint,
         ffmpeg_enabled: bool,
+        descriptive: bool,
         cancelled: Option<&AtomicBool>,
     ) -> Result<Self> {
+        check_cancelled(cancelled)?;
+        SourceIdentity::from_file(&file)?;
+        // Playback already receives authoritative library/CUE metadata. Only
+        // probing needs an additional descriptive-tag pass over this object.
+        let tags = if descriptive {
+            match read_tags(&mut file) {
+                Ok(tags) => tags.unwrap_or_default(),
+                Err(error) => {
+                    tracing::warn!(path = %path.display(), error = %error, "Source tags unavailable");
+                    Tags::default()
+                }
+            }
+        } else {
+            Tags::default()
+        };
+        file.rewind()
+            .context("Rewinding audio source after metadata")?;
         check_cancelled(cancelled)?;
         match decoder_hint {
             DecoderHint::Auto => (),
             DecoderHint::Native => {
-                return Self::open_native(path, buffer_len, file, cancelled);
+                let mut source = Self::open_native(path, buffer_len, file, cancelled)?;
+                source.info.apply_tags(tags, path);
+                return Ok(source);
             }
             DecoderHint::Ffmpeg => {
                 if !ffmpeg_enabled {
                     bail!("This track requires FFmpeg, but the FFmpeg extension is disabled");
                 }
                 return Self::from_ffmpeg(super::ffmpeg::Decoder::from_file(
-                    path, file, cancelled,
+                    path, file, tags, cancelled,
                 )?);
             }
         }
@@ -659,6 +649,7 @@ impl Source {
             drop(file);
             return Self::from_ffmpeg(super::ffmpeg::Decoder::from_input(
                 input.unwrap(),
+                tags,
                 cancelled,
             )?);
         }
@@ -677,16 +668,21 @@ impl Source {
                 if input.is_some() {
                     source.probe_backend = AudioBackend::Ffmpeg;
                 }
+                // Descriptive tags live in MediaInfo; materialize fallback tags only
+                // if a deferred decoder failure actually needs FFmpeg.
                 source.opening_fallback =
                     fallback.map(|file| (path.to_owned(), file, SourceSelection::default()));
+                source.info.apply_tags(tags, path);
                 Ok(source)
             }
             Err(native_error)
                 if ffmpeg_enabled && native_error.downcast_ref::<UnsupportedNative>().is_some() =>
             {
                 let decoded = match input {
-                    Some(input) => super::ffmpeg::Decoder::from_input(input, cancelled),
-                    None => super::ffmpeg::Decoder::from_file(path, fallback.unwrap(), cancelled),
+                    Some(input) => super::ffmpeg::Decoder::from_input(input, tags, cancelled),
+                    None => {
+                        super::ffmpeg::Decoder::from_file(path, fallback.unwrap(), tags, cancelled)
+                    }
                 };
                 decoded.and_then(Self::from_ffmpeg).with_context(|| format!("Native decoder rejected the audio ({native_error:#}); FFmpeg extension failed"))
             }
@@ -706,7 +702,7 @@ impl Source {
         Ok(Self {
             identity: decode.identity(),
             format: None,
-            metadata_budget: metadata_budget(false),
+            metadata_budget: metadata_budget(),
             track: 0,
             decode: Decode::Ffmpeg(Box::new(decode)),
             time_base,
@@ -752,8 +748,8 @@ impl Source {
         let mut stream =
             MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions { buffer_len });
         let compressed_summary = bitrate::probe(&mut stream, cancelled)?;
-        let mut metadata_budget = metadata_budget(false);
-        let mut format = match metadata_budget.with(|| {
+        let mut metadata_budget = metadata_budget();
+        let format = match metadata_budget.with(|| {
             get_probe().probe(
                 &hint,
                 stream,
@@ -867,12 +863,8 @@ impl Source {
         {
             packet_stats.invalidate();
         }
-        let mut info = MediaInfo {
-            title: path
-                .file_stem()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned(),
+        let info = MediaInfo {
+            title: String::new(),
             artist: String::new(),
             album: String::new(),
             duration: media_duration,
@@ -898,7 +890,6 @@ impl Source {
                 .map_or(0, |channels| channels.count() as u16),
             sample_rate: rate,
         };
-        metadata_tags(format.metadata(), track, &mut info);
         let time_base = track_time_base.unwrap_or_else(|| TimeBase::try_new(1, rate).unwrap());
         // Matroska emits nanosecond packets for exact trim, but timestamps
         // still have the Segment's declared quantization granularity.
@@ -1247,13 +1238,22 @@ impl Source {
         let step = match self.read_next(cancelled, &mut budget) {
             Err(error) if error.is::<UnsupportedNative>() && self.opening_fallback.is_some() => {
                 let (path, file, selection) = self.opening_fallback.take().unwrap();
-                let mut source =
-                    Self::from_ffmpeg(super::ffmpeg::Decoder::from_file(&path, file, cancelled)?)
-                        .with_context(|| {
-                        format!(
-                            "Native decoder rejected the audio ({error:#}); FFmpeg extension failed"
-                        )
-                    })?;
+                let tags = Tags {
+                    title: Some(self.info.title.clone()),
+                    artist: Some(self.info.artist.clone()),
+                    album: Some(self.info.album.clone()),
+                    track_number: self.info.track_number,
+                    disc_number: self.info.disc_number,
+                    release_date: self.info.release_date.clone(),
+                };
+                let mut source = Self::from_ffmpeg(super::ffmpeg::Decoder::from_file(
+                    &path, file, tags, cancelled,
+                )?)
+                .with_context(|| {
+                    format!(
+                        "Native decoder rejected the audio ({error:#}); FFmpeg extension failed"
+                    )
+                })?;
                 source.select(selection, cancelled)?;
                 *self = source;
                 return Ok(false);
@@ -1321,6 +1321,7 @@ impl Source {
                 buffer_len,
                 snapshot.decoder_hint,
                 ffmpeg_enabled,
+                false,
                 SourceSelection {
                     range: snapshot.range,
                     start: 0.0,
@@ -2105,6 +2106,7 @@ pub(super) mod tests {
             PROBE_BUFFER_LEN,
             hint,
             ffmpeg_enabled,
+            false,
             SourceSelection { range, start: 0.0 },
             None,
         )
@@ -2724,6 +2726,172 @@ pub(super) mod tests {
         file
     }
 
+    fn tagged_flac_file(title: &str) -> tempfile::NamedTempFile {
+        let audio = constant_flac_file(8000, 1);
+        let bytes = std::fs::read(audio.path()).unwrap();
+        let comments = [
+            format!("TITLE={title}"),
+            "ARTIST=演奏者".to_owned(),
+            "ALBUM=Album".to_owned(),
+            "TRACKNUMBER=3/12".to_owned(),
+            "DISCNUMBER=2/4".to_owned(),
+            "DATE=2024-09".to_owned(),
+        ];
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&0_u32.to_le_bytes()); // Empty vendor string.
+        payload.extend_from_slice(&(comments.len() as u32).to_le_bytes());
+        for comment in comments {
+            payload.extend_from_slice(&(comment.len() as u32).to_le_bytes());
+            payload.extend_from_slice(comment.as_bytes());
+        }
+        let mut file = tempfile::Builder::new().suffix(".flac").tempfile().unwrap();
+        file.write_all(b"fLaC\0\0\0\x22").unwrap();
+        file.write_all(&bytes[8..42]).unwrap();
+        file.write_all(&[0x84]).unwrap(); // Final block: Vorbis comments.
+        file.write_all(&(payload.len() as u32).to_be_bytes()[1..])
+            .unwrap();
+        file.write_all(&payload).unwrap();
+        file.write_all(&bytes[42..]).unwrap();
+        file
+    }
+
+    fn assert_tagged_flac_info(info: &MediaInfo, title: &str) {
+        assert_eq!(info.title, title);
+        assert_eq!(info.artist, "演奏者");
+        assert_eq!(info.album, "Album");
+        assert_eq!(info.track_number, Some(3));
+        assert_eq!(info.disc_number, Some(2));
+        assert_eq!(info.release_date.as_deref(), Some("2024-09"));
+        assert_eq!(info.sample_rate, 8000);
+        assert_eq!(info.channels, 1);
+        assert_eq!(info.bits_per_sample, Some(16));
+        assert_eq!(info.duration, Some(1.0));
+    }
+
+    #[test]
+    fn lofty_tags_match_across_decoders_without_changing_audio_facts() {
+        let file = tagged_flac_file("Tagged title");
+        for hint in [DecoderHint::Native, DecoderHint::Auto, DecoderHint::Ffmpeg] {
+            if hint == DecoderHint::Ffmpeg && !cfg!(feature = "ffmpeg") {
+                continue;
+            }
+            let mut source = Source::open(file.path(), PROBE_BUFFER_LEN, hint, true).unwrap();
+            assert_tagged_flac_info(source.info(), "Tagged title");
+            assert_eq!(decode_remaining(&mut source), vec![-5000.0 / 32768.0; 8000]);
+        }
+    }
+
+    #[test]
+    fn unsupported_descriptive_tags_do_not_fall_back_to_decoder_metadata() {
+        fn element(id: &[u8], payload: &[u8]) -> Vec<u8> {
+            let mut bytes = id.to_vec();
+            bytes.extend_from_slice(&((1_u64 << 56) | payload.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(payload);
+            bytes
+        }
+
+        let mut file = opening_prefix_file(0, true);
+        let mut bytes = std::fs::read(file.path()).unwrap();
+        let header_len = u64::from_be_bytes(bytes[4..12].try_into().unwrap()) & ((1_u64 << 56) - 1);
+        let segment_size = 12 + header_len as usize + 4;
+        let mut simple = element(&[0x45, 0xa3], b"TITLE");
+        simple.extend(element(&[0x44, 0x87], b"Decoder-only title"));
+        let mut tag = element(&[0x63, 0xc0], &[]);
+        tag.extend(element(&[0x67, 0xc8], &simple));
+        let tags = element(&[0x12, 0x54, 0xc3, 0x67], &element(&[0x73, 0x73], &tag));
+        bytes.splice(segment_size + 8..segment_size + 8, tags);
+        let size = (1_u64 << 56) | (bytes.len() - segment_size - 8) as u64;
+        bytes[segment_size..segment_size + 8].copy_from_slice(&size.to_be_bytes());
+        file.rewind().unwrap();
+        file.write_all(&bytes).unwrap();
+
+        assert_eq!(read_tags(file.as_file_mut()).unwrap(), None);
+        let expected_title = file.path().file_stem().unwrap().to_string_lossy();
+        for hint in [DecoderHint::Native, DecoderHint::Auto, DecoderHint::Ffmpeg] {
+            if hint == DecoderHint::Ffmpeg && !cfg!(feature = "ffmpeg") {
+                continue;
+            }
+            let mut source = Source::open(
+                file.path(),
+                PROBE_BUFFER_LEN,
+                hint,
+                cfg!(feature = "ffmpeg"),
+            )
+            .unwrap();
+            assert_eq!(source.info().title, expected_title);
+            assert!(source.info().artist.is_empty());
+            assert!(source.info().album.is_empty());
+            assert_eq!(source.info().sample_rate, 8000);
+            assert_eq!(decode_remaining(&mut source), [0.5, -0.5]);
+        }
+    }
+
+    #[test]
+    fn playback_and_pcm_opens_bypass_descriptive_metadata_for_all_decoders() {
+        let file = tagged_flac_file("Library owns this title");
+        let expected_title = file.path().file_stem().unwrap().to_string_lossy();
+        for hint in [DecoderHint::Native, DecoderHint::Auto, DecoderHint::Ffmpeg] {
+            if hint == DecoderHint::Ffmpeg && !cfg!(feature = "ffmpeg") {
+                continue;
+            }
+            let sources = [
+                Source::begin_open(
+                    file.path(),
+                    PROBE_BUFFER_LEN,
+                    hint,
+                    cfg!(feature = "ffmpeg"),
+                    SourceSelection::default(),
+                )
+                .unwrap(),
+                Source::open_with_cancel(
+                    file.path(),
+                    PROBE_BUFFER_LEN,
+                    hint,
+                    cfg!(feature = "ffmpeg"),
+                    false,
+                    SourceSelection::default(),
+                    None,
+                )
+                .unwrap(),
+                Source::open_file_with_cancel(
+                    file.path(),
+                    open_regular_file(file.path()).unwrap(),
+                    PROBE_BUFFER_LEN,
+                    hint,
+                    cfg!(feature = "ffmpeg"),
+                    false,
+                    SourceSelection::default(),
+                    None,
+                )
+                .unwrap(),
+            ];
+            for mut source in sources {
+                while !source.poll_open().unwrap() {}
+                assert_eq!(source.info().title, expected_title);
+                assert!(source.info().artist.is_empty());
+                assert!(source.info().album.is_empty());
+                assert_eq!(decode_remaining(&mut source), vec![-5000.0 / 32768.0; 8000]);
+            }
+        }
+    }
+
+    #[test]
+    fn probing_tags_uses_and_rewinds_the_already_opened_object() {
+        let original = tagged_flac_file("Original title");
+        let replacement = tagged_flac_file("Replacement title");
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("audio.flac");
+        let next = directory.path().join("next.flac");
+        std::fs::copy(original.path(), &path).unwrap();
+        let mut file = open_regular_file(&path).unwrap();
+        file.seek(std::io::SeekFrom::Start(42)).unwrap();
+        std::fs::copy(replacement.path(), &next).unwrap();
+        std::fs::rename(next, &path).unwrap();
+        let info = probe_file(&path, file, false).unwrap();
+        assert_tagged_flac_info(&info, "Original title");
+        assert_tagged_flac_info(&probe(&path, false).unwrap(), "Replacement title");
+    }
+
     #[test]
     fn native_flac_physical_end_seeks_reach_eof_and_can_seek_back() {
         let file = constant_flac_file(96_000, 12);
@@ -3167,6 +3335,7 @@ pub(super) mod tests {
                 PROBE_BUFFER_LEN,
                 hint,
                 true,
+                true,
                 None,
             )
             .unwrap();
@@ -3297,6 +3466,63 @@ pub(super) mod tests {
         file
     }
 
+    #[cfg(feature = "ffmpeg")]
+    #[test]
+    fn deferred_decoder_fallback_keeps_the_first_lofty_snapshot() {
+        let audio = aac_packet_file(0x40);
+        let mut file = tempfile::Builder::new().suffix(".aac").tempfile().unwrap();
+        let mut frames = Vec::new();
+        for (id, text) in [
+            (b"TIT2", "First title"),
+            (b"TPE1", "First artist"),
+            (b"TALB", "First album"),
+            (b"TRCK", "3/12"),
+            (b"TPOS", "2/4"),
+            (b"TYER", "2024"),
+        ] {
+            frames.extend_from_slice(id);
+            frames.extend_from_slice(&((text.len() + 1) as u32).to_be_bytes());
+            frames.extend_from_slice(&[0, 0, 0]); // Flags, then Latin-1 encoding.
+            frames.extend_from_slice(text.as_bytes());
+        }
+        let size = frames.len();
+        file.write_all(b"ID3\x03\0\0").unwrap();
+        file.write_all(&[
+            ((size >> 21) & 0x7f) as u8,
+            ((size >> 14) & 0x7f) as u8,
+            ((size >> 7) & 0x7f) as u8,
+            (size & 0x7f) as u8,
+        ])
+        .unwrap();
+        file.write_all(&frames).unwrap();
+        file.write_all(&std::fs::read(audio.path()).unwrap())
+            .unwrap();
+        let mut source = Source::open_file_unprimed(
+            file.path(),
+            open_regular_file(file.path()).unwrap(),
+            PROBE_BUFFER_LEN,
+            DecoderHint::Auto,
+            true,
+            true,
+            None,
+        )
+        .unwrap();
+        source.select(SourceSelection::default(), None).unwrap();
+        assert_eq!(source.info().title, "First title");
+        assert!(!source.uses_ffmpeg());
+        // Keep the audio unchanged but make any repeated metadata pass visible.
+        file.seek(std::io::SeekFrom::Start(21)).unwrap();
+        file.write_all(b"Other title").unwrap();
+        assert!(!source.poll_open().unwrap());
+        assert!(source.uses_ffmpeg());
+        assert_eq!(source.info().title, "First title");
+        assert_eq!(source.info().artist, "First artist");
+        assert_eq!(source.info().album, "First album");
+        assert_eq!(source.info().track_number, Some(3));
+        assert_eq!(source.info().disc_number, Some(2));
+        assert_eq!(source.info().release_date.as_deref(), Some("2024"));
+    }
+
     #[test]
     fn opening_fallback_only_follows_native_unsupported_errors() {
         let unsupported = aac_packet_file(0x40); // ID_CCE, unsupported by native AAC.
@@ -3389,6 +3615,7 @@ pub(super) mod tests {
             file,
             PROBE_BUFFER_LEN,
             DecoderHint::Auto,
+            true,
             true,
             None,
         )

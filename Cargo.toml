@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/rivu-ui", "crates/rivu-format", "crates/rivu-utils", "crates/rivu-migrate", "crates/rivu-dsp", "crates/rivu-audio", "crates/rivu-protocol", "crates/rivu-client", "crates/rivu-visuals"]
+members = ["crates/rivu-ui", "crates/rivu-format", "crates/rivu-utils", "crates/rivu-migrate", "crates/rivu-metadata", "crates/rivu-dsp", "crates/rivu-audio", "crates/rivu-protocol", "crates/rivu-client", "crates/rivu-visuals"]
 resolver = "3"
 
 [workspace.dependencies]
@@ -21,6 +21,7 @@ embed-nerd-font = []
 rivu-format = { path = "crates/rivu-format", default-features = false, features = ["database"] }
 rivu-utils = { path = "crates/rivu-utils", default-features = false, features = ["logging", "terminal"] }
 rivu-audio = { path = "crates/rivu-audio", default-features = false }
+rivu-metadata = { path = "crates/rivu-metadata" }
 rivu-ui = { path = "crates/rivu-ui" }
 rivu-dsp = { path = "crates/rivu-dsp", default-features = false, features = ["execution"] }
 rivu-protocol = { path = "crates/rivu-protocol" }
@@ -62,9 +63,6 @@ realfft = { version = "3.5", optional = true }
 # Load an explicitly installed runtime; never download/link a runtime at build time.
 ort = { version = "=2.0.0-rc.11", optional = true, default-features = false, features = ["std", "load-dynamic"] }
 signal-hook = "0.4.5"
-# Artwork needs container/tag probing; codecs and decoding belong to rivu-audio.
-symphonia = { version = "0.6.1", default-features = false, features = ["all-formats", "all-meta", "flac", "mp1", "mp2", "mp3"] }
-symphonia-metadata = "0.6.1"
 tempfile = "3.27"
 zbus = "5.19"
 url = "2"

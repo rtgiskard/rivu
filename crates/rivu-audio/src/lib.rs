@@ -69,11 +69,20 @@ mod ffmpeg {
     pub(super) struct Decoder;
 
     impl Decoder {
-        pub(super) fn from_file(_: &Path, _: File, _: Option<&AtomicBool>) -> Result<Self> {
+        pub(super) fn from_file(
+            _: &Path,
+            _: File,
+            _: rivu_metadata::Tags,
+            _: Option<&AtomicBool>,
+        ) -> Result<Self> {
             bail!("FFmpeg extension is not compiled; rebuild with --features ffmpeg")
         }
 
-        pub(super) fn from_input(_: Input, _: Option<&AtomicBool>) -> Result<Self> {
+        pub(super) fn from_input(
+            _: Input,
+            _: rivu_metadata::Tags,
+            _: Option<&AtomicBool>,
+        ) -> Result<Self> {
             availability()?;
             unreachable!("FFmpeg input cannot be opened without the ffmpeg feature")
         }
@@ -139,8 +148,7 @@ pub use graph::GraphRunner;
 pub use output::devices;
 pub use render::{RenderFormat, SourceRenderer};
 pub use source::{
-    AudioBackend, ProbeResult, SourceIdentity, metadata_budget, probe, probe_details, probe_file,
-    probe_with_cancel,
+    AudioBackend, ProbeResult, SourceIdentity, probe, probe_details, probe_file, probe_with_cancel,
 };
 pub use waveform::{WaveformFrame, WaveformIdentity};
 

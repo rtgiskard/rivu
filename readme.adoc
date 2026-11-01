@@ -80,9 +80,9 @@ Ctrl-C and SIGTERM also request a clean shutdown.
 
 == CLI
 
-CLI and TUI controls require a running core; `library probe` and `playback devices`
-can run independently. `--data-dir DIRECTORY` selects the instance. `--config FILE`
-selects startup/probe configuration.
+CLI and TUI controls require a running core; `library probe`, `library tags`, and
+`playback devices` can run independently. `--data-dir DIRECTORY` selects the
+instance. `--config FILE` selects startup/probe configuration.
 `--log-level LEVEL` temporarily overrides this process's stderr and enabled file
 logging (`debug`, `info`, `warning`, `error`).
 See link:doc/01_config.adoc#logging-and-diagnostics[logging and diagnostics].
@@ -116,8 +116,10 @@ working directory, not the host's; absolute paths are unchanged.
 
 == Files and data directories
 
-Rivu treats source media as read-only. Library, queue, and playlist edits change
-Rivu's records, not source files; audio processing writes separate outputs.
+Library, queue, and playlist edits change Rivu's records, not source files;
+audio processing writes separate outputs. The explicit offline
+link:doc/02_library.adoc#source-file-tags[`library tags` command] can read source
+tags or write selected fields with an original-file backup.
 
 By default, Rivu uses the platform data directory reported by the OS (on a
 typical Linux installation: `~/.local/share/rivu`) and

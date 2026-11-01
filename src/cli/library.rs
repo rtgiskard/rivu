@@ -22,6 +22,111 @@ pub(super) fn run(
     json: bool,
 ) -> Result<()> {
     match action {
+        LibraryAction::Tags {
+            path,
+            title,
+            artist,
+            album,
+        } => {
+            let patch = rivu_metadata::TagPatch {
+                title,
+                artist,
+                album,
+            };
+            if patch.title.is_some() || patch.artist.is_some() || patch.album.is_some() {
+                let report = rivu_metadata::edit_file(&path, &patch)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else if report.changed {
+                    let backup = report
+                        .backup_path
+                        .as_ref()
+                        .context("Source tag edit omitted its backup path")?;
+                    println!(
+                        "{}",
+                        i18n.format(
+                            "core-tags-written",
+                            &[
+                                (
+                                    "path",
+                                    TerminalEscaped(report.path.display()).to_string().into()
+                                ),
+                                (
+                                    "backup",
+                                    TerminalEscaped(backup.display()).to_string().into()
+                                ),
+                            ]
+                        )
+                    );
+                } else {
+                    println!(
+                        "{}",
+                        i18n.format(
+                            "core-tags-unchanged",
+                            &[(
+                                "path",
+                                TerminalEscaped(report.path.display()).to_string().into()
+                            )]
+                        )
+                    );
+                }
+                return Ok(());
+            }
+            let mut file =
+                rivu_utils::regular_file::open_regular_file(&path).with_context(|| {
+                    format!("Open source tags: {}", TerminalEscaped(path.display()))
+                })?;
+            let tags = rivu_metadata::read_tags(&mut file)?
+                .context("Source tag reading is not supported for this container")?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "path": path,
+                        "tags": tags,
+                    }))?
+                );
+            } else {
+                println!(
+                    "{}",
+                    i18n.format(
+                        "core-tags",
+                        &[
+                            ("path", TerminalEscaped(path.display()).to_string().into()),
+                            (
+                                "title",
+                                terminal_text(tags.title.as_deref().unwrap_or("—")).into()
+                            ),
+                            (
+                                "artist",
+                                terminal_text(tags.artist.as_deref().unwrap_or("—")).into()
+                            ),
+                            (
+                                "album",
+                                terminal_text(tags.album.as_deref().unwrap_or("—")).into()
+                            ),
+                            (
+                                "track",
+                                tags.track_number
+                                    .map_or("—".into(), |value| value.to_string())
+                                    .into()
+                            ),
+                            (
+                                "disc",
+                                tags.disc_number
+                                    .map_or("—".into(), |value| value.to_string())
+                                    .into()
+                            ),
+                            (
+                                "date",
+                                terminal_text(tags.release_date.as_deref().unwrap_or("—")).into()
+                            ),
+                        ]
+                    )
+                );
+            }
+            Ok(())
+        }
         LibraryAction::Probe { path, enhanced } => {
             let probe_config = config::Config::load(config_path)?;
             let ffmpeg_enabled = probe_config.ffmpeg_enabled || enhanced;
@@ -422,6 +527,7 @@ fn translate(action: LibraryAction) -> Result<(Command, bool)> {
         | LibraryAction::Stats
         | LibraryAction::History { .. }
         | LibraryAction::Probe { .. }
+        | LibraryAction::Tags { .. }
         | LibraryAction::Duplicates { .. }
         | LibraryAction::Relocate { .. } => bail!("This action is not a library command"),
     };
@@ -431,6 +537,7 @@ fn translate(action: LibraryAction) -> Result<(Command, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn scan_paths_are_anchored_without_expansion() -> Result<()> {
@@ -485,6 +592,85 @@ mod tests {
             translate(action(&["library", "other", "check", "--force", "--wait"]))?;
         assert!(matches!(command, Command::CheckOtherTracks { force: true }));
         assert!(wait);
+        Ok(())
+    }
+
+    fn wav() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&38_u32.to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16_u32.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&8000_u32.to_le_bytes());
+        bytes.extend_from_slice(&16000_u32.to_le_bytes());
+        bytes.extend_from_slice(&2_u16.to_le_bytes());
+        bytes.extend_from_slice(&16_u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&2_u32.to_le_bytes());
+        bytes.extend_from_slice(&0_i16.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn source_tag_commands_are_offline_and_keep_original_backup() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("source.wav");
+        let original = wav();
+        fs::write(&path, &original)?;
+        let config = directory.path().join("invalid.toml");
+        fs::write(&config, "not valid configuration [")?;
+        let data_dir = directory.path().join("no-server");
+        let i18n = Localizer::for_cli("en-US");
+
+        for json in [false, true] {
+            run(
+                &i18n,
+                &data_dir,
+                &config,
+                LibraryAction::Tags {
+                    path: path.clone(),
+                    title: None,
+                    artist: None,
+                    album: None,
+                },
+                json,
+            )?;
+        }
+        assert_eq!(fs::read(&path)?, original);
+        assert_eq!(fs::read_dir(directory.path())?.count(), 2);
+
+        for json in [false, true] {
+            run(
+                &i18n,
+                &data_dir,
+                &config,
+                LibraryAction::Tags {
+                    path: path.clone(),
+                    title: Some("Source title".into()),
+                    artist: Some("Source artist".into()),
+                    album: None,
+                },
+                json,
+            )?;
+            let tags = rivu_metadata::read_tags(&mut fs::File::open(&path)?)?
+                .context("supported WAV tags")?;
+            assert_eq!(tags.title.as_deref(), Some("Source title"));
+            assert_eq!(tags.artist.as_deref(), Some("Source artist"));
+            assert_eq!(fs::read_dir(directory.path())?.count(), 3);
+        }
+        let backup = fs::read_dir(directory.path())?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<std::io::Result<Vec<_>>>()?
+            .into_iter()
+            .find(|candidate| candidate != &path && candidate != &config)
+            .context("missing original-file backup")?;
+        assert_eq!(fs::read(backup)?, original);
+        assert!(
+            !data_dir.exists(),
+            "offline tag commands must not create a server data directory"
+        );
         Ok(())
     }
 }

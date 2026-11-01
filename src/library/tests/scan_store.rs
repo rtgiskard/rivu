@@ -1,6 +1,57 @@
 use super::*;
 
 #[test]
+fn source_tag_edit_refreshes_raw_metadata_without_losing_library_state() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().to_path_buf();
+    let audio = root.join("audio.wav");
+    wav(&audio, 150)?;
+    let store = crate::store::Store::open(Path::new(":memory:"))?;
+    let initial = scan_paths(std::slice::from_ref(&root), &[], false)?;
+    assert!(initial.errors.is_empty(), "{:?}", initial.errors);
+    store.apply_scan(&initial)?;
+    let id = store
+        .track_id_for_identity(crate::store::TrackIdentity::File(&audio))?
+        .context("scanned source identity")?;
+    store.edit_track(id, Some("Personal title"), None, None, None)?;
+    store.set_favorite(&[id], true)?;
+    store.enqueue_tracks(&[id])?;
+    let queue = store.queue_page(None, 0, 10)?;
+    let playlist = store.create_playlist_with_tracks("Keep references", &[id])?;
+    let before = store.track(id)?.context("saved source")?;
+    let report = rivu_metadata::edit_file(
+        &audio,
+        &rivu_metadata::TagPatch {
+            title: Some("Source title".into()),
+            artist: Some("Source artist".into()),
+            album: Some("Source album".into()),
+        },
+    )?;
+    assert!(report.changed);
+    let cached = store.known_source(&audio)?.context("cached source")?;
+    let known = [(audio.clone(), cached)];
+    let rescanned = scan_paths(std::slice::from_ref(&root), &known, false)?;
+    assert!(rescanned.errors.is_empty(), "{:?}", rescanned.errors);
+    store.apply_scan(&rescanned)?;
+    let after = store.track(id)?.context("rescanned source")?;
+    assert_eq!(after.title, "Personal title");
+    assert_eq!(after.artist, "Source artist");
+    assert_eq!(after.album, "Source album");
+    assert!(after.favorite);
+    assert_eq!(after.duration, before.duration);
+    assert_eq!(after.sample_rate, before.sample_rate);
+    assert_eq!(after.channels, before.channels);
+    assert_eq!(after.bits_per_sample, before.bits_per_sample);
+    assert_eq!(store.queue_page(None, 0, 10)?.rows[0].id, queue.rows[0].id);
+    assert_eq!(store.playlist_track_ids(playlist, 10)?, vec![id]);
+    assert_eq!(
+        store.track_id_for_identity(crate::store::TrackIdentity::File(&audio))?,
+        Some(id)
+    );
+    Ok(())
+}
+
+#[test]
 fn successful_cue_sources_and_segments_bypass_duration_admission() -> Result<()> {
     for frames in [150, 225] {
         let directory = tempfile::tempdir()?;

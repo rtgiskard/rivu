@@ -50,8 +50,19 @@ core-probe = { $path }
       probe backend: { $probe }
       decoder backend: { $decoder }
       FFmpeg extension audio decoding: { $ffmpeg }
+core-tags = Source tags: { $path }
+      title: { $title }
+      artist: { $artist }
+      album: { $album }
+      track number: { $track }
+      disc number: { $disc }
+      release date: { $date }
+core-tags-written = Source-file tags updated: { $path }
+    Original file backup: { $backup }
+    Library database overrides were not changed.
+core-tags-unchanged = Source-file tags unchanged: { $path } (no backup created)
 core-help-about = A quiet, local-first music player
-core-help-long = Run without a command to open the desktop UI. GUI and serve own one shared core per data directory; control commands connect to that instance. Output devices and file probing do not start an instance.
+core-help-long = Run without a command to open the desktop UI. GUI and serve own one shared core per data directory; control commands connect to that instance. Output devices, file probing, and source-file tags work offline without an instance.
 core-help-usage = Usage:
 core-help-commands = Commands
 core-help-options = Options
@@ -92,13 +103,17 @@ core-help-playback-device = Select an exact output device name, or restore the d
 core-help-library-scan = Import audio files, CUE sheets, or directories
 core-help-library-other = Browse registered tracks outside configured roots; with no roots, includes all registered tracks
 core-help-library-list = List library tracks, optionally filtered by text, favorite, or missing state
-core-help-library-edit = Edit library metadata
+core-help-library-edit = Edit database-only library metadata; never modify the source file
 core-help-library-remove = Remove library records and references
 core-help-library-favorite = Set or clear favorites
 core-help-library-clean-missing = Remove missing library records and references
 core-help-library-stats = Show library size and aggregate play counts
 core-help-library-history = Show recent tracks, once per track
 core-help-library-probe = Read metadata and decoder support without starting an instance
+core-help-library-tags = Read source-file tags offline. With --title, --artist, or --album, write those fields to the source file with an original-file backup; no server or library database update. Unchanged values create no backup.
+core-help-library-tags-title = Write the source-file title; an empty string explicitly clears it
+core-help-library-tags-artist = Write the source-file artist; an empty string explicitly clears it
+core-help-library-tags-album = Write the source-file album; an empty string explicitly clears it
 core-help-library-optimize = Reclaim database space and refresh query statistics; stop playback and scans first
 core-help-library-duplicates = Read historical same-content groups; cached hashes are not fresh verification
 core-help-library-relocate = Preserve a missing track identity at a freshly verified target

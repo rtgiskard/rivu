@@ -24,3 +24,19 @@ pub struct MediaInfo {
     pub channels: u16,
     pub sample_rate: u32,
 }
+
+impl MediaInfo {
+    pub(crate) fn apply_tags(&mut self, tags: rivu_metadata::Tags, path: &std::path::Path) {
+        self.title = tags.title.unwrap_or_else(|| {
+            path.file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        });
+        self.artist = tags.artist.unwrap_or_default();
+        self.album = tags.album.unwrap_or_default();
+        self.track_number = tags.track_number;
+        self.disc_number = tags.disc_number;
+        self.release_date = tags.release_date;
+    }
+}
