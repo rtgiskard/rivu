@@ -55,11 +55,11 @@ class FramingTests(unittest.TestCase):
             worker.write_frame(output, 17, payload + b"x")
         self.assertEqual(output.getvalue(), wire)
 
-    def test_legacy_paths_and_invalid_dimensions_are_rejected(self):
-        request = {"version":2,"task_id":"test","operation":"speech","sample_rate":8000,
+    def test_unknown_fields_and_invalid_dimensions_are_rejected(self):
+        request = {"version":worker.VERSION,"task_id":"test","operation":"speech","sample_rate":8000,
                    "channels":1,"frames":8,"model_manifest":"/manifest.json"}
         for fields in (
-            {"input_path":"/input.wav"}, {"output_dir":"/tmp/result"}, {"frames":True}, {"frames":0},
+            {"unknown":True}, {"frames":True}, {"frames":0},
             {"channels":3}, {"channels":True}, {"sample_rate":7999}, {"sample_rate":192001},
             {"sample_rate":8000.0}, {"frames":4*60*60*8000+1}, {"operation":"separate"},
         ):
@@ -107,13 +107,17 @@ class FramingTests(unittest.TestCase):
 
     def test_window_capacity_is_checked_before_allocation(self):
         source = worker.StreamInput(io.BytesIO(), {"frames":100,"channels":2})
-        with patch.object(worker, "MAX_WINDOW_BYTES", 32), self.assertRaisesRegex(worker.WorkerError, "128 MiB"):
-            source.window(0, 100)
+        with patch.object(worker, "MAX_WINDOW_BYTES", 32), \
+             patch("numpy.empty", side_effect=AssertionError("allocated window")) as allocate:
+            with self.assertRaises(worker.WorkerError) as error:
+                source.window(0, 100)
+            self.assertEqual(error.exception.code, "memory_capacity")
+            allocate.assert_not_called()
 
 
 class StreamEntrypointTests(unittest.TestCase):
     def test_invalid_requests_fail_without_pcm_or_manifest_access(self):
-        request = {"version":2,"task_id":"invalid-stream","operation":"speech","sample_rate":8000,
+        request = {"version":worker.VERSION,"task_id":"invalid-stream","operation":"speech","sample_rate":8000,
                    "channels":1,"frames":8,"model_manifest":"/missing-manifest.json"}
         for fields, code in (
             ({"channels":3}, "input_channels"),
@@ -141,7 +145,7 @@ class StreamEntrypointTests(unittest.TestCase):
             bundle_fixture(base)
             audio = np.linspace(-1.25, 1.25, 2*(8000+37), dtype="<f4").reshape(-1, 2)
             audio[0, 0] = -0.0
-            request = {"version":2,"task_id":"real-dry-stream","operation":"speech","sample_rate":8000,
+            request = {"version":worker.VERSION,"task_id":"real-dry-stream","operation":"speech","sample_rate":8000,
                        "channels":2,"frames":len(audio),"model_manifest":str(base / "manifest.json"),
                        "parameters":{"wet_mix":0}}
             completed = subprocess.run([sys.executable, "-B", worker.__file__, "--stream"],
@@ -175,7 +179,7 @@ class LocalBackendTransportTests(unittest.TestCase):
             bundle_fixture(base, operation, "MossFormer2_SE_48K" if operation == "speech" else "melband_roformer_kim")
             audio = np.linspace(-1.25, 1.25, frames*channels, dtype="<f4").reshape(-1, channels)
             audio[0, 0] = -0.0
-            request = {"version":2,"task_id":"local-transport","operation":operation,"sample_rate":8000,
+            request = {"version":worker.VERSION,"task_id":"local-transport","operation":operation,"sample_rate":8000,
                        "channels":channels,"frames":frames,"model_manifest":str(base/"manifest.json"),"threads":1,
                        "parameters":{"wet_mix":wet} if operation == "speech" else {"overlap":0.75}}
             # The audit hook rejects file writes, dirs, renames and removes even
@@ -303,7 +307,7 @@ raise SystemExit(result)
                 kind, payload = worker.read_frame(stream)
                 if kind == worker.JSON_FRAME:
                     event = json.loads(payload)
-                    self.assertEqual(event["version"], 3)
+                    self.assertEqual(event["version"], worker.EVENT_VERSION)
                     self.assertEqual(event["task_id"], request["task_id"])
                     events.append(event)
                 else:

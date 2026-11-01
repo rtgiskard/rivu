@@ -57,9 +57,7 @@ def load_model(base, device):
     spec.loader.exec_module(module)
     wrapper = importlib.import_module(package_name + ".mossformer2_se_wrapper")
     model = wrapper.MossFormer2_SE_48K(None).model
-    checkpoint = torch.load(base / "model.pt", map_location="cpu", weights_only=True)
-    state = checkpoint["model"] if "model" in checkpoint else checkpoint
-    state = {key.removeprefix("module."):value for key,value in state.items()}
+    state = torch.load(base / "model.pt", map_location="cpu", weights_only=True)
     model.load_state_dict(state, strict=True)
     return model.to(device).eval()
 

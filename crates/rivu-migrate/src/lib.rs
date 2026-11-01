@@ -177,8 +177,9 @@ pub fn run(options: &Options, mode: Mode, report: &mut Report) -> Result<()> {
 
     match &config {
         Some(target) => report.resources.push(format!(
-            "Configuration {}: current (schema 1), untouched",
-            target.display()
+            "Configuration {}: current (schema {}), untouched",
+            target.display(),
+            config::CONFIG_SCHEMA_VERSION
         )),
         None => report.resources.push(format!(
             "Configuration {}: absent, defaults apply; not created",

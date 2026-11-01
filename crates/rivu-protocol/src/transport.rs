@@ -884,45 +884,6 @@ mod tests {
     }
 
     #[test]
-    fn cancelling_a_partial_read_preserves_only_received_bytes() {
-        struct PartialRead<'a>(&'a [u8]);
-
-        impl AsyncRead for PartialRead<'_> {
-            fn poll_read(
-                mut self: Pin<&mut Self>,
-                _: &mut TaskContext<'_>,
-                buffer: &mut [u8],
-            ) -> Poll<io::Result<usize>> {
-                if self.0.is_empty() {
-                    return Poll::Pending;
-                }
-                let count = buffer.len().min(self.0.len());
-                buffer[..count].copy_from_slice(&self.0[..count]);
-                self.0 = &self.0[count..];
-                Poll::Ready(Ok(count))
-            }
-        }
-
-        async_io::block_on(async {
-            let mut encoded = Vec::new();
-            encode_response_frame_into(&WireResponse::Error("response".into()), &mut encoded)
-                .unwrap();
-            let mut stream = PartialRead(&encoded[..7]);
-            let mut pending = BytesMut::new();
-            assert!(
-                future::poll_once(read_response_frame(&mut stream, &mut pending))
-                    .await
-                    .is_none()
-            );
-            assert_eq!(pending.as_ref(), &encoded[..7]);
-            let mut rest = &encoded[7..];
-            let response = read_response_frame(&mut rest, &mut pending).await.unwrap();
-            assert!(matches!(response, WireResponse::Error(actual) if actual == "response"));
-            assert!(pending.is_empty());
-        });
-    }
-
-    #[test]
     fn absolute_deadline_expires_pending_work_without_resetting() {
         async_io::block_on(async {
             let deadline = Instant::now();

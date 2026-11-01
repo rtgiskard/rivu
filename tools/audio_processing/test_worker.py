@@ -10,7 +10,7 @@ from pathlib import Path
 import tempfile
 from unittest.mock import patch
 import unittest
-from runtime.worker import RUNTIME_FILES, WorkerError, canonical_digest, deny_network, digest, resample_exact, validate_artifacts, validate_manifest, validate_request
+from runtime.worker import VERSION, RUNTIME_FILES, WorkerError, canonical_digest, deny_network, digest, resample_exact, validate_artifacts, validate_manifest, validate_request
 from export import process_export
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -86,7 +86,7 @@ class ProvisionTests(unittest.TestCase):
 
 class ProtocolTests(unittest.TestCase):
     def request(self):
-        return {"version":2,"task_id":"test","operation":"speech","sample_rate":8000,
+        return {"version":VERSION,"task_id":"test","operation":"speech","sample_rate":8000,
                 "channels":1,"frames":8,"model_manifest":"/manifest.json"}
 
     def test_controls_reject_nonfinite_wrong_operation_and_unknown(self):
@@ -132,18 +132,9 @@ class ProtocolTests(unittest.TestCase):
                             validate_manifest(path,"speech" if operation=="separate" else "separate")
             manifest["id"] = "unknown-engine"
             path.write_text(json.dumps(manifest))
-            with self.assertRaisesRegex(WorkerError,"unsupported model"):
+            with self.assertRaisesRegex(WorkerError,"unsupported model") as error:
                 validate_manifest(path,operation)
-
-    def test_obsolete_models_are_rejected_at_manifest_admission(self):
-        with tempfile.TemporaryDirectory() as directory:
-            base = Path(directory)
-            for operation, model in (("speech", "nsnet2"), ("separate", "htdemucs")):
-                with self.subTest(model=model):
-                    bundle_fixture(base, operation, model)
-                    with self.assertRaisesRegex(WorkerError, "unsupported model id") as error:
-                        validate_manifest(base / "manifest.json", operation)
-                    self.assertEqual(error.exception.code, "model_manifest")
+            self.assertEqual(error.exception.code, "model_manifest")
 
     def test_construction_manifest_cannot_be_admitted_for_inference(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -383,7 +374,7 @@ class ExplicitExportTests(unittest.TestCase):
             self.assertFalse(destination.exists())
             self.assertNotIn("complete", [kind for kind, _ in events])
 
-    def test_dry_speech_still_rejects_model_controls_artifacts_and_bad_samples(self):
+    def test_dry_speech_still_rejects_invalid_controls_tampered_artifacts_and_bad_samples(self):
         import numpy as np
         import soundfile as sf
         with tempfile.TemporaryDirectory() as directory:
@@ -394,9 +385,13 @@ class ExplicitExportTests(unittest.TestCase):
             destination = base / "result"
             request = {**export_request(), "input_path":str(source),
                        "output_dir":str(destination), "model_manifest":str(base / "manifest.json"),
-                       "parameters":{"wet_mix":0, "post_filter":False}}
-            with self.assertRaisesRegex(WorkerError, "post_filter"):
-                process_export(request, lambda *args, **kwargs: None)
+                       "parameters":{"wet_mix":0}}
+            for invalid_control in ({"unknown":False}, {"post_filter":False}):
+                request["parameters"] = {"wet_mix":0, **invalid_control}
+                with self.subTest(control=invalid_control), self.assertRaises(WorkerError) as error:
+                    process_export(request, lambda *args, **kwargs: None)
+                self.assertEqual(error.exception.code, "invalid_request")
+                self.assertFalse(destination.exists())
             request["parameters"] = {"wet_mix":0}
             sf.write(source, np.full((8, 1), np.nan, dtype="float32"), 8000, subtype="FLOAT")
             with patch("runtime.worker.deny_network"), patch.dict(os.environ):
@@ -484,7 +479,7 @@ class ExplicitExportTests(unittest.TestCase):
             lines = stdout.getvalue().splitlines()
             event = json.loads(lines[-1])
             self.assertEqual(event["type"], "complete")
-            self.assertEqual(event["version"], 3)
+            self.assertEqual(event["version"], worker.EVENT_VERSION)
             self.assertLess(len(lines[-1].encode("utf-8")) + 1, 65536)
             report_path = destination / "result.json"
             self.assertGreater(report_path.stat().st_size, 65536)

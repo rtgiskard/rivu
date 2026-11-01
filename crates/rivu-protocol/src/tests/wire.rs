@@ -1626,9 +1626,8 @@ fn processing_commands_and_configuration_use_current_positional_contract() {
     };
     let patch: DenoisePatch = serde_json::from_str(r#"{"spectral_gain_floor_db":-18.5}"#).unwrap();
     assert_eq!(patch.spectral_gain_floor_db, Some(-18.5));
-    assert!(serde_json::from_str::<DenoisePatch>(r#"{"noise_floor_db":-18.5}"#).is_err());
-    // The renamed control remains the third positional field; neighboring
-    // absent controls retain their positions and no named key is sent over IPC.
+    // The spectral gain floor is the third positional field; absent controls
+    // retain their positions and no named key is sent over IPC.
     let mut expected = vec![0, 0, 1];
     expected.extend_from_slice(&(-18.5_f32).to_le_bytes());
     expected.resize(23, 0);

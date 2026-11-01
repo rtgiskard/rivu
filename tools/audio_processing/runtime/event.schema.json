@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:rivu:audio-processing:event:3",
-  "title": "Version 3 bounded framed JSON control and raw PCM outputs",
+  "$id": "urn:rivu:audio-processing:event:2",
+  "title": "Bounded framed JSON control and raw PCM outputs",
   "type": "object",
   "required": ["version", "task_id", "type"],
   "unevaluatedProperties": false,
   "properties": {
-    "version": {"const": 3},
+    "version": {"const": 2},
     "task_id": {"type": "string", "maxLength": 128},
     "type": {"enum": ["progress", "complete", "error"]}
   },

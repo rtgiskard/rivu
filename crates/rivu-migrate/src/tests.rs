@@ -207,7 +207,6 @@ fn unknown_future_and_invalid_configuration_fail_preflight() {
         "schema_version=99\n",
         "schema_version=0\n",
         "schema_version='1'\n",
-        "volume=0.5\n",
         "[playback]\nunknown=true\n",
         "[playback]\nvolume_percent=101\n",
         "[broken",

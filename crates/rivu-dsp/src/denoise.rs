@@ -480,7 +480,6 @@ mod tests {
         };
         let json = serde_json::to_string(&config).unwrap();
         assert_eq!(config, serde_json::from_str(&json).unwrap());
-        assert!(serde_json::from_str::<DenoiseConfig>(r#"{"noise_floor_db":-18.5}"#).is_err());
         for spectral_gain_floor_db in [f32::NAN, f32::INFINITY, -100.1, 0.1] {
             let mut bad = config.clone();
             bad.spectral_gain_floor_db = spectral_gain_floor_db;

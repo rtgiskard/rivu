@@ -112,7 +112,7 @@ fn pending_query_preserves_pipelined_responses_and_disconnected_clients_release_
 }
 
 #[test]
-fn configuration_only_change_wakes_ipc_watch_and_selective_read_omits_runtime() {
+fn configuration_change_wakes_ipc_watch_and_selective_read_omits_runtime() {
     let directory = socket_test_directory();
     let config_path = directory.path().join("config.toml");
     crate::config::Config {
@@ -144,15 +144,22 @@ fn configuration_only_change_wakes_ipc_watch_and_selective_read_omits_runtime() 
     let stop = watcher.cancellation();
     let (completed, completion) = std::sync::mpsc::sync_channel(1);
     let watched = std::thread::spawn(move || {
-        let changed = watcher.watch(before).unwrap().changed_since(before);
-        assert_eq!(
-            changed,
-            StateSections {
-                configuration: true,
-                ..Default::default()
+        let mut revisions = before;
+        loop {
+            let next = watcher.watch(revisions).unwrap();
+            let configuration_changed = next.changed_since(revisions).configuration;
+            revisions = next;
+            if configuration_changed {
+                let sections = StateSections {
+                    configuration: true,
+                    ..Default::default()
+                };
+                completed
+                    .send(watcher.get_state(sections).unwrap())
+                    .unwrap();
+                break;
             }
-        );
-        completed.send(watcher.get_state(changed).unwrap()).unwrap();
+        }
     });
     runtime
         .handle
@@ -162,7 +169,7 @@ fn configuration_only_change_wakes_ipc_watch_and_selective_read_omits_runtime() 
     let response = completion.recv_timeout(std::time::Duration::from_secs(5));
     stop.cancel();
     watched.join().unwrap();
-    let response = response.expect("configuration-only publication did not wake IPC Watch");
+    let response = response.expect("configuration publication did not wake IPC Watch");
     assert_eq!(
         response.sections(),
         StateSections {

@@ -1361,7 +1361,13 @@ fn neural_unwind_reaps_live_interpreter_before_failure_event_and_owner_retiremen
     let (directory, mut core) = fixture();
     source(directory.path());
     let worker = directory.path().join("panic_progress.sh");
-    let progress = r#"{"version":3,"task_id":"1","type":"progress","completed":0}"#;
+    let progress = serde_json::json!({
+        "version": crate::processing::WORKER_EVENT_VERSION,
+        "task_id": "1",
+        "type": "progress",
+        "completed": 0,
+    })
+    .to_string();
     let mut header = String::from("\\000");
     for byte in (progress.len() as u32).to_le_bytes() {
         header.push_str(&format!("\\{byte:03o}"));

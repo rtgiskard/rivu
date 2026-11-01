@@ -5,7 +5,7 @@
 Rivu reads `~/.config/rivu/config.toml` by default (or the XDG configuration
 directory); path overrides are described in link:../readme.adoc[the README].
 A missing file uses defaults. The optional top-level `schema_version` defaults
-to the current schema (`2`).
+to the current schema; see <<configuration-schema,Configuration schema>>.
 Omitted setting groups and fields use their defaults. Unreadable files, malformed
 TOML, unknown keys, misplaced fields, unsupported explicit schema versions, and
 invalid values are errors, not a reason to fall back to defaults.
@@ -1051,8 +1051,10 @@ selected instance style does not use them.
 
 == Configuration schema
 
-The application reads configuration schema `2`; explicit noncurrent versions are
-rejected. Normal saves preserve an omitted `schema_version` rather than adding it.
+The application reads only the current configuration schema; explicit noncurrent
+versions are rejected. Its authority is documented under
+link:26_migration.adoc#configuration-schema[Configuration schema]. Normal saves
+preserve an omitted `schema_version` rather than adding it.
 Declaring the current schema does not bypass field or value validation. Malformed
 TOML and file-access errors retain their specific causes.
 

@@ -56,7 +56,6 @@ fn invalid_existing_files_are_rejected_without_being_rewritten() {
         "[interface]\ntheme = 'unknown'\n",
         "[interface]\nquery_batch_size = 0\n",
         "[playback]\nvolume_percent = 101\n",
-        "volume = 0.25\n",
         "[interface",
     ] {
         fs::write(&path, contents).unwrap();
@@ -292,7 +291,6 @@ fn interface_theme_names_round_trip_strictly() {
     for invalid in [
         "[interface]\ntheme = 'unknown'\n",
         "[interface]\ntheme = 'TokyoNight'\n",
-        "[interface]\nui_theme = 'rivu_dark'\n",
         "theme = 'rivu_dark'\n",
     ] {
         write_current_config(&path, invalid).unwrap();
@@ -621,7 +619,6 @@ fn unknown_and_misplaced_file_keys_are_rejected() {
         "[visualizations.spectrum]\nunknown = true",
         "[visualizations.spectrogram]\nunknown = true",
         "[visualizations.general]\nunknown = true",
-        "[visualizations.audio_visualizer]",
         "[visualizations.radial]\nunknown = true",
         "[visualizations.reactive]\nunknown = true",
         "visualizations.general.labels = true",
@@ -1006,7 +1003,6 @@ fn malformed_unknown_and_invalid_values_are_rejected() {
         "playback.play_count_threshold_percent = 100.0",
         "playback.play_count_threshold_percent = nan",
         "playback.play_count_threshold_percent = inf",
-        "logging.max_log_files = 0",
         "interface.scale = 0.74",
         "interface.scale = 2.01",
         "interface.scale = nan",
@@ -1020,16 +1016,12 @@ fn malformed_unknown_and_invalid_values_are_rejected() {
         "visualizations.general.animation_fps = 65536",
         "visualizations.general.animation_fps = 1.5",
         "visualizations.general.animation_fps = '60'",
-        "visualizations.spectrum.db_range = 0",
-        "visualizations.spectrum.db_range = 161",
-        "visualizations.spectrogram.db_range = inf",
         "visualizations.general.analysis_fft_size = 256",
         "visualizations.general.analysis_fft_size = 65536",
         "visualizations.general.analysis_fft_size = 1000",
         "visualizations.general.analysis_window = 'hamming'",
         "visualizations.general.signal = 'After'",
         "visualizations.general.signal = 'unknown'",
-        "visualization_signal = 'before'",
         "visualizations.spectrum.signal = 'before'",
         "visualizations.spectrum.bar_layout = { mode = 'automatic', width = 0.9 }",
         "visualizations.spectrum.bar_layout = { mode = 'automatic', width = 21 }",

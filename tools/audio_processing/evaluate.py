@@ -28,12 +28,12 @@ import sys
 import time
 if __package__:
     from .benchmark import metrics, TIMING_BOUNDARIES, timing_summary
-    from .runtime.worker import digest, read_json
+    from .runtime.worker import EVENT_VERSION, digest, read_json
     from ..audio_quality.metric_core import score_difference, score_summary
     from ..audio_quality.music_manifest import music_records
 else:
     from benchmark import metrics, TIMING_BOUNDARIES, timing_summary
-    from runtime.worker import digest, read_json
+    from runtime.worker import EVENT_VERSION, digest, read_json
     from audio_quality.metric_core import score_difference, score_summary
     from audio_quality.music_manifest import music_records
 
@@ -106,7 +106,7 @@ def main():
         events=[json.loads(line) for line in completed.stdout.splitlines()]
         (output/(name+"-events.jsonl")).write_text(completed.stdout)
         (output/(name+"-stderr.txt")).write_text(completed.stderr)
-        if completed.returncode or not events or events[-1]["type"]!="complete" or events[-1].get("version")!=3 or events[-1].get("task_id")!=request["task_id"]:
+        if completed.returncode or not events or events[-1]["type"]!="complete" or events[-1].get("version")!=EVENT_VERSION or events[-1].get("task_id")!=request["task_id"]:
             raise RuntimeError(json.dumps({"case":name,"exit":completed.returncode,"events":events,"stderr":completed.stderr}))
         with (Path(request["output_dir"])/"result.json").open() as stream:
             result=json.load(stream)

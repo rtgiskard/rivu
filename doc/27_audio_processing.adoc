@@ -287,6 +287,8 @@ Run preparation from the repository root. It requires a new destination director
 with an existing parent and 2 GiB free. Choose `--download` or local `--weights`;
 even local weights require network access for pinned source/license evidence.
 Playback, builds and inference never download models.
+MossFormer2 loads its pinned publisher checkpoint as a strict state dictionary
+with exact parameter names.
 
 For native speech, install ONNX Runtime 1.23 or newer using the system package
 manager (on Arch Linux: `sudo pacman -S --needed onnxruntime`). If it is not on the
@@ -381,8 +383,10 @@ A bundle's runtime is a source snapshot: after worker updates, reprovision from
 the updated checkout into a new bundle and configure all three emitted paths.
 Do not patch hashed bundle files in place.
 
-Python application inference runs `worker.py --stream` with request version 2 and event
-version 3. Stdin/stdout carry JSON controls and interleaved float32-le PCM in
+Python application inference runs `worker.py --stream`; request and event versions
+are defined by `VERSION` and `EVENT_VERSION` in
+link:../tools/audio_processing/runtime/worker.py[the worker contract].
+Stdin/stdout carry JSON controls and interleaved float32-le PCM in
 frames: one-byte kind, four-byte little-endian length, at most 64 KiB payload.
 Requests declare rate, channels and exact frame count, not audio paths. Each
 process handles one task: request, declared PCM, empty input-end marker, then
@@ -399,7 +403,7 @@ be new with an existing parent. It writes stem WAVs and `result.json`, with an
 8 GiB total audio-output limit and 256 MiB additional free-space reserve.
 Both Python entrypoints validate inference controls before constructing stream
 input or creating export outputs. Model assets and PCM/output protocol checks
-remain separate. Reprovision Python workers when migrating to the framed protocol.
+remain separate.
 
 
 Use the same interpreter for MossFormer2 and Kim, with a runtime worker

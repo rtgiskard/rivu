@@ -684,6 +684,9 @@ impl Drop for ShutdownSignals {
 mod tests {
     use super::*;
 
+    // Full applications share the process-wide logging session.
+    static APP_SESSION: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
     fn runtime_fixture() -> (tempfile::TempDir, CoreRuntime) {
         let directory = tempfile::tempdir().unwrap();
         let config = directory.path().join("config.toml");
@@ -851,6 +854,7 @@ mod tests {
 
     #[test]
     fn ipc_shutdown_ack_survives_app_teardown_before_socket_retirement() {
+        let _session = APP_SESSION.lock();
         let directory = tempfile::tempdir().unwrap();
         let data_dir = directory.path().to_path_buf();
         let config_path = data_dir.join("config.toml");
@@ -865,12 +869,19 @@ mod tests {
         .unwrap();
         let (ready, started) = bounded(1);
         let worker = thread::spawn(move || {
-            let app = App::start(data_dir, config_path, Vec::new(), false)?;
-            ready.send(()).unwrap();
-            app.run()
+            let app = App::start(data_dir, config_path, Vec::new(), false);
+            ready
+                .send(
+                    app.as_ref()
+                        .map(|_| ())
+                        .map_err(|error| format!("{error:#}")),
+                )
+                .unwrap();
+            app?.run()
         });
         started
             .recv_timeout(std::time::Duration::from_secs(15))
+            .unwrap()
             .unwrap();
         let ack = rivu_client::request_ack(directory.path(), AppCommand::Shutdown).unwrap();
         assert!(ack.is_success());
@@ -880,6 +891,7 @@ mod tests {
 
     #[test]
     fn accepted_shutdown_returns_final_save_failure_after_services_retire() {
+        let _session = APP_SESSION.lock();
         let directory = tempfile::tempdir().unwrap();
         let config_path = directory.path().join("config.toml");
         crate::config::Config {
@@ -895,11 +907,20 @@ mod tests {
         let config = config_path.clone();
         let (ready, started) = bounded(1);
         let worker = thread::spawn(move || {
-            let app = App::start(data_dir, config, Vec::new(), false)?;
-            ready.send(()).unwrap();
-            app.run()
+            let app = App::start(data_dir, config, Vec::new(), false);
+            ready
+                .send(
+                    app.as_ref()
+                        .map(|_| ())
+                        .map_err(|error| format!("{error:#}")),
+                )
+                .unwrap();
+            app?.run()
         });
-        started.recv_timeout(Duration::from_secs(15)).unwrap();
+        started
+            .recv_timeout(Duration::from_secs(15))
+            .unwrap()
+            .unwrap();
         // An externally edited invalid file must not be overwritten. A quick
         // control changes desired config, guaranteeing a final save attempt.
         let invalid = "[playback]\nvolume_percent = 101\n";

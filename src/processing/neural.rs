@@ -1,8 +1,8 @@
 //! Bounded duplex PCM transport. Frames are kind:u8 + length:u32-le + payload.
 //! JSON (0), input PCM (1), input end (2), speech/vocals/accompaniment PCM (17/18/19).
 //! Payloads are at most 64 KiB; PCM is interleaved little-endian float32, not WAV.
-use super::AudioOutputs;
 use super::render::{ProgressReporter, check_cancel};
+use super::{AudioOutputs, WORKER_EVENT_VERSION, WORKER_REQUEST_VERSION};
 use anyhow::{Context, Result, bail, ensure};
 use rivu_audio as audio;
 use rivu_protocol::model::{ProcessingOperation, ProcessingPhase, ProcessingTaskStatus};
@@ -172,7 +172,7 @@ pub(super) fn run(
     }
     let task_id = status.id.to_string();
     let request = serde_json::to_vec(&serde_json::json!({
-        "version":2,"task_id":task_id,"operation":if speech {"speech"} else {"separate"},
+        "version":WORKER_REQUEST_VERSION,"task_id":task_id,"operation":if speech {"speech"} else {"separate"},
         "sample_rate":input.sample_rate(),"channels":input.channels(),"frames":input.frames(),
         "model_manifest":manifest,"parameters":parameters,"threads":config.threads,
         "device":if config.device == rivu_format::config::NeuralDevice::Cpu {"cpu"} else {"cuda"}
@@ -278,7 +278,8 @@ pub(super) fn run(
                         if kind == JSON {
                             let event: serde_json::Value = serde_json::from_slice(payload)?;
                             ensure!(
-                                event["version"] == 3 && event["task_id"] == task_id,
+                                event["version"] == WORKER_EVENT_VERSION
+                                    && event["task_id"] == task_id,
                                 "Neural event identity/version mismatch"
                             );
                             match event["type"].as_str() {
@@ -516,7 +517,7 @@ mod tests {
         // Requires python3 on PATH; only the standard library is used, not models.
         std::fs::write(
             &worker,
-            r#"import json, signal, struct, sys
+            format!(r#"import json, signal, struct, sys
 signal.alarm(10)  # A broken duplex exchange must fail rather than hang the suite.
 
 def read_frame():
@@ -534,7 +535,7 @@ assert sys.argv[1:] == ['--stream']
 kind, payload = read_frame()
 assert kind == 0
 request = json.loads(payload)
-assert request['version'] == 2
+assert request['version'] == {WORKER_REQUEST_VERSION}
 assert request['sample_rate'] == 48000
 assert request['frames'] > 0
 speech = request['operation'] == 'speech'
@@ -556,25 +557,25 @@ while True:
         data = struct.pack('<%df' % len(values), *(gain * x for x in values))
         for offset in range(0, len(data), 4096):
             send(kind, data[offset:offset + 4096])
-    send(0, json.dumps(dict(version=3, task_id=request['task_id'], type='progress',
+    send(0, json.dumps(dict(version={WORKER_EVENT_VERSION}, task_id=request['task_id'], type='progress',
         completed=len(pcm) // (4 * channels), total=request['frames'])).encode())
     sys.stdout.buffer.flush()
 assert sys.stdin.buffer.read() == b''
 expected = [((i % 17) - 8) / 4 for i in range(request['frames'] * channels)]
 assert pcm == struct.pack('<%df' % len(expected), *expected)
 if outcome == 'failure-after-pcm':
-    send(0, json.dumps(dict(version=3, task_id=request['task_id'], type='error',
+    send(0, json.dumps(dict(version={WORKER_EVENT_VERSION}, task_id=request['task_id'], type='error',
         code='inference', message='fixture failure after PCM')).encode())
     sys.stdout.buffer.flush()
     raise SystemExit(7)
-send(0, json.dumps(dict(version=3, task_id=request['task_id'], type='complete',
+send(0, json.dumps(dict(version={WORKER_EVENT_VERSION}, task_id=request['task_id'], type='complete',
     sample_rate=request['sample_rate'], channels=channels, frames=request['frames'],
-    outputs={name: True for _, name, _ in streams},
+    outputs={{name: True for _, name, _ in streams}},
     model=dict(id='stdlib-fixture', sha256='fixture-hash'))).encode())
 sys.stdout.buffer.flush()
 if outcome == 'complete-then-nonzero':
     raise SystemExit(7)
-"#,
+"#),
         )
         .unwrap();
         let manifest = if outcome == "onnx-disabled" {

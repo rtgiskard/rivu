@@ -139,10 +139,11 @@ body
 The frame header is six bytes. `body_length` excludes the four-byte length field
 and includes the version, message type, and serialized body.
 
-Bodies use Postcard serialization without COBS framing. The current protocol
-version is `12`. Both peers must use matching protocol versions and positional
-wire schemas. The four-byte frame length remains little-endian; body integers
-follow Postcard's encoding.
+Bodies use Postcard serialization without COBS framing. The protocol version is
+defined by `PROTOCOL_VERSION` in
+link:../crates/rivu-protocol/src/wire.rs[the wire contract]. Both peers must use
+matching protocol versions and positional wire schemas. The four-byte frame
+length remains little-endian; body integers follow Postcard's encoding.
 Version mismatches are rejected before decoding the body. There is no schema
 negotiation. See <<wire-schemas,Wire schemas>> for positional fields and adapters.
 Monitor EQ `SavePreset` and `ImportPreset` carry an explicit positional `overwrite`

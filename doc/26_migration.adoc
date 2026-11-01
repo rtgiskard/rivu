@@ -4,27 +4,28 @@
 
 == Scope and decisions
 
-This chapter defines format authority, startup handoff and offline conversion.
-<<future-historical-conversion,Future conversions>> are requirements, not supported
-inputs. See link:02_library.adoc#sqlite-maintenance[SQLite maintenance] for database
-operations and link:01_config.adoc#saving-configuration[configuration saving].
+This chapter defines database migration, read-only configuration validation and
+the startup handoff. See link:02_library.adoc#sqlite-maintenance[SQLite maintenance]
+for database operations and
+link:01_config.adoc#saving-configuration[configuration saving].
 
 === Current implementation
 
-The database format is `4`; the independent configuration schema is `2`.
+Current database and configuration formats are defined by `rivu-format`; see
+<<version-authority,Version authority>>.
 
-`rivu-migrate check` validates without conversion; `apply` upgrades validated
-database format `2` directly to `4`, retaining a durable SQLite backup. The upgrade
-adds `playlists.position` in playlist-ID order and preserves contents, playback
-statistics, indexes and queue state. Current resources remain unchanged without
-a backup; configuration is always read-only.
+`rivu-migrate check` validates without conversion; `apply` performs the
+<<supported-source-formats,supported database upgrade>>, retaining a durable
+SQLite backup. The upgrade adds `playlists.position` in playlist-ID order and
+preserves contents, playback statistics, indexes and queue state. Current
+resources remain unchanged without a backup; configuration is always read-only.
 
 Missing default resources are reported without creation; an explicitly selected
 missing database is an error. Unknown or malformed formats are rejected. Valid
 unversioned configuration is current and remains untouched.
 
-To inspect or upgrade an existing format `2` database before application
-startup, stop Rivu and run the tool with the intended data directory and configuration:
+To inspect or upgrade a supported database before application startup, stop Rivu
+and run the tool with the intended data directory and configuration:
 
 [source,sh]
 ----
@@ -90,8 +91,8 @@ add `--features database` for schema and trigger behavior.
 `rivu_meta.format_version` identifies structure and interpretation, independently
 of releases or write counts. Its singleton also stores `current_queue_entry_id`,
 referencing system-queue `playlist_entries.id` with `ON DELETE SET NULL`.
-New databases create format `4` directly.
-
+New databases create the current format directly. Its version is defined by
+`SCHEMA_VERSION` in link:../crates/rivu-format/src/database.rs[rivu-format's database contract].
 
 Offline preflight checks tables, readable columns, primary/unique keys, usable
 indexes, the queue singleton and required triggers. Before migration commits,
@@ -110,8 +111,10 @@ cannot establish compatibility.
 
 === Configuration schema
 
-Configuration schema `2` permits an omitted `schema_version`, meaning current,
-not historical. Missing files use defaults. New serialization includes the version;
+The current configuration schema permits an omitted `schema_version`, meaning
+current, not historical. Its version is defined by `CONFIG_SCHEMA_VERSION` in
+link:../crates/rivu-format/src/config.rs[rivu-format's configuration contract].
+Missing files use defaults. New serialization includes the version;
 format-preserving saves retain its omission, and loading never adds it. Database,
 configuration and application versions evolve independently.
 
@@ -208,19 +211,11 @@ Integration proof must run the tool, then load settings and query/write its data
 with the application. Unit tests or compilation alone are insufficient. The
 application dependency graph must contain no migration package or historical decoder.
 
-== Future historical conversion
+== Supported source formats
 
-Only source format `2` upgrades to `4`; `3` is not a supported historical format.
-Additional conversions require evidence of source structure and interpretation,
-a deliberate version decision, and validation of source, target and user data.
-The marker advances within the conversion transaction, not as a compatibility fix.
+The supported upgrade is database format `2` to `4`. Other noncurrent formats
+and unknown schema objects are rejected rather than guessed or removed.
+The conversion adds catalog positions and retires no source schema objects.
+Configuration is validated against its current schema, never converted.
 
-Known obsolete schema objects must be removed transactionally and their absence
-verified; unknown objects must not be deleted. The current conversion only adds
-catalog positions and retires no format `2` object.
-
-Configuration conversion needs a source contract for omitted settings so new
-defaults cannot redefine historical intent. It must define separate mutation and
-recovery boundaries; database atomicity does not cover both files. Historical
-rules stay in the independent tool.
 

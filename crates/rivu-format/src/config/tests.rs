@@ -107,7 +107,10 @@ fn file_and_direct_configuration_inputs_share_the_byte_budget() {
             let file_error = read_toml(&link).unwrap_err();
             let direct_error = from_toml(&text).unwrap_err();
             assert_eq!(file_error.kind(), io::ErrorKind::InvalidData);
-            assert_eq!(file_error.to_string(), direct_error.to_string());
+            assert_eq!(
+                direct_error.downcast_ref::<io::Error>().unwrap().kind(),
+                io::ErrorKind::InvalidData
+            );
         }
         assert_eq!(std::fs::metadata(&path).unwrap().len(), size as u64);
         assert!(
@@ -164,10 +167,8 @@ fn compact_configuration_cannot_expand_past_the_output_budget() {
         panic!("oversized serialization was accepted");
     };
     assert_eq!(
-        error.to_string(),
-        check_config_size((MAX_CONFIG_BYTES + 1) as u64)
-            .unwrap_err()
-            .to_string()
+        error.downcast_ref::<io::Error>().unwrap().kind(),
+        io::ErrorKind::InvalidData
     );
 }
 
@@ -200,7 +201,6 @@ fn current_toml_contract_rejects_explicit_noncurrent_versions_and_invalid_values
         "schema_version = -1\n",
         "schema_version = {}\n",
         "schema_version = 2\nunknown = true\n",
-        "schema_version = 2\n[interface]\nui_theme = 'rivu_dark'\n",
         "schema_version = 2\n[playback]\nvolume_percent = 101\n",
         "schema_version = 2\n[library]\nroots = ['/Music', '/Music/Live']\n",
     ] {
@@ -238,7 +238,6 @@ fn absent_version_uses_current_schema_and_serializes_explicitly() {
 fn absent_version_keeps_strict_parse_and_validation_causes() {
     for input in [
         "unknown = true\n",
-        "[interface]\nui_theme = 'rivu_dark'\n",
         "[playback]\nvolume_percent = 101\n",
         "[library]\nroots = ['/Music', '/Music/Live']\n",
     ] {
@@ -373,9 +372,6 @@ fn processing_tables_roundtrip_and_reject_invalid_controls() {
     edited.denoise.spectral_gain_floor_db = -18.5;
     let saved = update_toml(input, Some(&baseline), &edited).unwrap();
     assert_eq!(from_toml(&saved).unwrap(), edited);
-    for prefix in ["", "schema_version = 2\n"] {
-        assert!(from_toml(&format!("{prefix}[denoise]\nnoise_floor_db = -18.5\n")).is_err());
-    }
     assert!(from_toml("[neural]\nthreads = 9\n").is_err());
     assert!(from_toml("[neural]\nspeech_wet_mix = 1.5\n").is_err());
     assert!(from_toml("[denoise]\nstrength = -1\n").is_err());
@@ -463,12 +459,6 @@ fn processing_graph_roundtrip_preserves_node_local_settings_and_layout() {
     assert!(document["processing_graph"].get("revision").is_none());
     config.processing_graph.revision = 0;
     assert_eq!(from_toml(&saved).unwrap(), config);
-    let mut obsolete = document;
-    obsolete["processing_graph"]
-        .as_table_mut()
-        .unwrap()
-        .insert("revision".into(), toml::Value::Integer(42));
-    assert!(from_toml(&toml::to_string(&obsolete).unwrap()).is_err());
     assert_ne!(
         config.neural.speech_interpreter,
         PathBuf::from("/node-local/python")

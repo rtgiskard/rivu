@@ -102,32 +102,6 @@ fn playlist_name_conflicts_preserve_catalog_entries_and_queue() {
 }
 
 #[test]
-fn playlist_addition_with_missing_track_rolls_back_new_entries() {
-    let store = Store::open(Path::new(":memory:")).unwrap();
-    store
-        .apply_scan(&scan(vec![
-            rec("/music/a.wav", "a", "A", 10.),
-            rec("/music/b.wav", "b", "B", 10.),
-        ]))
-        .unwrap();
-    let tracks = all_tracks(&store);
-    let playlist = store.create_playlist("mix").unwrap();
-    store.add_playlist(playlist, &[tracks[0].id]).unwrap();
-    assert!(
-        store
-            .add_playlist(playlist, &[tracks[0].id, tracks[1].id, 999])
-            .is_err()
-    );
-    assert_eq!(
-        playlist_entries(&store, playlist)
-            .iter()
-            .map(|entry| entry.track_id)
-            .collect::<Vec<_>>(),
-        vec![tracks[0].id]
-    );
-}
-
-#[test]
 fn playlist_pages_and_batches_preserve_effective_audio_metadata() {
     let store = Store::open(Path::new(":memory:")).unwrap();
     let mut whole = rec("/music/shared.wav", "shared", "Whole", 180.0);

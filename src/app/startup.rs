@@ -1,4 +1,4 @@
-//! Startup orchestration only; historical recognition and conversion stay in rivu-migrate.
+//! Startup orchestration only; supported database upgrades stay in rivu-migrate.
 use crate::ipc::SocketOwner;
 use anyhow::{Context, Result, ensure};
 use rivu_format::database::{self, DatabaseState};

@@ -525,7 +525,7 @@ mod tests {
     }
 
     #[test]
-    fn optimize_database_accepts_reply_after_old_response_deadline() {
+    fn optimize_database_accepts_long_running_operation_reply() {
         use std::os::unix::net::UnixListener;
 
         let directory = socket_test_directory();
@@ -542,7 +542,7 @@ mod tests {
                 read_test_command(&mut stream),
                 Command::OptimizeDatabase
             ));
-            // Cross the old 120s deadline, then wait until the client's timeout
+            // Advance the response clock, then wait until the client's timeout
             // branch has observed it before making the response readable.
             clock.advance_and_wait_for_poll(Duration::from_secs(121));
             reply_test_ack(&mut stream, Ack::from_result(Ok(()), 17));

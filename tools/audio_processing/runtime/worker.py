@@ -3,7 +3,7 @@
 
 Invoke the prepared interpreter with worker.py --stream. Each frame is a one-byte
 kind, a uint32 little-endian payload size, and at most 65536 payload bytes. Kind 0
-is UTF-8 JSON (request v2/events v3), 1 is interleaved float32-le input, and 2 is
+is UTF-8 JSON, 1 is interleaved float32-le input, and 2 is
 the empty input-end marker, which must be followed immediately by stdin EOF.
 Each process handles one task; the producer must close stdin without waiting for
 completion. Output kinds 17/18/19 are speech/vocals/accompaniment
@@ -30,7 +30,7 @@ import struct
 
 sys.dont_write_bytecode = True
 VERSION = 2
-EVENT_VERSION = 3
+EVENT_VERSION = 2
 CORE_SECONDS = 24
 CONTEXT_SECONDS = 8
 MAX_SECONDS = 4 * 60 * 60
@@ -72,7 +72,7 @@ def validate_request(request):
     require(isinstance(request, dict), "invalid_request", "request must be an object")
     allowed = {"version", "task_id", "operation", "sample_rate", "channels", "frames", "model_manifest", "device", "threads", "parameters"}
     require(not (set(request) - allowed), "invalid_request", "unknown request fields: " + str(sorted(set(request) - allowed)))
-    require(request.get("version") == VERSION, "invalid_request", "version must be 2")
+    require(request.get("version") == VERSION, "invalid_request", f"version must be {VERSION}")
     require(isinstance(request.get("task_id"), str) and 0 < len(request["task_id"]) <= 128, "invalid_request", "task_id must be 1..128 characters")
     require(request.get("operation") in ("speech", "separate"), "invalid_request", "operation must be speech or separate")
     require(request.get("device", "cpu") in ("cpu", "cuda"), "invalid_request", "device must be cpu or cuda")

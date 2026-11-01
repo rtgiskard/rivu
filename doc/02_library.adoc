@@ -597,11 +597,11 @@ link:21_ipc.adoc#scanning-and-metadata-ownership[Scanning and metadata ownership
 for scan ownership and task lifecycle contracts.
 
 ==== Metadata reuse
-Ordinary scans reuse metadata and fingerprints when file size, modification time,
-and the metadata probe version allow it. Force scans reread the source; neither
-resets user edits. CUE sheets are always reread. An unchanged scan still reports
-errors but preserves existing views; an unchanged playlist import still creates
-its requested playlist.
+Ordinary scans reuse fingerprints when file size and modification time are
+unchanged. Reusing metadata also requires the current probe version. `--force`
+rereads both metadata and fingerprints; scans preserve user edits. CUE sheets
+are always reread. An unchanged scan still reports errors but preserves existing
+views; an unchanged playlist import still creates its requested playlist.
 
 ==== Bounded execution
 
@@ -710,22 +710,22 @@ rivu library keep-independent DESTINATION_ID
 
 == SQLite maintenance
 
-Rivu opens database format `4` only. A new database is initialized automatically;
-on a version mismatch, host startup invokes `rivu-migrate apply` to attempt an
-offline upgrade before opening business connections. Format `2` is the supported
-source. Install `rivu-migrate` beside `rivu` or on `PATH`; migration
-failure stops startup and prints diagnostics. The database stores library records,
-user edits and statistics, playlists, and queue occurrences and selection. Stop
-Rivu before external database edits. Queue restoration:
-link:04_playback.adoc#queue[Playback].
+Rivu opens only the current database format. A new database is initialized
+automatically; on a version mismatch, host startup invokes `rivu-migrate apply`
+to attempt a supported offline upgrade before opening business connections.
+Install `rivu-migrate` beside `rivu` or on `PATH`; migration failure stops startup
+and prints diagnostics. The database stores library records, user edits and
+statistics, playlists, and queue occurrences and selection. Stop Rivu before
+external database edits. Queue restoration: link:04_playback.adoc#queue[Playback].
 
 === Independent migration tool
 
 `rivu-migrate check` inspects configuration and database formats without starting
 the player or changing their contents; SQLite may update coordination sidecars.
 `apply` requires exclusive offline ownership: stop Rivu and external database
-writers first. It upgrades a validated format `2` database directly to `4` with a durable
-backup, preserving the existing playlist catalog order and all user data.
+writers first. It performs the
+link:26_migration.adoc#supported-source-formats[supported database upgrade] with a
+durable backup, preserving the existing playlist catalog order and all user data.
 Current resources are validated without rewriting them or creating backups;
 missing resources are not initialized.
 
