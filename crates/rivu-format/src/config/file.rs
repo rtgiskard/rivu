@@ -232,6 +232,43 @@ file_group!(Visualizations, VisualizationsView {
 ; waveform: Waveform, WaveformView
 ; oscilloscope: Oscilloscope, OscilloscopeView);
 
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct StoredGraph {
+    nodes: Vec<processing_graph::GraphNode>,
+    edges: Vec<processing_graph::GraphEdge>,
+    next_id: u64,
+}
+
+impl Default for StoredGraph {
+    fn default() -> Self {
+        let graph = ProcessingGraph::default();
+        Self {
+            nodes: graph.nodes,
+            edges: graph.edges,
+            next_id: graph.next_id,
+        }
+    }
+}
+
+fn serialize_graph<S: serde::Serializer>(
+    graph: &ProcessingGraph,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    #[derive(Serialize)]
+    struct View<'a> {
+        nodes: &'a [processing_graph::GraphNode],
+        edges: &'a [processing_graph::GraphEdge],
+        next_id: u64,
+    }
+    View {
+        nodes: &graph.nodes,
+        edges: &graph.edges,
+        next_id: graph.next_id,
+    }
+    .serialize(serializer)
+}
+
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(super) struct FileConfig {
@@ -244,7 +281,7 @@ pub(super) struct FileConfig {
     equalizer: Option<EqualizerConfig>,
     denoise: Option<DenoiseConfig>,
     neural: Option<NeuralConfig>,
-    processing_graph: Option<ProcessingGraph>,
+    processing_graph: Option<StoredGraph>,
     equalizer_presets: Option<Vec<EqualizerPreset>>,
     equalizer_ab: Option<EqualizerConfig>,
 }
@@ -270,7 +307,12 @@ impl FileConfig {
             config.neural = value;
         }
         if let Some(value) = self.processing_graph {
-            config.processing_graph = value;
+            config.processing_graph = ProcessingGraph {
+                revision: 0,
+                nodes: value.nodes,
+                edges: value.edges,
+                next_id: value.next_id,
+            };
         }
         if let Some(value) = self.equalizer_presets {
             config.equalizer_presets = value;
@@ -293,7 +335,7 @@ impl FileConfig {
         patch_field!(table, baseline, config, equalizer => equalizer: EqualizerConfig);
         patch_field!(table, baseline, config, denoise => denoise: DenoiseConfig);
         patch_field!(table, baseline, config, neural => neural: NeuralConfig);
-        patch_field!(table, baseline, config, processing_graph => processing_graph: ProcessingGraph);
+        patch_field!(table, baseline, config, #[serde(serialize_with = "serialize_graph")] processing_graph => processing_graph: ProcessingGraph);
         patch_field!(table, baseline, config, equalizer_presets => equalizer_presets: Vec<EqualizerPreset>);
         patch_field!(table, baseline, config, #[serde(skip_serializing_if = "Option::is_none")] equalizer_ab => equalizer_ab: Option<EqualizerConfig>);
         Ok(())
@@ -311,6 +353,7 @@ pub(super) struct FileConfigView<'a> {
     equalizer: &'a EqualizerConfig,
     denoise: &'a DenoiseConfig,
     neural: &'a NeuralConfig,
+    #[serde(serialize_with = "serialize_graph")]
     processing_graph: &'a ProcessingGraph,
     equalizer_presets: &'a Vec<EqualizerPreset>,
     #[serde(skip_serializing_if = "Option::is_none")]

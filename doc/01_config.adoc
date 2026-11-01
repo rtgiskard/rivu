@@ -251,6 +251,9 @@ connections and canvas positions, lives in `[processing_graph]` and its nested
 arrays. These are core settings in `config.toml`, not preferences in `layout.json`.
 The default graph connects Source directly to Output; the top-level Monitor EQ
 and restoration/neural defaults do not implicitly insert graph nodes.
+The graph edit revision is runtime-only and is not a configuration field. It
+starts fresh when configuration is loaded; IPC still carries the current token
+for optimistic edit checks.
 Unknown fields are rejected throughout the graph, including node-kind settings,
 node-local EQ/restoration/neural configuration, edges, ports, and noise selections;
 they are not silently ignored. Use the documented field names when editing TOML.

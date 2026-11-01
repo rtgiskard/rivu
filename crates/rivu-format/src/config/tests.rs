@@ -382,6 +382,35 @@ fn processing_tables_roundtrip_and_reject_invalid_controls() {
 }
 
 #[test]
+fn graph_patch_saves_edits_without_runtime_revision() {
+    let original = "# graph settings\n[playback]\nvolume_percent = 25\n";
+    let baseline = from_toml(original).unwrap();
+    let mut config = baseline.clone();
+    config
+        .processing_graph
+        .edit(
+            0,
+            processing_graph::GraphEdit::Move {
+                id: 1,
+                position: [800.0, 500.0],
+            },
+        )
+        .unwrap();
+    let saved = update_toml(original, Some(&baseline), &config).unwrap();
+    let document: toml::Value = toml::from_str(&saved).unwrap();
+    assert!(document["processing_graph"].get("revision").is_none());
+    let loaded = from_toml(&saved).unwrap();
+    assert_eq!(loaded.processing_graph.revision, 0);
+    assert_eq!(
+        loaded.processing_graph.node(1).unwrap().position,
+        [800.0, 500.0]
+    );
+    assert_eq!(config.processing_graph.revision, 1);
+    assert!(saved.starts_with("# graph settings\n"));
+    assert_eq!(loaded.volume, 0.25);
+}
+
+#[test]
 fn processing_graph_roundtrip_preserves_node_local_settings_and_layout() {
     use processing_graph::{EqImplementation, GraphNode, GraphNodeKind, NoiseSelection};
 
@@ -429,8 +458,16 @@ fn processing_graph_roundtrip_preserves_node_local_settings_and_layout() {
     }
     config.processing_graph.revision = 42;
     let saved = to_toml(&config).unwrap();
-    assert!(saved.contains("[processing_graph]"));
+    let document: toml::Value = toml::from_str(&saved).unwrap();
+    assert!(document["processing_graph"].get("revision").is_none());
+    config.processing_graph.revision = 0;
     assert_eq!(from_toml(&saved).unwrap(), config);
+    let mut obsolete = document;
+    obsolete["processing_graph"]
+        .as_table_mut()
+        .unwrap()
+        .insert("revision".into(), toml::Value::Integer(42));
+    assert!(from_toml(&toml::to_string(&obsolete).unwrap()).is_err());
     assert_ne!(
         config.neural.speech_interpreter,
         PathBuf::from("/node-local/python")
