@@ -128,6 +128,56 @@ impl Queue {
         );
     }
 
+    fn queue_append_drop_target<E: gpui::InteractiveElement>(
+        element: E,
+        cx: &mut Context<Self>,
+    ) -> E {
+        let theme = rivu_ui::theme::palette(cx);
+        let owner = cx.entity().downgrade();
+        element
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                window.prevent_default();
+                cx.stop_propagation();
+                this.drop_external_paths(paths, DragDestination::Queue, cx);
+            }))
+            .drag_over::<ExternalPaths>(|style, _, _, _| style.border_color(rgb(theme.accent)))
+            .on_drop(cx.listener(|this, drag: &ListDrag, window, cx| {
+                window.prevent_default();
+                this.drop_list_drag(drag, None, DragDestination::Queue, cx);
+            }))
+            .can_drop(move |value, _, cx| {
+                owner.upgrade().is_some_and(|owner| {
+                    let this = owner.read(cx);
+                    if let Some(drag) = value.downcast_ref::<ListDrag>().and_then(ListDrag::queue) {
+                        this.queue_drop_index(drag, None, owner.entity_id())
+                            .is_some()
+                    } else if value.is::<ExternalPaths>() {
+                        true
+                    } else {
+                        can_transfer(
+                            value,
+                            &this.state,
+                            DragDestination::Queue,
+                            this.library_selection_pending,
+                            this.content_resolution,
+                        )
+                    }
+                })
+            })
+            .drag_over::<ListDrag>(|style, _, _, _| style.border_color(rgb(theme.accent)))
+            .on_drop(cx.listener(|this, drag: &LibraryDrag, window, cx| {
+                window.prevent_default();
+                this.resolve_library_drag(drag, DragDestination::Queue, cx);
+            }))
+            .drag_over::<LibraryDrag>(|style, _, _, _| style.border_color(rgb(theme.accent)))
+            .on_drop(cx.listener(|this, drag: &ContentDrag, window, cx| {
+                window.prevent_default();
+                cx.stop_propagation();
+                this.drop_content(drag, DragDestination::Queue, cx);
+            }))
+            .drag_over::<ContentDrag>(|style, _, _, _| style.border_color(rgb(theme.accent)))
+    }
+
     pub(in crate::gui) fn render_panel(
         &mut self,
         panel_id: u64,
@@ -222,50 +272,7 @@ impl Queue {
             });
         let scroll = self.context.scroll.borrow_mut().list(("queue", panel_id));
         self.reveal_queue_locate(&scroll, cx);
-        let panel_drop_owner = cx.entity().downgrade();
-        let list_drop_owner = panel_drop_owner.clone();
-        panel_surface(("queue-panel", panel_id))
-            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
-                window.prevent_default();
-                cx.stop_propagation();
-                this.drop_external_paths(paths, DragDestination::Queue, cx);
-            }))
-            .drag_over::<ExternalPaths>(|style, _, _, _| style.border_color(rgb(theme.accent)))
-            .on_drop(cx.listener(|this, drag: &ListDrag, window, cx| {
-                window.prevent_default();
-                this.drop_list_drag(drag, None, DragDestination::Queue, cx);
-            }))
-            .can_drop(move |value, _, cx| {
-                panel_drop_owner.upgrade().is_some_and(|owner| {
-                    let this = owner.read(cx);
-                    if let Some(drag) = value.downcast_ref::<ListDrag>().and_then(ListDrag::queue) {
-                        this.queue_drop_index(drag, None, owner.entity_id())
-                            .is_some()
-                    } else if value.is::<ExternalPaths>() {
-                        true
-                    } else {
-                        can_transfer(
-                            value,
-                            &this.state,
-                            DragDestination::Queue,
-                            this.library_selection_pending,
-                            this.content_resolution,
-                        )
-                    }
-                })
-            })
-            .drag_over::<ListDrag>(|style, _, _, _| style.border_color(rgb(theme.accent)))
-            .on_drop(cx.listener(|this, drag: &LibraryDrag, window, cx| {
-                window.prevent_default();
-                this.resolve_library_drag(drag, DragDestination::Queue, cx);
-            }))
-            .drag_over::<LibraryDrag>(|style, _, _, _| style.border_color(rgb(theme.accent)))
-            .on_drop(cx.listener(|this, drag: &ContentDrag, window, cx| {
-                window.prevent_default();
-                cx.stop_propagation();
-                this.drop_content(drag, DragDestination::Queue, cx);
-            }))
-            .drag_over::<ContentDrag>(|style, _, _, _| style.border_color(rgb(theme.accent)))
+        Self::queue_append_drop_target(panel_surface(("queue-panel", panel_id)), cx)
             .child(rivu_ui::panel_heading_row(header, tools))
             .when(
                 self.model
@@ -316,335 +323,298 @@ impl Queue {
                 },
             )
             .child(list_viewport(
-                VirtualList::new(
-                    ("queue-rows", panel_id),
-                    self.model.rows.len(),
-                    &scroll,
-                    cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
-                        let row_height = rivu_ui::list_row_height(window, cx);
-                        range
-                            .map(|index| {
-                                let Some(entry) = this.model.rows.get(index) else {
-                                    return this.paged_loading_row(index, row_height, cx);
-                                };
-                                let id = entry.id;
-                                let track_id = entry.track_id;
-                                let favorite = entry.track.favorite;
-                                let position = entry.position;
-                                let can_move_down = position + 1 < this.state.queue.total;
-                                let revision = this.state.queue.revision;
-                                let playing = this.state.queue.current_id == Some(id);
-                                let source = QueueIdentity::from(entry);
-                                let generation = this.model.page_projection.generation();
-                                let drag_owner = cx.entity().downgrade();
-                                let drag_i18n = std::sync::Arc::clone(&this.context.i18n);
-                                let drag = QueueDrag {
-                                    owner: cx.entity().entity_id(),
-                                    source,
-                                    entries: Default::default(),
-                                    revision,
-                                };
-                                track_list_row(
-                                    theme,
-                                    rivu_ui::list_row(
-                                        theme,
-                                        ("queue-entry", id),
-                                        this.model.contains(&id),
-                                        row_height,
-                                    ),
-                                    TrackText::from(&entry.track),
-                                    position,
-                                    playing,
-                                    &this.context.i18n,
-                                )
-                                .when(entry.track.missing, |row| {
-                                    row.child(caption(theme, this.tr("gl-missing")))
-                                })
-                                .when(this.queue_locate_emphasized(id), |row| {
-                                    row.border_1()
-                                        .border_color(rgb(theme.accent))
-                                        .bg(rgb(theme.highlight))
-                                })
-                                .when(
-                                    this.focused
-                                        && this.model.active().is_some_and(|row| row.id == id),
-                                    |row| row.border_color(rgb(theme.accent)),
-                                )
-                                .group("queue-track-row")
-                                .relative()
-                                .child(
-                                    hover_actions(
-                                        theme,
-                                        ("queue-entry-actions", id),
-                                        "queue-track-row",
-                                        this.model.contains(&id),
-                                    )
-                                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation();
-                                    })
-                                    .child(
-                                        IconButtonGroup::new(
-                                            IconButtonStyle::Quiet,
-                                            IconButtonDensity::Compact,
-                                        )
-                                        .button(
-                                            IconButton::new(
-                                                ("queue-entry-play", id),
-                                                "",
-                                                this.tr("gl-play-queue-entry"),
-                                            ),
-                                            cx,
-                                            move |this, _, cx| {
-                                                this.send_queue_row_action(
-                                                    revision,
-                                                    Command::PlayQueue { queue_id: id },
-                                                    cx,
-                                                )
-                                            },
-                                        )
-                                        .button(
-                                            favorite_button(
-                                                ("queue-entry-favorite", id),
-                                                favorite,
-                                                |key| this.tr(key),
-                                            ),
-                                            cx,
-                                            move |this, _, cx| {
-                                                this.send(
-                                                    Command::SetFavorite {
-                                                        track_ids: vec![track_id],
-                                                        favorite: !favorite,
-                                                    },
-                                                    cx,
-                                                )
-                                            },
-                                        )
-                                        .button(
-                                            IconButton::new(
-                                                ("queue-entry-remove", id),
-                                                "",
-                                                this.tr("gl-remove-queue"),
-                                            ),
-                                            cx,
-                                            move |this, _, cx| {
-                                                this.send_queue_row_action(
-                                                    revision,
-                                                    Command::RemoveQueueEntries {
-                                                        queue_ids: vec![id],
-                                                    },
-                                                    cx,
-                                                )
-                                            },
-                                        )
-                                        .button(
-                                            IconButton::new(
-                                                ("queue-entry-up", id),
-                                                "",
-                                                this.tr("gl-entry-up"),
-                                            )
-                                            .enabled(position > 0),
-                                            cx,
-                                            move |this, _, cx| {
-                                                if position > 0 {
-                                                    this.send_queue_row_action(
-                                                        revision,
-                                                        Command::MoveQueue {
-                                                            queue_id: id,
-                                                            index: position - 1,
-                                                        },
-                                                        cx,
-                                                    );
-                                                }
-                                            },
-                                        )
-                                        .button(
-                                            IconButton::new(
-                                                ("queue-entry-down", id),
-                                                "",
-                                                this.tr("gl-entry-down"),
-                                            )
-                                            .enabled(can_move_down),
-                                            cx,
-                                            move |this, _, cx| {
-                                                if can_move_down {
-                                                    this.send_queue_row_action(
-                                                        revision,
-                                                        Command::MoveQueue {
-                                                            queue_id: id,
-                                                            index: position + 1,
-                                                        },
-                                                        cx,
-                                                    );
-                                                }
-                                            },
-                                        )
-                                        .into_div(),
-                                    ),
-                                )
-                                .on_mouse_down(
-                                    gpui::MouseButton::Right,
-                                    cx.listener(
-                                        move |this, event: &gpui::MouseDownEvent, _, cx| {
-                                            cx.emit(QueueEvent::FocusRequested);
-                                            this.refresh(cx);
-                                            let rows =
-                                                this.model.operation_rows(source, generation);
-                                            if revision != this.state.queue.revision
-                                                || rows.is_empty()
-                                            {
-                                                cx.stop_propagation();
-                                                return;
-                                            }
-                                            if !this.model.contains(&id) {
-                                                this.select_queue_entry(id, false, false, cx);
-                                                cx.notify();
-                                            }
-                                            // Keep the clicked occurrence frozen across deferred selection reads.
-                                            let track_ids =
-                                                rows.iter().map(|row| row.track_id).collect();
-                                            let queue_ids = rows.iter().map(|row| row.id).collect();
-                                            cx.emit(QueueEvent::ContentMenu {
-                                                request: std::cell::RefCell::new(Some(
-                                                    ContentMenuRequest {
-                                                        source: TrackSource::Tracks(track_ids),
-                                                        position: event.position,
-                                                        play: Some(Command::PlayQueue {
-                                                            queue_id: id,
-                                                        }),
-                                                    },
-                                                )),
-                                                revision,
-                                                remove: std::cell::RefCell::new(Some(
-                                                    Command::RemoveQueueEntries { queue_ids },
-                                                )),
-                                            });
-                                            cx.stop_propagation();
-                                        },
-                                    ),
-                                )
-                                .on_click(cx.listener(
-                                    move |this, event: &gpui::ClickEvent, _, cx| {
-                                        cx.emit(QueueEvent::FocusRequested);
-                                        let modifiers = event.modifiers();
-                                        this.select_queue_entry(
-                                            id,
-                                            modifiers.shift,
-                                            modifiers.control,
-                                            cx,
-                                        );
-                                        if event.click_count() == 2 {
-                                            this.send(Command::PlayQueue { queue_id: id }, cx);
-                                        }
-                                    },
-                                ))
-                                .when(
-                                    this.model.ready()
-                                        && this.model.query.is_none()
-                                        && this.model.selection_error.is_none(),
-                                    |row| {
-                                        row.on_drag(
-                                            ListDrag::Queue(drag),
-                                            move |drag, _, window, cx| {
-                                                let ListDrag::Queue(drag) = drag else {
-                                                    unreachable!()
-                                                };
-                                                rivu_ui::begin_list_drag(window, cx);
-                                                drag.entries.get_or_init(|| {
-                                                    drag_owner
-                                                        .update(cx, |this, cx| {
-                                                            this.refresh(cx);
-                                                            if drag.revision
-                                                                != this.state.queue.revision
-                                                                || !this.model.ready()
-                                                                || this.model.query.is_some()
-                                                                || this
-                                                                    .model
-                                                                    .selection_error
-                                                                    .is_some()
-                                                            {
-                                                                return Vec::new();
-                                                            }
-                                                            this.model.operation_rows(
-                                                                drag.source,
-                                                                generation,
-                                                            )
-                                                        })
-                                                        .unwrap_or_default()
-                                                });
-                                                let label = drag_i18n
-                                                    .format(
-                                                        "gl-move-queue-entries",
-                                                        &[(
-                                                            "count",
-                                                            drag.entries
-                                                                .get()
-                                                                .map_or(0, Vec::len)
-                                                                .into(),
-                                                        )],
-                                                    )
-                                                    .into();
-                                                cx.new(|_| rivu_ui::ListDragPreview { label })
-                                            },
-                                        )
-                                    },
-                                )
-                                .children([false, true].map(|after| {
-                                    this.queue_row_drop_zone(
-                                        (id, position),
+                Self::queue_append_drop_target(
+                    VirtualList::new(
+                        ("queue-rows", panel_id),
+                        self.model.rows.len(),
+                        &scroll,
+                        cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
+                            let row_height = rivu_ui::list_row_height(window, cx);
+                            range
+                                .map(|index| {
+                                    let Some(entry) = this.model.rows.get(index) else {
+                                        return this.paged_loading_row(index, row_height, cx);
+                                    };
+                                    let id = entry.id;
+                                    let track_id = entry.track_id;
+                                    let favorite = entry.track.favorite;
+                                    let position = entry.position;
+                                    let can_move_down = position + 1 < this.state.queue.total;
+                                    let revision = this.state.queue.revision;
+                                    let playing = this.state.queue.current_id == Some(id);
+                                    let source = QueueIdentity::from(entry);
+                                    let generation = this.model.page_projection.generation();
+                                    let drag_owner = cx.entity().downgrade();
+                                    let drag_i18n = std::sync::Arc::clone(&this.context.i18n);
+                                    let drag = QueueDrag {
+                                        owner: cx.entity().entity_id(),
+                                        source,
+                                        entries: Default::default(),
                                         revision,
-                                        after,
+                                    };
+                                    track_list_row(
                                         theme,
-                                        cx,
+                                        rivu_ui::list_row(
+                                            theme,
+                                            ("queue-entry", id),
+                                            this.model.contains(&id),
+                                            row_height,
+                                        ),
+                                        TrackText::from(&entry.track),
+                                        position,
+                                        playing,
+                                        &this.context.i18n,
                                     )
-                                }))
-                            })
-                            .collect::<Vec<_>>()
-                    }),
+                                    .when(entry.track.missing, |row| {
+                                        row.child(caption(theme, this.tr("gl-missing")))
+                                    })
+                                    .when(this.queue_locate_emphasized(id), |row| {
+                                        row.border_1()
+                                            .border_color(rgb(theme.accent))
+                                            .bg(rgb(theme.highlight))
+                                    })
+                                    .when(
+                                        this.focused
+                                            && this.model.active().is_some_and(|row| row.id == id),
+                                        |row| row.border_color(rgb(theme.accent)),
+                                    )
+                                    .group("queue-track-row")
+                                    .relative()
+                                    .child(
+                                        hover_actions(
+                                            theme,
+                                            ("queue-entry-actions", id),
+                                            "queue-track-row",
+                                            this.model.contains(&id),
+                                        )
+                                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation();
+                                        })
+                                        .child(
+                                            IconButtonGroup::new(
+                                                IconButtonStyle::Quiet,
+                                                IconButtonDensity::Compact,
+                                            )
+                                            .button(
+                                                IconButton::new(
+                                                    ("queue-entry-play", id),
+                                                    "",
+                                                    this.tr("gl-play-queue-entry"),
+                                                ),
+                                                cx,
+                                                move |this, _, cx| {
+                                                    this.send_queue_row_action(
+                                                        revision,
+                                                        Command::PlayQueue { queue_id: id },
+                                                        cx,
+                                                    )
+                                                },
+                                            )
+                                            .button(
+                                                favorite_button(
+                                                    ("queue-entry-favorite", id),
+                                                    favorite,
+                                                    |key| this.tr(key),
+                                                ),
+                                                cx,
+                                                move |this, _, cx| {
+                                                    this.send(
+                                                        Command::SetFavorite {
+                                                            track_ids: vec![track_id],
+                                                            favorite: !favorite,
+                                                        },
+                                                        cx,
+                                                    )
+                                                },
+                                            )
+                                            .button(
+                                                IconButton::new(
+                                                    ("queue-entry-remove", id),
+                                                    "",
+                                                    this.tr("gl-remove-queue"),
+                                                ),
+                                                cx,
+                                                move |this, _, cx| {
+                                                    this.send_queue_row_action(
+                                                        revision,
+                                                        Command::RemoveQueueEntries {
+                                                            queue_ids: vec![id],
+                                                        },
+                                                        cx,
+                                                    )
+                                                },
+                                            )
+                                            .button(
+                                                IconButton::new(
+                                                    ("queue-entry-up", id),
+                                                    "",
+                                                    this.tr("gl-entry-up"),
+                                                )
+                                                .enabled(position > 0),
+                                                cx,
+                                                move |this, _, cx| {
+                                                    if position > 0 {
+                                                        this.send_queue_row_action(
+                                                            revision,
+                                                            Command::MoveQueue {
+                                                                queue_id: id,
+                                                                index: position - 1,
+                                                            },
+                                                            cx,
+                                                        );
+                                                    }
+                                                },
+                                            )
+                                            .button(
+                                                IconButton::new(
+                                                    ("queue-entry-down", id),
+                                                    "",
+                                                    this.tr("gl-entry-down"),
+                                                )
+                                                .enabled(can_move_down),
+                                                cx,
+                                                move |this, _, cx| {
+                                                    if can_move_down {
+                                                        this.send_queue_row_action(
+                                                            revision,
+                                                            Command::MoveQueue {
+                                                                queue_id: id,
+                                                                index: position + 1,
+                                                            },
+                                                            cx,
+                                                        );
+                                                    }
+                                                },
+                                            )
+                                            .into_div(),
+                                        ),
+                                    )
+                                    .on_mouse_down(
+                                        gpui::MouseButton::Right,
+                                        cx.listener(
+                                            move |this, event: &gpui::MouseDownEvent, _, cx| {
+                                                cx.emit(QueueEvent::FocusRequested);
+                                                this.refresh(cx);
+                                                let rows =
+                                                    this.model.operation_rows(source, generation);
+                                                if revision != this.state.queue.revision
+                                                    || rows.is_empty()
+                                                {
+                                                    cx.stop_propagation();
+                                                    return;
+                                                }
+                                                if !this.model.contains(&id) {
+                                                    this.select_queue_entry(id, false, false, cx);
+                                                    cx.notify();
+                                                }
+                                                // Keep the clicked occurrence frozen across deferred selection reads.
+                                                let track_ids =
+                                                    rows.iter().map(|row| row.track_id).collect();
+                                                let queue_ids =
+                                                    rows.iter().map(|row| row.id).collect();
+                                                cx.emit(QueueEvent::ContentMenu {
+                                                    request: std::cell::RefCell::new(Some(
+                                                        ContentMenuRequest {
+                                                            source: TrackSource::Tracks(track_ids),
+                                                            position: event.position,
+                                                            play: Some(Command::PlayQueue {
+                                                                queue_id: id,
+                                                            }),
+                                                        },
+                                                    )),
+                                                    revision,
+                                                    remove: std::cell::RefCell::new(Some(
+                                                        Command::RemoveQueueEntries { queue_ids },
+                                                    )),
+                                                });
+                                                cx.stop_propagation();
+                                            },
+                                        ),
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, event: &gpui::ClickEvent, _, cx| {
+                                            cx.emit(QueueEvent::FocusRequested);
+                                            let modifiers = event.modifiers();
+                                            this.select_queue_entry(
+                                                id,
+                                                modifiers.shift,
+                                                modifiers.control,
+                                                cx,
+                                            );
+                                            if event.click_count() == 2 {
+                                                this.send(Command::PlayQueue { queue_id: id }, cx);
+                                            }
+                                        },
+                                    ))
+                                    .when(
+                                        this.model.ready()
+                                            && this.model.query.is_none()
+                                            && this.model.selection_error.is_none(),
+                                        |row| {
+                                            row.on_drag(
+                                                ListDrag::Queue(drag),
+                                                move |drag, _, window, cx| {
+                                                    let ListDrag::Queue(drag) = drag else {
+                                                        unreachable!()
+                                                    };
+                                                    rivu_ui::begin_list_drag(window, cx);
+                                                    drag.entries.get_or_init(|| {
+                                                        drag_owner
+                                                            .update(cx, |this, cx| {
+                                                                this.refresh(cx);
+                                                                if drag.revision
+                                                                    != this.state.queue.revision
+                                                                    || !this.model.ready()
+                                                                    || this.model.query.is_some()
+                                                                    || this
+                                                                        .model
+                                                                        .selection_error
+                                                                        .is_some()
+                                                                {
+                                                                    return Vec::new();
+                                                                }
+                                                                this.model.operation_rows(
+                                                                    drag.source,
+                                                                    generation,
+                                                                )
+                                                            })
+                                                            .unwrap_or_default()
+                                                    });
+                                                    let label = drag_i18n
+                                                        .format(
+                                                            "gl-move-queue-entries",
+                                                            &[(
+                                                                "count",
+                                                                drag.entries
+                                                                    .get()
+                                                                    .map_or(0, Vec::len)
+                                                                    .into(),
+                                                            )],
+                                                        )
+                                                        .into();
+                                                    cx.new(|_| rivu_ui::ListDragPreview { label })
+                                                },
+                                            )
+                                        },
+                                    )
+                                    .children(
+                                        [false, true].map(|after| {
+                                            this.queue_row_drop_zone(
+                                                (id, position),
+                                                revision,
+                                                after,
+                                                theme,
+                                                cx,
+                                            )
+                                        }),
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                        }),
+                    )
+                    .on_viewport_deferred(cx.weak_entity(), Self::ensure_queue_range),
+                    cx,
                 )
-                .on_viewport_deferred(cx.weak_entity(), Self::ensure_queue_range)
-                .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
-                    window.prevent_default();
-                    cx.stop_propagation();
-                    this.drop_external_paths(paths, DragDestination::Queue, cx);
-                }))
-                .drag_over::<ExternalPaths>(|style, _, _, _| style.border_color(rgb(theme.accent)))
-                .on_drop(cx.listener(|this, drag: &ListDrag, window, cx| {
-                    window.prevent_default();
-                    this.drop_list_drag(drag, None, DragDestination::Queue, cx);
-                }))
-                .can_drop(move |value, _, cx| {
-                    list_drop_owner.upgrade().is_some_and(|owner| {
-                        let this = owner.read(cx);
-                        if let Some(drag) =
-                            value.downcast_ref::<ListDrag>().and_then(ListDrag::queue)
-                        {
-                            this.queue_drop_index(drag, None, owner.entity_id())
-                                .is_some()
-                        } else if value.is::<ExternalPaths>() {
-                            true
-                        } else {
-                            can_transfer(
-                                value,
-                                &this.state,
-                                DragDestination::Queue,
-                                this.library_selection_pending,
-                                this.content_resolution,
-                            )
-                        }
-                    })
-                })
-                .drag_over::<ListDrag>(|style, _, _, _| style.border_color(rgb(theme.accent)))
-                .on_drop(cx.listener(|this, drag: &LibraryDrag, window, cx| {
-                    window.prevent_default();
-                    this.resolve_library_drag(drag, DragDestination::Queue, cx);
-                }))
-                .drag_over::<LibraryDrag>(|style, _, _, _| style.border_color(rgb(theme.accent)))
-                .on_drop(cx.listener(|this, drag: &ContentDrag, window, cx| {
-                    window.prevent_default();
-                    cx.stop_propagation();
-                    this.drop_content(drag, DragDestination::Queue, cx);
-                }))
-                .drag_over::<ContentDrag>(|style, _, _, _| style.border_color(rgb(theme.accent)))
                 .h_full()
                 .min_h_0()
                 .w_full()
