@@ -777,36 +777,7 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut
             Style::default().fg(colors.secondary),
         ));
     }
-    let metadata = state
-        .current_track()
-        .filter(|_| area.width >= 90)
-        .map(|track| {
-            let mut metadata = track.codec.to_ascii_lowercase();
-            if track.sample_rate != 0 {
-                if !metadata.is_empty() {
-                    metadata.push_str(" · ");
-                }
-                metadata.push_str(&format!("{:.1} kHz", track.sample_rate as f64 / 1000.0));
-            }
-            if let Some(bits) = track.bits_per_sample {
-                if !metadata.is_empty() {
-                    metadata.push_str(" · ");
-                }
-                metadata.push_str(&format!("{bits} bit"));
-            }
-            metadata
-        })
-        .unwrap_or_default();
-    let now_columns = Layout::horizontal([
-        Constraint::Min(1),
-        Constraint::Length(Span::raw(metadata.as_str()).width() as u16),
-    ])
-    .split(rows[0]);
-    frame.render_widget(Paragraph::new(Line::from(now)), now_columns[0]);
-    frame.render_widget(
-        Paragraph::new(metadata).style(Style::default().fg(colors.secondary)),
-        now_columns[1],
-    );
+    frame.render_widget(Paragraph::new(Line::from(now)), rows[0]);
     let position = state.playback.position.max(0.0);
     let duration = state
         .playback
@@ -944,6 +915,26 @@ fn draw_status(
                 true,
             ))
             .style(Style::default().fg(colors.secondary)),
+            columns[1],
+        );
+    } else if let Some(track) = state.current_track() {
+        let mut metadata = track.codec.to_ascii_lowercase();
+        if track.sample_rate != 0 {
+            if !metadata.is_empty() {
+                metadata.push_str(" · ");
+            }
+            metadata.push_str(&format!("{:.1} kHz", track.sample_rate as f64 / 1000.0));
+        }
+        if let Some(bits) = track.bits_per_sample {
+            if !metadata.is_empty() {
+                metadata.push_str(" · ");
+            }
+            metadata.push_str(&format!("{bits} bit"));
+        }
+        frame.render_widget(
+            Paragraph::new(cell_text(&metadata, columns[1].width as usize, true))
+                .alignment(ratatui::layout::Alignment::Right)
+                .style(Style::default().fg(colors.accent)),
             columns[1],
         );
     }

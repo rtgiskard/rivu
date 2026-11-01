@@ -408,6 +408,12 @@ playlist. Track lists prioritize titles as the terminal narrows and keep compact
 metadata, favorite, playback-state, and missing-file indicators where space permits.
 Truncation does not change stored metadata.
 
+The bottom-right status area shows current-track codec, sample rate, and bit depth
+in the theme accent color, distinct from the time display, when no message is active. Notices,
+scan status, errors, and startup hints take precedence; properties return when
+the message clears.
+Properties fit the available width rather than requiring a 90-column terminal.
+
 Press `i` outside the query editor for read-only details of the selected track,
 directory, or playlist. Playback changes do not replace that target. Track details
 includes tags, technical audio metadata, source path, Decoder hint, and playback

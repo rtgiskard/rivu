@@ -627,3 +627,48 @@ pub(in crate::terminal) fn render_view(ui: &mut UiState) -> String {
         .map(|cell| cell.symbol())
         .collect()
 }
+
+#[test]
+fn idle_footer_properties_yield_to_notices_and_return_after_expiration() {
+    for width in [40, 89, 90, 120] {
+        let mut state = TuiSnapshot {
+            current_track: Some(Arc::new(full_track(1))),
+            ..Default::default()
+        };
+        state.playback.duration = Some(125.);
+        let mut ui = UiState {
+            startup_hint_deadline: None,
+            ..Default::default()
+        };
+        let mut terminal = Terminal::new(TestBackend::new(width, 12)).unwrap();
+        let colors = TerminalColors::new(state.system.ui_theme);
+        for notice in [false, true, false] {
+            if notice {
+                ui.set_notice("Temporary warning".into(), NoticeKind::Warning);
+            } else if let Some(message) = ui.message.as_mut() {
+                message.expires_at = std::time::Instant::now();
+                assert!(ui.expire_message());
+            }
+            terminal.draw(|frame| draw(frame, &state, &mut ui)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let footer: String = (0..width).map(|x| buffer[(x, 11)].symbol()).collect();
+            if notice {
+                assert!(footer.contains("Temporary warning"), "{footer}");
+                assert!(!footer.contains("flac"));
+            } else {
+                let properties = "flac · 96.0 kHz · 24 bit";
+                if width >= 89 {
+                    assert!(footer.trim_end().ends_with(properties), "{footer}");
+                } else {
+                    assert!(footer.contains("flac · 96.0 kHz"), "{footer}");
+                    assert!(footer.contains('…'), "{footer}");
+                }
+                assert_eq!(buffer[(width - 2, 11)].fg, colors.accent);
+                assert_ne!(buffer[(width - 2, 11)].fg, colors.secondary);
+                assert_ne!(buffer[(width - 2, 11)].fg, colors.text);
+            }
+            let playback_title: String = (0..width).map(|x| buffer[(x, 9)].symbol()).collect();
+            assert!(!playback_title.contains("flac"));
+        }
+    }
+}
