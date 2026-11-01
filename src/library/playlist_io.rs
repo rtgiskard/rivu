@@ -4,7 +4,7 @@ use super::paths::{is_cue_path, logical_path};
 use crate::execution::BlockingExecutor;
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use futures::{FutureExt, Stream, StreamExt};
-use rivu_protocol::model::PlaylistExportTrack;
+use rivu_protocol::model::CueSegment;
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -13,6 +13,16 @@ use std::path::{Path, PathBuf};
 pub struct M3uItem {
     pub path: PathBuf,
     pub cue_track: Option<u32>,
+}
+
+/// Only the metadata needed to write a playlist export.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlaylistExportTrack {
+    pub path: PathBuf,
+    pub title: String,
+    pub artist: String,
+    pub duration: Option<f64>,
+    pub cue: Option<CueSegment>,
 }
 
 // Large enough for substantial music collections, while bounding hostile inputs.

@@ -2,10 +2,11 @@ use super::positions::{close_gaps, move_selection};
 use super::rows::cue_from_row;
 use super::tracks::{SOURCE_FILTER, search_filter, search_query, validate_encoded_track_ids};
 use super::{Store, batch_limit, changed};
+use crate::library::PlaylistExportTrack;
 use anyhow::{Context, Result, anyhow, bail};
 use rivu_protocol::model::{
     Batch, BatchContinuation, Page, PlaylistEntryCursor, PlaylistEntryLocation, PlaylistEntryRow,
-    PlaylistExportTrack, PlaylistSummary, QueryStamp,
+    PlaylistSummary, QueryStamp,
 };
 use rusqlite::{OptionalExtension, Transaction, params};
 use std::path::PathBuf;

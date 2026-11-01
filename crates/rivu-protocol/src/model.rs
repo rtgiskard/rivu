@@ -50,16 +50,6 @@ impl CueSegment {
     }
 }
 
-/// Only the metadata needed to write a playlist export.
-#[derive(Clone, Debug, PartialEq)]
-pub struct PlaylistExportTrack {
-    pub path: PathBuf,
-    pub title: String,
-    pub artist: String,
-    pub duration: Option<f64>,
-    pub cue: Option<CueSegment>,
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Track {
     pub id: i64,

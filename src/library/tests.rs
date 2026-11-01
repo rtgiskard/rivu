@@ -6,7 +6,7 @@ use super::scan::{
 use super::source::{UNCACHEABLE_MODIFIED_NS, cache_modified_ns};
 use super::*;
 use anyhow::{Context, Result};
-use rivu_protocol::model::{CueSegment, PlaylistExportTrack, ScanPhase, Track};
+use rivu_protocol::model::{CueSegment, ScanPhase, Track};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};

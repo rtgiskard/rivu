@@ -1,4 +1,5 @@
 use super::*;
+use crate::library::PlaylistExportTrack;
 use anyhow::ensure;
 
 /// Exactly one export retains a read snapshot; caller timeout never retires it.

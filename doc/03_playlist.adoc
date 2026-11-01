@@ -206,6 +206,9 @@ changes and retries, see link:02_library.adoc#paged-views[Paged views]. Only one
 export can run at a time. Its reply reports final output, not startup, and
 concurrent playlist edits do not alter the exported snapshot.
 
+The export row contract is application-local, shared by database reads, Core
+coordination and the playlist writer; it is not part of the IPC wire format.
+
 Export atomically replaces the destination only after successful output. Failure
 or shutdown cancellation before replacement preserves the old target; cancellation
 cannot undo replacement. A timeout does not cancel export or prove it failed.
