@@ -1,7 +1,10 @@
 use super::*;
 use crate::terminal::render::{draw, help_bindings, tests::render_view};
 use ratatui::{Terminal, backend::TestBackend, text::Line};
-use rivu_protocol::{model::Page, response::QueryRevisions};
+use rivu_protocol::{
+    model::{Page, PlaybackStatus},
+    response::QueryRevisions,
+};
 use std::path::Path;
 
 #[test]
@@ -254,20 +257,48 @@ pub(in crate::terminal) fn full_track(id: i64) -> rivu_protocol::model::Track {
 }
 
 #[test]
-fn notices_preserve_actionable_failures_across_playback_updates() {
+fn notices_preserve_actionable_failures_across_operation_feedback() {
     let mut ui = UiState::default();
     ui.set_notice("failure".into(), NoticeKind::Error);
-    ui.set_notice("playing".into(), NoticeKind::Information);
+    ui.set_notice("Added to queue".into(), NoticeKind::Information);
     assert!(matches!(
         ui.message.as_ref().unwrap().kind,
         NoticeKind::Error
     ));
     ui.message.as_mut().unwrap().expires_at = Instant::now();
-    ui.set_notice("playing".into(), NoticeKind::Information);
+    ui.set_notice("Added to queue".into(), NoticeKind::Information);
     assert!(matches!(
         ui.message.as_ref().unwrap().kind,
         NoticeKind::Information
     ));
+}
+
+#[test]
+fn playback_transitions_and_track_changes_leave_footer_notices_untouched() {
+    let mut tui = TuiState::new(
+        TuiSnapshot::default(),
+        Arc::new(Localizer::for_terminal("en-US")),
+    );
+    for status in [
+        PlaybackStatus::Playing,
+        PlaybackStatus::Paused,
+        PlaybackStatus::Stopped,
+    ] {
+        let mut next = tui.snapshot.clone();
+        next.playback.status = status;
+        next.queue.current_id = Some(next.queue.current_id.unwrap_or(0) + 1);
+        next.current_track = Some(Arc::new(full_track(1)));
+        tui.apply_snapshot(next);
+        assert!(tui.ui.message.is_none());
+    }
+    tui.ui.set_notice("failure".into(), NoticeKind::Error);
+    let deadline = tui.ui.message.as_ref().unwrap().expires_at;
+    let mut next = tui.snapshot.clone();
+    next.playback.status = PlaybackStatus::Playing;
+    tui.apply_snapshot(next);
+    let notice = tui.ui.message.as_ref().unwrap();
+    assert_eq!(notice.text, "failure");
+    assert_eq!(notice.expires_at, deadline);
 }
 
 #[test]

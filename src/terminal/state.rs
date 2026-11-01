@@ -1,6 +1,5 @@
 use super::{
     paged::PagedList,
-    render::track_label,
     worker::{QueryKind, QueryRequest, QueryResult},
 };
 use crate::{
@@ -13,8 +12,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::ListState;
 use rivu_protocol::{
     model::{
-        Command, DirectoryRow, LibraryRow, PlaybackStatus, PlaylistEntryRow, PlaylistSummary,
-        Query, QueueRow,
+        Command, DirectoryRow, LibraryRow, PlaylistEntryRow, PlaylistSummary, Query, QueueRow,
     },
     response::ViewResponse,
 };
@@ -74,19 +72,6 @@ fn snapshot_message(
     next: &TuiSnapshot,
     i18n: &Localizer,
 ) -> Option<String> {
-    if previous.playback.status != next.playback.status {
-        return Some(match next.playback.status {
-            PlaybackStatus::Playing => i18n.text("terminal-playing").into(),
-            PlaybackStatus::Paused => i18n.text("terminal-paused").into(),
-            PlaybackStatus::Stopped => i18n.text("terminal-stopped").into(),
-        });
-    }
-    if previous.queue.current_id != next.queue.current_id {
-        return next.current_track().map(|track| {
-            let label = track_label(&track.title, &track.artist);
-            i18n.format("terminal-now-playing", &[("track", label.as_ref().into())])
-        });
-    }
     match next.queue.total.cmp(&previous.queue.total) {
         std::cmp::Ordering::Greater => Some(i18n.text("terminal-queue-added").into()),
         std::cmp::Ordering::Less => Some(i18n.text("terminal-queue-removed").into()),
@@ -324,7 +309,7 @@ impl UiState {
             help_max_scroll: 0,
             help_scroll: 0,
             message: None,
-            startup_hint_deadline: Some(Instant::now() + Duration::from_secs(5)),
+            startup_hint_deadline: Some(Instant::now() + Duration::from_secs(4)),
             details: Details::default(),
             details_active: false,
             requested: None,
@@ -682,7 +667,7 @@ impl UiState {
         self.message = Some(Notice {
             text,
             kind,
-            expires_at: Instant::now() + Duration::from_secs(10),
+            expires_at: Instant::now() + Duration::from_secs(6),
         });
         self.mark_local_change();
     }

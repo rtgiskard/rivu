@@ -1,16 +1,12 @@
 terminal-command-rejected = Command rejected
 terminal-command-busy = Command queue busy
 terminal-unexpected-response = Unexpected view response
-terminal-playing = Playing
-terminal-paused = Paused
-terminal-stopped = Stopped
-terminal-now-playing = Now playing: { $track }
 terminal-queue-added = Added to queue
 terminal-queue-removed = Removed from queue
 terminal-connecting = Connecting to core…
 terminal-nothing-playing = Nothing playing
 terminal-keys = Keys
-terminal-startup-help = Tab / Shift+Tab: switch tabs · F1 / ?: help
+terminal-startup-help = F1/?: help
 terminal-page-loading = { $title } — loading
 terminal-page-empty = { $title } — empty
 terminal-playlist-count = { $name }  ({ $count ->

@@ -1,16 +1,12 @@
 terminal-command-rejected = 操作被拒绝
 terminal-command-busy = 操作队列繁忙
 terminal-unexpected-response = 响应内容异常
-terminal-playing = 播放中
-terminal-paused = 已暂停
-terminal-stopped = 已停止
-terminal-now-playing = 正在播放：{ $track }
 terminal-queue-added = 已加入队列
 terminal-queue-removed = 已移出队列
 terminal-connecting = 正在连接核心…
 terminal-nothing-playing = 暂无播放
 terminal-keys = 快捷键
-terminal-startup-help = Tab / Shift+Tab 切换标签页 · F1 / ? 查看帮助
+terminal-startup-help = F1/?: 查看帮助
 terminal-page-loading = { $title } — 加载中
 terminal-page-empty = { $title } — 空
 terminal-playlist-count = { $name }  （{ $count } 首）

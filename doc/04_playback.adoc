@@ -413,6 +413,8 @@ The bottom-right status area shows current-track codec, sample rate, and bit dep
 in the theme accent color, distinct from the time display, when no message is active. Notices,
 scan status, errors, and startup hints take precedence; properties return when
 the message clears.
+Track changes and play/pause/stop transitions do not create notices; the fixed
+playback display shows those states.
 Properties fit the available width rather than requiring a 90-column terminal.
 
 Press `i` outside the query editor for read-only details of the selected track,
@@ -428,8 +430,9 @@ reach the underlying list.
 
 The bottom area keeps position, duration, volume, shuffle, and repeat available
 while browsing. Notifications distinguish warnings and errors; ordinary playback
-updates do not replace a still-visible failure. Queue briefly shows an `F1 / ?`
-help hint on first entry; open help for the current context's bindings.
+updates do not replace a still-visible failure. Dynamic notifications expire after
+6 seconds. Queue shows an `F1 / ?` help hint for 4 seconds on first entry; open help
+for the current context's bindings.
 
 Left/Backspace goes to a parent directory; Left/Esc leaves playlist details.
 Esc returns from Search, Library tree, or playlist catalog to Queue. `q` closes
