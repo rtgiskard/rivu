@@ -1672,7 +1672,10 @@ fn processing_commands_and_configuration_use_current_positional_contract() {
             expected
         );
     }
-    let mut config = rivu_format::config::Config::default();
+    let mut config = rivu_format::config::Config {
+        log_max_files: 128,
+        ..Default::default()
+    };
     config.equalizer.enabled = true;
     config
         .equalizer

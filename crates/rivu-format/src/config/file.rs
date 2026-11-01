@@ -135,7 +135,7 @@ file_group!(Interface, InterfaceView {
 file_group!(Logging, LoggingView {
     level => log_level: LogLevel,
     to_file => log_to_file: bool,
-    retention_weeks => log_retention_weeks: u32,
+    max_log_files => log_max_files: u32,
 });
 
 file_group!(Spectrum, SpectrumView {

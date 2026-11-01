@@ -1050,9 +1050,15 @@ Tray registration reconciles current publication state independently of bus setu
 Unchanged menus retain their revision; shutdown cancels bus work and closes under
 a bounded deadline rather than waiting indefinitely for peers.
 
-App installs the process logger and owns writer lifetime; Core controls settings.
-A new writer is prepared before configuration persistence and activated only on
-save success. Producers retire before file output is flushed, outside GUI callbacks.
+App owns the process's single active logging session and writer lifetime; Core
+controls settings. A new session may start after the previous one finishes
+shutting down. The permanent subscriber uses a reloadable file layer for level
+and writer changes. A new writer is prepared before configuration persistence;
+only save success publishes the new output and level. File-count limits apply
+when constructing an appender, so changes take effect on the next enable or host
+restart. Native pruning during preparation is not rolled back after a failed
+save. Producers retire before file output is flushed, outside GUI callbacks, and
+session shutdown waits for the file writer to close.
 Standalone Core runtimes install no process subscriber. Processing shutdown closes
 event admission, joins workers, and drains unpublished outputs; retained auditions
 last until service retirement. See

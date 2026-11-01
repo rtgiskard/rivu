@@ -404,7 +404,7 @@ macro_rules! config_fields {
         pub mpris_enabled: bool,
         pub log_level: LogLevel,
         pub log_to_file: bool,
-        pub log_retention_weeks: u32,
+        pub log_max_files: u32,
         /// Default number of rows fetched by GUI and TUI paginated views.
         pub query_batch_size: u32,
         /// Maximum encoded image bytes admitted per cover, in MiB.
@@ -528,7 +528,7 @@ impl Default for Config {
             mpris_enabled: true,
             log_level: LogLevel::Warning,
             log_to_file: false,
-            log_retention_weeks: 4,
+            log_max_files: 4,
             query_batch_size: DEFAULT_QUERY_BATCH_SIZE,
             artwork_file_limit_mib: 16,
             artwork_decode_budget_mib: 64,
@@ -725,9 +725,9 @@ impl Config {
             self.artwork_decode_budget_mib
         );
         ensure!(
-            (1..=520).contains(&self.log_retention_weeks),
-            "logging.retention_weeks must be between 1 and 520; got {}",
-            self.log_retention_weeks
+            (1..=128).contains(&self.log_max_files),
+            "logging.max_log_files must be between 1 and 128; got {}",
+            self.log_max_files
         );
         ensure!(
             (20..=MAX_QUERY_ROWS as u32).contains(&self.query_batch_size),
@@ -904,7 +904,7 @@ impl Config {
 }
 
 /// Current on-disk config schema; omitted versions use this contract directly.
-pub const CONFIG_SCHEMA_VERSION: u32 = 1;
+pub const CONFIG_SCHEMA_VERSION: u32 = 2;
 pub const MAX_QUERY_ROWS: usize = 256;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

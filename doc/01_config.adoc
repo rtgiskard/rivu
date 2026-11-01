@@ -5,7 +5,7 @@
 Rivu reads `~/.config/rivu/config.toml` by default (or the XDG configuration
 directory); path overrides are described in link:../readme.adoc[the README].
 A missing file uses defaults. The optional top-level `schema_version` defaults
-to the current schema (`1`).
+to the current schema (`2`).
 Omitted setting groups and fields use their defaults. Unreadable files, malformed
 TOML, unknown keys, misplaced fields, unsupported explicit schema versions, and
 invalid values are errors, not a reason to fall back to defaults.
@@ -233,14 +233,24 @@ Global `--log-level LEVEL` overrides stderr and enabled file logging for this
 process's lifetime.
 
 `logging.to_file` defaults to `false`; enabling it writes weekly logs under the
-data directory. `logging.retention_weeks` accepts `1`–`520` and defaults to `4`.
+data directory. `logging.max_log_files` accepts `1`–`128` and defaults to `4`.
+The appender prunes matching log files when opening or rotating a file, limiting
+their count rather than their age or total bytes. Changing the limit takes effect
+the next time file logging is enabled or the host restarts. Reopening can leave
+fewer files than the limit; with a limit of `1`, it can discard earlier records
+from the same week.
 Stderr colors are enabled only for a terminal by default. `RIVU_COLOR=always`
 forces colors even when redirected; `NO_COLOR` takes precedence over it, and
 `NO_COLOR` or `RIVU_COLOR=never` disables colors for both levels and fields.
+The timestamp and level letter share the level's color; target and message text
+are outside that prefix styling.
 File logs never include generated ANSI styling.
 
 File logging starts after configuration is loaded. Records may be dropped under
 load; forced termination can lose pending records.
+Preparing an appender can prune files even if configuration persistence later
+fails; pruning is not rolled back. Output and level changes still require a
+successful configuration save.
 
 === Audio processing defaults
 
@@ -1041,7 +1051,7 @@ selected instance style does not use them.
 
 == Configuration schema
 
-The application reads configuration schema `1`; explicit noncurrent versions are
+The application reads configuration schema `2`; explicit noncurrent versions are
 rejected. Normal saves preserve an omitted `schema_version` rather than adding it.
 Declaring the current schema does not bypass field or value validation. Malformed
 TOML and file-access errors retain their specific causes.

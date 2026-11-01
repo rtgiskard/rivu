@@ -126,7 +126,7 @@ enum Field {
     ScanMinDurationSeconds,
     Volume,
     PlayCountThreshold,
-    LogRetentionWeeks,
+    LogMaxFiles,
     MediaReadBufferMib,
     ArtworkFileLimitMib,
     ArtworkDecodeBudgetMib,
@@ -190,7 +190,7 @@ impl Field {
             Self::ScanMinDurationSeconds => "library.scan_min_duration_seconds",
             Self::Volume => "playback.volume_percent",
             Self::PlayCountThreshold => "playback.play_count_threshold_percent",
-            Self::LogRetentionWeeks => "logging.retention_weeks",
+            Self::LogMaxFiles => "logging.max_log_files",
             Self::MediaReadBufferMib => "playback.media_read_buffer_mib",
             Self::ArtworkFileLimitMib => "interface.artwork_file_limit_mib",
             Self::ArtworkDecodeBudgetMib => "interface.artwork_decode_budget_mib",
@@ -281,7 +281,7 @@ impl Field {
             Self::ScanMinDurationSeconds => "settings-minimum-scan-duration-secs",
             Self::Volume => "settings-volume",
             Self::PlayCountThreshold => "settings-play-count-threshold",
-            Self::LogRetentionWeeks => "settings-log-retention-weeks",
+            Self::LogMaxFiles => "settings-log-max-files",
             Self::MediaReadBufferMib => "settings-media-read-buffer-mib",
             Self::ArtworkFileLimitMib => "settings-artwork-file-limit-mib",
             Self::ArtworkDecodeBudgetMib => "settings-artwork-decode-budget-mib",
@@ -357,7 +357,7 @@ impl Field {
             Self::ScanMinDurationSeconds => settings.tr("settings-scan-duration-hint"),
             Self::Volume => "0–100.".into(),
             Self::PlayCountThreshold => settings.tr("settings-play-count-threshold-hint"),
-            Self::LogRetentionWeeks => "1–520.".into(),
+            Self::LogMaxFiles => settings.tr("settings-log-max-files-hint"),
             Self::MediaReadBufferMib => settings.tr("settings-media-buffer-hint"),
             Self::ArtworkFileLimitMib => settings.tr("settings-artwork-file-limit-hint"),
             Self::ArtworkDecodeBudgetMib => settings.tr("settings-artwork-decode-budget-hint"),
@@ -869,7 +869,7 @@ impl Settings {
             Field::ScanMinDurationSeconds,
             Field::Volume,
             Field::PlayCountThreshold,
-            Field::LogRetentionWeeks,
+            Field::LogMaxFiles,
             Field::MediaReadBufferMib,
             Field::ArtworkFileLimitMib,
             Field::ArtworkDecodeBudgetMib,
@@ -1394,8 +1394,8 @@ impl Settings {
             cx,
         );
         self.set_value(
-            Field::LogRetentionWeeks,
-            self.model.draft.log_retention_weeks.to_string(),
+            Field::LogMaxFiles,
+            self.model.draft.log_max_files.to_string(),
             unchanged,
             cx,
         );
@@ -1640,7 +1640,7 @@ impl Settings {
             self.model.draft.play_count_threshold_percent,
             cx,
         )?;
-        config.log_retention_weeks = self.number(Field::LogRetentionWeeks, cx)?;
+        config.log_max_files = self.number(Field::LogMaxFiles, cx)?;
         config.media_read_buffer_mib = self.number(Field::MediaReadBufferMib, cx)?;
         config.artwork_file_limit_mib = self.number(Field::ArtworkFileLimitMib, cx)?;
         config.artwork_decode_budget_mib = self.number(Field::ArtworkDecodeBudgetMib, cx)?;
@@ -2008,7 +2008,7 @@ impl Settings {
             | Field::FontSizePt
             | Field::Scale
             | Field::LayoutSnapGrid
-            | Field::LogRetentionWeeks
+            | Field::LogMaxFiles
             | Field::ArtworkPeriodSeconds
             | Field::ArtworkFps => (SettingsPage::Interface, None),
             Field::EffectPrimaryColor

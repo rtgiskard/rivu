@@ -709,7 +709,7 @@ impl Settings {
                                 .child(log_level_dropdown),
                         )
                         .child(
-                            self.field(Field::LogRetentionWeeks, cx)
+                            self.field(Field::LogMaxFiles, cx)
                                 .flex_1()
                                 .min_w(rems(180. / 16.)),
                         ),

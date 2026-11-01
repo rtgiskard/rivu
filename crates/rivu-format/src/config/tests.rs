@@ -192,21 +192,22 @@ fn escaped_configuration_cannot_expand_past_the_output_budget() {
 fn current_toml_contract_rejects_explicit_noncurrent_versions_and_invalid_values() {
     for input in [
         "schema_version = 0\n",
-        "schema_version = 2\n",
+        "schema_version = 3\n",
+        "schema_version = 1\n",
         "schema_version = '1'\n",
         "schema_version = true\n",
         "schema_version = 1.0\n",
         "schema_version = -1\n",
         "schema_version = {}\n",
-        "schema_version = 1\nunknown = true\n",
-        "schema_version = 1\n[interface]\nui_theme = 'rivu_dark'\n",
-        "schema_version = 1\n[playback]\nvolume_percent = 101\n",
-        "schema_version = 1\n[library]\nroots = ['/Music', '/Music/Live']\n",
+        "schema_version = 2\nunknown = true\n",
+        "schema_version = 2\n[interface]\nui_theme = 'rivu_dark'\n",
+        "schema_version = 2\n[playback]\nvolume_percent = 101\n",
+        "schema_version = 2\n[library]\nroots = ['/Music', '/Music/Live']\n",
     ] {
         assert!(validate_toml(input).is_err(), "accepted {input}");
     }
     assert_eq!(
-        from_toml("schema_version = 1\n").unwrap(),
+        from_toml("schema_version = 2\n").unwrap(),
         Config::default()
     );
 }
@@ -268,9 +269,9 @@ fn absent_version_keeps_strict_parse_and_validation_causes() {
 #[test]
 fn explicit_versions_gate_current_fields_and_syntax_errors_keep_the_parse_cause() {
     let error =
-        from_toml("schema_version = 2\n[playback]\nvolume_percent = 'future'\n").unwrap_err();
+        from_toml("schema_version = 3\n[playback]\nvolume_percent = 'future'\n").unwrap_err();
     assert!(error.downcast_ref::<toml::de::Error>().is_none());
-    for input in ["[interface", "schema_version = 1\n[interface"] {
+    for input in ["[interface", "schema_version = 2\n[interface"] {
         let error = from_toml(input).unwrap_err();
         assert!(error.downcast_ref::<toml::de::Error>().is_some());
     }
@@ -278,7 +279,7 @@ fn explicit_versions_gate_current_fields_and_syntax_errors_keep_the_parse_cause(
 
 #[test]
 fn grouped_round_trip_uses_shared_defaults_validation_and_normalization() {
-    let text = "schema_version = 1\n[interface]\nlanguage = 'ZH_cn'\nfont = ''\n[playback]\nrepeat = 'one'\nvolume_percent = 25\n";
+    let text = "schema_version = 2\n[interface]\nlanguage = 'ZH_cn'\nfont = ''\n[playback]\nrepeat = 'one'\nvolume_percent = 25\n";
     let config = from_toml(text).unwrap();
     assert_eq!(config.ui_language, "zh-CN");
     assert_eq!(config.ui_font, Config::default().ui_font);
@@ -372,7 +373,7 @@ fn processing_tables_roundtrip_and_reject_invalid_controls() {
     edited.denoise.spectral_gain_floor_db = -18.5;
     let saved = update_toml(input, Some(&baseline), &edited).unwrap();
     assert_eq!(from_toml(&saved).unwrap(), edited);
-    for prefix in ["", "schema_version = 1\n"] {
+    for prefix in ["", "schema_version = 2\n"] {
         assert!(from_toml(&format!("{prefix}[denoise]\nnoise_floor_db = -18.5\n")).is_err());
     }
     assert!(from_toml("[neural]\nthreads = 9\n").is_err());

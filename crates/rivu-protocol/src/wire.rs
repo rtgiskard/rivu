@@ -1728,7 +1728,7 @@ pub struct WireConfig {
     mpris_enabled: bool,
     log_level: rivu_format::config::LogLevel,
     log_to_file: bool,
-    log_retention_weeks: u32,
+    log_max_files: u32,
     query_batch_size: u32,
     /// Artist, album, duration, codec, bitrate in fixed wire order.
     library_columns: [bool; 5],
@@ -1819,7 +1819,7 @@ impl From<&rivu_format::config::Config> for WireConfig {
             mpris_enabled: value.mpris_enabled,
             log_level: value.log_level,
             log_to_file: value.log_to_file,
-            log_retention_weeks: value.log_retention_weeks,
+            log_max_files: value.log_max_files,
             query_batch_size: value.query_batch_size,
             library_columns: [
                 value.library_columns.artist,
@@ -1917,7 +1917,7 @@ impl From<WireConfig> for rivu_format::config::Config {
             mpris_enabled: value.mpris_enabled,
             log_level: value.log_level,
             log_to_file: value.log_to_file,
-            log_retention_weeks: value.log_retention_weeks,
+            log_max_files: value.log_max_files,
             query_batch_size: value.query_batch_size,
             library_columns: rivu_format::config::LibraryColumns {
                 artist: value.library_columns[0],

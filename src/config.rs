@@ -20,7 +20,7 @@ pub(crate) fn logging_options(config: &Config) -> rivu_utils::logging::Options {
             LogLevel::Error => logging::LogLevel::Error,
         },
         to_file: config.log_to_file,
-        retention_weeks: config.log_retention_weeks,
+        max_log_files: config.log_max_files,
     }
 }
 

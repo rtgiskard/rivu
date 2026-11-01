@@ -11,7 +11,7 @@ operations and link:01_config.adoc#saving-configuration[configuration saving].
 
 === Current implementation
 
-The database format is `4`; the independent configuration schema is `1`.
+The database format is `4`; the independent configuration schema is `2`.
 
 `rivu-migrate check` validates without conversion; `apply` upgrades validated
 database format `2` directly to `4`, retaining a durable SQLite backup. The upgrade
@@ -110,7 +110,7 @@ cannot establish compatibility.
 
 === Configuration schema
 
-Configuration schema `1` permits an omitted `schema_version`, meaning current,
+Configuration schema `2` permits an omitted `schema_version`, meaning current,
 not historical. Missing files use defaults. New serialization includes the version;
 format-preserving saves retain its omission, and loading never adds it. Database,
 configuration and application versions evolve independently.

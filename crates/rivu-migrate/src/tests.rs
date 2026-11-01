@@ -77,7 +77,7 @@ fn explicit_paths_follow_host_precedence() {
 
 #[test]
 fn valid_configuration_is_read_only_with_or_without_version_and_through_symlinks() {
-    for version in ["", "schema_version=1\n"] {
+    for version in ["", "schema_version=2\n"] {
         for indirect in [false, true] {
             let (_directory, options) = fixture();
             let target = if indirect {

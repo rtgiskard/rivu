@@ -51,7 +51,7 @@ fn invalid_existing_files_are_rejected_without_being_rewritten() {
     let path = directory.path().join("config.toml");
     for contents in [
         "schema_version = 0\n",
-        "schema_version = 2\n",
+        "schema_version = 3\n",
         "schema_version = '1'\n",
         "[interface]\ntheme = 'unknown'\n",
         "[interface]\nquery_batch_size = 0\n",
@@ -735,7 +735,7 @@ fn save_reload_replaces_file_and_leaves_no_temporary_files() {
         mpris_enabled: false,
         log_level: LogLevel::Debug,
         log_to_file: true,
-        log_retention_weeks: 8,
+        log_max_files: 8,
         library_columns: LibraryColumns {
             artist: true,
             album: true,
@@ -1006,7 +1006,7 @@ fn malformed_unknown_and_invalid_values_are_rejected() {
         "playback.play_count_threshold_percent = 100.0",
         "playback.play_count_threshold_percent = nan",
         "playback.play_count_threshold_percent = inf",
-        "logging.retention_weeks = 0",
+        "logging.max_log_files = 0",
         "interface.scale = 0.74",
         "interface.scale = 2.01",
         "interface.scale = nan",
@@ -1482,13 +1482,24 @@ fn unreadable_configuration_is_not_treated_as_missing() {
 }
 
 #[test]
-fn log_retention_weeks_must_be_bounded() {
-    for log_retention_weeks in [0, 521] {
-        let config = Config {
-            log_retention_weeks,
-            ..Config::default()
-        };
-        assert!(config.validate().is_err());
+fn max_log_files_round_trips_and_rejects_out_of_range_values() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    for max_log_files in [1, 4, 128] {
+        write_current_config(
+            &path,
+            format!("[logging]\nmax_log_files = {max_log_files}\n"),
+        )
+        .unwrap();
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.log_max_files, max_log_files);
+        fs::remove_file(&path).unwrap();
+        config.save(&path).unwrap();
+        assert_eq!(Config::load(&path).unwrap().log_max_files, max_log_files);
+    }
+    for value in ["0", "129", "4294967295", "-1", "1.5", "'4'", "true"] {
+        write_current_config(&path, format!("[logging]\nmax_log_files = {value}\n")).unwrap();
+        assert!(Config::load(&path).is_err());
     }
 }
 
