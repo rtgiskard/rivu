@@ -669,7 +669,9 @@ without applying or discarding its unsaved edits. Historical cached BLAKE3 hashe
 identify candidates, not fresh proof. Rows show paths, current existence, scan
 state, metadata, favorites, overrides, history and playlist/queue reference counts.
 Choose a missing old identity and a present destination, then review and confirm.
-The close icon leaves undecided pairs unchanged. `Keep destination independent`
+Refresh and Close sit at the upper-right of the review. Hovering a group shows
+its fingerprint prefix and file count. The close icon leaves undecided pairs
+unchanged. `Keep destination independent`
 persists a decision that excludes that row from automatic and manual relocation,
 including after rescanning. No audio files are deleted.
 

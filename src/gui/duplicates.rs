@@ -1153,6 +1153,7 @@ impl Duplicates {
                         )
                         .role(gpui::Role::RadioButton)
                         .aria_label(group_label.clone())
+                        .tooltip(rivu_ui::text_tooltip(group_label.clone()))
                         .aria_toggled(if selected {
                             gpui::Toggled::True
                         } else {
@@ -1644,15 +1645,20 @@ impl Duplicates {
                 .p_3()
                 .gap_2()
                 .overflow_y_scroll()
-                .child(rivu_ui::panel_heading_row(
-                    rivu_ui::list_panel_header(
-                        theme,
-                        self.tr("gl-same-files-title"),
-                        self.tr("gl-same-files-note"),
-                    ),
-                    rivu_ui::panel_header_actions()
-                        .child(
-                            IconButton::new("review-refresh", "󰑐", self.tr("gl-refresh-groups"))
+                .child(
+                    rivu_ui::panel_heading_row(
+                        rivu_ui::list_panel_header(
+                            theme,
+                            self.tr("gl-same-files-title"),
+                            self.tr("gl-same-files-note"),
+                        ),
+                        rivu_ui::panel_header_actions()
+                            .child(
+                                IconButton::new(
+                                    "review-refresh",
+                                    "󰑐",
+                                    self.tr("gl-refresh-groups"),
+                                )
                                 .enabled(!busy)
                                 .build(
                                     IconButtonStyle::Quiet,
@@ -1668,16 +1674,19 @@ impl Duplicates {
                                         }
                                     },
                                 ),
-                        )
-                        .child(
-                            IconButton::new("review-close", "", self.tr("gl-close-review")).build(
-                                IconButtonStyle::Quiet,
-                                IconButtonDensity::Regular,
-                                cx,
-                                |this, _, cx| this.dismiss(cx),
+                            )
+                            .child(
+                                IconButton::new("review-close", "", self.tr("gl-close-review"))
+                                    .build(
+                                        IconButtonStyle::Quiet,
+                                        IconButtonDensity::Regular,
+                                        cx,
+                                        |this, _, cx| this.dismiss(cx),
+                                    ),
                             ),
-                        ),
-                ))
+                    )
+                    .items_start(),
+                )
                 .child(
                     row()
                         .flex_shrink(1.)

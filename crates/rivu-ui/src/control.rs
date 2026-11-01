@@ -67,7 +67,9 @@ pub fn button_style(
         .aria_label(label.clone())
         .justify_center()
         .max_w_full()
-        .tooltip(text_tooltip(label.clone()))
+        .when(!label.is_empty(), |control| {
+            control.tooltip(text_tooltip(label.clone()))
+        })
         .child(div().min_w_0().truncate().child(label))
 }
 
