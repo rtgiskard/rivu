@@ -1,5 +1,5 @@
 use super::Store;
-use super::positions::insert_tracks;
+use super::positions::insert_staged_tracks;
 use super::scan::{PROBE_VERSION, ScanImpacts};
 use crate::library::ExternalAdmission;
 use anyhow::{Context, Result, ensure};
@@ -128,16 +128,19 @@ impl Store {
             codec,channels,sample_rate,probe_version,bitrate_bps,bitrate_exact,track_number,
             disc_number,bits_per_sample,release_date FROM external_sources WHERE resolved_id IS NULL ORDER BY ordinal", [])?;
         tx.execute("UPDATE external_sources AS s SET resolved_id=(SELECT id FROM tracks INDEXED BY tracks_path WHERE path=s.path AND CASE WHEN cue_sheet IS NULL THEN 0 ELSE NULL END = 0 ORDER BY id LIMIT 1) WHERE resolved_id IS NULL", [])?;
-        let resolved = tx
-            .prepare("SELECT resolved_id FROM external_sources ORDER BY ordinal")?
-            .query_map([], |row| row.get::<_, i64>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let ids: Vec<_> = admission
-            .occurrences()
-            .iter()
-            .map(|&index| resolved[index])
-            .collect();
-        let count = insert_tracks(&tx, 0, insertion, &serde_json::to_string(&ids)?, None)?;
+        tx.execute_batch("CREATE TEMP TABLE insertion_tracks(ordinal INTEGER PRIMARY KEY,track_id INTEGER NOT NULL);")?;
+        {
+            let mut stage = tx.prepare(
+                "INSERT INTO insertion_tracks(ordinal,track_id) VALUES(?1,(SELECT resolved_id FROM external_sources WHERE ordinal=?2))",
+            )?;
+            for (ordinal, &source_index) in admission.occurrences().iter().enumerate() {
+                stage.execute(params![
+                    i64::try_from(ordinal)?,
+                    i64::try_from(source_index)?,
+                ])?;
+            }
+        }
+        let count = insert_staged_tracks(&tx, 0, insertion)?;
         let current_id = current_id
             .map(i64::try_from)
             .transpose()
@@ -283,6 +286,49 @@ mod tests {
         );
         assert_eq!(store.track_count().unwrap(), 1);
         assert_eq!(store.queue_state().unwrap(), before);
+    }
+
+    #[test]
+    fn unresolved_occurrence_rolls_back_registration_and_allows_retry() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let existing = admission(&["/outside/old.wav"], vec![0]);
+        store.admit_external_queue(&existing, None, None).unwrap();
+        let current_id = store.queue_ids().unwrap()[0];
+        store.set_queue_current(Some(current_id)).unwrap();
+        let before = store.queue_state().unwrap();
+        let prepared = admission(
+            &["/outside/first.wav", "/outside/unresolved.wav"],
+            vec![0, 1, 0],
+        );
+        store.conn.execute_batch("CREATE TEMP TRIGGER skip_external_identity BEFORE INSERT ON tracks WHEN new.path='/outside/unresolved.wav' BEGIN SELECT RAISE(IGNORE); END;").unwrap();
+
+        assert!(
+            store
+                .admit_external_queue(&prepared, Some(0), None)
+                .is_err()
+        );
+        assert_eq!(store.track_count().unwrap(), 1);
+        assert_eq!(store.queue_state().unwrap(), before);
+        assert!(
+            store
+                .track_id_for_identity(crate::store::TrackIdentity::File(Path::new(
+                    "/outside/first.wav"
+                )))
+                .unwrap()
+                .is_none()
+        );
+
+        store
+            .conn
+            .execute_batch("DROP TRIGGER skip_external_identity;")
+            .unwrap();
+        let (inserted, _, added) = store
+            .admit_external_queue(&prepared, Some(0), Some(current_id))
+            .unwrap();
+        assert_eq!(inserted, 3);
+        assert_eq!(added, 2);
+        assert_eq!(store.queue_id_at(3).unwrap(), Some(current_id));
+        assert_eq!(store.queue_state().unwrap().current_id, Some(current_id));
     }
 
     #[test]

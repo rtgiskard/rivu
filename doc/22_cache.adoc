@@ -42,6 +42,11 @@ complete queue. Randomizing the entire queue temporarily materializes an ID
 permutation; that buffer belongs to the operation and is released on completion.
 These bounds do not cap SQLite page caches or transaction working memory.
 
+External-file admission keeps resolved source identities and requested occurrences
+in SQL staging within one transaction, without a Rust resolved-ID list or an ID
+JSON round trip. Occurrences preserve request order and repeats; resolution or
+insertion failure rolls back both source registration and queue changes.
+
 Queue clearing deletes at most 4096 occurrences per prepared-statement execution
 inside one SQLite transaction. This bounds the foreign-key delete plan's temporary
 row-ID set without exposing partial clears: any failure rolls back all batches
