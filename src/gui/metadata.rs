@@ -785,6 +785,7 @@ impl Metadata {
                 self.metadata.track().map(|_| self.tr("gl-copy-value")),
                 cx,
             ));
+        let value = if value.is_empty() { "-".into() } else { value };
         label_value_row(theme, label, value, width, Some(actions))
             .h(height)
             .items_center()

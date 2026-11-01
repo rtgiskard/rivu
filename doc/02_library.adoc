@@ -455,8 +455,9 @@ Title, artist, album and play count appear as compact label/value rows. Hover a 
 for Edit followed by Copy; both use the same Nerd Font action style. Edit focuses
 the single-line input and selects its current value. Enter saves only that field;
 an unchanged value sends no write. Escape or leaving the input cancels unsubmitted
-text. Saving an empty title, artist or album clears that displayed text, not the
-audio file's tags. Play count accepts integers from `0` to `9223372036854775807`.
+text. Empty title, artist and album values display as `-`; their editors start
+empty, without the display placeholder. Saving an empty value clears that field,
+not the audio file's tags. Play count accepts integers from `0` to `9223372036854775807`.
 Setting the count does not change last-played time or reset the current playback's
 already-counted state. Any deferred playback statistics are recovered before the
 manual count is applied.
