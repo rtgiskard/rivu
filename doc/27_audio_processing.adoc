@@ -607,8 +607,10 @@ still be rejected by the realtime graph planner.
 Admission counts effective DSP work: disabled/solo-excluded IIR bands and identity
 peak/shelf sections do not consume stage estimates. Disabled EQ and fully bypassed
 restoration have no DSP latency/state, but edges and node buffers still count.
-Validation still applies; enabled flat FIR retains convolution latency, and active
-hum/repair is not bypassed by spectral Off.
+Restoration bypass means Wet=0, or spectral Off with both hum and repair disabled.
+DSP construction, realtime/offline planning and status use the same configuration
+predicate. Validation and Profile requirements still apply; enabled flat FIR
+retains convolution latency, and active hum/repair is not bypassed by spectral Off.
 
 Hybrid uses a single cached output port as its boundary: every path into the
 live target must cross that exact port. A separate uncached source branch or

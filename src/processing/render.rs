@@ -376,7 +376,7 @@ fn classical_native(
     } else {
         None
     };
-    let mut denoiser = if graph::denoise_bypassed(config) {
+    let mut denoiser = if config.is_bypassed() {
         None
     } else {
         Some(Denoiser::new(

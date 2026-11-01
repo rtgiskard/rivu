@@ -47,17 +47,11 @@ fn show_settings(
                 &[
                     (
                         "enabled",
-                        i18n.text(
-                            if config.denoise.wet > 0.0
-                                && (config.denoise.mode != rivu_dsp::denoise::DenoiseMode::Off
-                                    || config.denoise.hum.enabled
-                                    || config.denoise.impulse.enabled)
-                            {
-                                "core-yes"
-                            } else {
-                                "core-no"
-                            }
-                        )
+                        i18n.text(if !config.denoise.is_bypassed() {
+                            "core-yes"
+                        } else {
+                            "core-no"
+                        })
                         .into()
                     ),
                     ("mode", i18n.text(mode).into()),

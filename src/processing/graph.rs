@@ -10,11 +10,6 @@ use std::collections::{BTreeMap, VecDeque};
 
 const BLOCK: usize = 256;
 
-pub(super) fn denoise_bypassed(config: &rivu_dsp::denoise::DenoiseConfig) -> bool {
-    config.wet == 0.0
-        || (config.mode == DenoiseMode::Off && !config.hum.enabled && !config.impulse.enabled)
-}
-
 pub(super) fn prepare(
     graph: &ProcessingGraph,
     target: GraphPort,
@@ -313,7 +308,7 @@ impl Engine {
                     let profile = profiles.get(&port.node).cloned();
                     let denoiser =
                         Denoiser::new(self.rate, self.channels, config.clone(), profile)?;
-                    if denoise_bypassed(config) {
+                    if config.is_bypassed() {
                         Processor::Pass
                     } else {
                         Processor::Denoise(Box::new(DenoiseStream::new(denoiser, self.channels)))

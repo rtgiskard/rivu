@@ -667,17 +667,12 @@ fn visit(
     Ok(())
 }
 
-// Match the settled constructor bypass conditions in the DSP implementations.
+// Use the DSP-owned bypass rules without skipping constructor validation.
 // An enabled flat FIR still has convolution latency and must not be bypassed.
 fn is_bypassed(kind: &GraphNodeKind) -> bool {
     match kind {
         GraphNodeKind::Equalizer { config, .. } => !config.enabled,
-        GraphNodeKind::Denoise { config, .. } => {
-            config.wet == 0.0
-                || (config.mode == DenoiseMode::Off
-                    && !config.hum.enabled
-                    && !config.impulse.enabled)
-        }
+        GraphNodeKind::Denoise { config, .. } => config.is_bypassed(),
         _ => false,
     }
 }

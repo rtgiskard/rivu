@@ -417,8 +417,7 @@ impl Denoiser {
         }
         let size = config.fft_size;
         let hop = size / 4;
-        let bypass = config.wet == 0.0
-            || (config.mode == DenoiseMode::Off && !config.hum.enabled && !config.impulse.enabled);
+        let bypass = config.is_bypassed();
         let spectral = !bypass && config.mode != DenoiseMode::Off;
         let spectral_size = if spectral { size } else { 0 };
         let bins = if spectral { size / 2 + 1 } else { 0 };

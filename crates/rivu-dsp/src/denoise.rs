@@ -181,6 +181,12 @@ fn validate_format(sample_rate: u32, channels: usize, fft_size: usize) -> Result
 }
 
 impl DenoiseConfig {
+    /// Whether valid controls leave samples unchanged; does not validate them.
+    pub fn is_bypassed(&self) -> bool {
+        self.wet == 0.0
+            || (self.mode == DenoiseMode::Off && !self.hum.enabled && !self.impulse.enabled)
+    }
+
     /// Validate persisted controls before a source format is available.
     pub fn validate(&self) -> Result<()> {
         ensure!(
