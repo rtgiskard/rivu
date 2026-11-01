@@ -7,6 +7,52 @@ use crate::gui::{
 use gpui::{prelude::*, *};
 use std::{cell::RefCell, rc::Rc};
 
+// One declaration defines catalog order and the persisted keys/title mapping.
+macro_rules! panel_kinds {
+    ($($variant:ident => ($key:literal, $title:literal)),+ $(,)?) => {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub(in crate::gui) enum PanelKind {
+            $($variant),+
+        }
+
+        impl PanelKind {
+            pub(in crate::gui) const ALL: &'static [Self] = &[$(Self::$variant),+];
+
+            pub(in crate::gui) fn from_key(key: &str) -> Option<Self> {
+                match key {
+                    $($key => Some(Self::$variant),)+
+                    _ => None,
+                }
+            }
+
+            pub(in crate::gui) fn key(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $key),+
+                }
+            }
+
+            pub(in crate::gui) fn title_id(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $title),+
+                }
+            }
+        }
+    };
+}
+
+panel_kinds! {
+    Transport => ("transport", "shell-panel-playback"),
+    Library => ("library", "shell-panel-library"),
+    Albums => ("albums", "shell-panel-albums"),
+    Queue => ("queue", "shell-panel-queue"),
+    Playlists => ("playlists", "shell-panel-playlists"),
+    History => ("history", "shell-panel-history"),
+    Metadata => ("metadata", "shell-panel-metadata"),
+    Artwork => ("artwork", "shell-panel-artwork"),
+    AudioProcessing => ("audio_processing", "shell-panel-audio-processing"),
+    AudioVisualizer => ("audio_visualizer", "shell-panel-audio-visualizer"),
+}
+
 enum Owner {
     Library(Entity<library::Library>),
     Queue(Entity<queue::Queue>),
@@ -133,20 +179,21 @@ impl WindowView {
 
     pub(in crate::gui) fn render_panel(
         &mut self,
+        kind: PanelKind,
         panel: &layout::Panel,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let owner = match panel.kind.as_str() {
-            "library" => Owner::Library(self.library.clone()),
-            "queue" => Owner::Queue(self.queue.clone()),
-            "playlists" => Owner::Playlists(self.playlists.clone()),
-            "history" => Owner::History(self.history.clone()),
-            "metadata" => Owner::Metadata(self.metadata.clone()),
-            "transport" => Owner::Playback(self.playback.clone()),
-            "audio_processing" => Owner::Processing(self.audio_processing.clone()),
-            "albums" => return self.album_browser_panel(panel.id, window, cx),
-            "artwork" => {
+        let owner = match kind {
+            PanelKind::Library => Owner::Library(self.library.clone()),
+            PanelKind::Queue => Owner::Queue(self.queue.clone()),
+            PanelKind::Playlists => Owner::Playlists(self.playlists.clone()),
+            PanelKind::History => Owner::History(self.history.clone()),
+            PanelKind::Metadata => Owner::Metadata(self.metadata.clone()),
+            PanelKind::Transport => Owner::Playback(self.playback.clone()),
+            PanelKind::AudioProcessing => Owner::Processing(self.audio_processing.clone()),
+            PanelKind::Albums => return self.album_browser_panel(panel.id, window, cx),
+            PanelKind::Artwork => {
                 return self
                     .artwork_panels
                     .entry(panel.id)
@@ -162,13 +209,12 @@ impl WindowView {
                     .clone()
                     .into_any_element();
             }
-            "audio_visualizer" => {
+            PanelKind::AudioVisualizer => {
                 return self.presentation_panel(panel.id, cx);
             }
-            _ => unreachable!("registered panel kind"),
         };
         let geometry = WindowGeometry::current(window, self.state.system.config.ui_scale);
-        let measurements = (panel.kind == "transport").then(|| {
+        let measurements = (kind == PanelKind::Transport).then(|| {
             (
                 self.workspace
                     .interaction

@@ -1,5 +1,6 @@
 //! Panel catalog and context-menu presentation, options, and layout actions.
 
+use crate::gui::shell::panels::PanelKind;
 use crate::gui::window::*;
 use rivu_ui::{
     Popover, caption, checked_menu_item, column, menu_item, row, surface::MenuIndicator,
@@ -81,9 +82,9 @@ impl WindowView {
     ) -> gpui::Stateful<Div> {
         let mut choices = row().gap_1().flex_wrap();
         let mut visualizations = row().gap_1().flex_wrap();
-        for spec in PANELS {
-            let kind = spec.kind;
-            let title = self.tr(spec.title_id);
+        for &panel_kind in PanelKind::ALL {
+            let kind = panel_kind.key();
+            let title = self.tr(panel_kind.title_id());
             let drag = PanelDrag {
                 source: DockSource::Catalog(kind),
                 title: title.clone(),
@@ -125,8 +126,11 @@ impl WindowView {
                         })
                 });
             if matches!(
-                kind,
-                "metadata" | "artwork" | "audio_processing" | "audio_visualizer"
+                panel_kind,
+                PanelKind::Metadata
+                    | PanelKind::Artwork
+                    | PanelKind::AudioProcessing
+                    | PanelKind::AudioVisualizer
             ) {
                 visualizations = visualizations.child(choice);
             } else {

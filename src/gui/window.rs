@@ -31,56 +31,6 @@ pub(super) use std::{
 
 pub(super) const SPLIT_GUTTER: f32 = 4.0;
 
-pub(super) struct PanelSpec {
-    pub(super) kind: &'static str,
-    pub(super) title_id: &'static str,
-}
-pub(super) const PANELS: &[PanelSpec] = &[
-    PanelSpec {
-        kind: "transport",
-        title_id: "shell-panel-playback",
-    },
-    PanelSpec {
-        kind: "library",
-        title_id: "shell-panel-library",
-    },
-    PanelSpec {
-        kind: "albums",
-        title_id: "shell-panel-albums",
-    },
-    PanelSpec {
-        kind: "queue",
-        title_id: "shell-panel-queue",
-    },
-    PanelSpec {
-        kind: "playlists",
-        title_id: "shell-panel-playlists",
-    },
-    PanelSpec {
-        kind: "history",
-        title_id: "shell-panel-history",
-    },
-    PanelSpec {
-        kind: "metadata",
-        title_id: "shell-panel-metadata",
-    },
-    PanelSpec {
-        kind: "artwork",
-        title_id: "shell-panel-artwork",
-    },
-    PanelSpec {
-        kind: "audio_processing",
-        title_id: "shell-panel-audio-processing",
-    },
-    PanelSpec {
-        kind: "audio_visualizer",
-        title_id: "shell-panel-audio-visualizer",
-    },
-];
-pub(super) fn panel_spec(kind: &str) -> Option<&'static PanelSpec> {
-    PANELS.iter().find(|panel| panel.kind == kind)
-}
-
 #[derive(Clone)]
 pub(super) struct PanelDrag {
     pub(super) source: DockSource,
@@ -89,30 +39,6 @@ pub(super) struct PanelDrag {
 impl Render for PanelDrag {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         drag_preview(self.title.clone(), window, cx)
-    }
-}
-
-pub(super) fn dock_edge(position: Point<Pixels>, bounds: Bounds<Pixels>) -> Option<Edge> {
-    let x = (position.x - bounds.origin.x) / bounds.size.width;
-    let y = (position.y - bounds.origin.y) / bounds.size.height;
-    let horizontal = if x < 0.22 {
-        Some(Edge::Left)
-    } else if x > 0.78 {
-        Some(Edge::Right)
-    } else {
-        None
-    };
-    let vertical = if y < 0.22 {
-        Some(Edge::Top)
-    } else if y > 0.78 {
-        Some(Edge::Bottom)
-    } else {
-        None
-    };
-    match (horizontal, vertical) {
-        (Some(edge), None) | (None, Some(edge)) => Some(edge),
-        (None, None) => Some(Edge::Center),
-        _ => None,
     }
 }
 

@@ -1,4 +1,7 @@
-use super::{Layout, docking, layout_geometry};
+use super::{
+    Layout, docking,
+    layout_geometry::{self, dock_edge},
+};
 use crate::gui::window::*;
 
 fn panel_group(node: &Node, panel: u64) -> Option<(u64, usize)> {

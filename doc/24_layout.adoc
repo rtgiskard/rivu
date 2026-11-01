@@ -135,6 +135,11 @@ on its axis; the remaining center merges tabs. Corners with two competing edges
 and separator gutters are neutral. The outline and direction label identify
 the destination panel; shading previews the moved panel's final rectangle.
 
+Layout geometry owns edge classification. The shell declares known panel kinds,
+catalog order, stable keys and localized title identifiers together; construction
+dispatch is exhaustive over those kinds. Layout files retain string keys, including
+unknown kinds, which remain visible by their key with an unknown-panel placeholder.
+
 A target transition prepares one candidate using the actual move and measured
 reconciliation. Its projection previews source removal, collapse and gutters;
 release consumes that same candidate, with no fallback to a different target.

@@ -3,6 +3,30 @@ use super::{Axis, Edge, Node};
 use gpui::{Bounds, Pixels, Point};
 use std::collections::HashMap;
 
+pub(in crate::gui) fn dock_edge(position: Point<Pixels>, bounds: Bounds<Pixels>) -> Option<Edge> {
+    let x = (position.x - bounds.origin.x) / bounds.size.width;
+    let y = (position.y - bounds.origin.y) / bounds.size.height;
+    let horizontal = if x < 0.22 {
+        Some(Edge::Left)
+    } else if x > 0.78 {
+        Some(Edge::Right)
+    } else {
+        None
+    };
+    let vertical = if y < 0.22 {
+        Some(Edge::Top)
+    } else if y > 0.78 {
+        Some(Edge::Bottom)
+    } else {
+        None
+    };
+    match (horizontal, vertical) {
+        (Some(edge), None) | (None, Some(edge)) => Some(edge),
+        (None, None) => Some(Edge::Center),
+        _ => None,
+    }
+}
+
 pub(in crate::gui) fn node_id(node: &Node) -> u64 {
     match node {
         Node::Split { id, .. } | Node::Tabs { id, .. } => *id,

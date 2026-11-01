@@ -1,3 +1,4 @@
+use crate::gui::shell::panels::PanelKind;
 use crate::gui::window::*;
 use rivu_ui::{column, row};
 
@@ -330,9 +331,9 @@ impl WindowView {
                     let title = if let Some(options) = panel.audio_visualizer {
                         self.tr(visualization::visualization_style_id(options.style))
                     } else {
-                        panel_spec(&panel.kind).map_or_else(
+                        PanelKind::from_key(&panel.kind).map_or_else(
                             || SharedString::from(panel.kind.clone()),
-                            |spec| self.tr(spec.title_id),
+                            |kind| self.tr(kind.title_id()),
                         )
                     };
                     let tab_bar_visible = panel.show_tab_bar;
@@ -511,8 +512,8 @@ impl WindowView {
                                 )
                                 .into_any_element();
                         }
-                        panel_spec(&panel.kind)
-                            .map(|_| self.render_panel(panel, window, cx))
+                        PanelKind::from_key(&panel.kind)
+                            .map(|kind| self.render_panel(kind, panel, window, cx))
                             .unwrap_or_else(|| {
                                 div()
                                     .child(self.i18n.format(
