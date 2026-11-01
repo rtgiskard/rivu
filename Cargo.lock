@@ -2223,7 +2223,7 @@ dependencies = [
 [[package]]
 name = "gpui"
 version = "0.2.2"
-source = "git+https://github.com/rtgiskard/gpui-wgpu?rev=bd54c4c1e00046d2b7aff7355c7fc0fe8a78d9f2#bd54c4c1e00046d2b7aff7355c7fc0fe8a78d9f2"
+source = "git+https://github.com/rtgiskard/gpui-wgpu?rev=62678e1e6d77e29f65fc0be3e2c21c755ec9c95b#62678e1e6d77e29f65fc0be3e2c21c755ec9c95b"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -2480,7 +2480,7 @@ dependencies = [
 [[package]]
 name = "gpui_wgpu"
 version = "0.1.0"
-source = "git+https://github.com/rtgiskard/gpui-wgpu?rev=bd54c4c1e00046d2b7aff7355c7fc0fe8a78d9f2#bd54c4c1e00046d2b7aff7355c7fc0fe8a78d9f2"
+source = "git+https://github.com/rtgiskard/gpui-wgpu?rev=62678e1e6d77e29f65fc0be3e2c21c755ec9c95b#62678e1e6d77e29f65fc0be3e2c21c755ec9c95b"
 dependencies = [
  "anyhow",
  "bytemuck",

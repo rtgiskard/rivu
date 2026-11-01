@@ -54,9 +54,9 @@ bottom-to-top palette coordinates retain their initial behavior. Palette samples
 are straight-alpha sRGB values, interpolated in sRGB numerical space.
 
 The interface and retirement contracts are tied to the paired `Cargo.toml` patches
-at `bd54c4c1e00046d2b7aff7355c7fc0fe8a78d9f2`:
-https://github.com/rtgiskard/gpui-wgpu/blob/bd54c4c1e00046d2b7aff7355c7fc0fe8a78d9f2/crates/gpui/src/gpu.rs[`gpui::gpu`] and
-https://github.com/rtgiskard/gpui-wgpu/blob/bd54c4c1e00046d2b7aff7355c7fc0fe8a78d9f2/crates/gpui_wgpu/src/gpu_material.rs[`gpu_material`].
+at `62678e1e6d77e29f65fc0be3e2c21c755ec9c95b`:
+https://github.com/rtgiskard/gpui-wgpu/blob/62678e1e6d77e29f65fc0be3e2c21c755ec9c95b/crates/gpui/src/gpu.rs[`gpui::gpu`] and
+https://github.com/rtgiskard/gpui-wgpu/blob/62678e1e6d77e29f65fc0be3e2c21c755ec9c95b/crates/gpui_wgpu/src/gpu_material.rs[`gpu_material`].
 Update both revisions together and check these contracts; historical timings do
 not transfer automatically. Handles own CPU content, not device allocations or
 window identity: each window independently uploads and budgets shared content.
