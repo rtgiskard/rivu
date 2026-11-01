@@ -514,32 +514,16 @@ impl Core {
                 self.processing_status(*id).map(Box::new),
             ))),
             Query::RelocationTask { id } => Some(
-                self.active_relocation
-                    .as_ref()
-                    .map(|task| &task.status)
-                    .filter(|status| status.id == *id)
-                    .or_else(|| {
-                        self.relocation_results
-                            .iter()
-                            .find(|status| status.id == *id)
-                    })
+                self.relocation_status_ref(*id)
+                    .map(task_wait::TaskStatusRef::status)
                     .cloned()
                     .context("Unknown or expired relocation task")
                     .map(ViewResponse::RelocationTask)
                     .map_err(Into::into),
             ),
             Query::ScanTask { id } => Some(
-                self.active_scan
-                    .as_ref()
-                    .map(|task| &task.status)
-                    .filter(|status| status.id == *id)
-                    .or_else(|| {
-                        self.active_external_admission
-                            .as_ref()
-                            .map(|task| &task.status)
-                            .filter(|status| status.id == *id)
-                    })
-                    .or_else(|| self.scan_results.iter().find(|status| status.id == *id))
+                self.scan_status_ref(*id)
+                    .map(task_wait::TaskStatusRef::status)
                     .cloned()
                     .context("Unknown or expired scan task")
                     .map(ViewResponse::ScanTask)

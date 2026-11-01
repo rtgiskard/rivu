@@ -5,6 +5,21 @@ use std::collections::HashMap;
 pub(super) const MAX_TASK_WAITERS: usize = 256;
 type TaskReply = std::result::Result<TaskOutcome, QueryError>;
 
+/// Retained scan/relocation outcomes have been accepted by the owner; an active
+/// status is not complete even when its worker reports a terminal-looking phase.
+pub(super) enum TaskStatusRef<'a, T> {
+    Active(&'a T),
+    Retained(&'a T),
+}
+
+impl<'a, T> TaskStatusRef<'a, T> {
+    pub(super) fn status(self) -> &'a T {
+        match self {
+            Self::Active(status) | Self::Retained(status) => status,
+        }
+    }
+}
+
 struct PendingWait {
     // Only the owner may activate a reservation after checking current state.
     target: Option<TaskTarget>,
@@ -93,6 +108,43 @@ impl CoreHandle {
 }
 
 impl Core {
+    pub(super) fn scan_status_ref(&self, id: u64) -> Option<TaskStatusRef<'_, ScanTaskStatus>> {
+        self.active_scan
+            .as_ref()
+            .map(|task| &task.status)
+            .filter(|status| status.id == id)
+            .or_else(|| {
+                self.active_external_admission
+                    .as_ref()
+                    .map(|task| &task.status)
+                    .filter(|status| status.id == id)
+            })
+            .map(TaskStatusRef::Active)
+            .or_else(|| {
+                self.scan_results
+                    .iter()
+                    .find(|status| status.id == id)
+                    .map(TaskStatusRef::Retained)
+            })
+    }
+
+    pub(super) fn relocation_status_ref(
+        &self,
+        id: u64,
+    ) -> Option<TaskStatusRef<'_, RelocationTaskStatus>> {
+        self.active_relocation
+            .as_ref()
+            .map(|task| &task.status)
+            .filter(|status| status.id == id)
+            .map(TaskStatusRef::Active)
+            .or_else(|| {
+                self.relocation_results
+                    .iter()
+                    .find(|status| status.id == id)
+                    .map(TaskStatusRef::Retained)
+            })
+    }
+
     pub(super) fn register_task_wait(&self, target: TaskTarget, registration: u64) {
         if !self.task_waiters.lock().pending.contains_key(&registration) {
             return; // A disconnected caller cannot be resurrected by queued work.
@@ -120,42 +172,22 @@ impl Core {
         target: TaskTarget,
     ) -> std::result::Result<Option<TaskOutcome>, QueryError> {
         match target {
-            TaskTarget::Scan { id } => {
-                if self
-                    .active_scan
-                    .as_ref()
-                    .is_some_and(|task| task.status.id == id)
-                    || self
-                        .active_external_admission
-                        .as_ref()
-                        .is_some_and(|task| task.status.id == id)
-                {
-                    return Ok(None);
+            TaskTarget::Scan { id } => match self.scan_status_ref(id) {
+                Some(TaskStatusRef::Active(_)) => Ok(None),
+                Some(TaskStatusRef::Retained(status)) => {
+                    Ok(Some(TaskOutcome::Scan(status.clone())))
                 }
-                self.scan_results
-                    .iter()
-                    .find(|status| status.id == id)
-                    .cloned()
-                    .map(TaskOutcome::Scan)
-                    .map(Some)
-                    .ok_or_else(|| QueryError::Message("Unknown or expired scan task".into()))
-            }
-            TaskTarget::Relocation { id } => {
-                if self
-                    .active_relocation
-                    .as_ref()
-                    .is_some_and(|task| task.status.id == id)
-                {
-                    return Ok(None);
+                None => Err(QueryError::Message("Unknown or expired scan task".into())),
+            },
+            TaskTarget::Relocation { id } => match self.relocation_status_ref(id) {
+                Some(TaskStatusRef::Active(_)) => Ok(None),
+                Some(TaskStatusRef::Retained(status)) => {
+                    Ok(Some(TaskOutcome::Relocation(status.clone())))
                 }
-                self.relocation_results
-                    .iter()
-                    .find(|status| status.id == id)
-                    .cloned()
-                    .map(TaskOutcome::Relocation)
-                    .map(Some)
-                    .ok_or_else(|| QueryError::Message("Unknown or expired relocation task".into()))
-            }
+                None => Err(QueryError::Message(
+                    "Unknown or expired relocation task".into(),
+                )),
+            },
             TaskTarget::Processing { id } => {
                 let status = self.processing_status_ref(id).ok_or_else(|| {
                     QueryError::Message("Unknown or expired processing task".into())
