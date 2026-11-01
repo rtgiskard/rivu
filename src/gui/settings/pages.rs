@@ -6,11 +6,11 @@ use super::{
 };
 use crate::{
     config::{
-        AlbumArtworkDirection, AlbumArtworkMode, AnalysisWindow, AudioVisualizerStyle, LogLevel,
+        AnalysisWindow, ArtworkDirection, ArtworkMode, AudioVisualizerStyle, LogLevel,
         SpectrumStyle, VisualizationPalette, VisualizationSignal,
     },
     gui::{
-        album_artwork::ALBUM_ARTWORK_STYLES,
+        artwork_panel::ARTWORK_STYLES,
         visualization::{AUDIO_VISUALIZER_STYLES, visualization_style_label},
     },
     theme::Theme,
@@ -785,22 +785,22 @@ impl Settings {
         let settings = &*self;
         let draft = &settings.model.draft;
         let style = dropdown_button(
-            "album-artwork-style",
+            "artwork-style",
             self.tr("settings-style"),
-            SettingChoice::AlbumArtworkStyle(draft.album_artwork_style).label(&self.i18n),
-            self.dropdown.is_open() && self.dropdown_anchor == Measured::AlbumArtworkStyle,
+            SettingChoice::ArtworkStyle(draft.artwork_style).label(&self.i18n),
+            self.dropdown.is_open() && self.dropdown_anchor == Measured::ArtworkStyle,
             cx,
             |this, _, _| {
-                let values = ALBUM_ARTWORK_STYLES;
+                let values = ARTWORK_STYLES;
                 let selected = values
                     .iter()
-                    .position(|value| *value == this.model.draft.album_artwork_style)
+                    .position(|value| *value == this.model.draft.artwork_style)
                     .unwrap_or(0);
                 this.open_setting_dropdown(
                     values
                         .into_iter()
                         .map(|value| {
-                            let choice = SettingChoice::AlbumArtworkStyle(value);
+                            let choice = SettingChoice::ArtworkStyle(value);
                             ChoiceItem::new(choice, choice.label(&this.i18n))
                         })
                         .collect(),
@@ -809,24 +809,24 @@ impl Settings {
             },
         )
         .relative()
-        .child(self.measurement(Measured::AlbumArtworkStyle, cx));
+        .child(self.measurement(Measured::ArtworkStyle, cx));
         let mode = dropdown_button(
-            "album-artwork-mode",
+            "artwork-mode",
             self.tr("settings-mode"),
-            SettingChoice::AlbumArtworkMode(draft.album_artwork_mode).label(&self.i18n),
-            self.dropdown.is_open() && self.dropdown_anchor == Measured::AlbumArtworkMode,
+            SettingChoice::ArtworkMode(draft.artwork_mode).label(&self.i18n),
+            self.dropdown.is_open() && self.dropdown_anchor == Measured::ArtworkMode,
             cx,
             |this, _, _| {
-                let values = [AlbumArtworkMode::Static, AlbumArtworkMode::Rotating];
+                let values = [ArtworkMode::Static, ArtworkMode::Rotating];
                 let selected = values
                     .iter()
-                    .position(|value| *value == this.model.draft.album_artwork_mode)
+                    .position(|value| *value == this.model.draft.artwork_mode)
                     .unwrap_or(0);
                 this.open_setting_dropdown(
                     values
                         .into_iter()
                         .map(|value| {
-                            let choice = SettingChoice::AlbumArtworkMode(value);
+                            let choice = SettingChoice::ArtworkMode(value);
                             ChoiceItem::new(choice, choice.label(&this.i18n))
                         })
                         .collect(),
@@ -835,27 +835,27 @@ impl Settings {
             },
         )
         .relative()
-        .child(self.measurement(Measured::AlbumArtworkMode, cx));
+        .child(self.measurement(Measured::ArtworkMode, cx));
         let direction = dropdown_button(
-            "album-artwork-direction",
+            "artwork-direction",
             self.tr("settings-direction"),
-            SettingChoice::AlbumArtworkDirection(draft.album_artwork_direction).label(&self.i18n),
-            self.dropdown.is_open() && self.dropdown_anchor == Measured::AlbumArtworkDirection,
+            SettingChoice::ArtworkDirection(draft.artwork_direction).label(&self.i18n),
+            self.dropdown.is_open() && self.dropdown_anchor == Measured::ArtworkDirection,
             cx,
             |this, _, _| {
                 let values = [
-                    AlbumArtworkDirection::Clockwise,
-                    AlbumArtworkDirection::Counterclockwise,
+                    ArtworkDirection::Clockwise,
+                    ArtworkDirection::Counterclockwise,
                 ];
                 let selected = values
                     .iter()
-                    .position(|value| *value == this.model.draft.album_artwork_direction)
+                    .position(|value| *value == this.model.draft.artwork_direction)
                     .unwrap_or(0);
                 this.open_setting_dropdown(
                     values
                         .into_iter()
                         .map(|value| {
-                            let choice = SettingChoice::AlbumArtworkDirection(value);
+                            let choice = SettingChoice::ArtworkDirection(value);
                             ChoiceItem::new(choice, choice.label(&this.i18n))
                         })
                         .collect(),
@@ -864,8 +864,8 @@ impl Settings {
             },
         )
         .relative()
-        .child(self.measurement(Measured::AlbumArtworkDirection, cx));
-        let rotating = draft.album_artwork_mode == AlbumArtworkMode::Rotating;
+        .child(self.measurement(Measured::ArtworkDirection, cx));
+        let rotating = draft.artwork_mode == ArtworkMode::Rotating;
         column()
             .gap_3()
             .child(settings_group(
@@ -903,14 +903,14 @@ impl Settings {
                         ),
                     ))
                     .child(two_column(
-                        settings.field_state(Field::AlbumArtworkPeriodSeconds, cx),
+                        settings.field_state(Field::ArtworkPeriodSeconds, cx),
                         column().when(
                             !matches!(settings.model.target(), Target::Artwork(_)),
                             |column| {
                                 column
                                     .min_w(rems(180. / 16.))
                                     .gap_2()
-                                    .child(settings.field_state(Field::AlbumArtworkFps, cx))
+                                    .child(settings.field_state(Field::ArtworkFps, cx))
                             },
                         ),
                     )),

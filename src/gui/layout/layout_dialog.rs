@@ -50,7 +50,7 @@ impl WindowView {
         match self.workspace.activate(
             name,
             AudioVisualizerOptions::from(self.state.system.config.as_ref()),
-            crate::config::AlbumArtworkOptions::from(self.state.system.config.as_ref()),
+            crate::config::ArtworkOptions::from(self.state.system.config.as_ref()),
         ) {
             Ok(Some(cancellation)) => self.finish_layout_switch(cancellation, window, cx),
             Ok(None) => {}
@@ -100,7 +100,7 @@ impl WindowView {
                 .duplicate(
                     &name,
                     AudioVisualizerOptions::from(self.state.system.config.as_ref()),
-                    crate::config::AlbumArtworkOptions::from(self.state.system.config.as_ref()),
+                    crate::config::ArtworkOptions::from(self.state.system.config.as_ref()),
                 )
                 .map(Some),
             Action::Rename => self.workspace.layouts.rename(&name).map(|()| None),
@@ -443,7 +443,7 @@ impl WindowView {
     pub(in crate::gui) fn persist_layout(&mut self, cx: &mut Context<Self>) {
         self.workspace.persist(
             AudioVisualizerOptions::from(self.state.system.config.as_ref()),
-            crate::config::AlbumArtworkOptions::from(self.state.system.config.as_ref()),
+            crate::config::ArtworkOptions::from(self.state.system.config.as_ref()),
         );
         self.reconcile_feature_demand(cx);
         self.sync_analysis(cx);

@@ -266,7 +266,7 @@ hooks report current extent, cumulative pair allocations, nominal retained bytes
 and offscreen raster pass count, plus the actual adapter sample count. They also
 support no-readback submission and explicit completion waits. Baseline image and
 mixed-scene performance comparisons use separate binaries built from the fixed
-baseline and new source; there is no shipping environment switch or legacy route.
+baseline and current source.
 Image comparisons must cover clipping, translucent overlap, fractional coverage,
 native packed batches, nonzero raster origins, resize and resource recovery.
 

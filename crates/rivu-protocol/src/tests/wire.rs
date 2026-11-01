@@ -931,11 +931,11 @@ fn configuration_wire_adapter_preserves_optional_fields_and_library_columns() {
             output_device,
             library_columns,
             ui_theme: rivu_format::config::Theme::TokyoNight,
-            album_artwork_style: rivu_format::config::AlbumArtworkStyle::Metal,
-            album_artwork_mode: rivu_format::config::AlbumArtworkMode::Rotating,
-            album_artwork_period_seconds: 12.5,
-            album_artwork_direction: rivu_format::config::AlbumArtworkDirection::Counterclockwise,
-            album_artwork_fps: 240,
+            artwork_style: rivu_format::config::ArtworkStyle::Metal,
+            artwork_mode: rivu_format::config::ArtworkMode::Rotating,
+            artwork_period_seconds: 12.5,
+            artwork_direction: rivu_format::config::ArtworkDirection::Counterclockwise,
+            artwork_fps: 240,
             visualization_fps: 240,
             ..Default::default()
         });
@@ -1061,11 +1061,11 @@ fn configure_request_round_trip_preserves_optional_config_field_and_library_colu
             output_device,
             library_columns,
             ui_theme: rivu_format::config::Theme::TokyoNightDay,
-            album_artwork_style: rivu_format::config::AlbumArtworkStyle::Duotone,
-            album_artwork_mode: rivu_format::config::AlbumArtworkMode::Rotating,
-            album_artwork_period_seconds: 12.5,
-            album_artwork_direction: rivu_format::config::AlbumArtworkDirection::Counterclockwise,
-            album_artwork_fps: 30,
+            artwork_style: rivu_format::config::ArtworkStyle::Duotone,
+            artwork_mode: rivu_format::config::ArtworkMode::Rotating,
+            artwork_period_seconds: 12.5,
+            artwork_direction: rivu_format::config::ArtworkDirection::Counterclockwise,
+            artwork_fps: 30,
             visualization_fps: 30,
             ..Default::default()
         };

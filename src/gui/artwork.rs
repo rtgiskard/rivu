@@ -2359,10 +2359,10 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         use super::super::{
-            album_artwork::{AlbumArtwork, AlbumArtworkPanel},
+            artwork_panel::{ArtworkPanel, ArtworkRuntime},
             layout::{Axis, Node, Panel},
         };
-        use crate::config::{AlbumArtworkMode, AlbumArtworkOptions, AlbumArtworkStyle, Config};
+        use crate::config::{ArtworkMode, ArtworkOptions, ArtworkStyle, Config};
         use rivu_protocol::model::PlaybackStatus;
 
         cx.update(|cx| {
@@ -2380,7 +2380,7 @@ mod tests {
         let owner = cx.update(|cx| {
             let default = cx.new(|cx| DefaultArtwork::new(&crate::i18n::Localizer::new("en"), cx));
             cx.new(|cx| {
-                AlbumArtwork::new(
+                ArtworkRuntime::new(
                     manager,
                     default,
                     images.clone(),
@@ -2391,7 +2391,7 @@ mod tests {
         let mut panels = crate::gui::workspace::WorkspacePanels::default();
         let mut sync = |mode, status, fps, visible, cx: &mut gpui::TestAppContext| {
             let config = Config {
-                album_artwork_fps: fps,
+                artwork_fps: fps,
                 ..Config::default()
             };
             let root = Node::Split {
@@ -2405,12 +2405,12 @@ mod tests {
                         active: id,
                         panels: vec![Panel {
                             id,
-                            kind: "album_artwork".into(),
+                            kind: "artwork".into(),
                             show_tab_bar: true,
                             audio_visualizer: None,
-                            album_artwork: Some(AlbumArtworkOptions {
+                            artwork: Some(ArtworkOptions {
                                 mode,
-                                style: AlbumArtworkStyle::Plain,
+                                style: ArtworkStyle::Plain,
                                 ..(&config).into()
                             }),
                         }],
@@ -2426,18 +2426,11 @@ mod tests {
                 owner.sync(Some(&track), status, &config, &panels, visible, cx);
             });
         };
-        sync(
-            AlbumArtworkMode::Static,
-            PlaybackStatus::Paused,
-            0,
-            true,
-            cx,
-        );
+        sync(ArtworkMode::Static, PlaybackStatus::Paused, 0, true, cx);
         let window = cx.add_empty_window();
         window.update(|window, _| window.activate_window());
         window.run_until_parked();
-        let panels =
-            [1, 2].map(|id| window.new(|cx| AlbumArtworkPanel::new(id, owner.clone(), cx)));
+        let panels = [1, 2].map(|id| window.new(|cx| ArtworkPanel::new(id, owner.clone(), cx)));
         let draw = |window: &mut gpui::VisualTestContext| {
             window.draw(
                 gpui::point(gpui::px(0.), gpui::px(0.)),
@@ -2471,7 +2464,7 @@ mod tests {
             1
         );
 
-        for mode in [AlbumArtworkMode::Static, AlbumArtworkMode::Rotating] {
+        for mode in [ArtworkMode::Static, ArtworkMode::Rotating] {
             for status in [PlaybackStatus::Paused, PlaybackStatus::Playing] {
                 for fps in [1, 0] {
                     sync(mode, status, fps, true, &mut window.cx);
@@ -2538,7 +2531,7 @@ mod tests {
             "focus loss alone does not stop an actively playing rotation"
         );
         sync(
-            AlbumArtworkMode::Static,
+            ArtworkMode::Static,
             PlaybackStatus::Paused,
             0,
             true,
@@ -2571,7 +2564,7 @@ mod tests {
         // Hide with a native callback outstanding. It may drain once, but cannot
         // restart the old generation while the panels are hidden.
         sync(
-            AlbumArtworkMode::Static,
+            ArtworkMode::Static,
             PlaybackStatus::Paused,
             0,
             true,
@@ -2579,7 +2572,7 @@ mod tests {
         );
         draw(window);
         sync(
-            AlbumArtworkMode::Static,
+            ArtworkMode::Static,
             PlaybackStatus::Paused,
             0,
             false,
@@ -2591,7 +2584,7 @@ mod tests {
             0
         );
         sync(
-            AlbumArtworkMode::Static,
+            ArtworkMode::Static,
             PlaybackStatus::Paused,
             0,
             true,
@@ -2610,7 +2603,7 @@ mod tests {
         );
 
         sync(
-            AlbumArtworkMode::Rotating,
+            ArtworkMode::Rotating,
             PlaybackStatus::Playing,
             0,
             true,
@@ -2619,7 +2612,7 @@ mod tests {
         draw(window);
         window.update(|window, cx| window.simulate_next_frame(cx));
         sync(
-            AlbumArtworkMode::Rotating,
+            ArtworkMode::Rotating,
             PlaybackStatus::Playing,
             0,
             false,
@@ -2629,7 +2622,7 @@ mod tests {
         window.update(|window, cx| window.simulate_next_frame(cx));
         assert_eq!(angles(window), hidden_angles);
         sync(
-            AlbumArtworkMode::Rotating,
+            ArtworkMode::Rotating,
             PlaybackStatus::Playing,
             0,
             true,
@@ -2657,10 +2650,10 @@ mod tests {
             crate::gui::appearance::fonts::publish(&gpui::font("sans-serif"), 12, cx);
         });
         use super::super::{
-            album_artwork::{AlbumArtwork, AlbumArtworkPanel},
+            artwork_panel::{ArtworkPanel, ArtworkRuntime},
             layout::{Axis, Node, Panel},
         };
-        use crate::config::{AlbumArtworkOptions, AlbumArtworkStyle, Config};
+        use crate::config::{ArtworkOptions, ArtworkStyle, Config};
         use rivu_protocol::model::PlaybackStatus;
 
         let directory = tempfile::tempdir().unwrap();
@@ -2670,7 +2663,7 @@ mod tests {
         let artwork = cx.update(|cx| {
             let default = cx.new(|cx| DefaultArtwork::new(&crate::i18n::Localizer::new("en"), cx));
             cx.new(|cx| {
-                AlbumArtwork::new(
+                ArtworkRuntime::new(
                     manager,
                     default,
                     images.clone(),
@@ -2678,7 +2671,7 @@ mod tests {
                 )
             })
         });
-        let root = |panels: &[(u64, AlbumArtworkStyle, bool)]| Node::Split {
+        let root = |panels: &[(u64, ArtworkStyle, bool)]| Node::Split {
             id: 90,
             axis: Axis::Horizontal,
             boundaries: vec![0.5],
@@ -2690,10 +2683,10 @@ mod tests {
                     panels: vec![
                         Panel {
                             id,
-                            kind: "album_artwork".into(),
+                            kind: "artwork".into(),
                             show_tab_bar: true,
                             audio_visualizer: None,
-                            album_artwork: Some(AlbumArtworkOptions {
+                            artwork: Some(ArtworkOptions {
                                 style,
                                 ..(&config).into()
                             }),
@@ -2703,7 +2696,7 @@ mod tests {
                             kind: "queue".into(),
                             show_tab_bar: true,
                             audio_visualizer: None,
-                            album_artwork: None,
+                            artwork: None,
                         },
                     ],
                 })
@@ -2721,12 +2714,12 @@ mod tests {
             });
         };
         let initial = root(&[
-            (1, AlbumArtworkStyle::Vinyl, true),
-            (2, AlbumArtworkStyle::Vinyl, true),
+            (1, ArtworkStyle::Vinyl, true),
+            (2, ArtworkStyle::Vinyl, true),
         ]);
         sync(Some(&initial), true, cx);
         let window = cx.add_empty_window();
-        let panel = window.new(|cx| AlbumArtworkPanel::new(2, artwork.clone(), cx));
+        let panel = window.new(|cx| ArtworkPanel::new(2, artwork.clone(), cx));
         let draw_panel = |window: &mut gpui::VisualTestContext| {
             window.draw(
                 gpui::point(gpui::px(0.), gpui::px(0.)),
@@ -2744,8 +2737,8 @@ mod tests {
         let vinyl_pixels = decoded_decoration(window, &vinyl);
 
         let one_hidden = root(&[
-            (1, AlbumArtworkStyle::Vinyl, false),
-            (2, AlbumArtworkStyle::Vinyl, true),
+            (1, ArtworkStyle::Vinyl, false),
+            (2, ArtworkStyle::Vinyl, true),
         ]);
         sync(Some(&one_hidden), true, &mut window.cx);
         window.update(|window, _| images.release_retired(window));
@@ -2753,8 +2746,8 @@ mod tests {
         assert!(vinyl_pixels.upgrade().is_some());
 
         let switched = root(&[
-            (1, AlbumArtworkStyle::Vinyl, false),
-            (2, AlbumArtworkStyle::Glass, true),
+            (1, ArtworkStyle::Vinyl, false),
+            (2, ArtworkStyle::Glass, true),
         ]);
         sync(Some(&switched), true, &mut window.cx);
         draw_panel(window);

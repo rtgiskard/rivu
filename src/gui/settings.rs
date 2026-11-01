@@ -6,13 +6,13 @@ mod pages;
 
 use model::{Completion, PanelApply, SettingsModel, Submission, Target};
 
-use super::{album_artwork::album_artwork_style_label, visualization::visualization_style_label};
+use super::{artwork_panel::artwork_style_label, visualization::visualization_style_label};
 use crate::{
     artwork::{ArtworkCacheReport, ArtworkManager},
     config::{
-        AlbumArtworkDirection, AlbumArtworkMode, AlbumArtworkOptions, AlbumArtworkStyle,
-        AnalysisWindow, AudioVisualizerStyle, Config, ConfigPatch, LogLevel, SpectrumBarLayout,
-        SpectrumStyle, VisualizationPalette, VisualizationSignal,
+        AnalysisWindow, ArtworkDirection, ArtworkMode, ArtworkOptions, ArtworkStyle,
+        AudioVisualizerStyle, Config, ConfigPatch, LogLevel, SpectrumBarLayout, SpectrumStyle,
+        VisualizationPalette, VisualizationSignal,
     },
     core::CoreHandle,
     i18n::Localizer,
@@ -46,9 +46,9 @@ enum SettingChoice {
     LogLevel(LogLevel),
     Window(AnalysisWindow),
     Signal(VisualizationSignal),
-    AlbumArtworkStyle(AlbumArtworkStyle),
-    AlbumArtworkMode(AlbumArtworkMode),
-    AlbumArtworkDirection(AlbumArtworkDirection),
+    ArtworkStyle(ArtworkStyle),
+    ArtworkMode(ArtworkMode),
+    ArtworkDirection(ArtworkDirection),
 }
 
 impl SettingChoice {
@@ -56,17 +56,13 @@ impl SettingChoice {
         match self {
             Self::Language(_) | Self::Device(_) | Self::Font(_) | Self::CustomFont => String::new(),
             Self::Theme(value) => value.label().to_owned(),
-            Self::AlbumArtworkStyle(value) => album_artwork_style_label(i18n, value).to_owned(),
-            Self::AlbumArtworkMode(AlbumArtworkMode::Static) => {
-                i18n.text("settings-static").to_owned()
-            }
-            Self::AlbumArtworkMode(AlbumArtworkMode::Rotating) => {
-                i18n.text("settings-rotating").to_owned()
-            }
-            Self::AlbumArtworkDirection(AlbumArtworkDirection::Clockwise) => {
+            Self::ArtworkStyle(value) => artwork_style_label(i18n, value).to_owned(),
+            Self::ArtworkMode(ArtworkMode::Static) => i18n.text("settings-static").to_owned(),
+            Self::ArtworkMode(ArtworkMode::Rotating) => i18n.text("settings-rotating").to_owned(),
+            Self::ArtworkDirection(ArtworkDirection::Clockwise) => {
                 i18n.text("settings-clockwise").to_owned()
             }
-            Self::AlbumArtworkDirection(AlbumArtworkDirection::Counterclockwise) => {
+            Self::ArtworkDirection(ArtworkDirection::Counterclockwise) => {
                 i18n.text("settings-counterclockwise").to_owned()
             }
             Self::SpectrumStyle(value) => spectrum_style_label(i18n, value).to_owned(),
@@ -170,8 +166,8 @@ enum Field {
     WaveformPeakGamma,
     OscilloscopeTimeSpanMs,
     OscilloscopeGain,
-    AlbumArtworkPeriodSeconds,
-    AlbumArtworkFps,
+    ArtworkPeriodSeconds,
+    ArtworkFps,
 }
 #[derive(Debug)]
 struct FieldIssue {
@@ -234,8 +230,8 @@ impl Field {
             Self::WaveformPeakGamma => "visualizations.waveform.peak_gamma",
             Self::OscilloscopeTimeSpanMs => "visualizations.oscilloscope.time_span_ms",
             Self::OscilloscopeGain => "visualizations.oscilloscope.gain",
-            Self::AlbumArtworkPeriodSeconds => "interface.album_artwork.period_seconds",
-            Self::AlbumArtworkFps => "interface.album_artwork.fps",
+            Self::ArtworkPeriodSeconds => "interface.artwork.period_seconds",
+            Self::ArtworkFps => "interface.artwork.fps",
         }
     }
     fn precision(self) -> Option<usize> {
@@ -263,16 +259,14 @@ impl Field {
             | Self::WaveformPeakGamma
             | Self::OscilloscopeTimeSpanMs
             | Self::OscilloscopeGain
-            | Self::AlbumArtworkPeriodSeconds => Some(2),
+            | Self::ArtworkPeriodSeconds => Some(2),
             _ => None,
         }
     }
 
     fn enabled(self, config: &Config) -> bool {
         match self {
-            Self::AlbumArtworkPeriodSeconds => {
-                config.album_artwork_mode == AlbumArtworkMode::Rotating
-            }
+            Self::ArtworkPeriodSeconds => config.artwork_mode == ArtworkMode::Rotating,
             Self::SpectrumAutoWidth | Self::SpectrumFixedCount | Self::SpectrumGap => {
                 config.spectrum_style != SpectrumStyle::Solid
             }
@@ -326,8 +320,8 @@ impl Field {
             Self::WaveformPeakGamma => "settings-peak-gamma",
             Self::OscilloscopeTimeSpanMs => "settings-oscilloscope-time-span-ms",
             Self::OscilloscopeGain => "settings-oscilloscope-gain-x",
-            Self::AlbumArtworkPeriodSeconds => "settings-seconds-per-circle",
-            Self::AlbumArtworkFps => "settings-animation-rate-fps",
+            Self::ArtworkPeriodSeconds => "settings-seconds-per-circle",
+            Self::ArtworkFps => "settings-animation-rate-fps",
         }
     }
 
@@ -337,7 +331,7 @@ impl Field {
 
     fn hint(self, settings: &Settings) -> SharedString {
         match self {
-            Self::AlbumArtworkPeriodSeconds if !self.enabled(&settings.model.draft) => {
+            Self::ArtworkPeriodSeconds if !self.enabled(&settings.model.draft) => {
                 settings.tr(if matches!(settings.model.target(), Target::Artwork(_)) {
                     "settings-artwork-panel-recovery"
                 } else {
@@ -352,8 +346,8 @@ impl Field {
             Self::SpectrumHold | Self::SpectrumGravity if !self.enabled(&settings.model.draft) => {
                 settings.tr("settings-spectrum-peaks-recovery")
             }
-            Self::AlbumArtworkPeriodSeconds => settings.tr("settings-artwork-period-hint"),
-            Self::AlbumArtworkFps => format!(
+            Self::ArtworkPeriodSeconds => settings.tr("settings-artwork-period-hint"),
+            Self::ArtworkFps => format!(
                 "{} {}",
                 settings.tr("settings-animation-fps-hint"),
                 settings.tr("settings-artwork-motion-help")
@@ -631,9 +625,9 @@ enum Measured {
     SettingsLogLevel,
     SettingsWindow,
     SettingsSignal,
-    AlbumArtworkStyle,
-    AlbumArtworkMode,
-    AlbumArtworkDirection,
+    ArtworkStyle,
+    ArtworkMode,
+    ArtworkDirection,
 }
 
 pub(super) enum SettingsEvent {
@@ -641,7 +635,7 @@ pub(super) enum SettingsEvent {
     ReviewDuplicates,
     ApplyArtwork {
         panel_id: u64,
-        options: AlbumArtworkOptions,
+        options: ArtworkOptions,
         session: u64,
     },
 }
@@ -915,8 +909,8 @@ impl Settings {
             Field::WaveformPeakGamma,
             Field::OscilloscopeTimeSpanMs,
             Field::OscilloscopeGain,
-            Field::AlbumArtworkPeriodSeconds,
-            Field::AlbumArtworkFps,
+            Field::ArtworkPeriodSeconds,
+            Field::ArtworkFps,
         ]
         .into_iter()
         .map(|field| {
@@ -931,7 +925,7 @@ impl Settings {
                     | Field::EffectSecondaryColor
                     | Field::WaveformCursorColor => "settings-color-placeholder",
                     Field::MediaReadBufferMib => "settings-buffer-placeholder",
-                    Field::AlbumArtworkFps | Field::VisualizationAnimationFps => {
+                    Field::ArtworkFps | Field::VisualizationAnimationFps => {
                         "settings-display-fps-placeholder"
                     }
                     Field::ScanMinDurationSeconds => "settings-duration-placeholder",
@@ -1188,9 +1182,9 @@ impl Settings {
 
     fn restore_field_text(&mut self, field: Field, cx: &mut Context<Self>) {
         match field {
-            Field::AlbumArtworkPeriodSeconds => self.set_float(
+            Field::ArtworkPeriodSeconds => self.set_float(
                 field,
-                Some(self.model.draft.album_artwork_period_seconds),
+                Some(self.model.draft.artwork_period_seconds),
                 None,
                 cx,
             ),
@@ -1224,7 +1218,7 @@ impl Settings {
 
     fn sync_field_enabled(&self, cx: &mut App) {
         for field in [
-            Field::AlbumArtworkPeriodSeconds,
+            Field::ArtworkPeriodSeconds,
             Field::SpectrumAutoWidth,
             Field::SpectrumFixedCount,
             Field::SpectrumGap,
@@ -1620,14 +1614,14 @@ impl Settings {
             cx,
         );
         self.set_float(
-            Field::AlbumArtworkPeriodSeconds,
-            Some(self.model.draft.album_artwork_period_seconds),
+            Field::ArtworkPeriodSeconds,
+            Some(self.model.draft.artwork_period_seconds),
             unchanged,
             cx,
         );
         self.set_value(
-            Field::AlbumArtworkFps,
-            self.model.draft.album_artwork_fps.to_string(),
+            Field::ArtworkFps,
+            self.model.draft.artwork_fps.to_string(),
             unchanged,
             cx,
         );
@@ -1754,12 +1748,12 @@ impl Settings {
             self.model.draft.oscilloscope_gain,
             cx,
         )?;
-        config.album_artwork_period_seconds = self.float(
-            Field::AlbumArtworkPeriodSeconds,
-            self.model.draft.album_artwork_period_seconds,
+        config.artwork_period_seconds = self.float(
+            Field::ArtworkPeriodSeconds,
+            self.model.draft.artwork_period_seconds,
             cx,
         )?;
-        config.album_artwork_fps = self.number(Field::AlbumArtworkFps, cx)?;
+        config.artwork_fps = self.number(Field::ArtworkFps, cx)?;
         config.validate().map_err(|error| {
             let message = error.to_string();
             self.inputs
@@ -1991,7 +1985,7 @@ impl Settings {
     pub(super) fn open_artwork(
         &mut self,
         panel_id: u64,
-        options: AlbumArtworkOptions,
+        options: ArtworkOptions,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -2015,8 +2009,8 @@ impl Settings {
             | Field::Scale
             | Field::LayoutSnapGrid
             | Field::LogRetentionWeeks
-            | Field::AlbumArtworkPeriodSeconds
-            | Field::AlbumArtworkFps => (SettingsPage::Interface, None),
+            | Field::ArtworkPeriodSeconds
+            | Field::ArtworkFps => (SettingsPage::Interface, None),
             Field::EffectPrimaryColor
             | Field::EffectSecondaryColor
             | Field::ReactiveDbRange
@@ -2076,8 +2070,8 @@ impl Settings {
         if matches!(self.model.target(), Target::Artwork(_)) {
             let period = self
                 .float(
-                    Field::AlbumArtworkPeriodSeconds,
-                    self.model.draft.album_artwork_period_seconds,
+                    Field::ArtworkPeriodSeconds,
+                    self.model.draft.artwork_period_seconds,
                     cx,
                 )
                 .ok();
@@ -2245,11 +2239,9 @@ impl Settings {
             SettingChoice::LogLevel(value) => self.model.draft.log_level = value,
             SettingChoice::Window(value) => self.model.draft.analysis_window = value,
             SettingChoice::Signal(value) => self.model.draft.visualization_signal = value,
-            SettingChoice::AlbumArtworkStyle(value) => self.model.draft.album_artwork_style = value,
-            SettingChoice::AlbumArtworkMode(value) => self.model.draft.album_artwork_mode = value,
-            SettingChoice::AlbumArtworkDirection(value) => {
-                self.model.draft.album_artwork_direction = value
-            }
+            SettingChoice::ArtworkStyle(value) => self.model.draft.artwork_style = value,
+            SettingChoice::ArtworkMode(value) => self.model.draft.artwork_mode = value,
+            SettingChoice::ArtworkDirection(value) => self.model.draft.artwork_direction = value,
         }
         self.model.edited();
         self.dropdown.select_index(index);
@@ -2273,9 +2265,9 @@ impl Settings {
                 SettingChoice::DefaultVisualizerStyle(_) => Measured::DefaultVisualizerStyle,
                 SettingChoice::Palette(_) => Measured::SettingsStyle,
                 SettingChoice::Device(_) => Measured::Device,
-                SettingChoice::AlbumArtworkStyle(_) => Measured::AlbumArtworkStyle,
-                SettingChoice::AlbumArtworkMode(_) => Measured::AlbumArtworkMode,
-                SettingChoice::AlbumArtworkDirection(_) => Measured::AlbumArtworkDirection,
+                SettingChoice::ArtworkStyle(_) => Measured::ArtworkStyle,
+                SettingChoice::ArtworkMode(_) => Measured::ArtworkMode,
+                SettingChoice::ArtworkDirection(_) => Measured::ArtworkDirection,
             };
         }
         self.dropdown.open(items, selected);
@@ -2380,7 +2372,7 @@ impl Settings {
                     .child(self.basic_settings(cx))
                     .child(settings_card(
                         colors,
-                        self.tr("settings-album-artwork"),
+                        self.tr("settings-artwork"),
                         self.artwork_settings(cx),
                     ))
                     .child(settings_card(
@@ -2730,12 +2722,12 @@ mod tests {
         cx.update_window(handle, |_, window, cx| {
             settings.update(cx, |this, cx| {
                 this.scope.handle().focus(window, cx);
-                this.model.draft.album_artwork_mode = AlbumArtworkMode::Static;
+                this.model.draft.artwork_mode = ArtworkMode::Static;
                 this.open_setting_dropdown(
-                    [AlbumArtworkMode::Static, AlbumArtworkMode::Rotating]
+                    [ArtworkMode::Static, ArtworkMode::Rotating]
                         .into_iter()
                         .map(|value| {
-                            let choice = SettingChoice::AlbumArtworkMode(value);
+                            let choice = SettingChoice::ArtworkMode(value);
                             ChoiceItem::new(choice, choice.label(&this.i18n))
                         })
                         .collect(),
@@ -2771,10 +2763,7 @@ mod tests {
         settings.update(cx, |this, _| {
             assert!(this.dropdown.is_open());
             assert_eq!(this.dropdown.selected_index(), Some(0));
-            assert_eq!(
-                this.model.draft.album_artwork_mode,
-                AlbumArtworkMode::Static
-            );
+            assert_eq!(this.model.draft.artwork_mode, ArtworkMode::Static);
             assert!(this.active);
         });
         cx.update_window(handle, |_, window, cx| {
@@ -2806,11 +2795,11 @@ mod tests {
         });
         cx.update_window(window.into(), |_, window, cx| {
             settings.update(cx, |this, cx| {
-                this.set_value(Field::AlbumArtworkPeriodSeconds, "1e", None, cx);
-                let input = this.inputs[&Field::AlbumArtworkPeriodSeconds].clone();
+                this.set_value(Field::ArtworkPeriodSeconds, "1e", None, cx);
+                let input = this.inputs[&Field::ArtworkPeriodSeconds].clone();
                 this.open_setting_dropdown(
                     vec![ChoiceItem::new(
-                        SettingChoice::AlbumArtworkMode(AlbumArtworkMode::Static),
+                        SettingChoice::ArtworkMode(ArtworkMode::Static),
                         "Static",
                     )],
                     0,
@@ -2819,21 +2808,21 @@ mod tests {
                 input.update(cx, |input, cx| {
                     input.replace_text_in_range(Some(0..2), "99", window, cx);
                 });
-                assert_eq!(this.value(Field::AlbumArtworkPeriodSeconds, cx), "1e");
-                assert_eq!(this.inputs[&Field::AlbumArtworkPeriodSeconds], input);
+                assert_eq!(this.value(Field::ArtworkPeriodSeconds, cx), "1e");
+                assert_eq!(this.inputs[&Field::ArtworkPeriodSeconds], input);
                 this.open_setting_dropdown(
                     vec![ChoiceItem::new(
-                        SettingChoice::AlbumArtworkMode(AlbumArtworkMode::Rotating),
+                        SettingChoice::ArtworkMode(ArtworkMode::Rotating),
                         "Rotating",
                     )],
                     0,
                 );
                 this.choose_setting(0, cx);
-                assert_eq!(this.value(Field::AlbumArtworkPeriodSeconds, cx), "1e");
+                assert_eq!(this.value(Field::ArtworkPeriodSeconds, cx), "1e");
                 input.update(cx, |input, cx| {
                     input.replace_text_in_range(Some(0..2), "12", window, cx);
                 });
-                assert_eq!(this.value(Field::AlbumArtworkPeriodSeconds, cx), "12");
+                assert_eq!(this.value(Field::ArtworkPeriodSeconds, cx), "12");
             });
         })
         .unwrap();
@@ -2843,12 +2832,12 @@ mod tests {
     fn disabled_retained_fields_still_validate_global_apply(cx: &mut TestAppContext) {
         let (_directory, _runtime, settings) = fixture(cx);
         settings.update(cx, |this, cx| {
-            this.model.draft.album_artwork_mode = AlbumArtworkMode::Static;
+            this.model.draft.artwork_mode = ArtworkMode::Static;
             this.model.draft.spectrum_style = SpectrumStyle::Solid;
             this.model.draft.spectrum_peaks = false;
             this.sync_field_enabled(cx);
             for field in [
-                Field::AlbumArtworkPeriodSeconds,
+                Field::ArtworkPeriodSeconds,
                 Field::SpectrumAutoWidth,
                 Field::SpectrumGap,
                 Field::SpectrumHold,
@@ -2889,7 +2878,7 @@ mod tests {
             waveform_rms_gain: 1.234567,
             waveform_peak_gain: 1.234567,
             waveform_peak_gamma: 1.234567,
-            album_artwork_period_seconds: 23.45678,
+            artwork_period_seconds: 23.45678,
             ..base.clone()
         }
     }
@@ -2920,7 +2909,7 @@ mod tests {
             u64::from(config.waveform_rms_gain.to_bits()),
             u64::from(config.waveform_peak_gain.to_bits()),
             u64::from(config.waveform_peak_gamma.to_bits()),
-            u64::from(config.album_artwork_period_seconds.to_bits()),
+            u64::from(config.artwork_period_seconds.to_bits()),
         ]
     }
 
@@ -2998,8 +2987,8 @@ mod tests {
                 config.waveform_peak_gamma.to_string(),
             ),
             (
-                Field::AlbumArtworkPeriodSeconds,
-                config.album_artwork_period_seconds.to_string(),
+                Field::ArtworkPeriodSeconds,
+                config.artwork_period_seconds.to_string(),
             ),
         ]
     }
@@ -3240,8 +3229,8 @@ mod tests {
                 }
             })
         });
-        let mut options = AlbumArtworkOptions::from(runtime.handle.config_snapshot().as_ref());
-        options.mode = AlbumArtworkMode::Rotating;
+        let mut options = ArtworkOptions::from(runtime.handle.config_snapshot().as_ref());
+        options.mode = ArtworkMode::Rotating;
         options.period_seconds = 23.45678;
         cx.update_window(window.into(), |_, window, cx| {
             settings.update(cx, |this, cx| this.open_artwork(42, options, window, cx));
@@ -3252,13 +3241,7 @@ mod tests {
         settings.update(cx, |this, cx| {
             this.complete_panel_apply(this.model.session(), Ok(()), cx);
         });
-        edit_input(
-            &settings,
-            window,
-            Field::AlbumArtworkPeriodSeconds,
-            "23.46",
-            cx,
-        );
+        edit_input(&settings, window, Field::ArtworkPeriodSeconds, "23.46", cx);
         settings.update(cx, |this, cx| this.apply_settings(cx));
         assert_eq!(periods.borrow()[1], 23.46_f32.to_bits());
     }
@@ -3508,14 +3491,14 @@ mod tests {
             settings.update(cx, |this, cx| {
                 let config = this.handle.config_snapshot();
                 this.model
-                    .reset_artwork(&config, 22, AlbumArtworkOptions::from(config.as_ref()));
+                    .reset_artwork(&config, 22, ArtworkOptions::from(config.as_ref()));
                 this.active = true;
                 let Some(PanelApply::Artwork { session, .. }) =
                     this.model.begin_panel_apply(Some(17.0))
                 else {
                     panic!("expected panel apply");
                 };
-                this.model.draft.album_artwork_period_seconds = 19.0;
+                this.model.draft.artwork_period_seconds = 19.0;
                 this.cancel(cx);
                 assert!(this.active);
                 assert!(this.model.applying());
@@ -3523,7 +3506,7 @@ mod tests {
                 assert_eq!(this.model.target(), Target::Artwork(22));
                 this.complete_panel_apply(session, result, cx);
                 assert!(!this.model.applying());
-                assert_eq!(this.model.draft.album_artwork_period_seconds, 19.0);
+                assert_eq!(this.model.draft.artwork_period_seconds, 19.0);
                 this.cancel(cx);
                 assert!(!this.active);
                 assert_eq!(this.model.target(), Target::Global);
@@ -3638,13 +3621,13 @@ mod tests {
             this.restore_field_text(Field::SpectrumAutoWidth, cx);
             assert_eq!(this.value(Field::Font, cx), "custom-font");
             assert!(this.parse(cx).is_ok());
-            this.set_value(Field::AlbumArtworkPeriodSeconds, "0", None, cx);
+            this.set_value(Field::ArtworkPeriodSeconds, "0", None, cx);
             let error = this.parse(cx).unwrap_err();
             assert_eq!(
                 error.downcast_ref::<FieldIssue>().unwrap().field,
-                Field::AlbumArtworkPeriodSeconds
+                Field::ArtworkPeriodSeconds
             );
-            this.restore_field_text(Field::AlbumArtworkPeriodSeconds, cx);
+            this.restore_field_text(Field::ArtworkPeriodSeconds, cx);
             assert!(this.parse(cx).is_ok());
         });
     }

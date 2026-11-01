@@ -24,7 +24,7 @@ parameters to `[visualizations.reactive]`, and radial geometry and motion to
 `[visualizations.radial]`. View-specific settings live in
 `[visualizations.spectrum]`, `[visualizations.spectrogram]`,
 `[visualizations.waveform]`, and `[visualizations.oscilloscope]`.
-Album artwork settings live in `[interface.album_artwork]`; audio processing uses
+Artwork settings live in `[interface.artwork]`; audio processing uses
 the additional tables described under <<audio-processing-defaults,Audio processing defaults>>.
 Desktop integration belongs to Interface; output and decoding belong to Playback;
 shared analysis belongs to Visualizations. Dotted names below identify file paths.
@@ -343,7 +343,7 @@ remove other image-admission limits. See
 link:22_cache.adoc#artwork-lookup-retention[Artwork resource boundaries].
 
 
-Interface → Album artwork sets new-panel style, mode, period and direction;
+Interface → Artwork sets new-panel style, mode, period and direction;
 animation FPS remains shared. Existing panels use their own right-click Artwork
 settings editor. Static mode retains rotation parameters.
 
@@ -368,7 +368,7 @@ Rivu Dark is a blue-gray preset; Tokyo Night Day is a light theme. The Tokyo Nig
 presets adapt https://github.com/folke/tokyonight.nvim[Tokyo Night]. Unknown names
 are configuration errors; other applications' theme files are not imported.
 Themes do not change visualization backgrounds, signal palettes, canvas labels,
-cursor colors, or album artwork.
+cursor colors, or artwork.
 
 Search or browse installed fonts in Settings, including `monospace`, `sans-serif`,
 and `serif`. Enter or click to select; custom family names are accepted.
@@ -479,14 +479,15 @@ saved to `config.toml`. Ownership and retention rationale are documented in
 link:22_cache.adoc#artwork-lookup-retention[Artwork lookup retention].
 
 
-=== Album artwork
+=== Artwork
 
-The `Album artwork` panel (`album_artwork` in layout files) follows
-the current playback track independently of Metadata. Its configuration is:
+The `Artwork` panel (`artwork` in layout files) follows the current playback
+track independently of Track details and does not require album metadata.
+Its configuration is:
 
 [source,toml]
 ----
-[interface.album_artwork]
+[interface.artwork]
 style = "halo"
 mode = "rotating"
 period_seconds = 20.0
@@ -507,13 +508,13 @@ additional upper limit. `direction` accepts `clockwise` (default) or
 follows display callbacks without timer throttling; a positive value caps
 animation requests per second. Lower caps reduce rendering work and resource
 use at the cost of less smooth motion; zero can render more frequently on
-high-refresh displays. Changing the cap preserves the angle. All Album artwork
+high-refresh displays. Changing the cap preserves the angle. All Artwork
 panels share only frame rate; the analysis rate is independent. Mode, period, and
 direction in this configuration supply defaults for new panels, not live overrides.
 Playback-driven rotation and animated source covers have separate clocks but
 share this FPS cap. Their pause, hiding, track-change, and visualization-enable behavior is
-documented in link:04_playback.adoc#album-artwork-panel[Album artwork panel].
-Track details' full, static preview does not use the Album artwork FPS cap.
+documented in link:04_playback.adoc#artwork-panel[Artwork panel].
+Track details' full, static preview does not use the Artwork FPS cap.
 
 
 == Layout
@@ -634,26 +635,26 @@ and out-of-range indices are errors.
 
 The catalog's `kind` values are `transport` (Playback), `library`, `albums`,
 `queue`, `playlists`, `history` (Recent tracks), `metadata` (Track details),
-`album_artwork`, `audio_visualizer` (Visualization), and `audio_processing`.
+`artwork`, `audio_visualizer` (Visualization), and `audio_processing`.
 Spectrum, Spectrogram, and Waveform are styles of `audio_visualizer`, not separate
 panel kinds. Unknown kind strings are retained and show an unknown-panel message;
 they do not create a custom panel implementation.
 
-An Album artwork panel can additionally contain an `album_artwork` object with
+An Artwork panel can additionally contain an `artwork` object with
 all four keys: `style`, `mode`, `period_seconds`, and `direction`. For example:
 
 [source,json]
 ----
-{"kind": "album_artwork", "show_tab_bar": false, "album_artwork": {
+{"kind": "artwork", "show_tab_bar": false, "artwork": {
   "style": "halo", "mode": "rotating", "period_seconds": 20.0,
   "direction": "clockwise"
 }}
 ----
 
 The values use the same enums and positive finite period as
-<<album-artwork,Album artwork>>. Omit the whole object to initialize from global
+<<artwork,Artwork>>. Omit the whole object to initialize from global
 defaults when that layout is opened; partial objects and `null` are invalid.
-The object belongs only to `album_artwork` panels, just as the visualizer options
+The object belongs only to `artwork` panels, just as the visualizer options
 belong only to `audio_visualizer` panels. Animation FPS remains global.
 
 
@@ -672,7 +673,7 @@ track preview. Analysis and presentation have independent rates:
 |`animation_fps`
 |`0`–`240` / `0`
 |Spectrum, Spectrogram, and Audio Visualizer display cadence. `0` follows native
-window frames; positive values cap updates per second. Waveform and album artwork
+window frames; positive values cap updates per second. Waveform and artwork
 are independent.
 |===
 

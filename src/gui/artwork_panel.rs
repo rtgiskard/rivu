@@ -7,9 +7,7 @@ use gpui::{
 
 use crate::{
     artwork::{Artwork as LoadedArtwork, ArtworkIdentity, ArtworkManager},
-    config::{
-        AlbumArtworkDirection, AlbumArtworkMode, AlbumArtworkOptions, AlbumArtworkStyle, Config,
-    },
+    config::{ArtworkDirection, ArtworkMode, ArtworkOptions, ArtworkStyle, Config},
     i18n::Localizer,
 };
 use rivu_protocol::model::{PlaybackStatus, Track};
@@ -19,41 +17,41 @@ use super::artwork::{
     ArtworkDecoration, ArtworkImageRegistry, ArtworkLoader, ArtworkView, DefaultArtwork,
 };
 
-pub(super) const ALBUM_ARTWORK_STYLES: [AlbumArtworkStyle; 7] = [
-    AlbumArtworkStyle::Plain,
-    AlbumArtworkStyle::Card,
-    AlbumArtworkStyle::Vinyl,
-    AlbumArtworkStyle::Glass,
-    AlbumArtworkStyle::Metal,
-    AlbumArtworkStyle::Halo,
-    AlbumArtworkStyle::Duotone,
+pub(super) const ARTWORK_STYLES: [ArtworkStyle; 7] = [
+    ArtworkStyle::Plain,
+    ArtworkStyle::Card,
+    ArtworkStyle::Vinyl,
+    ArtworkStyle::Glass,
+    ArtworkStyle::Metal,
+    ArtworkStyle::Halo,
+    ArtworkStyle::Duotone,
 ];
 
-pub(super) fn album_artwork_style_id(style: AlbumArtworkStyle) -> &'static str {
+pub(super) fn artwork_style_id(style: ArtworkStyle) -> &'static str {
     match style {
-        AlbumArtworkStyle::Plain => "settings-plain",
-        AlbumArtworkStyle::Vinyl => "settings-vinyl",
-        AlbumArtworkStyle::Glass => "settings-glass",
-        AlbumArtworkStyle::Halo => "settings-halo",
-        AlbumArtworkStyle::Metal => "settings-metal",
-        AlbumArtworkStyle::Card => "settings-card",
-        AlbumArtworkStyle::Duotone => "settings-duotone",
+        ArtworkStyle::Plain => "settings-plain",
+        ArtworkStyle::Vinyl => "settings-vinyl",
+        ArtworkStyle::Glass => "settings-glass",
+        ArtworkStyle::Halo => "settings-halo",
+        ArtworkStyle::Metal => "settings-metal",
+        ArtworkStyle::Card => "settings-card",
+        ArtworkStyle::Duotone => "settings-duotone",
     }
 }
 
-pub(super) fn album_artwork_style_label(i18n: &Localizer, style: AlbumArtworkStyle) -> &str {
-    i18n.text(album_artwork_style_id(style))
+pub(super) fn artwork_style_label(i18n: &Localizer, style: ArtworkStyle) -> &str {
+    i18n.text(artwork_style_id(style))
 }
 
 #[derive(Clone, Copy, PartialEq)]
 struct RotationSettings {
-    mode: AlbumArtworkMode,
+    mode: ArtworkMode,
     period_seconds: f32,
-    direction: AlbumArtworkDirection,
+    direction: ArtworkDirection,
 }
 
 impl RotationSettings {
-    fn from_options(options: AlbumArtworkOptions) -> Self {
+    fn from_options(options: ArtworkOptions) -> Self {
         Self {
             mode: options.mode,
             period_seconds: options.period_seconds,
@@ -76,9 +74,9 @@ impl Rotation {
         Self {
             angle: 0.,
             settings: RotationSettings {
-                mode: AlbumArtworkMode::Static,
+                mode: ArtworkMode::Static,
                 period_seconds: 20.,
-                direction: AlbumArtworkDirection::Clockwise,
+                direction: ArtworkDirection::Clockwise,
             },
             running: false,
             last_tick: None,
@@ -91,8 +89,8 @@ impl Rotation {
         }
         if let Some(last) = self.last_tick.replace(now) {
             let direction = match self.settings.direction {
-                AlbumArtworkDirection::Clockwise => 1.,
-                AlbumArtworkDirection::Counterclockwise => -1.,
+                ArtworkDirection::Clockwise => 1.,
+                ArtworkDirection::Counterclockwise => -1.,
             };
             self.angle = (self.angle
                 + direction * std::f64::consts::TAU * now.duration_since(last).as_secs_f64()
@@ -108,12 +106,12 @@ impl Rotation {
         eligible: bool,
         reset: bool,
     ) -> bool {
-        let running = eligible && settings.mode == AlbumArtworkMode::Rotating;
+        let running = eligible && settings.mode == ArtworkMode::Rotating;
         let changed = reset || self.settings != settings || self.running != running;
         if changed {
             self.advance(now);
         }
-        if reset || settings.mode == AlbumArtworkMode::Static {
+        if reset || settings.mode == ArtworkMode::Static {
             self.angle = 0.;
         }
         self.settings = settings;
@@ -126,7 +124,7 @@ impl Rotation {
 }
 
 struct Instance {
-    options: AlbumArtworkOptions,
+    options: ArtworkOptions,
     rotation: Rotation,
     visible: bool,
 }
@@ -140,25 +138,25 @@ const DECORATIONS: [&[u8]; 6] = [
     include_bytes!("../../data/artwork/duotone.svg"),
 ];
 
-fn decoration_index(style: AlbumArtworkStyle) -> Option<usize> {
+fn decoration_index(style: ArtworkStyle) -> Option<usize> {
     match style {
-        AlbumArtworkStyle::Plain => None,
-        AlbumArtworkStyle::Vinyl => Some(0),
-        AlbumArtworkStyle::Glass => Some(1),
-        AlbumArtworkStyle::Halo => Some(2),
-        AlbumArtworkStyle::Metal => Some(3),
-        AlbumArtworkStyle::Card => Some(4),
-        AlbumArtworkStyle::Duotone => Some(5),
+        ArtworkStyle::Plain => None,
+        ArtworkStyle::Vinyl => Some(0),
+        ArtworkStyle::Glass => Some(1),
+        ArtworkStyle::Halo => Some(2),
+        ArtworkStyle::Metal => Some(3),
+        ArtworkStyle::Card => Some(4),
+        ArtworkStyle::Duotone => Some(5),
     }
 }
 
 /// Instances share one source owner, frame callback and cancellable deadline.
 /// Rotation and source-animation cursors remain local to individual panels.
-pub(super) struct AlbumArtwork {
+pub(super) struct ArtworkRuntime {
     manager: Arc<ArtworkManager>,
     loader: ArtworkLoader,
     view: ArtworkView,
-    default_album: Entity<DefaultArtwork>,
+    default_artwork: Entity<DefaultArtwork>,
     track: Option<Track>,
     status: PlaybackStatus,
     visible: bool,
@@ -174,10 +172,10 @@ pub(super) struct AlbumArtwork {
     activation_subscription: Option<gpui::Subscription>,
 }
 
-impl AlbumArtwork {
+impl ArtworkRuntime {
     pub(super) fn new(
         manager: Arc<ArtworkManager>,
-        default_album: Entity<DefaultArtwork>,
+        default_artwork: Entity<DefaultArtwork>,
         images: ArtworkImageRegistry,
         frames: Entity<AnimationFrames>,
     ) -> Self {
@@ -185,7 +183,7 @@ impl AlbumArtwork {
             manager,
             loader: ArtworkLoader::default(),
             view: ArtworkView::new(images.clone()),
-            default_album,
+            default_artwork,
             track: None,
             status: PlaybackStatus::Stopped,
             visible: false,
@@ -228,10 +226,10 @@ impl AlbumArtwork {
             self.instances.retain(|id, _| {
                 panels
                     .panel(*id)
-                    .is_some_and(|panel| panel.album_artwork.is_some())
+                    .is_some_and(|panel| panel.artwork.is_some())
             });
             for panel in panels.panels() {
-                let Some(options) = panel.album_artwork else {
+                let Some(options) = panel.artwork else {
                     continue;
                 };
                 let instance = self.instances.entry(panel.id).or_insert_with(|| {
@@ -288,7 +286,7 @@ impl AlbumArtwork {
                 }
             }
         }
-        changed |= self.visible != visible || self.fps != config.album_artwork_fps;
+        changed |= self.visible != visible || self.fps != config.artwork_fps;
         if source_changed {
             self.track = track.cloned();
         }
@@ -303,7 +301,7 @@ impl AlbumArtwork {
         if changed {
             self.cancel_frame(cx);
         }
-        self.fps = config.album_artwork_fps;
+        self.fps = config.artwork_fps;
         self.prepare_artwork(cx);
         if changed {
             cx.notify();
@@ -461,13 +459,13 @@ fn circle_bounds(bounds: Bounds<Pixels>) -> Bounds<Pixels> {
     }
 }
 
-fn artwork_bounds(bounds: Bounds<Pixels>, style: AlbumArtworkStyle, scale: f32) -> Bounds<Pixels> {
+fn artwork_bounds(bounds: Bounds<Pixels>, style: ArtworkStyle, scale: f32) -> Bounds<Pixels> {
     let circle = circle_bounds(bounds);
     let reserve = match style {
-        AlbumArtworkStyle::Vinyl | AlbumArtworkStyle::Glass | AlbumArtworkStyle::Metal => 0.94,
+        ArtworkStyle::Vinyl | ArtworkStyle::Glass | ArtworkStyle::Metal => 0.94,
         // Reserve the entire rotating square's diagonal, including SVG shadow.
-        AlbumArtworkStyle::Card => 0.94 * std::f32::consts::FRAC_1_SQRT_2,
-        AlbumArtworkStyle::Plain | AlbumArtworkStyle::Halo | AlbumArtworkStyle::Duotone => 1.0,
+        ArtworkStyle::Card => 0.94 * std::f32::consts::FRAC_1_SQRT_2,
+        ArtworkStyle::Plain | ArtworkStyle::Halo | ArtworkStyle::Duotone => 1.0,
     };
     let side = (f32::from(circle.size.width) * scale * reserve / 2.0).floor() * 2.0;
     let center = circle
@@ -479,18 +477,18 @@ fn artwork_bounds(bounds: Bounds<Pixels>, style: AlbumArtworkStyle, scale: f32) 
     }
 }
 
-fn artwork_image_ratio(style: AlbumArtworkStyle) -> f32 {
+fn artwork_image_ratio(style: ArtworkStyle) -> f32 {
     match style {
-        AlbumArtworkStyle::Plain => 1.0,
-        AlbumArtworkStyle::Vinyl | AlbumArtworkStyle::Card => 0.875,
-        AlbumArtworkStyle::Glass => 0.96875,
-        AlbumArtworkStyle::Halo | AlbumArtworkStyle::Duotone => 0.75,
-        AlbumArtworkStyle::Metal => 0.90625,
+        ArtworkStyle::Plain => 1.0,
+        ArtworkStyle::Vinyl | ArtworkStyle::Card => 0.875,
+        ArtworkStyle::Glass => 0.96875,
+        ArtworkStyle::Halo | ArtworkStyle::Duotone => 0.75,
+        ArtworkStyle::Metal => 0.90625,
     }
 }
 
-fn artwork_decode_side(side: Pixels, style: AlbumArtworkStyle, aspect: Option<f32>) -> Pixels {
-    if style == AlbumArtworkStyle::Card {
+fn artwork_decode_side(side: Pixels, style: ArtworkStyle, aspect: Option<f32>) -> Pixels {
+    if style == ArtworkStyle::Card {
         return side;
     }
     let aspect = aspect.unwrap_or(1.);
@@ -499,7 +497,7 @@ fn artwork_decode_side(side: Pixels, style: AlbumArtworkStyle, aspect: Option<f3
     side * aspect.max(1. / aspect)
 }
 
-impl AlbumArtwork {
+impl ArtworkRuntime {
     fn render_panel(
         &mut self,
         id: u64,
@@ -510,13 +508,13 @@ impl AlbumArtwork {
         self.request_frame(window, cx);
         let image = self.view.image(cx).map(|mut image| {
             // Multiple panels share a decode, not their playback cursor.
-            image.interactivity().element_id = Some(("album-artwork-cover", id).into());
+            image.interactivity().element_id = Some(("artwork-cover", id).into());
             image = image.with_automatic_animation_frames(false);
             image
         });
         let sizing = self.view.sizing(id);
         let image_aspect = self.view.aspect_ratio(cx);
-        let default_album = self.default_album.clone();
+        let default_artwork = self.default_artwork.clone();
         let instance = self
             .instances
             .get(&id)
@@ -544,8 +542,8 @@ impl AlbumArtwork {
                 }
                 let inset = (side - image_side) / 2.0;
                 let image = image
-                    .unwrap_or_else(|| default_album.read(cx).image(theme, image_side, window));
-                let surface = if style == AlbumArtworkStyle::Card {
+                    .unwrap_or_else(|| default_artwork.read(cx).image(theme, image_side, window));
+                let surface = if style == ArtworkStyle::Card {
                     // The complete source fits inside the SVG's 32..480 inner
                     // square. Source and frame rotate about the same center;
                     // the square's reserved diagonal keeps every corner inside.
@@ -570,7 +568,7 @@ impl AlbumArtwork {
                         .rounded_full()
                         .bg(rgb(theme.bg))
                         .when(
-                            matches!(style, AlbumArtworkStyle::Vinyl | AlbumArtworkStyle::Glass),
+                            matches!(style, ArtworkStyle::Vinyl | ArtworkStyle::Glass),
                             |surface| {
                                 surface.shadow(vec![BoxShadow {
                                     color: rgb(0x000000).alpha(0.28).into(),
@@ -590,7 +588,7 @@ impl AlbumArtwork {
                         )
                 };
                 let mut element = div().relative().size(side);
-                let behind = matches!(style, AlbumArtworkStyle::Halo | AlbumArtworkStyle::Duotone);
+                let behind = matches!(style, ArtworkStyle::Halo | ArtworkStyle::Duotone);
                 if behind && let Some(decoration) = decoration.take() {
                     element = element.child(decoration.absolute().size_full());
                 }
@@ -598,7 +596,7 @@ impl AlbumArtwork {
                 if let Some(decoration) = decoration {
                     element =
                         element.child(decoration.absolute().top_0().left_0().size_full().when(
-                            matches!(style, AlbumArtworkStyle::Vinyl | AlbumArtworkStyle::Card),
+                            matches!(style, ArtworkStyle::Vinyl | ArtworkStyle::Card),
                             |image| {
                                 image.with_transformation(Transformation::rotate(radians(angle)))
                             },
@@ -619,14 +617,14 @@ impl AlbumArtwork {
     }
 }
 
-pub(super) struct AlbumArtworkPanel {
+pub(super) struct ArtworkPanel {
     id: u64,
-    owner: Entity<AlbumArtwork>,
+    owner: Entity<ArtworkRuntime>,
     _subscription: gpui::Subscription,
 }
 
-impl AlbumArtworkPanel {
-    pub(super) fn new(id: u64, owner: Entity<AlbumArtwork>, cx: &mut Context<Self>) -> Self {
+impl ArtworkPanel {
+    pub(super) fn new(id: u64, owner: Entity<ArtworkRuntime>, cx: &mut Context<Self>) -> Self {
         let subscription = cx.observe(&owner, |_, _, cx| cx.notify());
         Self {
             id,
@@ -636,7 +634,7 @@ impl AlbumArtworkPanel {
     }
 }
 
-impl Render for AlbumArtworkPanel {
+impl Render for ArtworkPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.owner.update(cx, |owner, cx| {
             owner.render_panel(self.id, window, cx).into_any_element()
@@ -673,11 +671,11 @@ mod tests {
             active: 2,
             panels: vec![Panel {
                 id: 2,
-                kind: "album_artwork".into(),
+                kind: "artwork".into(),
                 show_tab_bar: false,
                 audio_visualizer: None,
-                album_artwork: Some(AlbumArtworkOptions {
-                    mode: AlbumArtworkMode::Rotating,
+                artwork: Some(ArtworkOptions {
+                    mode: ArtworkMode::Rotating,
                     ..(&config).into()
                 }),
             }],
@@ -691,7 +689,7 @@ mod tests {
         let owner = cx.update(|cx| {
             let default = cx.new(|cx| DefaultArtwork::new(&Localizer::new("en"), cx));
             cx.new(|cx| {
-                AlbumArtwork::new(
+                ArtworkRuntime::new(
                     manager,
                     default,
                     ArtworkImageRegistry::default(),
@@ -815,9 +813,9 @@ mod tests {
 
     fn rotating() -> RotationSettings {
         RotationSettings {
-            mode: AlbumArtworkMode::Rotating,
+            mode: ArtworkMode::Rotating,
             period_seconds: 20.,
-            direction: AlbumArtworkDirection::Clockwise,
+            direction: ArtworkDirection::Clockwise,
         }
     }
 
@@ -829,24 +827,24 @@ mod tests {
     fn cover_decode_demand_preserves_short_edge_density() {
         for aspect in [2., 0.5] {
             assert_eq!(
-                artwork_decode_side(px(512.), AlbumArtworkStyle::Plain, Some(aspect)),
+                artwork_decode_side(px(512.), ArtworkStyle::Plain, Some(aspect)),
                 px(1024.)
             );
             assert_eq!(
-                artwork_decode_side(px(512.), AlbumArtworkStyle::Vinyl, Some(aspect)),
+                artwork_decode_side(px(512.), ArtworkStyle::Vinyl, Some(aspect)),
                 px(1024.)
             );
             assert_eq!(
-                artwork_decode_side(px(512.), AlbumArtworkStyle::Card, Some(aspect)),
+                artwork_decode_side(px(512.), ArtworkStyle::Card, Some(aspect)),
                 px(512.)
             );
         }
         assert_eq!(
-            artwork_decode_side(px(512.), AlbumArtworkStyle::Plain, Some(1.)),
+            artwork_decode_side(px(512.), ArtworkStyle::Plain, Some(1.)),
             px(512.)
         );
         assert_eq!(
-            artwork_decode_side(px(512.), AlbumArtworkStyle::Plain, None),
+            artwork_decode_side(px(512.), ArtworkStyle::Plain, None),
             px(512.)
         );
     }
@@ -891,7 +889,7 @@ mod tests {
         for (settings, reset) in [
             (
                 RotationSettings {
-                    mode: AlbumArtworkMode::Static,
+                    mode: ArtworkMode::Static,
                     ..rotating()
                 },
                 false,
@@ -918,7 +916,7 @@ mod tests {
         rotation.advance(start + Duration::from_secs(5));
         let next = RotationSettings {
             period_seconds: 40.,
-            direction: AlbumArtworkDirection::Counterclockwise,
+            direction: ArtworkDirection::Counterclockwise,
             ..rotating()
         };
         rotation.sync(start + Duration::from_secs(5), next, true, false);
@@ -968,13 +966,13 @@ mod tests {
                 .center()
                 .map(|coordinate| (f32::from(coordinate) * scale).round());
             for style in [
-                AlbumArtworkStyle::Plain,
-                AlbumArtworkStyle::Vinyl,
-                AlbumArtworkStyle::Glass,
-                AlbumArtworkStyle::Halo,
-                AlbumArtworkStyle::Metal,
-                AlbumArtworkStyle::Card,
-                AlbumArtworkStyle::Duotone,
+                ArtworkStyle::Plain,
+                ArtworkStyle::Vinyl,
+                ArtworkStyle::Glass,
+                ArtworkStyle::Halo,
+                ArtworkStyle::Metal,
+                ArtworkStyle::Card,
+                ArtworkStyle::Duotone,
             ] {
                 let circle = artwork_bounds(bounds, style, scale);
                 assert!(circle.size.width >= px(0.0));
@@ -991,14 +989,14 @@ mod tests {
 
     #[test]
     fn card_preserves_inner_square_and_bounds_every_rotated_corner() {
-        assert_eq!(artwork_image_ratio(AlbumArtworkStyle::Card), 448. / 512.);
+        assert_eq!(artwork_image_ratio(ArtworkStyle::Card), 448. / 512.);
         for (width, height) in [(32., 96.), (400., 200.), (200., 400.), (997.5, 601.25)] {
             let bounds = Bounds {
                 origin: point(px(10.25), px(20.25)),
                 size: size(px(width), px(height)),
             };
             for scale in [1.0, 1.25, 1.5, 2.0] {
-                let card = artwork_bounds(bounds, AlbumArtworkStyle::Card, scale);
+                let card = artwork_bounds(bounds, ArtworkStyle::Card, scale);
                 for step in 0..32 {
                     let angle = step as f32 * std::f32::consts::TAU / 32.;
                     let extent = card.size.width * (angle.cos().abs() + angle.sin().abs()) / 2.;

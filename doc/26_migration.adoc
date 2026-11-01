@@ -105,7 +105,7 @@ format-preserving saves retain its omission, and loading never adds it. Database
 configuration and application versions evolve independently.
 
 Explicit noncurrent versions are rejected before field decoding; malformed TOML
-and I/O retain distinct causes. There are no historical aliases. The tool neither
+and I/O retain distinct causes. The tool neither
 rewrites nor backs up configuration and takes no configuration writer lock; see
 link:01_config.adoc#saving-configuration[Saving configuration].
 

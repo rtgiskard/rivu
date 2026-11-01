@@ -971,7 +971,7 @@ mod tests {
                 labels: false,
                 oscilloscope_overlay_channels: false,
             }),
-            album_artwork: None,
+            artwork: None,
         };
         let mut layout = layout::Layout {
             root: Some(layout::Node::Split {

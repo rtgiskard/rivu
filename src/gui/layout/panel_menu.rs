@@ -9,7 +9,7 @@ use rivu_ui::{
 pub(in crate::gui) enum PanelMenuPage {
     Main,
     AudioVisualizerStyle,
-    AlbumArtworkStyle,
+    ArtworkStyle,
     ConfirmClearQueue,
     LibraryColumns,
 }
@@ -126,7 +126,7 @@ impl WindowView {
                 });
             if matches!(
                 kind,
-                "metadata" | "album_artwork" | "audio_processing" | "audio_visualizer"
+                "metadata" | "artwork" | "audio_processing" | "audio_visualizer"
             ) {
                 visualizations = visualizations.child(choice);
             } else {
@@ -182,7 +182,7 @@ impl WindowView {
             .audio_visualizer_options(state.panel_id)
             .is_some_and(|options| options.style == crate::config::AudioVisualizerStyle::Waveform);
         let is_audio_visualizer = panel_kind == Some("audio_visualizer");
-        let is_album_artwork = panel_kind == Some("album_artwork");
+        let is_artwork = panel_kind == Some("artwork");
         let mut menu = Popover::menu(theme, "panel-context-menu", window)
             .map(|surface| self.menu_surface(surface, cx))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
@@ -210,36 +210,33 @@ impl WindowView {
                     .workspace
                     .layouts
                     .current()
-                    .album_artwork_options(state.panel_id)
-                    .filter(|_| is_album_artwork)
+                    .artwork_options(state.panel_id)
+                    .filter(|_| is_artwork)
                 {
                     menu = menu
                         .child(menu_item(
-                            "album-artwork-style-menu",
+                            "artwork-style-menu",
                             self.i18n.format(
                                 "shell-style-menu",
                                 &[(
                                     "style",
-                                    album_artwork::album_artwork_style_label(
-                                        &self.i18n,
-                                        options.style,
-                                    )
-                                    .into(),
+                                    artwork_panel::artwork_style_label(&self.i18n, options.style)
+                                        .into(),
                                 )],
                             ),
                             cx,
                             move |this, _, cx| {
                                 this.panel_menu = Some(PanelMenu {
-                                    page: PanelMenuPage::AlbumArtworkStyle,
+                                    page: PanelMenuPage::ArtworkStyle,
                                     ..state
                                 });
                                 cx.notify();
                             },
                         ))
                         .child(checked_menu_item(
-                            "album-artwork-rotation",
+                            "artwork-rotation",
                             self.tr("shell-artwork-rotation"),
-                            options.mode == crate::config::AlbumArtworkMode::Rotating,
+                            options.mode == crate::config::ArtworkMode::Rotating,
                             MenuIndicator::Check,
                             cx,
                             move |this, _, cx| {
@@ -248,27 +245,27 @@ impl WindowView {
                                     .workspace
                                     .layouts
                                     .current()
-                                    .album_artwork_options(state.panel_id)
+                                    .artwork_options(state.panel_id)
                                 {
                                     options.mode = match options.mode {
-                                        crate::config::AlbumArtworkMode::Static => {
-                                            crate::config::AlbumArtworkMode::Rotating
+                                        crate::config::ArtworkMode::Static => {
+                                            crate::config::ArtworkMode::Rotating
                                         }
-                                        crate::config::AlbumArtworkMode::Rotating => {
-                                            crate::config::AlbumArtworkMode::Static
+                                        crate::config::ArtworkMode::Rotating => {
+                                            crate::config::ArtworkMode::Static
                                         }
                                     };
                                     this.workspace
                                         .layouts
                                         .current_mut()
-                                        .set_album_artwork_options(state.panel_id, options);
+                                        .set_artwork_options(state.panel_id, options);
                                     this.persist_layout(cx);
                                 }
                                 cx.notify();
                             },
                         ))
                         .child(menu_item(
-                            "album-artwork-settings",
+                            "artwork-settings",
                             self.tr("shell-artwork-settings"),
                             cx,
                             move |this, window, cx| {
@@ -277,7 +274,7 @@ impl WindowView {
                                     .workspace
                                     .layouts
                                     .current()
-                                    .album_artwork_options(state.panel_id)
+                                    .artwork_options(state.panel_id)
                                 {
                                     this.settings.update(cx, |settings, cx| {
                                         settings.open_artwork(state.panel_id, options, window, cx)
@@ -527,20 +524,20 @@ impl WindowView {
                         },
                     ));
             }
-            PanelMenuPage::AlbumArtworkStyle => {
+            PanelMenuPage::ArtworkStyle => {
                 menu = menu
                     .child(rivu_ui::menu_title(theme, self.tr("shell-artwork-style")))
                     .child(rivu_ui::menu_separator(theme));
-                for style in album_artwork::ALBUM_ARTWORK_STYLES {
+                for style in artwork_panel::ARTWORK_STYLES {
                     let selected = self
                         .workspace
                         .layouts
                         .current()
-                        .album_artwork_options(state.panel_id)
+                        .artwork_options(state.panel_id)
                         .is_some_and(|options| options.style == style);
-                    let label = self.tr(album_artwork::album_artwork_style_id(style));
+                    let label = self.tr(artwork_panel::artwork_style_id(style));
                     menu = menu.child(checked_menu_item(
-                        ("album-artwork-style", style as usize),
+                        ("artwork-style", style as usize),
                         label,
                         selected,
                         MenuIndicator::Radio,
@@ -551,14 +548,14 @@ impl WindowView {
                                 .workspace
                                 .layouts
                                 .current()
-                                .album_artwork_options(state.panel_id)
+                                .artwork_options(state.panel_id)
                             {
                                 options.style = style;
                                 if this
                                     .workspace
                                     .layouts
                                     .current_mut()
-                                    .set_album_artwork_options(state.panel_id, options)
+                                    .set_artwork_options(state.panel_id, options)
                                 {
                                     this.persist_layout(cx);
                                 }
@@ -570,7 +567,7 @@ impl WindowView {
                 menu = menu
                     .child(rivu_ui::menu_separator(theme))
                     .child(rivu_ui::menu_back(
-                        "album-artwork-style-back",
+                        "artwork-style-back",
                         self.tr("shell-back"),
                         cx,
                         move |this, _, cx| {

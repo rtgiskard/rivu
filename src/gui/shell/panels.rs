@@ -1,7 +1,7 @@
 //! Cached panel instances observe their feature owner, never the window coordinator.
 use crate::gui::interaction::{Measured, MeasurementHandle, WindowGeometry};
 use crate::gui::{
-    WindowView, album_artwork, history, layout, library, metadata, playback, playlists, queue,
+    WindowView, artwork_panel, history, layout, library, metadata, playback, playlists, queue,
     scrolling,
 };
 use gpui::{prelude::*, *};
@@ -146,15 +146,15 @@ impl WindowView {
             "transport" => Owner::Playback(self.playback.clone()),
             "audio_processing" => Owner::Processing(self.audio_processing.clone()),
             "albums" => return self.album_browser_panel(panel.id, window, cx),
-            "album_artwork" => {
+            "artwork" => {
                 return self
                     .artwork_panels
                     .entry(panel.id)
                     .or_insert_with(|| {
                         cx.new(|cx| {
-                            album_artwork::AlbumArtworkPanel::new(
+                            artwork_panel::ArtworkPanel::new(
                                 panel.id,
-                                self.album_artwork.clone(),
+                                self.artwork_runtime.clone(),
                                 cx,
                             )
                         })

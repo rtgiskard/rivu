@@ -1,8 +1,8 @@
-mod album_artwork;
 mod album_browser;
 mod animation_frames;
 mod appearance;
 mod artwork;
+mod artwork_panel;
 mod audio_processing;
 mod components;
 mod coordination;

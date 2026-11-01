@@ -230,7 +230,7 @@ pub(super) struct AlbumBrowser {
     localized_text: BTreeMap<&'static str, SharedString>,
     manager: Arc<ArtworkManager>,
     images: ArtworkImageRegistry,
-    default_album: Entity<DefaultArtwork>,
+    default_artwork: Entity<DefaultArtwork>,
     model: AlbumModel,
     loading_text: rivu_ui::loading::LoadingText<()>,
     error: Option<String>,
@@ -261,7 +261,7 @@ impl AlbumBrowser {
         panel_id: u64,
         context: super::feature::FeatureContext,
         manager: Arc<ArtworkManager>,
-        default_album: Entity<DefaultArtwork>,
+        default_artwork: Entity<DefaultArtwork>,
         images: ArtworkImageRegistry,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -316,7 +316,7 @@ impl AlbumBrowser {
             snapshots: context.snapshots,
             manager,
             images,
-            default_album,
+            default_artwork,
             model: AlbumModel::default(),
             loading_text: rivu_ui::loading::LoadingText::new(std::time::Duration::from_millis(150)),
             error: None,
@@ -929,7 +929,7 @@ impl AlbumBrowser {
                     .flex_shrink_0()
                     .map(|view| match image {
                         Some(image) => view.child(div().absolute().size_full().child(image)),
-                        None => view.child(self.default_album.clone()),
+                        None => view.child(self.default_artwork.clone()),
                     })
                     .child(
                         div()

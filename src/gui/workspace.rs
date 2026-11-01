@@ -9,7 +9,7 @@ use super::{
     layout::{Layout, LayoutSet, Node, Panel, persistence::LayoutPersistenceHandle},
     scrolling::ScrollViews,
 };
-use crate::config::{AlbumArtworkOptions, AudioVisualizerOptions};
+use crate::config::{ArtworkOptions, AudioVisualizerOptions};
 use anyhow::Result;
 use std::{
     cell::RefCell,
@@ -116,7 +116,7 @@ impl Workspace {
     pub(super) fn new(
         save: LayoutPersistenceHandle,
         visualizer: AudioVisualizerOptions,
-        artwork: AlbumArtworkOptions,
+        artwork: ArtworkOptions,
     ) -> (Self, Option<String>) {
         let (mut layouts, load_error) = save.snapshot();
         layouts.reset_edit_mode();
@@ -150,7 +150,7 @@ impl Workspace {
         &mut self,
         name: &str,
         visualizer: AudioVisualizerOptions,
-        artwork: AlbumArtworkOptions,
+        artwork: ArtworkOptions,
     ) -> Result<Option<Cancellation>> {
         let name = self.layouts.selectable_name(name)?;
         if name == self.layouts.active_name() {
@@ -168,7 +168,7 @@ impl Workspace {
         &mut self,
         name: &str,
         visualizer: AudioVisualizerOptions,
-        artwork: AlbumArtworkOptions,
+        artwork: ArtworkOptions,
     ) -> Result<Cancellation> {
         let name = self.layouts.unused_name(name)?;
         let cancellation = self.cancel_before_activation();
@@ -185,11 +185,7 @@ impl Workspace {
         cancellation
     }
 
-    fn finish_activation(
-        &mut self,
-        visualizer: AudioVisualizerOptions,
-        artwork: AlbumArtworkOptions,
-    ) {
+    fn finish_activation(&mut self, visualizer: AudioVisualizerOptions, artwork: ArtworkOptions) {
         *self.scroll_views.borrow_mut() = ScrollViews::default();
         self.publish_structure(visualizer, artwork);
     }
@@ -197,7 +193,7 @@ impl Workspace {
     pub(super) fn publish_structure(
         &mut self,
         visualizer: AudioVisualizerOptions,
-        artwork: AlbumArtworkOptions,
+        artwork: ArtworkOptions,
     ) -> Cancellation {
         self.initialize_panels(visualizer, artwork);
         let cancellation = self.reconcile_structure();
@@ -226,24 +222,17 @@ impl Workspace {
     fn initialize_panels(
         &mut self,
         visualizer: AudioVisualizerOptions,
-        artwork: AlbumArtworkOptions,
+        artwork: ArtworkOptions,
     ) -> bool {
         self.layouts
             .current_mut()
             .initialize_audio_visualizers(visualizer)
-            | self
-                .layouts
-                .current_mut()
-                .initialize_album_artworks(artwork)
+            | self.layouts.current_mut().initialize_artworks(artwork)
     }
 
     /// Nonstructural edits preserve measurements and scroll; the session writer
     /// receives an immutable snapshot and remains alive after this window closes.
-    pub(super) fn persist(
-        &mut self,
-        visualizer: AudioVisualizerOptions,
-        artwork: AlbumArtworkOptions,
-    ) {
+    pub(super) fn persist(&mut self, visualizer: AudioVisualizerOptions, artwork: ArtworkOptions) {
         self.initialize_panels(visualizer, artwork);
         self.panels.reconcile(self.layouts.current());
         self.interaction
@@ -296,11 +285,11 @@ mod tests {
     use crate::gui::interaction::{Measured, WindowGeometry};
     use gpui::{Bounds, point, px, size};
 
-    fn defaults() -> (AudioVisualizerOptions, AlbumArtworkOptions) {
+    fn defaults() -> (AudioVisualizerOptions, ArtworkOptions) {
         let config = crate::config::Config::default();
         (
             AudioVisualizerOptions::from(&config),
-            AlbumArtworkOptions::from(&config),
+            ArtworkOptions::from(&config),
         )
     }
 
@@ -322,7 +311,7 @@ mod tests {
                 kind: kind.into(),
                 show_tab_bar: true,
                 audio_visualizer: None,
-                album_artwork: None,
+                artwork: None,
             }],
             active: id + 1,
         };
@@ -576,19 +565,16 @@ mod tests {
             locked: false,
         };
         let metadata = workspace.layouts.current_mut().add("metadata", None);
-        let art = workspace.layouts.current_mut().add("album_artwork", None);
+        let art = workspace.layouts.current_mut().add("artwork", None);
         workspace.publish_structure(visualizer, artwork);
-        assert_eq!(
-            workspace.panels.panel(art).unwrap().album_artwork,
-            Some(artwork)
-        );
+        assert_eq!(workspace.panels.panel(art).unwrap().artwork, Some(artwork));
         assert!(workspace.panels.metadata_consumers().is_empty());
-        assert!(workspace.panel_demand("album_artwork", true));
+        assert!(workspace.panel_demand("artwork", true));
 
         workspace.layouts.current_mut().activate(metadata);
         workspace.persist(visualizer, artwork);
         assert_eq!(workspace.panels.metadata_consumers(), &[metadata]);
-        assert!(!workspace.panel_demand("album_artwork", true));
+        assert!(!workspace.panel_demand("artwork", true));
         assert!(workspace.panels.contains_panel(art));
         // Resize/lock changes and rollback do not change the published demand.
         workspace.layouts.current_mut().locked = true;

@@ -60,14 +60,14 @@ fn fixture(cx: &mut TestAppContext) -> (tempfile::TempDir, CoreRuntime, Entity<M
         i18n: i18n.clone(),
         scroll: Default::default(),
     };
-    let default_album = cx.new(|cx| DefaultArtwork::new(&i18n, cx));
+    let default_artwork = cx.new(|cx| DefaultArtwork::new(&i18n, cx));
     let metadata = cx.new(|cx| {
         Metadata::new(
             context,
             gpui::font("sans-serif"),
             Arc::new(ArtworkManager::new(directory.path())),
             ArtworkImageRegistry::default(),
-            default_album,
+            default_artwork,
             cx,
         )
     });

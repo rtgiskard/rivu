@@ -161,7 +161,7 @@ fn artwork_decode_budget_patch_preserves_concurrent_unedited_fields() {
     };
     let mut latest = Config {
         volume: 0.25,
-        album_artwork_fps: 30,
+        artwork_fps: 30,
         artwork_file_limit_mib: 32,
         ..baseline.clone()
     };
@@ -391,40 +391,37 @@ fn library_column_selections_preserve_partial_defaults_and_round_trip() {
 }
 
 #[test]
-fn album_artwork_settings_round_trip_and_reject_invalid_motion_values() {
+fn artwork_settings_round_trip_and_reject_invalid_motion_values() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
     for (name, style) in [
-        ("plain", AlbumArtworkStyle::Plain),
-        ("vinyl", AlbumArtworkStyle::Vinyl),
-        ("glass", AlbumArtworkStyle::Glass),
-        ("halo", AlbumArtworkStyle::Halo),
-        ("metal", AlbumArtworkStyle::Metal),
-        ("card", AlbumArtworkStyle::Card),
-        ("duotone", AlbumArtworkStyle::Duotone),
+        ("plain", ArtworkStyle::Plain),
+        ("vinyl", ArtworkStyle::Vinyl),
+        ("glass", ArtworkStyle::Glass),
+        ("halo", ArtworkStyle::Halo),
+        ("metal", ArtworkStyle::Metal),
+        ("card", ArtworkStyle::Card),
+        ("duotone", ArtworkStyle::Duotone),
     ] {
-        write_current_config(&path, format!("interface.album_artwork.style = '{name}'\n")).unwrap();
+        write_current_config(&path, format!("interface.artwork.style = '{name}'\n")).unwrap();
         let config = Config::load(&path).unwrap();
-        assert_eq!(config.album_artwork_style, style);
+        assert_eq!(config.artwork_style, style);
         config.save(&path).unwrap();
         let saved = fs::read_to_string(&path).unwrap();
         let saved: toml::Value = toml::from_str(&saved).unwrap();
-        assert_eq!(
-            saved["interface"]["album_artwork"]["style"].as_str(),
-            Some(name)
-        );
+        assert_eq!(saved["interface"]["artwork"]["style"].as_str(), Some(name));
         assert_eq!(Config::load(&path).unwrap(), config);
     }
-    for mode in [AlbumArtworkMode::Static, AlbumArtworkMode::Rotating] {
+    for mode in [ArtworkMode::Static, ArtworkMode::Rotating] {
         for direction in [
-            AlbumArtworkDirection::Clockwise,
-            AlbumArtworkDirection::Counterclockwise,
+            ArtworkDirection::Clockwise,
+            ArtworkDirection::Counterclockwise,
         ] {
             for period in [f32::MIN_POSITIVE, 0.125, 20.0, f32::MAX] {
                 let config = Config {
-                    album_artwork_mode: mode,
-                    album_artwork_period_seconds: period,
-                    album_artwork_direction: direction,
+                    artwork_mode: mode,
+                    artwork_period_seconds: period,
+                    artwork_direction: direction,
                     ..Config::default()
                 };
                 config.save(&path).unwrap();
@@ -435,27 +432,27 @@ fn album_artwork_settings_round_trip_and_reject_invalid_motion_values() {
     for period in ["0", "-1", "nan", "inf", "-inf"] {
         write_current_config(
             &path,
-            format!("interface.album_artwork.period_seconds = {period}\n"),
+            format!("interface.artwork.period_seconds = {period}\n"),
         )
         .unwrap();
         let error = Config::load(&path).unwrap_err();
-        assert!(format!("{error:#}").contains("interface.album_artwork.period_seconds"));
+        assert!(format!("{error:#}").contains("interface.artwork.period_seconds"));
     }
     fs::remove_file(&path).unwrap();
     Config::default().save(&path).unwrap();
     let original = fs::read(&path).unwrap();
     for period in [0.0, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
         let config = Config {
-            album_artwork_period_seconds: period,
+            artwork_period_seconds: period,
             ..Config::default()
         };
         assert!(config.save(&path).is_err());
         assert_eq!(fs::read(&path).unwrap(), original);
     }
     for fps in [0, 1, 60, 240] {
-        write_current_config(&path, format!("interface.album_artwork.fps = {fps}\n")).unwrap();
+        write_current_config(&path, format!("interface.artwork.fps = {fps}\n")).unwrap();
         let config = Config::load(&path).unwrap();
-        assert_eq!(config.album_artwork_fps, fps);
+        assert_eq!(config.artwork_fps, fps);
         config.save(&path).unwrap();
         assert_eq!(Config::load(&path).unwrap(), config);
     }
@@ -463,7 +460,7 @@ fn album_artwork_settings_round_trip_and_reject_invalid_motion_values() {
     let original = fs::read(&path).unwrap();
     for fps in [241, u16::MAX] {
         let config = Config {
-            album_artwork_fps: fps,
+            artwork_fps: fps,
             ..Config::default()
         };
         assert!(config.validate().is_err());
@@ -481,7 +478,7 @@ fn album_artwork_settings_round_trip_and_reject_invalid_motion_values() {
         "fps = 1.5",
         "fps = '60'",
     ] {
-        write_current_config(&path, format!("[interface.album_artwork]\n{invalid}\n")).unwrap();
+        write_current_config(&path, format!("[interface.artwork]\n{invalid}\n")).unwrap();
         assert!(Config::load(&path).is_err());
     }
 }
@@ -801,11 +798,11 @@ fn save_reload_replaces_file_and_leaves_no_temporary_files() {
         oscilloscope_time_span_ms: 25.0,
         oscilloscope_gain: 2.0,
         oscilloscope_overlay_channels: true,
-        album_artwork_style: AlbumArtworkStyle::Glass,
-        album_artwork_mode: AlbumArtworkMode::Rotating,
-        album_artwork_period_seconds: 12.5,
-        album_artwork_direction: AlbumArtworkDirection::Counterclockwise,
-        album_artwork_fps: 120,
+        artwork_style: ArtworkStyle::Glass,
+        artwork_mode: ArtworkMode::Rotating,
+        artwork_period_seconds: 12.5,
+        artwork_direction: ArtworkDirection::Counterclockwise,
+        artwork_fps: 120,
         artwork_decode_budget_mib: 128,
         artwork_file_limit_mib: 32,
         gpu_material_budget_mib: 64,

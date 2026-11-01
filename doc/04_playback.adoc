@@ -63,8 +63,8 @@ or skipping the source. Failure to open the next entry at natural end stops play
 The desktop Playback panel shows title, artist, album, progress, transport, and
 volume. Blank artist or album metadata uses the same symbol placeholders and
 missing-field tooltips as playlist entries. Its favorite button changes the current
-track's library favorite, not the browsing selection. Use the separate Album
-artwork panel for covers.
+track's library favorite, not the browsing selection. Use the separate Artwork
+panel for covers.
 Hover or focus the volume control to see its percentage. The title's crosshair
 locates the current queue occurrence; see <<queue,Queue>>.
 
@@ -451,9 +451,9 @@ Its menu offers Play/Pause, Previous, Next, Shuffle, Repeat, and Quit.
 Repeat follows the cycle described under
 <<transport-and-timing,Transport and timing>>.
 
-== Album artwork panel
+== Artwork panel
 
-The *Album artwork* panel follows the current playback track, independently of
+The *Artwork* panel follows the current playback track, independently of
 Library selection and Track details. Add it from the panel catalog; it is also
 included in the built-in *Default* layout.
 
@@ -462,9 +462,9 @@ Artwork settings to edit its options with Apply and Discard. These choices belon
 to the panel instance and survive docking and layout duplication in memory.
 Use layout sync or quit the application normally to persist them across restarts;
 instance Apply and closing the desktop window do not write `layout.json`.
-Settings → Interface → Album artwork changes defaults for new panels without
+Settings → Interface → Artwork changes defaults for new panels without
 overwriting existing panels. See
-link:01_config.adoc#album-artwork[Album artwork configuration] for styles,
+link:01_config.adoc#artwork[Artwork configuration] for styles,
 animation parameters, defaults, and shared frame rate.
 
 Rotation follows playback while the panel is visible. Pausing or hiding it retains
@@ -485,7 +485,7 @@ headless cores and can be changed while running. It requires session D-Bus;
 registration failure appears in status without preventing playback. Restore the
 bus, then disable and re-enable the setting to retry registration.
 
-MPRIS, Track details, album cards, and the Album artwork panel prefer embedded
+MPRIS, Track details, album cards, and the Artwork panel prefer embedded
 front-cover artwork, then another supported embedded image. If none is available,
 Rivu checks only the audio file's immediate directory, without descending into
 subdirectories. Candidate stems must be exactly `cover`, `folder`, or `front`, in

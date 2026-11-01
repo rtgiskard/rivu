@@ -2,7 +2,7 @@
 //!
 //! The file has library, playback, interface, logging, visualizations, and audio
 //! processing tables; `processing_graph` persists the node-local audio DAG and layout.
-//! Interface contains theme and album_artwork; visualizations groups general defaults,
+//! Interface contains theme and artwork; visualizations groups general defaults,
 //! radial effects, reactive range overrides, and view-specific settings.
 //! Missing fields use [`Config::default`]; unknown or misplaced fields and invalid
 //! values are errors. `playback.repeat` accepts "off", "all", or "one". Omit
@@ -113,7 +113,7 @@ pub struct EqualizerPreset {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AlbumArtworkStyle {
+pub enum ArtworkStyle {
     Plain,
     Vinyl,
     Glass,
@@ -125,34 +125,34 @@ pub enum AlbumArtworkStyle {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AlbumArtworkMode {
+pub enum ArtworkMode {
     Static,
     Rotating,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AlbumArtworkDirection {
+pub enum ArtworkDirection {
     Clockwise,
     Counterclockwise,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AlbumArtworkOptions {
-    pub style: AlbumArtworkStyle,
-    pub mode: AlbumArtworkMode,
-    pub direction: AlbumArtworkDirection,
+pub struct ArtworkOptions {
+    pub style: ArtworkStyle,
+    pub mode: ArtworkMode,
+    pub direction: ArtworkDirection,
     pub period_seconds: f32,
 }
 
-impl From<&Config> for AlbumArtworkOptions {
+impl From<&Config> for ArtworkOptions {
     fn from(config: &Config) -> Self {
         Self {
-            style: config.album_artwork_style,
-            mode: config.album_artwork_mode,
-            direction: config.album_artwork_direction,
-            period_seconds: config.album_artwork_period_seconds,
+            style: config.artwork_style,
+            mode: config.artwork_mode,
+            direction: config.artwork_direction,
+            period_seconds: config.artwork_period_seconds,
         }
     }
 }
@@ -481,13 +481,13 @@ macro_rules! config_fields {
         pub oscilloscope_time_span_ms: f32,
         pub oscilloscope_gain: f32,
         pub oscilloscope_overlay_channels: bool,
-        pub album_artwork_style: AlbumArtworkStyle,
-        pub album_artwork_mode: AlbumArtworkMode,
+        pub artwork_style: ArtworkStyle,
+        pub artwork_mode: ArtworkMode,
         /// Positive finite seconds per full rotation, used for new artwork panels.
-        pub album_artwork_period_seconds: f32,
-        pub album_artwork_direction: AlbumArtworkDirection,
+        pub artwork_period_seconds: f32,
+        pub artwork_direction: ArtworkDirection,
         /// Animation request cap (0 follows display callbacks), at most 240 FPS.
-        pub album_artwork_fps: u16,
+        pub artwork_fps: u16,
         pub media_read_buffer_mib: u32,
         pub ffmpeg_enabled: bool,
         pub pipewire_auto_mix: bool,
@@ -587,11 +587,11 @@ impl Default for Config {
             oscilloscope_time_span_ms: 20.0,
             oscilloscope_gain: 1.0,
             oscilloscope_overlay_channels: false,
-            album_artwork_style: AlbumArtworkStyle::Halo,
-            album_artwork_mode: AlbumArtworkMode::Rotating,
-            album_artwork_period_seconds: 20.0,
-            album_artwork_direction: AlbumArtworkDirection::Clockwise,
-            album_artwork_fps: 0,
+            artwork_style: ArtworkStyle::Halo,
+            artwork_mode: ArtworkMode::Rotating,
+            artwork_period_seconds: 20.0,
+            artwork_direction: ArtworkDirection::Clockwise,
+            artwork_fps: 0,
             media_read_buffer_mib: 2,
             ffmpeg_enabled: false,
             pipewire_auto_mix: true,
@@ -892,13 +892,12 @@ impl Config {
             );
         }
         ensure!(
-            self.album_artwork_period_seconds.is_finite()
-                && self.album_artwork_period_seconds > 0.0,
-            "interface.album_artwork.period_seconds must be finite and greater than zero"
+            self.artwork_period_seconds.is_finite() && self.artwork_period_seconds > 0.0,
+            "interface.artwork.period_seconds must be finite and greater than zero"
         );
         ensure!(
-            self.album_artwork_fps <= 240,
-            "interface.album_artwork.fps must be between 0 and 240"
+            self.artwork_fps <= 240,
+            "interface.artwork.fps must be between 0 and 240"
         );
         Ok(())
     }

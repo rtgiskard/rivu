@@ -1,4 +1,4 @@
-use crate::config::{AlbumArtworkOptions, Config, ConfigPatch};
+use crate::config::{ArtworkOptions, Config, ConfigPatch};
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -10,7 +10,7 @@ pub(super) enum Target {
 pub(super) enum PanelApply {
     Artwork {
         panel_id: u64,
-        options: AlbumArtworkOptions,
+        options: ArtworkOptions,
         session: u64,
     },
 }
@@ -92,14 +92,14 @@ impl SettingsModel {
         &mut self,
         config: &Arc<Config>,
         panel_id: u64,
-        options: AlbumArtworkOptions,
+        options: ArtworkOptions,
     ) {
         self.reset(config);
         self.target = Target::Artwork(panel_id);
-        self.draft.album_artwork_style = options.style;
-        self.draft.album_artwork_mode = options.mode;
-        self.draft.album_artwork_direction = options.direction;
-        self.draft.album_artwork_period_seconds = options.period_seconds;
+        self.draft.artwork_style = options.style;
+        self.draft.artwork_mode = options.mode;
+        self.draft.artwork_direction = options.direction;
+        self.draft.artwork_period_seconds = options.period_seconds;
     }
 
     pub(super) fn edited(&mut self) {
@@ -150,13 +150,13 @@ impl SettingsModel {
                 if !period_seconds.is_finite() || period_seconds <= 0.0 {
                     return None;
                 }
-                self.draft.album_artwork_period_seconds = period_seconds;
+                self.draft.artwork_period_seconds = period_seconds;
                 PanelApply::Artwork {
                     panel_id,
-                    options: AlbumArtworkOptions {
-                        style: self.draft.album_artwork_style,
-                        mode: self.draft.album_artwork_mode,
-                        direction: self.draft.album_artwork_direction,
+                    options: ArtworkOptions {
+                        style: self.draft.artwork_style,
+                        mode: self.draft.artwork_mode,
+                        direction: self.draft.artwork_direction,
                         period_seconds,
                     },
                     session: self.session,
@@ -217,7 +217,7 @@ impl SettingsModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AlbumArtworkMode;
+    use crate::config::ArtworkMode;
 
     #[test]
     fn switching_targets_rejects_old_completions_and_routes_panel_options() {
@@ -227,14 +227,14 @@ mod tests {
         assert!(model.begin_apply(model.draft.clone()).is_none());
         assert!(!model.complete_panel_apply(model.session(), Ok(())));
 
-        let artwork = AlbumArtworkOptions {
-            mode: AlbumArtworkMode::Rotating,
+        let artwork = ArtworkOptions {
+            mode: ArtworkMode::Rotating,
             period_seconds: 13.0,
-            ..AlbumArtworkOptions::from(config.as_ref())
+            ..ArtworkOptions::from(config.as_ref())
         };
         model.reset_artwork(&config, 22, artwork);
         assert_eq!(model.target(), Target::Artwork(22));
-        assert_eq!(AlbumArtworkOptions::from(&model.draft), artwork);
+        assert_eq!(ArtworkOptions::from(&model.draft), artwork);
         assert_eq!(model.baseline(), config.as_ref());
         assert!(model.begin_apply(model.draft.clone()).is_none());
         let Some(PanelApply::Artwork {
@@ -248,7 +248,7 @@ mod tests {
         assert_eq!(panel_id, 22);
         assert_eq!(
             options,
-            AlbumArtworkOptions {
+            ArtworkOptions {
                 period_seconds: 17.0,
                 ..artwork
             }
@@ -284,7 +284,7 @@ mod tests {
     fn panel_validation_and_failure_preserve_edits_for_retry() {
         let config = Arc::new(Config::default());
         let mut model = SettingsModel::new(&config);
-        model.reset_artwork(&config, 1, AlbumArtworkOptions::from(config.as_ref()));
+        model.reset_artwork(&config, 1, ArtworkOptions::from(config.as_ref()));
         for period in [
             None,
             Some(0.0),
@@ -300,17 +300,17 @@ mod tests {
         assert!(model.begin_panel_apply(Some(20.0)).is_some());
         assert!(model.feedback().is_none());
         assert!(model.begin_panel_apply(Some(30.0)).is_none());
-        model.draft.album_artwork_mode = AlbumArtworkMode::Static;
+        model.draft.artwork_mode = ArtworkMode::Static;
         model.reject_input("must not replace pending feedback".into());
         assert!(model.feedback().is_none());
         assert!(model.complete_panel_apply(model.session(), Err("save failed".into())));
         assert!(!model.applying());
         assert!(matches!(model.feedback(), Some(Err(_))));
-        assert_eq!(model.draft.album_artwork_mode, AlbumArtworkMode::Static);
+        assert_eq!(model.draft.artwork_mode, ArtworkMode::Static);
         let Some(PanelApply::Artwork { options, .. }) = model.begin_panel_apply(Some(30.0)) else {
             panic!("expected retry");
         };
-        assert_eq!(options.mode, AlbumArtworkMode::Static);
+        assert_eq!(options.mode, ArtworkMode::Static);
         assert_eq!(options.period_seconds, 30.0);
         assert!(model.feedback().is_none());
     }
@@ -336,14 +336,14 @@ mod tests {
         );
         assert!(model.feedback().is_none());
         assert_ne!(model.draft.tray_enabled, config.tray_enabled);
-        model.reset_artwork(&config, 1, AlbumArtworkOptions::from(config.as_ref()));
+        model.reset_artwork(&config, 1, ArtworkOptions::from(config.as_ref()));
         let Some(PanelApply::Artwork { session, .. }) = model.begin_panel_apply(Some(20.0)) else {
             panic!("expected panel apply");
         };
-        model.draft.album_artwork_mode = AlbumArtworkMode::Rotating;
+        model.draft.artwork_mode = ArtworkMode::Rotating;
         model.edited();
         assert!(model.complete_panel_apply(session, Ok(())));
         assert!(model.feedback().is_none());
-        assert_eq!(model.draft.album_artwork_mode, AlbumArtworkMode::Rotating);
+        assert_eq!(model.draft.artwork_mode, ArtworkMode::Rotating);
     }
 }

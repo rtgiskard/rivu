@@ -285,7 +285,7 @@ final drawing; the per-view rules below distinguish those lifetimes.
 view releases it; completion-aware retirement is independent of logical demand.
 |===
 
-Album artwork and font caches have separate owners and lifetimes, independently
+Artwork and font caches have separate owners and lifetimes, independently
 of visualization enablement.
 
 Disabling visualizations is a destructive suspension, not another cache policy: it stops
@@ -514,7 +514,7 @@ MPRIS retains its completed-load identity only while it matches the current sour
 Clearing or changing selection forgets it even with another load in flight, so
 returning to an evicted source reacquires its cover after the physical slot retires.
 
-The Album artwork panel initiates acquisition only while visible. Hiding it
+The Artwork panel initiates acquisition only while visible. Hiding it
 clears queued demand without cancelling a submitted shared load; completion may
 warm the cache but cannot start another hidden lookup. Revealing it acquires the
 latest track. Other consumers, including MPRIS, retain their own acquisition demand.

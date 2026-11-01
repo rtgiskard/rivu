@@ -130,7 +130,7 @@ file_group!(Interface, InterfaceView {
     scale => ui_scale: f32,
     layout_snap_enabled => layout_snap_enabled: bool,
     layout_snap_grid_px => layout_snap_grid_px: u32,
-}; album_artwork: AlbumArtwork, AlbumArtworkView);
+}; artwork: Artwork, ArtworkView);
 
 file_group!(Logging, LoggingView {
     level => log_level: LogLevel,
@@ -190,12 +190,12 @@ file_group!(Oscilloscope, OscilloscopeView {
     overlay_channels => oscilloscope_overlay_channels: bool,
 });
 
-file_group!(AlbumArtwork, AlbumArtworkView {
-    style => album_artwork_style: AlbumArtworkStyle,
-    mode => album_artwork_mode: AlbumArtworkMode,
-    period_seconds => album_artwork_period_seconds: f32,
-    direction => album_artwork_direction: AlbumArtworkDirection,
-    fps => album_artwork_fps: u16,
+file_group!(Artwork, ArtworkView {
+    style => artwork_style: ArtworkStyle,
+    mode => artwork_mode: ArtworkMode,
+    period_seconds => artwork_period_seconds: f32,
+    direction => artwork_direction: ArtworkDirection,
+    fps => artwork_fps: u16,
 });
 
 file_group!(General, GeneralView {

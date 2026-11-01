@@ -394,7 +394,7 @@ mod tests {
             kind: kind.into(),
             show_tab_bar: true,
             audio_visualizer: None,
-            album_artwork: None,
+            artwork: None,
         };
         let node = Node::Tabs {
             id: 1,

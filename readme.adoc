@@ -29,7 +29,7 @@ image:https://github.com/user-attachments/assets/bf7493ca-cb1a-4b8e-97cb-0226f80
   link:doc/27_audio_processing.adoc#practical-workflow[workflow and quality limits]
 * *Visualizations and artwork:* one Visualization panel with eleven styles,
   including waveform, spectrum, spectrogram, stereo analysis, and oscilloscope;
-  independent album artwork
+  an independent Artwork panel
 
 Rivu plays local files; it does not fetch network media or cover art.
 The desktop requires Wayland; audio output requires a running PipeWire 1.2 or newer server.

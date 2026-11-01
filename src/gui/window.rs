@@ -3,7 +3,7 @@ use super::list_interaction::ContentMenuRequest;
 pub(super) use super::session::UiSession;
 use super::visualization::full_waveform::FullWaveformRequest;
 pub(super) use super::{
-    album_artwork, album_browser, animation_frames, appearance, artwork, audio_processing,
+    album_browser, animation_frames, appearance, artwork, artwork_panel, audio_processing,
     coordination, duplicates, feature, history, interaction, layout, library, list_interaction,
     metadata, playback, playlists, query, queue, settings, shell, visualization, workspace,
 };
@@ -65,8 +65,8 @@ pub(super) const PANELS: &[PanelSpec] = &[
         title_id: "shell-panel-metadata",
     },
     PanelSpec {
-        kind: "album_artwork",
-        title_id: "shell-panel-album-artwork",
+        kind: "artwork",
+        title_id: "shell-panel-artwork",
     },
     PanelSpec {
         kind: "audio_processing",
@@ -166,9 +166,9 @@ pub(crate) struct WindowView {
     pub(super) error: Option<String>,
     pub(super) artwork_manager: Arc<crate::artwork::ArtworkManager>,
     pub(super) artwork_images: artwork::ArtworkImageRegistry,
-    pub(super) default_album: Entity<artwork::DefaultArtwork>,
-    pub(super) album_artwork: Entity<album_artwork::AlbumArtwork>,
-    pub(super) artwork_panels: HashMap<u64, Entity<album_artwork::AlbumArtworkPanel>>,
+    pub(super) default_artwork: Entity<artwork::DefaultArtwork>,
+    pub(super) artwork_runtime: Entity<artwork_panel::ArtworkRuntime>,
+    pub(super) artwork_panels: HashMap<u64, Entity<artwork_panel::ArtworkPanel>>,
     pub(super) album_browsers: HashMap<u64, Entity<album_browser::AlbumBrowser>>,
     pub(super) panel_views: HashMap<u64, Entity<shell::panels::PanelView>>,
     pub(super) queue_replace: Option<coordination::queue_replace::QueueReplacement>,
@@ -521,7 +521,7 @@ impl WindowView {
         let (mut workspace, load_error) = workspace::Workspace::new(
             layout_save.clone(),
             AudioVisualizerOptions::from(state.system.config.as_ref()),
-            crate::config::AlbumArtworkOptions::from(state.system.config.as_ref()),
+            crate::config::ArtworkOptions::from(state.system.config.as_ref()),
         );
         let error = load_error
             .map(|error| i18n.format("shell-load-layouts-error", &[("error", error.into())]));
@@ -576,7 +576,7 @@ impl WindowView {
                         .workspace
                         .layouts
                         .current_mut()
-                        .set_album_artwork_options(*panel_id, *options)
+                        .set_artwork_options(*panel_id, *options)
                     {
                         this.workspace.publish_panel_options();
                         settings.update(cx, |settings, cx| {
@@ -738,8 +738,8 @@ impl WindowView {
             }
         })
         .detach();
-        let default_album = cx.new(|cx| artwork::DefaultArtwork::new(&i18n, cx));
-        let album_default = default_album.read(cx).circular();
+        let default_artwork = cx.new(|cx| artwork::DefaultArtwork::new(&i18n, cx));
+        let circular_default_artwork = default_artwork.read(cx).circular();
         let artwork_images =
             artwork::ArtworkImageRegistry::new(state.system.config.artwork_decode_budget_mib);
         let feature_context = feature::FeatureContext {
@@ -771,7 +771,7 @@ impl WindowView {
                     ui_font.clone(),
                     Arc::clone(&artwork_manager),
                     artwork_images.clone(),
-                    default_album.clone(),
+                    default_artwork.clone(),
                     cx,
                 )
             }),
@@ -783,11 +783,11 @@ impl WindowView {
             shell: shell::WindowShell::new(cx),
             error,
             queue_replace: None,
-            album_artwork: cx.new(|cx| {
-                let default_album = cx.new(|_| album_default);
-                album_artwork::AlbumArtwork::new(
+            artwork_runtime: cx.new(|cx| {
+                let default_artwork = cx.new(|_| circular_default_artwork);
+                artwork_panel::ArtworkRuntime::new(
                     Arc::clone(&artwork_manager),
-                    default_album,
+                    default_artwork,
                     artwork_images.clone(),
                     animation_frames.clone(),
                 )
@@ -797,7 +797,7 @@ impl WindowView {
             panel_views: HashMap::new(),
             artwork_manager,
             artwork_images,
-            default_album,
+            default_artwork,
             presentation,
             layout_action: None,
             panel_menu: None,
@@ -837,7 +837,7 @@ impl WindowView {
         self.metadata.update(cx, |metadata, cx| {
             metadata.release_render_images(window, cx)
         });
-        self.album_artwork.update(cx, |artwork, cx| {
+        self.artwork_runtime.update(cx, |artwork, cx| {
             artwork.release_all_images(window, cx);
         });
         for albums in self.album_browsers.values() {
@@ -913,7 +913,7 @@ impl WindowView {
     pub(super) fn layout_changed(&mut self, cx: &mut Context<Self>) {
         let cancellation = self.workspace.publish_structure(
             AudioVisualizerOptions::from(self.state.system.config.as_ref()),
-            crate::config::AlbumArtworkOptions::from(self.state.system.config.as_ref()),
+            crate::config::ArtworkOptions::from(self.state.system.config.as_ref()),
         );
         self.apply_layout_change(cancellation, cx);
         self.sync_analysis(cx);
@@ -1010,7 +1010,7 @@ impl WindowView {
             .artwork_images
             .set_decode_budget_mib(self.state.system.config.artwork_decode_budget_mib, cx)
         {
-            self.album_artwork.update(cx, |_, cx| cx.notify());
+            self.artwork_runtime.update(cx, |_, cx| cx.notify());
             for albums in self.album_browsers.values() {
                 albums.update(cx, |_, cx| cx.notify());
             }
@@ -1048,7 +1048,7 @@ impl WindowView {
                         scroll: Rc::clone(&self.workspace.scroll_views),
                     },
                     Arc::clone(&self.artwork_manager),
-                    self.default_album.clone(),
+                    self.default_artwork.clone(),
                     self.artwork_images.clone(),
                     cx,
                 )
@@ -1116,15 +1116,15 @@ impl WindowView {
         });
     }
 
-    pub(super) fn sync_album_artwork(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn sync_artwork(&mut self, cx: &mut Context<Self>) {
         self.sync_album_browser(cx);
         self.artwork_panels.retain(|id, _| {
             self.workspace
                 .panels
                 .panel(*id)
-                .is_some_and(|panel| panel.album_artwork.is_some())
+                .is_some_and(|panel| panel.artwork.is_some())
         });
-        self.album_artwork.update(cx, |artwork, cx| {
+        self.artwork_runtime.update(cx, |artwork, cx| {
             artwork.sync(
                 self.state.current_track(),
                 self.state.playback.status,
@@ -1137,7 +1137,7 @@ impl WindowView {
     }
 
     pub(super) fn sync_analysis(&mut self, cx: &mut Context<Self>) {
-        self.sync_album_artwork(cx);
+        self.sync_artwork(cx);
         self.sync_waveform(cx);
     }
 

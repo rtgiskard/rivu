@@ -31,7 +31,7 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
-use crate::config::{AlbumArtworkOptions, AudioVisualizerOptions, AudioVisualizerStyle};
+use crate::config::{ArtworkOptions, AudioVisualizerOptions, AudioVisualizerStyle};
 
 pub const MAX_SPLIT_DEPTH: usize = 32;
 
@@ -41,7 +41,7 @@ pub struct Panel {
     pub kind: String,
     pub show_tab_bar: bool,
     pub audio_visualizer: Option<AudioVisualizerOptions>,
-    pub album_artwork: Option<AlbumArtworkOptions>,
+    pub artwork: Option<ArtworkOptions>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,7 +122,7 @@ impl LayoutTemplate {
                         kind: (*kind).into(),
                         show_tab_bar,
                         audio_visualizer: None,
-                        album_artwork: None,
+                        artwork: None,
                     })
                     .collect(),
                 active: id + 1,
@@ -144,7 +144,7 @@ impl LayoutTemplate {
                             labels: false,
                             oscilloscope_overlay_channels: false,
                         }),
-                        album_artwork: None,
+                        artwork: None,
                     })
                     .collect(),
                 active: id + 1,
@@ -176,7 +176,7 @@ impl LayoutTemplate {
                     Axis::Horizontal,
                     0.21,
                     vec![
-                        tabs(12, &["album_artwork"], false),
+                        tabs(12, &["artwork"], false),
                         split(
                             14,
                             Axis::Vertical,
@@ -203,7 +203,7 @@ impl LayoutTemplate {
                             Axis::Vertical,
                             0.55,
                             vec![
-                                tabs(9, &["album_artwork"], false),
+                                tabs(9, &["artwork"], false),
                                 tabs(11, &["queue", "metadata"], true),
                             ],
                         ),
@@ -311,7 +311,7 @@ mod serialized {
         #[serde(skip_serializing_if = "Option::is_none")]
         oscilloscope_overlay_channels: Option<bool>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        album_artwork: Option<AlbumArtworkOptions>,
+        artwork: Option<ArtworkOptions>,
     }
 
     impl<'a> From<&'a Panel> for PanelView<'a> {
@@ -327,7 +327,7 @@ mod serialized {
                 oscilloscope_overlay_channels: panel
                     .audio_visualizer
                     .map(|options| options.oscilloscope_overlay_channels),
-                album_artwork: panel.album_artwork,
+                artwork: panel.artwork,
             }
         }
     }
@@ -531,7 +531,7 @@ mod serialized {
         #[serde(default, deserialize_with = "present")]
         oscilloscope_overlay_channels: Option<bool>,
         #[serde(default, deserialize_with = "present")]
-        album_artwork: Option<AlbumArtworkOptions>,
+        artwork: Option<ArtworkOptions>,
     }
 
     fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
@@ -581,14 +581,14 @@ mod serialized {
                                 Some(AudioVisualizerOptions { style, reference_lines, labels, oscilloscope_overlay_channels: overlay_channels.unwrap_or(false) }),
                             _ => return Err(anyhow!("visualizer options must be complete and belong to an audio_visualizer")),
                         };
-                        if let Some(options) = panel.album_artwork
-                            && (panel.kind != "album_artwork" || !options.period_seconds.is_finite() || options.period_seconds <= 0.0)
+                        if let Some(options) = panel.artwork
+                            && (panel.kind != "artwork" || !options.period_seconds.is_finite() || options.period_seconds <= 0.0)
                         {
-                            return Err(anyhow!("artwork options require an album_artwork and a positive finite period"));
+                            return Err(anyhow!("artwork options require an artwork and a positive finite period"));
                         }
                         Ok(Panel { id: allocate(next_id)?, kind: panel.kind,
                             show_tab_bar: panel.show_tab_bar, audio_visualizer,
-                            album_artwork: panel.album_artwork })
+                            artwork: panel.artwork })
                     }).collect::<Result<Vec<_>>>()?;
                     let active = panels
                         .get(active)
@@ -1037,7 +1037,7 @@ impl Layout {
             kind: kind.into(),
             show_tab_bar: true,
             audio_visualizer: None,
-            album_artwork: None,
+            artwork: None,
         };
         if let Some(root) = &mut self.root {
             let target = target
@@ -1429,8 +1429,8 @@ impl Layout {
         true
     }
 
-    pub fn initialize_album_artworks(&mut self, default: AlbumArtworkOptions) -> bool {
-        fn initialize(node: &mut Node, default: AlbumArtworkOptions) -> bool {
+    pub fn initialize_artworks(&mut self, default: ArtworkOptions) -> bool {
+        fn initialize(node: &mut Node, default: ArtworkOptions) -> bool {
             match node {
                 Node::Split { children, .. } => {
                     let mut changed = false;
@@ -1442,8 +1442,8 @@ impl Layout {
                 Node::Tabs { panels, .. } => {
                     let mut changed = false;
                     for panel in panels {
-                        if panel.kind == "album_artwork" && panel.album_artwork.is_none() {
-                            panel.album_artwork = Some(default);
+                        if panel.kind == "artwork" && panel.artwork.is_none() {
+                            panel.artwork = Some(default);
                             changed = true;
                         }
                     }
@@ -1456,27 +1456,24 @@ impl Layout {
             .is_some_and(|root| initialize(root, default))
     }
 
-    pub fn album_artwork_options(&self, id: u64) -> Option<AlbumArtworkOptions> {
+    pub fn artwork_options(&self, id: u64) -> Option<ArtworkOptions> {
         let Node::Tabs { panels, .. } = self.root.as_ref()?.panel_group(id)? else {
             return None;
         };
         panels
             .iter()
-            .find(|panel| panel.id == id && panel.kind == "album_artwork")?
-            .album_artwork
+            .find(|panel| panel.id == id && panel.kind == "artwork")?
+            .artwork
     }
 
-    pub fn set_album_artwork_options(&mut self, id: u64, options: AlbumArtworkOptions) -> bool {
+    pub fn set_artwork_options(&mut self, id: u64, options: ArtworkOptions) -> bool {
         if !options.period_seconds.is_finite() || options.period_seconds <= 0.0 {
             return false;
         }
-        let Some(panel) = self
-            .panel_mut(id)
-            .filter(|panel| panel.kind == "album_artwork")
-        else {
+        let Some(panel) = self.panel_mut(id).filter(|panel| panel.kind == "artwork") else {
             return false;
         };
-        panel.album_artwork = Some(options);
+        panel.artwork = Some(options);
         true
     }
 
@@ -1793,13 +1790,13 @@ mod tests {
     use serde_json::{Value, json};
 
     fn persisted_fixture() -> LayoutSet {
-        let artwork = artwork_options(crate::config::AlbumArtworkStyle::Plain);
+        let artwork = artwork_options(crate::config::ArtworkStyle::Plain);
         decoded(one_layout(json!({
             "type":"split", "axis":"horizontal", "boundaries":[0.4],
             "children":[
                 {"type":"tabs", "active":1, "panels":[
                     {"kind":"audio_visualizer", "style":"bars", "reference_lines":true, "labels":false},
-                    {"kind":"album_artwork", "album_artwork":artwork}
+                    {"kind":"artwork", "artwork":artwork}
                 ]},
                 {"type":"tabs", "panels":[{"kind":"library"}]}
             ]
@@ -1876,8 +1873,8 @@ mod tests {
             (format!("{root}/children/0/panels/0/reference_lines"), json!(false)),
             (format!("{root}/children/0/panels/0/labels"), json!(true)),
             (format!("{root}/children/0/panels/0/oscilloscope_overlay_channels"), json!(true)),
-            (format!("{root}/children/0/panels/1/album_artwork/period_seconds"), json!(value["layouts"]["Work"]["root"]["children"][0]["panels"][1]["album_artwork"]["period_seconds"].as_f64().unwrap() + 1.0)),
-            (format!("{root}/children/0/panels/1/album_artwork/style"), json!("vinyl")),
+            (format!("{root}/children/0/panels/1/artwork/period_seconds"), json!(value["layouts"]["Work"]["root"]["children"][0]["panels"][1]["artwork"]["period_seconds"].as_f64().unwrap() + 1.0)),
+            (format!("{root}/children/0/panels/1/artwork/style"), json!("vinyl")),
             (root.to_owned(), Value::Null),
         ];
         for (path, replacement) in changes {
@@ -1907,7 +1904,7 @@ mod tests {
             assert!(!original.persisted_eq(&changed), "{path}");
             assert!(!changed.persisted_eq(&original), "{path}");
         }
-        let artwork_path = format!("{root}/children/0/panels/1/album_artwork");
+        let artwork_path = format!("{root}/children/0/panels/1/artwork");
         for (field, first, second) in [
             ("mode", "static", "rotating"),
             ("direction", "clockwise", "counterclockwise"),
@@ -1935,7 +1932,7 @@ mod tests {
                     "oscilloscope_overlay_channels",
                 ][..],
             ),
-            (1, &["album_artwork"][..]),
+            (1, &["artwork"][..]),
         ] {
             let mut changed = value.clone();
             let panel = changed["layouts"]["Work"]["root"]["children"][0]["panels"][panel_index]
@@ -1993,7 +1990,7 @@ mod tests {
                 kind: kind.into(),
                 show_tab_bar: true,
                 audio_visualizer: None,
-                album_artwork: None,
+                artwork: None,
             }],
             active: id + 1,
         }
@@ -2894,59 +2891,53 @@ mod tests {
         reopened.validate().unwrap();
     }
 
-    fn artwork_options(style: crate::config::AlbumArtworkStyle) -> AlbumArtworkOptions {
-        AlbumArtworkOptions {
+    fn artwork_options(style: crate::config::ArtworkStyle) -> ArtworkOptions {
+        ArtworkOptions {
             style,
-            ..AlbumArtworkOptions::from(&crate::config::Config::default())
+            ..ArtworkOptions::from(&crate::config::Config::default())
         }
     }
 
     #[test]
     fn artwork_options_are_independent_and_survive_duplication_and_reload() {
-        use crate::config::{AlbumArtworkDirection, AlbumArtworkMode, AlbumArtworkStyle};
+        use crate::config::{ArtworkDirection, ArtworkMode, ArtworkStyle};
         let mut set = LayoutSet::default();
         *set.current_mut() = empty();
-        let first = set.current_mut().add("album_artwork", None);
-        let second = set.current_mut().add("album_artwork", None);
+        let first = set.current_mut().add("artwork", None);
+        let second = set.current_mut().add("artwork", None);
         let other = set.current_mut().add("library", None);
-        let defaults = artwork_options(AlbumArtworkStyle::Plain);
-        let custom = AlbumArtworkOptions {
-            style: AlbumArtworkStyle::Vinyl,
-            mode: AlbumArtworkMode::Rotating,
-            direction: AlbumArtworkDirection::Counterclockwise,
+        let defaults = artwork_options(ArtworkStyle::Plain);
+        let custom = ArtworkOptions {
+            style: ArtworkStyle::Vinyl,
+            mode: ArtworkMode::Rotating,
+            direction: ArtworkDirection::Counterclockwise,
             period_seconds: 7.5,
         };
-        assert!(set.current_mut().initialize_album_artworks(defaults));
-        assert!(set.current_mut().set_album_artwork_options(first, custom));
-        assert_eq!(set.current().album_artwork_options(first), Some(custom));
-        assert_eq!(set.current().album_artwork_options(second), Some(defaults));
-        assert_eq!(set.current().album_artwork_options(other), None);
-        assert!(!set.current_mut().set_album_artwork_options(other, custom));
-        assert!(
-            !set.current_mut()
-                .set_album_artwork_options(u64::MAX, custom)
-        );
+        assert!(set.current_mut().initialize_artworks(defaults));
+        assert!(set.current_mut().set_artwork_options(first, custom));
+        assert_eq!(set.current().artwork_options(first), Some(custom));
+        assert_eq!(set.current().artwork_options(second), Some(defaults));
+        assert_eq!(set.current().artwork_options(other), None);
+        assert!(!set.current_mut().set_artwork_options(other, custom));
+        assert!(!set.current_mut().set_artwork_options(u64::MAX, custom));
         for period_seconds in [0.0, -1.0, f32::NAN, f32::INFINITY] {
-            assert!(!set.current_mut().set_album_artwork_options(
+            assert!(!set.current_mut().set_artwork_options(
                 first,
-                AlbumArtworkOptions {
+                ArtworkOptions {
                     period_seconds,
                     ..custom
                 }
             ));
         }
-        assert_eq!(set.current().album_artwork_options(first), Some(custom));
+        assert_eq!(set.current().artwork_options(first), Some(custom));
         set.duplicate("Copy").unwrap();
         let copy_first = set.current().panels()[0].id;
-        assert!(
-            set.current_mut()
-                .set_album_artwork_options(copy_first, defaults)
-        );
+        assert!(set.current_mut().set_artwork_options(copy_first, defaults));
         set.select("Default").unwrap();
-        assert_eq!(set.current().album_artwork_options(first), Some(custom));
+        assert_eq!(set.current().artwork_options(first), Some(custom));
         let value = encoded(&set);
         assert_eq!(
-            value["layouts"]["Default"]["root"]["panels"][0]["album_artwork"]["period_seconds"],
+            value["layouts"]["Default"]["root"]["panels"][0]["artwork"]["period_seconds"],
             7.5
         );
         let reopened = decoded(value.clone()).unwrap();
@@ -2955,12 +2946,12 @@ mod tests {
 
     #[test]
     fn existing_artwork_layout_initialization_preserves_explicit_options() {
-        use crate::config::AlbumArtworkStyle;
-        let saved = artwork_options(AlbumArtworkStyle::Glass);
+        use crate::config::ArtworkStyle;
+        let saved = artwork_options(ArtworkStyle::Glass);
         let mut set = decoded(one_layout(json!({
             "type":"tabs", "panels":[
-                {"kind":"album_artwork", "album_artwork":saved},
-                {"kind":"album_artwork"},
+                {"kind":"artwork", "artwork":saved},
+                {"kind":"artwork"},
                 {"kind":"library"}
             ]
         })))
@@ -2971,15 +2962,15 @@ mod tests {
             .iter()
             .map(|panel| panel.id)
             .collect();
-        let defaults = artwork_options(AlbumArtworkStyle::Vinyl);
-        assert!(set.current_mut().initialize_album_artworks(defaults));
+        let defaults = artwork_options(ArtworkStyle::Vinyl);
+        assert!(set.current_mut().initialize_artworks(defaults));
         assert!(
             !set.current_mut()
-                .initialize_album_artworks(artwork_options(AlbumArtworkStyle::Plain))
+                .initialize_artworks(artwork_options(ArtworkStyle::Plain))
         );
-        assert_eq!(set.current().album_artwork_options(ids[0]), Some(saved));
-        assert_eq!(set.current().album_artwork_options(ids[1]), Some(defaults));
-        assert_eq!(set.current().album_artwork_options(ids[2]), None);
+        assert_eq!(set.current().artwork_options(ids[0]), Some(saved));
+        assert_eq!(set.current().artwork_options(ids[1]), Some(defaults));
+        assert_eq!(set.current().artwork_options(ids[2]), None);
         let value = encoded(&set);
         assert_eq!(encoded(&decoded(value.clone()).unwrap()), value);
     }
@@ -2987,33 +2978,43 @@ mod tests {
     #[test]
     fn artwork_options_survive_docking() {
         let mut layout = empty();
-        let source = layout.add("album_artwork", None);
+        let source = layout.add("artwork", None);
         let target = layout.add("library", None);
-        let options = artwork_options(crate::config::AlbumArtworkStyle::Vinyl);
-        assert!(layout.set_album_artwork_options(source, options));
+        let options = artwork_options(crate::config::ArtworkStyle::Vinyl);
+        assert!(layout.set_artwork_options(source, options));
         let destination = group(&layout, target);
         assert!(layout.move_panel(source, destination, Edge::Right, None));
-        assert_eq!(layout.album_artwork_options(source), Some(options));
+        assert_eq!(layout.artwork_options(source), Some(options));
     }
 
     #[test]
     fn artwork_persistence_rejects_incomplete_invalid_and_misplaced_options() {
         let valid =
-            serde_json::to_value(artwork_options(crate::config::AlbumArtworkStyle::Plain)).unwrap();
+            serde_json::to_value(artwork_options(crate::config::ArtworkStyle::Plain)).unwrap();
         for field in ["style", "mode", "direction", "period_seconds"] {
             let mut incomplete = valid.clone();
             incomplete.as_object_mut().unwrap().remove(field);
-            assert!(decoded(one_layout(json!({"type":"tabs", "panels":[{"kind":"album_artwork", "album_artwork":incomplete}]}))).is_err());
+            assert!(
+                decoded(one_layout(
+                    json!({"type":"tabs", "panels":[{"kind":"artwork", "artwork":incomplete}]})
+                ))
+                .is_err()
+            );
         }
         for period in [json!(0), json!(-1), json!(null), json!("20")] {
             let mut invalid = valid.clone();
             invalid["period_seconds"] = period;
-            assert!(decoded(one_layout(json!({"type":"tabs", "panels":[{"kind":"album_artwork", "album_artwork":invalid}]}))).is_err());
+            assert!(
+                decoded(one_layout(
+                    json!({"type":"tabs", "panels":[{"kind":"artwork", "artwork":invalid}]})
+                ))
+                .is_err()
+            );
         }
         for kind in ["library", "audio_visualizer"] {
             assert!(
                 decoded(one_layout(
-                    json!({"type":"tabs", "panels":[{"kind":kind, "album_artwork":valid}]})
+                    json!({"type":"tabs", "panels":[{"kind":kind, "artwork":valid}]})
                 ))
                 .is_err()
             );
@@ -3022,7 +3023,7 @@ mod tests {
         unknown["fps"] = json!(60);
         assert!(
             decoded(one_layout(
-                json!({"type":"tabs", "panels":[{"kind":"album_artwork", "album_artwork":unknown}]})
+                json!({"type":"tabs", "panels":[{"kind":"artwork", "artwork":unknown}]})
             ))
             .is_err()
         );
@@ -3043,7 +3044,7 @@ mod tests {
             json!({"type":"tabs", "panels":[{"kind":"audio_visualizer", "style":"bars"}]}),
             json!({"type":"tabs", "panels":[{"kind":"a", "style":"bars", "reference_lines":true, "labels":true}]}),
             json!({"type":"tabs", "panels":[{"kind":"audio_visualizer", "style":null}]}),
-            json!({"type":"tabs", "panels":[{"kind":"album_artwork", "album_artwork":null}]}),
+            json!({"type":"tabs", "panels":[{"kind":"artwork", "artwork":null}]}),
             json!({"type":"split", "axis":"horizontal", "children":[leaf.clone()]}),
             json!({"type":"split", "axis":"Horizontal", "children":[leaf.clone(), leaf.clone()]}),
             json!({"type":"split", "axis":"horizontal", "children":[split, leaf.clone()]}),

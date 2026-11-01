@@ -68,7 +68,7 @@ pub(in crate::gui) struct Metadata {
     artwork_manager: Arc<ArtworkManager>,
     artwork_loader: ArtworkLoader,
     artwork_view: ArtworkView,
-    default_album: Entity<DefaultArtwork>,
+    default_artwork: Entity<DefaultArtwork>,
 }
 
 impl EventEmitter<MetadataEvent> for Metadata {}
@@ -80,7 +80,7 @@ impl Metadata {
         ui_font: Font,
         artwork_manager: Arc<ArtworkManager>,
         artwork_images: ArtworkImageRegistry,
-        default_album: Entity<DefaultArtwork>,
+        default_artwork: Entity<DefaultArtwork>,
         cx: &mut Context<Self>,
     ) -> Self {
         let state = context.snapshot();
@@ -101,7 +101,7 @@ impl Metadata {
             artwork_manager,
             artwork_loader: ArtworkLoader::default(),
             artwork_view: ArtworkView::new(artwork_images),
-            default_album,
+            default_artwork,
         };
         this.sync_metadata_default(cx);
         this
@@ -1417,14 +1417,14 @@ impl Metadata {
                                 tags.child(match self.artwork_view.measured_image(panel_id, cx) {
                                     Some(image) => artwork_preview(
                                         theme,
-                                        self.tr("shell-panel-album-artwork"),
+                                        self.tr("shell-panel-artwork"),
                                         image,
                                         self.artwork_view.aspect_ratio(cx),
                                     ),
                                     None => artwork_preview(
                                         theme,
-                                        self.tr("shell-panel-album-artwork"),
-                                        self.default_album
+                                        self.tr("shell-panel-artwork"),
+                                        self.default_artwork
                                             .clone()
                                             .cached(gpui::StyleRefinement::default().size_full()),
                                         Some(1.0),

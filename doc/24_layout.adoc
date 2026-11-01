@@ -112,7 +112,7 @@ sizes.
 == Panel insertion
 
 The catalog uses two rows. The first contains Playback, Library, Albums, Queue,
-Playlists, and Recent tracks. The second contains Track details, Album artwork,
+Playlists, and Recent tracks. The second contains Track details, Artwork,
 Audio processing, and Visualization. Visualization inserts one `audio_visualizer`
 instance, initialized from global style and overlay defaults; Spectrum,
 Spectrogram, and Waveform are selectable styles rather than catalog entries.

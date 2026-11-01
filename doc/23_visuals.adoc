@@ -481,7 +481,7 @@ Color ramps derive from the configured visualizer colors, with increasing
 lightness and pale highlights reserved for the strongest cells. Density has a
 cyanward intermediate hue; Spatial Spectrum retains the primary-to-secondary
 hue progression. A bounded 256-sample straight RGBA palette is rebuilt only when
-configured colors change, preserving the previous 8-bit color/alpha quantization.
+configured colors change and uses 8-bit color/alpha quantization.
 The shader maps each of four neighboring scalar values to its quantized palette
 sample before interpolating colors. Opacity lifts faint cells without renormalizing
 the field: occupancy and spectral power retain fixed dB references, and empty cells
@@ -558,7 +558,7 @@ cover; neither requires extracted colors or audio data. Real and generated
 default covers share animation, interaction, and lifecycle rules. Style and
 frame-pacing changes preserve the rotation angle. Style controls, per-panel
 persistence, defaults, and the frame-rate range are documented in
-link:01_config.adoc#album-artwork[Album artwork].
+link:01_config.adoc#artwork[Artwork].
 
 Artwork uses the shared window frame gate described under
 <<independent-analysis-and-display-clocks,Independent analysis and display clocks>>,
@@ -640,7 +640,7 @@ are listed under <<renderer-regression-checks,Renderer regression checks>>.
 
 === Why the patch is needed
 
-Album artwork reuses its decoded image and atlas texture while the GPU transforms
+Artwork reuses its decoded image and atlas texture while the GPU transforms
 the already-cropped sprite. Rounded clipping follows image-local coordinates;
 the surrounding content mask remains in screen coordinates. No rotated pixel
 buffers or angle-indexed image cache are created. Image transforms pass through
