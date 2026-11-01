@@ -237,6 +237,7 @@ pub(super) enum QueryKind {
     QueueSelection(u64),
     Search(String),
     Directory(PathBuf),
+    OtherTracksCount,
     OtherTracks {
         query: String,
         favorite: Option<bool>,
@@ -269,6 +270,7 @@ impl QueryKind {
 
     fn into_query(self, offset: usize, limit: usize) -> Query {
         match self {
+            QueryKind::OtherTracksCount => Query::OtherTracksCount,
             QueryKind::Track(track_id) => Query::Track { track_id },
             QueryKind::Queue => Query::QueuePage {
                 query: None,

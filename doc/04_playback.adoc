@@ -396,6 +396,7 @@ Text edits use the shared
 link:02_library.adoc#desktop-list-search[delayed application and immediate clearing].
 
 Library's link:02_library.adoc#other[Other] has its own immediate `/` search.
+Its top-level entry is hidden when the unfiltered collection is empty.
 `Alt+f` / `Alt+m` toggle favorite-only / missing-only filters; `Alt+s` cycles ID,
 album, and most-played sorting. Selection follows its track through changes while
 that track remains in the results. `e` appends the selected track; `Alt+e` appends

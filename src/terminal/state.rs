@@ -164,7 +164,7 @@ impl View {
             Self::Tree(tree) if !tree.directory.as_os_str().is_empty() => {
                 Some(QueryKind::Directory(tree.directory.clone()))
             }
-            Self::Tree(_) => None,
+            Self::Tree(_) => Some(QueryKind::OtherTracksCount),
             Self::Playlists(_) => Some(QueryKind::Playlists),
             Self::PlaylistDetail { detail, .. } => Some(match detail.entry_anchor {
                 Some(entry_id) if selection => QueryKind::PlaylistSelection {
@@ -228,6 +228,11 @@ impl View {
                 return true;
             }
         }
+        if let Self::Tree(tree) = self
+            && QueryKind::OtherTracksCount.changed(previous, next)
+        {
+            tree.other_present = None;
+        }
         if rows_changed && !coordinates_changed && !page_size_changed {
             self.invalidate_payload();
         } else if rows_changed || page_size_changed {
@@ -256,6 +261,7 @@ impl View {
             && let Self::Tree(tree) = self
         {
             tree.roots = LibraryTree::roots(&next.system.library_roots);
+            tree.other_present = None;
             if !tree.other_tracks && tree.directory.as_os_str().is_empty() {
                 tree.entries.clear();
             }
@@ -336,6 +342,10 @@ impl UiState {
         if tree.other_tracks || !tree.directory.as_os_str().is_empty() {
             return false;
         }
+        // Do not clamp the saved selection against a provisional root-only total.
+        let Some(other_present) = tree.other_present else {
+            return false;
+        };
         let limit = state.system.query_batch_size as usize;
         let mut changed = false;
         while let Some(offset) = tree.entries.next_offset(limit) {
@@ -344,12 +354,16 @@ impl UiState {
                 .iter()
                 .cloned()
                 .map(|path| DirectoryRow::Directory { path })
-                .chain(std::iter::once(DirectoryRow::OtherTracks))
+                .chain(other_present.then_some(DirectoryRow::OtherTracks))
                 .skip(offset)
                 .take(limit)
                 .collect();
-            tree.entries
-                .insert(offset, limit, tree.roots.len() + 1, rows);
+            tree.entries.insert(
+                offset,
+                limit,
+                tree.roots.len() + usize::from(other_present),
+                rows,
+            );
             changed = true;
         }
         changed
@@ -406,6 +420,7 @@ impl UiState {
                 QueryKind::Directory(tree.directory.clone()),
                 tree.entries.next_offset(limit)?,
             ),
+            View::Tree(tree) if tree.other_present.is_none() => (QueryKind::OtherTracksCount, 0),
             View::Playlists(playlists) => (QueryKind::Playlists, playlists.next_offset(limit)?),
             View::PlaylistDetail { detail, .. }
                 if state
@@ -520,6 +535,12 @@ impl UiState {
                     .results
                     .insert(request.offset, request.limit, page.total, page.rows);
             }
+            (View::Tree(tree), ViewResponse::OtherTracksCount(total))
+                if !tree.other_tracks && tree.directory.as_os_str().is_empty() =>
+            {
+                tree.other_present = Some(total != 0);
+                tree.entries.clear();
+            }
             (View::Tree(tree), ViewResponse::LibraryPage(page)) if tree.other_tracks => {
                 tree.entries.insert(
                     request.offset,
@@ -590,6 +611,7 @@ impl UiState {
                 return true;
             }
         }
+        self.prepare_local_view(state);
         self.mark_local_change();
         true
     }
@@ -1230,6 +1252,7 @@ pub(super) struct LibraryTree {
     pub(super) ancestors: Vec<(PathBuf, ListState, usize)>,
     pub(super) entries: PagedList<DirectoryRow>,
     pub(super) other_tracks: bool,
+    other_present: Option<bool>,
     pub(super) query: String,
     pub(super) editing_query: bool,
     pub(super) favorite: Option<bool>,

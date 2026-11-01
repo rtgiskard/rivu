@@ -442,6 +442,7 @@ pub(in crate::terminal) fn track(index: usize) -> LibraryRow {
 pub(in crate::terminal) fn response(request: &QueryRequest, total: usize) -> QueryResult {
     let indices = request.offset..(request.offset + request.limit).min(total);
     let view = match &request.kind {
+        QueryKind::OtherTracksCount => ViewResponse::OtherTracksCount(total),
         QueryKind::Track(_) => panic!("track reads need explicit metadata"),
         QueryKind::Queue => ViewResponse::QueuePage(Page {
             total,
@@ -515,6 +516,75 @@ pub(in crate::terminal) fn response(request: &QueryRequest, total: usize) -> Que
         revisions: request.stamp.revisions(),
         view,
     }
+}
+
+#[test]
+fn other_header_tracks_unfiltered_membership_and_rejects_stale_results() {
+    for roots in [vec![], vec![PathBuf::from("/music")]] {
+        let mut state = query_snapshot();
+        state.system.library_roots = Arc::new(roots.clone());
+        let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
+        tui.ui.view = View::Tree(LibraryTree::new(&roots));
+        render_view(&mut tui.ui);
+        tui.ui.prepare_local_view(&state);
+        let first = tui.ui.query_request(&state).unwrap();
+        assert!(tui.ui.apply_query(&state, &first, Ok(response(&first, 0))));
+        let View::Tree(tree) = &tui.ui.view else {
+            unreachable!()
+        };
+        assert_eq!(tree.entries.total, roots.len());
+        assert!(tui.ui.query_request(&state).is_none());
+
+        state.library.structure_revision += 1;
+        tui.apply_snapshot(state.clone());
+        let stale = tui.ui.query_request(&state).unwrap();
+        state.library.structure_revision += 1;
+        tui.apply_snapshot(state.clone());
+        assert!(!tui.ui.apply_query(&state, &stale, Ok(response(&stale, 0))));
+        let current = tui.ui.query_request(&state).unwrap();
+        assert!(
+            tui.ui
+                .apply_query(&state, &current, Ok(response(&current, 1)))
+        );
+        let View::Tree(tree) = &tui.ui.view else {
+            unreachable!()
+        };
+        assert_eq!(tree.entries.total, roots.len() + 1);
+
+        state.library.structure_revision += 1;
+        tui.apply_snapshot(state.clone());
+        let current = tui.ui.query_request(&state).unwrap();
+        assert!(
+            tui.ui
+                .apply_query(&state, &current, Ok(response(&current, 0)))
+        );
+        let View::Tree(tree) = &tui.ui.view else {
+            unreachable!()
+        };
+        assert_eq!(tree.entries.total, roots.len());
+        assert!(tui.ui.query_request(&state).is_none());
+    }
+}
+
+#[test]
+fn other_header_selection_survives_membership_refresh() {
+    let mut state = query_snapshot();
+    state.system.library_roots = Arc::new(vec![PathBuf::from("/music")]);
+    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
+    tui.ui.view = View::Tree(LibraryTree::new(&state.system.library_roots));
+    render_view(&mut tui.ui);
+    load_visible(&mut tui.ui, &state);
+    tui.ui.key_action(KeyEvent::from(KeyCode::Down), &state);
+    state.library.revision += 1;
+    tui.apply_snapshot(state.clone());
+    assert!(tui.ui.query_request(&state).is_none());
+    state.library.structure_revision += 1;
+    tui.apply_snapshot(state.clone());
+    load_visible(&mut tui.ui, &state);
+    let View::Tree(tree) = &tui.ui.view else {
+        unreachable!()
+    };
+    assert_eq!(tree.entries.selected(), Some(&DirectoryRow::OtherTracks));
 }
 
 pub(in crate::terminal) fn load_visible(ui: &mut UiState, state: &TuiSnapshot) {
@@ -783,7 +853,7 @@ fn hidden_pages_follow_page_size_and_library_root_changes() {
     tui.ui.key_action(KeyEvent::from(KeyCode::Tab), &state);
     load_visible(&mut tui.ui, &state);
     tui.ui.key_action(KeyEvent::from(KeyCode::Tab), &state);
-    assert!(tui.ui.prepare_local_view(&state));
+    load_visible(&mut tui.ui, &state);
     tui.ui.key_action(KeyEvent::from(KeyCode::Tab), &state);
     let old = tui.ui.query_request(&state).unwrap();
     let mut next = state.clone();
@@ -799,7 +869,7 @@ fn hidden_pages_follow_page_size_and_library_root_changes() {
     assert_eq!(current.limit, 5);
     assert_ne!(current.generation, old.generation);
     tui.ui.key_action(KeyEvent::from(KeyCode::BackTab), &next);
-    assert!(tui.ui.prepare_local_view(&next));
+    load_visible(&mut tui.ui, &next);
     tui.ui.key_action(KeyEvent::from(KeyCode::Down), &next);
     let View::Tree(tree) = &tui.ui.view else {
         unreachable!()
