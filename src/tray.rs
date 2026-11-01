@@ -1,6 +1,5 @@
 use crate::{
-    app::AppHandle, artwork::DEFAULT_IMAGE, core::CoreHandle, i18n::Localizer,
-    projection::TraySnapshot,
+    DEFAULT_IMAGE, app::AppHandle, core::CoreHandle, i18n::Localizer, projection::TraySnapshot,
 };
 use futures::{FutureExt, StreamExt, channel::oneshot, future::Shared};
 use parking_lot::RwLock;

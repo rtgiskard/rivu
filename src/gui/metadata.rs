@@ -15,7 +15,7 @@ use super::{
     feature::FeatureContext,
     format_time,
 };
-use crate::{artwork::ArtworkManager, projection::GuiSnapshot};
+use crate::projection::GuiSnapshot;
 use chrono::{DateTime, Local};
 use gpui::{
     AnyElement, App, Context, Div, Entity, EventEmitter, Focusable, Font, SharedString,
@@ -23,6 +23,7 @@ use gpui::{
 };
 use read::{MetadataReadCoordinator, MetadataReadTask, ReadCompletion, ReadEnvironment};
 use rivu_format::decoder_hint::DecoderHint;
+use rivu_metadata::artwork::ArtworkManager;
 use rivu_protocol::model::{Command, PlaybackStatus, Query, Track};
 use rivu_ui::{
     ChoiceItem, ChoicePopup, ChoiceSelect, ChoiceState, IconButton, IconButtonDensity,

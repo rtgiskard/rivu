@@ -1,12 +1,12 @@
 //! Application lifecycle and services shared by graphical and headless instances.
 //! CLI parsing and client-relative path translation remain at the binary boundary.
+use rivu_metadata::artwork::ArtworkManager;
 
 mod startup;
 
 #[cfg(test)]
 use crate::config::ConfigPersistence;
 use crate::{
-    artwork::ArtworkManager,
     core::{CoreHandle, CoreLifecycle, CoreRuntime},
     execution::TaskRuntime,
     gui::{self, session::UiSession},
@@ -295,8 +295,11 @@ impl App {
             handle.clone(),
             &tasks.handle,
         )?;
-        let artwork =
-            Arc::new(ArtworkManager::new(&data_dir).with_max_image_bytes(artwork_limit_bytes));
+        let artwork = Arc::new(
+            ArtworkManager::new(&data_dir)
+                .with_default_image(crate::DEFAULT_IMAGE)
+                .with_max_image_bytes(artwork_limit_bytes),
+        );
         let mut app = Self {
             handle,
             runtime,

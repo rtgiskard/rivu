@@ -72,7 +72,7 @@ fn fixture() -> (tempfile::TempDir, Service, Track, Arc<Config>) {
         writer.write_sample(sample).unwrap();
     }
     writer.finalize().unwrap();
-    let mut track = crate::artwork::tests::track(path);
+    let mut track = crate::test_support::artwork_track(path);
     track.bits_per_sample = Some(32);
     let config = Arc::new(Config::default());
     let mut service = Service::new();

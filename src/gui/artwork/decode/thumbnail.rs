@@ -10,7 +10,7 @@ use gpui::{ImageCacheError, RenderImage};
 use image::{ImageDecoder, ImageFormat, ImageReader, codecs::webp::WebPDecoder};
 use parking_lot::Mutex;
 
-use crate::artwork::cache_paths::thumbnail_path;
+use rivu_metadata::artwork::cache_paths::thumbnail_path;
 
 use super::{Budget, decode, limit_error, preflight_webp, to_bgra};
 
@@ -350,10 +350,11 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let bytes = super::super::tests::large_encoded_bmp();
         let hash = blake3::hash(&bytes);
-        let path = crate::artwork::cache_paths::original_path(directory.path(), hash, "bmp");
+        let path =
+            rivu_metadata::artwork::cache_paths::original_path(directory.path(), hash, "bmp");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, bytes).unwrap();
-        let admitted = crate::artwork::DEFAULT_MAX_IMAGE_BYTES;
+        let admitted = rivu_metadata::artwork::DEFAULT_MAX_IMAGE_BYTES;
         let lower = 8 * 1024 * 1024;
         let budget = Budget::new(2);
         // Keep the shared source alive so later requests exercise resident reuse.
@@ -421,12 +422,13 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let bytes = png(800, 400, [240, 12, 20, 96]);
         let hash = blake3::hash(&bytes);
-        let path = crate::artwork::cache_paths::original_path(directory.path(), hash, "png");
+        let path =
+            rivu_metadata::artwork::cache_paths::original_path(directory.path(), hash, "png");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, &bytes).unwrap();
         let loaded = load(
             &path,
-            crate::artwork::DEFAULT_MAX_IMAGE_BYTES,
+            rivu_metadata::artwork::DEFAULT_MAX_IMAGE_BYTES,
             Budget::default(),
             256,
         )
@@ -457,7 +459,7 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), bytes);
         let cached = load(
             &path,
-            crate::artwork::DEFAULT_MAX_IMAGE_BYTES,
+            rivu_metadata::artwork::DEFAULT_MAX_IMAGE_BYTES,
             Budget::default(),
             256,
         )
@@ -520,7 +522,7 @@ mod tests {
         fs::write(&path, &bytes).unwrap();
         let image = load(
             &path,
-            crate::artwork::DEFAULT_MAX_IMAGE_BYTES,
+            rivu_metadata::artwork::DEFAULT_MAX_IMAGE_BYTES,
             Budget::default(),
             256,
         )
@@ -540,7 +542,7 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), bytes);
         let cached = load(
             &path,
-            crate::artwork::DEFAULT_MAX_IMAGE_BYTES,
+            rivu_metadata::artwork::DEFAULT_MAX_IMAGE_BYTES,
             Budget::default(),
             256,
         )
@@ -557,7 +559,7 @@ mod tests {
         for tier in [256, 512, 1024, u32::MAX] {
             let loaded = load(
                 &path,
-                crate::artwork::DEFAULT_MAX_IMAGE_BYTES,
+                rivu_metadata::artwork::DEFAULT_MAX_IMAGE_BYTES,
                 Budget::default(),
                 tier,
             )
@@ -582,7 +584,7 @@ mod tests {
                 size(
                     &load(
                         &path,
-                        crate::artwork::DEFAULT_MAX_IMAGE_BYTES,
+                        rivu_metadata::artwork::DEFAULT_MAX_IMAGE_BYTES,
                         Budget::default(),
                         tier
                     )
@@ -606,7 +608,7 @@ mod tests {
         fs::write(&path, &replacement).unwrap();
         let image = load(
             &path,
-            crate::artwork::DEFAULT_MAX_IMAGE_BYTES,
+            rivu_metadata::artwork::DEFAULT_MAX_IMAGE_BYTES,
             Budget::default(),
             256,
         )
@@ -626,7 +628,7 @@ mod tests {
         fs::write(&path, super::super::tests::gif()).unwrap();
         let loaded = load(
             &path,
-            crate::artwork::DEFAULT_MAX_IMAGE_BYTES,
+            rivu_metadata::artwork::DEFAULT_MAX_IMAGE_BYTES,
             Budget::default(),
             256,
         )
@@ -665,7 +667,7 @@ mod tests {
             fs::write(&path, bytes).unwrap();
             let loaded = load(
                 &path,
-                crate::artwork::DEFAULT_MAX_IMAGE_BYTES,
+                rivu_metadata::artwork::DEFAULT_MAX_IMAGE_BYTES,
                 Budget::default(),
                 256,
             )
@@ -682,14 +684,15 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let bytes = png(800, 400, [220, 22, 35, 255]);
         let hash = blake3::hash(&bytes);
-        let path = crate::artwork::cache_paths::original_path(directory.path(), hash, "png");
+        let path =
+            rivu_metadata::artwork::cache_paths::original_path(directory.path(), hash, "png");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, &bytes).unwrap();
         let thumbnail = thumbnail_path(&path, hash, 256).unwrap();
         for damaged in [true, false] {
             load(
                 &path,
-                crate::artwork::DEFAULT_MAX_IMAGE_BYTES,
+                rivu_metadata::artwork::DEFAULT_MAX_IMAGE_BYTES,
                 Budget::default(),
                 256,
             )
@@ -703,7 +706,7 @@ mod tests {
                 size(
                     &load(
                         &path,
-                        crate::artwork::DEFAULT_MAX_IMAGE_BYTES,
+                        rivu_metadata::artwork::DEFAULT_MAX_IMAGE_BYTES,
                         Budget::default(),
                         256
                     )
@@ -718,7 +721,7 @@ mod tests {
         assert!(
             load(
                 &path,
-                crate::artwork::DEFAULT_MAX_IMAGE_BYTES,
+                rivu_metadata::artwork::DEFAULT_MAX_IMAGE_BYTES,
                 Budget {
                     max_side: 512,
                     ..Budget::default()
@@ -737,18 +740,18 @@ mod tests {
         fs::write(&path, &bytes).unwrap();
         let first = source(
             blake3::hash(&bytes),
-            crate::artwork::DEFAULT_MAX_IMAGE_BYTES,
+            rivu_metadata::artwork::DEFAULT_MAX_IMAGE_BYTES,
             Budget::default(),
         );
         let second = source(
             blake3::hash(&bytes),
-            crate::artwork::DEFAULT_MAX_IMAGE_BYTES,
+            rivu_metadata::artwork::DEFAULT_MAX_IMAGE_BYTES,
             Budget::default(),
         );
         assert!(Arc::ptr_eq(&first, &second));
         let image = load(
             &path,
-            crate::artwork::DEFAULT_MAX_IMAGE_BYTES,
+            rivu_metadata::artwork::DEFAULT_MAX_IMAGE_BYTES,
             Budget::default(),
             256,
         )
@@ -756,7 +759,7 @@ mod tests {
         .image;
         let repeated = load(
             &path,
-            crate::artwork::DEFAULT_MAX_IMAGE_BYTES,
+            rivu_metadata::artwork::DEFAULT_MAX_IMAGE_BYTES,
             Budget::default(),
             256,
         )
@@ -766,7 +769,7 @@ mod tests {
         let original = Arc::clone(first.lock().original.as_ref().unwrap());
         load(
             &path,
-            crate::artwork::DEFAULT_MAX_IMAGE_BYTES,
+            rivu_metadata::artwork::DEFAULT_MAX_IMAGE_BYTES,
             Budget::default(),
             512,
         )

@@ -1,8 +1,9 @@
 //! Window ownership and release of visual subscriptions and analysis demand.
+use rivu_metadata::artwork::ArtworkManager;
 
 pub(crate) use super::layout::persistence::LoadedLayouts;
 use super::{WindowView, layout::persistence::LayoutPersistence};
-use crate::{app::AppHandle, artwork::ArtworkManager, core::CoreHandle, i18n::Localizer};
+use crate::{app::AppHandle, core::CoreHandle, i18n::Localizer};
 use anyhow::Result;
 use gpui::*;
 use std::{

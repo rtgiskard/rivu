@@ -1,3 +1,4 @@
+use rivu_metadata::artwork::{Artwork as LoadedArtwork, ArtworkIdentity, ArtworkManager};
 use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use gpui::{
@@ -6,7 +7,6 @@ use gpui::{
 };
 
 use crate::{
-    artwork::{Artwork as LoadedArtwork, ArtworkIdentity, ArtworkManager},
     config::{ArtworkDirection, ArtworkMode, ArtworkOptions, ArtworkStyle, Config},
     i18n::Localizer,
 };
@@ -330,7 +330,7 @@ impl ArtworkRuntime {
         let cached = self
             .track
             .as_ref()
-            .and_then(|track| self.manager.cached_result(track));
+            .and_then(|track| self.manager.cached_result(crate::artwork_source(track)));
         let cold = cached.is_none();
         self.replace_artwork(cached.flatten(), cx);
         if let Some(track) = self.track.as_ref().filter(|_| cold)
@@ -341,12 +341,12 @@ impl ArtworkRuntime {
     }
 
     fn start_artwork(&mut self, track: Track, cx: &mut Context<Self>) {
-        let identity = ArtworkIdentity::for_track(&track);
+        let identity = ArtworkIdentity::new(crate::artwork_source(&track));
         let manager = Arc::clone(&self.manager);
         cx.spawn(async move |this, cx| {
             let loaded = cx
                 .background_executor()
-                .spawn(async move { manager.load(&track) })
+                .spawn(async move { manager.load(crate::artwork_source(&track)) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if !this.loader.finish(&identity) {
@@ -356,7 +356,7 @@ impl ArtworkRuntime {
                     && this
                         .track
                         .as_ref()
-                        .is_some_and(|track| identity.matches(track))
+                        .is_some_and(|track| identity.matches(crate::artwork_source(track)))
                 {
                     this.replace_artwork(loaded, cx);
                 } else {
@@ -658,12 +658,13 @@ mod tests {
                 .save(path.join("cover.png"))
                 .unwrap();
         }
-        let original = crate::artwork::tests::track(directory.path().join("before/track.wav"));
+        let original =
+            crate::test_support::artwork_track(directory.path().join("before/track.wav"));
         let mut relocated = original.clone();
         relocated.path = directory.path().join("after/track.wav");
         let manager = Arc::new(ArtworkManager::new(directory.path()));
-        let old = manager.load(&original).unwrap();
-        let new = manager.load(&relocated).unwrap();
+        let old = manager.load(crate::artwork_source(&original)).unwrap();
+        let new = manager.load(crate::artwork_source(&relocated)).unwrap();
         assert_ne!(old, new);
         let config = Config::default();
         let root = Node::Tabs {
@@ -718,7 +719,10 @@ mod tests {
             );
             assert!(!owner.view.replace(Some(new), cx));
             assert_eq!(owner.instances[&2].rotation.angle, 0.75);
-            assert!(!ArtworkIdentity::for_track(&original).matches(owner.track.as_ref().unwrap()));
+            assert!(
+                !ArtworkIdentity::new(crate::artwork_source(&original))
+                    .matches(crate::artwork_source(owner.track.as_ref().unwrap()))
+            );
         });
         owner.update(cx, |owner, cx| {
             owner.sync(
@@ -737,9 +741,19 @@ mod tests {
                 let mut pressure = relocated.clone();
                 pressure.id = id;
                 pressure.path = directory.path().join("pressure").join(format!("{id}.wav"));
-                assert!(owner.manager.load(&pressure).is_none());
+                assert!(
+                    owner
+                        .manager
+                        .load(crate::artwork_source(&pressure))
+                        .is_none()
+                );
             }
-            assert!(owner.manager.cached_result(&relocated).is_none());
+            assert!(
+                owner
+                    .manager
+                    .cached_result(crate::artwork_source(&relocated))
+                    .is_none()
+            );
             owner.sync(
                 Some(&relocated),
                 PlaybackStatus::Paused,
@@ -774,8 +788,18 @@ mod tests {
         });
         cx.run_until_parked();
         owner.update(cx, |owner, cx| {
-            assert!(owner.manager.cached_result(&relocated).is_some());
-            assert!(owner.manager.cached_result(&missing).is_none());
+            assert!(
+                owner
+                    .manager
+                    .cached_result(crate::artwork_source(&relocated))
+                    .is_some()
+            );
+            assert!(
+                owner
+                    .manager
+                    .cached_result(crate::artwork_source(&missing))
+                    .is_none()
+            );
             assert!(owner.view.image(cx).is_none());
             owner.sync(
                 Some(&missing),
@@ -788,7 +812,10 @@ mod tests {
         });
         cx.run_until_parked();
         owner.update(cx, |owner, cx| {
-            assert_eq!(owner.manager.cached_result(&missing), Some(None));
+            assert_eq!(
+                owner.manager.cached_result(crate::artwork_source(&missing)),
+                Some(None)
+            );
             owner.sync(
                 Some(&missing),
                 PlaybackStatus::Paused,
@@ -807,7 +834,11 @@ mod tests {
             );
             assert!(owner.view.image(cx).is_none());
             assert!(owner.loader.prepare(&missing).is_some());
-            assert!(owner.loader.finish(&ArtworkIdentity::for_track(&missing)));
+            assert!(
+                owner
+                    .loader
+                    .finish(&ArtworkIdentity::new(crate::artwork_source(&missing)))
+            );
         });
     }
 

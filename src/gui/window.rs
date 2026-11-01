@@ -164,7 +164,7 @@ pub(crate) struct WindowView {
     pub(super) shell: shell::WindowShell,
 
     pub(super) error: Option<String>,
-    pub(super) artwork_manager: Arc<crate::artwork::ArtworkManager>,
+    pub(super) artwork_manager: Arc<rivu_metadata::artwork::ArtworkManager>,
     pub(super) artwork_images: artwork::ArtworkImageRegistry,
     pub(super) default_artwork: Entity<artwork::DefaultArtwork>,
     pub(super) artwork_runtime: Entity<artwork_panel::ArtworkRuntime>,
@@ -501,7 +501,7 @@ impl WindowView {
     pub(super) fn new(
         handle: CoreHandle,
         layout_save: LayoutPersistenceHandle,
-        artwork_manager: Arc<crate::artwork::ArtworkManager>,
+        artwork_manager: Arc<rivu_metadata::artwork::ArtworkManager>,
         session: Weak<RefCell<UiSession>>,
         i18n: Arc<Localizer>,
         window: &mut Window,

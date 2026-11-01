@@ -516,7 +516,7 @@ impl Render for WindowView {
                     static LOGO: std::sync::LazyLock<Arc<Image>> = std::sync::LazyLock::new(|| {
                         Arc::new(Image::from_bytes(
                             ImageFormat::Png,
-                            crate::artwork::DEFAULT_IMAGE.to_vec(),
+                            crate::DEFAULT_IMAGE.to_vec(),
                         ))
                     });
                     let built = chrono::DateTime::<chrono::Utc>::from_timestamp(

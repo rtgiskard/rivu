@@ -1859,7 +1859,7 @@ mod tests {
             )
         });
         let before = runtime.handle.gui_snapshot();
-        let track = crate::artwork::tests::track(directory.path().join("track.wav"));
+        let track = crate::test_support::artwork_track(directory.path().join("track.wav"));
         let state = |status, source_generation, seek_revision| VisualizerInputs {
             config: Arc::clone(&config),
             panels: &panels,
@@ -1964,7 +1964,7 @@ mod tests {
         };
         layout.add("audio_visualizer", None);
         let panels = demand(&layout);
-        let track = crate::artwork::tests::track(directory.path().join("track.wav"));
+        let track = crate::test_support::artwork_track(directory.path().join("track.wav"));
         let mut replacement = track.clone();
         replacement.id += 1;
         for boundary in 0..7 {
@@ -2077,7 +2077,7 @@ mod tests {
         };
         layout.add("audio_visualizer", None);
         let panels = demand(&layout);
-        let track = crate::artwork::tests::track(directory.path().join("track.wav"));
+        let track = crate::test_support::artwork_track(directory.path().join("track.wav"));
         let current = Some(track.id);
         let wrap = u64::MAX;
         for (case, before_current, after_current, (generation, revision), steps, fades) in [

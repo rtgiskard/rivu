@@ -2222,7 +2222,9 @@ mod content_menu_keyboard_tests {
             LayoutPersistence::new(LoadedLayouts::load(directory.path().join("layouts.json")));
         let handle = runtime.handle.clone();
         let save_handle = save.handle();
-        let artwork = Arc::new(crate::artwork::ArtworkManager::new(directory.path()));
+        let artwork = Arc::new(rivu_metadata::artwork::ArtworkManager::new(
+            directory.path(),
+        ));
         let window = cx.add_window(move |window, cx| {
             let mut app = WindowView::new(
                 handle,

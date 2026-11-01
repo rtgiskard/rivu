@@ -21,7 +21,7 @@ embed-nerd-font = []
 rivu-format = { path = "crates/rivu-format", default-features = false, features = ["database"] }
 rivu-utils = { path = "crates/rivu-utils", default-features = false, features = ["logging", "terminal"] }
 rivu-audio = { path = "crates/rivu-audio", default-features = false }
-rivu-metadata = { path = "crates/rivu-metadata" }
+rivu-metadata = { path = "crates/rivu-metadata", features = ["artwork"] }
 rivu-ui = { path = "crates/rivu-ui" }
 rivu-dsp = { path = "crates/rivu-dsp", default-features = false, features = ["execution"] }
 rivu-protocol = { path = "crates/rivu-protocol" }
@@ -73,6 +73,7 @@ image = { version = "0.25", default-features = false, features = ["png", "gif", 
 [dev-dependencies]
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 rivu-audio = { path = "crates/rivu-audio", default-features = false, features = ["test-support"] }
+rivu-metadata = { path = "crates/rivu-metadata", features = ["test-support"] }
 rivu-visuals = { path = "crates/rivu-visuals", features = ["test-support"] }
 ringbuf = "0.5"
 toml = "1.1.8"

@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use crate::artwork::{Artwork as LoadedArtwork, ArtworkIdentity};
+use rivu_metadata::artwork::{Artwork as LoadedArtwork, ArtworkIdentity};
 use rivu_protocol::model::Track;
 
 use gpui::{
@@ -868,7 +868,7 @@ impl ArtworkLoader {
         if self.active.is_some() {
             return None;
         }
-        self.active = Some(ArtworkIdentity::for_track(track));
+        self.active = Some(ArtworkIdentity::new(crate::artwork_source(track)));
         Some(track.clone())
     }
 
@@ -1142,15 +1142,19 @@ mod tests {
     const VINYL: &[u8] = include_bytes!("../../data/artwork/vinyl.svg");
 
     fn cover_wave(path: &Path, image: &[u8]) {
-        crate::artwork::tests::pictures_wav(path, 3, &[(image, image.len(), 3)]);
+        rivu_metadata::artwork::test_support::pictures_wav(path, 3, &[(image, image.len(), 3)]);
     }
 
     fn loaded_cover(bytes: &[u8]) -> (tempfile::TempDir, LoadedArtwork) {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("cover.wav");
         cover_wave(&path, bytes);
-        let manager = crate::artwork::ArtworkManager::new(directory.path());
-        let loaded = manager.load(&crate::artwork::tests::track(path)).unwrap();
+        let manager = rivu_metadata::artwork::ArtworkManager::new(directory.path());
+        let loaded = manager
+            .load(crate::artwork_source(&crate::test_support::artwork_track(
+                path,
+            )))
+            .unwrap();
         (directory, loaded)
     }
 
@@ -1697,17 +1701,17 @@ mod tests {
         let directory = tempfile::tempdir_in(".cache").unwrap();
         let path = directory.path().join("large-encoded.wav");
         cover_wave(&path, &decode::tests::large_encoded_bmp());
-        let track = crate::artwork::tests::track(path);
-        let manager = crate::artwork::ArtworkManager::new(directory.path());
-        let loaded = manager.load(&track).unwrap();
+        let track = crate::test_support::artwork_track(path);
+        let manager = rivu_metadata::artwork::ArtworkManager::new(directory.path());
+        let loaded = manager.load(crate::artwork_source(&track)).unwrap();
         assert_eq!(loaded.max_image_bytes(), 16 * 1024 * 1024);
         assert_eq!(
             std::fs::metadata(loaded.path()).unwrap().len(),
             9 * 1024 * 1024
         );
-        let lower = crate::artwork::ArtworkManager::new(directory.path())
+        let lower = rivu_metadata::artwork::ArtworkManager::new(directory.path())
             .with_max_image_bytes(8 * 1024 * 1024);
-        assert!(lower.load(&track).is_none());
+        assert!(lower.load(crate::artwork_source(&track)).is_none());
         let images = ArtworkImageRegistry::new(2);
         let view = ArtworkView::new(images.clone());
         let window = cx.add_empty_window();
@@ -1747,10 +1751,10 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         let (directory, admitted) = loaded_cover(&static_cover(800, 211));
-        let manager = crate::artwork::ArtworkManager::new(directory.path())
+        let manager = rivu_metadata::artwork::ArtworkManager::new(directory.path())
             .with_max_image_bytes(8 * 1024 * 1024);
-        let track = crate::artwork::tests::track(directory.path().join("cover.wav"));
-        let lower = manager.load(&track).unwrap();
+        let track = crate::test_support::artwork_track(directory.path().join("cover.wav"));
+        let lower = manager.load(crate::artwork_source(&track)).unwrap();
         assert_eq!(lower.path(), admitted.path());
         // Simulate an external cache-file change: the background reader must
         // still enforce each immutable session policy, including remembered errors.
@@ -1837,8 +1841,12 @@ mod tests {
                 gif[6..10].copy_from_slice(&[0, 32, 0, 32]); // 8192-square header only
             }
             cover_wave(&path, &gif);
-            let manager = crate::artwork::ArtworkManager::new(directory.path());
-            let loaded = manager.load(&crate::artwork::tests::track(path)).unwrap();
+            let manager = rivu_metadata::artwork::ArtworkManager::new(directory.path());
+            let loaded = manager
+                .load(crate::artwork_source(&crate::test_support::artwork_track(
+                    path,
+                )))
+                .unwrap();
             let images = ArtworkImageRegistry::default();
             let first = ArtworkView::new(images.clone());
             let second = ArtworkView::new(images.clone());
@@ -1932,8 +1940,12 @@ mod tests {
         let directory = tempfile::tempdir_in(".cache").unwrap();
         let path = directory.path().join("budget.wav");
         cover_wave(&path, &decode::tests::gif());
-        let manager = crate::artwork::ArtworkManager::new(directory.path());
-        let loaded = manager.load(&crate::artwork::tests::track(path)).unwrap();
+        let manager = rivu_metadata::artwork::ArtworkManager::new(directory.path());
+        let loaded = manager
+            .load(crate::artwork_source(&crate::test_support::artwork_track(
+                path,
+            )))
+            .unwrap();
         let images = ArtworkImageRegistry::default();
         let first = ArtworkView::new(images.clone());
         let second = ArtworkView::new(images.clone());
@@ -2046,8 +2058,12 @@ mod tests {
         let directory = tempfile::tempdir_in(".cache").unwrap();
         let path = directory.path().join("pending-budget.wav");
         cover_wave(&path, &decode::tests::gif());
-        let manager = crate::artwork::ArtworkManager::new(directory.path());
-        let loaded = manager.load(&crate::artwork::tests::track(path)).unwrap();
+        let manager = rivu_metadata::artwork::ArtworkManager::new(directory.path());
+        let loaded = manager
+            .load(crate::artwork_source(&crate::test_support::artwork_track(
+                path,
+            )))
+            .unwrap();
         for worker_finished in [false, true] {
             let images = ArtworkImageRegistry::default();
             let view = ArtworkView::new(images.clone());
@@ -2361,9 +2377,11 @@ mod tests {
         let directory = tempfile::tempdir_in(".cache").unwrap();
         let path = directory.path().join("paced.wav");
         cover_wave(&path, &decode::tests::gif());
-        let track = crate::artwork::tests::track(path);
-        let manager = Arc::new(crate::artwork::ArtworkManager::new(directory.path()));
-        assert!(manager.load(&track).is_some());
+        let track = crate::test_support::artwork_track(path);
+        let manager = Arc::new(rivu_metadata::artwork::ArtworkManager::new(
+            directory.path(),
+        ));
+        assert!(manager.load(crate::artwork_source(&track)).is_some());
         let images = ArtworkImageRegistry::default();
         let owner = cx.update(|cx| {
             let default = cx.new(|cx| DefaultArtwork::new(&crate::i18n::Localizer::new("en"), cx));
@@ -2645,7 +2663,9 @@ mod tests {
         use rivu_protocol::model::PlaybackStatus;
 
         let directory = tempfile::tempdir().unwrap();
-        let manager = Arc::new(crate::artwork::ArtworkManager::new(directory.path()));
+        let manager = Arc::new(rivu_metadata::artwork::ArtworkManager::new(
+            directory.path(),
+        ));
         let images = ArtworkImageRegistry::default();
         let config = Config::default();
         let artwork = cx.update(|cx| {
@@ -2873,8 +2893,8 @@ mod tests {
         let skipped = track(2, "original");
         let mut latest = first.clone();
         latest.path = "/moved/latest.wav".into();
-        let active = ArtworkIdentity::for_track(&first);
-        let replacement = ArtworkIdentity::for_track(&latest);
+        let active = ArtworkIdentity::new(crate::artwork_source(&first));
+        let replacement = ArtworkIdentity::new(crate::artwork_source(&latest));
         assert!(loader.prepare(&first).is_some());
         assert!(loader.prepare(&skipped).is_none());
         assert!(loader.prepare(&latest).is_none());

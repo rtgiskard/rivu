@@ -1,5 +1,8 @@
 //! Shared metadata readers and explicit, backed-up file edits.
 
+#[cfg(feature = "artwork")]
+pub mod artwork;
+
 mod writer;
 mod xattrs;
 

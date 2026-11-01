@@ -5264,11 +5264,16 @@ name = "rivu-metadata"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "blake3",
+ "image",
  "libc",
  "lofty",
+ "parking_lot",
  "rivu-utils",
  "serde",
  "tempfile",
+ "tracing",
+ "url",
 ]
 
 [[package]]

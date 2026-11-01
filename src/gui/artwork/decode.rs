@@ -309,7 +309,13 @@ pub(super) mod tests {
         // The decoded canvas is only 1.22 MiB and fits a 2 MiB retained budget.
         let budget = Budget::new(2);
         assert!(load(&path, 8 * MIB as usize, budget, 2048).is_err());
-        let decoded = load(&path, crate::artwork::DEFAULT_MAX_IMAGE_BYTES, budget, 2048).unwrap();
+        let decoded = load(
+            &path,
+            rivu_metadata::artwork::DEFAULT_MAX_IMAGE_BYTES,
+            budget,
+            2048,
+        )
+        .unwrap();
         assert_eq!(u32::from(decoded.image.size(0).width), 800);
         assert_eq!(u32::from(decoded.image.size(0).height), 400);
         assert_eq!(
@@ -319,7 +325,7 @@ pub(super) mod tests {
         assert!(
             load(
                 &path,
-                crate::artwork::DEFAULT_MAX_IMAGE_BYTES,
+                rivu_metadata::artwork::DEFAULT_MAX_IMAGE_BYTES,
                 Budget::new(1),
                 2048
             )

@@ -494,6 +494,12 @@ Artwork has three different retention layers: the application lookup identifies
 source results, encoded files persist on disk, and each window owns decoded
 display images. Releasing one layer does not imply reclamation of the others.
 
+`rivu-metadata` owns tag reading/editing and the optional `artwork` service.
+The service accepts source identity and path without depending on application
+track models. The application supplies its default image, owns the shared
+manager, and schedules blocking work; GPUI decoding and display lifetimes remain
+window-owned. Consumers needing only metadata parsing do not enable `artwork`.
+
 === Application-session lookup
 
 One application-session lookup manager serves MPRIS and every graphical window,

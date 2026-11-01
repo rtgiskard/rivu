@@ -3,10 +3,10 @@
 //! Owned executor tasks cancel publication, drain accepted replies with a
 //! deadline, then close the connection before application executor retirement.
 //! Playback changes come from the core subscription, never a polling loop.
+use rivu_metadata::artwork::{Artwork, ArtworkIdentity, ArtworkManager};
 
 use crate::{
     app::AppHandle,
-    artwork::{Artwork, ArtworkIdentity, ArtworkManager},
     core::{CoreHandle, Navigation},
     execution::BlockingExecutor,
     projection::MprisSnapshot,
@@ -282,9 +282,9 @@ impl Mpris {
                             // Selection changes release the old metadata lease even
                             // while another physical load still occupies the slot.
                             if !loaded_artwork.as_ref().is_some_and(|identity| {
-                                current
-                                    .current_track()
-                                    .is_some_and(|track| identity.matches(track))
+                                current.current_track().is_some_and(|track| {
+                                    identity.matches(crate::artwork_source(track))
+                                })
                             }) {
                                 loaded_artwork = None;
                             }
@@ -822,7 +822,9 @@ impl TrackMetadata {
             artist: track.artist.clone(),
             album: track.album.clone(),
             url: url::Url::from_file_path(&track.path).ok()?.into(),
-            art_url: artwork.cached(track).or_else(|| artwork.cached_default()),
+            art_url: artwork
+                .cached(crate::artwork_source(track))
+                .or_else(|| artwork.cached_default()),
             length: state
                 .playback
                 .duration
@@ -923,11 +925,11 @@ fn load_artwork(
         .filter(|_| !requested.shutting_down)?;
     if loaded
         .as_ref()
-        .is_some_and(|identity| identity.matches(track))
+        .is_some_and(|identity| identity.matches(crate::artwork_source(track)))
     {
         return None;
     }
-    let identity = ArtworkIdentity::for_track(track);
+    let identity = ArtworkIdentity::new(crate::artwork_source(track));
     let manager = Arc::clone(artwork);
     let track = track.clone();
     let workers = Arc::clone(workers);
@@ -939,7 +941,9 @@ fn load_artwork(
                 if cancellation.load(Ordering::Acquire) {
                     None
                 } else {
-                    manager.load(&track).or_else(|| manager.export_default())
+                    manager
+                        .load(crate::artwork_source(&track))
+                        .or_else(|| manager.export_default())
                 }
             })
             .await
@@ -966,7 +970,7 @@ async fn publish_artwork(
     if current.shutting_down
         || !current
             .current_track()
-            .is_some_and(|track| identity.matches(track))
+            .is_some_and(|track| identity.matches(crate::artwork_source(track)))
     {
         return Ok(());
     }
@@ -1155,7 +1159,9 @@ mod tests {
         let manager = MprisController::start(
             runtime.handle.clone(),
             AppHandle::new(&runtime, false),
-            Arc::new(ArtworkManager::new(directory.path())),
+            Arc::new(
+                ArtworkManager::new(directory.path()).with_default_image(crate::DEFAULT_IMAGE),
+            ),
             runtime.test_executor(),
             Arc::clone(runtime.test_workers()),
         );
@@ -1219,7 +1225,7 @@ mod tests {
             })
             .await
             .map_err(|error| zbus::Error::Failure(error.to_string()))?;
-            Ok((ArtworkIdentity::for_track(&track(1)), None))
+            Ok((ArtworkIdentity::new(crate::artwork_source(&track(1))), None))
         }
         .boxed();
         let mut load = ArtworkLoad {
@@ -1239,7 +1245,9 @@ mod tests {
     #[test]
     fn cancelling_unstarted_artwork_preserves_cache_only_behavior() {
         let (directory, mut runtime) = runtime_fixture();
-        let artwork = Arc::new(ArtworkManager::new(directory.path()));
+        let artwork = Arc::new(
+            ArtworkManager::new(directory.path()).with_default_image(crate::DEFAULT_IMAGE),
+        );
         let state = MprisSnapshot {
             queue: QueueState {
                 total: 1,
@@ -1255,7 +1263,7 @@ mod tests {
         async_io::block_on(load.retire());
         assert!(
             artwork
-                .cached_result(state.current_track().unwrap())
+                .cached_result(crate::artwork_source(state.current_track().unwrap()))
                 .is_none()
         );
         assert!(artwork.cached_default().is_none());
@@ -1544,7 +1552,7 @@ mod tests {
         let other_path = directory.path().join("other.wav");
         std::fs::copy(&path, &other_path).unwrap();
         // Distinct from the default export, so a fallback cannot satisfy the test.
-        let mut cover = crate::artwork::DEFAULT_IMAGE.to_vec();
+        let mut cover = crate::DEFAULT_IMAGE.to_vec();
         cover.push(1);
         std::fs::write(directory.path().join("cover.png"), cover).unwrap();
         let ack = async_io::block_on(runtime.handle.request_ack(Command::QueueExternalPaths {
@@ -1575,7 +1583,9 @@ mod tests {
             .clone();
         assert_ne!(other.id, selected_track.id);
         assert!(async_io::block_on(runtime.handle.navigate(Navigation::Previous)).is_success());
-        let artwork = Arc::new(ArtworkManager::new(directory.path()));
+        let artwork = Arc::new(
+            ArtworkManager::new(directory.path()).with_default_image(crate::DEFAULT_IMAGE),
+        );
         let app = AppHandle::new(&runtime, false);
         let connection = bus.serve_root(app.clone());
         let client = bus.connect();
@@ -1599,7 +1609,13 @@ mod tests {
             );
             let first = next_metadata(&mut signals).await;
             let original_uri = <&str>::try_from(&first["mpris:artUrl"]).unwrap().to_owned();
-            assert_eq!(original_uri, artwork.cached(selected_track).unwrap().uri());
+            assert_eq!(
+                original_uri,
+                artwork
+                    .cached(crate::artwork_source(selected_track))
+                    .unwrap()
+                    .uri()
+            );
             assert_ne!(original_uri, artwork.export_default().unwrap().uri());
 
             for (round, clear) in [false, true].into_iter().enumerate() {
@@ -1615,8 +1631,10 @@ mod tests {
                     assert!(runtime.handle.mpris_snapshot().current_track().is_none());
                     None
                 } else {
-                    let blocked =
-                        crate::artwork::tests::block_probe(Arc::clone(&artwork), other.clone());
+                    let blocked = rivu_metadata::artwork::test_support::block_probe(
+                        Arc::clone(&artwork),
+                        crate::artwork_source(&other),
+                    );
                     assert!(runtime.handle.navigate(Navigation::Next).await.is_success());
                     let changed = next_metadata(&mut signals).await;
                     assert_eq!(
@@ -1648,9 +1666,13 @@ mod tests {
                 for id in 1..=65 {
                     let mut pressure = track(-((round * 100 + id) as i64));
                     pressure.path = directory.path().join("pressure").join(format!("{id}.wav"));
-                    assert!(artwork.load(&pressure).is_none());
+                    assert!(artwork.load(crate::artwork_source(&pressure)).is_none());
                 }
-                assert!(artwork.cached_result(selected_track).is_none());
+                assert!(
+                    artwork
+                        .cached_result(crate::artwork_source(selected_track))
+                        .is_none()
+                );
 
                 if clear {
                     assert!(
@@ -1676,12 +1698,16 @@ mod tests {
                         <&str>::try_from(&waiting["mpris:artUrl"]).unwrap(),
                         artwork.cached_default().unwrap().uri()
                     );
-                    assert!(artwork.cached_result(selected_track).is_none());
+                    assert!(
+                        artwork
+                            .cached_result(crate::artwork_source(selected_track))
+                            .is_none()
+                    );
                 }
                 let reselected = runtime.handle.mpris_snapshot();
                 assert!(
-                    ArtworkIdentity::for_track(selected_track)
-                        .matches(reselected.current_track().unwrap())
+                    ArtworkIdentity::new(crate::artwork_source(selected_track))
+                        .matches(crate::artwork_source(reselected.current_track().unwrap()))
                 );
                 assert_eq!(reselected.playback.status, PlaybackStatus::Stopped);
                 if let Some((release, worker)) = blocked {
@@ -1706,7 +1732,11 @@ mod tests {
                         break;
                     }
                 }
-                assert!(artwork.cached_result(selected_track).is_some());
+                assert!(
+                    artwork
+                        .cached_result(crate::artwork_source(selected_track))
+                        .is_some()
+                );
             }
             publisher.retire().await;
             client.close().await.unwrap();
@@ -1752,11 +1782,12 @@ mod tests {
         .unwrap();
         assert!(async_io::block_on(runtime.handle.navigate(Navigation::Next)).is_success());
         let old = runtime.handle.mpris_snapshot();
-        let identity = ArtworkIdentity::for_track(old.current_track().unwrap());
+        let identity = ArtworkIdentity::new(crate::artwork_source(old.current_track().unwrap()));
         assert!(async_io::block_on(runtime.handle.navigate(Navigation::Next)).is_success());
         let current = runtime.handle.mpris_snapshot();
         assert_ne!(old.queue.current_id, current.queue.current_id);
-        let artwork = ArtworkManager::new(directory.path());
+        let artwork =
+            ArtworkManager::new(directory.path()).with_default_image(crate::DEFAULT_IMAGE);
         let mut metadata = TrackMetadata::from_snapshot(&current, &artwork);
         let mut loaded = None;
         let connection = bus.connect();
@@ -1782,7 +1813,8 @@ mod tests {
     #[test]
     fn metadata_getter_leaves_cold_and_replaced_fingerprints_unprobed() {
         let directory = tempfile::tempdir().unwrap();
-        let artwork = ArtworkManager::new(directory.path());
+        let artwork =
+            ArtworkManager::new(directory.path()).with_default_image(crate::DEFAULT_IMAGE);
         let mut current = track(7);
         current.path = directory.path().join("missing.flac");
         current.fingerprint = Some("original".into());
@@ -1802,9 +1834,13 @@ mod tests {
             TrackMetadata::from_snapshot(&state, &artwork)
                 .unwrap()
                 .art_url,
-            artwork.cached(current)
+            artwork.cached(crate::artwork_source(current))
         );
-        assert!(artwork.cached_result(current).is_none());
+        assert!(
+            artwork
+                .cached_result(crate::artwork_source(current))
+                .is_none()
+        );
         assert!(!directory.path().join("artwork").exists());
         assert!(
             !metadata_map(TrackMetadata::from_snapshot(&state, &artwork).as_ref())
@@ -1817,15 +1853,19 @@ mod tests {
                 .art_url,
             Some(default)
         );
-        artwork.load(current);
-        assert!(artwork.cached_result(current).is_some());
+        artwork.load(crate::artwork_source(current));
+        assert!(
+            artwork
+                .cached_result(crate::artwork_source(current))
+                .is_some()
+        );
         let mut replacement = current.clone();
         replacement.fingerprint = Some("replacement".into());
         state.current_track = Some(Arc::new(replacement));
         assert!(TrackMetadata::from_snapshot(&state, &artwork).is_some());
         assert!(
             artwork
-                .cached_result(state.current_track().unwrap())
+                .cached_result(crate::artwork_source(state.current_track().unwrap()))
                 .is_none()
         );
     }
@@ -1835,7 +1875,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let blocked = directory.path().join("blocked");
         std::fs::write(&blocked, b"not a directory").unwrap();
-        let artwork = ArtworkManager::new(&blocked);
+        let artwork = ArtworkManager::new(&blocked).with_default_image(crate::DEFAULT_IMAGE);
         assert!(artwork.export_default().is_none());
         std::fs::remove_file(&blocked).unwrap();
         std::fs::create_dir(&blocked).unwrap();
@@ -1861,7 +1901,8 @@ mod tests {
     #[test]
     fn metadata_notification_follows_path_changes_without_queue_revision_changes() {
         let directory = tempfile::tempdir().unwrap();
-        let artwork = ArtworkManager::new(directory.path());
+        let artwork =
+            ArtworkManager::new(directory.path()).with_default_image(crate::DEFAULT_IMAGE);
         let previous = MprisSnapshot {
             queue: QueueState {
                 total: 1,
@@ -1976,7 +2017,8 @@ mod tests {
     #[test]
     fn metadata_has_dbus_types_and_queue_occurrence_identity() {
         let directory = tempfile::tempdir().unwrap();
-        let artwork = ArtworkManager::new(directory.path());
+        let artwork =
+            ArtworkManager::new(directory.path()).with_default_image(crate::DEFAULT_IMAGE);
         let art = artwork.export_default().unwrap();
         let expected_uri = art.uri().to_owned();
         let track = TrackMetadata {

@@ -415,11 +415,15 @@ fn artwork_selection(owner: &mut Metadata, track: Track, cx: &mut Context<Metada
 fn hiding_details_releases_cached_artwork_until_revealed(cx: &mut TestAppContext) {
     let (directory, _runtime, metadata) = fixture(cx);
     let path = directory.path().join("cover.wav");
-    crate::artwork::tests::tagged_wav(&path);
+    rivu_metadata::artwork::test_support::tagged_wav(&path);
     let mut selected = track(7, "Cover");
     selected.path = path;
     metadata.update(cx, |this, cx| {
-        assert!(this.artwork_manager.load(&selected).is_some());
+        assert!(
+            this.artwork_manager
+                .load(crate::artwork_source(&selected))
+                .is_some()
+        );
         artwork_selection(this, selected, cx);
         this.visible = true;
         this.prepare_artwork(cx);
@@ -443,8 +447,16 @@ fn completed_negative_artwork_keeps_fallback_when_details_reopen(cx: &mut TestAp
     let mut selected = track(7, "Missing cover");
     selected.path = directory.path().join("missing-cover.wav");
     metadata.update(cx, |this, cx| {
-        assert!(this.artwork_manager.load(&selected).is_none());
-        assert_eq!(this.artwork_manager.cached_result(&selected), Some(None));
+        assert!(
+            this.artwork_manager
+                .load(crate::artwork_source(&selected))
+                .is_none()
+        );
+        assert_eq!(
+            this.artwork_manager
+                .cached_result(crate::artwork_source(&selected)),
+            Some(None)
+        );
         artwork_selection(this, selected.clone(), cx);
         this.visible = true;
         this.prepare_artwork(cx);
@@ -452,12 +464,14 @@ fn completed_negative_artwork_keeps_fallback_when_details_reopen(cx: &mut TestAp
         assert!(this.artwork_loader.prepare(&selected).is_some());
         assert!(
             this.artwork_loader
-                .finish(&crate::artwork::ArtworkIdentity::for_track(&selected))
+                .finish(&rivu_metadata::artwork::ArtworkIdentity::new(
+                    crate::artwork_source(&selected)
+                ))
         );
         this.set_visible(false, cx);
     });
     // A completed miss is not a new acquisition demand on every render/reopen.
-    crate::artwork::tests::tagged_wav(&selected.path);
+    rivu_metadata::artwork::test_support::tagged_wav(&selected.path);
     metadata.update(cx, |this, cx| {
         this.set_visible(true, cx);
         this.prepare_artwork(cx);
@@ -465,13 +479,19 @@ fn completed_negative_artwork_keeps_fallback_when_details_reopen(cx: &mut TestAp
     });
     cx.run_until_parked();
     metadata.update(cx, |this, cx| {
-        assert_eq!(this.artwork_manager.cached_result(&selected), Some(None));
+        assert_eq!(
+            this.artwork_manager
+                .cached_result(crate::artwork_source(&selected)),
+            Some(None)
+        );
         assert!(this.artwork_view.image(cx).is_none());
         this.prepare_artwork(cx);
         assert!(this.artwork_loader.prepare(&selected).is_some());
         assert!(
             this.artwork_loader
-                .finish(&crate::artwork::ArtworkIdentity::for_track(&selected))
+                .finish(&rivu_metadata::artwork::ArtworkIdentity::new(
+                    crate::artwork_source(&selected)
+                ))
         );
         assert!(this.artwork_view.image(cx).is_none());
     });
@@ -496,7 +516,10 @@ fn cached_relocation_is_delivered_while_old_artwork_is_in_flight(cx: &mut TestAp
         this.visible = true;
         this.prepare_artwork(cx);
         assert!(this.artwork_loader.prepare(&latest).is_none());
-        let expected = this.artwork_manager.load(&latest).unwrap();
+        let expected = this
+            .artwork_manager
+            .load(crate::artwork_source(&latest))
+            .unwrap();
         artwork_selection(this, latest.clone(), cx);
         this.prepare_artwork(cx);
         assert!(!this.artwork_view.replace(Some(expected.clone()), cx));
@@ -508,7 +531,9 @@ fn cached_relocation_is_delivered_while_old_artwork_is_in_flight(cx: &mut TestAp
         assert!(this.artwork_loader.prepare(&latest).is_some());
         assert!(
             this.artwork_loader
-                .finish(&crate::artwork::ArtworkIdentity::for_track(&latest))
+                .finish(&rivu_metadata::artwork::ArtworkIdentity::new(
+                    crate::artwork_source(&latest)
+                ))
         );
         this.set_visible(false, cx);
     });
@@ -517,9 +542,17 @@ fn cached_relocation_is_delivered_while_old_artwork_is_in_flight(cx: &mut TestAp
         for id in 100..170 {
             let mut pressure = track(id, "Missing");
             pressure.path = directory.path().join("pressure").join(format!("{id}.wav"));
-            assert!(this.artwork_manager.load(&pressure).is_none());
+            assert!(
+                this.artwork_manager
+                    .load(crate::artwork_source(&pressure))
+                    .is_none()
+            );
         }
-        assert!(this.artwork_manager.cached_result(&latest).is_none());
+        assert!(
+            this.artwork_manager
+                .cached_result(crate::artwork_source(&latest))
+                .is_none()
+        );
         this.set_visible(true, cx);
         this.prepare_artwork(cx);
         assert!(this.artwork_view.image(cx).is_none());
@@ -528,7 +561,7 @@ fn cached_relocation_is_delivered_while_old_artwork_is_in_flight(cx: &mut TestAp
     metadata.update(cx, |this, cx| {
         let expected = this
             .artwork_manager
-            .cached_result(&latest)
+            .cached_result(crate::artwork_source(&latest))
             .unwrap()
             .unwrap();
         assert!(!this.artwork_view.replace(Some(expected), cx));
@@ -542,8 +575,8 @@ fn hidden_artwork_completion_retires_without_loading_replacement(cx: &mut TestAp
     first.path = directory.path().join("first.wav");
     let mut replacement = track(8, "Replacement");
     replacement.path = directory.path().join("replacement.wav");
-    crate::artwork::tests::tagged_wav(&first.path);
-    crate::artwork::tests::tagged_wav(&replacement.path);
+    rivu_metadata::artwork::test_support::tagged_wav(&first.path);
+    rivu_metadata::artwork::test_support::tagged_wav(&replacement.path);
     metadata.update(cx, |this, cx| {
         artwork_selection(this, first.clone(), cx);
         this.visible = true;
@@ -554,8 +587,16 @@ fn hidden_artwork_completion_retires_without_loading_replacement(cx: &mut TestAp
     });
     cx.run_until_parked();
     metadata.update(cx, |this, cx| {
-        assert!(this.artwork_manager.cached_result(&first).is_some());
-        assert!(this.artwork_manager.cached_result(&replacement).is_none());
+        assert!(
+            this.artwork_manager
+                .cached_result(crate::artwork_source(&first))
+                .is_some()
+        );
+        assert!(
+            this.artwork_manager
+                .cached_result(crate::artwork_source(&replacement))
+                .is_none()
+        );
         assert!(this.artwork_view.image(cx).is_none());
         assert_eq!(this.metadata.identity(), Some(8));
         this.set_visible(true, cx);
@@ -563,7 +604,11 @@ fn hidden_artwork_completion_retires_without_loading_replacement(cx: &mut TestAp
     });
     cx.run_until_parked();
     metadata.update(cx, |this, cx| {
-        assert!(this.artwork_manager.cached_result(&replacement).is_some());
+        assert!(
+            this.artwork_manager
+                .cached_result(crate::artwork_source(&replacement))
+                .is_some()
+        );
         assert!(this.artwork_view.image(cx).is_some());
         assert_eq!(this.metadata.identity(), Some(8));
     });

@@ -1,5 +1,6 @@
 #[cfg(test)]
 use crate::config::ConfigPersistence;
+use rivu_metadata::artwork::{ArtworkCacheReport, ArtworkManager};
 mod library_stats;
 mod model;
 mod pages;
@@ -8,7 +9,6 @@ use model::{Completion, PanelApply, SettingsModel, Submission, Target};
 
 use super::{artwork_panel::artwork_style_label, visualization::visualization_style_label};
 use crate::{
-    artwork::{ArtworkCacheReport, ArtworkManager},
     config::{
         AnalysisWindow, ArtworkDirection, ArtworkMode, ArtworkOptions, ArtworkStyle,
         AudioVisualizerStyle, Config, ConfigPatch, LogLevel, SpectrumBarLayout, SpectrumStyle,

@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 /// Originals use the first 128 bits of the content hash, split into one bucket.
-pub(crate) fn original_path(cache_root: &Path, hash: blake3::Hash, extension: &str) -> PathBuf {
+pub fn original_path(cache_root: &Path, hash: blake3::Hash, extension: &str) -> PathBuf {
     let hex = hash.to_hex();
     cache_root
         .join(&hex[..2])
@@ -9,7 +9,7 @@ pub(crate) fn original_path(cache_root: &Path, hash: blake3::Hash, extension: &s
 }
 
 /// A thumbnail lives beside its source and retains only its pixel-size suffix.
-pub(crate) fn thumbnail_path(source: &Path, hash: blake3::Hash, tier: u32) -> Option<PathBuf> {
+pub fn thumbnail_path(source: &Path, hash: blake3::Hash, tier: u32) -> Option<PathBuf> {
     let hex = hash.to_hex();
     Some(
         source
