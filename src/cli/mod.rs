@@ -135,7 +135,6 @@ fn client_path(path: PathBuf) -> Result<PathBuf> {
 fn translate(action: Action) -> Result<(Command, bool)> {
     let mut wait = false;
     let command = match action {
-        Action::Library(action) => return library::translate(action),
         Action::Playback(PlaybackAction::Play { track_id }) => {
             track_id.map_or(Command::Resume, |track_id| Command::Play { track_id })
         }
@@ -221,6 +220,7 @@ fn translate(action: Action) -> Result<(Command, bool)> {
         },
         Action::Playback(PlaybackAction::Device { name }) => Command::Device { name },
         Action::Gui { .. }
+        | Action::Library(_)
         | Action::Serve { .. }
         | Action::Tui
         | Action::Quit
@@ -234,38 +234,8 @@ fn translate(action: Action) -> Result<(Command, bool)> {
 
 #[cfg(test)]
 mod tests {
-    use super::args::LibraryAction;
     use super::{Action, Command, PlaylistAction, translate};
     use anyhow::Result;
-
-    #[test]
-    fn scan_paths_are_anchored_without_expansion() -> Result<()> {
-        let cwd = std::env::current_dir()?;
-        let absolute = cwd.join("absolute.wav");
-        let (command, wait) = translate(Action::Library(LibraryAction::Scan {
-            paths: vec![
-                "music/../song.wav".into(),
-                "~/song.wav".into(),
-                absolute.clone(),
-            ],
-            wait: true,
-            force: true,
-        }))?;
-        let Command::Scan { paths, force } = command else {
-            panic!("expected scan command");
-        };
-        assert!(wait);
-        assert!(force);
-        assert_eq!(
-            paths,
-            [
-                cwd.join("music/../song.wav"),
-                cwd.join("~/song.wav"),
-                absolute
-            ]
-        );
-        Ok(())
-    }
 
     #[test]
     fn playlist_paths_are_anchored_without_requiring_destination() -> Result<()> {
@@ -408,21 +378,6 @@ mod other_tracks_tests {
             query(&["library", "other", "count"]),
             Query::OtherTracksCount
         ));
-    }
-
-    #[test]
-    fn other_checks_reuse_scan_wait_and_cancellation_commands() -> Result<()> {
-        let (command, wait) = translate(action(&["library", "other", "check"]))?;
-        assert!(matches!(
-            command,
-            Command::CheckOtherTracks { force: false }
-        ));
-        assert!(!wait);
-        let (command, wait) =
-            translate(action(&["library", "other", "check", "--force", "--wait"]))?;
-        assert!(matches!(command, Command::CheckOtherTracks { force: true }));
-        assert!(wait);
-        Ok(())
     }
 
     #[test]

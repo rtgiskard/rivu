@@ -387,10 +387,9 @@ pub(super) fn other_tracks_query(action: OtherTracksAction) -> Result<Query> {
     })
 }
 
-pub(super) fn translate(action: LibraryAction) -> Result<(Command, bool)> {
+fn translate(action: LibraryAction) -> Result<(Command, bool)> {
     let mut wait = false;
     let command = match action {
-        LibraryAction::Optimize => Command::OptimizeDatabase,
         LibraryAction::Scan {
             paths,
             wait: should_wait,
@@ -417,6 +416,7 @@ pub(super) fn translate(action: LibraryAction) -> Result<(Command, bool)> {
         LibraryAction::CleanMissing => Command::RemoveMissingTracks,
         LibraryAction::KeepIndependent { track_id } => Command::KeepTrackIndependent { track_id },
         LibraryAction::List { .. }
+        | LibraryAction::Optimize
         | LibraryAction::Other(_)
         | LibraryAction::Edit { .. }
         | LibraryAction::Stats
@@ -426,4 +426,65 @@ pub(super) fn translate(action: LibraryAction) -> Result<(Command, bool)> {
         | LibraryAction::Relocate { .. } => bail!("This action is not a library command"),
     };
     Ok((command, wait))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scan_paths_are_anchored_without_expansion() -> Result<()> {
+        let cwd = std::env::current_dir()?;
+        let absolute = cwd.join("absolute.wav");
+        let (command, wait) = translate(LibraryAction::Scan {
+            paths: vec![
+                "music/../song.wav".into(),
+                "~/song.wav".into(),
+                absolute.clone(),
+            ],
+            wait: true,
+            force: true,
+        })?;
+        let Command::Scan { paths, force } = command else {
+            panic!("expected scan command");
+        };
+        assert!(wait);
+        assert!(force);
+        assert_eq!(
+            paths,
+            [
+                cwd.join("music/../song.wav"),
+                cwd.join("~/song.wav"),
+                absolute
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn other_checks_reuse_scan_wait_and_cancellation_commands() -> Result<()> {
+        use clap::Parser;
+        let action = |arguments: &[&str]| {
+            let super::super::Action::Library(action) = super::super::Args::try_parse_from(
+                std::iter::once("rivu").chain(arguments.iter().copied()),
+            )
+            .unwrap()
+            .action
+            .unwrap() else {
+                panic!("expected library action");
+            };
+            action
+        };
+        let (command, wait) = translate(action(&["library", "other", "check"]))?;
+        assert!(matches!(
+            command,
+            Command::CheckOtherTracks { force: false }
+        ));
+        assert!(!wait);
+        let (command, wait) =
+            translate(action(&["library", "other", "check", "--force", "--wait"]))?;
+        assert!(matches!(command, Command::CheckOtherTracks { force: true }));
+        assert!(wait);
+        Ok(())
+    }
 }
