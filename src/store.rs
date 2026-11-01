@@ -32,7 +32,6 @@ pub(crate) struct Store {
     // Read-only owners invalidate each count on its published data-domain revision.
     revision_owned_counts: bool,
     track_cache: RefCell<cache::TrackCache>,
-    count_cache: RefCell<Option<tracks::TrackCount>>,
     duplicate_group_count_cache: RefCell<Option<duplicates::DuplicateGroupCount>>,
     scalar_counts: RefCell<cache::ScalarCounts>,
 }
@@ -130,7 +129,6 @@ impl Store {
                 capacity: 0,
                 clock: 0,
             }),
-            count_cache: RefCell::new(None),
             duplicate_group_count_cache: RefCell::new(None),
             scalar_counts: RefCell::new(cache::ScalarCounts::default()),
         })
@@ -171,10 +169,6 @@ impl Store {
             })
     }
 
-    pub(crate) fn invalidate_filtered_track_count(&self) {
-        *self.count_cache.borrow_mut() = None;
-    }
-
     pub(crate) fn invalidate_duplicate_group_count(&self) {
         *self.duplicate_group_count_cache.borrow_mut() = None;
     }
@@ -185,7 +179,7 @@ impl Store {
             self.track_cache.borrow_mut().entries.clear();
         }
         if dependencies.clear_filtered_track_count {
-            self.invalidate_filtered_track_count();
+            self.invalidate_scalar_count_domains(&[CountDomain::FilteredLibrary]);
         }
         if dependencies.clear_catalog_counts {
             self.invalidate_scalar_count_domains(&[CountDomain::Other, CountDomain::Directory]);
@@ -207,7 +201,6 @@ impl Store {
     /// A background commit invalidates both cached tracks and cached counts.
     pub(crate) fn invalidate_caches(&self) {
         self.track_cache.borrow_mut().entries.clear();
-        self.invalidate_filtered_track_count();
         self.invalidate_scalar_counts();
         self.invalidate_duplicate_group_count();
     }

@@ -70,6 +70,7 @@ impl Store {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CountDomain {
     Other,
+    FilteredLibrary,
     Directory,
     Albums,
     AlbumTracks,
@@ -86,10 +87,95 @@ pub(super) struct ScalarCounts {
     entries: Vec<ScalarCount>,
 }
 
+enum ScalarScope<'a> {
+    Keys {
+        identity: i64,
+        keys: &'a [&'a str],
+    },
+    FilteredLibrary {
+        query: Option<&'a str>,
+        favorite: Option<bool>,
+        missing: Option<bool>,
+        prefix: Option<&'a str>,
+    },
+}
+
+enum OwnedScalarScope {
+    Keys {
+        identity: i64,
+        keys: Vec<String>,
+    },
+    FilteredLibrary {
+        query: Option<String>,
+        favorite: Option<bool>,
+        missing: Option<bool>,
+        prefix: Option<String>,
+    },
+}
+
+impl ScalarScope<'_> {
+    fn matches(&self, cached: &OwnedScalarScope) -> bool {
+        match (self, cached) {
+            (
+                Self::Keys { identity, keys },
+                OwnedScalarScope::Keys {
+                    identity: cached_identity,
+                    keys: cached_keys,
+                },
+            ) => {
+                identity == cached_identity
+                    && cached_keys
+                        .iter()
+                        .map(String::as_str)
+                        .eq(keys.iter().copied())
+            }
+            (
+                Self::FilteredLibrary {
+                    query,
+                    favorite,
+                    missing,
+                    prefix,
+                },
+                OwnedScalarScope::FilteredLibrary {
+                    query: cached_query,
+                    favorite: cached_favorite,
+                    missing: cached_missing,
+                    prefix: cached_prefix,
+                },
+            ) => {
+                *query == cached_query.as_deref()
+                    && favorite == cached_favorite
+                    && missing == cached_missing
+                    && *prefix == cached_prefix.as_deref()
+            }
+            _ => false,
+        }
+    }
+
+    fn into_owned(self) -> OwnedScalarScope {
+        match self {
+            Self::Keys { identity, keys } => OwnedScalarScope::Keys {
+                identity,
+                keys: keys.iter().map(|key| (*key).to_owned()).collect(),
+            },
+            Self::FilteredLibrary {
+                query,
+                favorite,
+                missing,
+                prefix,
+            } => OwnedScalarScope::FilteredLibrary {
+                query: query.map(str::to_owned),
+                favorite,
+                missing,
+                prefix: prefix.map(str::to_owned),
+            },
+        }
+    }
+}
+
 struct ScalarCount {
     domain: CountDomain,
-    keys: Vec<String>,
-    identity: i64,
+    scope: OwnedScalarScope,
     total: usize,
 }
 
@@ -121,6 +207,35 @@ impl Store {
         keys: &[&str],
         read: impl FnOnce() -> Result<usize>,
     ) -> Result<usize> {
+        self.cached_scalar_count(domain, ScalarScope::Keys { identity, keys }, read)
+    }
+
+    pub(super) fn cached_filtered_library_count(
+        &self,
+        query: Option<&str>,
+        favorite: Option<bool>,
+        missing: Option<bool>,
+        prefix: Option<&str>,
+        read: impl FnOnce() -> Result<usize>,
+    ) -> Result<usize> {
+        self.cached_scalar_count(
+            CountDomain::FilteredLibrary,
+            ScalarScope::FilteredLibrary {
+                query,
+                favorite,
+                missing,
+                prefix,
+            },
+            read,
+        )
+    }
+
+    fn cached_scalar_count(
+        &self,
+        domain: CountDomain,
+        scope: ScalarScope<'_>,
+        read: impl FnOnce() -> Result<usize>,
+    ) -> Result<usize> {
         // A writer transaction must never publish a count that could outlive a
         // rollback. Read workers instead invalidate on accepted revision ownership.
         if !self.revision_owned_counts && !self.conn.is_autocommit() {
@@ -142,15 +257,11 @@ impl Store {
                 cache.changes = changes;
                 cache.external_revision = external_revision;
             }
-            if let Some(index) = cache.entries.iter().position(|entry| {
-                entry.domain == domain
-                    && entry.identity == identity
-                    && entry
-                        .keys
-                        .iter()
-                        .map(String::as_str)
-                        .eq(keys.iter().copied())
-            }) {
+            if let Some(index) = cache
+                .entries
+                .iter()
+                .position(|entry| entry.domain == domain && scope.matches(&entry.scope))
+            {
                 let entry = cache.entries.remove(index);
                 let total = entry.total;
                 cache.entries.push(entry);
@@ -159,13 +270,16 @@ impl Store {
         }
         let total = read()?;
         let mut cache = self.scalar_counts.borrow_mut();
+        // Retain only the latest filtered-library scope, within the shared cap.
+        if domain == CountDomain::FilteredLibrary {
+            cache.entries.retain(|entry| entry.domain != domain);
+        }
         if cache.entries.len() == 16 {
             cache.entries.remove(0);
         }
         cache.entries.push(ScalarCount {
             domain,
-            identity,
-            keys: keys.iter().map(|key| (*key).to_owned()).collect(),
+            scope: scope.into_owned(),
             total,
         });
         Ok(total)

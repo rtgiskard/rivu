@@ -117,16 +117,6 @@ pub(crate) struct PlaybackSource {
     fingerprint: Option<blake3::Hash>,
 }
 
-// Only the latest scope is retained; no row payloads or per-query map accumulate.
-pub(super) struct TrackCount {
-    changes: u64,
-    query: Option<String>,
-    favorite: Option<bool>,
-    missing: Option<bool>,
-    prefix: Option<String>,
-    total: usize,
-}
-
 impl Store {
     pub(crate) fn other_tracks_sources(&self, roots: &[PathBuf]) -> Result<Vec<PathBuf>> {
         let roots = serde_json::to_string(&other_root_prefixes(roots)?)?;
@@ -677,50 +667,28 @@ impl Store {
         if query.is_none() && favorite.is_none() && missing.is_none() && prefix.is_none() {
             return self.track_count();
         }
-        // Writable transactions bypass counts; read-only owners fence invalidation.
-        let cacheable = self.revision_owned_counts || self.conn.is_autocommit();
-        let changes = self.conn.total_changes();
-        if cacheable
-            && let Some(cached) = self.count_cache.borrow().as_ref()
-            && cached.changes == changes
-            && cached.query.as_deref() == query
-            && cached.favorite == favorite
-            && cached.missing == missing
-            && cached.prefix.as_deref() == prefix
-        {
-            return Ok(cached.total);
-        }
-        let total = match prefix {
-            Some(prefix) if query.is_none() && favorite.is_none() && missing.is_none() => {
-                // Omitting nullable predicates keeps this count on the covering path index.
-                self.conn.query_row(
-                    "SELECT COUNT(*) FROM tracks WHERE path>=?1 AND path<(rtrim(?1,'/')||'0')",
-                    [prefix],
+        self.cached_filtered_library_count(query, favorite, missing, prefix, || {
+            Ok(match prefix {
+                Some(prefix) if query.is_none() && favorite.is_none() && missing.is_none() => {
+                    // Omitting nullable predicates keeps this count on the covering path index.
+                    self.conn.query_row(
+                        "SELECT COUNT(*) FROM tracks WHERE path>=?1 AND path<(rtrim(?1,'/')||'0')",
+                        [prefix],
+                        |row| row.get::<_, i64>(0),
+                    )?
+                }
+                Some(prefix) => self.conn.query_row(
+                    &format!("SELECT COUNT(*) FROM tracks {TRACK_SEARCH_FILTER}{DIRECTORY_SCOPE}"),
+                    params![query, favorite, missing, prefix],
                     |row| row.get::<_, i64>(0),
-                )?
-            }
-            Some(prefix) => self.conn.query_row(
-                &format!("SELECT COUNT(*) FROM tracks {TRACK_SEARCH_FILTER}{DIRECTORY_SCOPE}"),
-                params![query, favorite, missing, prefix],
-                |row| row.get::<_, i64>(0),
-            )?,
-            None => self.conn.query_row(
-                &format!("SELECT COUNT(*) FROM tracks {TRACK_SEARCH_FILTER}"),
-                params![query, favorite, missing],
-                |row| row.get::<_, i64>(0),
-            )?,
-        } as usize;
-        if cacheable {
-            *self.count_cache.borrow_mut() = Some(TrackCount {
-                changes,
-                query: query.map(str::to_owned),
-                favorite,
-                missing,
-                prefix: prefix.map(str::to_owned),
-                total,
-            });
-        }
-        Ok(total)
+                )?,
+                None => self.conn.query_row(
+                    &format!("SELECT COUNT(*) FROM tracks {TRACK_SEARCH_FILTER}"),
+                    params![query, favorite, missing],
+                    |row| row.get::<_, i64>(0),
+                )?,
+            } as usize)
+        })
     }
 
     pub fn library_stats(&self) -> Result<rivu_protocol::model::LibraryStats> {

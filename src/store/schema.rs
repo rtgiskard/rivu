@@ -38,7 +38,6 @@ impl Store {
                 capacity: (crate::config::DEFAULT_QUERY_BATCH_SIZE as usize).saturating_mul(2),
                 clock: 0,
             }),
-            count_cache: RefCell::new(None),
             duplicate_group_count_cache: RefCell::new(None),
             scalar_counts: RefCell::new(super::cache::ScalarCounts::default()),
         };

@@ -2,6 +2,86 @@ use super::*;
 use crate::store::CountDomain;
 
 #[test]
+fn filtered_library_count_scopes_keep_optional_filters_distinct() {
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    store
+        .conn
+        .execute_batch(
+            "INSERT INTO tracks(path,raw_title,favorite,missing) VALUES
+             ('/music/a','needle',1,0),
+             ('/music/b','needle',0,1),
+             ('relative','other',0,0);",
+        )
+        .unwrap();
+    let count = |query: Option<&str>,
+                 favorite: Option<bool>,
+                 missing: Option<bool>,
+                 prefix: Option<&str>| {
+        store
+            .cached_filtered_library_count(query, favorite, missing, prefix, || {
+                Ok(store.conn.query_row(
+                    "SELECT COUNT(*) FROM tracks
+                     WHERE (?1 IS NULL OR instr(lower(raw_title),?1)>0)
+                       AND (?2 IS NULL OR favorite=?2)
+                       AND (?3 IS NULL OR missing=?3)
+                       AND (?4 IS NULL OR (path>=?4 AND path<(rtrim(?4,'/')||'0')))",
+                    rusqlite::params![query, favorite, missing, prefix],
+                    |row| row.get::<_, i64>(0),
+                )? as usize)
+            })
+            .unwrap()
+    };
+    assert_eq!(count(None, None, None, None), 3);
+    // An empty prefix still restricts the BINARY path range; it is not no scope.
+    assert_eq!(count(None, None, None, Some("")), 2);
+    assert_eq!(count(Some(""), None, None, None), 3);
+    assert_eq!(count(None, None, None, Some("")), 2);
+    assert_eq!(count(Some("needle"), None, None, None), 2);
+    assert_eq!(count(None, Some(true), None, None), 1);
+    assert_eq!(count(None, Some(false), None, None), 2);
+    assert_eq!(count(None, None, Some(true), None), 1);
+    assert_eq!(count(None, None, Some(false), None), 2);
+    assert_eq!(count(None, None, None, None), 3);
+}
+
+#[test]
+fn writable_filtered_counts_refresh_external_commits_and_rollback() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("writable-counts.db");
+    let store = Store::open(&path).unwrap();
+    store
+        .conn
+        .execute_batch(
+            "INSERT INTO tracks(path,raw_title) VALUES
+             ('/music/a','needle'),('/music/b','needle'),('/music/c','other');",
+        )
+        .unwrap();
+    let count = || {
+        store
+            .library_page(Some("needle"), None, None, 0, 0)
+            .unwrap()
+            .total
+    };
+    assert_eq!(count(), 2);
+    let external = Store::open(&path).unwrap();
+    external
+        .conn
+        .execute(
+            "UPDATE tracks SET raw_title='other' WHERE path='/music/a'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(count(), 1);
+    let transaction = store.conn.unchecked_transaction().unwrap();
+    transaction
+        .execute("UPDATE tracks SET raw_title='needle'", [])
+        .unwrap();
+    assert_eq!(count(), 3);
+    transaction.rollback().unwrap();
+    assert_eq!(count(), 1);
+}
+
+#[test]
 fn bitrate_reader_fresh_payloads_preserve_owned_count_caches() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("bitrate-counts.db");
@@ -32,7 +112,6 @@ fn bitrate_reader_fresh_payloads_preserve_owned_count_caches() {
             .total,
         1
     );
-    assert!(reader.count_cache.borrow().is_some());
     assert_eq!(
         reader
             .cached_count(CountDomain::Queue, &["retained bitrate count"], || Ok(7))
@@ -40,7 +119,13 @@ fn bitrate_reader_fresh_payloads_preserve_owned_count_caches() {
         7
     );
     assert!(writer.upgrade_bitrate(&source, 192_000, true).unwrap());
-    assert!(reader.count_cache.borrow().is_some());
+    assert_eq!(
+        reader
+            .library_page(Some("Source"), None, None, 0, 0)
+            .unwrap()
+            .total,
+        1
+    );
     assert_eq!(
         reader
             .cached_count(CountDomain::Queue, &["retained bitrate count"], || panic!(
@@ -224,7 +309,7 @@ fn reader_snapshots_refresh_counts_after_domain_invalidation_and_rollback() {
         .conn
         .execute("UPDATE tracks SET raw_title='changed' WHERE id=2", [])
         .unwrap();
-    reader.invalidate_filtered_track_count();
+    reader.invalidate_scalar_count_domains(&[CountDomain::FilteredLibrary]);
     assert_eq!(counts(), (1, 2));
     writer
         .conn

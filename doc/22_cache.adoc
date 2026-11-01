@@ -71,13 +71,14 @@ playback statistics and committed bitrate changes patch existing entries. Scans
 clear it only for display impacts. This bounds entries, not string bytes. The
 background query owner and export do not populate this LRU or assemble pages from it.
 
-Count retention stores scalars, not rows: one latest filtered library count, one
-duplicate-group total, and a sixteen-entry LRU for Other, directories, albums,
-album members, Queue, and playlist entries. Keys include normalized filters and
-collection identity, never page boundaries. The read owner reuses them across
-snapshots while their data-domain revisions remain valid, advancing cache
-ownership only after snapshot publication validation. Unrelated collection changes,
-no-change scans, and bitrate-only changes preserve library totals.
+Count retention stores scalars, not rows: one duplicate-group total and a shared
+sixteen-entry LRU for filtered Library, Other, directories, albums, album members,
+Queue, and playlist entries. Filtered Library retains only its latest scope within
+that shared limit. Keys preserve optional filters and collection identity, never
+page boundaries. The read owner reuses counts across snapshots while their
+data-domain revisions remain valid, advancing cache ownership only after snapshot
+publication validation. Unrelated collection changes, no-change scans, and
+bitrate-only changes preserve library totals.
 
 Writable count caches check local SQLite changes and on-demand `PRAGMA data_version`
 for independent commits; writer transactions bypass them to avoid rollback leakage.

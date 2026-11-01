@@ -601,8 +601,8 @@ impl ReadQueries {
             // Only accepted snapshots can change cache ownership. A rejected
             // version cannot tag old cached totals as belonging to a newer one.
             if connection.library_revision != revisions.library {
-                snapshot.invalidate_filtered_track_count();
                 snapshot.invalidate_scalar_count_domains(&[
+                    CountDomain::FilteredLibrary,
                     CountDomain::Other,
                     CountDomain::Directory,
                     CountDomain::Queue,
