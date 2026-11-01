@@ -1171,6 +1171,27 @@ impl Store {
         self.cache_track_stats(track, stats);
         Ok(stats)
     }
+    pub fn set_play_count(&self, track: i64, play_count: u64) -> Result<super::TrackStats> {
+        let play_count =
+            i64::try_from(play_count).context("play count exceeds SQLite integer range")?;
+        let tx = self.conn.unchecked_transaction()?;
+        let (mut stats, changed) = match tx.query_row(
+            "UPDATE tracks SET play_count=?1 WHERE id=?2 AND play_count<>?1 RETURNING play_count,last_played",
+            params![play_count, track], super::TrackStats::from_row,
+        ).optional()? {
+            Some(stats) => (stats, true),
+            None => (tx.query_row("SELECT play_count,last_played FROM tracks WHERE id=?1", [track], super::TrackStats::from_row)
+                .optional()?.with_context(|| format!("track {track} does not exist"))?, false),
+        };
+        stats.changed = changed;
+        if changed {
+            (stats.queue, stats.albums) = tx.query_row(&format!("SELECT EXISTS(SELECT 1 FROM playlist_entries WHERE playlist_id=0 AND track_id=t.id),{} FROM tracks AS t WHERE id=?1", super::albums::eligible_member("t")), [track], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        }
+        tx.commit()?;
+        self.cache_track_stats(track, stats);
+        Ok(stats)
+    }
+
     pub fn increment_play_count(&self, track: i64) -> Result<super::TrackStats> {
         let tx = self.conn.unchecked_transaction()?;
         let mut stats = tx.query_row(
@@ -1574,6 +1595,31 @@ mod request_tests {
         assert_eq!(removed.removed, 1);
         assert!(removed.albums && !removed.queue);
         assert_eq!(removed.playlists, [playlist]);
+        Ok(())
+    }
+
+    #[test]
+    fn manual_play_count_preserves_activity_and_checks_sqlite_bounds() -> Result<()> {
+        let store = Store::open(Path::new(":memory:"))?;
+        store.conn.execute_batch(
+            "INSERT INTO tracks(id,path,raw_album,last_played) VALUES (1,'/one.wav','Album',42)",
+        )?;
+        store.enqueue_tracks(&[1])?;
+        let _ = store.track(1)?;
+        for count in [7, 0, i64::MAX as u64] {
+            let stats = store.set_play_count(1, count)?;
+            assert!(stats.changed && stats.queue && stats.albums);
+            assert_eq!((stats.play_count, stats.last_played), (count, Some(42)));
+            let cached = store.track(1)?.unwrap();
+            assert_eq!((cached.play_count, cached.last_played), (count, Some(42)));
+            let noop = store.set_play_count(1, count)?;
+            assert!(!noop.changed && !noop.queue && !noop.albums);
+        }
+        assert!(store.set_play_count(1, i64::MAX as u64 + 1).is_err());
+        assert!(store.set_play_count(999, 0).is_err());
+        store.conn.execute_batch("CREATE TEMP TRIGGER reject_count BEFORE UPDATE OF play_count ON tracks BEGIN SELECT RAISE(ABORT,'count rejected'); END")?;
+        assert!(store.set_play_count(1, 2).is_err());
+        assert_eq!(store.track(1)?.unwrap().play_count, i64::MAX as u64);
         Ok(())
     }
 

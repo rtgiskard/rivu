@@ -463,7 +463,7 @@ impl Render for WindowView {
             Some(KeyboardSurface::Menu(..))
         )
         .then(|| self.shell.scope().clone());
-        let dialog_scope = (!self.manual_confirmation_open()).then(|| self.shell.scope().clone());
+        let dialog_scope = Some(self.shell.scope().clone());
         let layout_focus = self.shell.layout_focus().clone();
         self.playlists.update(cx, |playlists, cx| {
             playlists.set_shell_context(layout_focus, menu_scope, dialog_scope, cx);
@@ -626,11 +626,6 @@ impl Render for WindowView {
                 KeyboardSurface::Dialog(DialogSurface::KeyboardHelp) => {
                     let context = self.shell.help().expect("live keyboard help");
                     app = app.child(self.keyboard_help_overlay(context, cx));
-                }
-                KeyboardSurface::Dialog(DialogSurface::MetadataConfirmation) => {
-                    if let Some(confirmation) = self.render_manual_confirmation(window, cx) {
-                        app = app.child(confirmation);
-                    }
                 }
             }
         }

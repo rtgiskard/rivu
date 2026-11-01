@@ -653,6 +653,10 @@ pub enum Command {
         key: AlbumKey,
     },
     OptimizeDatabase,
+    SetPlayCount {
+        track_id: i64,
+        play_count: u64,
+    },
     SetFavorite {
         track_ids: Vec<i64>,
         favorite: bool,

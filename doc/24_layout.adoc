@@ -29,9 +29,9 @@ link:01_config.adoc#layout[Configuration and layout].
 
 Switching or duplicating replaces the active tree, cancels interactions,
 invalidates geometry and reconciles panel demand. Layouts hold structure and
-instance preferences, not business-state or scroll snapshots. Playback, metadata
-drafts and accepted saves retain their independent owners; unused graphics retire
-rather than forming a hidden-layout cache. Renaming the active layout or deleting
+instance preferences, not business-state or scroll snapshots. Playback and accepted
+metadata saves retain their independent owners; inline fields cancel on blur and
+unused graphics retire rather than forming a hidden-layout cache. Renaming the active layout or deleting
 an inactive one does not replace the tree.
 
 === Initial layouts
@@ -222,9 +222,9 @@ docking and cramped viewports may still produce smaller panels: lists must shrin
 inside them rather than overflow neighbors, and longer headings do not increase
 the layout minimum.
 Heading actions stay on one line while the title shrinks; their shared overflow
-policy is described below. Track details field pairs stack in narrow panels and
-return to equal columns when space permits; individual label/value rows retain
-their baseline alignment.
+policy is described below. Track details label/value pairs stack in narrow panels
+and return to equal columns when space permits. Inline edit and read-only states
+share a compact single-line height; long values truncate instead of wrapping.
 
 === Panel chrome and overlays
 
@@ -248,8 +248,8 @@ follows typography and interface scale, including loading and recovery rows.
 Shared headings keep titles and secondary text independently truncated beside
 fixed, non-wrapping actions. Tools align with the full title/status block;
 toolbars may opt into wrapping, but heading actions do not reflow or enlarge
-saved panel proportions. Track details retains full editor status in a tooltip;
-the metadata session still owns its meaning and action availability.
+saved panel proportions. Track details retains full loading status in a tooltip;
+its feature owns field-specific input, errors and write availability.
 
 Panel tabs, panel catalogs and content headings share the same localized names;
 settings navigation and TUI headings reuse those names for the same concepts.
@@ -340,7 +340,7 @@ application configuration, not a per-layout setting.
 Visibility gates rendering, analysis, and new tree/Details reads, not state
 validity. Hidden windows and inactive tabs still reconcile core state and
 query-owner keys; revealing a panel demands only missing current data.
-Projection acceptance, metadata-draft retention, compact occurrence selection,
+Projection acceptance, identity-safe metadata saves, compact occurrence selection,
 and physical-worker cancellation follow
 link:22_cache.adoc#query-projection-retention[Query projection retention].
 Keyboard list actions target only a visible active panel; see
@@ -362,8 +362,8 @@ GPUI remains the rendering and input framework. Library, Queue, Playlists,
 History, Metadata, Duplicates, and Playback have independent window-lifetime
 owners. A feature owns its inputs, model, read execution, result acceptance, and
 rendering; multiple panels of that feature share its business state. The window
-coordinates explicit cross-feature actions and metadata confirmation, not a
-second aggregate browser model or query dispatcher. See
+coordinates explicit cross-feature actions, not a second aggregate browser model
+or query dispatcher. Inline metadata edits never block navigation. See
 link:22_cache.adoc#query-projection-retention[Query projection retention].
 
 Audio processing configuration and jobs belong to Core, not the docking tree.
@@ -394,11 +394,10 @@ edits onto committed configuration; failure or obsolete completion cannot erase
 new input. Panel settings share this boundary, not artwork-cache maintenance.
 
 Relative selection uses each feature's latest desired cursor. The feature
-prepares and validates its target; the window arbitrates newest manual intent
-and metadata-draft confirmation. Confirmation revalidates before discarding a
-draft, and queued actions recheck protection. Terminal non-commit transitions
-release arbitration and reconsider playback follow; stale results cannot settle
-a newer intent.
+prepares and validates its target; the window arbitrates newest manual intent.
+Committing a different track cancels unsubmitted Details input without confirmation.
+Terminal non-commit transitions release arbitration and reconsider playback follow;
+stale results cannot settle a newer intent.
 
 === Surfaces, focus and input routing
 

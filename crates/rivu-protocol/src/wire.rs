@@ -534,6 +534,10 @@ pub enum WireCommand {
         after: bool,
         expected_revision: u64,
     },
+    SetPlayCount {
+        track_id: i64,
+        play_count: u64,
+    },
 }
 
 pub fn wire_usize(value: u64, field: &str) -> Result<usize> {
@@ -1092,6 +1096,13 @@ impl From<Command> for WireCommand {
             Command::PlayAlbum { key } => Self::PlayAlbum { key },
             Command::EnqueueAlbum { key } => Self::EnqueueAlbum { key },
             Command::OptimizeDatabase => Self::OptimizeDatabase,
+            Command::SetPlayCount {
+                track_id,
+                play_count,
+            } => Self::SetPlayCount {
+                track_id,
+                play_count,
+            },
             Command::SetFavorite {
                 track_ids,
                 favorite,
@@ -1377,6 +1388,13 @@ impl TryFrom<WireCommand> for Command {
             WireCommand::EnqueueAlbum { key } => Self::EnqueueAlbum { key },
             WireCommand::ShowWindow => bail!("ShowWindow is an application request"),
             WireCommand::OptimizeDatabase => Self::OptimizeDatabase,
+            WireCommand::SetPlayCount {
+                track_id,
+                play_count,
+            } => Self::SetPlayCount {
+                track_id,
+                play_count,
+            },
             WireCommand::SetFavorite {
                 track_ids,
                 favorite,

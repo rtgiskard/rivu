@@ -26,7 +26,6 @@ pub(super) enum MenuSurface {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum DialogSurface {
     KeyboardHelp,
-    MetadataConfirmation,
     About,
     DuplicateReview,
     PlaylistEditor,
@@ -206,11 +205,7 @@ impl WindowView {
     }
 
     pub(super) fn dialog_surface(&self, surface: gpui::Stateful<Div>) -> gpui::Stateful<Div> {
-        if self.manual_confirmation_open() {
-            surface
-        } else {
-            self.shell.scope().surface(surface)
-        }
+        self.shell.scope().surface(surface)
     }
 
     /// Leaving an editor must not leave the surface that still owns the keyboard.
@@ -272,8 +267,6 @@ impl WindowView {
                 .is_open(Surface::About)
                 .then_some(Dialog(D::About)),
             self.shell.help().map(|_| Dialog(D::KeyboardHelp)),
-            self.manual_confirmation_open()
-                .then_some(Dialog(D::MetadataConfirmation)),
         ]
         .into_iter()
         .flatten()
@@ -287,7 +280,6 @@ impl WindowView {
         let surface = self.current_keyboard_surface(cx);
         let focus_ticket = self.shell.synchronize(surface, window, cx);
         let frame_epoch = self.shell.focus_epoch;
-        let confirmation = self.manual_confirmation_id();
         let owner = cx.weak_entity();
         window.set_native_focus_guard(move |focus, window, cx| {
             let Some(owner) = owner.upgrade() else {
@@ -298,8 +290,7 @@ impl WindowView {
                 frame_epoch,
                 surface,
                 owner.current_keyboard_surface(cx),
-            ) || owner.manual_confirmation_id() != confirmation
-            {
+            ) {
                 return false;
             }
             match surface {
@@ -323,8 +314,7 @@ impl WindowView {
                     epoch,
                     surface,
                     this.current_keyboard_surface(cx),
-                ) && this.manual_confirmation_id() == confirmation
-                {
+                ) {
                     if surface.is_none()
                         && window.focused(cx) != focus_before_restore
                         && this.shell.layout_focus().contains_focused(window, cx)
@@ -392,7 +382,6 @@ mod tests {
         let window = cx.add_window(|_, _| gpui::EmptyView).into();
         let surfaces = [
             Some(KeyboardSurface::Settings),
-            Some(KeyboardSurface::Dialog(DialogSurface::MetadataConfirmation)),
             Some(KeyboardSurface::Dialog(DialogSurface::About)),
             Some(KeyboardSurface::Menu(MenuSurface::App)),
             None,

@@ -346,8 +346,8 @@ Client command failures before handshake or encoding completes are `NotAdmitted`
 Once a socket write is attempted, write, flush, response, and cancellation failures
 are conservatively `Unknown`, even without evidence that bytes reached the peer.
 The client's `CommandFailure` carries no invented Core revision or task ID.
-`Shutdown` is an App lifecycle request and bypasses GUI draft confirmation;
-interactive GUI/tray quit uses the separate user-shutdown path. Shutdown
+`Shutdown` is an App lifecycle request; interactive GUI/tray quit uses the separate
+user-shutdown path. Neither confirms unsubmitted inline Details text. Shutdown
 acknowledgement means accepted shutdown, not final persistence or worker
 retirement. Blocking I/O and cooperative cancellation provide no hard exit deadline.
 The host attempts each final persistence domain even if another fails, retires
@@ -504,7 +504,7 @@ Bitrate-only publication does not advance structure, collection membership, or
 count revisions, and does not query Queue, album, or playlist membership.
 
 Consumers discard old-stamp payloads and reload on demand; hidden views wait for
-reveal. Selection, counts, navigation geometry, and metadata drafts survive
+reveal. Selection, counts, navigation geometry, and active Details input survive
 bitrate-only invalidation. The global bitrate revision may conservatively invalidate
 unrelated track payloads, but needs no event history. Hover uses retained rows,
 not another Track request. Range anchors ignore bitrate-only changes, while range

@@ -178,11 +178,11 @@ gl-ready = Ready
 gl-track-unavailable = Track unavailable
 
 gl-metadata-saving = Saving metadata…
-gl-metadata-edit-note = Changes are saved only in Rivu, not to audio files. Clearing and saving a field clears its displayed text.
-
-gl-unsaved = Unsaved changes
+gl-metadata-edit-note = Edit one field, then Enter to save in Rivu only. Escape or leaving the field cancels. Clearing and saving clears its displayed text, not media tags.
 
 gl-copy-value = Copy value
+gl-edit-value = Edit value
+gl-play-count-invalid = Enter a whole number from 0 to 9223372036854775807.
 
 gl-file-path = Source path
 gl-track-kind = Type
@@ -223,8 +223,6 @@ gl-play-count = Plays
 
 gl-last-played = Last played
 
-gl-save-metadata = Save metadata. Media files are never modified
-
 gl-reload-playback = Reload current playback track
 
 gl-file = File
@@ -237,7 +235,7 @@ gl-auto = Auto
 
 gl-native = Native
 
-gl-decoder-save-note = Save to apply on the next track open or full waveform request
+gl-decoder-apply-note = Selection saves immediately; applies on the next track open or full waveform request
 
 gl-decoder-warning = FFmpeg requires the extension; native DTS-WAV decoding may produce noise
 
@@ -372,11 +370,6 @@ gl-details-loading-status = { $status } · Loading track details…
 
 gl-details-failed-status = { $status } · Could not load track details: { $error }
 
-gl-details-protected-status = { $status } · { $draft }{ $follow ->
-        [1] { " · Playback follow paused" }
-       *[other] { "" }
-    }
-
 gl-track-id = Track #{ $id }
 
 gl-duplicate-response = Unexpected same-files response
@@ -502,15 +495,7 @@ gl-target-identity = Destination #{ $id }: { $path }
 
 gl-page-range = { $start }–{ $end } of { $total }
 
-gl-metadata-stale-action = The selection changed while waiting. Select the desired track again; your Details draft has been kept.
-
-gl-metadata-discard-saving = The save already submitted may still complete. Discard any remaining draft and continue, or Cancel to keep editing this track.
-
-gl-metadata-discard-note = Discard the unsaved Details draft and continue? Cancel keeps the draft and the original selection.
-
-gl-metadata-discard-title = Discard Details draft?
-
-gl-metadata-discard = Discard metadata changes
+gl-selection-stale-action = The selection changed while waiting. Select the desired track again.
 
 gl-metadata-load-failed = Could not load track details
 

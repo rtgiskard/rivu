@@ -430,6 +430,94 @@ fn committed_play_count_invalidates_once_without_queue_projection_reads() {
 }
 
 #[test]
+fn manual_play_count_updates_projections_without_consuming_playback_count() {
+    let (_directory, mut core) = fixture_with_database(Some(10.0));
+    playing(&mut core, 1);
+    let last_played = core.track(1).unwrap().last_played;
+    let before = core.state.query_revisions();
+    core.command(Command::SetPlayCount {
+        track_id: 1,
+        play_count: 7,
+    })
+    .unwrap();
+    assert!(!core.playback.as_ref().unwrap().counted);
+    assert_eq!(core.track(1).unwrap().last_played, last_played);
+    assert_eq!(core.state.current_track().unwrap().play_count, 7);
+    assert_eq!(core.state.library.history[0].play_count, 7);
+    assert_eq!(core.state.library.revision, before.library + 1);
+    assert_eq!(core.state.queue.revision, before.queue + 1);
+    let unchanged = core.state.query_revisions();
+    core.command(Command::SetPlayCount {
+        track_id: 1,
+        play_count: 7,
+    })
+    .unwrap();
+    assert_eq!(core.state.query_revisions(), unchanged);
+    assert!(
+        core.command(Command::SetPlayCount {
+            track_id: 1,
+            play_count: u64::MAX
+        })
+        .is_err()
+    );
+    assert!(
+        core.command(Command::SetPlayCount {
+            track_id: 999,
+            play_count: 0
+        })
+        .is_err()
+    );
+    progress(&mut core, 8.0, 8.0);
+    assert_eq!(play_count(&core, 1), 8);
+    assert!(core.playback.as_ref().unwrap().counted);
+    core.command(Command::SetPlayCount {
+        track_id: 1,
+        play_count: 0,
+    })
+    .unwrap();
+    progress(&mut core, 9.0, 9.0);
+    assert_eq!(play_count(&core, 1), 0);
+    assert!(core.playback.as_ref().unwrap().counted);
+}
+
+#[test]
+fn manual_play_count_recovers_deferred_count_before_overwriting() {
+    let (_directory, mut core) = fixture_with_database(Some(10.0));
+    playing(&mut core, 1);
+    core.playback.as_mut().unwrap().heard = 8.0;
+    core.playback_write_deferred = true;
+    core.command(Command::SetPlayCount {
+        track_id: 1,
+        play_count: 4,
+    })
+    .unwrap();
+    assert_eq!(play_count(&core, 1), 4);
+    assert!(core.playback.as_ref().unwrap().counted);
+    assert!(!core.playback_write_deferred);
+    progress(&mut core, 9.0, 9.0);
+    assert_eq!(play_count(&core, 1), 4);
+}
+
+#[test]
+fn manual_play_count_does_not_overwrite_failed_deferred_statistics() {
+    let (directory, mut core) = fixture_with_database(Some(10.0));
+    playing(&mut core, 1);
+    core.playback.as_mut().unwrap().heard = 8.0;
+    core.playback_write_deferred = true;
+    let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+    connection.execute_batch("CREATE TRIGGER reject_count BEFORE UPDATE OF play_count ON tracks BEGIN SELECT RAISE(ABORT,'count rejected'); END").unwrap();
+    assert!(
+        core.command(Command::SetPlayCount {
+            track_id: 1,
+            play_count: 4
+        })
+        .is_err()
+    );
+    assert_eq!(play_count(&core, 1), 0);
+    assert!(!core.playback.as_ref().unwrap().counted);
+}
+
+#[test]
 fn saturated_audio_admission_preserves_state_requests_events_and_command_order() {
     let (_directory, mut core) = fixture();
     let (commands, receive) = async_channel::bounded(64);

@@ -86,13 +86,6 @@ impl WindowView {
                 cx.stop_propagation();
                 return;
             }
-            Some(shell::KeyboardSurface::Dialog(shell::DialogSurface::MetadataConfirmation)) => {
-                if cancel {
-                    self.cancel_manual_action(cx);
-                }
-                cx.stop_propagation();
-                return;
-            }
             _ => {}
         }
         if rivu_ui::tab_key(event) {
@@ -108,6 +101,8 @@ impl WindowView {
         }
         // Leaving an editor is one operation; dismissing its containing surface is another.
         if cancel && self.input_focused(window, cx) {
+            self.metadata
+                .update(cx, |metadata, cx| metadata.cancel_edit(cx));
             self.focus_keyboard_surface(window, cx);
             cx.stop_propagation();
             return;
@@ -146,7 +141,7 @@ impl WindowView {
                             self.focus_keyboard_surface(window, cx);
                             cx.notify();
                         }
-                        DialogSurface::KeyboardHelp | DialogSurface::MetadataConfirmation => {
+                        DialogSurface::KeyboardHelp => {
                             unreachable!("handled before editor and Tab routing");
                         }
                     }

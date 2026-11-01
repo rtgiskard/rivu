@@ -1,11 +1,8 @@
-//! Window-owned explicit actions and their metadata confirmation barrier.
-//! Feature owners prepare, validate, and commit their selections; this coordinator
-//! owns only cross-feature intent identity and the window's confirmation dialog.
-//! Refresh reconciles owners before a frozen target is validated or a draft discarded.
+//! Window-owned newest explicit action identity.
+//! Features prepare and validate their targets before committing selections.
 
 use crate::gui::WindowView;
-use gpui::{AnyElement, Context, Window, prelude::*};
-use rivu_ui::{IconButton, IconButtonDensity, IconButtonStyle, panel_header, row};
+use gpui::Context;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::gui) struct ManualIntentId(u64);
@@ -16,13 +13,11 @@ pub(in crate::gui) struct ManualIntentId(u64);
 pub(in crate::gui) struct ManualIntents {
     serial: u64,
     preparing: bool,
-    pending: Option<(ManualIntentId, ManualAction)>,
 }
 
 impl ManualIntents {
     pub(in crate::gui) fn begin(&mut self) -> ManualIntentId {
         self.serial = self.serial.wrapping_add(1);
-        self.pending = None;
         self.preparing = true;
         ManualIntentId(self.serial)
     }
@@ -31,40 +26,24 @@ impl ManualIntents {
         self.serial == id.0 && self.preparing
     }
 
-    fn offer(
-        &mut self,
-        id: ManualIntentId,
-        action: ManualAction,
-        protected: bool,
-    ) -> Option<ManualAction> {
+    fn offer(&mut self, id: ManualIntentId, action: ManualAction) -> Option<ManualAction> {
         if !self.current(id) {
             return None;
         }
         self.preparing = false;
-        if protected {
-            self.pending = Some((id, action));
-            None
-        } else {
-            Some(action)
-        }
-    }
-
-    fn take_pending(&mut self) -> Option<ManualAction> {
-        let (id, action) = self.pending.take()?;
-        (self.serial == id.0).then_some(action)
+        Some(action)
     }
 
     fn settle(&mut self, id: ManualIntentId) -> bool {
-        if self.serial != id.0 || (!self.preparing && self.pending.is_none()) {
+        if self.serial != id.0 || !self.preparing {
             return false;
         }
         self.preparing = false;
-        self.pending = None;
         true
     }
 
     pub(in crate::gui) fn allows_follow(&self) -> bool {
-        !self.preparing && self.pending.is_none()
+        !self.preparing
     }
 }
 
@@ -84,7 +63,6 @@ pub(in crate::gui) enum ManualAction {
 
 impl WindowView {
     pub(in crate::gui) fn begin_manual_intent(&mut self, cx: &mut Context<Self>) -> ManualIntentId {
-        let confirmation_open = self.manual_confirmation_open();
         let id = self.manual_intents.begin();
         self.library
             .update(cx, |library, cx| library.cancel_selection(cx));
@@ -93,9 +71,6 @@ impl WindowView {
         self.playlists
             .update(cx, |playlists, cx| playlists.cancel_selection(cx));
         self.sync_transfer_state(cx);
-        if confirmation_open {
-            cx.notify();
-        }
         id
     }
 
@@ -123,19 +98,13 @@ impl WindowView {
         id: ManualIntentId,
         cx: &mut Context<Self>,
     ) {
-        let confirmation_open = self.manual_confirmation_open();
         if self.manual_intents.settle(id) {
             self.reconcile_manual_follow(cx);
-            if confirmation_open {
-                cx.notify();
-            }
         }
     }
 
     pub(in crate::gui) fn reconcile_manual_follow(&mut self, cx: &mut Context<Self>) {
-        // A clean notification can be held behind preparation or confirmation.
-        // Every non-commit terminal transition releases that barrier; metadata
-        // still owns protection and explicit-track versus playback-follow policy.
+        // Preparing a selection holds playback follow until the intent settles.
         if self.manual_intents.allows_follow() {
             self.metadata
                 .update(cx, |metadata, cx| metadata.resume_follow(cx));
@@ -158,16 +127,6 @@ impl WindowView {
         }
     }
 
-    fn manual_action_target(&self, action: &ManualAction, cx: &gpui::App) -> Option<i64> {
-        match action {
-            ManualAction::Library(commit) => self.library.read(cx).library_commit_target(commit),
-            ManualAction::Playlist(commit) => Some(commit.target.track_id),
-            ManualAction::Queue(commit) => Some(commit.target.track_id),
-            ManualAction::History { commit, .. } => Some(commit.track_id),
-            _ => None,
-        }
-    }
-
     pub(in crate::gui) fn ready_manual_action(
         &mut self,
         id: ManualIntentId,
@@ -183,71 +142,14 @@ impl WindowView {
             self.reject_stale_manual_action(cx);
             return;
         }
-        let protected = self
-            .metadata
-            .read(cx)
-            .needs_confirmation(self.manual_action_target(&action, cx), cx);
-        if let Some(action) = self.manual_intents.offer(id, action, protected) {
+        if let Some(action) = self.manual_intents.offer(id, action) {
             self.commit_manual_action(action, cx);
-        } else {
-            cx.notify();
         }
     }
 
     fn reject_stale_manual_action(&mut self, cx: &mut Context<Self>) {
-        self.error = Some(self.i18n.text("gl-metadata-stale-action").into());
+        self.error = Some(self.i18n.text("gl-selection-stale-action").into());
         cx.notify();
-    }
-
-    pub(in crate::gui) fn manual_confirmation_open(&self) -> bool {
-        self.manual_intents.pending.is_some()
-    }
-
-    pub(in crate::gui) fn manual_confirmation_id(&self) -> Option<ManualIntentId> {
-        self.manual_intents.pending.as_ref().map(|(id, _)| *id)
-    }
-
-    pub(in crate::gui) fn cancel_manual_action(&mut self, cx: &mut Context<Self>) {
-        self.invalidate_manual_intent(cx);
-        cx.notify();
-    }
-
-    pub(in crate::gui) fn resume_manual_action(&mut self, discard: bool, cx: &mut Context<Self>) {
-        self.refresh(cx);
-        let Some((id, action)) = self.manual_intents.pending.as_ref() else {
-            return;
-        };
-        // Validate while the confirmation still owns its identity, before either
-        // taking the commit or touching the original editor and draft.
-        if !self.manual_action_valid(action, cx) {
-            let id = *id;
-            self.settle_manual_intent(id, cx);
-            self.reject_stale_manual_action(cx);
-            return;
-        }
-        // Clean notifications are queued. A later edit may already protect the
-        // original draft again; only explicit Discard may bypass that barrier.
-        if !discard
-            && self
-                .metadata
-                .read(cx)
-                .needs_confirmation(self.manual_action_target(action, cx), cx)
-        {
-            return;
-        }
-        let Some(action) = self.manual_intents.take_pending() else {
-            return;
-        };
-        if discard {
-            self.metadata
-                .update(cx, |metadata, cx| metadata.discard(cx));
-        }
-        self.commit_manual_action(action, cx);
-        cx.notify();
-    }
-
-    fn discard_metadata_and_continue(&mut self, cx: &mut Context<Self>) {
-        self.resume_manual_action(true, cx);
     }
 
     fn commit_manual_action(&mut self, action: ManualAction, cx: &mut Context<Self>) {
@@ -277,7 +179,6 @@ impl WindowView {
             }
             ManualAction::ReloadPlayback => {
                 self.metadata.update(cx, |metadata, cx| {
-                    metadata.discard(cx);
                     metadata.clear_selection(cx);
                 });
             }
@@ -299,69 +200,6 @@ impl WindowView {
         let id = self.begin_manual_intent(cx);
         self.ready_manual_action(id, ManualAction::Clear, cx);
     }
-
-    pub(in crate::gui) fn render_manual_confirmation(
-        &mut self,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let theme = rivu_ui::theme::palette(cx);
-        self.manual_intents.pending.as_ref()?;
-        let detail = if self.metadata.read(cx).saving() {
-            self.i18n.text("gl-metadata-discard-saving")
-        } else {
-            self.i18n.text("gl-metadata-discard-note")
-        };
-        Some(
-            rivu_ui::Dialog::backdrop("metadata-confirmation-modal")
-                .map(|surface| self.shell.scope().surface(surface))
-                .child(
-                    rivu_ui::Dialog::scroll_card(theme, "metadata-confirmation-card", window)
-                        .w(gpui::rems(26.25))
-                        .child(
-                            panel_header(
-                                theme,
-                                self.tr("gl-metadata-discard-title"),
-                                detail.to_owned(),
-                            )
-                            .flex_shrink_0(),
-                        )
-                        .child(
-                            row()
-                                .flex_shrink_0()
-                                .justify_end()
-                                .child(
-                                    IconButton::new(
-                                        "metadata-confirmation-cancel",
-                                        "",
-                                        self.tr("shell-cancel"),
-                                    )
-                                    .build(
-                                        IconButtonStyle::Surface,
-                                        IconButtonDensity::Regular,
-                                        cx,
-                                        |this, _, cx| this.cancel_manual_action(cx),
-                                    ),
-                                )
-                                .child(rivu_ui::danger_control(
-                                    theme,
-                                    IconButton::new(
-                                        "metadata-confirmation-discard",
-                                        "󰆴",
-                                        self.tr("gl-metadata-discard"),
-                                    )
-                                    .build(
-                                        IconButtonStyle::Surface,
-                                        IconButtonDensity::Regular,
-                                        cx,
-                                        |this, _, cx| this.discard_metadata_and_continue(cx),
-                                    ),
-                                )),
-                        ),
-                )
-                .into_any_element(),
-        )
-    }
 }
 
 #[cfg(test)]
@@ -369,103 +207,30 @@ mod tests {
     use super::{ManualAction, ManualIntents};
 
     #[test]
-    fn settlement_releases_both_barriers_once_without_reopening_committed_actions() {
-        for confirming in [false, true] {
-            let mut owner = ManualIntents::default();
-            let intent = owner.begin();
-            if confirming {
-                assert!(owner.offer(intent, ManualAction::Clear, true).is_none());
-            }
-            assert!(!owner.allows_follow());
-            assert!(owner.settle(intent));
-            assert!(owner.allows_follow());
-            assert!(owner.take_pending().is_none());
-            assert!(!owner.settle(intent));
-            assert!(owner.offer(intent, ManualAction::Quit, true).is_none());
-
-            let committed = owner.begin();
-            assert!(matches!(
-                owner.offer(committed, ManualAction::Clear, false),
-                Some(ManualAction::Clear)
-            ));
-            assert!(!owner.settle(committed));
-            let newer = owner.begin();
-            assert!(!owner.settle(committed));
-            assert!(owner.current(newer));
-            assert!(!owner.allows_follow());
-        }
-    }
-
-    #[test]
-    fn clean_editor_cannot_follow_over_newer_preparing_or_confirmed_intent() {
+    fn late_completion_cannot_replace_newer_action() {
         let mut owner = ManualIntents::default();
-        assert!(owner.allows_follow());
-        let first = owner.begin();
-        assert!(!owner.allows_follow());
-        assert!(owner.offer(first, ManualAction::Clear, true).is_none());
-        assert!(!owner.allows_follow());
-        let newer = owner.begin();
-        assert!(!owner.settle(first));
-        assert!(!owner.allows_follow());
-        assert!(owner.take_pending().is_none());
-        assert!(owner.settle(newer));
-        assert!(owner.allows_follow());
-        assert!(owner.offer(first, ManualAction::Quit, true).is_none());
-        assert!(owner.offer(newer, ManualAction::Quit, true).is_none());
-    }
-
-    #[test]
-    fn late_range_cannot_replace_newer_exit_or_clean_selection() {
-        let mut owner = ManualIntents::default();
-        let range = owner.begin();
-        let quit = owner.begin();
-        assert!(owner.offer(quit, ManualAction::Quit, true).is_none());
-        assert!(owner.offer(range, ManualAction::Clear, true).is_none());
-        assert!(matches!(owner.take_pending(), Some(ManualAction::Quit)));
-        let navigation = owner.begin();
-        let clean_selection = owner.begin();
+        let old = owner.begin();
+        let current = owner.begin();
+        assert!(owner.offer(old, ManualAction::Clear).is_none());
+        assert!(owner.current(current));
         assert!(matches!(
-            owner.offer(clean_selection, ManualAction::ReloadPlayback, false),
-            Some(ManualAction::ReloadPlayback)
+            owner.offer(current, ManualAction::Quit),
+            Some(ManualAction::Quit)
         ));
-        assert!(owner.offer(navigation, ManualAction::Clear, true).is_none());
-        assert!(owner.take_pending().is_none());
+        assert!(owner.offer(current, ManualAction::Clear).is_none());
+        assert!(owner.allows_follow());
     }
 
     #[test]
-    fn cancel_and_new_input_prevent_old_save_resume() {
+    fn settlement_releases_preparation_once_without_settling_newer_intent() {
         let mut owner = ManualIntents::default();
-        let first = owner.begin();
-        assert!(owner.offer(first, ManualAction::Clear, true).is_none());
-        owner.begin(); // Cancel invalidates intent, not the editor or draft.
-        assert!(owner.take_pending().is_none());
-        assert!(owner.offer(first, ManualAction::Clear, false).is_none());
-        let next = owner.begin();
-        assert!(owner.offer(next, ManualAction::Quit, true).is_none());
-        assert!(matches!(owner.take_pending(), Some(ManualAction::Quit)));
-        assert!(owner.take_pending().is_none());
-    }
-
-    #[test]
-    fn completion_and_confirmation_can_each_publish_only_once() {
-        let mut owner = ManualIntents::default();
-        let clean = owner.begin();
-        assert!(matches!(
-            owner.offer(clean, ManualAction::Clear, false),
-            Some(ManualAction::Clear)
-        ));
-        assert!(!owner.current(clean));
-        assert!(owner.offer(clean, ManualAction::Quit, true).is_none());
-        assert!(owner.take_pending().is_none());
-        let protected = owner.begin();
-        assert!(owner.offer(protected, ManualAction::Quit, true).is_none());
-        assert!(owner.offer(protected, ManualAction::Clear, true).is_none());
-        assert!(matches!(owner.take_pending(), Some(ManualAction::Quit)));
-        assert!(owner.offer(protected, ManualAction::Clear, false).is_none());
-        assert!(owner.take_pending().is_none());
-        let failed = owner.begin();
-        assert!(owner.settle(failed));
-        assert!(owner.offer(failed, ManualAction::Clear, false).is_none());
-        assert!(owner.take_pending().is_none());
+        let old = owner.begin();
+        let current = owner.begin();
+        assert!(!owner.settle(old));
+        assert!(!owner.allows_follow());
+        assert!(owner.settle(current));
+        assert!(!owner.settle(current));
+        assert!(owner.allows_follow());
+        assert!(owner.offer(current, ManualAction::Clear).is_none());
     }
 }

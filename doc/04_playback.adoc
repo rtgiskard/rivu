@@ -190,7 +190,7 @@ Use *Locate playing entry in Queue* in the toolbar or Playback title to reveal a
 emphasize the current occurrence, including while paused. The Playback button
 opens an existing Queue tab or adds one if the layout is unlocked; it reports an
 error if a locked layout has none. Location changes neither selection, playback,
-nor Details drafts and does not automatically follow playback changes. Without
+nor the Details target and does not automatically follow playback changes. Without
 a current occurrence it is disabled; a removed entry is not replaced by a duplicate.
 
 Hover a row for Favorite, Play, Remove, Move up, and Move down. These actions

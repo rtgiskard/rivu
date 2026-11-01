@@ -81,7 +81,6 @@ impl PlaylistBrowser {
     }
     pub(super) fn search_entries(&mut self, query: Option<String>) {
         self.entry_generation = self.entry_generation.wrapping_add(1);
-        self.track_selection.query = query.clone();
         self.entries.query = query;
         self.track_selection.clear();
         self.entries.rows.clear();
@@ -312,7 +311,6 @@ impl PlaylistBrowser {
         let changed = self.entries.playlist_id != Some(id);
         if changed {
             self.entries.query = None;
-            self.track_selection.query = None;
             self.track_selection.clear();
             self.entries.rows.clear();
             self.entries.scroll.scroll_to_item(0, ScrollStrategy::Top);

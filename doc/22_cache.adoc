@@ -109,8 +109,9 @@ link:21_ipc.adoc#query-results-and-pagination[IPC query results].
 
 Feature owners reconcile configuration and freshness even while hidden, but submit
 reads only for demand. Hiding immediately revokes pending publication rights while
-preserving accepted rows, selections, and Details drafts. An open Add to playlist
-chooser has independent demand; cover acquisition has separate owners.
+preserving accepted rows and selections. Inline Details text cancels on blur;
+submitted saves remain identity-safe. An open Add to playlist chooser has
+independent demand; cover acquisition has separate owners.
 
 GUI and TUI consumers use `QueryTracker` for query identity, freshness stamps, and
 owner-scoped cancellation generations. It owns neither result rows nor worker
@@ -149,7 +150,8 @@ buffers. Selection-existence reads are independent of page size, and position
 validity is independent of operation progress.
 |Details
 |One read coordinator; explicit selections query Track, while playback-follow uses
-Core's current-track projection. Draft/save acceptance has a separate owner.
+Core's current-track projection. Inline text and field-specific save acceptance
+have a separate owner; reads never overwrite the active input.
 |Collection resolution
 |One cancellable paged reader for album-menu favorite actions. Whole-collection
 Queue/Playlist copies instead submit versioned source identity for transactional
@@ -163,7 +165,7 @@ late admission cannot reopen the review.
 Debounced reads recheck demand before submission. An abandoned timer releases only
 its unsubmitted reservation. Album searches, Playlist pages, and explicit Details
 preserve the latest demand's quiet deadline across hiding and redispatch; replacement
-renews it. Confirmation barriers, drafts, and selections remain separate from read
+renews it. Inline edits, accepted saves and selections remain separate from read
 lifetime, so late reads or saves cannot restore retired intent. See
 link:24_layout.adoc[GUI layout] for interaction rules.
 
@@ -638,8 +640,8 @@ cancel or unload another's image. Only the last retired consumer cancels the
 pending load or removes the completed image from the renderer. Hiding Track
 details or the large artwork panel retires its display owner and queued lookup
 demand; a late shared lookup may warm the session cache but cannot restore a
-hidden owner or start another hidden acquisition. Track details keeps its editor
-draft independently. Window hide, close, or reload releases
+hidden owner or start another hidden acquisition. Unsubmitted Details input cancels
+on blur, independently of accepted writes. Window hide, close, or reload releases
 current and retired display owners without waiting for another frame. Another
 window owns an independent decode.
 

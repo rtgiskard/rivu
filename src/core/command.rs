@@ -551,6 +551,12 @@ impl Core {
             } => self.edit_track(track_id, title, artist, album, decoder_hint)?,
             Command::RemoveTracks { track_ids } => self.remove_tracks(track_ids)?,
             Command::RemoveHistory { track_ids } => self.remove_history(track_ids)?,
+            Command::SetPlayCount {
+                track_id,
+                play_count,
+            } => {
+                self.set_play_count(track_id, play_count)?;
+            }
             Command::SetFavorite {
                 track_ids,
                 favorite,

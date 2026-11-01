@@ -1124,6 +1124,31 @@ fn edit_track_wire_round_trip_preserves_omitted_and_explicit_fields() {
 }
 
 #[test]
+fn set_play_count_wire_round_trip_preserves_integer_boundaries() {
+    for track_id in [i64::MIN, 1, i64::MAX] {
+        for play_count in [0, i64::MAX as u64, u64::MAX] {
+            let request = WireRequest::Command(WireCommand::from(Command::SetPlayCount {
+                track_id,
+                play_count,
+            }));
+            let mut encoded = Vec::new();
+            encode_request_frame_into(&request, &mut encoded).unwrap();
+            let WireRequest::Command(command) = decode_request_frame(&encoded[4..]).unwrap() else {
+                panic!("expected command request");
+            };
+            let Command::SetPlayCount {
+                track_id: decoded_id,
+                play_count: decoded_count,
+            } = command.try_into().unwrap()
+            else {
+                panic!("expected play count command");
+            };
+            assert_eq!((decoded_id, decoded_count), (track_id, play_count));
+        }
+    }
+}
+
+#[test]
 fn relative_playback_intents_round_trip() {
     let mut encoded = Vec::new();
     for command in [

@@ -1,11 +1,11 @@
 //! Coordinates details demand, projection validity, and the single physical reader.
 //!
-//! The edit session's token protects its baseline and identity; projection generation
-//! independently protects query freshness. Neither identity substitutes for the other.
+//! The session token protects track identity; projection generation independently
+//! protects query freshness. Neither identity substitutes for the other.
 //! A pending refresh is also the one coalesced queued demand while a worker exists.
 //! Logical cancellation preserves that demand and never releases the physical gate.
 
-use super::session::{LoadToken, MetadataDraft, MetadataSession, MetadataValues};
+use super::session::{LoadToken, MetadataSession};
 use crate::query_tracking::{QueryTicket, QueryTracker};
 use rivu_protocol::{
     model::Query,
@@ -57,7 +57,7 @@ pub(super) struct ReadEnvironment {
 
 pub(super) enum ReadCompletion {
     Retired,
-    Loaded(Option<MetadataValues>),
+    Loaded(bool),
     Failed,
 }
 
@@ -188,15 +188,14 @@ impl MetadataReadCoordinator {
         session.fail_load(read.token, error.to_string())
     }
 
-    /// Completion alone retires submitted I/O. Widget text is borrowed only here;
-    /// the coordinator never stores a second draft or changes the session baseline.
+    /// Completion alone retires submitted I/O. Inline text is view-owned and is
+    /// never read or overwritten by this coordinator.
     pub(super) fn finish(
         &mut self,
         read: MetadataRead,
         session: &mut MetadataSession,
         environment: ReadEnvironment,
         response: QueryResponse,
-        draft: MetadataDraft<'_>,
         unexpected_response: impl FnOnce() -> String,
     ) -> ReadCompletion {
         if self.worker == Some(ReadWorker::TimedOut(read)) {
@@ -236,7 +235,7 @@ impl MetadataReadCoordinator {
             return ReadCompletion::Retired;
         }
         if let ViewResponse::Track(track) = result {
-            ReadCompletion::Loaded(session.accept_load(read.token, track, draft))
+            ReadCompletion::Loaded(session.accept_load(read.token, track))
         } else {
             session.fail_load(read.token, unexpected_response());
             ReadCompletion::Failed
@@ -272,7 +271,6 @@ mod tests {
                     revisions
                 },
                 response(),
-                MetadataValues::default().as_draft(),
                 || "wrong response".into(),
             ),
             ReadCompletion::Retired
@@ -309,14 +307,9 @@ mod tests {
         read: MetadataRead,
         visible: bool,
     ) -> ReadCompletion {
-        owner.finish(
-            read,
-            session,
-            environment(visible),
-            response(),
-            MetadataValues::default().as_draft(),
-            || "wrong response".into(),
-        )
+        owner.finish(read, session, environment(visible), response(), || {
+            "wrong response".into()
+        })
     }
 
     fn request(
@@ -518,7 +511,8 @@ mod tests {
         request(&mut owner, &mut session, 1, now);
         let first = owner.prepare(&mut session, true, now).unwrap();
         assert!(owner.submit(first.read, &session, environment(true)));
-        session.discard_draft();
+        session.clear_selection();
+        session.select(1);
         assert!(matches!(
             finish(&mut owner, &mut session, first.read, true),
             ReadCompletion::Retired
@@ -543,7 +537,6 @@ mod tests {
                     revisions: QueryRevisions::default(),
                     result: Err(QueryError::Message("read failed".into())),
                 },
-                MetadataValues::default().as_draft(),
                 || "wrong response".into(),
             ),
             ReadCompletion::Failed
@@ -599,7 +592,6 @@ mod tests {
                 },
                 result: Err(QueryError::Message("Core unavailable".into())),
             },
-            MetadataValues::default().as_draft(),
             || "wrong response".into(),
         );
         assert!(matches!(completion, ReadCompletion::Failed));
@@ -658,14 +650,9 @@ mod tests {
         let mut changed = response();
         changed.revisions.library = 1;
         assert!(matches!(
-            owner.finish(
-                first.read,
-                &mut session,
-                environment(true),
-                changed,
-                MetadataValues::default().as_draft(),
-                || "wrong response".into(),
-            ),
+            owner.finish(first.read, &mut session, environment(true), changed, || {
+                "wrong response".into()
+            },),
             ReadCompletion::Retired
         ));
         assert!(session.accepts_load(first.read.token));

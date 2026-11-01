@@ -212,7 +212,7 @@ track, use the explicit clear-and-locate action to reveal it.
 Use `Locate playing track in Library` to reveal the current track, also while paused.
 It expands the root and parent directories in tree view or uses the current flat
 sort, scrolls to the exact library identity, and briefly emphasizes it. Selection,
-playback, and Details drafts are unchanged; track changes do not automatically follow.
+playback, and the Details target are unchanged; track changes do not automatically follow.
 
 If filters hide the track, only the explicit `Clear filters and locate` action
 clears them. Tracks outside roots are located in Other. The control is disabled
@@ -334,7 +334,7 @@ GUI/TUI library and playlist views, and the GUI Albums panel, load results
 automatically while scrolling; there are no page numbers or manual load-more
 controls. Expand a GUI directory to browse its children. Collapsing it preserves
 descendant expansion choices
-for reopening. Loading more rows does not clear selections or metadata drafts.
+for reopening. Loading more rows does not clear selections or an active Details input.
 Failed GUI loads offer a retry button that reloads data without rescanning files;
 TUI loads can be requested again by leaving and reopening the view.
 Desktop queries time out after 12 seconds; retry without rescanning. Row-navigation
@@ -369,7 +369,7 @@ Query limits, revisions, and batch contracts: link:21_ipc.adoc[IPC].
 
 === Database edits
 
-Title, artist, album, favorite, and decoder-hint edits change Rivu's database only;
+Title, artist, album, favorite, play-count, and decoder-hint edits change Rivu's database only;
 media files, tags, and CUE sheets are never rewritten. Rescans preserve matching IDs,
 overrides, favorites, decoder hints, counts, and last-played timestamps. `library remove` and
 `library clean-missing` atomically remove records and their queue/playlist
@@ -398,49 +398,48 @@ rivu library edit 12 --title "New title" --artist "Artist" --album "Album"
 rivu library clean-missing
 ----
 
-=== Track details drafts
+=== Inline Track details edits
 
-Edit title, artist, album, and Decoder hint in Track details, then Save to commit
-changed fields together. Background refreshes preserve drafts. Edits made during
-a save stay unsaved; failure preserves them for correction or retry. A completed
-save cannot overwrite later edits or another track's details. Clearing and saving
-a field clears its displayed text, not the audio file's tags.
+Title, artist, album and play count appear as compact label/value rows. Hover a row
+for Copy followed by Edit; both use the same Nerd Font action style. Edit focuses
+the single-line input and selects its current value. Enter saves only that field;
+an unchanged value sends no write. Escape or leaving the input cancels unsubmitted
+text. Saving an empty title, artist or album clears that displayed text, not the
+audio file's tags. Play count accepts integers from `0` to `9223372036854775807`.
+Setting the count does not change last-played time or reset the current playback's
+already-counted state. Any deferred playback statistics are recovered before the
+manual count is applied.
 
-Only one track's draft is retained. Unsaved or saving details stay on that track
-instead of following playback. To abandon the draft, select another track, clear
-selection, or reload and confirm Discard; there is no standalone Discard button.
-Cancel keeps the previous selection and draft. Hiding the panel, switching its tab,
-or deleting a playlist or entry does not discard it. In playback-follow mode,
-restoring every edited field to its saved value resumes follow once no save or
-manual action is pending; an explicitly selected track does not follow playback.
+Only one inline field is edited at a time. Same-track refreshes preserve its input;
+a failed save retains the input and an error for correction or retry. Selecting a
+different track, clearing selection or reloading cancels unsubmitted text without
+confirmation. Playback-follow details switch immediately when playback changes;
+an explicit selection remains on that track. Closing the window or quitting does
+not ask about unsubmitted text.
 
-Escape leaves a focused input before requesting selection clearing. The latest
-navigation or close request takes precedence. Range selection waits for all rows
-and draft confirmation; failed loads or Cancel preserve selection and draft.
-If the target changes during confirmation, select it again.
-
-User-initiated window closing and GUI quitting ask before discarding a draft.
-Drafts are not persisted across restarts: external shutdown commands, termination
-signals, and crashes cannot offer this confirmation.
+Submitted commands may still finish after blur, cancellation or selection changes.
+Their completion cannot replace a newer editor or another track's details. A
+successful save refreshes authoritative details; a refresh failure does not roll
+back a committed write. Decoder hint is a dropdown: choosing an option saves it
+immediately and independently of the inline text field. It applies on the next
+track open or full waveform request.
 
 === Loading and unavailable records
 
 Details distinguishes no selection, loading (`Not loaded`), query failure, an
 unavailable record, and unknown metadata on a loaded track (`—`). Editing and
 actions are disabled until the selected track is ready. Switching tracks clears
-old values and artwork; same-track refreshes retain ready details and drafts,
+old values and artwork; same-track refreshes retain ready details and active input,
 including after query failure.
 
 Reload exits manual selection and follows the then-current Playback track without
-changing list selections; Discard or Cancel protects an unsaved or saving draft.
-Without a current track, it clears details. A confirmed unavailable record disables
-Save and clears details only when there is no draft or pending save. Otherwise,
-the fields remain inspectable, copyable, and editable. Only a successful reload
-that finds the record enables Save again: resetting fields, cached playback data,
-or an earlier save acknowledgement cannot do so.
+changing list selections. Without a current track, it clears details. A confirmed
+unavailable record clears details and cancels its inline editor. Cached playback
+data and earlier acknowledgements cannot restore an unavailable record; only a
+successful details read can do so.
 
-Decoder hints use the same Save and draft-discard workflow as tags. Routing and
-DTS-WAV safety: link:04_playback.adoc#optional-ffmpeg-decoder[Playback].
+Decoder routing and DTS-WAV safety:
+link:04_playback.adoc#optional-ffmpeg-decoder[Playback].
 
 === Read-only probing and displayed metadata
 

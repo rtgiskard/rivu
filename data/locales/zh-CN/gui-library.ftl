@@ -178,11 +178,11 @@ gl-ready = 就绪
 gl-track-unavailable = 曲目不可用
 
 gl-metadata-saving = 正在保存元数据…
-gl-metadata-edit-note = 仅保存到 Rivu，不修改音频文件；清空并保存会清除显示文本。
-
-gl-unsaved = 有未保存的更改
+gl-metadata-edit-note = 每次编辑一个字段，按 Enter 仅保存到 Rivu；Escape 或离开输入框取消。清空并保存会清除显示文本，不修改媒体标签。
 
 gl-copy-value = 复制值
+gl-edit-value = 编辑值
+gl-play-count-invalid = 请输入 0 至 9223372036854775807 之间的整数。
 
 gl-file-path = 源路径
 gl-track-kind = 类型
@@ -223,8 +223,6 @@ gl-play-count = 播放次数
 
 gl-last-played = 上次播放
 
-gl-save-metadata = 保存元数据，不会修改媒体文件
-
 gl-reload-playback = 重新加载当前播放曲目
 
 gl-file = 文件
@@ -237,7 +235,7 @@ gl-auto = 自动
 
 gl-native = 原生
 
-gl-decoder-save-note = 保存后，下次打开曲目或请求完整波形时生效
+gl-decoder-apply-note = 选择后立即保存，下次打开曲目或请求完整波形时生效
 
 gl-decoder-warning = FFmpeg 需启用扩展；原生解码 DTS-WAV 可能产生噪声
 
@@ -329,11 +327,6 @@ gl-playlist-count = { $total } 个播放列表 · 已选 { $selected } 首曲目
 gl-details-loading-status = { $status } · 正在加载曲目详情…
 
 gl-details-failed-status = { $status } · 无法加载曲目详情：{ $error }
-
-gl-details-protected-status = { $status } · { $draft }{ $follow ->
-        [1] { " · 已暂停跟随播放" }
-       *[other] { "" }
-    }
 
 gl-track-id = 曲目 #{ $id }
 
@@ -457,15 +450,7 @@ gl-target-identity = 目标 #{ $id }：{ $path }
 
 gl-page-range = 第 { $start }–{ $end } 项，共 { $total } 项
 
-gl-metadata-stale-action = 等待期间选择已改变，请重新选择曲目。详情草稿已保留。
-
-gl-metadata-discard-saving = 已提交的保存仍可能完成。可丢弃剩余草稿并继续，或取消以继续编辑此曲目。
-
-gl-metadata-discard-note = 丢弃未保存的详情草稿并继续？取消会保留草稿和原选择。
-
-gl-metadata-discard-title = 丢弃详情草稿？
-
-gl-metadata-discard = 丢弃元数据更改
+gl-selection-stale-action = 等待期间选择已改变，请重新选择曲目。
 
 gl-metadata-load-failed = 无法加载曲目详情
 

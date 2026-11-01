@@ -28,8 +28,8 @@ impl WindowView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Workspace has committed the tree and viewport transition; feature
-        // drafts and accepted metadata writes remain with their existing owners.
+        // Workspace has committed the tree and viewport transition; accepted
+        // metadata writes remain with their feature owner independently of focus.
         if cancellation.docking {
             cx.stop_active_drag(window);
         }

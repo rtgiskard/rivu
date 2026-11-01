@@ -519,7 +519,7 @@ Track details' full, static preview does not use the Album artwork FPS cap.
 instance preferences, plus the selected layout. Locks are window-local; each
 newly opened window starts locked. Layouts do not contain separate browsing or
 editing sessions. Switching keeps playback, queue, global settings, window
-placement and the Track details draft.
+placement and accepted Track details saves; inline text cancels on blur.
 
 Open `Menu > Layouts` to switch, duplicate, rename or delete layouts. Names must
 be nonempty and unique after trimming. To delete the active layout, switch first;

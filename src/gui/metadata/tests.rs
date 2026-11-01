@@ -72,21 +72,6 @@ fn fixture(cx: &mut TestAppContext) -> (tempfile::TempDir, CoreRuntime, Entity<M
         )
     });
     metadata.update(cx, |this, cx| {
-        // Exercise the feature's event boundary with no pending root manual intent.
-        // Confirmation arbitration remains the root's responsibility.
-        this._subscriptions.push(cx.subscribe(
-            &cx.entity(),
-            |this, _, event: &MetadataEvent, cx| {
-                if matches!(
-                    event,
-                    MetadataEvent::ResumeManualAction {
-                        resume_follow: true
-                    }
-                ) {
-                    this.resume_follow(cx);
-                }
-            },
-        ));
         playback(this, track(1, "A"), cx);
     });
     (directory, runtime, metadata)
@@ -99,47 +84,43 @@ fn playback(owner: &mut Metadata, track: Track, cx: &mut Context<Metadata>) {
 }
 
 #[gpui::test]
-fn bitrate_revision_retains_hidden_draft_and_queues_reload(cx: &mut TestAppContext) {
+fn bitrate_revision_retains_inline_text_and_queues_hidden_reload(cx: &mut TestAppContext) {
     let (_directory, _runtime, metadata) = fixture(cx);
-    metadata.update(cx, |this, cx| {
-        this.metadata.select(1);
-        let token = this.metadata.begin_load(1);
-        let draft = this.draft(cx);
-        let values = this
-            .metadata
-            .accept_load(token, Some(track(1, "original")), draft)
-            .unwrap();
-        this.set_metadata_values(values, cx);
-        this.inputs[&Field::Title].update(cx, |input, cx| input.set_text("local edit", cx));
-        let identity = this.metadata.editor_identity();
-        let original = this.track_snapshot().unwrap();
-        let mut state = (*this.state).clone();
-        state.library.bitrate_revision += 1;
-        this.reconcile(Rc::new(state), cx);
-        assert!(Arc::ptr_eq(&this.track_snapshot().unwrap(), &original));
-        assert_eq!(original.bitrate_bps, None);
-        assert_eq!(this.draft(cx).title, "local edit");
-        assert!(this.metadata.dirty(this.draft(cx)));
-        assert_eq!(this.metadata.read_state(), &MetadataReadState::Idle);
-        let mut state = (*this.state).clone();
-        state.library.bitrate_revision += 1;
-        this.reconcile(Rc::new(state), cx);
-        assert!(Arc::ptr_eq(&this.track_snapshot().unwrap(), &original));
-        assert_eq!(this.metadata.editor_identity(), identity);
-        assert_eq!(this.metadata.selected(), Some(1));
-        assert_eq!(this.draft(cx).title, "local edit");
-        assert!(this.metadata.dirty(this.draft(cx)));
-        assert!(
-            this.metadata_read
-                .prepare(&mut this.metadata, false, Instant::now())
-                .is_none()
-        );
-        assert!(
-            this.metadata_read
-                .prepare(&mut this.metadata, true, Instant::now())
-                .is_some()
-        );
-    });
+    let window = cx
+        .add_empty_window()
+        .update(|window, _| window.window_handle());
+    cx.update_window(window, |_, window, cx| {
+        metadata.update(cx, |this, cx| {
+            artwork_selection(this, track(1, "original"), cx);
+            this.begin_edit(Field::Title, window, cx);
+            this.edit
+                .as_ref()
+                .unwrap()
+                .input
+                .update(cx, |input, cx| input.set_text("local edit", cx));
+            let original = this.track_snapshot().unwrap();
+            let mut state = (*this.state).clone();
+            state.library.bitrate_revision += 1;
+            this.reconcile(Rc::new(state), cx);
+            assert!(Arc::ptr_eq(&this.track_snapshot().unwrap(), &original));
+            assert_eq!(
+                this.edit.as_ref().unwrap().input.read(cx).text(),
+                "local edit"
+            );
+            assert_eq!(this.edit.as_ref().unwrap().baseline, "original");
+            assert!(
+                this.metadata_read
+                    .prepare(&mut this.metadata, false, Instant::now())
+                    .is_none()
+            );
+            assert!(
+                this.metadata_read
+                    .prepare(&mut this.metadata, true, Instant::now())
+                    .is_some()
+            );
+        });
+    })
+    .unwrap();
 }
 
 #[gpui::test]
@@ -154,8 +135,8 @@ fn hidden_playback_advance_with_bitrate_change_prepares_current_identity(cx: &mu
         state.current_track = Some(Arc::new(track(2, "B")));
         this.reconcile(Rc::new(state), cx);
         assert_eq!(this.metadata.identity(), Some(2));
-        assert_eq!(this.draft(cx).title, "B");
-        assert!(!this.dirty(cx));
+        assert_eq!(this.metadata.track().unwrap().title, "B");
+        assert!(this.edit.is_none());
         // Exercise reveal's demand preparation without a real Core read or timer.
         let task = this
             .metadata_read
@@ -180,7 +161,11 @@ fn edit_text(
     window: gpui::AnyWindowHandle,
     cx: &mut TestAppContext,
 ) {
-    let input = metadata.read_with(cx, |this, _| this.inputs[&field].clone());
+    let input = metadata.read_with(cx, |this, _| {
+        let edit = this.edit.as_ref().unwrap();
+        assert_eq!(edit.field, field);
+        edit.input.clone()
+    });
     cx.update_window(window, |_, window, cx| {
         input.update(cx, |input, cx| {
             let end = input.text().encode_utf16().count();
@@ -231,133 +216,115 @@ fn typography_uses_the_root_font_across_snapshot_and_size_changes(cx: &mut TestA
 }
 
 #[gpui::test]
-fn restoring_each_text_input_resumes_playback_without_another_snapshot(cx: &mut TestAppContext) {
+fn selection_and_blur_cancel_without_submitting(cx: &mut TestAppContext) {
     let (_directory, _runtime, metadata) = fixture(cx);
     let window = cx
         .add_empty_window()
         .update(|window, _| window.window_handle());
-    for (field, original) in [
-        (Field::Title, "A"),
-        (Field::Artist, "artist"),
-        (Field::Album, "album"),
-    ] {
-        metadata.update(cx, |this, cx| playback(this, track(1, "A"), cx));
+    for field in [Field::Title, Field::Artist, Field::Album, Field::PlayCount] {
+        cx.update_window(window, |_, window, cx| {
+            metadata.update(cx, |this, cx| {
+                playback(this, track(1, "A"), cx);
+                this.begin_edit(field, window, cx);
+            })
+        })
+        .unwrap();
         edit_text(&metadata, field, "draft", window, cx);
         metadata.update(cx, |this, cx| {
             playback(this, track(2, "B"), cx);
-            assert_eq!(this.metadata.identity(), Some(1));
-            assert!(this.dirty(cx));
-        });
-        edit_text(&metadata, field, original, window, cx);
-        metadata.update(cx, |this, cx| {
+            assert!(this.edit.is_none());
             assert_eq!(this.metadata.identity(), Some(2));
-            assert_eq!(this.inputs[&Field::Title].read(cx).text(), "B");
-            assert!(!this.protected(cx));
+            assert!(!this.metadata.saving(field));
         });
     }
+    cx.update_window(window, |_, window, cx| {
+        metadata.update(cx, |this, cx| {
+            this.begin_edit(Field::Title, window, cx);
+            let focus = cx.focus_handle();
+            focus.focus(window, cx);
+        })
+    })
+    .unwrap();
+    cx.run_until_parked();
+    metadata.read_with(cx, |this, _| assert!(this.edit.is_none()));
 }
 
 #[gpui::test]
-fn decoder_restoration_reconciles_details_but_keeps_explicit_selection(cx: &mut TestAppContext) {
+fn unchanged_submit_and_invalid_count_do_not_save(cx: &mut TestAppContext) {
     let (_directory, _runtime, metadata) = fixture(cx);
-    metadata.update(cx, |this, cx| {
-        this.set_decoder_hint(DecoderHint::Native, cx);
-        playback(this, track(2, "B"), cx);
-        assert_eq!(this.metadata.identity(), Some(1));
-        this.set_decoder_hint(DecoderHint::Auto, cx);
-    });
-    cx.run_until_parked();
-    metadata.update(cx, |this, cx| {
-        assert_eq!(this.metadata.identity(), Some(2));
-        playback(this, track(1, "A"), cx);
-        this.metadata.select(1);
-        this.set_decoder_hint(DecoderHint::Native, cx);
-        let token = this.metadata.begin_load(1);
-        let draft = this.draft(cx);
-        assert!(
-            this.metadata
-                .accept_load(token, Some(track(1, "remote")), draft)
-                .is_none()
-        );
-        playback(this, track(2, "B"), cx);
-        this.set_decoder_hint(DecoderHint::Auto, cx);
-    });
-    cx.run_until_parked();
-    metadata.update(cx, |this, cx| {
-        assert_eq!(this.metadata.identity(), Some(1));
-        assert_eq!(this.metadata.selected(), Some(1));
-        assert_eq!(this.inputs[&Field::Title].read(cx).text(), "remote");
-        assert!(!this.protected(cx));
-    });
+    let window = cx
+        .add_empty_window()
+        .update(|window, _| window.window_handle());
+    cx.update_window(window, |_, window, cx| {
+        metadata.update(cx, |this, cx| {
+            this.begin_edit(Field::Title, window, cx);
+            this.submit_field(Field::Title, cx);
+            assert!(this.edit.is_none());
+            assert!(!this.metadata.saving(Field::Title));
+            this.begin_edit(Field::PlayCount, window, cx);
+            this.edit
+                .as_ref()
+                .unwrap()
+                .input
+                .update(cx, |input, cx| input.set_text("-1", cx));
+            this.submit_field(Field::PlayCount, cx);
+            assert!(this.edit.as_ref().unwrap().error.is_some());
+            assert_eq!(this.edit.as_ref().unwrap().input.read(cx).text(), "-1");
+            assert!(!this.metadata.saving(Field::PlayCount));
+        })
+    })
+    .unwrap();
 }
 
 #[gpui::test]
-fn hidden_save_completion_releases_only_clean_drafts_and_rejects_old_epochs(
-    cx: &mut TestAppContext,
-) {
+fn failure_retains_input_but_late_failure_cannot_touch_reopened_edit(cx: &mut TestAppContext) {
     let (_directory, _runtime, metadata) = fixture(cx);
-    for ok in [false, true] {
-        let (token, values) = metadata.update(cx, |this, cx| {
-            playback(this, track(1, "A"), cx);
-            this.visible = true;
-            this.set_decoder_hint(DecoderHint::Native, cx);
-            let values = MetadataValues {
-                title: "A".into(),
-                artist: "artist".into(),
-                album: "album".into(),
-                decoder_hint: DecoderHint::Native,
-            };
-            let (token, _) = this.metadata.begin_save(values.as_draft()).unwrap();
-            playback(this, track(2, "B"), cx);
-            // A failed write leaves the old baseline; restoration during the write
-            // is clean but must remain pinned until its physical completion.
-            if !ok {
-                this.set_decoder_hint(DecoderHint::Auto, cx);
-            }
-            this.set_visible(false, cx);
-            this.cancel_read();
-            assert!(this.saving());
-            assert_eq!(this.metadata.identity(), Some(1));
-            (token, values)
-        });
-        cx.run_until_parked();
+    let window = cx
+        .add_empty_window()
+        .update(|window, _| window.window_handle());
+    cx.update_window(window, |_, window, cx| {
         metadata.update(cx, |this, cx| {
-            assert_eq!(this.metadata.identity(), Some(1));
-            this.finish_save(token, values, None, ack(ok), cx);
-        });
-        cx.run_until_parked();
-        metadata.update(cx, |this, cx| {
-            assert_eq!(this.metadata.identity(), Some(2));
-            assert!(!this.saving());
-            assert_eq!(this.inputs[&Field::Title].read(cx).text(), "B");
-        });
-    }
-    let (token, values) = metadata.update(cx, |this, cx| {
-        playback(this, track(1, "A"), cx);
-        this.set_decoder_hint(DecoderHint::Native, cx);
-        let values = MetadataValues {
-            title: "A".into(),
-            artist: "artist".into(),
-            album: "album".into(),
-            decoder_hint: DecoderHint::Native,
-        };
-        let (token, _) = this.metadata.begin_save(values.as_draft()).unwrap();
-        this.set_decoder_hint(DecoderHint::Ffmpeg, cx);
-        playback(this, track(2, "B"), cx);
-        this.finish_save(token, values.clone(), None, ack(true), cx);
-        (token, values)
-    });
-    cx.run_until_parked();
-    metadata.update(cx, |this, cx| {
-        assert_eq!(this.metadata.identity(), Some(1));
-        assert_eq!(this.metadata_decoder_hint, DecoderHint::Ffmpeg);
-        assert!(this.dirty(cx));
-        this.discard(cx);
-        this.clear_selection(cx);
-        this.finish_save(token, values, None, ack(true), cx);
-        assert_eq!(this.metadata.identity(), Some(2));
-        assert_eq!(this.metadata_decoder_hint, DecoderHint::Auto);
-    });
+            this.begin_edit(Field::Title, window, cx);
+            this.edit
+                .as_ref()
+                .unwrap()
+                .input
+                .update(cx, |input, cx| input.set_text("submitted", cx));
+            let serial = this.edit.as_ref().unwrap().serial;
+            let (save, _) = this
+                .metadata
+                .begin_save(&SavedValue::Title("submitted".into()))
+                .unwrap();
+            this.finish_save(
+                save,
+                Some((serial, "submitted".into())),
+                None,
+                ack(false),
+                cx,
+            );
+            assert_eq!(
+                this.edit.as_ref().unwrap().input.read(cx).text(),
+                "submitted"
+            );
+            assert!(this.edit.as_ref().unwrap().error.is_some());
+            let (save, _) = this
+                .metadata
+                .begin_save(&SavedValue::Title("submitted".into()))
+                .unwrap();
+            this.cancel_edit(cx);
+            this.begin_edit(Field::Artist, window, cx);
+            this.finish_save(
+                save,
+                Some((serial, "submitted".into())),
+                None,
+                ack(false),
+                cx,
+            );
+            assert_eq!(this.edit.as_ref().unwrap().field, Field::Artist);
+            assert!(this.edit.as_ref().unwrap().error.is_none());
+        })
+    })
+    .unwrap();
 }
 
 #[gpui::test]
@@ -365,42 +332,74 @@ fn save_ack_preserves_newer_details_and_refreshes_an_unchanged_projection(cx: &m
     let (_directory, _runtime, metadata) = fixture(cx);
     metadata.update(cx, |this, cx| {
         artwork_selection(this, track(7, "original"), cx);
-        let submitted = MetadataValues {
-            title: "submitted".into(),
-            artist: "submitted artist".into(),
-            album: "submitted album".into(),
-            decoder_hint: DecoderHint::Ffmpeg,
-        };
-        this.set_metadata_values(submitted.clone(), cx);
-        let (save, _) = this.metadata.begin_save(submitted.as_draft()).unwrap();
+        let (save, _) = this
+            .metadata
+            .begin_save(&SavedValue::Title("submitted".into()))
+            .unwrap();
         let read = this.metadata.begin_load(7);
-        let mut newer = track(7, "newer");
-        newer.artist = "newer artist".into();
-        newer.album = "newer album".into();
-        newer.decoder_hint = DecoderHint::Native;
-        assert!(
-            this.metadata
-                .accept_load(read, Some(newer), submitted.as_draft())
-                .is_none()
-        );
-        this.finish_save(save, submitted, None, ack(true), cx);
+        assert!(this.metadata.accept_load(read, Some(track(7, "newer"))));
+        this.finish_save(save, None, None, ack(true), cx);
         assert_eq!(this.metadata.track().unwrap().title, "newer");
-        assert_eq!(this.inputs[&Field::Title].read(cx).text(), "newer");
-        assert_eq!(this.inputs[&Field::Artist].read(cx).text(), "newer artist");
-        assert_eq!(this.inputs[&Field::Album].read(cx).text(), "newer album");
-        assert_eq!(this.metadata_decoder_hint, DecoderHint::Native);
-        assert!(!this.dirty(cx));
-        // No publication changed: the acknowledgement itself must demand a read.
-        let now = Instant::now();
         let task = this
             .metadata_read
-            .prepare(&mut this.metadata, true, now)
-            .expect("the accepted save must refresh authoritative details");
+            .prepare(&mut this.metadata, true, Instant::now())
+            .unwrap();
         assert!(matches!(task.read.query(), Query::Track { track_id: 7 }));
         assert!(
             this.metadata_read
-                .prepare(&mut this.metadata, true, now)
+                .prepare(&mut this.metadata, true, Instant::now())
                 .is_none()
+        );
+    });
+}
+
+#[gpui::test]
+fn selection_epoch_rejects_old_acknowledgement(cx: &mut TestAppContext) {
+    let (_directory, _runtime, metadata) = fixture(cx);
+    metadata.update(cx, |this, cx| {
+        artwork_selection(this, track(7, "original"), cx);
+        let (save, _) = this
+            .metadata
+            .begin_save(&SavedValue::Title("submitted".into()))
+            .unwrap();
+        this.request_track(8, cx);
+        artwork_selection(this, track(7, "returned"), cx);
+        this.finish_save(save, None, None, ack(false), cx);
+        assert_eq!(this.metadata.track().unwrap().title, "returned");
+        assert!(this.error.is_none());
+    });
+}
+
+#[gpui::test]
+fn queued_submit_cannot_commit_a_replacement_editor(cx: &mut TestAppContext) {
+    let (_directory, _runtime, metadata) = fixture(cx);
+    let window = cx
+        .add_empty_window()
+        .update(|window, _| window.window_handle());
+    cx.update_window(window, |_, window, cx| {
+        metadata.update(cx, |this, cx| {
+            this.begin_edit(Field::Title, window, cx);
+            let old = this.edit.as_ref().unwrap().input.clone();
+            old.update(cx, |input, cx| {
+                input.set_text("obsolete", cx);
+                cx.emit(InputEvent::Submit);
+            });
+            this.cancel_edit(cx);
+            this.begin_edit(Field::Title, window, cx);
+            this.edit
+                .as_ref()
+                .unwrap()
+                .input
+                .update(cx, |input, cx| input.set_text("replacement", cx));
+        })
+    })
+    .unwrap();
+    cx.run_until_parked();
+    metadata.read_with(cx, |this, cx| {
+        assert!(!this.metadata.saving(Field::Title));
+        assert_eq!(
+            this.edit.as_ref().unwrap().input.read(cx).text(),
+            "replacement"
         );
     });
 }
@@ -408,12 +407,8 @@ fn save_ack_preserves_newer_details_and_refreshes_an_unchanged_projection(cx: &m
 fn artwork_selection(owner: &mut Metadata, track: Track, cx: &mut Context<Metadata>) {
     owner.metadata.select(track.id);
     let token = owner.metadata.begin_load(track.id);
-    let draft = owner.draft(cx);
-    let values = owner
-        .metadata
-        .accept_load(token, Some(track), draft)
-        .unwrap();
-    owner.set_metadata_values(values, cx);
+    assert!(owner.metadata.accept_load(token, Some(track)));
+    owner.cancel_edit(cx);
 }
 
 #[gpui::test]

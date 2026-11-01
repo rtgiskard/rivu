@@ -1102,7 +1102,7 @@ mod tests {
     }
 
     #[test]
-    fn ready_queue_navigation_keeps_desired_offset_until_confirmation_or_cancellation() {
+    fn ready_queue_navigation_keeps_desired_offset_until_commit_or_cancellation() {
         use crate::gui::coordination::manual_actions::ManualIntents;
         let mut intents = ManualIntents::default();
         let mut queue = queue(0);

@@ -48,7 +48,7 @@ impl WindowView {
                         this.metadata.update(cx, |owner, cx| {
                             if let Some(id) = id {
                                 owner.request_track(*id, cx);
-                            } else if !owner.protected(cx) {
+                            } else {
                                 owner.clear_selection(cx);
                             }
                         });
@@ -282,13 +282,6 @@ impl WindowView {
                         let intent = this.begin_manual_intent(cx);
                         this.ready_manual_action(intent, ManualAction::ReloadPlayback, cx);
                     }
-                    MetadataEvent::ResumeManualAction { resume_follow } => {
-                        if this.manual_confirmation_open() {
-                            this.resume_manual_action(false, cx);
-                        } else if *resume_follow {
-                            this.reconcile_manual_follow(cx);
-                        }
-                    }
                     MetadataEvent::TrackChanged => this.sync_waveform(cx),
                     MetadataEvent::Error(error) => this.feature_error(error, cx),
                 }
@@ -367,11 +360,6 @@ impl WindowView {
                 }
                 playlist_overlay = open;
             }),
-            cx.observe(&self.metadata, |this, _, cx| {
-                if this.manual_confirmation_open() {
-                    cx.notify();
-                }
-            }),
         ]
     }
 
@@ -388,11 +376,8 @@ impl WindowView {
 
     fn search_changed(&mut self, cx: &mut Context<Self>) {
         let intent = self.begin_manual_intent(cx);
-        self.metadata.update(cx, |owner, cx| {
-            if !owner.protected(cx) {
-                owner.clear_selection(cx);
-            }
-        });
+        self.metadata
+            .update(cx, |owner, cx| owner.clear_selection(cx));
         self.settle_manual_intent(intent, cx);
         self.sync_waveform(cx);
     }

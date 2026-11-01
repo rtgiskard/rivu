@@ -499,7 +499,7 @@ impl Queue {
                                                 this.select_queue_entry(id, false, false, cx);
                                                 cx.notify();
                                             }
-                                            // Selection requests may await confirmation; keep this operation frozen.
+                                            // Keep the clicked occurrence frozen across deferred selection reads.
                                             let track_ids =
                                                 rows.iter().map(|row| row.track_id).collect();
                                             let queue_ids = rows.iter().map(|row| row.id).collect();

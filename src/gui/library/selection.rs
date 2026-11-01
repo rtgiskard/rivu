@@ -695,43 +695,6 @@ impl Library {
             && commit.index < commit.scope.total()
     }
 
-    pub(in crate::gui) fn library_commit_target(&self, commit: &LibraryCommit) -> Option<i64> {
-        if let Some(selected) = &commit.selected {
-            let tracks = selected.iter().filter_map(|node| match node {
-                LibraryNode::Track(id) => Some(*id),
-                _ => None,
-            });
-            if let LibraryNode::Track(id) = &commit.endpoint
-                && selected.contains(&commit.endpoint)
-            {
-                return Some(*id);
-            }
-            return tracks
-                .chain(
-                    self.library
-                        .selected()
-                        .iter()
-                        .copied()
-                        .filter(|_| commit.multi),
-                )
-                .min();
-        }
-        match &commit.endpoint {
-            LibraryNode::Track(id) if !commit.multi || !self.library.selected().contains(id) => {
-                Some(*id)
-            }
-            LibraryNode::Track(id) => self
-                .library
-                .selected()
-                .iter()
-                .copied()
-                .filter(|other| other != id)
-                .min(),
-            _ if commit.multi => self.library.selected().iter().copied().min(),
-            _ => None,
-        }
-    }
-
     pub(in crate::gui) fn commit_library_selection(
         &mut self,
         commit: LibraryCommit,

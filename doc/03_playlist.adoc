@@ -128,15 +128,19 @@ another client clears it on refresh. Empty playlists and unloaded pages do not
 imply deletion. See link:02_library.adoc#paged-views[Paged views] for loading,
 timeouts, and CLI incomplete-output recovery.
 
-A range is selected only after all its rows load and any Details draft confirmation
-is resolved. Failure preserves the previous selection and draft. Refresh keeps
-entries that still exist and discards removed ones. Pending or failed selection
-loads disable group actions and offer Retry; loaded row controls remain row-local.
+A range is selected only after all its rows load. Failure preserves the previous
+selection. Committing a different Details track cancels its unsubmitted inline text.
+Refresh keeps entries that still exist and discards removed ones. Pending or failed
+selection loads disable group actions and offer Retry; loaded row controls remain row-local.
 Retry reconciles the previous selection rather than replaying a failed range or
 key command. With no previous selection it restores an empty selection so you
 can navigate again. Failed group removal does not partially remove entries.
 
 === Playlist query validity
+
+The entry view owns the current filter for both navigation requests and response
+acceptance. Changing it clears selection and revokes older navigation intent;
+late success or failure only retires its worker, without restoring selection.
 
 Listings restart if this playlist's membership or order changes, not on renames
 or changes to other playlists. Metadata edits may invalidate displayed results

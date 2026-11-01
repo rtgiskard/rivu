@@ -359,6 +359,13 @@ impl Core {
         )
     }
 
+    pub(in crate::core) fn set_play_count(&mut self, track_id: i64, play_count: u64) -> Result<()> {
+        i64::try_from(play_count).context("play count exceeds SQLite integer range")?;
+        self.flush_deferred_playback()?;
+        let stats = self.store.set_play_count(track_id, play_count)?;
+        self.update_track_stats(track_id, stats)
+    }
+
     pub(in crate::core) fn update_track_stats(
         &mut self,
         track_id: i64,
