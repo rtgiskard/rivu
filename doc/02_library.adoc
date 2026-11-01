@@ -452,7 +452,7 @@ automatic encoding-normalization operation and cannot reconstruct lost text.
 === Inline Track details edits
 
 Title, artist, album and play count appear as compact label/value rows. Hover a row
-for Copy followed by Edit; both use the same Nerd Font action style. Edit focuses
+for Edit followed by Copy; both use the same Nerd Font action style. Edit focuses
 the single-line input and selects its current value. Enter saves only that field;
 an unchanged value sends no write. Escape or leaving the input cancels unsubmitted
 text. Saving an empty title, artist or album clears that displayed text, not the
@@ -460,6 +460,10 @@ audio file's tags. Play count accepts integers from `0` to `9223372036854775807`
 Setting the count does not change last-played time or reset the current playback's
 already-counted state. Any deferred playback statistics are recovered before the
 manual count is applied.
+
+Tags are ordered as title/artist, album/release date, disc number/track number,
+then play count/last played. Decoder guidance is available from the info icon
+to the right of its dropdown.
 
 Only one inline field is edited at a time. Same-track refreshes preserve its input;
 a failed save retains the input and an error for correction or retry. Selecting a

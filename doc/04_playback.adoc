@@ -331,8 +331,8 @@ Native support is checked through the first packet decode: an unsupported
 format at that point also permits Auto fallback. Corrupt input and cancellation
 do not trigger a decoder fallback.
 
-Track details provides a *Decoder hint* selection. Use *Save* to commit it together
-with tag edits; an unsaved selection does not affect playback or waveform decoding:
+Track details provides a *Decoder hint* selection. Choosing an option saves it
+immediately, independently of tag edits:
 
 * *Auto* preserves automatic native-first selection and FFmpeg fallback.
 * *Native* uses only the native decoder, without FFmpeg recognition or fallback.

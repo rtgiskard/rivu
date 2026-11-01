@@ -644,30 +644,33 @@ impl Metadata {
             Self::choose_hint,
             |this, _, cx| this.close_hint(cx),
         );
-        let mut content = column()
-            .gap_1()
-            .child(
-                row()
-                    .gap_4()
-                    .child(caption(theme, self.tr("gl-decoder-hint")))
-                    .child(
-                        div()
-                            .relative()
-                            .w(gpui::rems(10.))
-                            .min_w_0()
-                            .child(
-                                gpui::canvas(
-                                    move |bounds, _, _| measure.set(Some(bounds)),
-                                    |_, _, _, _| {},
-                                )
-                                .absolute()
-                                .size_full(),
+        let mut content = column().gap_1().child(
+            row()
+                .gap_4()
+                .child(caption(theme, self.tr("gl-decoder-hint")))
+                .child(
+                    div()
+                        .relative()
+                        .w(gpui::rems(10.))
+                        .min_w_0()
+                        .child(
+                            gpui::canvas(
+                                move |bounds, _, _| measure.set(Some(bounds)),
+                                |_, _, _, _| {},
                             )
-                            .child(disabled_control(theme, trigger, !enabled)),
-                    ),
-            )
-            .child(caption(theme, self.tr("gl-decoder-apply-note")))
-            .child(caption(theme, self.tr("gl-decoder-warning")));
+                            .absolute()
+                            .size_full(),
+                        )
+                        .child(disabled_control(theme, trigger, !enabled)),
+                )
+                .child(
+                    div()
+                        .id(("metadata-decoder-help", panel))
+                        .flex_shrink_0()
+                        .child(caption(theme, "").opacity(0.6).text_color(rgb(theme.text)))
+                        .tooltip(rivu_ui::text_tooltip(self.tr("gl-decoder-note"))),
+                ),
+        );
         if self.hint_panel == Some(panel)
             && self.hint_choices.is_open()
             && let Some(bounds) = bounds.get()
@@ -747,12 +750,6 @@ impl Metadata {
         let actions = row()
             .id(("metadata-field-actions", field as usize))
             .gap_0()
-            .children(metadata_copy(
-                label.clone(),
-                value.clone(),
-                self.metadata.track().map(|_| self.tr("gl-copy-value")),
-                cx,
-            ))
             .child(rivu_ui::hover_reveal(
                 ("metadata-edit-action", field as usize),
                 "label-value-row",
@@ -781,6 +778,12 @@ impl Metadata {
                     },
                 )
                 .text_size(gpui::rems(0.75)),
+            ))
+            .children(metadata_copy(
+                label.clone(),
+                value.clone(),
+                self.metadata.track().map(|_| self.tr("gl-copy-value")),
+                cx,
             ));
         label_value_row(theme, label, value, width, Some(actions))
             .h(height)
@@ -1139,58 +1142,55 @@ impl Metadata {
                 ),
             ],
         ];
-        let tags: [[(SharedString, SharedString); 2]; 2] = [
-            [
-                (
-                    self.tr("gl-track"),
-                    track.map_or_else(
-                        || placeholder.clone(),
-                        |track| {
-                            track
-                                .track_number
-                                .map_or("—".into(), |value| value.to_string().into())
-                        },
-                    ),
+        let release_date = (
+            self.tr("gl-release"),
+            track.map_or_else(
+                || placeholder.clone(),
+                |track| {
+                    track
+                        .release_date
+                        .as_deref()
+                        .unwrap_or("—")
+                        .to_owned()
+                        .into()
+                },
+            ),
+        );
+        let last_played = (
+            self.tr("gl-last-played"),
+            track.map_or_else(
+                || placeholder.clone(),
+                |track| self.last_played_text(track.id, track.last_played).into(),
+            ),
+        );
+        let tags: [[(SharedString, SharedString); 2]; 1] = [[
+            (
+                self.tr("gl-disc"),
+                track.map_or_else(
+                    || placeholder.clone(),
+                    |track| {
+                        track
+                            .disc_number
+                            .map_or("—".into(), |value| value.to_string().into())
+                    },
                 ),
-                (
-                    self.tr("gl-release"),
-                    track.map_or_else(
-                        || placeholder.clone(),
-                        |track| {
-                            track
-                                .release_date
-                                .as_deref()
-                                .unwrap_or("—")
-                                .to_owned()
-                                .into()
-                        },
-                    ),
+            ),
+            (
+                self.tr("gl-track-number"),
+                track.map_or_else(
+                    || placeholder.clone(),
+                    |track| {
+                        track
+                            .track_number
+                            .map_or("—".into(), |value| value.to_string().into())
+                    },
                 ),
-            ],
-            [
-                (
-                    self.tr("gl-disc"),
-                    track.map_or_else(
-                        || placeholder.clone(),
-                        |track| {
-                            track
-                                .disc_number
-                                .map_or("—".into(), |value| value.to_string().into())
-                        },
-                    ),
-                ),
-                (
-                    self.tr("gl-last-played"),
-                    track.map_or_else(
-                        || placeholder.clone(),
-                        |track| self.last_played_text(track.id, track.last_played).into(),
-                    ),
-                ),
-            ],
-        ];
+            ),
+        ]];
         let edit_labels = [
             [self.tr("gl-title"), self.tr("gl-artist")],
-            [self.tr("gl-album"), self.tr("gl-play-count")],
+            [self.tr("gl-album"), release_date.0.clone()],
+            [self.tr("gl-play-count"), last_played.0.clone()],
         ];
         // Static labels are measured even before values load, using the caption font.
         // Every card shares the same two column widths.
@@ -1404,16 +1404,43 @@ impl Metadata {
                                     window,
                                     cx,
                                 ),
+                                label_value_row(
+                                    theme,
+                                    release_date.0.clone(),
+                                    release_date.1.clone(),
+                                    label_widths[1],
+                                    metadata_copy(
+                                        release_date.0,
+                                        release_date.1,
+                                        copy_hint.clone(),
+                                        cx,
+                                    ),
+                                ),
+                            ))
+                            .child(metadata_rows(
+                                theme,
+                                tags,
+                                label_widths,
+                                copy_hint.clone(),
+                                cx,
+                            ))
+                            .child(metadata_row(
                                 self.panel_field(
                                     theme,
                                     Field::PlayCount,
                                     self.tr("gl-play-count"),
-                                    label_widths[1],
+                                    label_widths[0],
                                     window,
                                     cx,
                                 ),
+                                label_value_row(
+                                    theme,
+                                    last_played.0.clone(),
+                                    last_played.1.clone(),
+                                    label_widths[1],
+                                    metadata_copy(last_played.0, last_played.1, copy_hint, cx),
+                                ),
                             ))
-                            .child(metadata_rows(theme, tags, label_widths, copy_hint, cx))
                             .when(track.is_some(), |tags| {
                                 tags.child(match self.artwork_view.measured_image(panel_id, cx) {
                                     Some(image) => artwork_preview(

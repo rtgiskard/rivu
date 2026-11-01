@@ -178,7 +178,7 @@ gl-ready = Ready
 gl-track-unavailable = Track unavailable
 
 gl-metadata-saving = Saving metadata…
-gl-metadata-edit-note = Edit one field, then Enter to save in Rivu only. Escape or leaving the field cancels. Clearing and saving clears its displayed text, not media tags.
+gl-metadata-edit-note = Enter saves to Rivu’s database; Escape or leaving cancels. File tags stay unchanged.
 
 gl-copy-value = Copy value
 gl-edit-value = Edit value
@@ -213,17 +213,18 @@ gl-bitrate = Bitrate
 
 gl-bits-sample = Bits/sample
 
-gl-disc = Disc
+gl-disc = Disc number
 
 gl-track = Track
+gl-track-number = Track number
 
-gl-release = Release
+gl-release = Release date
 
 gl-play-count = Plays
 
 gl-last-played = Last played
 
-gl-reload-playback = Reload current playback track
+gl-reload-playback = Refresh details for the current playback track
 
 gl-file = File
 
@@ -235,9 +236,8 @@ gl-auto = Auto
 
 gl-native = Native
 
-gl-decoder-apply-note = Selection saves immediately; applies on the next track open or full waveform request
-
-gl-decoder-warning = FFmpeg requires the extension; native DTS-WAV decoding may produce noise
+gl-decoder-note = Applies on the next track or full-waveform load.
+    Enable FFmpeg in Settings. Native DTS-WAV decoding may produce noise.
 
 gl-tags = Tags
 

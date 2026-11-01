@@ -18,7 +18,7 @@ settings-log-max-files = Log files to keep
 settings-log-max-files-hint = 1–128 files; default 4. This is not a disk-capacity limit. Changes apply the next time file logging is enabled or after restart.
 settings-media-read-buffer-mib = Media read buffer (MiB)
 settings-artwork-file-limit-mib = Encoded cover file limit (MiB)
-settings-artwork-file-limit-hint = 1–64 MiB; default 16. Limits encoded bytes for embedded covers and directory images, not decoded image memory. Restart the background host to apply; restarting only the GUI is not enough.
+settings-artwork-file-limit-hint = 1–64 MiB; default 16. Limits encoded cover size, not decoded memory. Quit and restart to apply.
 settings-artwork-decode-budget-mib = Cover decode budget (MiB per cover)
 settings-artwork-decode-budget-hint = 1–1024 MiB per cover. Apply updates open covers; workspace and dimension limits remain fixed
 settings-gpu-material-budget-mib = Shared GPU buffer budget (MiB)
@@ -72,7 +72,7 @@ settings-library-root-stats =
     }
 settings-library-root-stats-loading = Loading statistics…
 settings-library-root-stats-unavailable = Statistics unavailable
-settings-library-root-stats-hint = Catalog audio file sizes, including missing tracks at their last scanned size. CUE tracks sharing a source file count its bytes once; separate copies count separately. Updated after scanning; not directory or disk usage.
+settings-library-root-stats-hint = Catalog audio size, updated after scanning; missing files retain their last size. Shared CUE sources count once, separate copies individually. Not disk usage.
 settings-artwork-period-hint = Seconds for one full rotation; finite and greater than zero
 settings-animation-fps-hint = 0–240; 0 follows the display, a cap reduces rendering work
 settings-scan-depth-hint = Minimum 1; starting folder = depth 0

@@ -178,7 +178,7 @@ gl-ready = 就绪
 gl-track-unavailable = 曲目不可用
 
 gl-metadata-saving = 正在保存元数据…
-gl-metadata-edit-note = 每次编辑一个字段，按 Enter 仅保存到 Rivu；Escape 或离开输入框取消。清空并保存会清除显示文本，不修改媒体标签。
+gl-metadata-edit-note = Enter 保存到数据库；Escape 或离开输入框取消。不改文件标签。
 
 gl-copy-value = 复制值
 gl-edit-value = 编辑值
@@ -213,9 +213,10 @@ gl-bitrate = 码率
 
 gl-bits-sample = 采样位深
 
-gl-disc = 碟片
+gl-disc = 碟片编号
 
 gl-track = 曲目
+gl-track-number = 曲目编号
 
 gl-release = 发行日期
 
@@ -223,7 +224,7 @@ gl-play-count = 播放次数
 
 gl-last-played = 上次播放
 
-gl-reload-playback = 重新加载当前播放曲目
+gl-reload-playback = 刷新当前播放曲目的详情
 
 gl-file = 文件
 
@@ -235,9 +236,8 @@ gl-auto = 自动
 
 gl-native = 原生
 
-gl-decoder-apply-note = 选择后立即保存，下次打开曲目或请求完整波形时生效
-
-gl-decoder-warning = FFmpeg 需启用扩展；原生解码 DTS-WAV 可能产生噪声
+gl-decoder-note = 下次加载曲目或完整波形时生效。
+    FFmpeg 需在设置中启用；DTS-WAV 原生解码可能产生噪声。
 
 gl-tags = 标签
 
