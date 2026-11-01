@@ -164,7 +164,7 @@ impl View {
             Self::Tree(tree) if !tree.directory.as_os_str().is_empty() => {
                 Some(QueryKind::Directory(tree.directory.clone()))
             }
-            Self::Tree(_) => Some(QueryKind::OtherTracksCount),
+            Self::Tree(_) => None,
             Self::Playlists(_) => Some(QueryKind::Playlists),
             Self::PlaylistDetail { detail, .. } => Some(match detail.entry_anchor {
                 Some(entry_id) if selection => QueryKind::PlaylistSelection {
@@ -234,7 +234,6 @@ impl View {
             match self {
                 Self::Search(search) => search.results.clear(),
                 Self::Tree(tree) => {
-                    tree.other_count = None;
                     if tree.other_tracks {
                         tree.anchor = tree
                             .anchor
@@ -340,13 +339,12 @@ impl UiState {
         let limit = state.system.query_batch_size as usize;
         let mut changed = false;
         while let Some(offset) = tree.entries.next_offset(limit) {
-            let rows = std::iter::once(DirectoryRow::OtherTracks)
-                .chain(
-                    tree.roots
-                        .iter()
-                        .cloned()
-                        .map(|path| DirectoryRow::Directory { path }),
-                )
+            let rows = tree
+                .roots
+                .iter()
+                .cloned()
+                .map(|path| DirectoryRow::Directory { path })
+                .chain(std::iter::once(DirectoryRow::OtherTracks))
                 .skip(offset)
                 .take(limit)
                 .collect();
@@ -404,11 +402,6 @@ impl UiState {
                     tree.entries.next_offset(limit)?
                 },
             ),
-            View::Tree(tree)
-                if tree.directory.as_os_str().is_empty() && tree.other_count.is_none() =>
-            {
-                (QueryKind::OtherTracksCount, 0)
-            }
             View::Tree(tree) if !tree.directory.as_os_str().is_empty() => (
                 QueryKind::Directory(tree.directory.clone()),
                 tree.entries.next_offset(limit)?,
@@ -538,9 +531,6 @@ impl UiState {
                     DirectoryRow::Track(track) => Some(track.id),
                     _ => None,
                 });
-            }
-            (View::Tree(tree), ViewResponse::OtherTracksCount(count)) => {
-                tree.other_count = Some(count)
             }
             (View::Tree(tree), ViewResponse::LibraryLocate(location)) if tree.other_tracks => {
                 let anchor = tree.anchor.take();
@@ -1247,7 +1237,6 @@ pub(super) struct LibraryTree {
     pub(super) sort: rivu_protocol::model::LibrarySort,
     pub(super) anchor: Option<i64>,
     pub(super) selected_track_id: Option<i64>,
-    pub(super) other_count: Option<usize>,
 }
 
 impl LibraryTree {

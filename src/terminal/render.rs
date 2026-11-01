@@ -1474,20 +1474,15 @@ fn draw_tree(
         tree.directory.to_string_lossy().into_owned()
     };
     let other_tracks = tree.other_tracks;
-    let other_count = tree.other_count;
     draw_paged_list(
         frame,
         area,
         title,
         &mut tree.entries,
         |entry| match entry {
-            DirectoryRow::OtherTracks => RowContent::label(
-                match other_count {
-                    Some(count) => format!("{} ({count})", i18n.text("library-other")).into(),
-                    None => i18n.text("library-other").to_owned().into(),
-                },
-                "󰒟",
-            ),
+            DirectoryRow::OtherTracks => {
+                RowContent::label(i18n.text("library-other").to_owned().into(), "󰒟")
+            }
             DirectoryRow::Directory { path } => RowContent::label(
                 path.file_name()
                     .unwrap_or(path.as_os_str())

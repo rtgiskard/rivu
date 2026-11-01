@@ -244,7 +244,6 @@ pub(super) enum QueryKind {
         sort: LibrarySort,
         anchor: Option<i64>,
     },
-    OtherTracksCount,
     Playlists,
     Playlist(i64),
     PlaylistSelection {
@@ -270,7 +269,6 @@ impl QueryKind {
 
     fn into_query(self, offset: usize, limit: usize) -> Query {
         match self {
-            QueryKind::OtherTracksCount => Query::OtherTracksCount,
             QueryKind::Track(track_id) => Query::Track { track_id },
             QueryKind::Queue => Query::QueuePage {
                 query: None,

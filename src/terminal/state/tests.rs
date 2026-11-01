@@ -442,7 +442,6 @@ pub(in crate::terminal) fn track(index: usize) -> LibraryRow {
 pub(in crate::terminal) fn response(request: &QueryRequest, total: usize) -> QueryResult {
     let indices = request.offset..(request.offset + request.limit).min(total);
     let view = match &request.kind {
-        QueryKind::OtherTracksCount => ViewResponse::OtherTracksCount(total),
         QueryKind::Track(_) => panic!("track reads need explicit metadata"),
         QueryKind::Queue => ViewResponse::QueuePage(Page {
             total,
@@ -801,6 +800,7 @@ fn hidden_pages_follow_page_size_and_library_root_changes() {
     assert_ne!(current.generation, old.generation);
     tui.ui.key_action(KeyEvent::from(KeyCode::BackTab), &next);
     assert!(tui.ui.prepare_local_view(&next));
+    tui.ui.key_action(KeyEvent::from(KeyCode::Down), &next);
     let View::Tree(tree) = &tui.ui.view else {
         unreachable!()
     };
@@ -814,7 +814,7 @@ fn hidden_pages_follow_page_size_and_library_root_changes() {
     ));
     tui.ui.key_action(KeyEvent::from(KeyCode::Left), &next);
     load_visible(&mut tui.ui, &next);
-    tui.ui.key_action(KeyEvent::from(KeyCode::Down), &next);
+    tui.ui.key_action(KeyEvent::from(KeyCode::Up), &next);
     load_visible(&mut tui.ui, &next);
     let View::Tree(tree) = &tui.ui.view else {
         unreachable!()
@@ -1438,7 +1438,7 @@ fn other_tracks_selection_survives_changes_between_locate_and_page() {
 }
 
 #[test]
-fn tree_top_level_has_other_tracks_then_configured_roots_and_restores_parent() {
+fn tree_top_level_has_configured_roots_then_other_and_restores_parent() {
     let mut state = TuiSnapshot::default();
     state.system.query_batch_size = 1;
     for roots in [
@@ -1468,11 +1468,10 @@ fn tree_top_level_has_other_tracks_then_configured_roots_and_restores_parent() {
         assert!(tree.entries.loaded);
         let mut ordered_roots = roots.clone();
         ordered_roots.sort();
-        let expected = std::iter::once(DirectoryRow::OtherTracks).chain(
-            ordered_roots
-                .into_iter()
-                .map(|path| DirectoryRow::Directory { path }),
-        );
+        let expected = ordered_roots
+            .into_iter()
+            .map(|path| DirectoryRow::Directory { path })
+            .chain(std::iter::once(DirectoryRow::OtherTracks));
         for (index, row) in expected.enumerate() {
             load_visible(&mut ui, &state);
             let View::Tree(tree) = &ui.view else {
@@ -1912,7 +1911,6 @@ fn bitrate_tui() -> TuiState {
 
     let mut tree = LibraryTree {
         directory: "/music".into(),
-        other_count: Some(42),
         ..LibraryTree::default()
     };
     tree.entries.set_viewport(2);
@@ -2100,7 +2098,6 @@ fn bitrate_changes_reload_retained_payloads_without_losing_coordinates_or_identi
     };
     assert_eq!(page_coordinates(&tree.entries), tree_coordinates);
     assert_eq!(tree.directory, Path::new("/music"));
-    assert_eq!(tree.other_count, Some(42));
     assert!(tree.entries.pages.is_empty());
     let View::PlaylistDetail { detail, .. } = tui.ui.cached_playlists.as_ref().unwrap() else {
         unreachable!()
@@ -2177,41 +2174,27 @@ fn bitrate_stale_or_future_response_stamps_retire_and_retry() {
 }
 
 #[test]
-fn bitrate_changes_leave_summary_pages_and_count_requests_untouched() {
-    for root in [false, true] {
-        let state = query_snapshot();
-        let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
-        tui.ui.view = if root {
-            View::Tree(LibraryTree::new(&["/music".into()]))
-        } else {
-            View::Playlists(PagedList::default())
-        };
-        if root {
-            tui.ui.prepare_local_view(&state);
-        } else {
-            let first = tui.ui.query_request(&state).unwrap();
-            assert!(tui.ui.apply_query(&state, &first, Ok(response(&first, 12))));
-        }
-        let pending = tui.ui.query_request(&state).unwrap();
-        tui.ui.requested = Some(pending.clone());
-        let mut next = state.clone();
-        next.library.bitrate_revision += 1;
-        tui.apply_snapshot(next.clone());
-        assert_eq!(tui.ui.requested.as_ref(), Some(&pending));
-        assert_eq!(tui.ui.query_request(&next), Some(pending.clone()));
-        match &tui.ui.view {
-            View::Tree(tree) => assert!(matches!(
-                tree.entries.get(0),
-                Some(DirectoryRow::OtherTracks)
-            )),
-            View::Playlists(playlists) => assert_eq!(playlists.get(0).unwrap().name, "row-0"),
-            _ => unreachable!(),
-        }
-        assert!(
-            tui.ui
-                .apply_query(&next, &pending, Ok(response(&pending, 12)))
-        );
-    }
+fn bitrate_changes_leave_summary_pages_and_requests_untouched() {
+    let state = query_snapshot();
+    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
+    tui.ui.view = View::Playlists(PagedList::default());
+    let first = tui.ui.query_request(&state).unwrap();
+    assert!(tui.ui.apply_query(&state, &first, Ok(response(&first, 12))));
+    let pending = tui.ui.query_request(&state).unwrap();
+    tui.ui.requested = Some(pending.clone());
+    let mut next = state.clone();
+    next.library.bitrate_revision += 1;
+    tui.apply_snapshot(next.clone());
+    assert_eq!(tui.ui.requested.as_ref(), Some(&pending));
+    assert_eq!(tui.ui.query_request(&next), Some(pending.clone()));
+    let View::Playlists(playlists) = &tui.ui.view else {
+        unreachable!()
+    };
+    assert_eq!(playlists.get(0).unwrap().name, "row-0");
+    assert!(
+        tui.ui
+            .apply_query(&next, &pending, Ok(response(&pending, 12)))
+    );
 }
 
 #[test]
