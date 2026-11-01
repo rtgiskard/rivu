@@ -597,6 +597,11 @@ impl Queue {
                                             )
                                         },
                                     )
+                                    .map(|mut row| {
+                                        row.style().overflow.y = Some(gpui::Overflow::Visible);
+                                        row.style().overflow.x = Some(gpui::Overflow::Visible);
+                                        row
+                                    })
                                     .children(
                                         [false, true].map(|after| {
                                             this.queue_row_drop_zone(
@@ -656,7 +661,7 @@ impl Queue {
         after: bool,
         theme: &'static rivu_ui::theme::Palette,
         cx: &mut Context<Self>,
-    ) -> gpui::Stateful<Div> {
+    ) -> AnyElement {
         let destination = DragDestination::QueueAt {
             index: position + usize::from(after),
             revision,
@@ -732,7 +737,7 @@ impl Queue {
         let zone = indicator!(zone, ListDrag);
         let zone = indicator!(zone, LibraryDrag);
         let zone = indicator!(zone, ContentDrag);
-        indicator!(zone, ExternalPaths)
+        rivu_ui::list_drop_overlay(indicator!(zone, ExternalPaths)).into_any_element()
     }
 }
 

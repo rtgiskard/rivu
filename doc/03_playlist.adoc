@@ -47,7 +47,8 @@ does not restrict whole-playlist Play, Append, or Export.
 
 Drag a playlist name to change catalog order. A row's upper half inserts before
 that playlist and its lower half inserts after it; the accent line marks the
-insertion boundary. Dropping below the rows appends. Dropping on the source row
+shared insertion boundary without moving between the two neighboring half-rows.
+Dropping below the rows appends. Dropping on the source row
 or pressing Esc leaves the order unchanged. Catalog ordering is disabled while
 the playlist-name search is active; clear it before dragging. The order is saved
 across restarts, and new playlists append. Reordering does not change playlist

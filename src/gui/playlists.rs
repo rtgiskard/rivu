@@ -1226,6 +1226,11 @@ impl Playlists {
                         )
                         .group("playlist-catalog-row")
                         .relative()
+                        .map(|mut row| {
+                            row.style().overflow.y = Some(gpui::Overflow::Visible);
+                            row.style().overflow.x = Some(gpui::Overflow::Visible);
+                            row
+                        })
                         .gap_0()
                         .child(row_text(
                             theme,
@@ -1356,7 +1361,7 @@ impl Playlists {
                         .children([false, true].into_iter().map(|after| {
                             let owner = cx.weak_entity();
                             let highlight_owner = owner.clone();
-                            rivu_ui::list_drop_target(
+                            rivu_ui::list_drop_overlay(rivu_ui::list_drop_target(
                                 (if after { "catalog-insert-after" } else { "catalog-insert-before" }, id as u64),
                                 after,
                             )
@@ -1376,7 +1381,7 @@ impl Playlists {
                                 } else {
                                     style
                                 }
-                            })
+                            }))
                         }))
                         .into_any_element()
                     })
@@ -1505,6 +1510,11 @@ impl Playlists {
                             )
                             .group("playlist-track-row")
                             .relative()
+                            .map(|mut row| {
+                                row.style().overflow.y = Some(gpui::Overflow::Visible);
+                                row.style().overflow.x = Some(gpui::Overflow::Visible);
+                                row
+                            })
                             .gap_0()
                             .child(
                                 hover_actions(
@@ -1739,69 +1749,91 @@ impl Playlists {
                                         owner.read(cx).can_drop_playlist_row(value, destination, id)
                                     })
                                 };
-                                rivu_ui::list_drop_target(
-                                    (
-                                        if after {
-                                            "playlist-insert-after"
-                                        } else {
-                                            "playlist-insert-before"
+                                rivu_ui::list_drop_overlay(
+                                    rivu_ui::list_drop_target(
+                                        (
+                                            if after {
+                                                "playlist-insert-after"
+                                            } else {
+                                                "playlist-insert-before"
+                                            },
+                                            id as u64,
+                                        ),
+                                        after,
+                                    )
+                                    .can_drop(|value, _, _| {
+                                        value.is::<LibraryDrag>()
+                                            || value.is::<super::ContentDrag>()
+                                            || value.is::<ListDrag>()
+                                    })
+                                    .on_drop(cx.listener(
+                                        move |this, drag: &LibraryDrag, window, cx| {
+                                            window.prevent_default();
+                                            cx.stop_propagation();
+                                            this.drop_playlist_row(
+                                                drag,
+                                                destination,
+                                                id,
+                                                after,
+                                                cx,
+                                            );
                                         },
-                                        id as u64,
+                                    ))
+                                    .on_drop(cx.listener(
+                                        move |this, drag: &super::ContentDrag, window, cx| {
+                                            window.prevent_default();
+                                            cx.stop_propagation();
+                                            this.drop_playlist_row(
+                                                drag,
+                                                destination,
+                                                id,
+                                                after,
+                                                cx,
+                                            );
+                                        },
+                                    ))
+                                    .on_drop(cx.listener(
+                                        move |this, drag: &ListDrag, window, cx| {
+                                            window.prevent_default();
+                                            cx.stop_propagation();
+                                            this.drop_playlist_row(
+                                                drag,
+                                                destination,
+                                                id,
+                                                after,
+                                                cx,
+                                            );
+                                        },
+                                    ))
+                                    .drag_over::<LibraryDrag>({
+                                        let valid = valid.clone();
+                                        move |style, drag, _, cx| {
+                                            if valid(drag, cx) {
+                                                style.border_color(rgb(theme.accent))
+                                            } else {
+                                                style
+                                            }
+                                        }
+                                    })
+                                    .drag_over::<super::ContentDrag>({
+                                        let valid = valid.clone();
+                                        move |style, drag, _, cx| {
+                                            if valid(drag, cx) {
+                                                style.border_color(rgb(theme.accent))
+                                            } else {
+                                                style
+                                            }
+                                        }
+                                    })
+                                    .drag_over::<ListDrag>(
+                                        move |style, drag, _, cx| {
+                                            if valid(drag, cx) {
+                                                style.border_color(rgb(theme.accent))
+                                            } else {
+                                                style
+                                            }
+                                        },
                                     ),
-                                    after,
-                                )
-                                .can_drop(|value, _, _| {
-                                    value.is::<LibraryDrag>()
-                                        || value.is::<super::ContentDrag>()
-                                        || value.is::<ListDrag>()
-                                })
-                                .on_drop(cx.listener(
-                                    move |this, drag: &LibraryDrag, window, cx| {
-                                        window.prevent_default();
-                                        cx.stop_propagation();
-                                        this.drop_playlist_row(drag, destination, id, after, cx);
-                                    },
-                                ))
-                                .on_drop(cx.listener(
-                                    move |this, drag: &super::ContentDrag, window, cx| {
-                                        window.prevent_default();
-                                        cx.stop_propagation();
-                                        this.drop_playlist_row(drag, destination, id, after, cx);
-                                    },
-                                ))
-                                .on_drop(cx.listener(move |this, drag: &ListDrag, window, cx| {
-                                    window.prevent_default();
-                                    cx.stop_propagation();
-                                    this.drop_playlist_row(drag, destination, id, after, cx);
-                                }))
-                                .drag_over::<LibraryDrag>({
-                                    let valid = valid.clone();
-                                    move |style, drag, _, cx| {
-                                        if valid(drag, cx) {
-                                            style.border_color(rgb(theme.accent))
-                                        } else {
-                                            style
-                                        }
-                                    }
-                                })
-                                .drag_over::<super::ContentDrag>({
-                                    let valid = valid.clone();
-                                    move |style, drag, _, cx| {
-                                        if valid(drag, cx) {
-                                            style.border_color(rgb(theme.accent))
-                                        } else {
-                                            style
-                                        }
-                                    }
-                                })
-                                .drag_over::<ListDrag>(
-                                    move |style, drag, _, cx| {
-                                        if valid(drag, cx) {
-                                            style.border_color(rgb(theme.accent))
-                                        } else {
-                                            style
-                                        }
-                                    },
                                 )
                             }))
                             .into_any_element()

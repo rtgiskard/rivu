@@ -4,19 +4,119 @@ use gpui::{Div, ElementId, SharedString, Stateful, Window, div, prelude::*, rgb}
 pub const LIST_ROW_REMS: f32 = 2.625;
 pub const DROPDOWN_ROW_REMS: f32 = 2.0;
 
-/// A transparent half-row drop target with no ordinary pointer handlers.
-/// Keep it attached across drag starts; only valid drag-over styles reveal its border.
+/// Half-row target for a bordered list row with visible overflow.
+/// Defer its draw above adjacent rows. Both sides paint the same two-pixel line
+/// centered on the shared row boundary, including the parent's one-pixel border.
 pub fn list_drop_target(id: impl Into<ElementId>, after: bool) -> Stateful<Div> {
     div()
         .id(id)
         .absolute()
         .left_0()
         .right_0()
-        .top(gpui::relative(if after { 0.5 } else { 0.0 }))
-        .h(gpui::relative(0.5))
+        .top(if after {
+            gpui::Length::from(gpui::relative(0.5))
+        } else {
+            gpui::Length::from(gpui::px(-2.))
+        })
+        .bottom(if after {
+            gpui::Length::from(gpui::px(-2.))
+        } else {
+            gpui::Length::from(gpui::relative(0.5))
+        })
         .border_color(gpui::transparent_black())
         .when(after, |zone| zone.border_b_2())
         .when(!after, |zone| zone.border_t_2())
+}
+
+/// Paint a drop target over adjacent rows without escaping its list viewport.
+pub fn list_drop_overlay(target: Stateful<Div>) -> impl IntoElement {
+    ListDropOverlay {
+        target: Some(target.into_any_element()),
+        mask: None,
+        layout: None,
+    }
+}
+
+struct ListDropOverlay {
+    target: Option<gpui::AnyElement>,
+    mask: Option<gpui::ContentMask<gpui::Pixels>>,
+    layout: Option<gpui::LayoutId>,
+}
+
+impl IntoElement for ListDropOverlay {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl gpui::Element for ListDropOverlay {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<gpui::ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&gpui::GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        window: &mut Window,
+        cx: &mut gpui::App,
+    ) -> (gpui::LayoutId, ()) {
+        let layout = *self
+            .layout
+            .get_or_insert_with(|| self.target.as_mut().unwrap().request_layout(window, cx));
+        (layout, ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&gpui::GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        _bounds: gpui::Bounds<gpui::Pixels>,
+        _layout: &mut (),
+        window: &mut Window,
+        cx: &mut gpui::App,
+    ) {
+        if let Some(mask) = self.mask {
+            window.with_content_mask(Some(mask), |window| {
+                self.target.as_mut().unwrap().prepaint(window, cx);
+            });
+        } else {
+            let mask = window.content_mask();
+            let overlay = Self {
+                target: self.target.take(),
+                mask: Some(mask),
+                layout: self.layout,
+            };
+            // Initialize only the new wrapper; its child already has a layout.
+            let mut overlay = overlay.into_any_element();
+            overlay.request_layout(window, cx);
+            window.defer_draw(overlay, window.element_offset(), 0, Some(mask));
+        }
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&gpui::GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        _bounds: gpui::Bounds<gpui::Pixels>,
+        _layout: &mut (),
+        _prepaint: &mut (),
+        window: &mut Window,
+        cx: &mut gpui::App,
+    ) {
+        if let Some(target) = self.target.as_mut() {
+            target.paint(window, cx);
+        }
+    }
 }
 
 pub fn row_background(

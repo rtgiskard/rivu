@@ -1112,3 +1112,98 @@ fn overlay_material_follows_row_hover_without_treating_keyboard_focus_as_hover()
         .unwrap();
     }
 }
+
+struct ClippedDropTarget {
+    drops: usize,
+}
+
+impl Render for ClippedDropTarget {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = crate::theme::palette(cx);
+        crate::column()
+            .w(gpui::px(200.))
+            .child(
+                div()
+                    .id("source")
+                    .w_full()
+                    .h(gpui::px(40.))
+                    .on_drag(0u8, |_, _, _, cx| {
+                        cx.new(|_| ListDragPreview {
+                            label: "drag".into(),
+                        })
+                    }),
+            )
+            .child(
+                div().h(gpui::px(20.)).w_full().overflow_hidden().child(
+                    crate::list_row(theme, "partial-row", false, gpui::px(40.))
+                        .relative()
+                        .map(|mut row| {
+                            row.style().overflow.x = Some(gpui::Overflow::Visible);
+                            row.style().overflow.y = Some(gpui::Overflow::Visible);
+                            row
+                        })
+                        .children([false, true].map(|after| {
+                            crate::list_drop_overlay(
+                                crate::list_drop_target(("target", usize::from(after)), after)
+                                    .can_drop(|value, _, _| value.is::<u8>())
+                                    .on_drop(cx.listener(|this, _: &u8, _, _| this.drops += 1)),
+                            )
+                        })),
+                ),
+            )
+    }
+}
+
+#[test]
+fn deferred_row_drop_targets_reject_pointer_outside_list_viewport() {
+    for (y, expected) in [(50., 1), (70., 0)] {
+        let mut cx = TestAppContext::single();
+        cx.update(crate::theme::init_test);
+        let window = cx.add_window(|_, _| ClippedDropTarget { drops: 0 });
+        let root = window.root(&mut cx).unwrap();
+        let handle = window.into();
+        draw(&mut cx, handle);
+        cx.update_window(handle, |_, window, cx| {
+            window.dispatch_event(
+                gpui::MouseDownEvent {
+                    button: gpui::MouseButton::Left,
+                    position: gpui::point(gpui::px(20.), gpui::px(20.)),
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+            window.dispatch_event(
+                gpui::MouseMoveEvent {
+                    pressed_button: Some(gpui::MouseButton::Left),
+                    position: gpui::point(gpui::px(40.), gpui::px(y)),
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+            assert!(cx.has_active_drag());
+        })
+        .unwrap();
+        draw(&mut cx, handle);
+        cx.update_window(handle, |_, window, cx| {
+            window.simulate_mouse_move(gpui::point(gpui::px(40.), gpui::px(y)), cx);
+            window.draw(cx).clear(cx);
+            window.dispatch_event(
+                gpui::MouseUpEvent {
+                    button: gpui::MouseButton::Left,
+                    position: gpui::point(gpui::px(40.), gpui::px(y)),
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+        })
+        .unwrap();
+        assert_eq!(
+            root.read_with(&cx, |this, _| this.drops),
+            expected,
+            "drop y={y}"
+        );
+    }
+}
