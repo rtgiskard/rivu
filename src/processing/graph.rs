@@ -3,10 +3,10 @@ use super::render::{ProgressReporter, check_cancel, validate_output};
 use super::*;
 use anyhow::bail;
 use rivu_dsp::{
-    denoise::{DenoiseMode, Denoiser, NoiseProfile, ProfileCollector},
+    denoise::{BlockDenoiser, DenoiseMode, Denoiser, NoiseProfile, ProfileCollector},
     equalizer::{fir::FirEqualizer, iir::Equalizer},
 };
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 
 const BLOCK: usize = 256;
 
@@ -93,72 +93,13 @@ struct Edge {
     position: usize,
 }
 
-struct DenoiseStream {
-    processor: Denoiser,
-    queue: VecDeque<f32>,
-    output: Vec<f32>,
-    finished: bool,
-}
-impl DenoiseStream {
-    fn new(processor: Denoiser, channels: usize) -> Self {
-        let latency = processor.lookahead_frames() * channels;
-        let burst = processor
-            .config()
-            .fft_size
-            .max(processor.lookahead_frames())
-            + BLOCK;
-        let mut queue = VecDeque::with_capacity(latency + burst * channels);
-        queue.resize(latency, 0.0);
-        Self {
-            processor,
-            queue,
-            output: Vec::with_capacity(burst * channels),
-            finished: false,
-        }
-    }
-    fn process(
-        &mut self,
-        samples: &mut [f32],
-        input_samples: usize,
-        eof: bool,
-        cancel: &AtomicBool,
-    ) -> Result<()> {
-        self.output.clear();
-        if input_samples > 0 {
-            self.processor.process_block(
-                &samples[..input_samples],
-                &mut self.output,
-                &mut || cancel.load(Ordering::Acquire),
-            )?;
-        }
-        if eof && !self.finished {
-            self.processor
-                .finish(&mut self.output, &mut || cancel.load(Ordering::Acquire))?;
-            self.finished = true;
-        }
-        ensure!(
-            self.queue.len() + self.output.len() <= self.queue.capacity(),
-            "Denoise output exceeded bounded staging capacity"
-        );
-        self.queue.extend(self.output.iter().copied());
-        ensure!(
-            self.queue.len() >= samples.len(),
-            "Denoise exceeded declared lookahead"
-        );
-        for sample in samples {
-            *sample = self.queue.pop_front().expect("checked queue length");
-        }
-        Ok(())
-    }
-}
-
 enum Processor {
     Source(audio::PcmAudio),
     Decoder,
     Pass,
     Iir(Equalizer),
     Fir(FirEqualizer),
-    Denoise(Box<DenoiseStream>),
+    Denoise(Box<BlockDenoiser>),
 }
 struct Node {
     inputs: Vec<Edge>,
@@ -311,7 +252,7 @@ impl Engine {
                     if config.is_bypassed() {
                         Processor::Pass
                     } else {
-                        Processor::Denoise(Box::new(DenoiseStream::new(denoiser, self.channels)))
+                        Processor::Denoise(Box::new(BlockDenoiser::new(denoiser, BLOCK)?))
                     }
                 }
                 GraphNodeKind::Speech { .. } | GraphNodeKind::Separate { .. } => {
@@ -323,7 +264,7 @@ impl Engine {
         let (delay, tail) = match &processor {
             Processor::Fir(fir) => (fir.latency_frames() as u64, fir.tail_frames() as u64),
             Processor::Denoise(denoise) => {
-                let delay = denoise.processor.lookahead_frames() as u64;
+                let delay = denoise.lookahead_frames() as u64;
                 (delay, delay)
             }
             _ => (0, 0),
@@ -424,7 +365,7 @@ impl Engine {
                             output,
                             input_frames * self.channels,
                             input_end.is_some_and(|end| position + count as u64 >= end),
-                            cancel,
+                            &mut || cancel.load(Ordering::Acquire),
                         )?,
                     }
                 }

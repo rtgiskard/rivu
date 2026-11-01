@@ -5,11 +5,11 @@
 //! is no limiter or normalization. Preparation and destruction belong on the
 //! audio worker (or admission thread), never in the device callback.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail, ensure};
 use rivu_dsp::{
-    denoise::{DenoiseMode, Denoiser},
+    denoise::{BlockDenoiser, DenoiseMode, Denoiser},
     equalizer::config::FilterKind,
     equalizer::fir::FirEqualizer,
     equalizer::iir::Equalizer,
@@ -58,74 +58,12 @@ impl DelayLine {
     }
 }
 
-struct StreamingDenoise {
-    denoiser: Denoiser,
-    output: Vec<f32>,
-    queue: VecDeque<f32>,
-    delay_samples: usize,
-    finished: bool,
-}
-impl StreamingDenoise {
-    fn new(denoiser: Denoiser, channels: usize) -> Self {
-        let delay_samples = denoiser.lookahead_frames() * channels;
-        let spectral_frames = if denoiser.config().mode == DenoiseMode::Off {
-            0
-        } else {
-            denoiser.config().fft_size
-        };
-        let burst = spectral_frames.max(denoiser.lookahead_frames()) + GRAPH_BLOCK_FRAMES;
-        let mut queue = VecDeque::with_capacity(delay_samples + burst * channels);
-        queue.resize(delay_samples, 0.0);
-        Self {
-            denoiser,
-            output: Vec::with_capacity(burst * channels),
-            queue,
-            delay_samples,
-            finished: false,
-        }
-    }
-    fn process(&mut self, samples: &mut [f32], input_samples: usize, eof: bool) -> Result<()> {
-        self.output.clear();
-        if input_samples > 0 {
-            self.denoiser.process_block(
-                &samples[..input_samples],
-                &mut self.output,
-                &mut || false,
-            )?;
-        }
-        if eof && !self.finished {
-            self.denoiser.finish(&mut self.output, &mut || false)?;
-            self.finished = true;
-        }
-        ensure!(
-            self.queue.len() + self.output.len() <= self.queue.capacity(),
-            "streaming denoise exceeded its admitted output capacity"
-        );
-        self.queue.extend(self.output.iter().copied());
-        ensure!(
-            self.queue.len() >= samples.len(),
-            "streaming denoise exceeded declared lookahead"
-        );
-        for sample in samples {
-            *sample = self.queue.pop_front().expect("checked queue length");
-        }
-        Ok(())
-    }
-    fn reset(&mut self) {
-        self.denoiser.reset();
-        self.output.clear();
-        self.queue.clear();
-        self.queue.resize(self.delay_samples, 0.0);
-        self.finished = false;
-    }
-}
-
 enum Processor {
     Source,
     Pass,
     Iir(Equalizer),
     Fir(FirEqualizer),
-    Denoise(Box<StreamingDenoise>),
+    Denoise(Box<BlockDenoiser>),
 }
 struct Input {
     node: usize,
@@ -394,7 +332,10 @@ impl GraphRunner {
                         let denoiser = Denoiser::new(sample_rate, channels, config.clone(), None)?;
                         let latency = denoiser.lookahead_frames();
                         (
-                            Processor::Denoise(Box::new(StreamingDenoise::new(denoiser, channels))),
+                            Processor::Denoise(Box::new(BlockDenoiser::new(
+                                denoiser,
+                                GRAPH_BLOCK_FRAMES,
+                            )?)),
                             latency,
                             latency,
                         )
@@ -612,7 +553,8 @@ impl GraphRunner {
                         let eof = self.source_frames.is_some_and(|source| {
                             self.processed_frames + frames as u64 >= source + node.input_tail as u64
                         });
-                        denoise.process(output, input_frames * self.channels, eof)?;
+                        denoise
+                            .process(output, input_frames * self.channels, eof, &mut || false)?;
                     }
                 }
             }

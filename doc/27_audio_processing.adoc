@@ -691,6 +691,12 @@ do no model loading, FFT planning or file I/O. Allocation, block work and retain
 storage are bounded; long-running preparation stays on workers. Bypass, gain,
 resampling and latency compensation are explicit, not silent quality fallbacks.
 
+Realtime and offline native graphs share `rivu-dsp::denoise::BlockDenoiser` for
+lookahead prefill, fixed-block output and one-time EOF flushing. Its staging is
+bounded by lookahead and the admitted block size, independent of source duration.
+Only the declared real input is processed; graph padding drains delay rather than
+extending the source. Reset clears both DSP history and adapter staging.
+
 Non-finite input/intermediate PCM fails without publishing partial audio; finite
 over-range samples are not clipped or silenced. A failed DSP/profile operation
 requires reset before reuse because a finite prefix may have advanced history.

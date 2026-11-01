@@ -296,9 +296,181 @@ mod processor;
 #[cfg(feature = "execution")]
 pub use processor::{Denoiser, ProfileCollector};
 
+/// Fixed-block graph adapter with declared lookahead prefill and bounded staging.
+/// Only `input_samples` are source audio; the rest of a block drains graph delay.
+#[cfg(feature = "execution")]
+pub struct BlockDenoiser {
+    denoiser: Denoiser,
+    output: Vec<f32>,
+    queue: std::collections::VecDeque<f32>,
+    delay_samples: usize,
+    max_block_samples: usize,
+    finished: bool,
+}
+
+#[cfg(feature = "execution")]
+impl BlockDenoiser {
+    pub fn new(denoiser: Denoiser, max_block_frames: usize) -> Result<Self> {
+        ensure!(
+            (1..=MAX_BLOCK_FRAMES).contains(&max_block_frames),
+            "invalid denoise adapter block size"
+        );
+        let channels = denoiser.channels();
+        let delay_samples = denoiser.lookahead_frames() * channels;
+        let max_block_samples = max_block_frames * channels;
+        // Before a call at most lookahead source samples remain withheld.
+        // Processing plus finish can emit only those and this call's real input.
+        let burst = delay_samples + max_block_samples;
+        let mut queue = std::collections::VecDeque::with_capacity(delay_samples + burst);
+        queue.resize(delay_samples, 0.0);
+        Ok(Self {
+            denoiser,
+            output: Vec::with_capacity(burst),
+            queue,
+            delay_samples,
+            max_block_samples,
+            finished: false,
+        })
+    }
+
+    pub fn lookahead_frames(&self) -> usize {
+        self.denoiser.lookahead_frames()
+    }
+
+    /// Finish the source once at EOF, then drain its prefilled playback delay.
+    /// Cancellation invalidates the stream until reset, just like `Denoiser`.
+    pub fn process(
+        &mut self,
+        samples: &mut [f32],
+        input_samples: usize,
+        eof: bool,
+        cancel: &mut impl FnMut() -> bool,
+    ) -> Result<()> {
+        let channels = self.denoiser.channels();
+        ensure!(
+            samples.len() <= self.max_block_samples
+                && samples.len().is_multiple_of(channels)
+                && input_samples <= samples.len()
+                && input_samples.is_multiple_of(channels),
+            "invalid denoise adapter block"
+        );
+        self.output.clear();
+        if input_samples > 0 {
+            self.denoiser
+                .process_block(&samples[..input_samples], &mut self.output, cancel)?;
+        }
+        if eof && !self.finished {
+            self.denoiser.finish(&mut self.output, cancel)?;
+            self.finished = true;
+        }
+        ensure!(
+            self.queue.len() + self.output.len() <= self.queue.capacity(),
+            "streaming denoise exceeded its admitted output capacity"
+        );
+        self.queue.extend(self.output.iter().copied());
+        ensure!(
+            self.queue.len() >= samples.len(),
+            "streaming denoise exceeded declared lookahead"
+        );
+        for sample in samples {
+            *sample = self.queue.pop_front().expect("checked queue length");
+        }
+        Ok(())
+    }
+
+    pub fn reset(&mut self) {
+        self.denoiser.reset();
+        self.output.clear();
+        self.queue.clear();
+        self.queue.resize(self.delay_samples, 0.0);
+        self.finished = false;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "execution")]
+    #[test]
+    fn block_adapter_preserves_real_input_eof_reset_and_capacity() {
+        const BLOCK: usize = 256;
+        for mode in [
+            DenoiseMode::Off,
+            DenoiseMode::Stationary,
+            DenoiseMode::Adaptive,
+        ] {
+            let mut config = DenoiseConfig {
+                mode,
+                fft_size: 256,
+                wet: 0.5,
+                ..Default::default()
+            };
+            config.impulse.enabled = true;
+            config.impulse.max_width = 8;
+            config.hum.enabled = true;
+            for frames in [0, 1, 255, 256, 257, 1025] {
+                let input: Vec<_> = (0..frames * 2)
+                    .map(|index| (index as f32 * 0.031).sin() * 0.2)
+                    .collect();
+                let mut reference = Denoiser::new(48_000, 2, config.clone(), None).unwrap();
+                let delay = reference.lookahead_frames() * 2;
+                let mut expected = vec![0.0; delay];
+                for chunk in input.chunks(74) {
+                    reference
+                        .process_block(chunk, &mut expected, &mut || false)
+                        .unwrap();
+                }
+                reference.finish(&mut expected, &mut || false).unwrap();
+                let mut adapter = BlockDenoiser::new(
+                    Denoiser::new(48_000, 2, config.clone(), None).unwrap(),
+                    BLOCK,
+                )
+                .unwrap();
+                let capacities = (adapter.output.capacity(), adapter.queue.capacity());
+                for _ in 0..2 {
+                    let mut actual = Vec::new();
+                    let mut position = 0;
+                    while position < expected.len() {
+                        let count = (expected.len() - position).min(BLOCK * 2);
+                        let real = input.len().saturating_sub(position).min(count);
+                        // Padded graph samples must never reach the denoiser.
+                        let mut block = vec![f32::NAN; count];
+                        let start = position.min(input.len());
+                        block[..real].copy_from_slice(&input[start..start + real]);
+                        adapter
+                            .process(
+                                &mut block,
+                                real,
+                                position + count >= input.len(),
+                                &mut || false,
+                            )
+                            .unwrap();
+                        actual.extend_from_slice(&block);
+                        position += count;
+                        assert_eq!(
+                            (adapter.output.capacity(), adapter.queue.capacity()),
+                            capacities
+                        );
+                    }
+                    // Repeated graph EOF must not finish the source twice.
+                    adapter.process(&mut [], 0, true, &mut || false).unwrap();
+                    assert_eq!(adapter.denoiser.input_frames(), frames as u64);
+                    assert_eq!(adapter.denoiser.output_frames(), frames as u64);
+                    assert_eq!(actual, expected);
+                    adapter.reset();
+                }
+                assert!(
+                    adapter
+                        .process(&mut [0.0; 2], 2, false, &mut || true)
+                        .is_err()
+                );
+                assert!(adapter.process(&mut [], 0, true, &mut || false).is_err());
+                adapter.reset();
+                adapter.process(&mut [], 0, true, &mut || false).unwrap();
+            }
+        }
+    }
 
     #[test]
     fn serde_and_validation_reject_invalid_parameters() {
