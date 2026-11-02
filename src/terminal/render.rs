@@ -1,8 +1,8 @@
 use super::{
     paged::PagedList,
     state::{
-        DetailState, Details, LibrarySearch, LibraryTree, NoticeKind, PlaylistDetail, RecentTracks,
-        SearchFocus, TopTab, UiState, View,
+        DetailState, Details, LibraryTree, NoticeKind, PlaylistDetail, RecentTracks, SearchState,
+        TopTab, UiState, View,
     },
 };
 use crate::{
@@ -538,9 +538,13 @@ fn help_order(action: Action) -> u8 {
         | Action::SeekForward
         | Action::Backspace => 2,
         Action::First | Action::Last | Action::SeekStart | Action::SeekEnd | Action::Enqueue => 3,
-        Action::Expand | Action::VolumeDown | Action::VolumeUp | Action::Favorite => 4,
+        Action::Expand
+        | Action::Parent
+        | Action::VolumeDown
+        | Action::VolumeUp
+        | Action::Favorite => 4,
         Action::Activate | Action::Repeat | Action::Remove => 5,
-        Action::Parent | Action::Shuffle => 6,
+        Action::Shuffle => 6,
         _ => 7,
     }
 }
@@ -718,7 +722,6 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut
         height: 1.min(outer[3].height),
         ..outer[3]
     };
-    let i18n = &ui.i18n;
     let active_tab = ui.view.tab();
     let mut tabs = Vec::new();
     for (tab, label) in [
@@ -734,27 +737,12 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut
         } else {
             Style::default().fg(colors.secondary)
         };
-        tabs.push(Span::styled(i18n.text(label), style));
+        tabs.push(Span::styled(ui.i18n.text(label), style));
         tabs.push(Span::raw("  "));
     }
     frame.render_widget(Paragraph::new(Line::from(tabs)), navigation);
-    ui.page_size = outer[1]
-        .height
-        .saturating_sub(match ui.view {
-            View::Search(_) => 2,
-            _ => 1,
-        })
-        .max(1) as usize;
-    match &mut ui.view {
-        View::Search(search) => draw_search(frame, outer[1], search, i18n, colors),
-        View::Tree(tree) => draw_tree(frame, outer[1], tree, i18n, colors),
-        View::PlaylistDetail { detail, .. } => {
-            draw_playlist_detail(frame, outer[1], detail, i18n, colors)
-        }
-        View::Playlists(playlists) => draw_playlists(frame, outer[1], playlists, i18n, colors),
-        View::Queue => draw_queue(frame, outer[1], state, &mut ui.queue, i18n, colors),
-        View::Recent(recent) => draw_recent(frame, outer[1], recent, i18n, colors),
-    }
+    draw_current_page(frame, outer[1], state, ui, colors);
+    let i18n = &ui.i18n;
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(playback);
     let mut now = Vec::with_capacity(3);
     if let Some(track) = state.current_track() {
@@ -1262,7 +1250,6 @@ fn draw_recent(
 enum BrowserMode {
     Tracks,
     PlaylistTracks,
-    UnfocusedTracks,
     Labels,
 }
 
@@ -1289,7 +1276,6 @@ fn draw_paged_list<T>(
         area.height,
     );
     let tracks = !matches!(mode, BrowserMode::Labels);
-    let focused = !matches!(mode, BrowserMode::UnfocusedTracks);
     page.set_viewport(area.height.saturating_sub(1) as usize);
     let loading = !page.loaded
         || (page.selection.offset()..page.visible_end()).any(|index| page.get(index).is_none());
@@ -1324,11 +1310,7 @@ fn draw_paged_list<T>(
     let title_line = Line::from(vec![
         Span::styled(
             cell_text(&title, area.width as usize - count_width, false),
-            Style::default().fg(if focused {
-                colors.accent
-            } else {
-                colors.secondary
-            }),
+            Style::default().fg(colors.accent),
         ),
         Span::styled(
             cell_text(&count, count_width, true),
@@ -1348,11 +1330,7 @@ fn draw_paged_list<T>(
             .map(|index| index - page.selection.offset()),
     );
     frame.render_stateful_widget(
-        List::new(items).highlight_style(if focused {
-            list_selection_style(colors)
-        } else {
-            Style::default().bg(colors.selected)
-        }),
+        List::new(items).highlight_style(list_selection_style(colors)),
         items_area,
         &mut selection,
     );
@@ -1425,15 +1403,14 @@ fn query_tail(query: &str, width: usize) -> (&str, usize) {
     (&query[start..], cells)
 }
 
-fn draw_search(
+fn draw_search_input(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
-    search: &mut LibrarySearch,
+    search: &SearchState,
     i18n: &Localizer,
     colors: TerminalColors,
 ) {
-    let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
-    let focused = search.focus == SearchFocus::Query;
+    let focused = search.editing;
     let prefix = format!(" 󰍉 {} › ", i18n.text("terminal-search"));
     let prefix_width = Line::from(prefix.as_str()).width().min(area.width as usize);
     let input_width = area.width as usize - prefix_width;
@@ -1458,39 +1435,70 @@ fn draw_search(
         } else {
             Style::default()
         }),
-        rows[0],
+        area,
     );
-    if focused && input_width > 0 && rows[0].height > 0 {
-        frame.set_cursor_position((area.x + (prefix_width + cursor) as u16, rows[0].y));
+    if focused && input_width > 0 && area.height > 0 {
+        frame.set_cursor_position((area.x + (prefix_width + cursor) as u16, area.y));
     }
-    draw_paged_list(
-        frame,
-        rows[1],
-        i18n.text("shell-panel-library").into(),
-        &mut search.results,
-        |track| RowContent::track(track),
-        i18n,
-        BrowserStyle {
-            mode: if focused {
-                BrowserMode::UnfocusedTracks
-            } else {
-                BrowserMode::Tracks
+}
+
+fn draw_current_page(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    state: &TuiSnapshot,
+    ui: &mut UiState,
+    colors: TerminalColors,
+) {
+    let i18n = &ui.i18n;
+    let list_area = if ui.search.active {
+        let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
+        draw_search_input(frame, rows[0], &ui.search, i18n, colors);
+        rows[1]
+    } else {
+        area
+    };
+    ui.page_size = list_area.height.saturating_sub(1).max(1) as usize;
+    match &mut ui.view {
+        View::LibraryResults(results) => draw_paged_list(
+            frame,
+            list_area,
+            i18n.text("shell-panel-library").into(),
+            results,
+            |track| RowContent::track(track),
+            i18n,
+            BrowserStyle {
+                mode: BrowserMode::Tracks,
+                colors,
             },
+        ),
+        View::Tree(tree) => draw_tree(
+            frame,
+            list_area,
+            tree,
+            &ui.search.applied_query,
+            i18n,
             colors,
-        },
-    );
+        ),
+        View::PlaylistDetail { detail, .. } => {
+            draw_playlist_detail(frame, list_area, detail, i18n, colors)
+        }
+        View::Playlists(playlists) => draw_playlists(frame, list_area, playlists, i18n, colors),
+        View::Queue => draw_queue(frame, list_area, state, &mut ui.queue, i18n, colors),
+        View::Recent(recent) => draw_recent(frame, list_area, recent, i18n, colors),
+    }
 }
 
 fn draw_tree(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     tree: &mut LibraryTree,
+    applied_query: &str,
     i18n: &Localizer,
     colors: TerminalColors,
 ) {
     let title = if tree.other_tracks {
         format!(
-            "{} · {}{}{} · /{}{} · {}",
+            "{} · {}{}{} · {}",
             i18n.text("library-other"),
             i18n.text(match tree.sort {
                 rivu_protocol::model::LibrarySort::Id => "terminal-sort-id",
@@ -1499,8 +1507,6 @@ fn draw_tree(
             }),
             if tree.favorite.is_some() { " ♥" } else { "" },
             if tree.missing.is_some() { " !" } else { "" },
-            tree.query,
-            if tree.editing_query { "▏" } else { "" },
             i18n.text("terminal-other-tracks-help")
         )
     } else if tree.directory.as_os_str().is_empty() {
@@ -1547,7 +1553,7 @@ fn draw_tree(
     if other_tracks
         && tree.entries.loaded
         && tree.entries.total == 0
-        && tree.query.is_empty()
+        && applied_query.is_empty()
         && tree.favorite.is_none()
         && tree.missing.is_none()
     {

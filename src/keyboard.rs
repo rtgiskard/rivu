@@ -93,12 +93,13 @@ const QUEUE: u16 = (1 << Context::GuiQueue as u16) | (1 << Context::TuiQueue as 
 const TRACKS: u16 =
     (1 << Context::GuiPlaylistTracks as u16) | (1 << Context::TuiPlaylistTracks as u16);
 const TREE: u16 = (1 << Context::GuiLibrary as u16) | (1 << Context::TuiTree as u16);
-const SEARCH: u16 = QUERY | (1 << Context::TuiSearchResults as u16);
 const TABS: u16 = (1 << Context::TuiQueue as u16)
     | (1 << Context::TuiTree as u16)
     | (1 << Context::TuiPlaylists as u16)
     | (1 << Context::TuiPlaylistTracks as u16)
-    | (1 << Context::TuiRecent as u16);
+    | (1 << Context::TuiRecent as u16)
+    | QUERY
+    | (1 << Context::TuiSearchResults as u16);
 const MULTI: u16 = (1 << Context::GuiQueue as u16)
     | (1 << Context::GuiPlaylistTracks as u16)
     | (1 << Context::GuiHistory as u16);
@@ -147,11 +148,19 @@ static BINDINGS: &[Binding] = &[
         "escape",
         "Escape",
         0,
-        GUI | TUI | HELP,
+        (GUI | TUI | HELP) & !QUERY,
         Cancel,
         "keyboard-cancel"
     ),
-    binding!("q", "q", 0, TUI & !SEARCH, Close, "keyboard-close"),
+    binding!(
+        "escape",
+        "Escape",
+        0,
+        QUERY,
+        Cancel,
+        "keyboard-clear-search"
+    ),
+    binding!("q", "q", 0, TUI & !QUERY, Close, "keyboard-close"),
     binding!(
         "c",
         "Ctrl+C",
@@ -161,14 +170,7 @@ static BINDINGS: &[Binding] = &[
         "keyboard-close"
     ),
     binding!("f", "Ctrl+F", CONTROL, GUI_LIST, Search, "keyboard-search"),
-    binding!(
-        "/",
-        "/",
-        0,
-        TUI & !(SEARCH | (1 << Context::TuiRecent as u16)),
-        Search,
-        "keyboard-library-search"
-    ),
+    binding!("/", "/", 0, TUI & !QUERY, Search, "keyboard-page-search"),
     binding!("space", "Space", 0, PLAYBACK, Toggle, "keyboard-toggle"),
     binding!("n", "n", 0, PLAYBACK, Next, "keyboard-next-previous"),
     binding!("p", "p", 0, PLAYBACK, Previous, "keyboard-next-previous"),
@@ -228,13 +230,14 @@ static BINDINGS: &[Binding] = &[
         PageDown,
         "keyboard-page-pair"
     ),
+    binding!("enter", "Enter", 0, LIST, Activate, "keyboard-activate"),
     binding!(
         "enter",
         "Enter",
         0,
-        LIST | QUERY,
+        QUERY,
         Activate,
-        "keyboard-activate"
+        "keyboard-apply-search"
     ),
     binding!(
         "delete",
@@ -249,14 +252,6 @@ static BINDINGS: &[Binding] = &[
         "Left",
         0,
         TREE | (1 << Context::TuiPlaylistTracks as u16),
-        Parent,
-        "keyboard-parent"
-    ),
-    binding!(
-        "backspace",
-        "Backspace",
-        0,
-        1 << Context::TuiTree as u16,
         Parent,
         "keyboard-parent"
     ),
@@ -284,12 +279,12 @@ static BINDINGS: &[Binding] = &[
         Favorite,
         "keyboard-favorite"
     ),
-    binding!("tab", "Tab", 0, GUI | SEARCH, Traverse, "keyboard-traverse"),
+    binding!("tab", "Tab", 0, GUI, Traverse, "keyboard-traverse"),
     binding!(
         "tab",
         "Shift+Tab",
         SHIFT,
-        GUI | SEARCH,
+        GUI,
         Traverse,
         "keyboard-traverse"
     ),
@@ -480,7 +475,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn recent_has_track_navigation_without_search_or_removal() {
+    fn recent_has_track_navigation_and_search_without_removal() {
         let context = Context::TuiRecent;
         for (key, action) in [
             ("up", Action::Up),
@@ -494,12 +489,83 @@ mod tests {
             ("i", Action::Details),
             ("m", Action::Favorite),
             ("space", Action::Toggle),
+            ("/", Action::Search),
             ("q", Action::Close),
         ] {
             assert_eq!(resolve(key, Modifiers::default(), context), Some(action));
         }
-        for key in ["/", "delete", "backspace", "a"] {
+        for key in ["delete", "backspace", "a"] {
             assert_eq!(resolve(key, Modifiers::default(), context), None);
+        }
+    }
+
+    #[test]
+    fn contextual_search_editor_owns_printable_keys_and_submits_explicitly() {
+        let context = Context::TuiSearchQuery;
+        for key in ["space", "m", "q", "?", "/", "i", "n", "p"] {
+            assert_eq!(resolve(key, Modifiers::default(), context), None);
+        }
+        for (key, action) in [
+            ("enter", Action::Activate),
+            ("escape", Action::Cancel),
+            ("backspace", Action::Backspace),
+            ("tab", Action::Traverse),
+            ("f1", Action::Help),
+        ] {
+            assert_eq!(resolve(key, Modifiers::default(), context), Some(action));
+        }
+        assert_eq!(
+            resolve(
+                "c",
+                Modifiers {
+                    control: true,
+                    ..Default::default()
+                },
+                context
+            ),
+            Some(Action::Close)
+        );
+        let rows = help_rows(&[context]).collect::<Vec<_>>();
+        assert!(
+            rows.iter()
+                .any(|row| row.description == "keyboard-apply-search")
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.description == "keyboard-tabs-pair")
+        );
+        assert!(
+            !rows
+                .iter()
+                .any(|row| row.description == "keyboard-traverse")
+        );
+    }
+
+    #[test]
+    fn contextual_search_is_available_on_every_page_and_results_keep_track_actions() {
+        for context in [
+            Context::TuiQueue,
+            Context::TuiPlaylists,
+            Context::TuiPlaylistTracks,
+            Context::TuiTree,
+            Context::TuiRecent,
+            Context::TuiSearchResults,
+        ] {
+            assert_eq!(
+                resolve("/", Modifiers::default(), context),
+                Some(Action::Search)
+            );
+        }
+        for (key, action) in [
+            ("enter", Action::Activate),
+            ("i", Action::Details),
+            ("m", Action::Favorite),
+            ("tab", Action::Traverse),
+        ] {
+            assert_eq!(
+                resolve(key, Modifiers::default(), Context::TuiSearchResults),
+                Some(action)
+            );
         }
     }
 
@@ -696,7 +762,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_tabs_traverse_pages_without_changing_search_or_gui_bindings() {
+    fn terminal_tabs_traverse_pages_including_search_and_preserve_gui_bindings() {
         for context in [
             Context::TuiQueue,
             Context::TuiTree,

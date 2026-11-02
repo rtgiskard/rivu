@@ -182,9 +182,10 @@ The open field shows matches / total; a pending or failed total does not hide
 available album results. No matches is distinct from an empty collection. Search
 changes the view, not saved contents or playback order.
 
-Desktop searches and terminal Search apply nonempty edits after 150 ms without
-input; Enter does not bypass the delay. Surrounding whitespace is ignored, and
-clearing applies immediately. Terminal Other applies every edit immediately.
+Desktop searches apply nonempty edits after 150 ms without input; Enter does not
+bypass the delay. Surrounding whitespace is ignored, and clearing applies
+immediately. The link:04_playback.adoc#terminal-client[terminal client] applies
+search only when Enter is pressed in its editor.
 
 Library searches title, artist, and the full source path, combined with its
 favorite and missing-file filters; it does not search album metadata. Albums

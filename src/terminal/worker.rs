@@ -236,7 +236,12 @@ pub(super) enum QueryKind {
     Queue,
     QueueSelection(u64),
     Search(String),
+    LibrarySelection(i64),
     Directory(PathBuf),
+    DirectorySelection {
+        track_id: i64,
+        path: PathBuf,
+    },
     OtherTracksCount,
     OtherTracks {
         query: String,
@@ -257,6 +262,7 @@ pub(super) enum QueryKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct QueryRequest {
     pub(super) kind: QueryKind,
+    pub(super) filter: Option<String>,
     pub(super) offset: usize,
     pub(super) limit: usize,
     pub(super) generation: u64,
@@ -271,6 +277,24 @@ impl QueryKind {
     fn into_query(self, offset: usize, limit: usize) -> Query {
         match self {
             QueryKind::OtherTracksCount => Query::OtherTracksCount,
+            QueryKind::LibrarySelection(track_id) => Query::LibraryLocate {
+                track_id,
+                path: PathBuf::new(),
+                tree: false,
+                query: None,
+                favorite: None,
+                missing: None,
+                sort: LibrarySort::Id,
+            },
+            QueryKind::DirectorySelection { track_id, path } => Query::LibraryLocate {
+                track_id,
+                path,
+                tree: true,
+                query: None,
+                favorite: None,
+                missing: None,
+                sort: LibrarySort::Id,
+            },
             QueryKind::Track(track_id) => Query::Track { track_id },
             QueryKind::Queue => Query::QueuePage {
                 query: None,
@@ -376,7 +400,25 @@ impl QueryKind {
 
 impl QueryRequest {
     pub(super) fn query(&self) -> Query {
-        self.kind.query(self.offset, self.limit)
+        let mut query = self.kind.query(self.offset, self.limit);
+        match &mut query {
+            Query::QueuePage { query, .. }
+            | Query::QueueEntries { query, .. }
+            | Query::LibraryPage { query, .. }
+            | Query::DirectoryPage { query, .. }
+            | Query::LibraryLocate { query, .. }
+            | Query::OtherTracksPage { query, .. }
+            | Query::OtherTracksLocate { query, .. }
+            | Query::PlaylistSummaries { query, .. }
+            | Query::PlaylistEntries { query, .. }
+            | Query::PlaylistEntryLocations { query, .. } => {
+                if let Some(filter) = &self.filter {
+                    *query = Some(filter.clone());
+                }
+            }
+            _ => {}
+        }
+        query
     }
 }
 

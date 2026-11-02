@@ -1,227 +1,552 @@
+use super::tests::{playlist_view, query_snapshot, queue_row, response, track};
 use super::*;
-use rivu_protocol::model::Page;
-use std::time::Duration;
+use rivu_protocol::model::{
+    LibraryLocateResult, LibraryLocation, LibrarySort, Page, PlaylistEntryLocation,
+};
+use std::path::Path;
 
-fn search(ui: &UiState) -> &LibrarySearch {
-    let View::Search(search) = &ui.view else {
-        panic!("expected search view");
-    };
-    search
+fn key(ui: &mut UiState, state: &TuiSnapshot, code: KeyCode) -> KeyAction {
+    ui.key_action(KeyEvent::from(code), state)
 }
 
-fn search_mut(ui: &mut UiState) -> &mut LibrarySearch {
-    let View::Search(search) = &mut ui.view else {
-        panic!("expected search view");
-    };
-    search
-}
-
-fn edit(ui: &mut UiState, query: &str, now: Instant) {
-    let search = search_mut(ui);
-    search.query = query.into();
-    if search.filter(now) {
-        ui.cancel_query();
+fn submit(ui: &mut UiState, state: &TuiSnapshot, query: &str) {
+    ui.open_search();
+    for character in query.chars() {
+        assert!(matches!(
+            key(ui, state, KeyCode::Char(character)),
+            KeyAction::Ignored
+        ));
     }
+    key(ui, state, KeyCode::Enter);
+    assert!(!ui.search.editing);
 }
 
-fn apply_pending(ui: &mut UiState, now: Instant) -> bool {
-    let changed = search_mut(ui).apply_pending(now);
-    if changed {
-        ui.cancel_query();
-    }
-    changed
-}
-
-fn page(request: &QueryRequest, first_id: i64) -> QueryResult {
-    let rows = (0..request.limit)
-        .map(|index| LibraryRow {
-            path: Default::default(),
-            id: first_id + index as i64,
-            title: format!("track-{}", first_id + index as i64),
-            artist: "artist".into(),
-            album: "album".into(),
-            duration: None,
-            codec: "flac".into(),
-            channels: 2,
-            sample_rate: 44100,
-            bits_per_sample: None,
-            cue_number: None,
-            bitrate_bps: None,
-            bitrate_exact: false,
-            favorite: false,
-            missing: false,
-            play_count: 0,
-        })
-        .collect();
+fn result(request: &QueryRequest, view: ViewResponse) -> QueryResult {
     QueryResult {
         revisions: request.stamp.revisions(),
-        view: ViewResponse::LibraryPage(Page { total: 12, rows }),
+        view,
     }
 }
 
-fn fixture() -> (UiState, TuiSnapshot, Instant) {
-    let mut state = TuiSnapshot::default();
+fn library_fixture() -> (UiState, TuiSnapshot) {
+    let mut state = query_snapshot();
     state.system.query_batch_size = 2;
     let mut ui = UiState {
-        view: View::Search(LibrarySearch::default()),
+        view: View::Tree(LibraryTree::new(&state.system.library_roots)),
         ..UiState::default()
     };
-    // Requests use the real clock. A future edit clock keeps every request below
-    // its debounce deadline without sleeping or depending on test execution speed.
-    let now = Instant::now() + Duration::from_secs(86_400);
-    edit(&mut ui, "active", now);
-    assert!(apply_pending(
-        &mut ui,
-        now + rivu_protocol::model::SEARCH_DEBOUNCE
-    ));
+    submit(&mut ui, &state, "active");
     let request = ui.query_request(&state).unwrap();
-    assert_eq!(request.kind, QueryKind::Search("active".into()));
-    assert!(ui.apply_query(&state, &request, Ok(page(&request, 100))));
-    (ui, state, now + Duration::from_secs(1))
-}
-
-fn assert_row(ui: &UiState, index: usize, id: i64) {
-    let row = search(ui).results.get(index).expect("expected loaded row");
-    assert_eq!(row.id, id);
-    assert_eq!(row.title, format!("track-{id}"));
+    assert!(ui.apply_query(&state, &request, Ok(response(&request, 12))));
+    (ui, state)
 }
 
 #[test]
-fn pending_draft_retains_rows_and_accepts_active_query_pages() {
-    let (mut ui, state, now) = fixture();
-    let active_page = ui.query_request(&state).unwrap();
-    assert_eq!(active_page.offset, 2);
-    ui.requested = Some(active_page.clone());
-
-    edit(&mut ui, "replacement", now);
-    assert_row(&ui, 0, 100);
-    assert_eq!(ui.query_request(&state), Some(active_page.clone()));
-    assert!(ui.apply_query(&state, &active_page, Ok(page(&active_page, 102))));
-    assert_row(&ui, 0, 100);
-    assert_row(&ui, 2, 102);
-
-    assert!(apply_pending(
-        &mut ui,
-        now + rivu_protocol::model::SEARCH_DEBOUNCE
+fn draft_never_submits_and_enter_only_applies_without_playing() {
+    let (mut ui, state) = library_fixture();
+    let pending = ui.query_request(&state).unwrap();
+    ui.open_search();
+    for _ in 0.."active".len() {
+        key(&mut ui, &state, KeyCode::Backspace);
+    }
+    for character in " next ".chars() {
+        key(&mut ui, &state, KeyCode::Char(character));
+    }
+    assert_eq!(ui.search.applied_query, "active");
+    assert_eq!(ui.query_request(&state), Some(pending.clone()));
+    assert!(ui.apply_query(&state, &pending, Ok(response(&pending, 12))));
+    assert!(matches!(
+        key(&mut ui, &state, KeyCode::Enter),
+        KeyAction::Ignored
     ));
-    assert!(search(&ui).results.get(0).is_none());
-    let replacement = ui.query_request(&state).unwrap();
-    assert_eq!(replacement.kind, QueryKind::Search("replacement".into()));
-    assert_eq!(replacement.offset, 0);
-    assert!(ui.apply_query(&state, &replacement, Ok(page(&replacement, 200))));
-    assert_row(&ui, 0, 200);
-}
-
-#[test]
-fn nonempty_edits_restart_the_tail_deadline_and_trim_the_applied_query() {
-    let (mut ui, state, now) = fixture();
-    let debounce = rivu_protocol::model::SEARCH_DEBOUNCE;
-    edit(&mut ui, "next", now);
-    let second_edit = now + debounce / 2;
-    edit(&mut ui, "  next album\t", second_edit);
-
-    assert!(!apply_pending(&mut ui, now + debounce));
-    assert_row(&ui, 0, 100);
-    assert_eq!(
-        ui.query_request(&state).unwrap().kind,
-        QueryKind::Search("active".into())
+    let fresh = ui.query_request(&state).unwrap();
+    assert_eq!(fresh.offset, 0);
+    assert!(
+        matches!(fresh.query(), Query::LibraryPage { query: Some(query), .. } if query == "next")
     );
-    assert!(!apply_pending(
-        &mut ui,
-        second_edit + debounce - Duration::from_nanos(1)
+    let View::LibraryResults(rows) = &ui.view else {
+        panic!("library results");
+    };
+    assert!(rows.pages.is_empty());
+    assert!(ui.apply_query(&state, &fresh, Ok(response(&fresh, 12))));
+    assert!(matches!(
+        key(&mut ui, &state, KeyCode::Enter),
+        KeyAction::Command(Command::Play { track_id: 0 })
     ));
-    assert!(apply_pending(&mut ui, second_edit + debounce));
-    let request = ui.query_request(&state).unwrap();
-    assert_eq!(request.kind, QueryKind::Search("next album".into()));
-    assert_eq!(request.offset, 0);
-    assert!(ui.apply_query(&state, &request, Ok(page(&request, 300))));
-    assert_row(&ui, 0, 300);
 }
 
 #[test]
-fn clear_and_whitespace_immediately_apply_empty_and_cancel_pending_drafts() {
-    for cleared in ["", " \t\u{2003}\n"] {
-        let (mut ui, state, now) = fixture();
-        let old = ui.query_request(&state).unwrap();
-        edit(&mut ui, "pending", now);
-        edit(&mut ui, cleared, now + Duration::from_millis(1));
-        let empty = ui.query_request(&state).unwrap();
-        assert_eq!(empty.kind, QueryKind::Search(String::new()));
-        assert_eq!(empty.offset, 0);
-        assert!(search(&ui).results.get(0).is_none());
-        assert!(!ui.apply_query(&state, &old, Ok(page(&old, 102))));
-        assert!(ui.apply_query(&state, &empty, Ok(page(&empty, 400))));
-        assert_row(&ui, 0, 400);
-        assert!(!apply_pending(&mut ui, now + Duration::from_secs(1)));
-        assert_row(&ui, 0, 400);
+fn every_printable_shortcut_is_editor_text_and_backspace_is_not_parent() {
+    let state = query_snapshot();
+    let mut ui = UiState {
+        view: View::Tree(LibraryTree {
+            directory: "/music/album".into(),
+            ..LibraryTree::default()
+        }),
+        ..UiState::default()
+    };
+    ui.open_search();
+    for character in " m q?e/春".chars() {
+        assert!(matches!(
+            key(&mut ui, &state, KeyCode::Char(character)),
+            KeyAction::Ignored
+        ));
+    }
+    assert_eq!(ui.search.query, " m q?e/春");
+    key(&mut ui, &state, KeyCode::Backspace);
+    assert_eq!(ui.search.query, " m q?e/");
+    assert!(matches!(&ui.view, View::Tree(tree) if tree.directory == Path::new("/music/album")));
+    key(&mut ui, &state, KeyCode::F(1));
+    assert!(ui.show_help);
+    key(&mut ui, &state, KeyCode::Esc);
+    assert!(ui.search.editing);
+    assert!(matches!(
+        ui.key_action(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &state
+        ),
+        KeyAction::Quit
+    ));
+}
 
-        // An already empty effective query must keep its loaded browse results.
-        edit(
+#[test]
+fn applying_or_clearing_rejects_old_responses_even_when_query_text_returns() {
+    let (mut ui, state) = library_fixture();
+    let old = ui.query_request(&state).unwrap();
+    ui.open_search();
+    ui.search.query = "replacement".into();
+    key(&mut ui, &state, KeyCode::Enter);
+    assert!(!ui.apply_query(&state, &old, Ok(response(&old, 12))));
+    ui.open_search();
+    ui.search.query = "active".into();
+    key(&mut ui, &state, KeyCode::Enter);
+    let first = ui.query_request(&state).unwrap();
+    assert!(ui.apply_query(&state, &first, Ok(response(&first, 12))));
+    let fresh = ui.query_request(&state).unwrap();
+    assert_eq!(fresh.query(), old.query());
+    assert_ne!(fresh.generation, old.generation);
+    assert!(!ui.apply_query(&state, &old, Ok(response(&old, 12))));
+    key(&mut ui, &state, KeyCode::Esc);
+    assert!(!ui.search.active);
+    assert!(matches!(ui.view, View::Tree(_)));
+    assert!(!ui.apply_query(&state, &fresh, Ok(response(&fresh, 12))));
+}
+
+#[test]
+fn empty_draft_waits_for_enter_and_then_restores_unfiltered_page_first_row() {
+    let (mut ui, state) = library_fixture();
+    ui.open_search();
+    ui.search.query = "  ".into();
+    assert!(
+        matches!(ui.query_request(&state).unwrap().query(), Query::LibraryPage { query: Some(query), .. } if query == "active")
+    );
+    key(&mut ui, &state, KeyCode::Enter);
+    assert!(!ui.search.active);
+    assert!(
+        matches!(&ui.view, View::Tree(tree) if tree.directory.as_os_str().is_empty() && tree.entries.selection.selected().is_none())
+    );
+}
+
+#[test]
+fn filtered_queue_actions_use_occurrences_and_refresh_uses_filtered_offsets() {
+    let mut state = query_snapshot();
+    state.system.query_batch_size = 1;
+    state.queue.total = 20;
+    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
+    submit(&mut tui.ui, &state, "duplicate");
+    let first = tui.ui.query_request(&state).unwrap();
+    assert!(
+        matches!(first.query(), Query::QueuePage { query: Some(query), offset: 0, .. } if query == "duplicate")
+    );
+    let mut row = queue_row(8, 101);
+    row.offset = 0;
+    assert!(tui.ui.apply_query(
+        &state,
+        &first,
+        Ok(result(
+            &first,
+            ViewResponse::QueuePage(Page {
+                total: 2,
+                rows: vec![row]
+            })
+        ))
+    ));
+    key(&mut tui.ui, &state, KeyCode::Down);
+    let second = tui.ui.query_request(&state).unwrap();
+    let mut duplicate = queue_row(17, 202);
+    duplicate.offset = 1;
+    assert!(tui.ui.apply_query(
+        &state,
+        &second,
+        Ok(result(
+            &second,
+            ViewResponse::QueuePage(Page {
+                total: 2,
+                rows: vec![duplicate.clone()]
+            })
+        ))
+    ));
+    assert!(matches!(
+        key(&mut tui.ui, &state, KeyCode::Enter),
+        KeyAction::Command(Command::PlayQueue { queue_id: 202 })
+    ));
+    assert!(matches!(
+        key(&mut tui.ui, &state, KeyCode::Delete),
+        KeyAction::Command(Command::RemoveQueue { queue_id: 202 })
+    ));
+    let mut next = state.clone();
+    next.queue.revision += 1;
+    next.queue.total = 19;
+    tui.apply_snapshot(next.clone());
+    assert_eq!(tui.ui.queue.total, 2);
+    let lookup = tui.ui.query_request(&next).unwrap();
+    assert!(
+        matches!(lookup.query(), Query::QueueEntries { query: Some(query), queue_ids } if query == "duplicate" && queue_ids == vec![202])
+    );
+    duplicate.position = 16;
+    duplicate.offset = 0;
+    assert!(tui.ui.apply_query(
+        &next,
+        &lookup,
+        Ok(result(&lookup, ViewResponse::QueueEntries(vec![duplicate])))
+    ));
+    assert_eq!(tui.ui.queue.selection.selected(), Some(0));
+    let page = tui.ui.query_request(&next).unwrap();
+    assert_eq!(page.offset, 0);
+    assert!(tui.ui.apply_query(
+        &next,
+        &page,
+        Ok(result(
+            &page,
+            ViewResponse::QueuePage(Page {
+                total: 1,
+                rows: vec![QueueRow {
+                    offset: 0,
+                    ..queue_row(16, 202)
+                }]
+            })
+        ))
+    ));
+    assert_eq!(tui.ui.queue.total, 1);
+    assert_eq!(tui.snapshot.queue.total, 19);
+    key(&mut tui.ui, &next, KeyCode::Esc);
+    let clear = tui.ui.query_request(&next).unwrap();
+    assert!(matches!(
+        clear.query(),
+        Query::QueuePage {
+            query: None,
+            offset: 0,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn playlist_query_and_occurrence_lookup_keep_playlist_scope_and_filtered_offset() {
+    let state = query_snapshot();
+    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
+    tui.ui.view = playlist_view(1);
+    submit(&mut tui.ui, &state, "song");
+    let first = tui.ui.query_request(&state).unwrap();
+    assert!(
+        matches!(first.query(), Query::PlaylistEntries { playlist_id: 1, query: Some(query), .. } if query == "song")
+    );
+    assert!(tui.ui.apply_query(&state, &first, Ok(response(&first, 2))));
+    key(&mut tui.ui, &state, KeyCode::Down);
+    assert!(matches!(
+        key(&mut tui.ui, &state, KeyCode::Delete),
+        KeyAction::Command(Command::RemovePlaylistEntry { entry_id: 1 })
+    ));
+    let mut next = state.clone();
+    *Arc::make_mut(&mut next.library.playlist_entry_revisions)
+        .get_mut(&1)
+        .unwrap() += 1;
+    tui.apply_snapshot(next.clone());
+    let lookup = tui.ui.query_request(&next).unwrap();
+    assert!(
+        matches!(lookup.query(), Query::PlaylistEntryLocations { playlist_id: 1, query: Some(query), entry_ids } if query == "song" && entry_ids == vec![1])
+    );
+    assert!(tui.ui.apply_query(
+        &next,
+        &lookup,
+        Ok(result(
+            &lookup,
+            ViewResponse::PlaylistEntryLocations(vec![PlaylistEntryLocation {
+                id: 1,
+                playlist_id: 1,
+                track_id: 7,
+                position: 19,
+                offset: 1,
+                total: 2
+            }])
+        ))
+    ));
+    let View::PlaylistDetail { detail, .. } = &tui.ui.view else {
+        panic!("playlist detail");
+    };
+    assert_eq!(detail.entries.selection.selected(), Some(1));
+    assert_eq!(detail.entries.total, 2);
+    key(&mut tui.ui, &next, KeyCode::Left);
+    assert!(!tui.ui.search.active);
+    assert!(matches!(tui.ui.view, View::Playlists(_)));
+    assert!(matches!(
+        tui.ui.query_request(&next).unwrap().query(),
+        Query::PlaylistSummaries { query: None, .. }
+    ));
+}
+
+#[test]
+fn directory_search_keeps_directory_semantics_and_clears_on_opening_target() {
+    let state = query_snapshot();
+    let mut ui = UiState {
+        view: View::Tree(LibraryTree {
+            directory: "/music".into(),
+            ..LibraryTree::default()
+        }),
+        ..UiState::default()
+    };
+    submit(&mut ui, &state, "child");
+    let request = ui.query_request(&state).unwrap();
+    assert!(
+        matches!(request.query(), Query::DirectoryPage { path, query: Some(query), .. } if path == Path::new("/music") && query == "child")
+    );
+    assert!(ui.apply_query(
+        &state,
+        &request,
+        Ok(result(
+            &request,
+            ViewResponse::DirectoryPage(Page {
+                total: 1,
+                rows: vec![DirectoryRow::Directory {
+                    path: "/music/child".into()
+                }]
+            })
+        ))
+    ));
+    key(&mut ui, &state, KeyCode::Right);
+    assert!(!ui.search.active);
+    assert!(
+        matches!(ui.query_request(&state).unwrap().query(), Query::DirectoryPage { path, query: None, offset: 0, .. } if path == Path::new("/music/child"))
+    );
+}
+
+#[test]
+fn directory_refresh_locates_selected_track_with_same_query() {
+    let state = query_snapshot();
+    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
+    tui.ui.view = View::Tree(LibraryTree {
+        directory: "/music".into(),
+        ..LibraryTree::default()
+    });
+    submit(&mut tui.ui, &state, "song");
+    let request = tui.ui.query_request(&state).unwrap();
+    assert!(tui.ui.apply_query(
+        &state,
+        &request,
+        Ok(result(
+            &request,
+            ViewResponse::DirectoryPage(Page {
+                total: 2,
+                rows: vec![
+                    DirectoryRow::Track(track(42)),
+                    DirectoryRow::Track(track(43))
+                ]
+            })
+        ))
+    ));
+    let mut next = state.clone();
+    next.library.revision += 1;
+    tui.apply_snapshot(next.clone());
+    let locate = tui.ui.query_request(&next).unwrap();
+    assert!(
+        matches!(locate.query(), Query::LibraryLocate { track_id: 42, path, tree: true, query: Some(query), .. } if path == Path::new("/music") && query == "song")
+    );
+}
+
+#[test]
+fn other_uses_global_editor_and_retains_collection_filters_and_sort() {
+    let state = query_snapshot();
+    let mut ui = UiState {
+        view: View::Tree(LibraryTree {
+            other_tracks: true,
+            favorite: Some(true),
+            missing: Some(false),
+            sort: LibrarySort::Album,
+            ..LibraryTree::default()
+        }),
+        ..UiState::default()
+    };
+    submit(&mut ui, &state, "outside");
+    let request = ui.query_request(&state).unwrap();
+    assert!(
+        matches!(request.query(), Query::OtherTracksPage { query: Some(query), favorite: Some(true), missing: Some(false), sort: LibrarySort::Album, .. } if query == "outside")
+    );
+    key(&mut ui, &state, KeyCode::Esc);
+    let cleared = ui.query_request(&state).unwrap();
+    assert!(
+        matches!(cleared.query(), Query::OtherTracksPage { query: Some(query), favorite: Some(true), missing: Some(false), sort: LibrarySort::Album, .. } if query.is_empty())
+    );
+}
+
+#[test]
+fn recent_filters_only_titles_locally_and_preserves_same_query_selection() {
+    let mut state = query_snapshot();
+    state.library.history = Arc::new(vec![
+        HistoryEntry {
+            track_id: 1,
+            title: "Needle A".into(),
+            play_count: 1,
+            played_at: 1,
+            favorite: false,
+        },
+        HistoryEntry {
+            track_id: 2,
+            title: "unrelated".into(),
+            play_count: 99,
+            played_at: 3,
+            favorite: true,
+        },
+        HistoryEntry {
+            track_id: 3,
+            title: "needle B".into(),
+            play_count: 1,
+            played_at: 2,
+            favorite: false,
+        },
+    ]);
+    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
+    let mut recent = RecentTracks::default();
+    recent.sync(&state.library.history, "");
+    tui.ui.view = View::Recent(recent);
+    tui.ui.open_search();
+    tui.ui.search.query = "NEEDLE".into();
+    assert!(tui.ui.query_request(&state).is_none());
+    let View::Recent(recent) = &tui.ui.view else {
+        panic!("recent");
+    };
+    assert_eq!(recent.entries.total, 3);
+    key(&mut tui.ui, &state, KeyCode::Enter);
+    let View::Recent(recent) = &tui.ui.view else {
+        panic!("recent");
+    };
+    assert_eq!(recent.entries.total, 2);
+    key(&mut tui.ui, &state, KeyCode::Down);
+    let mut next = state.clone();
+    Arc::make_mut(&mut next.library.history)[0].played_at = 10;
+    tui.apply_snapshot(next.clone());
+    let View::Recent(recent) = &tui.ui.view else {
+        panic!("recent");
+    };
+    assert_eq!(recent.selected().unwrap().track_id, 1);
+    assert_eq!(recent.entries.selection.selected(), Some(0));
+    assert!(matches!(
+        key(&mut tui.ui, &next, KeyCode::Enter),
+        KeyAction::Command(Command::Play { track_id: 1 })
+    ));
+    key(&mut tui.ui, &next, KeyCode::Esc);
+    let View::Recent(recent) = &tui.ui.view else {
+        panic!("recent");
+    };
+    assert_eq!(recent.entries.total, 3);
+    assert_eq!(recent.entries.selection.selected(), Some(0));
+}
+
+#[test]
+fn tab_switching_from_editor_clears_search_and_never_caches_query() {
+    for tab in [KeyCode::Tab, KeyCode::BackTab] {
+        let (mut ui, state) = library_fixture();
+        ui.open_search();
+        ui.search.query = "draft".into();
+        key(&mut ui, &state, tab);
+        assert!(!ui.search.active);
+        assert!(ui.search.query.is_empty());
+        assert!(matches!(ui.cached_library, Some(View::Tree(_))));
+        key(
             &mut ui,
-            "another pending draft",
-            now + Duration::from_secs(2),
+            &state,
+            if tab == KeyCode::Tab {
+                KeyCode::BackTab
+            } else {
+                KeyCode::Tab
+            },
         );
-        edit(&mut ui, cleared, now + Duration::from_secs(2));
-        assert_row(&ui, 0, 400);
-        assert!(!apply_pending(&mut ui, now + Duration::from_secs(3)));
-        assert_row(&ui, 0, 400);
+        assert!(!ui.search.active);
+        assert!(matches!(ui.view, View::Tree(_)));
     }
 }
 
 #[test]
-fn editing_back_to_active_query_keeps_rows_and_active_completion_valid() {
-    let (mut ui, state, now) = fixture();
-    let active_page = ui.query_request(&state).unwrap();
-    edit(&mut ui, "different", now);
-    edit(&mut ui, "  active  ", now + Duration::from_millis(50));
-    assert!(!apply_pending(&mut ui, now + Duration::from_secs(1)));
-    assert_row(&ui, 0, 100);
-    assert_eq!(ui.query_request(&state), Some(active_page.clone()));
-    assert!(ui.apply_query(&state, &active_page, Ok(page(&active_page, 102))));
-    assert_row(&ui, 2, 102);
+fn library_same_query_refresh_keeps_identity_and_rejects_old_revision() {
+    let (ui, state) = library_fixture();
+    let mut tui = TuiState {
+        snapshot: state.clone(),
+        ui,
+    };
+    key(&mut tui.ui, &state, KeyCode::Down);
+    let old = tui.ui.query_request(&state).unwrap();
+    let mut next = state.clone();
+    next.library.revision += 1;
+    tui.apply_snapshot(next.clone());
+    assert!(!tui.ui.apply_query(&next, &old, Ok(response(&old, 12))));
+    let locate = tui.ui.query_request(&next).unwrap();
+    assert!(
+        matches!(locate.query(), Query::LibraryLocate { track_id: 1, query: Some(query), tree: false, .. } if query == "active")
+    );
+    let located = result(
+        &locate,
+        ViewResponse::LibraryLocate(LibraryLocateResult::Located(LibraryLocation {
+            offset: 7,
+            total: 12,
+            child: None,
+        })),
+    );
+    assert!(tui.ui.apply_query(&next, &locate, Ok(located)));
+    let View::LibraryResults(rows) = &tui.ui.view else {
+        panic!("library results");
+    };
+    assert_eq!(rows.selection.selected(), Some(7));
+    assert_eq!(tui.ui.query_request(&next).unwrap().offset, 6);
+    // Another revision before the relocated page arrives must retain the ID,
+    // rather than treating its new offset as an identity.
+    next.library.revision += 1;
+    tui.apply_snapshot(next.clone());
+    assert!(matches!(
+        tui.ui.query_request(&next).unwrap().query(),
+        Query::LibraryLocate { track_id: 1, .. }
+    ));
 }
 
 #[test]
-fn applied_query_change_rejects_old_completion_even_after_returning_to_same_text() {
-    let (mut ui, state, now) = fixture();
-    let old = ui.query_request(&state).unwrap();
-    edit(&mut ui, "other", now);
-    assert!(apply_pending(
-        &mut ui,
-        now + rivu_protocol::model::SEARCH_DEBOUNCE
+fn playlist_summary_search_keeps_enter_action_and_clears_on_expansion() {
+    let state = query_snapshot();
+    let mut ui = UiState {
+        view: View::Playlists(PagedList::default()),
+        ..UiState::default()
+    };
+    submit(&mut ui, &state, "collection");
+    let request = ui.query_request(&state).unwrap();
+    assert!(
+        matches!(request.query(), Query::PlaylistSummaries { query: Some(query), offset: 0, .. } if query == "collection")
+    );
+    assert!(ui.apply_query(&state, &request, Ok(response(&request, 2))));
+    assert!(matches!(
+        key(&mut ui, &state, KeyCode::Enter),
+        KeyAction::Command(Command::PlayPlaylist { playlist_id: 0 })
     ));
-    assert!(!ui.apply_query(&state, &old, Ok(page(&old, 900))));
-
-    let later = now + Duration::from_secs(1);
-    edit(&mut ui, "active", later);
-    assert!(apply_pending(
-        &mut ui,
-        later + rivu_protocol::model::SEARCH_DEBOUNCE
-    ));
-    let first = ui.query_request(&state).unwrap();
-    assert!(ui.apply_query(&state, &first, Ok(page(&first, 500))));
-    let fresh = ui.query_request(&state).unwrap();
-    assert_eq!(fresh.kind, old.kind);
-    assert_eq!(fresh.offset, old.offset);
-    assert_ne!(fresh.generation, old.generation);
-    assert!(!ui.apply_query(&state, &old, Ok(page(&old, 900))));
-    assert_row(&ui, 0, 500);
-    assert!(search(&ui).results.get(2).is_none());
-    assert!(ui.apply_query(&state, &fresh, Ok(page(&fresh, 502))));
-    assert_row(&ui, 2, 502);
+    key(&mut ui, &state, KeyCode::Right);
+    assert!(!ui.search.active);
+    assert!(matches!(&ui.view, View::PlaylistDetail { detail, .. } if detail.playlist_id == 0));
 }
 
 #[test]
-fn pending_draft_does_not_allow_stale_library_revision_results() {
-    let (mut ui, mut state, now) = fixture();
-    let old = ui.query_request(&state).unwrap();
-    edit(&mut ui, "pending", now);
-    state.library.revision += 1;
-    assert!(!ui.apply_query(&state, &old, Ok(page(&old, 900))));
-    assert_row(&ui, 0, 100);
-    assert!(search(&ui).results.get(2).is_none());
-    let fresh = ui.query_request(&state).unwrap();
-    assert_eq!(fresh.kind, QueryKind::Search("active".into()));
-    assert!(ui.apply_query(&state, &fresh, Ok(page(&fresh, 102))));
-    assert_row(&ui, 2, 102);
+fn empty_queue_search_never_leaves_an_unloadable_result_page() {
+    let state = TuiSnapshot::default();
+    let mut ui = UiState::default();
+    submit(&mut ui, &state, "missing");
+    assert!(ui.query_request(&state).is_none());
+    assert!(ui.queue.loaded);
+    assert_eq!(ui.queue.total, 0);
+    key(&mut ui, &state, KeyCode::Esc);
+    assert!(!ui.search.active);
+    assert!(ui.queue.loaded);
 }

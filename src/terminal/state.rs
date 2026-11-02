@@ -42,26 +42,41 @@ impl TuiState {
     pub(super) fn apply_snapshot(&mut self, next: TuiSnapshot) {
         let page_size_changed =
             self.snapshot.system.query_batch_size != next.system.query_batch_size;
+        let selected = self
+            .ui
+            .view
+            .query_kind(false)
+            .filter(|kind| kind.clone().changed_without_bitrate(&self.snapshot, &next))
+            .and_then(|_| self.ui.selected_identity());
         self.ui.sync_queue(&self.snapshot, &next);
         if page_size_changed {
             self.ui.queue.pages.clear();
             self.ui.queue.fetch_size = 0;
         }
-        let active_changed = self
-            .ui
-            .view
-            .sync_snapshot(&self.snapshot, &next, page_size_changed);
+        let was_playlist_detail = matches!(self.ui.view, View::PlaylistDetail { .. });
+        let active_changed = self.ui.view.sync_snapshot(
+            &self.snapshot,
+            &next,
+            page_size_changed,
+            &self.ui.search.applied_query,
+        );
+        if was_playlist_detail && matches!(self.ui.view, View::Playlists(_)) {
+            self.ui.clear_search(&next);
+        }
         if let Some(tree) = &mut self.ui.cached_library {
-            tree.sync_snapshot(&self.snapshot, &next, page_size_changed);
+            tree.sync_snapshot(&self.snapshot, &next, page_size_changed, "");
         }
         if let Some(playlists) = &mut self.ui.cached_playlists {
-            playlists.sync_snapshot(&self.snapshot, &next, page_size_changed);
+            playlists.sync_snapshot(&self.snapshot, &next, page_size_changed, "");
         }
         if let Some(recent) = &mut self.ui.cached_recent {
-            recent.sync_snapshot(&self.snapshot, &next, page_size_changed);
+            recent.sync_snapshot(&self.snapshot, &next, page_size_changed, "");
         }
         self.ui.sync_details(&next);
         if active_changed || page_size_changed {
+            if self.ui.refresh_anchor.is_none() {
+                self.ui.refresh_anchor = selected;
+            }
             self.ui.cancel_query();
         }
         if let Some(message) = snapshot_message(&self.snapshot, &next, &self.ui.i18n) {
@@ -127,7 +142,7 @@ impl RecentTracks {
         self.source.get(*self.entries.selected()?)
     }
 
-    fn sync(&mut self, source: &Arc<Vec<HistoryEntry>>) {
+    fn sync(&mut self, source: &Arc<Vec<HistoryEntry>>, query: &str) {
         if self.entries.loaded && Arc::ptr_eq(&self.source, source) {
             return;
         }
@@ -135,7 +150,10 @@ impl RecentTracks {
         let old_position = self.entries.selection.selected().unwrap_or(0);
         let mut indices = self.entries.pages.remove(&0).unwrap_or_default();
         indices.clear();
-        indices.extend(0..source.len());
+        let query = query.to_lowercase();
+        indices.extend((0..source.len().min(256)).filter(|&index| {
+            query.is_empty() || source[index].title.to_lowercase().contains(&query)
+        }));
         indices.sort_unstable_by_key(|&index| {
             (
                 std::cmp::Reverse(source[index].played_at),
@@ -148,14 +166,14 @@ impl RecentTracks {
                     .iter()
                     .position(|&index| source[index].track_id == id)
             })
-            .unwrap_or(old_position.min(source.len().saturating_sub(1)));
+            .unwrap_or(old_position.min(indices.len().saturating_sub(1)));
         self.source = Arc::clone(source);
+        let total = indices.len();
         self.entries.clear();
         self.entries
             .selection
-            .select((!source.is_empty()).then_some(selected));
-        self.entries
-            .insert(0, source.len().max(1), source.len(), indices);
+            .select((total != 0).then_some(selected));
+        self.entries.insert(0, total.max(1), total, indices);
     }
 }
 
@@ -163,7 +181,7 @@ impl RecentTracks {
 pub(super) enum View {
     #[default]
     Queue,
-    Search(LibrarySearch),
+    LibraryResults(PagedList<LibraryRow>),
     Tree(LibraryTree),
     Playlists(PagedList<PlaylistSummary>),
     Recent(RecentTracks),
@@ -186,7 +204,7 @@ impl View {
         match self {
             Self::Queue => TopTab::Queue,
             Self::Playlists(_) | Self::PlaylistDetail { .. } => TopTab::Playlists,
-            Self::Tree(_) | Self::Search(_) => TopTab::Library,
+            Self::Tree(_) | Self::LibraryResults(_) => TopTab::Library,
             Self::Recent(_) => TopTab::Recent,
         }
     }
@@ -195,7 +213,7 @@ impl View {
         match self {
             Self::Recent(_) => None,
             Self::Queue => Some(QueryKind::Queue),
-            Self::Search(search) => Some(QueryKind::Search(search.applied_query.clone())),
+            Self::LibraryResults(_) => Some(QueryKind::Search(String::new())),
             Self::Tree(tree) if tree.other_tracks => Some(tree.other_query()),
             Self::Tree(tree) if !tree.directory.as_os_str().is_empty() => {
                 Some(QueryKind::Directory(tree.directory.clone()))
@@ -219,9 +237,10 @@ impl View {
         previous: &TuiSnapshot,
         next: &TuiSnapshot,
         page_size_changed: bool,
+        query: &str,
     ) -> bool {
         if let Self::Recent(recent) = self {
-            recent.sync(&next.library.history);
+            recent.sync(&next.library.history, query);
             return false;
         }
         let rows_changed = self
@@ -277,9 +296,9 @@ impl View {
             self.invalidate_payload();
         } else if rows_changed || page_size_changed {
             match self {
-                Self::Search(search) => search.results.clear(),
+                Self::LibraryResults(results) => results.clear(),
                 Self::Tree(tree) => {
-                    if tree.other_tracks {
+                    if tree.other_tracks || !tree.directory.as_os_str().is_empty() {
                         tree.anchor = tree
                             .anchor
                             .or_else(|| {
@@ -312,7 +331,7 @@ impl View {
     // Payload-only changes keep membership, counts and navigation coordinates.
     fn invalidate_payload(&mut self) {
         match self {
-            Self::Search(search) => search.results.pages.clear(),
+            Self::LibraryResults(results) => results.pages.clear(),
             Self::Tree(tree) => {
                 tree.entries.pages.retain(|_, rows| {
                     !rows.iter().any(|row| matches!(row, DirectoryRow::Track(_)))
@@ -328,6 +347,9 @@ impl View {
 pub(super) struct UiState {
     pub(super) i18n: Arc<Localizer>,
     pub(super) view: View,
+    pub(super) search: SearchState,
+    refresh_anchor: Option<i64>,
+    library_selected_id: Option<i64>,
     // Each slot owns only its tab's view; switching moves bounded page caches.
     pub(super) cached_library: Option<View>,
     pub(super) cached_playlists: Option<View>,
@@ -356,6 +378,9 @@ impl UiState {
         Self {
             i18n,
             view: View::default(),
+            search: SearchState::default(),
+            refresh_anchor: None,
+            library_selected_id: None,
             cached_library: None,
             cached_playlists: None,
             cached_recent: None,
@@ -428,17 +453,12 @@ impl UiState {
             self.projection.sync(&query, revisions);
             return Some(QueryRequest {
                 kind,
+                filter: None,
                 offset: 0,
                 limit: 1,
                 generation: self.projection.generation(),
                 stamp,
             });
-        }
-        if let View::Search(search) = &mut self.view
-            && search.apply_pending(Instant::now())
-        {
-            self.cancel_query();
-            self.mark_local_change();
         }
         let limit = state.system.query_batch_size as usize;
         let (kind, offset) = match &self.view {
@@ -446,9 +466,15 @@ impl UiState {
                 Some(queue_id) => (QueryKind::QueueSelection(queue_id), 0),
                 None => (QueryKind::Queue, self.queue.next_offset(limit)?),
             },
-            View::Search(search) => {
-                let offset = search.results.next_offset(limit)?;
-                (QueryKind::Search(search.applied_query.clone()), offset)
+            View::LibraryResults(results) => {
+                if let Some(track_id) = self.refresh_anchor {
+                    (QueryKind::LibrarySelection(track_id), 0)
+                } else {
+                    (
+                        QueryKind::Search(self.search.applied_query.clone()),
+                        results.next_offset(limit)?,
+                    )
+                }
             }
             View::Tree(tree) if tree.other_tracks => (
                 tree.other_query(),
@@ -458,10 +484,19 @@ impl UiState {
                     tree.entries.next_offset(limit)?
                 },
             ),
-            View::Tree(tree) if !tree.directory.as_os_str().is_empty() => (
-                QueryKind::Directory(tree.directory.clone()),
-                tree.entries.next_offset(limit)?,
-            ),
+            View::Tree(tree) if !tree.directory.as_os_str().is_empty() => match tree.anchor {
+                Some(track_id) => (
+                    QueryKind::DirectorySelection {
+                        track_id,
+                        path: tree.directory.clone(),
+                    },
+                    0,
+                ),
+                None => (
+                    QueryKind::Directory(tree.directory.clone()),
+                    tree.entries.next_offset(limit)?,
+                ),
+            },
             View::Tree(tree) if tree.other_present.is_none() => (QueryKind::OtherTracksCount, 0),
             View::Playlists(playlists) => (QueryKind::Playlists, playlists.next_offset(limit)?),
             View::PlaylistDetail { detail, .. }
@@ -486,16 +521,22 @@ impl UiState {
             }
             _ => return None,
         };
-        let query = kind.query(offset, limit);
-        let revisions = state.query_revisions(kind.playlist_id());
-        self.projection.sync(&query, revisions);
-        let request = QueryRequest {
+        let filter = (!matches!(kind, QueryKind::Search(_))
+            && !self.search.applied_query.is_empty())
+        .then(|| self.search.applied_query.clone());
+        let mut request = QueryRequest {
             kind,
+            filter,
             offset,
             limit,
-            generation: self.projection.generation(),
-            stamp: query.stamp(revisions),
+            generation: 0,
+            stamp: Query::OtherTracksCount.stamp(state.query_revisions(None)),
         };
+        let query = request.query();
+        let revisions = state.query_revisions(request.kind.playlist_id());
+        self.projection.sync(&query, revisions);
+        request.generation = self.projection.generation();
+        request.stamp = query.stamp(revisions);
         if self.failed_request.as_ref() == Some(&request) {
             None
         } else {
@@ -559,7 +600,7 @@ impl UiState {
             (View::Queue, ViewResponse::QueueEntries(rows)) => {
                 if let QueryKind::QueueSelection(queue_id) = request.kind {
                     if let Some(row) = rows.iter().find(|row| row.id == queue_id) {
-                        self.queue.selection.select(Some(row.position));
+                        self.queue.selection.select(Some(row.offset));
                         self.queue.set_viewport(self.queue.viewport_rows);
                     }
                     self.queue_selected_id =
@@ -572,10 +613,22 @@ impl UiState {
                     );
                 }
             }
-            (View::Search(search), ViewResponse::LibraryPage(page)) => {
-                search
-                    .results
-                    .insert(request.offset, request.limit, page.total, page.rows);
+            (View::LibraryResults(rows), ViewResponse::LibraryLocate(location)) => {
+                self.library_selected_id = None;
+                if let rivu_protocol::model::LibraryLocateResult::Located(location) = location {
+                    self.library_selected_id = self.refresh_anchor;
+                    rows.total = location.total;
+                    rows.loaded = true;
+                    rows.selection.select(Some(location.offset));
+                    rows.set_viewport(rows.viewport_rows);
+                }
+                self.refresh_anchor = None;
+            }
+            (View::LibraryResults(results), ViewResponse::LibraryPage(page)) => {
+                results.insert(request.offset, request.limit, page.total, page.rows);
+                if let Some(row) = results.selected() {
+                    self.library_selected_id = Some(row.id);
+                }
             }
             (View::Tree(tree), ViewResponse::OtherTracksCount(total))
                 if !tree.other_tracks && tree.directory.as_os_str().is_empty() =>
@@ -595,7 +648,7 @@ impl UiState {
                     _ => None,
                 });
             }
-            (View::Tree(tree), ViewResponse::LibraryLocate(location)) if tree.other_tracks => {
+            (View::Tree(tree), ViewResponse::LibraryLocate(location)) => {
                 let anchor = tree.anchor.take();
                 tree.selected_track_id = None;
                 if let rivu_protocol::model::LibraryLocateResult::Located(location) = location {
@@ -608,6 +661,10 @@ impl UiState {
             (View::Tree(tree), ViewResponse::DirectoryPage(page)) => {
                 tree.entries
                     .insert(request.offset, request.limit, page.total, page.rows);
+                tree.selected_track_id = tree.entries.selected().and_then(|entry| match entry {
+                    DirectoryRow::Track(track) => Some(track.id),
+                    _ => None,
+                });
             }
             (View::Playlists(playlists), ViewResponse::PlaylistSummaries(page)) => {
                 playlists.insert(request.offset, request.limit, page.total, page.rows);
@@ -634,7 +691,7 @@ impl UiState {
                     if let Some(entry) = entry {
                         detail.entries.total = entry.total;
                         detail.entries.loaded = true;
-                        detail.entries.selection.select(Some(entry.position));
+                        detail.entries.selection.select(Some(entry.offset));
                         detail.entries.set_viewport(detail.entries.viewport_rows);
                     }
                     detail.entry_anchor = None;
@@ -674,8 +731,8 @@ impl UiState {
                 "shell-panel-queue",
                 None,
             ),
-            View::Search(search) => (
-                search.results.selected().map(|track| track.id),
+            View::LibraryResults(results) => (
+                results.selected().map(|track| track.id),
                 "terminal-search",
                 None,
             ),
@@ -797,13 +854,22 @@ impl UiState {
             .or_else(|| self.queue.selected().map(|row| row.id))
             .or(self.queue_selected_id);
         let selected = self.queue.selection.selected().unwrap_or(0);
+        let filtered_total = self.queue.total;
         self.queue.clear();
-        self.queue.total = next.queue.total;
-        self.queue.loaded = true;
-        self.queue
-            .selection
-            .select((next.queue.total != 0).then(|| selected.min(next.queue.total - 1)));
+        if self.search.applied_query.is_empty() || !matches!(self.view, View::Queue) {
+            self.queue.total = next.queue.total;
+            self.queue.loaded = true;
+            self.queue
+                .selection
+                .select((next.queue.total != 0).then(|| selected.min(next.queue.total - 1)));
+        } else {
+            self.queue.total = filtered_total;
+            self.queue.loaded = true;
+        }
         if next.queue.total == 0 {
+            self.queue.total = 0;
+            self.queue.loaded = true;
+            self.queue.selection.select(None);
             self.queue_anchor = None;
             self.queue_selected_id = None;
         }
@@ -820,10 +886,96 @@ impl UiState {
     }
 
     pub(super) fn open_search(&mut self) {
-        self.store_page();
-        self.view = View::Search(LibrarySearch::default());
-        self.cancel_query();
+        self.search.active = true;
+        self.search.editing = true;
+        self.search.query.clone_from(&self.search.applied_query);
         self.mark_local_change();
+    }
+
+    fn reset_results(&mut self, state: &TuiSnapshot) {
+        self.refresh_anchor = None;
+        match &mut self.view {
+            View::Queue => {
+                self.queue = PagedList {
+                    viewport_rows: self.queue.viewport_rows,
+                    ..PagedList::default()
+                };
+                self.queue.loaded = state.queue.total == 0;
+                self.queue_anchor = None;
+                self.queue_selected_id = None;
+            }
+            View::LibraryResults(results) => {
+                *results = PagedList {
+                    viewport_rows: results.viewport_rows,
+                    ..PagedList::default()
+                };
+                self.library_selected_id = None;
+            }
+            View::Tree(tree) => {
+                tree.entries = PagedList {
+                    viewport_rows: tree.entries.viewport_rows,
+                    ..PagedList::default()
+                };
+                tree.anchor = None;
+                tree.selected_track_id = None;
+            }
+            View::Playlists(rows) => {
+                *rows = PagedList {
+                    viewport_rows: rows.viewport_rows,
+                    ..PagedList::default()
+                }
+            }
+            View::PlaylistDetail { detail, .. } => {
+                detail.entries = PagedList {
+                    viewport_rows: detail.entries.viewport_rows,
+                    ..PagedList::default()
+                };
+                detail.entry_anchor = None;
+                detail.selected_entry_id = None;
+            }
+            View::Recent(recent) => {
+                recent.entries = PagedList::default();
+                recent.sync(&state.library.history, &self.search.applied_query);
+            }
+        }
+        self.cancel_query();
+    }
+
+    fn clear_search(&mut self, state: &TuiSnapshot) {
+        if !self.search.active {
+            return;
+        }
+        self.search = SearchState::default();
+        if matches!(self.view, View::LibraryResults(_)) {
+            self.view = View::Tree(LibraryTree::new(&state.system.library_roots));
+        }
+        self.reset_results(state);
+        self.mark_local_change();
+    }
+
+    fn submit_search(&mut self, state: &TuiSnapshot) {
+        self.search.applied_query = self.search.query.trim().to_owned();
+        self.search.editing = false;
+        if self.search.applied_query.is_empty() {
+            self.clear_search(state);
+            return;
+        }
+        if matches!(&self.view, View::Tree(tree) if !tree.other_tracks && tree.directory.as_os_str().is_empty())
+        {
+            self.view = View::LibraryResults(PagedList::default());
+        }
+        self.reset_results(state);
+        self.mark_local_change();
+    }
+
+    fn selected_identity(&self) -> Option<i64> {
+        match &self.view {
+            View::LibraryResults(rows) => rows
+                .selected()
+                .map(|row| row.id)
+                .or(self.library_selected_id),
+            _ => None,
+        }
     }
 
     fn store_page(&mut self) {
@@ -833,11 +985,12 @@ impl UiState {
             view @ (View::Playlists(_) | View::PlaylistDetail { .. }) => {
                 self.cached_playlists = Some(view);
             }
-            View::Queue | View::Search(_) => {}
+            View::Queue | View::LibraryResults(_) => {}
         }
     }
 
     fn switch_tab(&mut self, backward: bool, state: &TuiSnapshot) {
+        self.clear_search(state);
         let target = match (self.view.tab(), backward) {
             (TopTab::Queue, false) | (TopTab::Library, true) => TopTab::Playlists,
             (TopTab::Playlists, false) | (TopTab::Recent, true) => TopTab::Library,
@@ -857,7 +1010,7 @@ impl UiState {
                 .unwrap_or_else(|| View::Tree(LibraryTree::new(&state.system.library_roots))),
             TopTab::Recent => self.cached_recent.take().unwrap_or_else(|| {
                 let mut recent = RecentTracks::default();
-                recent.sync(&state.library.history);
+                recent.sync(&state.library.history, "");
                 View::Recent(recent)
             }),
         };
@@ -867,13 +1020,13 @@ impl UiState {
     }
 
     pub(super) fn keyboard_context(&self) -> KeyboardContext {
+        if self.search.editing {
+            return KeyboardContext::TuiSearchQuery;
+        }
         match &self.view {
             View::Queue => KeyboardContext::TuiQueue,
             View::Recent(_) => KeyboardContext::TuiRecent,
-            View::Search(search) if search.focus == SearchFocus::Query => {
-                KeyboardContext::TuiSearchQuery
-            }
-            View::Search(_) => KeyboardContext::TuiSearchResults,
+            View::LibraryResults(_) => KeyboardContext::TuiSearchResults,
             View::Tree(_) => KeyboardContext::TuiTree,
             View::Playlists(_) => KeyboardContext::TuiPlaylists,
             View::PlaylistDetail { .. } => KeyboardContext::TuiPlaylistTracks,
@@ -949,7 +1102,8 @@ impl UiState {
                 KeyAction::Ignored
             };
         }
-        if let View::Tree(tree) = &mut self.view
+        if !self.search.editing
+            && let View::Tree(tree) = &mut self.view
             && let Some(result) = tree.other_key(key)
         {
             self.cancel_query();
@@ -968,13 +1122,32 @@ impl UiState {
             )
             && let KeyCode::Char(character) = key.code
         {
-            if let View::Search(search) = &mut self.view {
-                search.query.push(character);
-                if search.filter(Instant::now()) {
-                    self.cancel_query();
-                }
-            }
+            self.search.query.push(character);
             self.mark_local_change();
+            return KeyAction::Ignored;
+        }
+        if self.search.active && resolve_key(key, context) == Some(Action::Cancel) {
+            self.clear_search(state);
+            return KeyAction::Ignored;
+        }
+        if self.search.editing {
+            match resolve_key(key, context) {
+                Some(Action::Activate) => self.submit_search(state),
+                Some(Action::Backspace) => {
+                    self.search.query.pop();
+                    self.mark_local_change();
+                }
+                Some(Action::Traverse) => self.switch_tab(
+                    key.code == KeyCode::BackTab || key.modifiers.contains(KeyModifiers::SHIFT),
+                    state,
+                ),
+                Some(Action::Help) => {
+                    self.show_help = true;
+                    self.help_scroll = 0;
+                    self.mark_local_change();
+                }
+                _ => {}
+            }
             return KeyAction::Ignored;
         }
         let Some(action) = resolve_key(key, context) else {
@@ -999,7 +1172,7 @@ impl UiState {
                 let track_id = match &self.view {
                     View::Queue => self.queue.selected().map(|row| row.track.id),
                     View::Recent(recent) => recent.selected().map(|entry| entry.track_id),
-                    View::Search(search) => search.results.selected().map(|track| track.id),
+                    View::LibraryResults(results) => results.selected().map(|track| track.id),
                     View::PlaylistDetail { detail, .. } => {
                         detail.entries.selected().map(|entry| entry.track_id)
                     }
@@ -1016,7 +1189,7 @@ impl UiState {
                 });
             }
             Action::Search => return KeyAction::Search,
-            Action::Traverse if !matches!(self.view, View::Search(_)) => {
+            Action::Traverse => {
                 self.switch_tab(
                     key.code == KeyCode::BackTab || key.modifiers.contains(KeyModifiers::SHIFT),
                     state,
@@ -1051,54 +1224,27 @@ impl UiState {
                 }
                 self.view = View::Recent(recent);
             }
-            View::Search(mut search) => {
-                let close = action == Action::Cancel && search.focus == SearchFocus::Query;
-                match action {
-                    Action::Traverse => {
-                        search.focus = match search.focus {
-                            SearchFocus::Query => SearchFocus::Results,
-                            SearchFocus::Results => SearchFocus::Query,
-                        };
-                        changed = true;
-                    }
-                    Action::Cancel if !close => {
-                        search.focus = SearchFocus::Query;
-                        changed = true;
-                    }
-                    Action::Activate if search.focus == SearchFocus::Results => {
-                        command = search
-                            .results
-                            .selected()
-                            .map(|track| Command::Play { track_id: track.id });
-                    }
-                    Action::Activate => {
-                        search.focus = SearchFocus::Results;
-                        changed = true;
-                    }
-                    Action::Backspace => {
-                        if search.query.pop().is_some() {
-                            if search.filter(Instant::now()) {
-                                self.cancel_query();
-                            }
-                            changed = true;
-                        }
-                    }
-                    _ => changed = search.results.navigate_action(action, page_size),
-                }
-                self.view = if close {
-                    self.cancel_query();
-                    View::Queue
+            View::LibraryResults(mut results) => {
+                if action == Action::Activate {
+                    command = results
+                        .selected()
+                        .map(|track| Command::Play { track_id: track.id });
                 } else {
-                    View::Search(search)
-                };
-                changed |= close;
+                    changed = results.navigate_action(action, page_size);
+                    if changed {
+                        self.library_selected_id = results.selected().map(|row| row.id);
+                    }
+                }
+                self.view = View::LibraryResults(results);
             }
             View::Tree(mut tree) => {
                 let mut close = false;
+                let mut transition = false;
                 match action {
                     Action::Cancel | Action::Parent => {
                         changed = tree.parent();
                         close = action == Action::Cancel && !changed;
+                        transition = changed || close;
                         if changed || close {
                             self.cancel_query();
                         }
@@ -1115,13 +1261,20 @@ impl UiState {
                             command = tree.activate();
                         }
                         changed = tree.directory != directory || tree.other_tracks != was_other;
+                        transition = changed;
+                        if transition
+                            && self.search.active
+                            && let Some((_, selection, _)) = tree.ancestors.last_mut()
+                        {
+                            *selection = ListState::default();
+                        }
                         if changed {
                             self.cancel_query();
                         }
                     }
                     _ => {
                         changed = tree.entries.navigate_action(action, page_size);
-                        if changed && tree.other_tracks {
+                        if changed {
                             tree.anchor = None;
                             tree.selected_track_id =
                                 tree.entries.selected().and_then(|entry| match entry {
@@ -1138,6 +1291,9 @@ impl UiState {
                     View::Tree(tree)
                 };
                 changed |= close;
+                if transition && self.search.active {
+                    self.clear_search(state);
+                }
             }
             View::PlaylistDetail {
                 playlists,
@@ -1181,6 +1337,9 @@ impl UiState {
                     View::PlaylistDetail { playlists, detail }
                 };
                 changed |= close;
+                if close {
+                    self.clear_search(state);
+                }
             }
             View::Playlists(mut playlists) => {
                 let close = action == Action::Cancel;
@@ -1195,9 +1354,17 @@ impl UiState {
                                 selected_entry_id: None,
                             };
                             self.view = View::PlaylistDetail {
-                                playlists: (playlists.selection, playlists.viewport_rows),
+                                playlists: (
+                                    if self.search.active {
+                                        ListState::default()
+                                    } else {
+                                        playlists.selection
+                                    },
+                                    playlists.viewport_rows,
+                                ),
                                 detail,
                             };
+                            self.clear_search(state);
                             self.cancel_query();
                             self.mark_local_change();
                             return KeyAction::Ignored;
@@ -1242,6 +1409,17 @@ impl UiState {
             },
         }
         if changed {
+            if matches!(
+                action,
+                Action::Up
+                    | Action::Down
+                    | Action::PageUp
+                    | Action::PageDown
+                    | Action::First
+                    | Action::Last
+            ) {
+                self.refresh_anchor = None;
+            }
             if matches!(action, Action::First | Action::Last) {
                 self.cancel_query();
             }
@@ -1266,53 +1444,12 @@ pub(super) struct PlaylistDetail {
     pub(super) selected_entry_id: Option<i64>,
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
-pub(super) enum SearchFocus {
-    #[default]
-    Query,
-    Results,
-}
-
 #[derive(Default)]
-pub(super) struct LibrarySearch {
+pub(super) struct SearchState {
     pub(super) query: String,
     pub(super) applied_query: String,
-    pub(super) results: PagedList<LibraryRow>,
-    pub(super) focus: SearchFocus,
-    pub(super) query_deadline: Option<Instant>,
-}
-
-impl LibrarySearch {
-    fn filter(&mut self, now: Instant) -> bool {
-        let query = self.query.trim();
-        if query == self.applied_query {
-            self.query_deadline = None;
-            return false;
-        }
-        if query.is_empty() {
-            self.query_deadline = None;
-            self.applied_query.clear();
-            self.results = PagedList::default();
-            return true;
-        }
-        self.query_deadline = Some(now + rivu_protocol::model::SEARCH_DEBOUNCE);
-        false
-    }
-
-    fn apply_pending(&mut self, now: Instant) -> bool {
-        if !self.query_deadline.is_some_and(|deadline| now >= deadline) {
-            return false;
-        }
-        self.query_deadline = None;
-        let query = self.query.trim();
-        if query == self.applied_query {
-            return false;
-        }
-        self.applied_query.clear();
-        self.applied_query.push_str(query);
-        self.results = PagedList::default();
-        true
-    }
+    pub(super) editing: bool,
+    pub(super) active: bool,
 }
 
 /// Only the active directory's bounded pages are retained. Ancestors store
@@ -1325,8 +1462,6 @@ pub(super) struct LibraryTree {
     pub(super) entries: PagedList<DirectoryRow>,
     pub(super) other_tracks: bool,
     other_present: Option<bool>,
-    pub(super) query: String,
-    pub(super) editing_query: bool,
     pub(super) favorite: Option<bool>,
     pub(super) missing: Option<bool>,
     pub(super) sort: rivu_protocol::model::LibrarySort,
@@ -1337,7 +1472,7 @@ pub(super) struct LibraryTree {
 impl LibraryTree {
     fn other_query(&self) -> QueryKind {
         QueryKind::OtherTracks {
-            query: self.query.clone(),
+            query: String::new(),
             favorite: self.favorite,
             missing: self.missing,
             sort: self.sort,
@@ -1368,86 +1503,67 @@ impl LibraryTree {
         if !self.other_tracks {
             return None;
         }
-        let mut refresh = false;
-        if self.editing_query && !alt && !key.modifiers.contains(KeyModifiers::CONTROL) {
-            match key.code {
-                KeyCode::Enter | KeyCode::Esc => self.editing_query = false,
-                KeyCode::Backspace => refresh = self.query.pop().is_some(),
-                KeyCode::Char(character) => {
-                    self.query.push(character);
-                    refresh = true;
-                }
-                _ => return None,
+        match (alt, key.code) {
+            (true, KeyCode::Char('f')) => {
+                self.favorite = if self.favorite.is_some() {
+                    None
+                } else {
+                    Some(true)
+                };
             }
-        } else {
-            match (alt, key.code) {
-                (false, KeyCode::Char('/')) => self.editing_query = true,
-                (true, KeyCode::Char('f')) => {
-                    self.favorite = if self.favorite.is_some() {
-                        None
-                    } else {
-                        Some(true)
-                    };
-                    refresh = true;
-                }
-                (true, KeyCode::Char('m')) => {
-                    self.missing = if self.missing.is_some() {
-                        None
-                    } else {
-                        Some(true)
-                    };
-                    refresh = true;
-                }
-                (true, KeyCode::Char('s')) => {
-                    self.sort = match self.sort {
-                        rivu_protocol::model::LibrarySort::Id => {
-                            rivu_protocol::model::LibrarySort::Album
-                        }
-                        rivu_protocol::model::LibrarySort::Album => {
-                            rivu_protocol::model::LibrarySort::MostPlayed
-                        }
-                        rivu_protocol::model::LibrarySort::MostPlayed => {
-                            rivu_protocol::model::LibrarySort::Id
-                        }
-                    };
-                    refresh = true;
-                }
-                (false, KeyCode::Char('e')) => {
-                    return Some(
-                        self.entries
-                            .selected()
-                            .and_then(|entry| match entry {
-                                DirectoryRow::Track(track) => {
-                                    Some(KeyAction::Command(Command::Enqueue {
-                                        track_ids: vec![track.id],
-                                    }))
-                                }
-                                _ => None,
-                            })
-                            .unwrap_or(KeyAction::Ignored),
-                    );
-                }
-                _ => return None,
+            (true, KeyCode::Char('m')) => {
+                self.missing = if self.missing.is_some() {
+                    None
+                } else {
+                    Some(true)
+                };
             }
+            (true, KeyCode::Char('s')) => {
+                self.sort = match self.sort {
+                    rivu_protocol::model::LibrarySort::Id => {
+                        rivu_protocol::model::LibrarySort::Album
+                    }
+                    rivu_protocol::model::LibrarySort::Album => {
+                        rivu_protocol::model::LibrarySort::MostPlayed
+                    }
+                    rivu_protocol::model::LibrarySort::MostPlayed => {
+                        rivu_protocol::model::LibrarySort::Id
+                    }
+                };
+            }
+            (false, KeyCode::Char('e')) => {
+                return Some(
+                    self.entries
+                        .selected()
+                        .and_then(|entry| match entry {
+                            DirectoryRow::Track(track) => {
+                                Some(KeyAction::Command(Command::Enqueue {
+                                    track_ids: vec![track.id],
+                                }))
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or(KeyAction::Ignored),
+                );
+            }
+            _ => return None,
         }
-        if refresh {
-            self.anchor = self
-                .anchor
-                .or_else(|| {
-                    self.entries.selected().and_then(|entry| match entry {
-                        DirectoryRow::Track(track) => Some(track.id),
-                        _ => None,
-                    })
+        self.anchor = self
+            .anchor
+            .or_else(|| {
+                self.entries.selected().and_then(|entry| match entry {
+                    DirectoryRow::Track(track) => Some(track.id),
+                    _ => None,
                 })
-                .or(self.selected_track_id);
-            let selection = std::mem::take(&mut self.entries.selection);
-            let viewport_rows = self.entries.viewport_rows;
-            self.entries = PagedList {
-                selection,
-                viewport_rows,
-                ..PagedList::default()
-            };
-        }
+            })
+            .or(self.selected_track_id);
+        let selection = std::mem::take(&mut self.entries.selection);
+        let viewport_rows = self.entries.viewport_rows;
+        self.entries = PagedList {
+            selection,
+            viewport_rows,
+            ..PagedList::default()
+        };
         Some(KeyAction::Ignored)
     }
 
@@ -1501,7 +1617,6 @@ impl LibraryTree {
         };
         self.directory = directory;
         self.other_tracks = false;
-        self.editing_query = false;
         self.anchor = None;
         self.selected_track_id = None;
         self.entries = PagedList {

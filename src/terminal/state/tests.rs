@@ -111,7 +111,8 @@ fn favorite_targets_only_selected_track_and_respects_input_ownership() {
     }
     ui.open_search();
     ui.key_action(KeyEvent::from(KeyCode::Char('m')), &state);
-    assert!(matches!(&ui.view, View::Search(search) if search.query == "m"));
+    assert_eq!(ui.search.query, "m");
+    ui.clear_search(&state);
     ui.view = View::Playlists(PagedList::default());
     assert!(matches!(
         ui.key_action(KeyEvent::from(KeyCode::Char('m')), &state),
@@ -137,17 +138,20 @@ fn favorite_targets_only_selected_track_and_respects_input_ownership() {
 #[test]
 fn details_pin_search_target_reject_late_reads_and_restore_source() {
     let state = query_snapshot();
-    let mut ui = UiState::default();
-    let mut search = LibrarySearch {
-        query: "夜航".into(),
-        applied_query: "夜航".into(),
-        focus: SearchFocus::Results,
-        ..LibrarySearch::default()
+    let mut ui = UiState {
+        search: SearchState {
+            query: "夜航".into(),
+            applied_query: "夜航".into(),
+            active: true,
+            editing: false,
+        },
+        ..UiState::default()
     };
-    search.results.set_viewport(2);
-    search.results.insert(0, 2, 2, vec![track(1), track(2)]);
-    search.results.selection.select(Some(1));
-    ui.view = View::Search(search);
+    let mut results = PagedList::default();
+    results.set_viewport(2);
+    results.insert(0, 2, 2, vec![track(1), track(2)]);
+    results.selection.select(Some(1));
+    ui.view = View::LibraryResults(results);
     ui.key_action(KeyEvent::from(KeyCode::Char('i')), &state);
     assert!(ui.details_active);
     let old = ui.query_request(&state).unwrap();
@@ -186,17 +190,12 @@ fn details_pin_search_target_reject_late_reads_and_restore_source() {
     assert!(matches!(&ui.details.state, DetailState::Ready(track) if track.id == 2));
     assert_eq!(ui.details.scroll, ui.details.max_scroll);
     ui.key_action(KeyEvent::from(KeyCode::Esc), &state);
-    let View::Search(search) = &ui.view else {
+    let View::LibraryResults(results) = &ui.view else {
         panic!("search source lost")
     };
-    assert_eq!(search.query, "夜航");
-    assert!(search.focus == SearchFocus::Results);
-    assert_eq!(search.results.selected().unwrap().id, 2);
-    ui.key_action(KeyEvent::from(KeyCode::Tab), &state);
-    assert!(
-        matches!(&ui.view, View::Search(search) if search.focus == SearchFocus::Query && search.query == "夜航")
-    );
-    ui.key_action(KeyEvent::from(KeyCode::BackTab), &state);
+    assert_eq!(ui.search.applied_query, "夜航");
+    assert!(!ui.search.editing);
+    assert_eq!(results.selected().unwrap().id, 2);
     ui.key_action(KeyEvent::from(KeyCode::Up), &state);
     ui.key_action(KeyEvent::from(KeyCode::Char('i')), &state);
     let current = ui.query_request(&state).unwrap();
@@ -474,6 +473,15 @@ pub(in crate::terminal) fn response(request: &QueryRequest, total: usize) -> Que
     let indices = request.offset..(request.offset + request.limit).min(total);
     let view = match &request.kind {
         QueryKind::OtherTracksCount => ViewResponse::OtherTracksCount(total),
+        QueryKind::LibrarySelection(track_id) | QueryKind::DirectorySelection { track_id, .. } => {
+            ViewResponse::LibraryLocate(rivu_protocol::model::LibraryLocateResult::Located(
+                rivu_protocol::model::LibraryLocation {
+                    offset: *track_id as usize,
+                    total,
+                    child: None,
+                },
+            ))
+        }
         QueryKind::Track(_) => panic!("track reads need explicit metadata"),
         QueryKind::Queue => ViewResponse::QueuePage(Page {
             total,
@@ -1013,26 +1021,19 @@ fn hidden_pages_follow_page_size_and_library_root_changes() {
 }
 
 #[test]
-fn search_retains_editor_traversal_and_cached_library_while_highlighting_library() {
+fn search_tab_traversal_clears_editor_and_keeps_directory_scope() {
     let state = query_snapshot();
-    let mut ui = UiState::new(Arc::new(Localizer::for_terminal("en-US")));
-    ui.view = View::Tree(LibraryTree {
-        directory: "/music/disc".into(),
-        ..LibraryTree::default()
-    });
-    assert!(matches!(
-        ui.key_action(KeyEvent::from(KeyCode::Char('/')), &state),
-        KeyAction::Search
-    ));
+    let mut ui = UiState {
+        view: View::Tree(LibraryTree {
+            directory: "/music/disc".into(),
+            ..LibraryTree::default()
+        }),
+        ..UiState::default()
+    };
     ui.open_search();
-    for key in [KeyCode::Tab, KeyCode::BackTab] {
-        ui.key_action(KeyEvent::from(key), &state);
-        assert_eq!(ui.view.tab(), TopTab::Library);
-    }
-    assert!(matches!(&ui.view, View::Search(search) if search.focus == SearchFocus::Query));
-    ui.key_action(KeyEvent::from(KeyCode::Esc), &state);
-    assert!(matches!(ui.view, View::Queue));
-    ui.key_action(KeyEvent::from(KeyCode::BackTab), &state);
+    ui.key_action(KeyEvent::from(KeyCode::Tab), &state);
+    assert_eq!(ui.view.tab(), TopTab::Recent);
+    assert!(!ui.search.active);
     ui.key_action(KeyEvent::from(KeyCode::BackTab), &state);
     assert!(matches!(&ui.view, View::Tree(tree) if tree.directory == Path::new("/music/disc")));
 }
@@ -1041,7 +1042,7 @@ fn search_retains_editor_traversal_and_cached_library_while_highlighting_library
 fn unrelated_updates_preserve_pending_and_loaded_terminal_pages() {
     for view in [
         View::Queue,
-        View::Search(LibrarySearch::default()),
+        View::LibraryResults(PagedList::default()),
         View::Tree(LibraryTree {
             directory: "/music".into(),
             ..LibraryTree::default()
@@ -1295,7 +1296,7 @@ fn playlist_reorder_preserves_unrelated_terminal_views() {
     snapshot.system.query_batch_size = 3;
     Arc::make_mut(&mut snapshot.library.playlist_entry_revisions).insert(2, 0);
     for view in [
-        View::Search(LibrarySearch::default()),
+        View::LibraryResults(PagedList::default()),
         View::Tree(LibraryTree {
             directory: "/music".into(),
             ..LibraryTree::default()
@@ -1370,6 +1371,7 @@ fn terminal_playlist_reorder_relocates_identity_and_rejects_stale_results() {
         panic!("expected entry locations");
     };
     entries[0].position = 9;
+    entries[0].offset = 9;
     assert!(tui.ui.apply_query(&tui.snapshot, &lookup, Ok(located)));
     let page = tui.ui.query_request(&tui.snapshot).unwrap();
     assert_eq!(page.kind, QueryKind::Playlist(1));
@@ -1394,10 +1396,7 @@ fn every_queried_view_renders_across_batches_without_resetting_scroll() {
     state.system.query_batch_size = 3;
     Arc::make_mut(&mut state.library.playlist_entry_revisions).insert(7, 0);
     let views = [
-        View::Search(LibrarySearch {
-            focus: SearchFocus::Results,
-            ..LibrarySearch::default()
-        }),
+        View::LibraryResults(PagedList::default()),
         View::Tree(LibraryTree {
             directory: "/music".into(),
             ..LibraryTree::default()
@@ -1727,6 +1726,8 @@ fn returning_to_parent_restores_selection_and_middle_of_viewport() {
         ..UiState::default()
     };
     ui.key_action(KeyEvent::from(KeyCode::Enter), &state);
+    ui.key_action(KeyEvent::from(KeyCode::Backspace), &state);
+    assert!(matches!(&ui.view, View::Tree(tree) if tree.directory == Path::new("/music/34")));
     ui.key_action(KeyEvent::from(KeyCode::Esc), &state);
     let View::Tree(tree) = &mut ui.view else {
         panic!("expected parent directory")
@@ -1789,7 +1790,11 @@ fn interrupt_exits_editors_and_overlays_without_dispatching_core_commands() {
     let mut screens = vec![
         UiState::default(),
         UiState {
-            view: View::Search(LibrarySearch::default()),
+            search: SearchState {
+                active: true,
+                editing: true,
+                ..SearchState::default()
+            },
             ..UiState::default()
         },
         UiState {
@@ -1822,10 +1827,10 @@ fn question_mark_opens_help_except_when_owned_by_query_input() {
         assert!(ui.show_help);
         ui.key_action(help, &state);
         assert!(!ui.show_help);
-        ui.view = View::Search(LibrarySearch::default());
+        ui.open_search();
         ui.key_action(help, &state);
         assert!(!ui.show_help);
-        assert!(matches!(&ui.view, View::Search(search) if search.query == "?"));
+        assert_eq!(ui.search.query, "?");
         ui.key_action(KeyEvent::from(KeyCode::Tab), &state);
         ui.key_action(help, &state);
         assert!(ui.show_help);
@@ -1835,10 +1840,8 @@ fn question_mark_opens_help_except_when_owned_by_query_input() {
 #[test]
 fn query_editor_keeps_printable_shortcuts_and_rejects_modified_text() {
     let state = TuiSnapshot::default();
-    let mut ui = UiState {
-        view: View::Search(LibrarySearch::default()),
-        ..UiState::default()
-    };
+    let mut ui = UiState::default();
+    ui.open_search();
     for character in "R? q Aa/[]!春".chars() {
         assert!(matches!(
             ui.key_action(KeyEvent::from(KeyCode::Char(character)), &state),
@@ -1854,22 +1857,14 @@ fn query_editor_keeps_printable_shortcuts_and_rejects_modified_text() {
         ui.key_action(KeyEvent::new(KeyCode::Char('q'), modifiers), &state);
         ui.key_action(KeyEvent::new(KeyCode::Backspace, modifiers), &state);
     }
-    let View::Search(search) = &ui.view else {
-        panic!("query stays open")
-    };
-    assert_eq!(search.query, "R? q Aa/[]!春");
+    assert_eq!(ui.search.query, "R? q Aa/[]!春");
     ui.key_action(KeyEvent::from(KeyCode::BackTab), &state);
-    assert!(matches!(&ui.view, View::Search(search) if search.focus == SearchFocus::Results));
-    assert!(matches!(
-        ui.key_action(KeyEvent::from(KeyCode::Char('q')), &state),
-        KeyAction::Ignored
-    ));
+    assert!(!ui.search.active);
+    assert_eq!(ui.view.tab(), TopTab::Recent);
     assert!(matches!(
         ui.key_action(KeyEvent::from(KeyCode::Char(' ')), &state),
         KeyAction::Command(Command::Toggle)
     ));
-    ui.key_action(KeyEvent::from(KeyCode::Esc), &state);
-    assert!(matches!(&ui.view, View::Search(search) if search.focus == SearchFocus::Query));
     ui.key_action(KeyEvent::from(KeyCode::Esc), &state);
     assert!(matches!(ui.view, View::Queue));
 }
@@ -2059,10 +2054,10 @@ fn details_containers_are_not_tracks_and_query_editor_owns_i() {
     );
     assert!(ui.query_request(&state).is_none());
     ui.key_action(KeyEvent::from(KeyCode::Esc), &state);
-    ui.view = View::Search(LibrarySearch::default());
+    ui.open_search();
     ui.key_action(KeyEvent::from(KeyCode::Char('i')), &state);
     assert!(!ui.details_active);
-    assert!(matches!(&ui.view, View::Search(search) if search.query == "i"));
+    assert_eq!(ui.search.query, "i");
 }
 
 fn bitrate_tui() -> TuiState {
@@ -2081,17 +2076,12 @@ fn bitrate_tui() -> TuiState {
     tui.ui.queue.selection.select(Some(1));
     *tui.ui.queue.selection.offset_mut() = 1;
 
-    let mut search = LibrarySearch {
-        query: "draft query".into(),
-        focus: SearchFocus::Results,
-        ..LibrarySearch::default()
-    };
-    search.results.set_viewport(2);
-    search
-        .results
-        .insert(0, 3, 12, vec![track(7), track(8), track(7)]);
-    search.results.selection.select(Some(1));
-    tui.ui.view = View::Search(search);
+    tui.ui.search.query = "draft query".into();
+    let mut results = PagedList::default();
+    results.set_viewport(2);
+    results.insert(0, 3, 12, vec![track(7), track(8), track(7)]);
+    results.selection.select(Some(1));
+    tui.ui.view = View::LibraryResults(results);
 
     let mut tree = LibraryTree {
         directory: "/music".into(),
@@ -2162,7 +2152,7 @@ fn page_coordinates<T>(list: &PagedList<T>) -> (usize, bool, usize, Option<usize
 fn bitrate_late_page_responses_are_rejected_and_retried_at_the_new_stamp() {
     for view in [
         View::Queue,
-        View::Search(LibrarySearch::default()),
+        View::LibraryResults(PagedList::default()),
         View::Tree(LibraryTree {
             directory: "/music".into(),
             ..LibraryTree::default()
@@ -2224,8 +2214,8 @@ fn bitrate_late_page_responses_are_rejected_and_retried_at_the_new_stamp() {
                 let row = &tui.ui.queue.get(0).unwrap().track;
                 (row.bitrate_bps, row.bitrate_exact)
             }
-            View::Search(search) => {
-                let row = search.results.get(0).unwrap();
+            View::LibraryResults(results) => {
+                let row = results.get(0).unwrap();
                 (row.bitrate_bps, row.bitrate_exact)
             }
             View::Tree(tree) => {
@@ -2248,10 +2238,10 @@ fn bitrate_late_page_responses_are_rejected_and_retried_at_the_new_stamp() {
 fn bitrate_changes_reload_retained_payloads_without_losing_coordinates_or_identity() {
     let mut tui = bitrate_tui();
     let queue_coordinates = page_coordinates(&tui.ui.queue);
-    let View::Search(search) = &tui.ui.view else {
+    let View::LibraryResults(results) = &tui.ui.view else {
         unreachable!()
     };
-    let search_coordinates = page_coordinates(&search.results);
+    let search_coordinates = page_coordinates(results);
     let View::Tree(tree) = tui.ui.cached_library.as_ref().unwrap() else {
         unreachable!()
     };
@@ -2270,13 +2260,13 @@ fn bitrate_changes_reload_retained_payloads_without_losing_coordinates_or_identi
     assert_eq!(page_coordinates(&tui.ui.queue), queue_coordinates);
     assert!(tui.ui.queue.pages.is_empty());
     assert!(tui.ui.queue_anchor.is_none());
-    let View::Search(search) = &tui.ui.view else {
+    let View::LibraryResults(results) = &tui.ui.view else {
         unreachable!()
     };
-    assert_eq!(page_coordinates(&search.results), search_coordinates);
-    assert!(search.results.pages.is_empty());
-    assert_eq!(search.query, "draft query");
-    assert!(matches!(search.focus, SearchFocus::Results));
+    assert_eq!(page_coordinates(results), search_coordinates);
+    assert!(results.pages.is_empty());
+    assert_eq!(tui.ui.search.query, "draft query");
+    assert!(!tui.ui.search.editing);
     let View::Tree(tree) = tui.ui.cached_library.as_ref().unwrap() else {
         unreachable!()
     };

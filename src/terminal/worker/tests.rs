@@ -202,10 +202,8 @@ fn replacing_queries_keeps_one_stalled_socket_until_worker_shutdown() {
     });
     let mut worker = spawn_query_worker(directory.path(), 1);
     let state = TuiSnapshot::default();
-    let mut ui = UiState {
-        view: View::Playlists(PagedList::default()),
-        ..UiState::default()
-    };
+    let mut ui = UiState::default();
+    ui.view = View::Playlists(PagedList::default());
     let request = ui.query_request(&state).unwrap();
     worker.request(request.clone());
     let mut stream = accepted.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -287,6 +285,7 @@ fn replaced_bitrate_queries_drain_then_send_only_latest_on_the_same_session() {
     let mut worker = spawn_query_worker(directory.path(), 1);
     let request = QueryRequest {
         kind: QueryKind::Queue,
+        filter: None,
         offset: 0,
         limit: 20,
         generation: 0,
@@ -344,6 +343,7 @@ fn query_worker_shutdown_cancels_active_exchange_and_discards_pending_job() {
     let mut worker = spawn_query_worker(directory.path(), 1);
     let request = QueryRequest {
         kind: QueryKind::Queue,
+        filter: None,
         offset: 0,
         limit: 20,
         generation: 0,
@@ -526,6 +526,7 @@ fn watcher_identity_binds_delayed_command_and_query_workers() {
     let mut queries = spawn_query_worker(directory.path(), instance_id);
     let request = QueryRequest {
         kind: QueryKind::Queue,
+        filter: None,
         offset: 0,
         limit: 20,
         generation: 0,
@@ -607,6 +608,7 @@ fn superseded_query_still_reports_replacement_instance_as_fatal() {
     let mut worker = spawn_query_worker(directory.path(), 1);
     worker.request(QueryRequest {
         kind: QueryKind::Queue,
+        filter: None,
         offset: 0,
         limit: 20,
         generation: 0,
@@ -662,6 +664,7 @@ fn query_worker_reconnection_rejects_replacement_before_accepting_results() {
     let mut worker = spawn_query_worker(directory.path(), 1);
     let request = QueryRequest {
         kind: QueryKind::Queue,
+        filter: None,
         offset: 0,
         limit: 20,
         generation: 0,

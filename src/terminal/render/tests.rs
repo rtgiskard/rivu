@@ -211,19 +211,21 @@ fn help_hierarchy_wraps_and_scrolls_read_only_in_current_context() {
 fn query_tail_preserves_graphemes_and_keeps_input_cursor_visible() {
     let query = "春风e\u{301}夜航";
     for language in ["en-US", "zh-CN"] {
-        let mut search = LibrarySearch {
+        let mut search = SearchState {
             query: query.into(),
-            ..LibrarySearch::default()
+            editing: true,
+            active: true,
+            ..SearchState::default()
         };
         let i18n = Localizer::for_terminal(language);
         for width in [1, 8, 18, 24, 60] {
             let mut terminal = Terminal::new(TestBackend::new(width, 8)).unwrap();
             terminal
                 .draw(|frame| {
-                    draw_search(
+                    draw_search_input(
                         frame,
                         frame.area(),
-                        &mut search,
+                        &search,
                         &i18n,
                         TerminalColors::new(crate::theme::Theme::default()),
                     )
@@ -238,14 +240,14 @@ fn query_tail_preserves_graphemes_and_keeps_input_cursor_visible() {
             }
             assert_eq!(search.query, query);
         }
-        search.focus = SearchFocus::Results;
+        search.editing = false;
         let mut terminal = Terminal::new(TestBackend::new(60, 8)).unwrap();
         terminal
             .draw(|frame| {
-                draw_search(
+                draw_search_input(
                     frame,
                     frame.area(),
-                    &mut search,
+                    &search,
                     &i18n,
                     TerminalColors::new(crate::theme::Theme::default()),
                 )
@@ -255,6 +257,89 @@ fn query_tail_preserves_graphemes_and_keeps_input_cursor_visible() {
     }
     assert_eq!(query_tail(query, 5), ("e\u{301}夜航", 5));
     assert_eq!(query_tail(query, 1), ("", 0));
+}
+
+#[test]
+fn global_search_row_wraps_every_current_page_without_replacing_it() {
+    for language in ["en-US", "zh-CN"] {
+        let mut other = LibraryTree::default();
+        other.other_tracks = true;
+        for view in [
+            View::Queue,
+            View::LibraryResults(PagedList::default()),
+            View::Tree(LibraryTree::default()),
+            View::Tree(other),
+            View::Playlists(PagedList::default()),
+            View::PlaylistDetail {
+                playlists: (ListState::default(), 0),
+                detail: PlaylistDetail {
+                    playlist_id: 1,
+                    name: "Playlist detail".into(),
+                    entries: PagedList::default(),
+                    entry_anchor: None,
+                    selected_entry_id: None,
+                },
+            },
+            View::Recent(RecentTracks::default()),
+        ] {
+            let mut ui = UiState::new(Arc::new(Localizer::for_terminal(language)));
+            ui.view = view;
+            ui.search.query = "draft query".into();
+            ui.search.applied_query = "applied query".into();
+            let mut terminal = Terminal::new(TestBackend::new(100, 6)).unwrap();
+            for active in [false, true] {
+                for editing in [false, true] {
+                    ui.search.active = active;
+                    ui.search.editing = editing;
+                    terminal
+                        .draw(|frame| {
+                            draw_current_page(
+                                frame,
+                                frame.area(),
+                                &TuiSnapshot::default(),
+                                &mut ui,
+                                TerminalColors::new(crate::theme::Theme::default()),
+                            );
+                        })
+                        .unwrap();
+                    let text = terminal_text(&terminal);
+                    assert_eq!(text.contains("draft query"), active, "{text}");
+                    assert!(!text.contains("applied query"), "{text}");
+                    assert_eq!(terminal.backend().cursor_visible(), active && editing);
+                    assert_eq!(ui.page_size, if active { 4 } else { 5 });
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn full_library_results_keep_normal_rows_below_the_shared_editor() {
+    let mut results = PagedList::default();
+    results.insert(0, 2, 2, vec![track(0), track(1)]);
+    let mut ui = UiState::default();
+    ui.view = View::LibraryResults(results);
+    ui.search.active = true;
+    ui.search.editing = true;
+    ui.search.query = "draft".into();
+    let mut terminal = Terminal::new(TestBackend::new(80, 4)).unwrap();
+    terminal
+        .draw(|frame| {
+            draw_current_page(
+                frame,
+                frame.area(),
+                &TuiSnapshot::default(),
+                &mut ui,
+                TerminalColors::new(crate::theme::Theme::default()),
+            );
+        })
+        .unwrap();
+    let text = terminal_text(&terminal);
+    let lines = text.lines().collect::<Vec<_>>();
+    assert!(lines[0].contains("draft"), "{text}");
+    assert!(lines[1].contains("Library"), "{text}");
+    assert!(lines[2].contains("row-0"), "{text}");
+    assert!(lines[3].contains("row-1"), "{text}");
 }
 
 #[test]
@@ -293,7 +378,6 @@ fn browser_modes_leave_all_rows_below_the_count_header_for_items() {
     for mode in [
         BrowserMode::Tracks,
         BrowserMode::PlaylistTracks,
-        BrowserMode::UnfocusedTracks,
         BrowserMode::Labels,
     ] {
         let mut page = PagedList::default();
@@ -628,45 +712,17 @@ fn queue_mutations_relocate_selected_occurrence_and_clamp_deleted_selection() {
 }
 
 pub(in crate::terminal) fn render_view(ui: &mut UiState) -> String {
-    let height = match ui.view {
-        View::Search(_) => 6,
-        _ => 5,
-    };
+    let height = if ui.search.active { 6 } else { 5 };
     let mut terminal = Terminal::new(TestBackend::new(60, height)).unwrap();
     terminal
         .draw(|frame| {
-            let area = frame.area();
-            match &mut ui.view {
-                View::Search(search) => draw_search(
-                    frame,
-                    area,
-                    search,
-                    &ui.i18n,
-                    TerminalColors::new(crate::theme::Theme::default()),
-                ),
-                View::Tree(tree) => draw_tree(
-                    frame,
-                    area,
-                    tree,
-                    &ui.i18n,
-                    TerminalColors::new(crate::theme::Theme::default()),
-                ),
-                View::Playlists(playlists) => draw_playlists(
-                    frame,
-                    area,
-                    playlists,
-                    &ui.i18n,
-                    TerminalColors::new(crate::theme::Theme::default()),
-                ),
-                View::PlaylistDetail { detail, .. } => draw_playlist_detail(
-                    frame,
-                    area,
-                    detail,
-                    &ui.i18n,
-                    TerminalColors::new(crate::theme::Theme::default()),
-                ),
-                View::Queue | View::Recent(_) => panic!("expected a queried view"),
-            }
+            draw_current_page(
+                frame,
+                frame.area(),
+                &TuiSnapshot::default(),
+                ui,
+                TerminalColors::new(crate::theme::Theme::default()),
+            );
         })
         .unwrap();
     terminal
@@ -686,10 +742,8 @@ fn idle_footer_properties_yield_to_notices_and_return_after_expiration() {
             ..Default::default()
         };
         state.playback.duration = Some(125.);
-        let mut ui = UiState {
-            startup_hint_deadline: None,
-            ..Default::default()
-        };
+        let mut ui = UiState::default();
+        ui.startup_hint_deadline = None;
         let mut terminal = Terminal::new(TestBackend::new(width, 12)).unwrap();
         let colors = TerminalColors::new(state.system.ui_theme);
         for notice in [false, true, false] {
