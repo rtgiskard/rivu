@@ -24,6 +24,7 @@ pub(crate) enum Context {
     TuiTree,
     TuiPlaylists,
     TuiPlaylistTracks,
+    TuiRecent,
     TuiHelp,
     GuiHelp,
 }
@@ -80,7 +81,7 @@ const SHIFT: u8 = 1;
 const CONTROL: u8 = 2;
 const GUI: u16 = (1 << 7) - 1;
 const GUI_LIST: u16 = GUI & !(1 << Context::Gui as u16);
-const TUI: u16 = ((1 << 13) - 1) & !GUI;
+const TUI: u16 = ((1 << 14) - 1) & !GUI;
 const QUERY: u16 = 1 << Context::TuiSearchQuery as u16;
 const HELP: u16 = (1 << Context::TuiHelp as u16) | (1 << Context::GuiHelp as u16);
 const LIST: u16 = (1 << Context::GuiLibrary as u16)
@@ -96,7 +97,8 @@ const SEARCH: u16 = QUERY | (1 << Context::TuiSearchResults as u16);
 const TABS: u16 = (1 << Context::TuiQueue as u16)
     | (1 << Context::TuiTree as u16)
     | (1 << Context::TuiPlaylists as u16)
-    | (1 << Context::TuiPlaylistTracks as u16);
+    | (1 << Context::TuiPlaylistTracks as u16)
+    | (1 << Context::TuiRecent as u16);
 const MULTI: u16 = (1 << Context::GuiQueue as u16)
     | (1 << Context::GuiPlaylistTracks as u16)
     | (1 << Context::GuiHistory as u16);
@@ -163,7 +165,7 @@ static BINDINGS: &[Binding] = &[
         "/",
         "/",
         0,
-        TUI & !SEARCH,
+        TUI & !(SEARCH | (1 << Context::TuiRecent as u16)),
         Search,
         "keyboard-library-search"
     ),
@@ -478,6 +480,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn recent_has_track_navigation_without_search_or_removal() {
+        let context = Context::TuiRecent;
+        for (key, action) in [
+            ("up", Action::Up),
+            ("down", Action::Down),
+            ("home", Action::First),
+            ("end", Action::Last),
+            ("pageup", Action::PageUp),
+            ("pagedown", Action::PageDown),
+            ("tab", Action::Traverse),
+            ("enter", Action::Activate),
+            ("i", Action::Details),
+            ("m", Action::Favorite),
+            ("space", Action::Toggle),
+            ("q", Action::Close),
+        ] {
+            assert_eq!(resolve(key, Modifiers::default(), context), Some(action));
+        }
+        for key in ["/", "delete", "backspace", "a"] {
+            assert_eq!(resolve(key, Modifiers::default(), context), None);
+        }
+    }
+
+    #[test]
     fn super_is_not_a_control_alias() {
         for (key, context, shift, action) in [
             ("f", Context::GuiLibrary, false, Action::Search),
@@ -676,6 +702,7 @@ mod tests {
             Context::TuiTree,
             Context::TuiPlaylists,
             Context::TuiPlaylistTracks,
+            Context::TuiRecent,
             Context::TuiSearchQuery,
             Context::TuiSearchResults,
             Context::Gui,
@@ -720,6 +747,7 @@ mod tests {
             Context::TuiTree,
             Context::TuiPlaylists,
             Context::TuiPlaylistTracks,
+            Context::TuiRecent,
             Context::TuiSearchQuery,
             Context::TuiSearchResults,
             Context::TuiHelp,

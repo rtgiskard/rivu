@@ -383,12 +383,18 @@ already selected decoder and never loads FFmpeg or changes decoder selection.
 == Terminal client
 
 The TUI controls the running core. Leaving it does not stop playback. `Tab` cycles
-Queue → Playlists → Library; `Shift+Tab` reverses direction, retaining each page's
+Queue → Playlists → Library → Recent tracks; `Shift+Tab` reverses direction, retaining each page's
 selection and scroll position. `Right` opens a playlist; Enter plays the selected
 playlist, track, or queue occurrence. In playlist details, `a` enqueues the selected
 track. Selecting a row alone does not change playback.
 
-Use `/` to open Library search. Tab/Shift+Tab switches between query and results;
+Recent tracks is always available, including when empty. It shows the published
+history of up to 256 unique tracks in recent-play order, with titles and local
+last-played timestamps where width permits. Enter plays the selected track,
+`i` opens its details, and `m` toggles its favorite. Navigation and shared playback
+shortcuts work as on other track lists; Recent has no search, sorting, or removal.
+
+Use `/` from Queue, Playlists, or Library to open Library search. Tab/Shift+Tab switches between query and results;
 Enter from the query focuses results, and Enter on a result plays it. Esc from
 results returns to the query; Esc from the query returns to Queue. The query owns
 printable characters, including playback shortcuts and `?`; F1 still opens help.
@@ -404,7 +410,7 @@ the complete collection regardless of filters. `Alt+c` checks registered files;
 `Alt+Shift+c` forces rereading. Collection-wide Alt actions also work on its header.
 
 Outside the query editor, `m` toggles the selected track's favorite in Queue,
-Library, Search, or playlist entries. It never changes a whole directory or
+Library, Search, Recent, or playlist entries. It never changes a whole directory or
 playlist. Track lists prioritize titles as the terminal narrows and keep compact
 metadata, favorite, playback-state, and missing-file indicators where space permits.
 Truncation does not change stored metadata.

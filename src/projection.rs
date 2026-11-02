@@ -136,6 +136,7 @@ pub struct TuiLibrarySnapshot {
     pub bitrate_revision: u64,
     pub duplicate_groups_revision: u64,
     pub duplicate_members_revision: u64,
+    pub history: Arc<Vec<HistoryEntry>>,
 }
 
 #[derive(Clone, Debug)]
@@ -183,6 +184,7 @@ impl TuiSnapshot {
                 bitrate_revision: state.library.bitrate_revision,
                 duplicate_groups_revision: state.library.duplicate_groups_revision,
                 duplicate_members_revision: state.library.duplicate_members_revision,
+                history: Arc::clone(&state.library.history),
             },
             queue: state.queue.clone(),
             current_track: state.current_track.clone(),

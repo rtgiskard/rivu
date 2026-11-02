@@ -12,6 +12,56 @@ use rivu_protocol::{
 use std::sync::Arc;
 
 #[test]
+fn recent_renders_source_indices_timestamps_and_standard_empty_state() {
+    let i18n = Localizer::for_terminal("en-US");
+    let colors = TerminalColors::new(crate::theme::Theme::default());
+    let mut recent = RecentTracks {
+        source: Arc::new(vec![
+            rivu_protocol::model::HistoryEntry {
+                track_id: 1,
+                title: "Not selected".into(),
+                play_count: 1,
+                played_at: 0,
+                favorite: false,
+            },
+            rivu_protocol::model::HistoryEntry {
+                track_id: 2,
+                title: "Recent title".into(),
+                play_count: 2,
+                played_at: 1_700_000_000,
+                favorite: true,
+            },
+        ]),
+        entries: PagedList::default(),
+    };
+    recent.entries.insert(0, 256, 1, vec![1]);
+    for width in [24, 80] {
+        let mut terminal = Terminal::new(TestBackend::new(width, 8)).unwrap();
+        terminal
+            .draw(|frame| draw_recent(frame, frame.area(), &mut recent, &i18n, colors))
+            .unwrap();
+        let text = terminal_text(&terminal);
+        assert!(text.contains("Recent title"));
+        assert!(!text.contains("Not selected"));
+        if width == 80 {
+            let timestamp = chrono::DateTime::from_timestamp(1_700_000_000, 0)
+                .unwrap()
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string();
+            assert!(text.contains(&timestamp));
+        }
+    }
+    recent.entries = PagedList::default();
+    recent.entries.insert(0, 256, 0, vec![]);
+    let mut terminal = Terminal::new(TestBackend::new(80, 8)).unwrap();
+    terminal
+        .draw(|frame| draw_recent(frame, frame.area(), &mut recent, &i18n, colors))
+        .unwrap();
+    assert!(terminal_text(&terminal).contains("Recent tracks — empty"));
+}
+
+#[test]
 fn details_loading_and_errors_preserve_scroll_until_fresh_track_is_rendered() {
     let i18n = Localizer::for_terminal("en-US");
     let colors = TerminalColors::new(crate::theme::Theme::default());
@@ -615,7 +665,7 @@ pub(in crate::terminal) fn render_view(ui: &mut UiState) -> String {
                     &ui.i18n,
                     TerminalColors::new(crate::theme::Theme::default()),
                 ),
-                View::Queue => panic!("expected a queried view"),
+                View::Queue | View::Recent(_) => panic!("expected a queried view"),
             }
         })
         .unwrap();

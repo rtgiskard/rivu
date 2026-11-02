@@ -1,8 +1,8 @@
 use super::{
     paged::PagedList,
     state::{
-        DetailState, Details, LibrarySearch, LibraryTree, NoticeKind, PlaylistDetail, SearchFocus,
-        TopTab, UiState, View,
+        DetailState, Details, LibrarySearch, LibraryTree, NoticeKind, PlaylistDetail, RecentTracks,
+        SearchFocus, TopTab, UiState, View,
     },
 };
 use crate::{
@@ -549,6 +549,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, area: Rect, ui: &mut UiState, color
     let context = ui.keyboard_context();
     let context_label = match context {
         KeyboardContext::TuiQueue => "shell-panel-queue",
+        KeyboardContext::TuiRecent => "shell-panel-history",
         KeyboardContext::TuiPlaylists | KeyboardContext::TuiPlaylistTracks => {
             "shell-panel-playlists"
         }
@@ -724,6 +725,7 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut
         (TopTab::Queue, "shell-panel-queue"),
         (TopTab::Playlists, "shell-panel-playlists"),
         (TopTab::Library, "shell-panel-library"),
+        (TopTab::Recent, "shell-panel-history"),
     ] {
         let style = if tab == active_tab {
             Style::default()
@@ -751,6 +753,7 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut
         }
         View::Playlists(playlists) => draw_playlists(frame, outer[1], playlists, i18n, colors),
         View::Queue => draw_queue(frame, outer[1], state, &mut ui.queue, i18n, colors),
+        View::Recent(recent) => draw_recent(frame, outer[1], recent, i18n, colors),
     }
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(playback);
     let mut now = Vec::with_capacity(3);
@@ -1209,6 +1212,47 @@ fn draw_queue(
         i18n,
         BrowserStyle {
             mode: BrowserMode::Tracks,
+            colors,
+        },
+    );
+}
+
+fn draw_recent(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    recent: &mut RecentTracks,
+    i18n: &Localizer,
+    colors: TerminalColors,
+) {
+    let width = area.width.saturating_sub(4) as usize;
+    let source = &recent.source;
+    draw_paged_list(
+        frame,
+        area,
+        i18n.text("shell-panel-history").into(),
+        &mut recent.entries,
+        |index| {
+            let entry = &source[*index];
+            let title = if width >= 35 {
+                chrono::DateTime::from_timestamp(entry.played_at, 0).map_or_else(
+                    || Cow::Owned(entry.title.clone()),
+                    |time| {
+                        Cow::Owned(format!(
+                            "{}  {}",
+                            cell_text(&entry.title, width - 21, false),
+                            time.with_timezone(&chrono::Local)
+                                .format("%Y-%m-%d %H:%M:%S")
+                        ))
+                    },
+                )
+            } else {
+                Cow::Owned(entry.title.clone())
+            };
+            RowContent::label(title, " ")
+        },
+        i18n,
+        BrowserStyle {
+            mode: BrowserMode::Labels,
             colors,
         },
     );

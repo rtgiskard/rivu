@@ -654,6 +654,73 @@ pub(in crate::terminal) fn query_snapshot() -> TuiSnapshot {
     state
 }
 
+fn recent_entry(id: i64, played_at: i64) -> HistoryEntry {
+    HistoryEntry {
+        track_id: id,
+        title: format!("recent-{id}"),
+        play_count: 1,
+        played_at,
+        favorite: false,
+    }
+}
+
+#[test]
+fn recent_refresh_preserves_selected_track_across_reorder_and_hidden_updates() {
+    let mut state = query_snapshot();
+    state.library.history = Arc::new(vec![
+        recent_entry(1, 10),
+        recent_entry(2, 20),
+        recent_entry(3, 30),
+    ]);
+    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
+    tui.ui.key_action(KeyEvent::from(KeyCode::BackTab), &state);
+    let View::Recent(recent) = &tui.ui.view else {
+        unreachable!()
+    };
+    assert_eq!(recent.selected().unwrap().track_id, 3);
+    tui.ui.key_action(KeyEvent::from(KeyCode::Down), &state);
+    tui.ui.key_action(KeyEvent::from(KeyCode::Tab), &state);
+    state.library.history = Arc::new(vec![
+        recent_entry(1, 50),
+        recent_entry(2, 20),
+        recent_entry(3, 30),
+    ]);
+    tui.apply_snapshot(state.clone());
+    tui.ui.key_action(KeyEvent::from(KeyCode::BackTab), &state);
+    let View::Recent(recent) = &tui.ui.view else {
+        unreachable!()
+    };
+    assert_eq!(recent.selected().unwrap().track_id, 2);
+    assert!(matches!(
+        tui.ui.key_action(KeyEvent::from(KeyCode::Enter), &state),
+        KeyAction::Command(Command::Play { track_id: 2 })
+    ));
+    assert!(
+        matches!(tui.ui.key_action(KeyEvent::from(KeyCode::Char('m')), &state), KeyAction::Command(Command::ToggleFavorite { track_ids }) if track_ids == vec![2])
+    );
+    tui.ui
+        .key_action(KeyEvent::from(KeyCode::Char('i')), &state);
+    assert_eq!(
+        tui.ui.query_request(&state).unwrap().kind,
+        QueryKind::Track(2)
+    );
+    tui.ui.key_action(KeyEvent::from(KeyCode::Esc), &state);
+    state.library.history = Arc::new(vec![recent_entry(1, 50), recent_entry(3, 30)]);
+    tui.apply_snapshot(state.clone());
+    let View::Recent(recent) = &tui.ui.view else {
+        unreachable!()
+    };
+    assert_eq!(recent.selected().unwrap().track_id, 3);
+    state.library.history = Arc::new(vec![]);
+    tui.apply_snapshot(state.clone());
+    assert!(matches!(
+        tui.ui.key_action(KeyEvent::from(KeyCode::Enter), &state),
+        KeyAction::Ignored
+    ));
+    assert!(tui.ui.query_request(&state).is_none());
+    assert_eq!(tui.ui.view.tab(), TopTab::Recent);
+}
+
 #[test]
 fn tabs_wrap_in_both_directions_and_ignore_retired_shortcuts() {
     let state = query_snapshot();
@@ -675,11 +742,21 @@ fn tabs_wrap_in_both_directions_and_ignore_retired_shortcuts() {
         ] {
             let mut ui = UiState::default();
             let expected = if backward {
-                [TopTab::Library, TopTab::Playlists, TopTab::Queue]
+                [
+                    TopTab::Recent,
+                    TopTab::Library,
+                    TopTab::Playlists,
+                    TopTab::Queue,
+                ]
             } else {
-                [TopTab::Playlists, TopTab::Library, TopTab::Queue]
+                [
+                    TopTab::Playlists,
+                    TopTab::Library,
+                    TopTab::Recent,
+                    TopTab::Queue,
+                ]
             };
-            for tab in expected.into_iter().cycle().take(6) {
+            for tab in expected.into_iter().cycle().take(8) {
                 assert!(matches!(ui.key_action(key, &state), KeyAction::Ignored));
                 assert_eq!(ui.view.tab(), tab);
                 assert!(ui.startup_hint_deadline.is_none());
@@ -750,6 +827,7 @@ fn tab_round_trip_moves_cached_pages_and_preserves_subpage_coordinates() {
     };
     let directory_row = tree.entries.selected().unwrap() as *const DirectoryRow;
     tui.ui.key_action(KeyEvent::from(KeyCode::Tab), &state);
+    tui.ui.key_action(KeyEvent::from(KeyCode::Tab), &state);
     assert_eq!(
         (
             tui.ui.queue.selection.selected(),
@@ -757,6 +835,7 @@ fn tab_round_trip_moves_cached_pages_and_preserves_subpage_coordinates() {
         ),
         queue_position
     );
+    tui.ui.key_action(KeyEvent::from(KeyCode::BackTab), &state);
     tui.ui.key_action(KeyEvent::from(KeyCode::BackTab), &state);
     let View::Tree(tree) = &tui.ui.view else {
         unreachable!()
@@ -837,6 +916,7 @@ fn hidden_pages_invalidate_without_cancelling_visible_queue_and_handle_deletion(
     load_visible(&mut tui.ui, &state);
     tui.ui.key_action(KeyEvent::from(KeyCode::Tab), &state);
     tui.ui.key_action(KeyEvent::from(KeyCode::Tab), &state);
+    tui.ui.key_action(KeyEvent::from(KeyCode::Tab), &state);
     let queue_request = tui.ui.query_request(&state).unwrap();
     tui.ui.requested = Some(queue_request.clone());
     let mut next = state.clone();
@@ -886,6 +966,7 @@ fn hidden_pages_follow_page_size_and_library_root_changes() {
     tui.ui.key_action(KeyEvent::from(KeyCode::Tab), &state);
     load_visible(&mut tui.ui, &state);
     tui.ui.key_action(KeyEvent::from(KeyCode::Tab), &state);
+    tui.ui.key_action(KeyEvent::from(KeyCode::Tab), &state);
     let old = tui.ui.query_request(&state).unwrap();
     let mut next = state.clone();
     next.system.query_batch_size = 5;
@@ -899,6 +980,7 @@ fn hidden_pages_follow_page_size_and_library_root_changes() {
     let current = tui.ui.query_request(&next).unwrap();
     assert_eq!(current.limit, 5);
     assert_ne!(current.generation, old.generation);
+    tui.ui.key_action(KeyEvent::from(KeyCode::BackTab), &next);
     tui.ui.key_action(KeyEvent::from(KeyCode::BackTab), &next);
     load_visible(&mut tui.ui, &next);
     tui.ui.key_action(KeyEvent::from(KeyCode::Down), &next);
@@ -950,6 +1032,7 @@ fn search_retains_editor_traversal_and_cached_library_while_highlighting_library
     assert!(matches!(&ui.view, View::Search(search) if search.focus == SearchFocus::Query));
     ui.key_action(KeyEvent::from(KeyCode::Esc), &state);
     assert!(matches!(ui.view, View::Queue));
+    ui.key_action(KeyEvent::from(KeyCode::BackTab), &state);
     ui.key_action(KeyEvent::from(KeyCode::BackTab), &state);
     assert!(matches!(&ui.view, View::Tree(tree) if tree.directory == Path::new("/music/disc")));
 }
@@ -2155,7 +2238,7 @@ fn bitrate_late_page_responses_are_rejected_and_retried_at_the_new_stamp() {
                 let row = detail.entries.get(0).unwrap();
                 (row.bitrate_bps, row.bitrate_exact)
             }
-            View::Playlists(_) => unreachable!(),
+            View::Playlists(_) | View::Recent(_) => unreachable!(),
         };
         assert_eq!(fields, (Some(1_536_000), true));
     }

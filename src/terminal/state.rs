@@ -12,7 +12,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::ListState;
 use rivu_protocol::{
     model::{
-        Command, DirectoryRow, LibraryRow, PlaylistEntryRow, PlaylistSummary, Query, QueueRow,
+        Command, DirectoryRow, HistoryEntry, LibraryRow, PlaylistEntryRow, PlaylistSummary, Query,
+        QueueRow,
     },
     response::ViewResponse,
 };
@@ -55,6 +56,9 @@ impl TuiState {
         }
         if let Some(playlists) = &mut self.ui.cached_playlists {
             playlists.sync_snapshot(&self.snapshot, &next, page_size_changed);
+        }
+        if let Some(recent) = &mut self.ui.cached_recent {
+            recent.sync_snapshot(&self.snapshot, &next, page_size_changed);
         }
         self.ui.sync_details(&next);
         if active_changed || page_size_changed {
@@ -113,12 +117,56 @@ pub(super) enum DetailState {
 }
 
 #[derive(Default)]
+pub(super) struct RecentTracks {
+    pub(super) source: Arc<Vec<HistoryEntry>>,
+    pub(super) entries: PagedList<usize>,
+}
+
+impl RecentTracks {
+    fn selected(&self) -> Option<&HistoryEntry> {
+        self.source.get(*self.entries.selected()?)
+    }
+
+    fn sync(&mut self, source: &Arc<Vec<HistoryEntry>>) {
+        if self.entries.loaded && Arc::ptr_eq(&self.source, source) {
+            return;
+        }
+        let selected_id = self.selected().map(|entry| entry.track_id);
+        let old_position = self.entries.selection.selected().unwrap_or(0);
+        let mut indices = self.entries.pages.remove(&0).unwrap_or_default();
+        indices.clear();
+        indices.extend(0..source.len());
+        indices.sort_unstable_by_key(|&index| {
+            (
+                std::cmp::Reverse(source[index].played_at),
+                std::cmp::Reverse(source[index].track_id),
+            )
+        });
+        let selected = selected_id
+            .and_then(|id| {
+                indices
+                    .iter()
+                    .position(|&index| source[index].track_id == id)
+            })
+            .unwrap_or(old_position.min(source.len().saturating_sub(1)));
+        self.source = Arc::clone(source);
+        self.entries.clear();
+        self.entries
+            .selection
+            .select((!source.is_empty()).then_some(selected));
+        self.entries
+            .insert(0, source.len().max(1), source.len(), indices);
+    }
+}
+
+#[derive(Default)]
 pub(super) enum View {
     #[default]
     Queue,
     Search(LibrarySearch),
     Tree(LibraryTree),
     Playlists(PagedList<PlaylistSummary>),
+    Recent(RecentTracks),
     PlaylistDetail {
         playlists: (ListState, usize),
         detail: PlaylistDetail,
@@ -130,6 +178,7 @@ pub(super) enum TopTab {
     Queue,
     Playlists,
     Library,
+    Recent,
 }
 
 impl View {
@@ -138,11 +187,13 @@ impl View {
             Self::Queue => TopTab::Queue,
             Self::Playlists(_) | Self::PlaylistDetail { .. } => TopTab::Playlists,
             Self::Tree(_) | Self::Search(_) => TopTab::Library,
+            Self::Recent(_) => TopTab::Recent,
         }
     }
 
     fn query_kind(&self, selection: bool) -> Option<QueryKind> {
         match self {
+            Self::Recent(_) => None,
             Self::Queue => Some(QueryKind::Queue),
             Self::Search(search) => Some(QueryKind::Search(search.applied_query.clone())),
             Self::Tree(tree) if tree.other_tracks => Some(tree.other_query()),
@@ -169,6 +220,10 @@ impl View {
         next: &TuiSnapshot,
         page_size_changed: bool,
     ) -> bool {
+        if let Self::Recent(recent) = self {
+            recent.sync(&next.library.history);
+            return false;
+        }
         let rows_changed = self
             .query_kind(false)
             .is_some_and(|kind| kind.changed(previous, next));
@@ -239,7 +294,7 @@ impl View {
                 }
                 Self::Playlists(playlists) => playlists.clear(),
                 Self::PlaylistDetail { detail, .. } => detail.entries.clear(),
-                Self::Queue => {}
+                Self::Queue | Self::Recent(_) => {}
             }
         }
         if previous.system.library_roots != next.system.library_roots
@@ -264,7 +319,7 @@ impl View {
                 });
             }
             Self::PlaylistDetail { detail, .. } => detail.entries.pages.clear(),
-            Self::Queue => {}
+            Self::Queue | Self::Recent(_) => {}
             Self::Playlists(_) => {}
         }
     }
@@ -276,6 +331,7 @@ pub(super) struct UiState {
     // Each slot owns only its tab's view; switching moves bounded page caches.
     pub(super) cached_library: Option<View>,
     pub(super) cached_playlists: Option<View>,
+    pub(super) cached_recent: Option<View>,
     pub(super) queue: PagedList<QueueRow>,
     // Resolve the selected occurrence after edits before requesting its new viewport.
     pub(super) queue_anchor: Option<u64>,
@@ -302,6 +358,7 @@ impl UiState {
             view: View::default(),
             cached_library: None,
             cached_playlists: None,
+            cached_recent: None,
             queue: PagedList::default(),
             queue_anchor: None,
             queue_selected_id: None,
@@ -607,6 +664,11 @@ impl UiState {
 
     fn open_details(&mut self) {
         let (target, source_label, container) = match &self.view {
+            View::Recent(recent) => (
+                recent.selected().map(|entry| entry.track_id),
+                "shell-panel-history",
+                None,
+            ),
             View::Queue => (
                 self.queue.selected().map(|row| row.track.id),
                 "shell-panel-queue",
@@ -767,6 +829,7 @@ impl UiState {
     fn store_page(&mut self) {
         match std::mem::take(&mut self.view) {
             view @ View::Tree(_) => self.cached_library = Some(view),
+            view @ View::Recent(_) => self.cached_recent = Some(view),
             view @ (View::Playlists(_) | View::PlaylistDetail { .. }) => {
                 self.cached_playlists = Some(view);
             }
@@ -777,8 +840,9 @@ impl UiState {
     fn switch_tab(&mut self, backward: bool, state: &TuiSnapshot) {
         let target = match (self.view.tab(), backward) {
             (TopTab::Queue, false) | (TopTab::Library, true) => TopTab::Playlists,
-            (TopTab::Playlists, false) | (TopTab::Queue, true) => TopTab::Library,
-            (TopTab::Library, false) | (TopTab::Playlists, true) => TopTab::Queue,
+            (TopTab::Playlists, false) | (TopTab::Recent, true) => TopTab::Library,
+            (TopTab::Library, false) | (TopTab::Queue, true) => TopTab::Recent,
+            (TopTab::Recent, false) | (TopTab::Playlists, true) => TopTab::Queue,
         };
         self.store_page();
         self.view = match target {
@@ -791,6 +855,11 @@ impl UiState {
                 .cached_library
                 .take()
                 .unwrap_or_else(|| View::Tree(LibraryTree::new(&state.system.library_roots))),
+            TopTab::Recent => self.cached_recent.take().unwrap_or_else(|| {
+                let mut recent = RecentTracks::default();
+                recent.sync(&state.library.history);
+                View::Recent(recent)
+            }),
         };
         self.startup_hint_deadline = None;
         self.cancel_query();
@@ -800,6 +869,7 @@ impl UiState {
     pub(super) fn keyboard_context(&self) -> KeyboardContext {
         match &self.view {
             View::Queue => KeyboardContext::TuiQueue,
+            View::Recent(_) => KeyboardContext::TuiRecent,
             View::Search(search) if search.focus == SearchFocus::Query => {
                 KeyboardContext::TuiSearchQuery
             }
@@ -928,6 +998,7 @@ impl UiState {
             Action::Favorite => {
                 let track_id = match &self.view {
                     View::Queue => self.queue.selected().map(|row| row.track.id),
+                    View::Recent(recent) => recent.selected().map(|entry| entry.track_id),
                     View::Search(search) => search.results.selected().map(|track| track.id),
                     View::PlaylistDetail { detail, .. } => {
                         detail.entries.selected().map(|entry| entry.track_id)
@@ -964,6 +1035,22 @@ impl UiState {
         let mut changed = false;
         let mut command = None;
         match view {
+            View::Recent(mut recent) => {
+                if action == Action::Activate {
+                    command = recent.selected().map(|entry| Command::Play {
+                        track_id: entry.track_id,
+                    });
+                } else if action == Action::Cancel {
+                    self.cached_recent = Some(View::Recent(recent));
+                    self.view = View::Queue;
+                    self.cancel_query();
+                    self.mark_local_change();
+                    return KeyAction::Ignored;
+                } else {
+                    changed = recent.entries.navigate_action(action, page_size);
+                }
+                self.view = View::Recent(recent);
+            }
             View::Search(mut search) => {
                 let close = action == Action::Cancel && search.focus == SearchFocus::Query;
                 match action {
