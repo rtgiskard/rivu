@@ -60,15 +60,16 @@ fn draft_never_submits_and_enter_only_applies_without_playing() {
         KeyAction::Ignored
     ));
     let fresh = ui.query_request(&state).unwrap();
-    assert_eq!(fresh.offset, 0);
     assert!(
-        matches!(fresh.query(), Query::LibraryPage { query: Some(query), .. } if query == "next")
+        matches!(fresh.query(), Query::LibraryLocate { track_id: 0, query: Some(query), .. } if query == "next")
     );
     let View::LibraryResults(rows) = &ui.view else {
         panic!("library results");
     };
     assert!(rows.pages.is_empty());
     assert!(ui.apply_query(&state, &fresh, Ok(response(&fresh, 12))));
+    let page = ui.query_request(&state).unwrap();
+    assert!(ui.apply_query(&state, &page, Ok(response(&page, 12))));
     assert!(matches!(
         key(&mut ui, &state, KeyCode::Enter),
         KeyAction::Command(Command::Play { track_id: 0 })
@@ -122,6 +123,8 @@ fn applying_or_clearing_rejects_old_responses_even_when_query_text_returns() {
     key(&mut ui, &state, KeyCode::Enter);
     let first = ui.query_request(&state).unwrap();
     assert!(ui.apply_query(&state, &first, Ok(response(&first, 12))));
+    let page = ui.query_request(&state).unwrap();
+    assert!(ui.apply_query(&state, &page, Ok(response(&page, 12))));
     let fresh = ui.query_request(&state).unwrap();
     assert_eq!(fresh.query(), old.query());
     assert_ne!(fresh.generation, old.generation);
@@ -133,7 +136,7 @@ fn applying_or_clearing_rejects_old_responses_even_when_query_text_returns() {
 }
 
 #[test]
-fn empty_draft_waits_for_enter_and_then_restores_unfiltered_page_first_row() {
+fn empty_draft_waits_for_enter_and_global_track_cannot_select_a_tree_container() {
     let (mut ui, state) = library_fixture();
     ui.open_search();
     ui.search.query = "  ".into();
@@ -143,7 +146,7 @@ fn empty_draft_waits_for_enter_and_then_restores_unfiltered_page_first_row() {
     key(&mut ui, &state, KeyCode::Enter);
     assert!(!ui.search.active);
     assert!(
-        matches!(&ui.view, View::Tree(tree) if tree.directory.as_os_str().is_empty() && tree.entries.selection.selected().is_none())
+        matches!(&ui.view, View::Tree(tree) if tree.directory.as_os_str().is_empty() && tree.entries.selection.selected() == Some(0))
     );
 }
 
@@ -233,11 +236,7 @@ fn filtered_queue_actions_use_occurrences_and_refresh_uses_filtered_offsets() {
     let clear = tui.ui.query_request(&next).unwrap();
     assert!(matches!(
         clear.query(),
-        Query::QueuePage {
-            query: None,
-            offset: 0,
-            ..
-        }
+        Query::QueueEntries { query: None, queue_ids } if queue_ids == vec![202]
     ));
 }
 
@@ -431,6 +430,12 @@ fn recent_filters_only_titles_locally_and_preserves_same_query_selection() {
     };
     assert_eq!(recent.entries.total, 2);
     key(&mut tui.ui, &state, KeyCode::Down);
+    tui.ui.open_search();
+    key(&mut tui.ui, &state, KeyCode::Enter);
+    let View::Recent(recent) = &tui.ui.view else {
+        panic!("recent");
+    };
+    assert_eq!(recent.selected().unwrap().track_id, 1);
     let mut next = state.clone();
     Arc::make_mut(&mut next.library.history)[0].played_at = 10;
     tui.apply_snapshot(next.clone());
@@ -443,12 +448,31 @@ fn recent_filters_only_titles_locally_and_preserves_same_query_selection() {
         key(&mut tui.ui, &next, KeyCode::Enter),
         KeyAction::Command(Command::Play { track_id: 1 })
     ));
+    key(&mut tui.ui, &next, KeyCode::Down);
+    tui.ui.open_search();
+    tui.ui.search.query = "e".into();
+    key(&mut tui.ui, &next, KeyCode::Enter);
+    let View::Recent(recent) = &tui.ui.view else {
+        panic!("recent");
+    };
+    assert_eq!(recent.selected().unwrap().track_id, 3);
+    key(&mut tui.ui, &next, KeyCode::Down);
     key(&mut tui.ui, &next, KeyCode::Esc);
     let View::Recent(recent) = &tui.ui.view else {
         panic!("recent");
     };
     assert_eq!(recent.entries.total, 3);
-    assert_eq!(recent.entries.selection.selected(), Some(0));
+    assert_eq!(recent.selected().unwrap().track_id, 3);
+    assert_eq!(recent.entries.selection.selected(), Some(2));
+    key(&mut tui.ui, &next, KeyCode::Down);
+    tui.ui.open_search();
+    key(&mut tui.ui, &next, KeyCode::Esc);
+    let View::Recent(recent) = &tui.ui.view else {
+        panic!("recent");
+    };
+    assert_eq!(recent.selected().unwrap().track_id, 3);
+    assert_eq!(recent.entries.selection.selected(), Some(2));
+    assert_eq!(recent.entries.selection.offset(), 2);
 }
 
 #[test]
@@ -636,4 +660,765 @@ fn playlist_metadata_filter_changes_relocate_the_selected_occurrence_before_refi
             KeyAction::Command(Command::RemovePlaylistEntry { entry_id }) if entry_id == expected_id
         ));
     }
+}
+
+fn replace_query(ui: &mut UiState, state: &TuiSnapshot, query: &str) {
+    ui.open_search();
+    ui.search.query = query.into();
+    assert!(matches!(key(ui, state, KeyCode::Enter), KeyAction::Ignored));
+}
+
+#[test]
+fn track_search_changes_locate_unloaded_identity_and_same_query_keeps_pages() {
+    for kind in 0..3 {
+        let mut state = query_snapshot();
+        state.system.query_batch_size = 2;
+        let mut ui = UiState {
+            view: match kind {
+                0 => View::Tree(LibraryTree::new(&state.system.library_roots)),
+                1 => View::Tree(LibraryTree {
+                    directory: "/music".into(),
+                    ..LibraryTree::default()
+                }),
+                _ => View::Tree(LibraryTree {
+                    other_tracks: true,
+                    ..LibraryTree::default()
+                }),
+            },
+            ..UiState::default()
+        };
+        replace_query(&mut ui, &state, "first");
+        let initial = ui.query_request(&state).unwrap();
+        assert!(ui.apply_query(&state, &initial, Ok(response(&initial, 12))));
+        key(&mut ui, &state, KeyCode::Down);
+        replace_query(&mut ui, &state, "second");
+        let lookup = ui.query_request(&state).unwrap();
+        assert!(matches!(
+            lookup.query(),
+            Query::LibraryLocate { track_id: 1, .. } | Query::OtherTracksLocate { track_id: 1, .. }
+        ));
+        let located = result(
+            &lookup,
+            ViewResponse::LibraryLocate(LibraryLocateResult::Located(LibraryLocation {
+                offset: 7,
+                total: 12,
+                child: None,
+            })),
+        );
+        assert!(ui.apply_query(&state, &lookup, Ok(located)));
+        let page = ui.query_request(&state).unwrap();
+        assert_eq!(page.offset, 6);
+        let mut loaded = response(&page, 12);
+        match &mut loaded.view {
+            ViewResponse::LibraryPage(page) => page.rows[1].id = 1,
+            ViewResponse::DirectoryPage(page) => page.rows[1] = DirectoryRow::Track(track(1)),
+            _ => panic!("track page"),
+        }
+        assert!(ui.apply_query(&state, &page, Ok(loaded)));
+        let demand = ui.query_request(&state);
+        let generation = ui.projection.generation();
+        let (selection, scroll, allocation) = match &ui.view {
+            View::LibraryResults(rows) => (
+                rows.selection.selected(),
+                rows.selection.offset(),
+                rows.pages[&6].as_ptr() as usize,
+            ),
+            View::Tree(tree) => (
+                tree.entries.selection.selected(),
+                tree.entries.selection.offset(),
+                tree.entries.pages[&6].as_ptr() as usize,
+            ),
+            _ => unreachable!(),
+        };
+        replace_query(&mut ui, &state, " second ");
+        assert_eq!(ui.query_request(&state), demand);
+        assert_eq!(ui.projection.generation(), generation);
+        match &ui.view {
+            View::LibraryResults(rows) => {
+                assert_eq!(rows.selection.selected(), selection);
+                assert_eq!(rows.selection.offset(), scroll);
+                assert_eq!(rows.pages[&6].as_ptr() as usize, allocation);
+            }
+            View::Tree(tree) => {
+                assert_eq!(tree.entries.selection.selected(), selection);
+                assert_eq!(tree.entries.selection.offset(), scroll);
+                assert_eq!(tree.entries.pages[&6].as_ptr() as usize, allocation);
+            }
+            _ => unreachable!(),
+        }
+        if kind != 0 {
+            key(&mut ui, &state, KeyCode::Esc);
+            let clear = ui.query_request(&state).unwrap();
+            assert!(matches!(
+                clear.query(),
+                Query::LibraryLocate {
+                    track_id: 1,
+                    query: None,
+                    ..
+                } | Query::OtherTracksLocate {
+                    track_id: 1,
+                    query: Some(_),
+                    ..
+                }
+            ));
+        }
+    }
+}
+
+#[test]
+fn queue_search_changes_and_tab_clear_preserve_duplicate_occurrence() {
+    let mut state = query_snapshot();
+    state.queue.total = 20;
+    state.system.query_batch_size = 2;
+    let mut ui = UiState::default();
+    replace_query(&mut ui, &state, "first");
+    let first = ui.query_request(&state).unwrap();
+    let mut initial = response(&first, 4);
+    let ViewResponse::QueuePage(page) = &mut initial.view else {
+        unreachable!()
+    };
+    page.rows[0].track.id = 7;
+    page.rows[1].track.id = 7;
+    assert!(ui.apply_query(&state, &first, Ok(initial)));
+    key(&mut ui, &state, KeyCode::Down);
+    replace_query(&mut ui, &state, "second");
+    let lookup = ui.query_request(&state).unwrap();
+    assert!(
+        matches!(lookup.query(), Query::QueueEntries { queue_ids, query: Some(query) } if queue_ids == vec![1001] && query == "second")
+    );
+    let mut selected = queue_row(17, 1001);
+    selected.offset = 5;
+    assert!(ui.apply_query(
+        &state,
+        &lookup,
+        Ok(result(&lookup, ViewResponse::QueueEntries(vec![selected])))
+    ));
+    let page = ui.query_request(&state).unwrap();
+    assert_eq!(page.offset, 4);
+    let mut loaded = response(&page, 6);
+    let ViewResponse::QueuePage(rows) = &mut loaded.view else {
+        unreachable!()
+    };
+    rows.rows[1].id = 1001;
+    rows.rows[1].track.id = 7;
+    assert!(ui.apply_query(&state, &page, Ok(loaded)));
+    let demand = ui.query_request(&state);
+    replace_query(&mut ui, &state, "second");
+    assert_eq!(ui.query_request(&state), demand);
+    assert!(matches!(
+        key(&mut ui, &state, KeyCode::Enter),
+        KeyAction::Command(Command::PlayQueue { queue_id: 1001 })
+    ));
+    key(&mut ui, &state, KeyCode::Tab);
+    assert!(!ui.search.active);
+    key(&mut ui, &state, KeyCode::BackTab);
+    let clear = ui.query_request(&state).unwrap();
+    assert!(
+        matches!(clear.query(), Query::QueueEntries { queue_ids, query: None } if queue_ids == vec![1001])
+    );
+    assert!(!ui.apply_query(
+        &state,
+        &lookup,
+        Ok(result(&lookup, ViewResponse::QueueEntries(vec![])))
+    ));
+}
+
+#[test]
+fn playlist_search_changes_and_tab_clear_preserve_duplicate_entry() {
+    let mut state = query_snapshot();
+    state.system.query_batch_size = 2;
+    let mut ui = UiState {
+        view: playlist_view(1),
+        ..UiState::default()
+    };
+    replace_query(&mut ui, &state, "first");
+    let first = ui.query_request(&state).unwrap();
+    let mut initial = response(&first, 8);
+    let ViewResponse::PlaylistEntries(page) = &mut initial.view else {
+        unreachable!()
+    };
+    for entry in &mut page.rows {
+        entry.track_id = 7;
+    }
+    assert!(ui.apply_query(&state, &first, Ok(initial)));
+    key(&mut ui, &state, KeyCode::Down);
+    replace_query(&mut ui, &state, "second");
+    let lookup = ui.query_request(&state).unwrap();
+    assert!(
+        matches!(lookup.query(), Query::PlaylistEntryLocations { entry_ids, .. } if entry_ids == vec![1])
+    );
+    let location = PlaylistEntryLocation {
+        id: 1,
+        playlist_id: 1,
+        track_id: 7,
+        position: 19,
+        offset: 7,
+        total: 8,
+    };
+    assert!(ui.apply_query(
+        &state,
+        &lookup,
+        Ok(result(
+            &lookup,
+            ViewResponse::PlaylistEntryLocations(vec![location])
+        ))
+    ));
+    let page = ui.query_request(&state).unwrap();
+    assert_eq!(page.offset, 6);
+    let mut loaded = response(&page, 8);
+    let ViewResponse::PlaylistEntries(rows) = &mut loaded.view else {
+        unreachable!()
+    };
+    rows.rows[1].id = 1;
+    rows.rows[1].track_id = 7;
+    assert!(ui.apply_query(&state, &page, Ok(loaded)));
+    let demand = ui.query_request(&state);
+    replace_query(&mut ui, &state, "second");
+    assert_eq!(ui.query_request(&state), demand);
+    assert!(matches!(
+        key(&mut ui, &state, KeyCode::Delete),
+        KeyAction::Command(Command::RemovePlaylistEntry { entry_id: 1 })
+    ));
+    key(&mut ui, &state, KeyCode::Tab);
+    key(&mut ui, &state, KeyCode::BackTab);
+    let clear = ui.query_request(&state).unwrap();
+    assert!(
+        matches!(clear.query(), Query::PlaylistEntryLocations { entry_ids, query: None, .. } if entry_ids == vec![1])
+    );
+}
+
+#[test]
+fn missing_search_identity_falls_back_once_without_ghost_targets() {
+    for kind in 0..5 {
+        for total in [0, 2] {
+            let mut state = query_snapshot();
+            state.queue.total = 20;
+            state.system.query_batch_size = 2;
+            let ui = UiState {
+                view: match kind {
+                    0 => View::Queue,
+                    1 => View::Tree(LibraryTree::new(&state.system.library_roots)),
+                    2 => View::Tree(LibraryTree {
+                        directory: "/music".into(),
+                        ..LibraryTree::default()
+                    }),
+                    3 => View::Tree(LibraryTree {
+                        other_tracks: true,
+                        ..LibraryTree::default()
+                    }),
+                    _ => playlist_view(1),
+                },
+                ..UiState::default()
+            };
+            let mut tui = TuiState {
+                snapshot: state.clone(),
+                ui,
+            };
+            replace_query(&mut tui.ui, &state, "first");
+            let initial = tui.ui.query_request(&state).unwrap();
+            assert!(
+                tui.ui
+                    .apply_query(&state, &initial, Ok(response(&initial, 4)))
+            );
+            key(&mut tui.ui, &state, KeyCode::Down);
+            replace_query(&mut tui.ui, &state, "second");
+            let lookup = tui.ui.query_request(&state).unwrap();
+            let missing = match kind {
+                0 => ViewResponse::QueueEntries(vec![]),
+                4 => ViewResponse::PlaylistEntryLocations(vec![]),
+                _ => ViewResponse::LibraryLocate(LibraryLocateResult::Filtered),
+            };
+            assert!(
+                tui.ui
+                    .apply_query(&state, &lookup, Ok(result(&lookup, missing)))
+            );
+            let fallback = tui.ui.query_request(&state).unwrap();
+            assert_eq!(fallback.offset, 0);
+            // Publish again before the fallback page: the disappeared target
+            // must not be resurrected from remembered identity fields.
+            state.queue.revision += 1;
+            state.library.revision += 1;
+            *Arc::make_mut(&mut state.library.playlist_entry_revisions)
+                .get_mut(&1)
+                .unwrap() += 1;
+            tui.apply_snapshot(state.clone());
+            let fresh = tui.ui.query_request(&state).unwrap();
+            assert!(matches!(
+                fresh.query(),
+                Query::QueuePage { .. }
+                    | Query::LibraryPage { .. }
+                    | Query::DirectoryPage { .. }
+                    | Query::OtherTracksPage { .. }
+                    | Query::PlaylistEntries { .. }
+            ));
+            assert_eq!(fresh.offset, 0);
+            assert!(
+                tui.ui
+                    .apply_query(&state, &fresh, Ok(response(&fresh, total)))
+            );
+            let selected = match &tui.ui.view {
+                View::Queue => tui.ui.queue.selection.selected(),
+                View::LibraryResults(rows) => rows.selection.selected(),
+                View::Tree(tree) => tree.entries.selection.selected(),
+                View::PlaylistDetail { detail, .. } => detail.entries.selection.selected(),
+                _ => unreachable!(),
+            };
+            assert_eq!(selected, (total != 0).then_some(0));
+        }
+    }
+}
+
+fn container_fixture(catalog: bool) -> (UiState, TuiSnapshot) {
+    let mut state = query_snapshot();
+    state.system.query_batch_size = 2;
+    let view = if catalog {
+        let mut rows = PagedList::default();
+        rows.insert(
+            0,
+            2,
+            2,
+            vec![
+                PlaylistSummary {
+                    id: 0,
+                    name: "first".into(),
+                    entry_count: 0,
+                },
+                PlaylistSummary {
+                    id: 1,
+                    name: "target".into(),
+                    entry_count: 0,
+                },
+            ],
+        );
+        rows.selection.select(Some(1));
+        View::Playlists(rows)
+    } else {
+        let mut tree = LibraryTree {
+            directory: "/music".into(),
+            ..LibraryTree::default()
+        };
+        tree.entries.insert(
+            0,
+            2,
+            2,
+            vec![
+                DirectoryRow::Directory {
+                    path: "/music/first".into(),
+                },
+                DirectoryRow::Directory {
+                    path: "/music/target".into(),
+                },
+            ],
+        );
+        tree.entries.selection.select(Some(1));
+        View::Tree(tree)
+    };
+    (
+        UiState {
+            view,
+            ..UiState::default()
+        },
+        state,
+    )
+}
+
+fn container_page(request: &QueryRequest, catalog: bool, found: bool, total: usize) -> QueryResult {
+    let indices = request.offset..(request.offset + request.limit).min(total);
+    let view = if catalog {
+        ViewResponse::PlaylistSummaries(Page {
+            total,
+            rows: indices
+                .map(|index| PlaylistSummary {
+                    id: if found && index == 3 {
+                        1
+                    } else {
+                        index as i64 + 10
+                    },
+                    name: format!("row-{index}"),
+                    entry_count: 0,
+                })
+                .collect(),
+        })
+    } else {
+        ViewResponse::DirectoryPage(Page {
+            total,
+            rows: indices
+                .map(|index| DirectoryRow::Directory {
+                    path: if found && index == 3 {
+                        "/music/target".into()
+                    } else {
+                        format!("/music/{index}").into()
+                    },
+                })
+                .collect(),
+        })
+    };
+    result(request, view)
+}
+
+#[test]
+fn container_search_scans_bounded_pages_and_finishes_found_missing_or_empty() {
+    for catalog in [false, true] {
+        for (found, total) in [(true, 4), (false, 4), (false, 0)] {
+            let (mut ui, state) = container_fixture(catalog);
+            replace_query(&mut ui, &state, "filter");
+            let first = ui.query_request(&state).unwrap();
+            assert_eq!(first.offset, 0);
+            assert!(ui.apply_query(
+                &state,
+                &first,
+                Ok(container_page(&first, catalog, found, total))
+            ));
+            if total != 0 {
+                match &ui.view {
+                    View::Tree(tree) => {
+                        assert_eq!(tree.entries.pages.len(), 1);
+                        assert!(tree.entries.pages.contains_key(&0));
+                    }
+                    View::Playlists(rows) => {
+                        assert_eq!(rows.pages.len(), 1);
+                        assert!(rows.pages.contains_key(&0));
+                    }
+                    _ => unreachable!(),
+                }
+                let second = ui.query_request(&state).unwrap();
+                assert_eq!(second.offset, 2);
+                assert!(!ui.apply_query(
+                    &state,
+                    &first,
+                    Ok(container_page(&first, catalog, found, total))
+                ));
+                assert!(ui.apply_query(
+                    &state,
+                    &second,
+                    Ok(container_page(&second, catalog, found, total))
+                ));
+            }
+            let (selection, pending) = match &ui.view {
+                View::Tree(tree) => (
+                    tree.entries.selection.selected(),
+                    tree.entries.identity_lookup.is_some(),
+                ),
+                View::Playlists(rows) => {
+                    (rows.selection.selected(), rows.identity_lookup.is_some())
+                }
+                _ => unreachable!(),
+            };
+            assert!(!pending);
+            assert_eq!(
+                selection,
+                if total == 0 {
+                    None
+                } else if found {
+                    Some(3)
+                } else {
+                    Some(0)
+                }
+            );
+            let demand = ui.query_request(&state);
+            replace_query(&mut ui, &state, "filter");
+            assert_eq!(ui.query_request(&state), demand);
+            let mut tui = TuiState {
+                snapshot: state.clone(),
+                ui,
+            };
+            for _ in 0..2 {
+                let mut next = tui.snapshot.clone();
+                next.library.revision += 1;
+                next.library.structure_revision += 1;
+                next.library.playlist_revision += 1;
+                tui.apply_snapshot(next.clone());
+                let page = tui.ui.query_request(&next).unwrap();
+                assert!(tui.ui.apply_query(
+                    &next,
+                    &page,
+                    Ok(container_page(&page, catalog, false, 4))
+                ));
+                match &tui.ui.view {
+                    View::Tree(tree) => {
+                        assert!(tree.entries.identity_lookup.is_none());
+                        assert!(
+                            matches!(tree.entries.selected(), Some(DirectoryRow::Directory { path }) if path != Path::new("/music/target"))
+                        );
+                    }
+                    View::Playlists(rows) => {
+                        assert!(rows.identity_lookup.is_none());
+                        assert_ne!(rows.selected().unwrap().id, 1);
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn container_scan_clear_survives_tab_cache_and_navigation_rejects_late_pages() {
+    for catalog in [false, true] {
+        let (mut ui, state) = container_fixture(catalog);
+        replace_query(&mut ui, &state, "filter");
+        let first = ui.query_request(&state).unwrap();
+        assert!(ui.apply_query(&state, &first, Ok(container_page(&first, catalog, true, 4))));
+        let old = ui.query_request(&state).unwrap();
+        assert_eq!(old.offset, 2);
+        key(&mut ui, &state, KeyCode::Tab);
+        assert!(!ui.apply_query(&state, &old, Ok(container_page(&old, catalog, true, 4))));
+        key(&mut ui, &state, KeyCode::BackTab);
+        let clear = ui.query_request(&state).unwrap();
+        assert_eq!(clear.filter, None);
+        assert_eq!(clear.offset, 0);
+        assert!(ui.apply_query(&state, &clear, Ok(container_page(&clear, catalog, true, 4))));
+        let second = ui.query_request(&state).unwrap();
+        assert!(ui.apply_query(
+            &state,
+            &second,
+            Ok(container_page(&second, catalog, true, 4))
+        ));
+        match &ui.view {
+            View::Tree(tree) => assert_eq!(tree.entries.selection.selected(), Some(3)),
+            View::Playlists(rows) => assert_eq!(rows.selection.selected(), Some(3)),
+            _ => unreachable!(),
+        }
+        replace_query(&mut ui, &state, "next");
+        let initial = ui.query_request(&state).unwrap();
+        assert!(ui.apply_query(
+            &state,
+            &initial,
+            Ok(container_page(&initial, catalog, true, 4))
+        ));
+        let obsolete = ui.query_request(&state).unwrap();
+        key(&mut ui, &state, KeyCode::Down);
+        let fresh = ui.query_request(&state).unwrap();
+        assert_ne!(fresh.generation, obsolete.generation);
+        assert!(!ui.apply_query(
+            &state,
+            &obsolete,
+            Ok(container_page(&obsolete, catalog, true, 4))
+        ));
+        assert!(ui.apply_query(&state, &fresh, Ok(container_page(&fresh, catalog, true, 4))));
+        match &ui.view {
+            View::Tree(tree) => {
+                assert_eq!(tree.entries.selection.selected(), Some(1));
+                assert!(tree.entries.identity_lookup.is_none());
+            }
+            View::Playlists(rows) => {
+                assert_eq!(rows.selection.selected(), Some(1));
+                assert!(rows.identity_lookup.is_none());
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[test]
+fn root_global_search_and_clear_never_restore_an_unreachable_container() {
+    let mut state = query_snapshot();
+    state.system.library_roots = Arc::new(vec!["/a".into(), "/b".into()]);
+    let mut tree = LibraryTree::new(&state.system.library_roots);
+    tree.other_present = Some(true);
+    let mut ui = UiState {
+        view: View::Tree(tree),
+        ..UiState::default()
+    };
+    ui.prepare_local_view(&state);
+    key(&mut ui, &state, KeyCode::Down);
+    replace_query(&mut ui, &state, "song");
+    let first = ui.query_request(&state).unwrap();
+    assert!(matches!(
+        first.query(),
+        Query::LibraryPage { offset: 0, .. }
+    ));
+    assert!(ui.apply_query(&state, &first, Ok(response(&first, 4))));
+    key(&mut ui, &state, KeyCode::Down);
+    key(&mut ui, &state, KeyCode::Esc);
+    let count = ui.query_request(&state).unwrap();
+    assert!(ui.apply_query(
+        &state,
+        &count,
+        Ok(result(&count, ViewResponse::OtherTracksCount(1)))
+    ));
+    let View::Tree(tree) = &ui.view else {
+        unreachable!()
+    };
+    assert_eq!(tree.entries.selection.selected(), Some(0));
+    assert!(
+        matches!(tree.entries.selected(), Some(DirectoryRow::Directory { path }) if path == Path::new("/a"))
+    );
+}
+
+#[test]
+fn navigation_cancels_pending_track_and_occurrence_search_locates() {
+    for kind in 0..5 {
+        let mut state = query_snapshot();
+        state.system.query_batch_size = 2;
+        let mut ui = UiState {
+            view: match kind {
+                0 => View::Queue,
+                1 => View::Tree(LibraryTree::new(&state.system.library_roots)),
+                2 => View::Tree(LibraryTree {
+                    directory: "/music".into(),
+                    ..LibraryTree::default()
+                }),
+                3 => View::Tree(LibraryTree {
+                    other_tracks: true,
+                    ..LibraryTree::default()
+                }),
+                _ => playlist_view(1),
+            },
+            ..UiState::default()
+        };
+        replace_query(&mut ui, &state, "first");
+        let initial = ui.query_request(&state).unwrap();
+        assert!(ui.apply_query(&state, &initial, Ok(response(&initial, 4))));
+        key(&mut ui, &state, KeyCode::Down);
+        replace_query(&mut ui, &state, "second");
+        let obsolete = ui.query_request(&state).unwrap();
+        key(&mut ui, &state, KeyCode::Down);
+        let fresh = ui.query_request(&state).unwrap();
+        let late = match kind {
+            0 => {
+                let mut row = queue_row(7, 1001);
+                row.offset = 7;
+                ViewResponse::QueueEntries(vec![row])
+            }
+            4 => ViewResponse::PlaylistEntryLocations(vec![PlaylistEntryLocation {
+                id: 1,
+                playlist_id: 1,
+                track_id: 7,
+                position: 7,
+                offset: 7,
+                total: 8,
+            }]),
+            _ => ViewResponse::LibraryLocate(LibraryLocateResult::Located(LibraryLocation {
+                offset: 7,
+                total: 8,
+                child: None,
+            })),
+        };
+        assert!(!ui.apply_query(&state, &obsolete, Ok(result(&obsolete, late))));
+        assert_eq!(fresh.offset, 0);
+        assert!(ui.apply_query(&state, &fresh, Ok(response(&fresh, 4))));
+        let selection = match &ui.view {
+            View::Queue => ui.queue.selection.selected(),
+            View::LibraryResults(rows) => rows.selection.selected(),
+            View::Tree(tree) => tree.entries.selection.selected(),
+            View::PlaylistDetail { detail, .. } => detail.entries.selection.selected(),
+            _ => unreachable!(),
+        };
+        assert_eq!(selection, Some(0));
+    }
+}
+
+#[test]
+fn recent_search_preserves_current_track_or_first_without_hidden_selection() {
+    let mut state = query_snapshot();
+    state.library.history = Arc::new(
+        (1..=3)
+            .map(|id| HistoryEntry {
+                track_id: id,
+                title: if id == 2 {
+                    "beta".into()
+                } else {
+                    "alpha".into()
+                },
+                play_count: 1,
+                played_at: id,
+                favorite: false,
+            })
+            .collect(),
+    );
+    let mut recent = RecentTracks::default();
+    recent.sync(&state.library.history, "");
+    let mut ui = UiState {
+        view: View::Recent(recent),
+        ..UiState::default()
+    };
+    key(&mut ui, &state, KeyCode::Down); // beta / track 2
+    replace_query(&mut ui, &state, "alpha");
+    let View::Recent(recent) = &ui.view else {
+        unreachable!()
+    };
+    assert_eq!(recent.selected().unwrap().track_id, 3);
+    key(&mut ui, &state, KeyCode::Down); // alpha / track 1
+    let View::Recent(recent) = &ui.view else {
+        unreachable!()
+    };
+    let allocation = recent.entries.pages[&0].as_ptr();
+    replace_query(&mut ui, &state, "alpha");
+    let View::Recent(recent) = &ui.view else {
+        unreachable!()
+    };
+    assert_eq!(recent.entries.pages[&0].as_ptr(), allocation);
+    assert_eq!(recent.selected().unwrap().track_id, 1);
+    replace_query(&mut ui, &state, " ");
+    let View::Recent(recent) = &ui.view else {
+        unreachable!()
+    };
+    assert_eq!(recent.entries.total, 3);
+    assert_eq!(recent.selected().unwrap().track_id, 1);
+    assert!(!ui.search.active);
+    replace_query(&mut ui, &state, "missing");
+    let View::Recent(recent) = &ui.view else {
+        unreachable!()
+    };
+    assert_eq!(recent.entries.total, 0);
+    assert_eq!(recent.entries.selection.selected(), None);
+    replace_query(&mut ui, &state, "alpha");
+    let View::Recent(recent) = &ui.view else {
+        unreachable!()
+    };
+    assert_eq!(recent.selected().unwrap().track_id, 3);
+}
+
+#[test]
+fn container_scan_restores_scroll_and_discards_nonvisible_scan_batches() {
+    let (mut ui, state) = container_fixture(false);
+    let View::Tree(tree) = &mut ui.view else {
+        unreachable!()
+    };
+    tree.entries.clear();
+    tree.entries.viewport_rows = 4;
+    tree.entries.selection = ListState::default().with_selected(Some(8)).with_offset(7);
+    tree.entries.insert(
+        8,
+        2,
+        20,
+        vec![
+            DirectoryRow::Directory {
+                path: "/music/target".into(),
+            },
+            DirectoryRow::Directory {
+                path: "/music/neighbor".into(),
+            },
+        ],
+    );
+    replace_query(&mut ui, &state, "filter");
+    for expected in (0..=8).step_by(2) {
+        let request = ui.query_request(&state).unwrap();
+        assert_eq!(request.offset, expected);
+        let page = ViewResponse::DirectoryPage(Page {
+            total: 20,
+            rows: (expected..expected + 2)
+                .map(|index| DirectoryRow::Directory {
+                    path: if index == 9 {
+                        "/music/target".into()
+                    } else {
+                        format!("/music/{index}").into()
+                    },
+                })
+                .collect(),
+        });
+        assert!(ui.apply_query(&state, &request, Ok(result(&request, page))));
+        let View::Tree(tree) = &ui.view else {
+            unreachable!()
+        };
+        assert_eq!(tree.entries.pages.len(), 1);
+    }
+    let View::Tree(tree) = &ui.view else {
+        unreachable!()
+    };
+    assert_eq!(tree.entries.selection.selected(), Some(9));
+    assert_eq!(tree.entries.selection.offset(), 7);
+    assert!(tree.entries.pages.contains_key(&8));
+    assert!(tree.entries.identity_lookup.is_none());
 }

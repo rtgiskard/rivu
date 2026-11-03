@@ -1,5 +1,5 @@
 use super::{
-    paged::PagedList,
+    paged::{ContainerIdentity, PagedList},
     worker::{QueryKind, QueryRequest, QueryResult},
 };
 use crate::{
@@ -309,7 +309,9 @@ impl View {
             match self {
                 Self::LibraryResults(results) => results.clear(),
                 Self::Tree(tree) => {
-                    if tree.other_tracks || !tree.directory.as_os_str().is_empty() {
+                    if tree.entries.identity_lookup.is_none()
+                        && (tree.other_tracks || !tree.directory.as_os_str().is_empty())
+                    {
                         tree.anchor = tree
                             .anchor
                             .or_else(|| {
@@ -429,7 +431,7 @@ impl UiState {
         let limit = state.system.query_batch_size as usize;
         let mut changed = false;
         while let Some(offset) = tree.entries.next_offset(limit) {
-            let rows = tree
+            let rows: Vec<_> = tree
                 .roots
                 .iter()
                 .cloned()
@@ -438,12 +440,13 @@ impl UiState {
                 .skip(offset)
                 .take(limit)
                 .collect();
-            tree.entries.insert(
-                offset,
-                limit,
-                tree.roots.len() + usize::from(other_present),
-                rows,
-            );
+            let total = tree.roots.len() + usize::from(other_present);
+            if tree
+                .entries
+                .resolve_identity(offset, total, &rows, matches_directory_identity)
+            {
+                tree.entries.insert(offset, limit, total, rows);
+            }
             changed = true;
         }
         changed
@@ -678,7 +681,11 @@ impl UiState {
             (View::Queue, ViewResponse::QueuePage(page)) if request.kind == QueryKind::Queue => {
                 self.queue
                     .insert(request.offset, request.limit, page.total, page.rows);
-                self.queue_selected_id = self.queue.selected().map(|row| row.id);
+                if self.queue.total == 0 {
+                    self.queue_selected_id = None;
+                } else if let Some(row) = self.queue.selected() {
+                    self.queue_selected_id = Some(row.id);
+                }
             }
             (View::Queue, ViewResponse::QueueEntries(rows)) => {
                 if let QueryKind::QueueSelection(queue_id) = request.kind {
@@ -708,6 +715,8 @@ impl UiState {
                 results.insert(request.offset, request.limit, page.total, page.rows);
                 if let Some(row) = results.selected() {
                     self.library_selected_id = Some(row.id);
+                } else if results.total == 0 {
+                    self.library_selected_id = None;
                 }
             }
             (View::Tree(tree), ViewResponse::OtherTracksCount(total))
@@ -723,10 +732,11 @@ impl UiState {
                     page.total,
                     page.rows.into_iter().map(DirectoryRow::Track).collect(),
                 );
-                tree.selected_track_id = tree.entries.selected().and_then(|entry| match entry {
-                    DirectoryRow::Track(track) => Some(track.id),
-                    _ => None,
-                });
+                if let Some(DirectoryRow::Track(track)) = tree.entries.selected() {
+                    tree.selected_track_id = Some(track.id);
+                } else if tree.entries.total == 0 {
+                    tree.selected_track_id = None;
+                }
             }
             (View::Tree(tree), ViewResponse::LibraryLocate(location)) => {
                 let anchor = tree.anchor.take();
@@ -734,20 +744,29 @@ impl UiState {
                 if let rivu_protocol::model::LibraryLocateResult::Located(location) = location {
                     tree.selected_track_id = anchor;
                     tree.entries.total = location.total;
+                    tree.entries.loaded = true;
                     tree.entries.selection.select(Some(location.offset));
                     tree.entries.set_viewport(tree.entries.viewport_rows);
                 }
             }
             (View::Tree(tree), ViewResponse::DirectoryPage(page)) => {
-                tree.entries
-                    .insert(request.offset, request.limit, page.total, page.rows);
-                tree.selected_track_id = tree.entries.selected().and_then(|entry| match entry {
-                    DirectoryRow::Track(track) => Some(track.id),
-                    _ => None,
-                });
+                if tree.entries.resolve_identity(request.offset, page.total, &page.rows, matches_directory_identity) {
+                    tree.entries.insert(request.offset, request.limit, page.total, page.rows);
+                }
+                if tree.entries.identity_lookup.is_some() {
+                    tree.selected_track_id = None;
+                } else if let Some(DirectoryRow::Track(track)) = tree.entries.selected() {
+                    tree.selected_track_id = Some(track.id);
+                } else if tree.entries.total == 0 {
+                    tree.selected_track_id = None;
+                }
             }
             (View::Playlists(playlists), ViewResponse::PlaylistSummaries(page)) => {
-                playlists.insert(request.offset, request.limit, page.total, page.rows);
+                if playlists.resolve_identity(request.offset, page.total, &page.rows, |row, id| {
+                    matches!(id, ContainerIdentity::Playlist(target) if row.id == *target)
+                }) {
+                    playlists.insert(request.offset, request.limit, page.total, page.rows);
+                }
             }
             (View::PlaylistDetail { detail, .. }, ViewResponse::PlaylistSummary(summary))
                 if request.kind == QueryKind::PlaylistSummary(detail.playlist_id) =>
@@ -763,7 +782,11 @@ impl UiState {
                 detail
                     .entries
                     .insert(request.offset, request.limit, page.total, page.rows);
-                detail.selected_entry_id = detail.entries.selected().map(|entry| entry.id);
+                if let Some(entry) = detail.entries.selected() {
+                    detail.selected_entry_id = Some(entry.id);
+                } else if detail.entries.total == 0 {
+                    detail.selected_entry_id = None;
+                }
             }
             (
                 View::PlaylistDetail { detail, .. },
@@ -952,7 +975,8 @@ impl UiState {
                 .select((next.queue.total != 0).then(|| selected.min(next.queue.total - 1)));
         } else {
             self.queue.total = filtered_total;
-            self.queue.loaded = true;
+            // An old empty match set cannot suppress the refreshed first page.
+            self.queue.loaded = filtered_total != 0;
         }
         if next.queue.total == 0 {
             self.queue.total = 0;
@@ -981,50 +1005,89 @@ impl UiState {
         self.mark_local_change();
     }
 
-    fn reset_results(&mut self, state: &TuiSnapshot) {
-        self.refresh_anchor = None;
+    fn refilter_results(&mut self, state: &TuiSnapshot) {
         match &mut self.view {
             View::Queue => {
-                self.queue = PagedList {
-                    viewport_rows: self.queue.viewport_rows,
-                    ..PagedList::default()
-                };
-                self.queue.loaded = state.queue.total == 0;
-                self.queue_anchor = None;
-                self.queue_selected_id = None;
-            }
-            View::LibraryResults(results) => {
-                *results = PagedList {
-                    viewport_rows: results.viewport_rows,
-                    ..PagedList::default()
-                };
-                self.library_selected_id = None;
-            }
-            View::Tree(tree) => {
-                tree.entries = PagedList {
-                    viewport_rows: tree.entries.viewport_rows,
-                    ..PagedList::default()
-                };
-                tree.anchor = None;
-                tree.selected_track_id = None;
-            }
-            View::Playlists(rows) => {
-                *rows = PagedList {
-                    viewport_rows: rows.viewport_rows,
-                    ..PagedList::default()
+                self.queue_anchor = self
+                    .queue_anchor
+                    .or_else(|| self.queue.selected().map(|row| row.id))
+                    .or(self.queue_selected_id);
+                self.queue.clear();
+                self.queue.selection.select(Some(0));
+                if state.queue.total == 0 {
+                    self.queue.loaded = true;
+                    self.queue.selection.select(None);
+                    self.queue_anchor = None;
+                    self.queue_selected_id = None;
                 }
             }
+            View::LibraryResults(results) => {
+                self.refresh_anchor = self
+                    .refresh_anchor
+                    .or_else(|| results.selected().map(|row| row.id))
+                    .or(self.library_selected_id);
+                results.clear();
+                results.selection.select(Some(0));
+            }
+            View::Tree(tree) => {
+                let container = tree
+                    .entries
+                    .identity_lookup
+                    .as_ref()
+                    .map(|(id, _, _)| id.clone())
+                    .or_else(|| tree.entries.selected().and_then(directory_identity));
+                if container.is_some() {
+                    tree.anchor = None;
+                    tree.selected_track_id = None;
+                } else {
+                    tree.anchor = tree
+                        .anchor
+                        .or_else(|| {
+                            tree.entries.selected().and_then(|entry| match entry {
+                                DirectoryRow::Track(track) => Some(track.id),
+                                _ => None,
+                            })
+                        })
+                        .or(tree.selected_track_id);
+                }
+                tree.entries.retain_identity(container);
+                if tree.anchor.is_some() {
+                    tree.entries.identity_lookup = None;
+                    tree.entries.selection.select(Some(0));
+                }
+            }
+            View::Playlists(rows) => {
+                let identity = rows
+                    .identity_lookup
+                    .as_ref()
+                    .map(|(id, _, _)| id.clone())
+                    .or_else(|| {
+                        rows.selected()
+                            .map(|row| ContainerIdentity::Playlist(row.id))
+                    });
+                rows.retain_identity(identity);
+            }
             View::PlaylistDetail { detail, .. } => {
-                detail.entries = PagedList {
-                    viewport_rows: detail.entries.viewport_rows,
-                    ..PagedList::default()
-                };
-                detail.entry_anchor = None;
-                detail.selected_entry_id = None;
+                detail.entry_anchor = detail
+                    .entry_anchor
+                    .or_else(|| detail.entries.selected().map(|entry| entry.id))
+                    .or(detail.selected_entry_id);
+                detail.entries.clear();
+                detail.entries.selection.select(Some(0));
             }
             View::Recent(recent) => {
-                recent.entries = PagedList::default();
+                let selected_id = recent.selected().map(|entry| entry.track_id);
+                recent.entries.loaded = false;
                 recent.sync(&state.library.history, &self.search.applied_query);
+                if selected_id
+                    .is_some_and(|id| recent.selected().is_none_or(|entry| entry.track_id != id))
+                {
+                    recent
+                        .entries
+                        .selection
+                        .select((recent.entries.total != 0).then_some(0));
+                    recent.entries.set_viewport(recent.entries.viewport_rows);
+                }
             }
         }
         self.cancel_query();
@@ -1034,26 +1097,50 @@ impl UiState {
         if !self.search.active {
             return;
         }
+        let had_query = !self.search.applied_query.is_empty();
         self.search = SearchState::default();
-        if matches!(self.view, View::LibraryResults(_)) {
-            self.view = View::Tree(LibraryTree::new(&state.system.library_roots));
+        if let View::LibraryResults(rows) = &self.view {
+            // A global track result is not a root directory/OtherTracks row.
+            // Returning to Tree therefore has no reachable matching identity.
+            let mut tree = LibraryTree::new(&state.system.library_roots);
+            tree.entries.viewport_rows = rows.viewport_rows;
+            self.view = View::Tree(tree);
+            self.refresh_anchor = None;
+            self.library_selected_id = None;
         }
-        self.reset_results(state);
+        if had_query {
+            self.refilter_results(state);
+        }
         self.mark_local_change();
     }
 
     fn submit_search(&mut self, state: &TuiSnapshot) {
-        self.search.applied_query = self.search.query.trim().to_owned();
-        self.search.editing = false;
-        if self.search.applied_query.is_empty() {
+        let query = self.search.query.trim();
+        let query_changed = self.search.applied_query != query;
+        if query.is_empty() {
             self.clear_search(state);
             return;
         }
+        if query_changed {
+            self.search.applied_query.clear();
+            self.search.applied_query.push_str(query);
+        }
+        self.search.editing = false;
         if matches!(&self.view, View::Tree(tree) if !tree.other_tracks && tree.directory.as_os_str().is_empty())
         {
-            self.view = View::LibraryResults(PagedList::default());
+            let View::Tree(tree) = &self.view else {
+                unreachable!()
+            };
+            self.view = View::LibraryResults(PagedList {
+                viewport_rows: tree.entries.viewport_rows,
+                ..PagedList::default()
+            });
+            self.refresh_anchor = None;
+            self.library_selected_id = None;
         }
-        self.reset_results(state);
+        if query_changed {
+            self.refilter_results(state);
+        }
         self.mark_local_change();
     }
 
@@ -1318,6 +1405,67 @@ impl UiState {
         {
             return KeyAction::Command(command);
         }
+        let mut cancelled_lookup = false;
+        if matches!(
+            action,
+            Action::Up
+                | Action::Down
+                | Action::PageUp
+                | Action::PageDown
+                | Action::First
+                | Action::Last
+        ) {
+            // Navigation owns the current selection even while a locator is
+            // pending. Cancel that intent, then apply the actual action below.
+            cancelled_lookup = match &mut self.view {
+                View::Queue if self.queue_anchor.is_some() => {
+                    self.queue_anchor = None;
+                    self.queue_selected_id = None;
+                    if !self.queue.loaded {
+                        self.queue.selection.select(Some(0));
+                    }
+                    true
+                }
+                View::LibraryResults(rows) if self.refresh_anchor.is_some() => {
+                    self.refresh_anchor = None;
+                    self.library_selected_id = None;
+                    if !rows.loaded {
+                        rows.selection.select(Some(0));
+                    }
+                    true
+                }
+                View::Tree(tree)
+                    if tree.anchor.is_some() || tree.entries.identity_lookup.is_some() =>
+                {
+                    tree.anchor = None;
+                    tree.selected_track_id = None;
+                    tree.entries.identity_lookup = None;
+                    if !tree.entries.loaded {
+                        tree.entries.selection.select(Some(0));
+                    }
+                    true
+                }
+                View::PlaylistDetail { detail, .. } if detail.entry_anchor.is_some() => {
+                    detail.entry_anchor = None;
+                    detail.selected_entry_id = None;
+                    if !detail.entries.loaded {
+                        detail.entries.selection.select(Some(0));
+                    }
+                    true
+                }
+                View::Playlists(rows) if rows.identity_lookup.is_some() => {
+                    rows.identity_lookup = None;
+                    if !rows.loaded {
+                        rows.selection.select(Some(0));
+                    }
+                    true
+                }
+                _ => false,
+            };
+            if cancelled_lookup {
+                self.cancel_query();
+            }
+        }
         let page_size = self.page_size;
         let view = std::mem::take(&mut self.view);
         let mut changed = false;
@@ -1519,6 +1667,7 @@ impl UiState {
                 }
             },
         }
+        changed |= cancelled_lookup;
         if changed {
             if matches!(
                 action,
@@ -1723,6 +1872,22 @@ impl LibraryTree {
             ..PagedList::default()
         };
         true
+    }
+}
+
+fn directory_identity(row: &DirectoryRow) -> Option<ContainerIdentity> {
+    match row {
+        DirectoryRow::Directory { path } => Some(ContainerIdentity::Directory(path.clone())),
+        DirectoryRow::OtherTracks => Some(ContainerIdentity::OtherTracks),
+        DirectoryRow::Track(_) => None,
+    }
+}
+
+fn matches_directory_identity(row: &DirectoryRow, identity: &ContainerIdentity) -> bool {
+    match (row, identity) {
+        (DirectoryRow::Directory { path }, ContainerIdentity::Directory(target)) => path == target,
+        (DirectoryRow::OtherTracks, ContainerIdentity::OtherTracks) => true,
+        _ => false,
     }
 }
 

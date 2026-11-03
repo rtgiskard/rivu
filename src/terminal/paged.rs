@@ -1,6 +1,14 @@
 use crate::keyboard::Action;
 use ratatui::widgets::ListState;
 use std::collections::HashMap;
+use std::path::PathBuf;
+
+#[derive(Clone, PartialEq, Eq)]
+pub(super) enum ContainerIdentity {
+    Directory(PathBuf),
+    OtherTracks,
+    Playlist(i64),
+}
 
 pub(super) struct PagedList<T> {
     pub(super) pages: HashMap<usize, Vec<T>>,
@@ -9,6 +17,8 @@ pub(super) struct PagedList<T> {
     pub(super) fetch_size: usize,
     pub(super) selection: ListState,
     pub(super) viewport_rows: usize,
+    // Target identity, next scan offset, and the viewport to restore on success.
+    pub(super) identity_lookup: Option<(ContainerIdentity, usize, usize)>,
 }
 
 impl<T> Default for PagedList<T> {
@@ -20,6 +30,7 @@ impl<T> Default for PagedList<T> {
             fetch_size: 0,
             selection: ListState::default(),
             viewport_rows: 1,
+            identity_lookup: None,
         }
     }
 }
@@ -30,10 +41,16 @@ impl<T> PagedList<T> {
         self.total = 0;
         self.loaded = false;
         self.fetch_size = 0;
+        if let Some((_, offset, _)) = &mut self.identity_lookup {
+            *offset = 0;
+        }
     }
 
     pub(super) fn next_offset(&self, fetch_size: usize) -> Option<usize> {
         let fetch_size = fetch_size.max(1);
+        if let Some((_, offset, _)) = &self.identity_lookup {
+            return Some(*offset);
+        }
         let selected = self.selection.selected().unwrap_or(0) / fetch_size * fetch_size;
         if !self.loaded || self.fetch_size != fetch_size {
             return Some(selected);
@@ -127,7 +144,7 @@ impl<T> PagedList<T> {
 
     pub(super) fn insert(&mut self, offset: usize, fetch_size: usize, total: usize, items: Vec<T>) {
         if self.fetch_size != fetch_size {
-            self.clear();
+            self.pages.clear();
         }
         self.fetch_size = fetch_size;
         self.pages.insert(offset, items);
@@ -137,6 +154,43 @@ impl<T> PagedList<T> {
         self.selection
             .select((total != 0).then(|| selected.min(total - 1)));
         self.set_viewport(self.viewport_rows);
+    }
+
+    pub(super) fn retain_identity(&mut self, identity: Option<ContainerIdentity>) {
+        let scroll = self
+            .identity_lookup
+            .as_ref()
+            .map_or(self.selection.offset(), |(_, _, scroll)| *scroll);
+        self.clear();
+        self.identity_lookup = identity.map(|identity| (identity, 0, scroll));
+        self.selection.select(Some(0));
+    }
+
+    // Catalogs and directory containers have no protocol locate endpoint. Keep
+    // the first page navigable; subsequent scan batches are transient.
+    pub(super) fn resolve_identity(
+        &mut self,
+        offset: usize,
+        total: usize,
+        items: &[T],
+        matches: impl Fn(&T, &ContainerIdentity) -> bool,
+    ) -> bool {
+        let Some((identity, next, scroll)) = &mut self.identity_lookup else {
+            return true;
+        };
+        if let Some(index) = items.iter().position(|item| matches(item, identity)) {
+            self.selection.select(Some(offset + index));
+            *self.selection.offset_mut() = *scroll;
+            self.identity_lookup = None;
+            return true;
+        }
+        if !items.is_empty() && offset + items.len() < total {
+            *next = offset + items.len();
+            return offset == 0;
+        }
+        self.identity_lookup = None;
+        self.selection.select((total != 0).then_some(0));
+        offset == 0
     }
 
     pub(super) fn get(&self, index: usize) -> Option<&T> {

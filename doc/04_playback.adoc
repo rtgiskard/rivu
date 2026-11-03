@@ -396,8 +396,11 @@ last-played timestamps where width permits. Enter plays the selected track,
 `i` opens its details, and `m` toggles its favorite. Navigation and shared playback
 shortcuts work as on other track lists; Recent has no sorting or removal.
 
-Use `/` to search the current page. Type a query, then press Enter to apply it;
-typing alone does not change the results. Press `/` again to edit the query.
+Use `/` to search the current page, then Enter to apply; typing alone does not
+change the results. Applying or clearing search keeps the selected entry if it
+remains in the results; otherwise it selects the first result, or nothing when
+empty. Scrolling adjusts only as needed to keep the selection visible.
+Search does not start playback. Press `/` again to edit the query.
 Enter on the filtered list keeps its normal play or open action. The editor owns
 all printable characters, including Space, `m`, `q`, and `?`; F1 opens help and
 Ctrl-C exits even while editing.
@@ -423,12 +426,11 @@ The search scope follows the page:
   at most 256 tracks.
 
 Searches use case-insensitive literal substrings, not wildcard patterns. There is
-one transient editor: Esc clears and closes it, restoring the unfiltered current
-page at its first row, without restoring an old scroll position. Tab/Shift+Tab
-switches top-level tabs even while editing and clears search. Entering or leaving
+one transient editor: Esc clears and closes it. Tab/Shift+Tab switches top-level
+tabs even while editing and clears search. Entering or leaving
 a directory, Other, or playlist details also clears it; queries are not preserved
-per tab. Background refreshes of the same applied query keep the selected
-occurrence or track when it still matches.
+per tab. Background refreshes of the same applied query also preserve selection
+by identity when the entry remains visible.
 Open playlist details also follow external playlist renames without resetting
 their track selection or scroll position.
 Entry loading and title refresh are independent: failure of one neither blocks
