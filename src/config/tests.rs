@@ -1,6 +1,34 @@
 use super::*;
 use std::{fs, path::Path};
 
+#[test]
+fn common_palette_patch_preserves_unrelated_theme_and_supports_reset() {
+    let baseline = Config::default();
+    for palette in [
+        VisualizationPalette::Inferno,
+        VisualizationPalette::Magma,
+        VisualizationPalette::Viridis,
+        VisualizationPalette::Cividis,
+        VisualizationPalette::Grayscale,
+        VisualizationPalette::Deadbeef,
+    ] {
+        let draft = Config {
+            visualization_palette: palette,
+            ..baseline.clone()
+        };
+        let mut latest = Config {
+            ui_theme: Theme::TokyoNight,
+            ..baseline.clone()
+        };
+        ConfigPatch::between(&baseline, &draft).apply_to(&mut latest);
+        assert_eq!(latest.visualization_palette, palette);
+        assert_eq!(latest.ui_theme, Theme::TokyoNight);
+        ConfigPatch::between(&draft, &baseline).apply_to(&mut latest);
+        assert_eq!(latest.visualization_palette, VisualizationPalette::Deadbeef);
+        assert_eq!(latest.ui_theme, Theme::TokyoNight);
+    }
+}
+
 fn write_current_config(path: &Path, contents: impl AsRef<str>) -> std::io::Result<()> {
     fs::write(
         path,
@@ -758,7 +786,7 @@ fn save_reload_replaces_file_and_leaves_no_temporary_files() {
         ffmpeg_enabled: true,
         pipewire_auto_mix: false,
         spectrum_style: SpectrumStyle::Solid,
-        visualization_palette: VisualizationPalette::TokyoNight,
+        visualization_palette: VisualizationPalette::Magma,
         visualization_background: "#101820".parse().unwrap(),
         analysis_fft_size: 16384,
         analysis_window: AnalysisWindow::Hann,

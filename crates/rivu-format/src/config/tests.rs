@@ -1,8 +1,43 @@
 use super::*;
 
 #[test]
+fn common_palettes_roundtrip_and_patch() {
+    let original = "[visualizations.general]\npalette = 'deadbeef'\n";
+    let baseline = from_toml(original).unwrap();
+    assert_eq!(
+        Config::default().visualization_palette,
+        VisualizationPalette::Deadbeef
+    );
+    for (name, palette) in [
+        ("inferno", VisualizationPalette::Inferno),
+        ("magma", VisualizationPalette::Magma),
+        ("viridis", VisualizationPalette::Viridis),
+        ("cividis", VisualizationPalette::Cividis),
+        ("grayscale", VisualizationPalette::Grayscale),
+        ("deadbeef", VisualizationPalette::Deadbeef),
+    ] {
+        let config = from_toml(&format!("[visualizations.general]\npalette = '{name}'\n")).unwrap();
+        assert_eq!(config.visualization_palette, palette);
+        assert_eq!(from_toml(&to_toml(&config).unwrap()).unwrap(), config);
+        let saved = update_toml(original, Some(&baseline), &config).unwrap();
+        assert_eq!(from_toml(&saved).unwrap(), config);
+    }
+    for value in ["tokyo_night", "Inferno", "unknown", ""] {
+        assert!(from_toml(&format!("[visualizations.general]\npalette = '{value}'\n")).is_err());
+    }
+    for value in ["inferno", "deadbeef", "tokyo_night"] {
+        assert!(
+            from_toml(&format!(
+                "[visualizations.spectrogram]\npalette = '{value}'\n"
+            ))
+            .is_err()
+        );
+    }
+}
+
+#[test]
 fn visualization_groups_round_trip_and_preserve_independent_ranges() {
-    let original = "[visualizations.general]\nenabled = false\nsignal = 'before'\nanalysis_rate_hz = 30\nanimation_fps = 120\nbackground = '#123456'\npalette = 'tokyo_night'\nanalysis_fft_size = 4096\nanalysis_window = 'hann'\ndb_range = 85.0\n[visualizations.radial]\nrotation_speed = 2.0\nbar_width = 1.0\nring_opacity = 0.5\ninner_diameter = 1.0\nfade_when_idle = true\n[visualizations.reactive]\nsensitivity = 2.0\nbloom_intensity = 1.0\ndb_range = 85.0\n[visualizations.spectrum]\ndb_range = 65.0\n[visualizations.spectrogram]\ndb_range = 105.0\n[visualizations.defaults]\nstyle = 'oscilloscope'\nreference_lines = true\nlabels = true\n[visualizations.effects]\nprimary_color = '#112233'\nsecondary_color = '#445566'\n";
+    let original = "[visualizations.general]\nenabled = false\nsignal = 'before'\nanalysis_rate_hz = 30\nanimation_fps = 120\nbackground = '#123456'\npalette = 'viridis'\nanalysis_fft_size = 4096\nanalysis_window = 'hann'\ndb_range = 85.0\n[visualizations.radial]\nrotation_speed = 2.0\nbar_width = 1.0\nring_opacity = 0.5\ninner_diameter = 1.0\nfade_when_idle = true\n[visualizations.reactive]\nsensitivity = 2.0\nbloom_intensity = 1.0\ndb_range = 85.0\n[visualizations.spectrum]\ndb_range = 65.0\n[visualizations.spectrogram]\ndb_range = 105.0\n[visualizations.defaults]\nstyle = 'oscilloscope'\nreference_lines = true\nlabels = true\n[visualizations.effects]\nprimary_color = '#112233'\nsecondary_color = '#445566'\n";
     let mut config = from_toml(original).unwrap();
     assert!(!config.visualization_enabled);
     assert!(config.default_visualizer_reference_lines);

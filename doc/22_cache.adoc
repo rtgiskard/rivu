@@ -320,9 +320,9 @@ link:23_visuals.adoc#waveform[Waveform].
 Spectrum retains frequency mappings per panel; levels reuse compatible mappings,
 while geometry, grouping or display-mapping changes rebuild them. Each panel render
 rebuilds its body, though retained scenes can replay without a render.
-One shared 1024-entry palette uses cubic colors quantized to 8-bit channels;
-range, size and style do not change its identity. Waveform instead uses floating-point
-endpoints. Body representation belongs to
+Spectrum and Spectrogram share the selected GPU color map; range, size and style
+do not change its identity. Waveform uses paired endpoints from the same map.
+Body representation belongs to
 link:25_gpu_rendering.adoc#consumer-cutover-contracts[GPU consumer contracts].
 
 Suspension retains the final immutable body, normalized peak markers, and display

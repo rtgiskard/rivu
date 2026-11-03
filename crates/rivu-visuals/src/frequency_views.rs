@@ -10,8 +10,6 @@ mod spectrogram;
 mod spectrum;
 
 use crate::labels::paint_label;
-#[cfg(test)]
-use crate::palette::{DEADBEEF_STOPS, TOKYO_NIGHT_STOPS, gradient};
 use crate::palette::{PaletteLut, active_palette_lut};
 use spectrogram::Spectrogram;
 #[cfg(test)]
@@ -176,8 +174,9 @@ impl FrequencyViews {
         let palette_changed = data.palette_lut.palette != config.visualization_palette;
         let history_missing =
             data.enabled && data.spectrogram.visible && data.spectrogram.history_columns == 0;
-        let shared_appearance_changed = palette_changed
-            || data.visualization_background != config.visualization_background.rgb();
+        let background_changed =
+            data.visualization_background != config.visualization_background.rgb();
+        let spectrum_appearance_changed = palette_changed || background_changed;
         let spectrum_changed = data.spectrum.db_range != spectrum_db_range
             || data.spectrum.bar_layout != config.spectrum_bar_layout
             || data.spectrum.style != config.spectrum_style
@@ -192,15 +191,14 @@ impl FrequencyViews {
         let analysis_changed = data.analysis_fft_size != config.analysis_fft_size
             || data.analysis_window != config.analysis_window
             || data.visualization_signal != config.visualization_signal;
-        let heat_changed = palette_changed
-            || data.spectrogram.db_range != spectrogram_db_range
+        let heat_changed = data.spectrogram.db_range != spectrogram_db_range
             || data.spectrogram.interpolate != config.spectrogram_interpolate;
         let history_span_changed =
             data.spectrogram.history_seconds != config.spectrogram_history_seconds;
         let history_changed = history_missing
             || history_span_changed
             || data.analysis_rate_hz != config.analysis_rate_hz;
-        let changed = shared_appearance_changed
+        let changed = spectrum_appearance_changed
             || spectrum_changed
             || analysis_changed
             || heat_changed
@@ -208,12 +206,12 @@ impl FrequencyViews {
         if !changed {
             return false;
         }
-        if shared_appearance_changed || spectrum_changed || analysis_changed {
+        if background_changed || spectrum_changed || analysis_changed {
             data.spectrum.presentations.clear();
         }
         // Scheduling/capacity changes and missing working history do not revoke
         // compatible retained output while a replacement is being prepared.
-        if shared_appearance_changed || heat_changed || history_span_changed || analysis_changed {
+        if background_changed || heat_changed || history_span_changed || analysis_changed {
             data.spectrogram.presentations.clear();
         }
         if palette_changed {
@@ -257,6 +255,29 @@ impl FrequencyViews {
             data.spectrum.envelope_initialized = false;
         } else if heat_changed {
             data.invalidate_spectrogram();
+        }
+        if palette_changed
+            && !background_changed
+            && !spectrum_changed
+            && !analysis_changed
+            && let Err(error) = data.recolor_spectrum()
+        {
+            data.error = Some(error);
+            data.spectrum.presentations.clear();
+        }
+        if palette_changed
+            && !analysis_changed
+            && !heat_changed
+            && !history_span_changed
+            && !background_changed
+        {
+            // Reuse retained scalar fields, including suspended presentations.
+            // Palette selection never invalidates analysis or resamples history.
+            if let Err(error) = data.recolor_spectrogram() {
+                data.error = Some(error);
+                data.invalidate_spectrogram();
+                data.spectrogram.presentations.clear();
+            }
         }
         let levels = if data.spectrum.show_peaks {
             &data.spectrum.peaks
@@ -1340,7 +1361,7 @@ mod tests {
         });
         visuals.update(&frame(1.0, -30.0), Duration::from_secs_f64(1.0));
         let lut = PaletteLut::new(VisualizationPalette::Deadbeef);
-        lut.spectrum_gpu_palette
+        lut.gpu_palette
             .set(Err("palette allocation failed".into()))
             .unwrap();
         let mut data = visuals.data.borrow_mut();
@@ -1366,33 +1387,6 @@ mod tests {
         assert!(!spectrum_labels_visible(true, px(77.0)));
         assert!(spectrum_labels_visible(true, px(78.0)));
         assert!(!spectrum_labels_visible(false, px(100.0)));
-    }
-
-    #[test]
-    fn smooth_gradient_preserves_palette_stops() {
-        for stops in [TOKYO_NIGHT_STOPS, DEADBEEF_STOPS] {
-            for &(position, color) in stops {
-                assert_eq!(gradient(position, stops), color);
-            }
-        }
-        // The interior retains the authored cubic tangent, not a linear stop blend.
-        assert_eq!(gradient(0.1, TOKYO_NIGHT_STOPS), [138, 115, 187]);
-    }
-
-    #[test]
-    fn spectrum_palette_retains_visible_floor_and_high_energy_colors() {
-        for palette in [
-            VisualizationPalette::Deadbeef,
-            VisualizationPalette::TokyoNight,
-        ] {
-            let lut = PaletteLut::new(palette);
-            let gpu = lut.spectrum_gpu_palette().unwrap();
-            let colors = gpu.colors();
-            assert!(colors.iter().all(|color| color[3] == 1.0));
-            assert!(colors[0][2] > colors[0][0]);
-            assert!(colors[colors.len() - 1][0] > colors[0][0]);
-            assert!(colors[0][..3].iter().any(|channel| *channel > 0.0));
-        }
     }
 
     fn level_range(levels: &[f32]) -> Option<(f32, f32)> {
@@ -1981,12 +1975,6 @@ mod tests {
                 true,
                 true,
             ),
-            (
-                "palette",
-                |c| c.visualization_palette = VisualizationPalette::TokyoNight,
-                true,
-                true,
-            ),
             ("FFT", |c| c.analysis_fft_size = 16384, true, true),
             (
                 "window",
@@ -2060,6 +2048,195 @@ mod tests {
                     assert!(
                         Arc::ptr_eq(&data.spectrogram.presentations[&1].layers[0].1, &tile),
                         "{name}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn palette_and_heat_mapping_changes_recolor_only_compatible_publications() {
+        for disabled in [false, true] {
+            let mut visuals = configured_visuals();
+            visuals.update(&frame(1.0, -10.0), Duration::from_secs(1));
+            visuals.update(&frame(1.1, -20.0), Duration::from_millis(1100));
+            publish_analysis_views(&visuals, 1);
+            if disabled {
+                visuals.set_enabled(false);
+            }
+            let config = Config {
+                visualization_palette: VisualizationPalette::Viridis,
+                spectrogram_db_range: Some(100.0),
+                ..Config::default()
+            };
+            assert!(visuals.configure_config(&config));
+            let data = visuals.data.borrow();
+            assert!(data.spectrogram.presentations.is_empty());
+            assert!(data.spectrogram.tiles.is_empty());
+            assert!(Arc::ptr_eq(
+                data.spectrum.presentations[&1]
+                    .body
+                    .as_ref()
+                    .unwrap()
+                    .palette(),
+                &data.palette_lut.gpu_palette().unwrap(),
+            ));
+        }
+    }
+
+    #[test]
+    fn shared_palettes_recolor_retained_history_without_reanalysis_or_resampling() {
+        for disabled in [false, true] {
+            let mut visuals = configured_visuals();
+            let mut config = Config::default();
+            visuals.update(&frame(1.0, -10.0), Duration::from_secs(1));
+            visuals.update(&frame(1.1, -20.0), Duration::from_millis(1100));
+            publish_analysis_views(&visuals, 1);
+            publish_analysis_views(&visuals, 2);
+            if disabled {
+                visuals.set_enabled(false);
+            }
+            let (history, analysis, sampling, scratch) = {
+                let data = visuals.data.borrow();
+                (
+                    data.spectrogram
+                        .columns
+                        .iter()
+                        .map(|column| {
+                            (
+                                column.revision,
+                                column.sample_time,
+                                column.interval_start,
+                                column.levels.clone(),
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                    (
+                        data.last_analysis_sequence,
+                        data.latest_sample_time,
+                        data.stream_generation,
+                        data.latest_levels.clone(),
+                        data.spectrum.peaks.clone(),
+                    ),
+                    (
+                        data.spectrogram.heat_samples.as_ptr(),
+                        data.spectrogram.heat_sample_generation,
+                        data.spectrogram.sample_height,
+                    ),
+                    data.spectrogram.tile_values.clone(),
+                )
+            };
+            for palette in [
+                VisualizationPalette::Inferno,
+                VisualizationPalette::Magma,
+                VisualizationPalette::Viridis,
+                VisualizationPalette::Cividis,
+                VisualizationPalette::Grayscale,
+                VisualizationPalette::Deadbeef,
+            ] {
+                let before = visuals.data.borrow().spectrogram.presentations[&1].layers[0]
+                    .1
+                    .clone();
+                config.visualization_palette = palette;
+                assert!(visuals.configure_config(&config));
+                for panel_id in [1, 2] {
+                    visuals
+                        .data
+                        .borrow_mut()
+                        .prepare_spectrogram_presentation(panel_id)
+                        .unwrap();
+                }
+                assert!(!visuals.configure_config(&config));
+                let spectrum =
+                    (!disabled).then(|| prepared_body(&visuals, 1, 100.0, 100.0).unwrap());
+                let data = visuals.data.borrow();
+                let after = &data.spectrogram.presentations[&1].layers[0].1;
+                assert!(!Arc::ptr_eq(&before, after));
+                assert!(!Arc::ptr_eq(before.palette(), after.palette()));
+                assert!(Arc::ptr_eq(
+                    after,
+                    &data.spectrogram.presentations[&2].layers[0].1
+                ));
+                assert!(Arc::ptr_eq(
+                    after.palette(),
+                    &data.palette_lut.gpu_palette().unwrap()
+                ));
+                if let Some(spectrum) = spectrum {
+                    assert!(Arc::ptr_eq(spectrum.palette(), after.palette()));
+                }
+                let field = |frame: &GpuFrame| {
+                    let gpui::GpuContent::Field {
+                        width,
+                        height,
+                        values,
+                        params,
+                        intervals,
+                    } = frame.content()
+                    else {
+                        panic!("expected spectrogram field");
+                    };
+                    (
+                        *width,
+                        *height,
+                        values
+                            .iter()
+                            .map(|value| value.to_bits())
+                            .collect::<Vec<_>>(),
+                        params.mapping,
+                        intervals.clone(),
+                    )
+                };
+                assert_eq!(field(&before), field(after));
+                assert!(!data.spectrum.presentations.is_empty());
+                assert_eq!(data.palette_lut.palette, palette);
+                assert!(Rc::ptr_eq(&data.palette_lut, &active_palette_lut(palette)));
+                assert!(Arc::ptr_eq(
+                    data.spectrum.presentations[&1]
+                        .body
+                        .as_ref()
+                        .unwrap()
+                        .palette(),
+                    after.palette(),
+                ));
+                assert_eq!(
+                    data.spectrogram
+                        .columns
+                        .iter()
+                        .map(|column| (
+                            column.revision,
+                            column.sample_time,
+                            column.interval_start,
+                            column.levels.clone(),
+                        ))
+                        .collect::<Vec<_>>(),
+                    history
+                );
+                assert_eq!(
+                    (
+                        data.last_analysis_sequence,
+                        data.latest_sample_time,
+                        data.stream_generation,
+                        data.latest_levels.clone(),
+                        data.spectrum.peaks.clone(),
+                    ),
+                    analysis
+                );
+                assert_eq!(
+                    (
+                        data.spectrogram.heat_samples.as_ptr(),
+                        data.spectrogram.heat_sample_generation,
+                        data.spectrogram.sample_height,
+                    ),
+                    sampling
+                );
+                assert_eq!(data.spectrogram.tile_values, scratch);
+                if !disabled {
+                    assert!(
+                        data.spectrogram
+                            .tiles
+                            .iter()
+                            .flatten()
+                            .any(|tile| Arc::ptr_eq(&tile.publication, after))
                     );
                 }
             }

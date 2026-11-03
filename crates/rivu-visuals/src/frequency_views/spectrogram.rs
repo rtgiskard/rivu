@@ -4,10 +4,10 @@ use super::sampling::{
     mapped_frequency_level,
 };
 use super::{FrequencyState, axis_label_margin, finite_level, plot_bounds};
-use crate::{VisualParameters, labels::paint_aligned_label, palette::PALETTE_LUT_SIZE};
+use crate::{VisualParameters, labels::paint_aligned_label, palette::MAX_PALETTE_COLORS};
 use gpui::{
-    App, Bounds, GpuFieldParams, GpuFrame, GpuLimits, GpuSource, GpuValueMapping, Pixels,
-    SharedString, Window, point, px, size,
+    App, Bounds, GpuContent, GpuFieldParams, GpuFrame, GpuLimits, GpuSource, GpuValueMapping,
+    Pixels, SharedString, Window, point, px, size,
 };
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
@@ -399,6 +399,60 @@ impl FrequencyState {
         self.spectrogram.tiles.clear();
     }
 
+    pub(super) fn recolor_spectrogram(&mut self) -> Result<(), String> {
+        // Immutable GPU frames own their samples. Copy them only on selection
+        // changes, not during repaint; never redo frequency pooling or analysis.
+        // Several panels and the tile cache can retain the same publication.
+        let mut recolored = HashMap::new();
+        let mut recolor = |publication: &mut Arc<GpuFrame>| -> Result<(), String> {
+            let replacement = if let Some(frame) = recolored.get(&publication.id()) {
+                Arc::clone(frame)
+            } else {
+                let GpuContent::Field {
+                    height,
+                    values,
+                    params,
+                    intervals: Some(intervals),
+                    ..
+                } = publication.content()
+                else {
+                    return Err("Spectrogram publication is not a column field".into());
+                };
+                let frame = GpuFrame::field_columns(
+                    intervals,
+                    *height,
+                    values,
+                    self.palette_lut.gpu_palette()?,
+                    *params,
+                    GpuLimits {
+                        max_field_width: SPECTROGRAM_TILE_COLUMNS as u32,
+                        max_field_height: *height,
+                        max_field_cells: SPECTROGRAM_TILE_COLUMNS * *height as usize,
+                        max_palette_colors: MAX_PALETTE_COLORS,
+                        ..Default::default()
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+                recolored.insert(publication.id(), Arc::clone(&frame));
+                frame
+            };
+            *publication = replacement;
+            Ok(())
+        };
+        for tile in self.spectrogram.tiles.iter_mut().flatten() {
+            recolor(&mut tile.publication)?;
+        }
+        for presentation in self.spectrogram.presentations.values_mut() {
+            for (_, publication) in &mut presentation.layers {
+                recolor(publication)?;
+            }
+        }
+        for (_, publication) in &mut self.spectrogram.draws {
+            recolor(publication)?;
+        }
+        Ok(())
+    }
+
     pub(super) fn clear_history(&mut self) {
         self.invalidate_spectrogram();
         for column in &mut self.spectrogram.columns {
@@ -534,7 +588,7 @@ impl FrequencyState {
                     &intervals[..count],
                     height as u32,
                     &self.spectrogram.tile_values,
-                    self.palette_lut.spectrogram_gpu_palette()?,
+                    self.palette_lut.gpu_palette()?,
                     GpuFieldParams {
                         mapping: GpuValueMapping::Linear {
                             min: -self.spectrogram.db_range,
@@ -545,7 +599,7 @@ impl FrequencyState {
                         max_field_width: SPECTROGRAM_TILE_COLUMNS as u32,
                         max_field_height: height as u32,
                         max_field_cells: SPECTROGRAM_TILE_COLUMNS * height,
-                        max_palette_colors: PALETTE_LUT_SIZE,
+                        max_palette_colors: MAX_PALETTE_COLORS,
                         ..Default::default()
                     },
                 )

@@ -6,11 +6,11 @@ use super::{
 use crate::{
     VisualParameters,
     labels::{paint_aligned_label, paint_label},
-    palette::SPECTRUM_GPU_PALETTE_SIZE,
+    palette::MAX_PALETTE_COLORS,
 };
 use gpui::{
-    App, Bounds, GpuFrame, GpuLimits, GpuPathParams, GpuRectangle, GpuRectangleParams, GpuSource,
-    PathBuilder, Pixels, Point, SharedString, Window, fill, point, px, rgb, size,
+    App, Bounds, GpuContent, GpuFrame, GpuLimits, GpuPathParams, GpuRectangle, GpuRectangleParams,
+    GpuSource, PathBuilder, Pixels, Point, SharedString, Window, fill, point, px, rgb, size,
 };
 use rivu_format::config::{SpectrumBarLayout, SpectrumStyle};
 use std::{collections::HashMap, ops::Range, sync::Arc, time::Duration};
@@ -97,12 +97,49 @@ pub(super) struct SpectrumMapping {
 
 pub(super) struct SpectrumPresentation {
     pub(super) body: Option<Arc<GpuFrame>>,
-    pub(super) peaks: Vec<(Bounds<f32>, u32)>,
+    pub(super) peaks: Vec<(Bounds<f32>, f32, u32)>,
     pub(super) labels: [SharedString; 2],
     pub(super) db_labels: [SharedString; 4],
 }
 
 impl FrequencyState {
+    pub(super) fn recolor_spectrum(&mut self) -> Result<(), String> {
+        for presentation in self.spectrum.presentations.values_mut() {
+            for (_, fraction, color) in &mut presentation.peaks {
+                *color = stop_color(self.palette_lut.lookup_rgb(*fraction));
+            }
+            let Some(body) = &mut presentation.body else {
+                continue;
+            };
+            let palette = self.palette_lut.gpu_palette()?;
+            *body = match body.content() {
+                GpuContent::Path { path, params } => GpuFrame::path(
+                    Arc::clone(path),
+                    palette,
+                    *params,
+                    GpuLimits {
+                        max_path_vertices: path.vertices.len(),
+                        max_palette_colors: MAX_PALETTE_COLORS,
+                        ..Default::default()
+                    },
+                ),
+                GpuContent::Rectangles { rectangles, params } => GpuFrame::rectangles(
+                    rectangles,
+                    palette,
+                    *params,
+                    GpuLimits {
+                        max_rectangles: rectangles.len(),
+                        max_palette_colors: MAX_PALETTE_COLORS,
+                        ..Default::default()
+                    },
+                ),
+                _ => return Err("Spectrum publication has unexpected content".into()),
+            }
+            .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
     pub(super) fn advance_spectrum(&mut self, now: Duration) -> bool {
         if !self.spectrum.visible || !self.spectrum.envelope_initialized {
             return false;
@@ -432,11 +469,11 @@ impl FrequencyState {
             };
             let frame = GpuFrame::rectangles(
                 &self.spectrum.rectangles,
-                self.palette_lut.spectrum_gpu_palette()?,
+                self.palette_lut.gpu_palette()?,
                 params,
                 GpuLimits {
                     max_rectangles: rectangle_capacity,
-                    max_palette_colors: SPECTRUM_GPU_PALETTE_SIZE,
+                    max_palette_colors: MAX_PALETTE_COLORS,
                     ..GpuLimits::default()
                 },
             )
@@ -455,11 +492,11 @@ impl FrequencyState {
             Some(
                 GpuFrame::path(
                     Arc::new(path),
-                    self.palette_lut.spectrum_gpu_palette()?,
+                    self.palette_lut.gpu_palette()?,
                     GpuPathParams::default(),
                     GpuLimits {
                         max_path_vertices: path_vertices,
-                        max_palette_colors: SPECTRUM_GPU_PALETTE_SIZE,
+                        max_palette_colors: MAX_PALETTE_COLORS,
                         ..GpuLimits::default()
                     },
                 )
@@ -535,7 +572,8 @@ impl FrequencyState {
                         point(peak_x / plot.size.width, peak_y / plot.size.height),
                         size(peak_width / plot.size.width, px(1.0) / plot.size.height),
                     ),
-                    stop_color(self.palette_lut.lookup_mapped_rgb(fraction)),
+                    fraction,
+                    stop_color(self.palette_lut.lookup_rgb(fraction)),
                 ));
             }
         }
@@ -612,7 +650,7 @@ impl FrequencyState {
                     .paint_gpu(plot, GpuSource::Fixed(body.clone()))
                     .map_err(|error| format!("Cannot paint spectrum GPU body: {error}"))?;
             }
-            for (bounds, color) in &presentation.peaks {
+            for (bounds, _, color) in &presentation.peaks {
                 window.paint_quad(fill(plot_bounds(plot, *bounds), rgb(*color)));
             }
             Ok::<(), String>(())

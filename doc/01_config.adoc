@@ -709,7 +709,12 @@ restore old frames. Waveform keeps its track preview when hidden but discards it
 when visualizations are disabled. Scheduling and continuity details are in
 link:23_visuals.adoc#presentation-scheduling-and-visibility[Presentation scheduling and visibility].
 
-`visualizations.general.palette` accepts `tokyo_night` or `deadbeef` (default `deadbeef`).
+`visualizations.general.palette` sets the Spectrum, Spectrogram, and Waveform colors:
+`inferno`, `magma`, `viridis`, `cividis`, `grayscale`, or `deadbeef` (default).
+Select it under Settings → Visualizations → General.
+Older configurations must remove `visualizations.spectrogram.palette` and set
+`visualizations.general.palette` instead; the signal palette `tokyo_night` is
+no longer accepted. The Tokyo Night interface theme is unchanged.
 Color settings use quoted `"#RRGGBB"` values.
 
 Visualization caches are always enabled within their resource bounds. Spectrum
@@ -737,9 +742,10 @@ Shared visualization settings apply as follows:
   requested, keeping the displayed waveform until results are available.
 
 * `visualizations.general.background` sets the background for all views (default
-  `"#08090C"`); `visualizations.general.palette` is shared by Spectrum, Spectrogram, and
-  Waveform. The radial, stereo-analysis, fractal, and Oscilloscope styles use
-  the Audio Visualizer primary and secondary colors.
+  `"#08090C"`); `visualizations.general.palette` is shared by Spectrum,
+  Spectrogram, and Waveform. The radial, stereo-analysis,
+  fractal, and Oscilloscope styles use the Audio Visualizer primary and secondary
+  colors.
 * `visualizations.general.db_range` supplies the display span for Spectrum, Spectrogram,
   and the radial/stereo/fractal styles unless their settings override it. It does
   not affect Waveform gain, Oscilloscope amplitude, or volume.
@@ -1010,8 +1016,6 @@ Both fractal styles are generative art, not amplitude or phase measurements.
 
 Live-analysis styles use `visualizations.general.analysis_fft_size` and
 `visualizations.general.analysis_rate_hz`; Waveform does not request FFT or PCM snapshots.
-Spectrum, Spectrogram, and Waveform use `visualizations.general.palette`; the remaining
-styles share `visualizations.effects.primary_color` and `secondary_color`.
 `visualizations.general.analysis_window` affects FFT measurements, not Oscilloscope
 PCM; changing it still clears that view.
 `visualizations.reactive.db_range`

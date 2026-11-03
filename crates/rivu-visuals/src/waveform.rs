@@ -585,7 +585,7 @@ impl WaveformPlot {
         let frame = GpuFrame::waveform(
             values,
             gpu_palette,
-            palette.waveform_gpu_params(),
+            gpui::GpuWaveformParams::default(),
             GpuLimits {
                 max_waveform_columns,
                 max_palette_colors,
@@ -2076,7 +2076,7 @@ mod tests {
             ]
         );
         assert!(columns[1].levels.iter().all(|value| value.is_nan()));
-        assert_eq!(params.palette_start, 0.06);
+        assert_eq!(params.palette_start, 0.0);
 
         data.left_rms.clear();
         data.left_peaks.clear();

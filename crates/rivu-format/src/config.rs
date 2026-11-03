@@ -158,10 +158,13 @@ impl From<&Config> for ArtworkOptions {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum VisualizationPalette {
-    #[serde(rename = "tokyo_night")]
-    TokyoNight,
-    #[serde(rename = "deadbeef")]
+    Inferno,
+    Magma,
+    Viridis,
+    Cividis,
+    Grayscale,
     Deadbeef,
 }
 

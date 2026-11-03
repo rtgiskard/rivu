@@ -217,7 +217,7 @@ impl SettingsModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ArtworkMode;
+    use crate::config::{ArtworkMode, Theme, VisualizationPalette};
 
     #[test]
     fn switching_targets_rejects_old_completions_and_routes_panel_options() {
@@ -316,26 +316,58 @@ mod tests {
     }
 
     #[test]
-    fn later_edits_hide_success_for_global_and_panel_submissions() {
+    fn global_and_panel_apply_preserve_later_edits_and_discard() {
         let config = Arc::new(Config::default());
         let mut model = SettingsModel::new(&config);
-        let (_, submission) = model.begin_apply(model.draft.clone()).unwrap();
+        model.draft.visualization_palette = VisualizationPalette::Viridis;
+        model.edited();
+        let (patch, submission) = model.begin_apply(model.draft.clone()).unwrap();
+        let mut committed = Config {
+            ui_theme: Theme::TokyoNight,
+            ..config.as_ref().clone()
+        };
+        patch.apply_to(&mut committed);
+        assert_eq!(config.visualization_palette, VisualizationPalette::Deadbeef);
         assert_eq!(
-            model.complete_apply(submission, Arc::clone(&config), Ok(())),
+            committed.visualization_palette,
+            VisualizationPalette::Viridis
+        );
+        let committed = Arc::new(committed);
+        assert_eq!(
+            model.complete_apply(submission, Arc::clone(&committed), Ok(())),
             Completion::Committed
         );
         assert_eq!(model.feedback(), &Some(Ok(())));
+        assert_eq!(model.draft, *committed);
+        assert_eq!(model.draft.ui_theme, Theme::TokyoNight);
+        assert_eq!(
+            model.draft.visualization_palette,
+            VisualizationPalette::Viridis
+        );
+        model.draft.visualization_palette = VisualizationPalette::Magma;
         model.edited();
         assert!(model.feedback().is_none());
-        let (_, submission) = model.begin_apply(model.draft.clone()).unwrap();
-        model.draft.tray_enabled = !model.draft.tray_enabled;
+        let (patch, submission) = model.begin_apply(model.draft.clone()).unwrap();
+        let mut committed = committed.as_ref().clone();
+        patch.apply_to(&mut committed);
+        let committed = Arc::new(committed);
+        model.draft.visualization_palette = VisualizationPalette::Cividis;
         model.edited();
         assert_eq!(
-            model.complete_apply(submission, Arc::clone(&config), Ok(())),
+            model.complete_apply(submission, Arc::clone(&committed), Ok(())),
             Completion::Committed
         );
         assert!(model.feedback().is_none());
-        assert_ne!(model.draft.tray_enabled, config.tray_enabled);
+        assert_eq!(
+            model.baseline().visualization_palette,
+            VisualizationPalette::Magma
+        );
+        assert_eq!(
+            model.draft.visualization_palette,
+            VisualizationPalette::Cividis
+        );
+        model.reset(&committed);
+        assert_eq!(model.draft, *committed);
         model.reset_artwork(&config, 1, ArtworkOptions::from(config.as_ref()));
         let Some(PanelApply::Artwork { session, .. }) = model.begin_panel_apply(Some(20.0)) else {
             panic!("expected panel apply");

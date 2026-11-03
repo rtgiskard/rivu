@@ -198,10 +198,12 @@ integrated rotation phase from the current speed; speed edits preserve phase.
 
 Presentation changes are not new audio: Spectrum and Spectrogram appearance,
 range and axis settings invalidate only affected retained drawings and rebuild
-from compatible working levels/history. Shared palette and background changes
-affect both views. A suspended panel whose working data has been
-released cannot reconstruct that data from its final drawing. It waits for fresh
-input after an incompatible mapping change; a final drawing cannot authorize
+from compatible working levels/history. Spectrum, Spectrogram and Waveform share
+one signal palette; palette changes preserve Spectrum geometry and retained
+Spectrogram scalar history.
+Shared background changes affect both frequency views. A suspended panel whose
+working data has been released cannot reconstruct that data from its final drawing.
+It waits for fresh input after an incompatible mapping change; a final drawing cannot authorize
 redrawing the prior source under a new source/seek or analysis identity.
 
 Only affected visual panel entities are invalidated by analysis or waveform
@@ -358,18 +360,11 @@ decibel floor remain empty rather than creating a minimum-height colored band.
 All styles normalize the gradient to the full plot bounds, with the strongest
 color at the top and the visible minimum at the bottom. A curve below the plot's
 ceiling neither stretches to fill it nor acquires a local-height gradient.
-The full authored cubic palette mapping is retained, not a two-color approximation or duplicated,
-masked palette intervals.
-
-Waveform and Spectrum exclude DeaDBeeF's initial black-to-deep-blue interval:
-normalized color levels map to `0.06 + 0.94 * level` in the original palette.
-Spectrum samples the remaining visible domain across the full plot height; body
-and Peak colors use that same domain. Waveform uses it for RMS endpoints and
-Peak colors, retaining the color compression described above; its center color
-is dimmed and desaturated separately. Tokyo Night's palette domain is unchanged.
-Spectrogram continues to use the complete palette,
-including DeaDBeeF's black floor. These color mappings do not alter signal levels
-or amplitude geometry.
+Spectrum, Spectrogram and Waveform use the same palette: Inferno, Magma, Viridis,
+Cividis, Grayscale or Deadbeef (default). Deadbeef starts at deep blue rather than
+black; scientific color maps retain their complete standard ranges. Palette
+selection does not change intensity, RMS mixing, Peak mapping or signal geometry.
+Options are documented in link:01_config.adoc#visualizations[Visualizations].
 
 Peak markers are discrete, solid-colored markers drawn separately from the body.
 They are not connected into a curve, preserving their transient-marker meaning.
@@ -647,9 +642,9 @@ buffers or angle-indexed image cache are created. Image transforms pass through
 the existing sprite rendering path, with antialiasing coverage kept in screen
 pixels under scaling and rotation.
 
-Spectrum fills its geometry with the shared GPU palette material. Its full
-authored cubic palette is retained rather than approximated by two stops or
-repeated masked submissions; see <<spectrum,Spectrum>>.
+Spectrum fills its geometry with the shared GPU palette material, retaining the
+full standard color maps or authored Deadbeef cubic rather than approximating
+them with two stops; see <<spectrum,Spectrum>>.
 
 Rust scene records, WGPU pipelines and shader layouts change together. Palette
 Paths, ordinary fills and transformed image sprites have distinct drawing paths.

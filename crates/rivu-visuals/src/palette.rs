@@ -1,21 +1,15 @@
-//! Shared color lookup and lazy GPU palettes for frequency plots and track previews.
+//! Shared color lookup and lazy GPU palettes for Spectrum, Spectrogram and Waveform.
+mod matplotlib;
+
 use gpui::GpuPalette;
 use rivu_format::config::VisualizationPalette;
 use std::{
     cell::{OnceCell, RefCell},
     rc::Rc,
-    sync::Arc,
+    sync::{Arc, LazyLock},
 };
 
-pub(super) const TOKYO_NIGHT_STOPS: &[(f32, [u8; 3])] = &[
-    (0.0, [65, 72, 110]),
-    (0.2, [187, 154, 247]),
-    (0.42, [125, 207, 255]),
-    (0.62, [158, 206, 106]),
-    (0.82, [224, 175, 104]),
-    (1.0, [247, 118, 142]),
-];
-// Preserve DeaDBeeF's six color positions after a small black low-end floor.
+// Retain the authored black guard point: it determines the cubic tangent at blue.
 pub(super) const DEADBEEF_STOPS: &[(f32, [u8; 3])] = &[
     (0.0, [0, 0, 0]),
     (0.06, [0, 32, 100]),
@@ -26,29 +20,13 @@ pub(super) const DEADBEEF_STOPS: &[(f32, [u8; 3])] = &[
     (1.0, [255, 0, 0]),
 ];
 
-pub(super) fn palette_stops(palette: VisualizationPalette) -> &'static [(f32, [u8; 3])] {
-    match palette {
-        VisualizationPalette::TokyoNight => TOKYO_NIGHT_STOPS,
-        VisualizationPalette::Deadbeef => DEADBEEF_STOPS,
-    }
-}
-
-pub(super) fn visible_palette_fraction(palette: VisualizationPalette, fraction: f32) -> f32 {
-    let fraction = fraction.clamp(0.0, 1.0);
-    match palette {
-        VisualizationPalette::Deadbeef => 0.06 + fraction * 0.94,
-        VisualizationPalette::TokyoNight => fraction,
-    }
-}
-
 pub(super) const PALETTE_LUT_SIZE: usize = 1024;
-pub(super) const SPECTRUM_GPU_PALETTE_SIZE: usize = PALETTE_LUT_SIZE;
+pub(super) const MAX_PALETTE_COLORS: usize = PALETTE_LUT_SIZE;
 
 pub(super) struct PaletteLut {
     pub(super) palette: VisualizationPalette,
-    colors: [[u8; 3]; PALETTE_LUT_SIZE],
-    pub(super) spectrum_gpu_palette: OnceCell<Result<Arc<GpuPalette>, String>>,
-    spectrogram_gpu_palette: OnceCell<Result<Arc<GpuPalette>, String>>,
+    colors: &'static [[f32; 3]],
+    pub(super) gpu_palette: OnceCell<Result<Arc<GpuPalette>, String>>,
     waveform_gpu_palette: OnceCell<Result<Arc<GpuPalette>, String>>,
 }
 
@@ -56,41 +34,39 @@ impl PaletteLut {
     pub(super) fn new(palette: VisualizationPalette) -> Self {
         Self {
             palette,
-            colors: std::array::from_fn(|index| {
-                let fraction = index as f32 / (PALETTE_LUT_SIZE - 1) as f32;
-                gradient(fraction, palette_stops(palette))
-            }),
-            spectrum_gpu_palette: OnceCell::new(),
-            spectrogram_gpu_palette: OnceCell::new(),
+            colors: match palette {
+                VisualizationPalette::Inferno => &matplotlib::INFERNO,
+                VisualizationPalette::Magma => &matplotlib::MAGMA,
+                VisualizationPalette::Viridis => &matplotlib::VIRIDIS,
+                VisualizationPalette::Cividis => &matplotlib::CIVIDIS,
+                VisualizationPalette::Grayscale => &[[0.0; 3], [1.0; 3]],
+                VisualizationPalette::Deadbeef => {
+                    static VISIBLE: LazyLock<[[f32; 3]; PALETTE_LUT_SIZE]> = LazyLock::new(|| {
+                        std::array::from_fn(|index| {
+                            let fraction = index as f32 / (PALETTE_LUT_SIZE - 1) as f32;
+                            // Sample after the authored black guard point; all
+                            // consumers receive the same visible 0..1 domain.
+                            gradient_channels(0.06 + fraction * 0.94, DEADBEEF_STOPS)
+                                .map(|channel| channel / 255.0)
+                        })
+                    });
+                    &*VISIBLE
+                }
+            },
+            gpu_palette: OnceCell::new(),
             waveform_gpu_palette: OnceCell::new(),
         }
     }
 
-    pub(super) fn spectrum_gpu_palette(&self) -> Result<Arc<GpuPalette>, String> {
-        self.spectrum_gpu_palette
+    pub(super) fn gpu_palette(&self) -> Result<Arc<GpuPalette>, String> {
+        self.gpu_palette
             .get_or_init(|| {
-                let colors: [[f32; 4]; SPECTRUM_GPU_PALETTE_SIZE] = std::array::from_fn(|index| {
-                    let fraction = index as f32 / (SPECTRUM_GPU_PALETTE_SIZE - 1) as f32;
-                    let [red, green, blue] = gradient(
-                        visible_palette_fraction(self.palette, fraction),
-                        palette_stops(self.palette),
-                    );
-                    [red, green, blue, 255].map(|channel| channel as f32 / 255.0)
-                });
-                GpuPalette::new(&colors, SPECTRUM_GPU_PALETTE_SIZE)
-                    .map_err(|error| format!("Cannot create spectrum GPU palette: {error}"))
-            })
-            .clone()
-    }
-
-    pub(super) fn spectrogram_gpu_palette(&self) -> Result<Arc<GpuPalette>, String> {
-        self.spectrogram_gpu_palette
-            .get_or_init(|| {
-                let colors: [[f32; 4]; PALETTE_LUT_SIZE] = std::array::from_fn(|index| {
-                    let [r, g, b] = self.colors[index];
-                    [r, g, b, 255].map(|v| v as f32 / 255.0)
-                });
-                GpuPalette::new(&colors, PALETTE_LUT_SIZE).map_err(|error| error.to_string())
+                let mut colors = [[0.0; 4]; MAX_PALETTE_COLORS];
+                for (color, &[r, g, b]) in colors.iter_mut().zip(self.colors) {
+                    *color = [r, g, b, 1.0];
+                }
+                GpuPalette::new(&colors[..self.colors.len()], MAX_PALETTE_COLORS)
+                    .map_err(|error| format!("Cannot create visualization GPU palette: {error}"))
             })
             .clone()
     }
@@ -99,36 +75,28 @@ impl PaletteLut {
     pub(super) fn waveform_gpu_palette(&self) -> Result<Arc<GpuPalette>, String> {
         self.waveform_gpu_palette
             .get_or_init(|| {
-                let stops = palette_stops(self.palette);
-                let floor = gradient_channels(visible_palette_fraction(self.palette, 0.0), stops);
+                let floor = self.colors[0];
                 let neutral = floor.iter().sum::<f32>() / 3.0;
-                let low = floor.map(|value| (value + 3.0 * neutral) / (6.0 * 255.0));
-                let colors: Vec<_> = (0..PALETTE_LUT_SIZE)
-                    .flat_map(|index| {
-                        let fraction = index as f32 / (PALETTE_LUT_SIZE - 1) as f32;
-                        let high = gradient_channels(fraction, stops).map(|value| value / 255.0);
-                        [low, high].map(|[r, g, b]| [r, g, b, 1.0])
-                    })
+                let low = floor.map(|value| (value + 3.0 * neutral) / 6.0);
+                let colors: Vec<_> = self
+                    .colors
+                    .iter()
+                    .flat_map(|channels| [low, *channels].map(|[r, g, b]| [r, g, b, 1.0]))
                     .collect();
                 GpuPalette::new(&colors, PALETTE_LUT_SIZE * 2).map_err(|error| error.to_string())
             })
             .clone()
     }
 
-    pub(super) fn waveform_gpu_params(&self) -> gpui::GpuWaveformParams {
-        gpui::GpuWaveformParams {
-            palette_start: visible_palette_fraction(self.palette, 0.0),
-        }
-    }
-
     pub(super) fn lookup_rgb(&self, fraction: f32) -> [u8; 3] {
-        let index = (fraction.clamp(0.0, 1.0) * (PALETTE_LUT_SIZE - 1) as f32).round() as usize;
-        self.colors[index]
-    }
-
-    // Waveform and Spectrum exclude DeaDBeeF's black floor; Spectrogram does not.
-    pub(super) fn lookup_mapped_rgb(&self, fraction: f32) -> [u8; 3] {
-        self.lookup_rgb(visible_palette_fraction(self.palette, fraction))
+        let position = fraction.clamp(0.0, 1.0) * (self.colors.len() - 1) as f32;
+        let left = position.floor() as usize;
+        let right = (left + 1).min(self.colors.len() - 1);
+        let mix = position - left as f32;
+        std::array::from_fn(|channel| {
+            ((self.colors[left][channel] * (1.0 - mix) + self.colors[right][channel] * mix) * 255.0)
+                .round() as u8
+        })
     }
 }
 
@@ -145,14 +113,8 @@ pub(super) fn active_palette_lut(palette: VisualizationPalette) -> Rc<PaletteLut
     })
 }
 
-/// Cubic Hermite interpolation preserves the palette position and tangent
-/// continuously inside each authored color-stop interval. The lookup table and
-/// Spectrum's shared GPU palette samples this same authored mapping.
-pub(super) fn gradient(value: f32, stops: &[(f32, [u8; 3])]) -> [u8; 3] {
-    gradient_channels(value, stops).map(|channel| channel.round() as u8)
-}
-
-pub(super) fn gradient_channels(value: f32, stops: &[(f32, [u8; 3])]) -> [f32; 3] {
+/// Preserve the authored cubic tangents before sampling the display domain.
+fn gradient_channels(value: f32, stops: &[(f32, [u8; 3])]) -> [f32; 3] {
     debug_assert!(stops.len() >= 2);
     let value = value.clamp(0.0, 1.0);
     let index = stops
@@ -191,4 +153,81 @@ pub(super) fn gradient_channels(value: f32, stops: &[(f32, [u8; 3])]) -> [f32; 3
             + h11 * span * slope(index + 1, channel);
         value.clamp(0.0, 255.0)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn visible_lut_interpolation_preserves_authored_colors_within_one_rgb_step() {
+        let lut = PaletteLut::new(VisualizationPalette::Deadbeef);
+        let waveform = lut.waveform_gpu_palette().unwrap();
+        assert_eq!(lut.lookup_rgb(0.0), [0, 32, 100]);
+        assert_eq!(lut.lookup_rgb(1.0), [255, 0, 0]);
+        // Uniform samples preserve the authored cubic without a shader crop.
+        for step in 0..=2048 {
+            let fraction = step as f32 / 2048.0;
+            let position = fraction * (PALETTE_LUT_SIZE - 1) as f32;
+            let left = position.floor() as usize;
+            let right = (left + 1).min(PALETTE_LUT_SIZE - 1);
+            let mix = position - left as f32;
+            let expected = gradient_channels(0.06 + fraction * 0.94, DEADBEEF_STOPS);
+            for (channel, expected) in expected.iter().enumerate() {
+                let low = waveform.colors()[left * 2 + 1][channel];
+                let high = waveform.colors()[right * 2 + 1][channel];
+                let actual = low + (high - low) * mix;
+                assert!((actual - expected / 255.0).abs() < 1.0 / 255.0);
+            }
+        }
+    }
+
+    #[test]
+    fn standard_palettes_preserve_every_official_sample() {
+        for (palette, samples) in [
+            (VisualizationPalette::Inferno, &matplotlib::INFERNO),
+            (VisualizationPalette::Magma, &matplotlib::MAGMA),
+            (VisualizationPalette::Viridis, &matplotlib::VIRIDIS),
+            (VisualizationPalette::Cividis, &matplotlib::CIVIDIS),
+        ] {
+            let lut = PaletteLut::new(palette);
+            let gpu = lut.gpu_palette().unwrap();
+            assert_eq!(gpu.colors().len(), samples.len());
+            for (actual, &[r, g, b]) in gpu.colors().iter().zip(samples) {
+                assert_eq!(*actual, [r, g, b, 1.0]);
+            }
+        }
+    }
+
+    #[test]
+    fn shared_palettes_keep_waveform_rms_mixes_and_peak_colors() {
+        for palette in [
+            VisualizationPalette::Inferno,
+            VisualizationPalette::Magma,
+            VisualizationPalette::Viridis,
+            VisualizationPalette::Cividis,
+            VisualizationPalette::Grayscale,
+            VisualizationPalette::Deadbeef,
+        ] {
+            let lut = active_palette_lut(palette);
+            assert!(Rc::ptr_eq(&lut, &active_palette_lut(palette)));
+            let gpu = lut.gpu_palette().unwrap();
+            assert!(Arc::ptr_eq(&gpu, &lut.gpu_palette().unwrap()));
+            let waveform = lut.waveform_gpu_palette().unwrap();
+            let floor = lut.colors[0];
+            let neutral = floor.iter().sum::<f32>() / 3.0;
+            let low = floor.map(|value| (value + 3.0 * neutral) / 6.0);
+            assert_eq!(waveform.colors().len(), gpu.colors().len() * 2);
+            for (pair, color) in waveform
+                .colors()
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .zip(gpu.colors())
+            {
+                assert_eq!(pair[0], [low[0], low[1], low[2], 1.0]);
+                assert_eq!(pair[1], *color);
+            }
+        }
+    }
 }

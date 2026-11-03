@@ -1054,7 +1054,11 @@ impl Settings {
                     cx,
                     |this, _, _| {
                         let values = [
-                            VisualizationPalette::TokyoNight,
+                            VisualizationPalette::Inferno,
+                            VisualizationPalette::Magma,
+                            VisualizationPalette::Viridis,
+                            VisualizationPalette::Cividis,
+                            VisualizationPalette::Grayscale,
                             VisualizationPalette::Deadbeef,
                         ];
                         let selected = values

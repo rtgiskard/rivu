@@ -520,10 +520,14 @@ fn spectrum_style_label(i18n: &Localizer, style: SpectrumStyle) -> String {
     }
 }
 
-fn visualization_palette_label(_i18n: &Localizer, palette: VisualizationPalette) -> String {
+fn visualization_palette_label(_i18n: &Localizer, palette: VisualizationPalette) -> &'static str {
     match palette {
-        VisualizationPalette::TokyoNight => "Tokyo Night".to_owned(),
-        VisualizationPalette::Deadbeef => "Deadbeef".to_owned(),
+        VisualizationPalette::Inferno => "Inferno",
+        VisualizationPalette::Magma => "Magma",
+        VisualizationPalette::Viridis => "Viridis",
+        VisualizationPalette::Cividis => "Cividis",
+        VisualizationPalette::Grayscale => "Grayscale",
+        VisualizationPalette::Deadbeef => "Deadbeef",
     }
 }
 

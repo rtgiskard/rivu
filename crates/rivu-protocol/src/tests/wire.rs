@@ -928,6 +928,7 @@ fn configuration_wire_adapter_preserves_optional_fields_and_library_columns() {
     ] {
         let config = Arc::new(rivu_format::config::Config {
             scan_min_duration_seconds: if output_device.is_some() { u32::MAX } else { 0 },
+            visualization_palette: rivu_format::config::VisualizationPalette::Viridis,
             output_device,
             library_columns,
             ui_theme: rivu_format::config::Theme::TokyoNight,
@@ -964,6 +965,41 @@ fn configuration_wire_adapter_preserves_optional_fields_and_library_columns() {
             state_response(state).configuration.unwrap().config.as_ref(),
             config.as_ref()
         );
+    }
+}
+
+#[test]
+fn common_palette_values_roundtrip_configuration_wire() {
+    use rivu_format::config::{Config, VisualizationPalette};
+
+    for palette in [
+        VisualizationPalette::Inferno,
+        VisualizationPalette::Magma,
+        VisualizationPalette::Viridis,
+        VisualizationPalette::Cividis,
+        VisualizationPalette::Grayscale,
+        VisualizationPalette::Deadbeef,
+    ] {
+        let config = Arc::new(Config {
+            visualization_palette: palette,
+            ..Default::default()
+        });
+        let mut encoded = Vec::new();
+        encode_response_frame_into(
+            &WireResponse::State(wire_state(StateResponse {
+                configuration: Some(rivu_protocol::model::ConfigurationState {
+                    config: Arc::clone(&config),
+                    config_path: "/test/config.toml".into(),
+                }),
+                ..Default::default()
+            })),
+            &mut encoded,
+        )
+        .unwrap();
+        let WireResponse::State(state) = decode_response_frame(&encoded[4..]).unwrap() else {
+            panic!("expected state")
+        };
+        assert_eq!(state_response(state).configuration.unwrap().config, config);
     }
 }
 
@@ -1058,6 +1094,7 @@ fn configure_request_round_trip_preserves_optional_config_field_and_library_colu
             default_visualizer_labels: output_device.is_none(),
             oscilloscope_overlay_channels: output_device.is_some(),
             scan_min_duration_seconds: if output_device.is_some() { u32::MAX } else { 0 },
+            visualization_palette: rivu_format::config::VisualizationPalette::Magma,
             output_device,
             library_columns,
             ui_theme: rivu_format::config::Theme::TokyoNightDay,
