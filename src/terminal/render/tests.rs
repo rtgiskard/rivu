@@ -488,6 +488,31 @@ fn tiny_browser_rows_preserve_title_without_horizontal_overflow() {
 }
 
 #[test]
+fn other_path_titles_expand_only_when_rendered_and_preserve_grapheme_clipping() {
+    let mut track = track(0);
+    track.title = "夜航e\u{301}👩‍🚀".into();
+    track.path = "/音乐/春风/夜航.flac".into();
+    let path = track.path.parent().unwrap();
+    let colors = TerminalColors::new(crate::theme::Theme::default());
+    for width in 0..=140 {
+        let mut measured = RowContent::track(&track);
+        measured.title_path = Some(path);
+        measured.file_icon = true;
+        assert!(matches!(measured.title, Cow::Borrowed(_)));
+        let columns = BrowserColumns::new(width, true, std::iter::once(measured));
+        let mut visible = RowContent::track(&track);
+        visible.title_path = Some(path);
+        visible.file_icon = true;
+        let mut expanded = RowContent::track(&track);
+        expanded.title = format!("{} · {}", track.title, path.display()).into();
+        expanded.file_icon = true;
+        let line = columns.line(visible, colors);
+        assert_eq!(line.width(), width as usize);
+        assert_eq!(line, columns.line(expanded, colors));
+    }
+}
+
+#[test]
 fn playback_markers_follow_occurrence_and_status_not_selection() {
     let mut state = TuiSnapshot::default();
     state.queue.current_id = Some(17);

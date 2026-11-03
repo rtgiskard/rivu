@@ -116,11 +116,11 @@ fn wrap_details(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
-fn detail_value(value: &str, colors: TerminalColors) -> Span<'static> {
+fn detail_value(value: String, colors: TerminalColors) -> Span<'static> {
     if value.is_empty() {
         Span::styled("—", Style::default().fg(colors.secondary))
     } else {
-        Span::styled(value.to_owned(), Style::default().fg(colors.text))
+        Span::styled(value, Style::default().fg(colors.text))
     }
 }
 
@@ -143,7 +143,7 @@ fn detail_field(
     for line in wrap_details(value, width.saturating_sub(value_indent)) {
         lines.push(Line::from(vec![
             Span::raw(" ".repeat(value_indent)),
-            detail_value(&line, colors),
+            detail_value(line, colors),
         ]));
     }
     lines
@@ -167,12 +167,15 @@ fn detail_fields(
             let left_width = COLUMN_WIDTH + COLUMN_GAP;
             let left = detail_field(i18n.text(pair[0].0), &pair[0].1, COLUMN_WIDTH, colors);
             let right = detail_field(i18n.text(pair[1].0), &pair[1].1, COLUMN_WIDTH, colors);
-            for index in 0..left.len().max(right.len()) {
-                let mut row = left.get(index).cloned().unwrap_or_default();
+            let count = left.len().max(right.len());
+            let mut left = left.into_iter();
+            let mut right = right.into_iter();
+            for _ in 0..count {
+                let mut row = left.next().unwrap_or_default();
                 let padding = left_width.saturating_sub(row.width());
                 row.spans.push(Span::raw(" ".repeat(padding)));
-                if let Some(other) = right.get(index) {
-                    row.spans.extend(other.spans.iter().cloned());
+                if let Some(other) = right.next() {
+                    row.spans.extend(other.spans);
                 }
                 lines.push(row);
             }
@@ -986,6 +989,7 @@ fn draw_messages(
 
 pub(super) struct RowContent<'a> {
     pub(super) title: Cow<'a, str>,
+    title_path: Option<&'a std::path::Path>,
     pub(super) artist: &'a str,
     pub(super) album: &'a str,
     pub(super) codec: &'a str,
@@ -1001,6 +1005,7 @@ impl<'a> RowContent<'a> {
     pub(super) fn track(track: &'a LibraryRow) -> Self {
         Self {
             title: Cow::Borrowed(&track.title),
+            title_path: None,
             artist: &track.artist,
             album: &track.album,
             codec: &track.codec,
@@ -1016,6 +1021,7 @@ impl<'a> RowContent<'a> {
     pub(super) fn playlist(entry: &'a PlaylistEntryRow) -> Self {
         Self {
             title: Cow::Borrowed(&entry.title),
+            title_path: None,
             artist: &entry.artist,
             album: &entry.album,
             codec: &entry.codec,
@@ -1031,6 +1037,7 @@ impl<'a> RowContent<'a> {
     pub(super) fn label(title: Cow<'a, str>, marker: &'static str) -> Self {
         Self {
             title,
+            title_path: None,
             artist: "",
             album: "",
             codec: "",
@@ -1116,10 +1123,15 @@ impl BrowserColumns {
 
     fn line(self, row: RowContent<'_>, colors: TerminalColors) -> Line<'static> {
         let mut spans = Vec::with_capacity(13);
+        // Column measurement needs only attributes; expand Other paths for visible rows only.
+        let row_title = match row.title_path {
+            Some(path) => Cow::Owned(format!("{} · {}", row.title, path.display())),
+            None => row.title,
+        };
         let title = if self.artist == 0 {
-            track_label(&row.title, row.artist)
+            track_label(&row_title, row.artist)
         } else {
-            Cow::Borrowed(row.title.as_ref())
+            Cow::Borrowed(row_title.as_ref())
         };
         let prefix = if row.file_icon {
             "󰎇"
@@ -1569,12 +1581,7 @@ fn draw_tree(
             DirectoryRow::Track(track) => {
                 let mut content = RowContent::track(track);
                 if other_tracks {
-                    content.title = format!(
-                        "{} · {}",
-                        track.title,
-                        track.path.parent().unwrap_or(&track.path).display()
-                    )
-                    .into();
+                    content.title_path = Some(track.path.parent().unwrap_or(&track.path));
                 }
                 content.file_icon = true;
                 content
