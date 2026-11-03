@@ -385,9 +385,10 @@ already selected decoder and never loads FFmpeg or changes decoder selection.
 The TUI controls the running core. Leaving it does not stop playback. `Tab` cycles
 Queue → Playlists → Library → Recent; `Shift+Tab` reverses direction.
 Without a search, each page retains its selection and scroll position.
-`Right` opens a playlist; Enter plays the selected
-playlist, track, or queue occurrence. In playlist details, `a` enqueues the selected
-track. Selecting a row alone does not change playback.
+`Right` opens a playlist; Enter plays the selected playlist, track, or queue
+occurrence. In Library track lists and playlist details, `e` enqueues the selected
+track. `Alt+e` enqueues the selected Library directory or the complete Other
+collection, regardless of filters. Selecting a row alone does not change playback.
 
 Recent is always available, including when empty. It shows the published
 history of up to 256 unique tracks in recent-play order, with titles and local
@@ -433,9 +434,10 @@ Library's link:02_library.adoc#other[Other] entry is hidden at the top level whe
 the unfiltered collection is empty.
 `Alt+f` / `Alt+m` toggle favorite-only / missing-only filters; `Alt+s` cycles ID,
 album, and most-played sorting. Selection follows its track through changes while
-that track remains in the results. `e` appends the selected track; `Alt+e` appends
-the complete collection regardless of filters. `Alt+c` checks registered files;
+that track remains in the results. `Alt+c` checks registered files;
 `Alt+Shift+c` forces rereading. Collection-wide Alt actions also work on its header.
+`Alt+x` cancels an active scan before its saving phase. F1 lists the actions for
+the current context.
 
 Outside the query editor, `m` toggles the selected track's favorite in Queue,
 Library, Recent, or playlist entries. It never changes a whole directory or

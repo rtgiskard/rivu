@@ -7,6 +7,303 @@ use rivu_protocol::{
 };
 use std::path::Path;
 
+fn shortcut_tree(rows: Vec<DirectoryRow>, other_tracks: bool) -> View {
+    let mut tree = LibraryTree {
+        directory: if other_tracks {
+            PathBuf::new()
+        } else {
+            "/music".into()
+        },
+        other_tracks,
+        ..LibraryTree::default()
+    };
+    tree.entries.set_viewport(rows.len().max(1));
+    tree.entries.insert(0, rows.len(), rows.len(), rows);
+    View::Tree(tree)
+}
+
+#[test]
+fn enqueue_track_uses_e_on_library_search_other_and_playlist_only() {
+    let state = query_snapshot();
+    let mut results = PagedList::default();
+    results.set_viewport(2);
+    results.insert(0, 2, 2, vec![track(41), track(42)]);
+    results.selection.select(Some(1));
+    let mut playlist = UiState {
+        view: playlist_view(1),
+        ..UiState::default()
+    };
+    load_visible(&mut playlist, &state);
+    let View::PlaylistDetail { detail, .. } = &mut playlist.view else {
+        unreachable!()
+    };
+    detail.entries.selection.select(Some(1));
+    assert_eq!(
+        detail.entries.selected().map(|entry| entry.track_id),
+        Some(1)
+    );
+    for (view, expected) in [
+        (View::LibraryResults(results), 42),
+        (
+            shortcut_tree(vec![DirectoryRow::Track(track(42))], false),
+            42,
+        ),
+        (
+            shortcut_tree(vec![DirectoryRow::Track(track(42))], true),
+            42,
+        ),
+        (playlist.view, 1),
+    ] {
+        let mut ui = UiState {
+            view,
+            ..UiState::default()
+        };
+        for modifiers in [
+            KeyModifiers::CONTROL,
+            KeyModifiers::SHIFT,
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+            KeyModifiers::SUPER,
+        ] {
+            assert!(matches!(
+                ui.key_action(KeyEvent::new(KeyCode::Char('e'), modifiers), &state),
+                KeyAction::Ignored
+            ));
+        }
+        assert!(matches!(
+            ui.key_action(KeyEvent::from(KeyCode::Char('a')), &state),
+            KeyAction::Ignored
+        ));
+        assert!(matches!(
+            ui.key_action(KeyEvent::from(KeyCode::Char('e')), &state),
+            KeyAction::Command(Command::Enqueue { track_ids }) if track_ids == vec![expected]
+        ));
+        ui.show_help = true;
+        assert!(matches!(
+            ui.key_action(KeyEvent::from(KeyCode::Char('e')), &state),
+            KeyAction::Ignored
+        ));
+        ui.show_help = false;
+        ui.details_active = true;
+        assert!(matches!(
+            ui.key_action(KeyEvent::from(KeyCode::Char('e')), &state),
+            KeyAction::Ignored
+        ));
+        ui.details_active = false;
+        ui.open_search();
+        assert_eq!(ui.keyboard_context(), KeyboardContext::TuiSearchQuery);
+        ui.key_action(KeyEvent::from(KeyCode::Char('e')), &state);
+        assert_eq!(ui.search.query, "e");
+        for key in ['e', 'f', 'm', 's', 'c'] {
+            assert!(matches!(
+                ui.key_action(KeyEvent::new(KeyCode::Char(key), KeyModifiers::ALT), &state),
+                KeyAction::Ignored
+            ));
+        }
+        assert_eq!(ui.search.query, "e");
+    }
+    for view in [
+        View::Queue,
+        View::Recent(RecentTracks::default()),
+        View::Playlists(PagedList::default()),
+    ] {
+        let mut ui = UiState {
+            view,
+            ..UiState::default()
+        };
+        assert!(matches!(
+            ui.key_action(KeyEvent::from(KeyCode::Char('e')), &state),
+            KeyAction::Ignored
+        ));
+        assert!(matches!(
+            ui.key_action(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::ALT), &state),
+            KeyAction::Ignored
+        ));
+    }
+}
+
+#[test]
+fn collection_enqueue_targets_selected_directory_or_entire_other_not_library() {
+    let state = query_snapshot();
+    let mut ui = UiState {
+        view: shortcut_tree(
+            vec![DirectoryRow::Directory {
+                path: "/music/selected".into(),
+            }],
+            false,
+        ),
+        ..UiState::default()
+    };
+    assert!(matches!(
+        ui.key_action(KeyEvent::from(KeyCode::Char('e')), &state),
+        KeyAction::Ignored
+    ));
+    assert!(matches!(
+        ui.key_action(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::ALT), &state),
+        KeyAction::Command(Command::EnqueueSources { directories, track_ids, other_tracks: false })
+            if directories == vec![PathBuf::from("/music/selected")] && track_ids.is_empty()
+    ));
+    ui.view = shortcut_tree(vec![DirectoryRow::Track(track(42))], false);
+    assert!(matches!(
+        ui.key_action(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::ALT), &state),
+        KeyAction::Ignored
+    ));
+    for view in [
+        shortcut_tree(vec![DirectoryRow::OtherTracks], false),
+        shortcut_tree(vec![DirectoryRow::Track(track(42))], true),
+        shortcut_tree(Vec::new(), true),
+    ] {
+        ui.view = view;
+        if let View::Tree(tree) = &mut ui.view {
+            tree.favorite = Some(true);
+            tree.missing = Some(true);
+            tree.sort = rivu_protocol::model::LibrarySort::Album;
+        }
+        ui.search.active = true;
+        ui.search.applied_query = "selected subset".into();
+        assert!(matches!(
+            ui.key_action(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::ALT), &state),
+            KeyAction::Command(Command::EnqueueSources { directories, track_ids, other_tracks: true })
+                if directories.is_empty() && track_ids.is_empty()
+        ));
+    }
+    ui.view = shortcut_tree(Vec::new(), false);
+    assert!(matches!(
+        ui.key_action(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::ALT), &state),
+        KeyAction::Ignored
+    ));
+}
+
+#[test]
+fn other_actions_and_help_keep_their_existing_collection_scope() {
+    let state = query_snapshot();
+    let mut ui = UiState::default();
+    for (view, context, check) in [
+        (
+            shortcut_tree(
+                vec![DirectoryRow::Directory {
+                    path: "/music/selected".into(),
+                }],
+                false,
+            ),
+            KeyboardContext::TuiTree,
+            false,
+        ),
+        (
+            shortcut_tree(vec![DirectoryRow::OtherTracks], false),
+            KeyboardContext::TuiOtherTarget,
+            true,
+        ),
+        (
+            shortcut_tree(vec![DirectoryRow::Track(track(42))], true),
+            KeyboardContext::TuiOther,
+            true,
+        ),
+    ] {
+        ui.view = view;
+        assert_eq!(ui.keyboard_context(), context);
+        for modifiers in [KeyModifiers::ALT, KeyModifiers::ALT | KeyModifiers::SHIFT] {
+            let action = ui.key_action(KeyEvent::new(KeyCode::Char('c'), modifiers), &state);
+            if check {
+                assert!(
+                    matches!(action, KeyAction::Command(Command::CheckOtherTracks { force })
+                    if force == modifiers.contains(KeyModifiers::SHIFT))
+                );
+            } else {
+                assert!(matches!(action, KeyAction::Ignored));
+            }
+        }
+        assert!(matches!(
+            ui.key_action(
+                KeyEvent::new(
+                    KeyCode::Char('c'),
+                    KeyModifiers::ALT | KeyModifiers::CONTROL
+                ),
+                &state
+            ),
+            KeyAction::Ignored
+        ));
+        for key in ['f', 'm', 's'] {
+            ui.key_action(KeyEvent::new(KeyCode::Char(key), KeyModifiers::ALT), &state);
+        }
+        let View::Tree(tree) = &ui.view else {
+            unreachable!()
+        };
+        assert_eq!(
+            tree.favorite,
+            (context == KeyboardContext::TuiOther).then_some(true)
+        );
+        assert_eq!(
+            tree.missing,
+            (context == KeyboardContext::TuiOther).then_some(true)
+        );
+        assert_eq!(
+            tree.sort,
+            if context == KeyboardContext::TuiOther {
+                rivu_protocol::model::LibrarySort::Album
+            } else {
+                rivu_protocol::model::LibrarySort::Id
+            }
+        );
+        let rows = help_bindings(context).collect::<Vec<_>>();
+        assert_eq!(
+            rows.iter()
+                .any(|row| row.action == Action::CheckOtherTracks),
+            check
+        );
+        assert_eq!(
+            rows.iter().any(|row| row.action == Action::FilterFavorites),
+            context == KeyboardContext::TuiOther
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.action == Action::EnqueueCollection && row.label() == "Alt+e")
+        );
+    }
+}
+
+#[test]
+fn cancel_scan_remains_global_including_search_editor_with_exact_modifiers() {
+    let mut state = query_snapshot();
+    state.system.scanning = true;
+    state.system.scan_task_id = Some(17);
+    for view in [
+        View::Queue,
+        View::Recent(RecentTracks::default()),
+        View::Playlists(PagedList::default()),
+        shortcut_tree(vec![DirectoryRow::Track(track(42))], false),
+        shortcut_tree(vec![DirectoryRow::Track(track(42))], true),
+    ] {
+        let mut ui = UiState {
+            view,
+            ..UiState::default()
+        };
+        for editing in [false, true] {
+            ui.search.editing = editing;
+            assert!(matches!(
+                ui.key_action(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT), &state),
+                KeyAction::Command(Command::CancelScan { id: 17 })
+            ));
+            assert!(matches!(
+                ui.key_action(
+                    KeyEvent::new(
+                        KeyCode::Char('x'),
+                        KeyModifiers::ALT | KeyModifiers::CONTROL
+                    ),
+                    &state
+                ),
+                KeyAction::Ignored
+            ));
+        }
+    }
+    state.system.scanning = false;
+    let mut ui = UiState::default();
+    assert!(matches!(
+        ui.key_action(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT), &state),
+        KeyAction::Ignored
+    ));
+}
+
 #[test]
 fn startup_hint_expires_once_at_its_deadline() {
     let mut ui = UiState::default();

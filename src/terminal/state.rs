@@ -1038,6 +1038,12 @@ impl UiState {
             View::Queue => KeyboardContext::TuiQueue,
             View::Recent(_) => KeyboardContext::TuiRecent,
             View::LibraryResults(_) => KeyboardContext::TuiSearchResults,
+            View::Tree(tree) if tree.other_tracks => KeyboardContext::TuiOther,
+            View::Tree(tree)
+                if matches!(tree.entries.selected(), Some(DirectoryRow::OtherTracks)) =>
+            {
+                KeyboardContext::TuiOtherTarget
+            }
             View::Tree(_) => KeyboardContext::TuiTree,
             View::Playlists(_) => KeyboardContext::TuiPlaylists,
             View::PlaylistDetail { .. } => KeyboardContext::TuiPlaylistTracks,
@@ -1101,7 +1107,8 @@ impl UiState {
             self.mark_local_change();
             return KeyAction::Ignored;
         }
-        if key.modifiers == KeyModifiers::ALT && key.code == KeyCode::Char('x') {
+        let resolved = resolve_key(key, context);
+        if resolved == Some(Action::CancelScan) {
             return if state.system.scanning
                 && !state.system.scan_progress.as_ref().is_some_and(|progress| {
                     progress.phase == rivu_protocol::model::ScanPhase::Saving
@@ -1112,14 +1119,6 @@ impl UiState {
             } else {
                 KeyAction::Ignored
             };
-        }
-        if !self.search.editing
-            && let View::Tree(tree) = &mut self.view
-            && let Some(result) = tree.other_key(key)
-        {
-            self.cancel_query();
-            self.mark_local_change();
-            return result;
         }
         // The query editor owns all printable characters, including keys that
         // control playback elsewhere. Control/Alt/Super chords are never text.
@@ -1161,9 +1160,18 @@ impl UiState {
             }
             return KeyAction::Ignored;
         }
-        let Some(action) = resolve_key(key, context) else {
+        let Some(action) = resolved else {
             return KeyAction::Ignored;
         };
+        if let View::Tree(tree) = &mut self.view
+            && let Some(result) = tree.other_action(action)
+        {
+            if matches!(result, KeyAction::Ignored) {
+                self.cancel_query();
+                self.mark_local_change();
+            }
+            return result;
+        }
         if matches!(action, Action::Help | Action::Search | Action::Traverse) {
             self.startup_hint_deadline = None;
         }
@@ -1178,6 +1186,24 @@ impl UiState {
             Action::Details => {
                 self.open_details();
                 return KeyAction::Ignored;
+            }
+            Action::Enqueue => {
+                let track_id = match &self.view {
+                    View::LibraryResults(results) => results.selected().map(|track| track.id),
+                    View::PlaylistDetail { detail, .. } => {
+                        detail.entries.selected().map(|entry| entry.track_id)
+                    }
+                    View::Tree(tree) => tree.entries.selected().and_then(|entry| match entry {
+                        DirectoryRow::Track(track) => Some(track.id),
+                        DirectoryRow::Directory { .. } | DirectoryRow::OtherTracks => None,
+                    }),
+                    _ => None,
+                };
+                return track_id.map_or(KeyAction::Ignored, |track_id| {
+                    KeyAction::Command(Command::Enqueue {
+                        track_ids: vec![track_id],
+                    })
+                });
             }
             Action::Favorite => {
                 let track_id = match &self.view {
@@ -1315,11 +1341,6 @@ impl UiState {
                     Action::Activate => {
                         command = detail.entries.selected().map(|entry| Command::Play {
                             track_id: entry.track_id,
-                        })
-                    }
-                    Action::Enqueue => {
-                        command = detail.entries.selected().map(|entry| Command::Enqueue {
-                            track_ids: vec![entry.track_id],
                         })
                     }
                     Action::Remove => {
@@ -1490,46 +1511,47 @@ impl LibraryTree {
             anchor: self.anchor,
         }
     }
-    fn other_key(&mut self, key: KeyEvent) -> Option<KeyAction> {
-        let alt = key.modifiers.contains(KeyModifiers::ALT);
-        let target =
-            self.other_tracks || matches!(self.entries.selected(), Some(DirectoryRow::OtherTracks));
-        if target && alt {
-            match key.code {
-                KeyCode::Char('c' | 'C') => {
-                    return Some(KeyAction::Command(Command::CheckOtherTracks {
-                        force: key.modifiers.contains(KeyModifiers::SHIFT),
-                    }));
+    fn other_action(&mut self, action: Action) -> Option<KeyAction> {
+        if action == Action::EnqueueCollection {
+            let (directories, other_tracks) = if self.other_tracks {
+                (Vec::new(), true)
+            } else {
+                match self.entries.selected() {
+                    Some(DirectoryRow::OtherTracks) => (Vec::new(), true),
+                    Some(DirectoryRow::Directory { path }) => (vec![path.clone()], false),
+                    _ => return Some(KeyAction::Ignored),
                 }
-                KeyCode::Char('e') => {
-                    return Some(KeyAction::Command(Command::EnqueueSources {
-                        directories: Vec::new(),
-                        track_ids: Vec::new(),
-                        other_tracks: true,
-                    }));
-                }
-                _ => {}
-            }
+            };
+            return Some(KeyAction::Command(Command::EnqueueSources {
+                directories,
+                track_ids: Vec::new(),
+                other_tracks,
+            }));
         }
-        if !self.other_tracks {
-            return None;
+        if matches!(
+            action,
+            Action::CheckOtherTracks | Action::ForceCheckOtherTracks
+        ) {
+            return Some(KeyAction::Command(Command::CheckOtherTracks {
+                force: action == Action::ForceCheckOtherTracks,
+            }));
         }
-        match (alt, key.code) {
-            (true, KeyCode::Char('f')) => {
+        match action {
+            Action::FilterFavorites => {
                 self.favorite = if self.favorite.is_some() {
                     None
                 } else {
                     Some(true)
                 };
             }
-            (true, KeyCode::Char('m')) => {
+            Action::FilterMissing => {
                 self.missing = if self.missing.is_some() {
                     None
                 } else {
                     Some(true)
                 };
             }
-            (true, KeyCode::Char('s')) => {
+            Action::CycleSort => {
                 self.sort = match self.sort {
                     rivu_protocol::model::LibrarySort::Id => {
                         rivu_protocol::model::LibrarySort::Album
@@ -1541,21 +1563,6 @@ impl LibraryTree {
                         rivu_protocol::model::LibrarySort::Id
                     }
                 };
-            }
-            (false, KeyCode::Char('e')) => {
-                return Some(
-                    self.entries
-                        .selected()
-                        .and_then(|entry| match entry {
-                            DirectoryRow::Track(track) => {
-                                Some(KeyAction::Command(Command::Enqueue {
-                                    track_ids: vec![track.id],
-                                }))
-                            }
-                            _ => None,
-                        })
-                        .unwrap_or(KeyAction::Ignored),
-                );
             }
             _ => return None,
         }

@@ -558,6 +558,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, area: Rect, ui: &mut UiState, color
             "shell-panel-playlists"
         }
         KeyboardContext::TuiSearchQuery | KeyboardContext::TuiSearchResults => "terminal-search",
+        KeyboardContext::TuiOther | KeyboardContext::TuiOtherTarget => "library-other",
         _ => "shell-panel-library",
     };
     let title = format!(
@@ -1528,7 +1529,7 @@ fn draw_tree(
 ) {
     let title = if tree.other_tracks {
         format!(
-            "{} · {}{}{} · {}",
+            "{} · {}{}{}",
             i18n.text("library-other"),
             i18n.text(match tree.sort {
                 rivu_protocol::model::LibrarySort::Id => "terminal-sort-id",
@@ -1537,7 +1538,6 @@ fn draw_tree(
             }),
             if tree.favorite.is_some() { " ♥" } else { "" },
             if tree.missing.is_some() { " !" } else { "" },
-            i18n.text("terminal-other-tracks-help")
         )
     } else if tree.directory.as_os_str().is_empty() {
         i18n.text("shell-panel-library").into()

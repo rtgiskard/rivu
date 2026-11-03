@@ -25,6 +25,8 @@ pub(crate) enum Context {
     TuiPlaylists,
     TuiPlaylistTracks,
     TuiRecent,
+    TuiOtherTarget,
+    TuiOther,
     TuiHelp,
     GuiHelp,
 }
@@ -59,6 +61,13 @@ pub(crate) enum Action {
     Parent,
     Expand,
     Enqueue,
+    EnqueueCollection,
+    FilterFavorites,
+    FilterMissing,
+    CycleSort,
+    CheckOtherTracks,
+    ForceCheckOtherTracks,
+    CancelScan,
     Traverse,
     SelectAll,
     ExtendUp,
@@ -74,33 +83,31 @@ pub(crate) struct Binding {
     pub action: Action,
     key: &'static str,
     modifiers: u8,
-    contexts: u16,
+    contexts: u32,
 }
 
 const SHIFT: u8 = 1;
 const CONTROL: u8 = 2;
-const GUI: u16 = (1 << 7) - 1;
-const GUI_LIST: u16 = GUI & !(1 << Context::Gui as u16);
-const TUI: u16 = ((1 << 14) - 1) & !GUI;
-const QUERY: u16 = 1 << Context::TuiSearchQuery as u16;
-const HELP: u16 = (1 << Context::TuiHelp as u16) | (1 << Context::GuiHelp as u16);
-const LIST: u16 = (1 << Context::GuiLibrary as u16)
+const ALT: u8 = 4;
+const GUI: u32 = (1 << 7) - 1;
+const GUI_LIST: u32 = GUI & !(1 << Context::Gui as u16);
+const TUI: u32 = ((1 << 16) - 1) & !GUI;
+const QUERY: u32 = 1 << Context::TuiSearchQuery as u16;
+const HELP: u32 = (1 << Context::TuiHelp as u16) | (1 << Context::GuiHelp as u16);
+const OTHER: u32 = 1 << Context::TuiOther as u16;
+const OTHER_TARGET: u32 = OTHER | (1 << Context::TuiOtherTarget as u16);
+const TUI_TREE: u32 = (1 << Context::TuiTree as u16) | OTHER_TARGET;
+const LIST: u32 = (1 << Context::GuiLibrary as u16)
     | (1 << Context::GuiQueue as u16)
     | (1 << Context::GuiPlaylistTracks as u16)
     | (TUI & !QUERY);
-const PLAYBACK: u16 = GUI | (TUI & !QUERY);
-const QUEUE: u16 = (1 << Context::GuiQueue as u16) | (1 << Context::TuiQueue as u16);
-const TRACKS: u16 =
+const PLAYBACK: u32 = GUI | (TUI & !QUERY);
+const QUEUE: u32 = (1 << Context::GuiQueue as u16) | (1 << Context::TuiQueue as u16);
+const TRACKS: u32 =
     (1 << Context::GuiPlaylistTracks as u16) | (1 << Context::TuiPlaylistTracks as u16);
-const TREE: u16 = (1 << Context::GuiLibrary as u16) | (1 << Context::TuiTree as u16);
-const TABS: u16 = (1 << Context::TuiQueue as u16)
-    | (1 << Context::TuiTree as u16)
-    | (1 << Context::TuiPlaylists as u16)
-    | (1 << Context::TuiPlaylistTracks as u16)
-    | (1 << Context::TuiRecent as u16)
-    | QUERY
-    | (1 << Context::TuiSearchResults as u16);
-const MULTI: u16 = (1 << Context::GuiQueue as u16)
+const TREE: u32 = (1 << Context::GuiLibrary as u16) | TUI_TREE;
+const TABS: u32 = TUI & !HELP;
+const MULTI: u32 = (1 << Context::GuiQueue as u16)
     | (1 << Context::GuiPlaylistTracks as u16)
     | (1 << Context::GuiHistory as u16);
 
@@ -264,13 +271,57 @@ static BINDINGS: &[Binding] = &[
         "keyboard-expand"
     ),
     binding!(
-        "a",
-        "a",
+        "e",
+        "e",
         0,
-        1 << Context::TuiPlaylistTracks as u16,
+        TUI_TREE
+            | (1 << Context::TuiSearchResults as u16)
+            | (1 << Context::TuiPlaylistTracks as u16),
         Enqueue,
         "keyboard-enqueue"
     ),
+    binding!(
+        "e",
+        "Alt+e",
+        ALT,
+        TUI_TREE,
+        EnqueueCollection,
+        "keyboard-enqueue-collection"
+    ),
+    binding!(
+        "f",
+        "Alt+f",
+        ALT,
+        OTHER,
+        FilterFavorites,
+        "keyboard-filter-favorites"
+    ),
+    binding!(
+        "m",
+        "Alt+m",
+        ALT,
+        OTHER,
+        FilterMissing,
+        "keyboard-filter-missing"
+    ),
+    binding!("s", "Alt+s", ALT, OTHER, CycleSort, "keyboard-cycle-sort"),
+    binding!(
+        "c",
+        "Alt+c",
+        ALT,
+        OTHER_TARGET,
+        CheckOtherTracks,
+        "keyboard-check-other"
+    ),
+    binding!(
+        "c",
+        "Alt+Shift+c",
+        ALT | SHIFT,
+        OTHER_TARGET,
+        ForceCheckOtherTracks,
+        "keyboard-force-check-other"
+    ),
+    binding!("x", "Alt+x", ALT, TUI, CancelScan, "keyboard-cancel-scan"),
     binding!(
         "m",
         "m",
@@ -356,7 +407,7 @@ pub(crate) fn bindings(context: Context) -> impl Iterator<Item = &'static Bindin
 pub(crate) struct HelpRow {
     pub description: &'static str,
     pub action: Action,
-    contexts: u16,
+    contexts: u32,
 }
 
 impl HelpRow {
@@ -411,7 +462,7 @@ pub(crate) fn help_rows(contexts: &[Context]) -> impl Iterator<Item = HelpRow> +
 }
 
 pub(crate) fn resolve(key: &str, mut modifiers: Modifiers, context: Context) -> Option<Action> {
-    if modifiers.alt || modifiers.function || modifiers.platform {
+    if modifiers.function || modifiers.platform {
         return None;
     }
     // Crossterm reports uppercase characters, whereas GPUI reports a lowercase
@@ -426,7 +477,9 @@ pub(crate) fn resolve(key: &str, mut modifiers: Modifiers, context: Context) -> 
     } else {
         key
     };
-    let bits = (u8::from(modifiers.shift) * SHIFT) | (u8::from(modifiers.control) * CONTROL);
+    let bits = (u8::from(modifiers.shift) * SHIFT)
+        | (u8::from(modifiers.control) * CONTROL)
+        | (u8::from(modifiers.alt) * ALT);
     bindings(context)
         .find(|binding| binding.key == key && binding.modifiers == bits)
         .map(|binding| binding.action)
@@ -473,6 +526,168 @@ pub(crate) fn playback_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enqueue_and_other_actions_use_exact_modifiers_and_scopes() {
+        let alt = Modifiers {
+            alt: true,
+            ..Default::default()
+        };
+        for context in [
+            Context::TuiTree,
+            Context::TuiOtherTarget,
+            Context::TuiOther,
+            Context::TuiSearchResults,
+            Context::TuiPlaylistTracks,
+        ] {
+            assert_eq!(
+                resolve("e", Modifiers::default(), context),
+                Some(Action::Enqueue)
+            );
+            assert_eq!(resolve("a", Modifiers::default(), context), None);
+            for modifiers in [
+                Modifiers {
+                    control: true,
+                    ..Default::default()
+                },
+                Modifiers {
+                    shift: true,
+                    ..Default::default()
+                },
+                Modifiers {
+                    control: true,
+                    alt: true,
+                    ..Default::default()
+                },
+                Modifiers {
+                    alt: true,
+                    shift: true,
+                    ..Default::default()
+                },
+                Modifiers {
+                    platform: true,
+                    ..Default::default()
+                },
+                Modifiers {
+                    function: true,
+                    ..Default::default()
+                },
+            ] {
+                assert_eq!(resolve("e", modifiers, context), None);
+            }
+        }
+        for context in [Context::TuiTree, Context::TuiOtherTarget, Context::TuiOther] {
+            assert_eq!(resolve("e", alt, context), Some(Action::EnqueueCollection));
+            assert_eq!(resolve("x", alt, context), Some(Action::CancelScan));
+        }
+        for context in [Context::TuiOtherTarget, Context::TuiOther] {
+            assert_eq!(resolve("c", alt, context), Some(Action::CheckOtherTracks));
+            assert_eq!(
+                resolve("C", alt, context),
+                Some(Action::ForceCheckOtherTracks)
+            );
+            assert_eq!(
+                resolve(
+                    "c",
+                    Modifiers {
+                        control: true,
+                        ..alt
+                    },
+                    context
+                ),
+                None
+            );
+        }
+        for (key, action) in [
+            ("f", Action::FilterFavorites),
+            ("m", Action::FilterMissing),
+            ("s", Action::CycleSort),
+        ] {
+            assert_eq!(resolve(key, alt, Context::TuiOther), Some(action));
+            for context in [Context::TuiTree, Context::TuiOtherTarget] {
+                assert_eq!(resolve(key, alt, context), None);
+            }
+        }
+    }
+
+    #[test]
+    fn new_terminal_bindings_do_not_leak_to_gui_editors_or_other_collections() {
+        for context in [
+            Context::Gui,
+            Context::GuiLibrary,
+            Context::GuiQueue,
+            Context::GuiPlaylistTracks,
+            Context::GuiHistory,
+            Context::GuiPlaylists,
+            Context::GuiAlbums,
+            Context::GuiHelp,
+            Context::TuiSearchQuery,
+            Context::TuiQueue,
+            Context::TuiRecent,
+            Context::TuiPlaylists,
+        ] {
+            assert_eq!(resolve("e", Modifiers::default(), context), None);
+            for key in ["e", "f", "m", "s", "c"] {
+                for shift in [false, true] {
+                    assert_eq!(
+                        resolve(
+                            key,
+                            Modifiers {
+                                alt: true,
+                                shift,
+                                ..Default::default()
+                            },
+                            context
+                        ),
+                        None
+                    );
+                }
+            }
+            assert!(!help_rows(&[context]).any(|row| matches!(
+                row.action,
+                Action::Enqueue
+                    | Action::EnqueueCollection
+                    | Action::FilterFavorites
+                    | Action::FilterMissing
+                    | Action::CycleSort
+                    | Action::CheckOtherTracks
+                    | Action::ForceCheckOtherTracks
+            )));
+        }
+        for context in [Context::TuiSearchResults, Context::TuiPlaylistTracks] {
+            assert_eq!(
+                resolve(
+                    "e",
+                    Modifiers {
+                        alt: true,
+                        ..Default::default()
+                    },
+                    context
+                ),
+                None
+            );
+        }
+        let rows = help_rows(&[Context::TuiOther]).collect::<Vec<_>>();
+        for action in [
+            Action::Enqueue,
+            Action::EnqueueCollection,
+            Action::FilterFavorites,
+            Action::FilterMissing,
+            Action::CycleSort,
+            Action::CheckOtherTracks,
+            Action::ForceCheckOtherTracks,
+            Action::CancelScan,
+        ] {
+            assert!(rows.iter().any(|row| row.action == action));
+        }
+        assert_eq!(
+            rows.iter()
+                .find(|row| row.action == Action::Enqueue)
+                .unwrap()
+                .label(),
+            "e"
+        );
+    }
 
     #[test]
     fn recent_has_track_navigation_and_search_without_removal() {
