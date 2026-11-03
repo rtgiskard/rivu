@@ -252,6 +252,7 @@ pub(super) enum QueryKind {
     },
     Playlists,
     Playlist(i64),
+    PlaylistSummary(i64),
     PlaylistSelection {
         playlist_id: i64,
         entry_id: i64,
@@ -318,6 +319,7 @@ impl QueryKind {
                 sort: LibrarySort::Id,
             },
             QueryKind::Track(track_id) => Query::Track { track_id },
+            QueryKind::PlaylistSummary(playlist_id) => Query::PlaylistSummary { playlist_id },
             QueryKind::Queue => Query::QueuePage {
                 query: None,
                 offset,
@@ -422,6 +424,15 @@ impl QueryKind {
 }
 
 impl QueryRequest {
+    // Failure suppression follows demand and freshness, not a submission generation.
+    pub(super) fn same_demand(&self, other: &Self) -> bool {
+        self.kind == other.kind
+            && self.filter == other.filter
+            && self.offset == other.offset
+            && self.limit == other.limit
+            && self.stamp == other.stamp
+    }
+
     pub(super) fn query(&self) -> Query {
         self.kind.clone().filtered_query(
             self.offset,

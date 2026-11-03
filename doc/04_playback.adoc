@@ -429,6 +429,11 @@ switches top-level tabs even while editing and clears search. Entering or leavin
 a directory, Other, or playlist details also clears it; queries are not preserved
 per tab. Background refreshes of the same applied query keep the selected
 occurrence or track when it still matches.
+Open playlist details also follow external playlist renames without resetting
+their track selection or scroll position.
+Entry loading and title refresh are independent: failure of one neither blocks
+nor retries the other. Failed queries stay suppressed until their demand or
+relevant revision changes, or the view is reopened.
 
 Library's link:02_library.adoc#other[Other] entry is hidden at the top level when
 the unfiltered collection is empty.

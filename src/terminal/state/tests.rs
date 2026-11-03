@@ -780,6 +780,13 @@ pub(in crate::terminal) fn response(request: &QueryRequest, total: usize) -> Que
             ))
         }
         QueryKind::Track(_) => panic!("track reads need explicit metadata"),
+        QueryKind::PlaylistSummary(playlist_id) => {
+            ViewResponse::PlaylistSummary(Some(PlaylistSummary {
+                id: *playlist_id,
+                name: "collection".into(),
+                entry_count: total,
+            }))
+        }
         QueryKind::Queue => ViewResponse::QueuePage(Page {
             total,
             rows: indices
@@ -940,6 +947,7 @@ pub(in crate::terminal) fn playlist_view(playlist_id: i64) -> View {
         detail: PlaylistDetail {
             playlist_id,
             name: "collection".into(),
+            summary_dirty: false,
             entries: PagedList::default(),
             entry_anchor: None,
             selected_entry_id: None,
@@ -1371,6 +1379,7 @@ fn unrelated_updates_preserve_pending_and_loaded_terminal_pages() {
             }
             QueryKind::Playlist(_) => {
                 next.library.revision = state.library.revision;
+                next.library.playlist_revision = state.library.playlist_revision;
                 Arc::make_mut(&mut next.library.playlist_entry_revisions).insert(1, 9);
             }
             _ => unreachable!(),
@@ -1604,6 +1613,7 @@ fn playlist_reorder_preserves_unrelated_terminal_views() {
             detail: PlaylistDetail {
                 playlist_id: 2,
                 name: "other".into(),
+                summary_dirty: false,
                 entries: PagedList::default(),
                 entry_anchor: None,
                 selected_entry_id: None,
@@ -1633,6 +1643,7 @@ fn terminal_playlist_reorder_relocates_identity_and_rejects_stale_results() {
         detail: PlaylistDetail {
             playlist_id: 1,
             name: "one".into(),
+            summary_dirty: false,
             entries: PagedList::default(),
             entry_anchor: None,
             selected_entry_id: None,
@@ -1704,6 +1715,7 @@ fn every_queried_view_renders_across_batches_without_resetting_scroll() {
             detail: PlaylistDetail {
                 playlist_id: 7,
                 name: "collection".into(),
+                summary_dirty: false,
                 entries: PagedList::default(),
                 entry_anchor: None,
                 selected_entry_id: None,
@@ -2755,4 +2767,179 @@ fn bitrate_changes_do_not_retire_playlist_location_lookups() {
         unreachable!()
     };
     assert_eq!(detail.entries.selection.selected(), Some(1));
+}
+
+#[test]
+fn external_playlist_rename_refreshes_active_and_cached_titles_without_reloading_entries() {
+    for cached in [false, true] {
+        let state = query_snapshot();
+        let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
+        tui.ui.view = playlist_view(1);
+        load_visible(&mut tui.ui, &state);
+        tui.ui.key_action(KeyEvent::from(KeyCode::Down), &state);
+        let View::PlaylistDetail { detail, .. } = &tui.ui.view else {
+            panic!("playlist detail");
+        };
+        let coordinates = page_coordinates(&detail.entries);
+        let selected = detail.entries.selected().unwrap() as *const PlaylistEntryRow;
+        if cached {
+            tui.ui.switch_tab(false, &state);
+            load_visible(&mut tui.ui, &state);
+        }
+
+        let mut next = state.clone();
+        next.library.playlist_revision += 1;
+        tui.apply_snapshot(next.clone());
+        if cached {
+            let View::PlaylistDetail { detail, .. } = tui.ui.cached_playlists.as_ref().unwrap()
+            else {
+                panic!("cached playlist detail");
+            };
+            assert!(detail.summary_dirty);
+            assert_eq!(detail.name, "collection");
+            assert_eq!(page_coordinates(&detail.entries), coordinates);
+            assert_eq!(detail.entries.selected().unwrap() as *const _, selected);
+            // Hidden details are invalidated by snapshots, never polled.
+            assert!(tui.ui.query_request(&next).is_none());
+            tui.ui.switch_tab(true, &next);
+        }
+        let stale = tui.ui.query_request(&next).unwrap();
+        assert_eq!(stale.kind, QueryKind::PlaylistSummary(1));
+        assert_eq!(stale.query(), Query::PlaylistSummary { playlist_id: 1 });
+        next.library.playlist_revision += 1;
+        tui.apply_snapshot(next.clone());
+        assert!(!tui.ui.apply_query(&next, &stale, Ok(response(&stale, 12))));
+        let request = tui.ui.query_request(&next).unwrap();
+        assert!(tui.ui.apply_query(
+            &next,
+            &request,
+            Ok(QueryResult {
+                revisions: next.query_revisions(None),
+                view: ViewResponse::PlaylistSummary(Some(PlaylistSummary {
+                    id: 1,
+                    name: "Renamed 夜航".into(),
+                    entry_count: 999,
+                })),
+            })
+        ));
+        let View::PlaylistDetail { detail, .. } = &tui.ui.view else {
+            panic!("playlist detail");
+        };
+        assert_eq!(detail.name, "Renamed 夜航");
+        assert!(!detail.summary_dirty);
+        assert_eq!(page_coordinates(&detail.entries), coordinates);
+        assert_eq!(detail.entries.selected().unwrap() as *const _, selected);
+        assert!(tui.ui.query_request(&next).is_none());
+    }
+}
+
+#[test]
+fn failed_playlist_entries_do_not_block_title_refresh_or_retry_after_it() {
+    for prefetch in [false, true] {
+        let state = query_snapshot();
+        let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
+        tui.ui.view = playlist_view(1);
+        if prefetch {
+            let first = tui.ui.query_request(&state).unwrap();
+            assert!(tui.ui.apply_query(&state, &first, Ok(response(&first, 12))));
+        }
+        let failed = tui.ui.query_request(&state).unwrap();
+        assert_eq!(failed.offset, if prefetch { 3 } else { 0 });
+        assert!(
+            tui.ui
+                .apply_query(&state, &failed, Err("read failed".into()))
+        );
+        let View::PlaylistDetail { detail, .. } = &tui.ui.view else {
+            panic!("playlist detail");
+        };
+        let coordinates = page_coordinates(&detail.entries);
+        let selected = detail.entries.selected().map(|row| row as *const _);
+
+        let mut next = state.clone();
+        next.library.playlist_revision += 1;
+        tui.apply_snapshot(next.clone());
+        let summary = tui
+            .ui
+            .query_request(&next)
+            .expect("independent title refresh");
+        assert_eq!(summary.kind, QueryKind::PlaylistSummary(1));
+        assert!(tui.ui.apply_query(
+            &next,
+            &summary,
+            Ok(QueryResult {
+                revisions: next.query_revisions(None),
+                view: ViewResponse::PlaylistSummary(Some(PlaylistSummary {
+                    id: 1,
+                    name: "Renamed".into(),
+                    entry_count: 12,
+                })),
+            })
+        ));
+        let View::PlaylistDetail { detail, .. } = &tui.ui.view else {
+            panic!("playlist detail");
+        };
+        assert_eq!(detail.name, "Renamed");
+        assert_eq!(page_coordinates(&detail.entries), coordinates);
+        assert_eq!(
+            detail.entries.selected().map(|row| row as *const _),
+            selected
+        );
+        assert!(
+            tui.ui.query_request(&next).is_none(),
+            "failed entries stay suppressed"
+        );
+    }
+}
+
+#[test]
+fn failed_playlist_title_does_not_block_pages_or_retry_when_they_load() {
+    let state = query_snapshot();
+    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
+    tui.ui.view = playlist_view(1);
+    load_visible(&mut tui.ui, &state);
+    let mut next = state.clone();
+    next.library.playlist_revision += 1;
+    tui.apply_snapshot(next.clone());
+    let summary = tui.ui.query_request(&next).unwrap();
+    assert_eq!(summary.kind, QueryKind::PlaylistSummary(1));
+    assert!(
+        tui.ui
+            .apply_query(&next, &summary, Err("summary failed".into()))
+    );
+    for _ in 0..3 {
+        tui.ui.key_action(KeyEvent::from(KeyCode::Down), &next);
+    }
+    let page = tui
+        .ui
+        .query_request(&next)
+        .expect("independent page prefetch");
+    assert_eq!(page.kind, QueryKind::Playlist(1));
+    assert_eq!(page.offset, 6);
+    assert!(tui.ui.apply_query(&next, &page, Ok(response(&page, 12))));
+    assert!(
+        tui.ui.query_request(&next).is_none(),
+        "failed title stays suppressed"
+    );
+
+    next.library.playlist_revision += 1;
+    tui.apply_snapshot(next.clone());
+    let refreshed = tui.ui.query_request(&next).expect("new title revision");
+    assert_eq!(refreshed.kind, QueryKind::PlaylistSummary(1));
+    assert!(
+        tui.ui
+            .apply_query(&next, &refreshed, Err("summary still unavailable".into()))
+    );
+    tui.ui.key_action(KeyEvent::from(KeyCode::Down), &next);
+    tui.ui.key_action(KeyEvent::from(KeyCode::Down), &next);
+    tui.ui.key_action(KeyEvent::from(KeyCode::Down), &next);
+    let page = tui.ui.query_request(&next).unwrap();
+    assert_eq!(page.kind, QueryKind::Playlist(1));
+    assert!(
+        tui.ui
+            .apply_query(&next, &page, Err("entries unavailable".into()))
+    );
+    assert!(
+        tui.ui.query_request(&next).is_none(),
+        "neither failure retries the other"
+    );
 }

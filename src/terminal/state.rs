@@ -265,6 +265,9 @@ impl View {
             rows_changed
         };
         if let Self::PlaylistDetail { detail, .. } = self {
+            if QueryKind::PlaylistSummary(detail.playlist_id).changed(previous, next, "") {
+                detail.summary_dirty = true;
+            }
             let compact = Query::PlaylistEntryLocations {
                 query: (!query.is_empty()).then(|| query.to_owned()),
                 playlist_id: detail.playlist_id,
@@ -377,6 +380,7 @@ pub(super) struct UiState {
     pub(super) requested: Option<QueryRequest>,
     pub(super) projection: QueryTracker,
     pub(super) failed_request: Option<QueryRequest>,
+    failed_summary_request: Option<QueryRequest>,
     pub(super) local_revision: u64,
     // Keyboard PageUp/PageDown distance follows the terminal viewport, not query limits.
     pub(super) page_size: usize,
@@ -405,6 +409,7 @@ impl UiState {
             requested: None,
             projection: QueryTracker::default(),
             failed_request: None,
+            failed_summary_request: None,
             local_revision: 0,
             page_size: 0,
         }
@@ -469,7 +474,27 @@ impl UiState {
             });
         }
         let limit = state.system.query_batch_size as usize;
-        let (kind, offset) = match &self.view {
+        if let Some((kind, offset)) = self.view_query(state, limit)
+            && let Some(request) = self.prepare_query(state, kind, offset, limit)
+        {
+            return Some(request);
+        }
+        let View::PlaylistDetail { detail, .. } = &self.view else {
+            return None;
+        };
+        if !detail.summary_dirty {
+            return None;
+        }
+        self.prepare_query(
+            state,
+            QueryKind::PlaylistSummary(detail.playlist_id),
+            0,
+            limit,
+        )
+    }
+
+    fn view_query(&self, state: &TuiSnapshot, limit: usize) -> Option<(QueryKind, usize)> {
+        Some(match &self.view {
             View::Queue if state.queue.total != 0 => match self.queue_anchor {
                 Some(queue_id) => (QueryKind::QueueSelection(queue_id), 0),
                 None => (QueryKind::Queue, self.queue.next_offset(limit)?),
@@ -528,8 +553,17 @@ impl UiState {
                 }
             }
             _ => return None,
-        };
-        let filter = (!matches!(kind, QueryKind::Search(_))
+        })
+    }
+
+    fn prepare_query(
+        &mut self,
+        state: &TuiSnapshot,
+        kind: QueryKind,
+        offset: usize,
+        limit: usize,
+    ) -> Option<QueryRequest> {
+        let filter = (!matches!(kind, QueryKind::Search(_) | QueryKind::PlaylistSummary(_))
             && !self.search.applied_query.is_empty())
         .then(|| self.search.applied_query.clone());
         let mut request = QueryRequest {
@@ -542,13 +576,24 @@ impl UiState {
         };
         let query = request.query();
         let revisions = state.query_revisions(request.kind.playlist_id());
+        request.stamp = query.stamp(revisions);
+        // Suppressed demand must not change the active query's generation.
+        if self
+            .failure_slot(&request.kind)
+            .as_ref()
+            .is_some_and(|failed| failed.same_demand(&request))
+        {
+            return None;
+        }
         self.projection.sync(&query, revisions);
         request.generation = self.projection.generation();
-        request.stamp = query.stamp(revisions);
-        if self.failed_request.as_ref() == Some(&request) {
-            None
-        } else {
-            Some(request)
+        Some(request)
+    }
+
+    fn failure_slot(&mut self, kind: &QueryKind) -> &mut Option<QueryRequest> {
+        match kind {
+            QueryKind::PlaylistSummary(_) => &mut self.failed_summary_request,
+            _ => &mut self.failed_request,
         }
     }
 
@@ -568,7 +613,7 @@ impl UiState {
             Ok(result) => result,
             Err(error) => {
                 self.requested = None;
-                self.failed_request = Some(request.clone());
+                *self.failure_slot(&request.kind) = Some(request.clone());
                 if self.details_active {
                     self.details.stamp = Some(request.stamp);
                     self.details.error_scroll = 0;
@@ -678,6 +723,16 @@ impl UiState {
             }
             (View::Playlists(playlists), ViewResponse::PlaylistSummaries(page)) => {
                 playlists.insert(request.offset, request.limit, page.total, page.rows);
+            }
+            (View::PlaylistDetail { detail, .. }, ViewResponse::PlaylistSummary(summary))
+                if request.kind == QueryKind::PlaylistSummary(detail.playlist_id) =>
+            {
+                if let Some(summary) = summary
+                    && summary.id == detail.playlist_id
+                {
+                    detail.name = summary.name;
+                }
+                detail.summary_dirty = false;
             }
             (View::PlaylistDetail { detail, .. }, ViewResponse::PlaylistEntries(page)) => {
                 detail
@@ -897,6 +952,7 @@ impl UiState {
     fn cancel_query(&mut self) {
         self.requested = None;
         self.failed_request = None;
+        self.failed_summary_request = None;
         self.projection.cancel();
     }
 
@@ -1385,6 +1441,7 @@ impl UiState {
                             let detail = PlaylistDetail {
                                 playlist_id: playlist.id,
                                 name: playlist.name.clone(),
+                                summary_dirty: false,
                                 entries: PagedList::default(),
                                 entry_anchor: None,
                                 selected_entry_id: None,
@@ -1475,6 +1532,7 @@ impl Default for UiState {
 pub(super) struct PlaylistDetail {
     pub(super) playlist_id: i64,
     pub(super) name: String,
+    pub(super) summary_dirty: bool,
     pub(super) entries: PagedList<PlaylistEntryRow>,
     pub(super) entry_anchor: Option<i64>,
     pub(super) selected_entry_id: Option<i64>,

@@ -580,6 +580,7 @@ fn localized_playlist_rendering_preserves_user_metadata() {
         entries: PagedList::default(),
         entry_anchor: None,
         selected_entry_id: None,
+        summary_dirty: false,
     };
     detail.entries.set_viewport(4);
     detail.entries.insert(
