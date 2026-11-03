@@ -16,7 +16,7 @@ pub enum StatusKind {
 
 /// Shared inline status text for asynchronous panel and settings actions.
 pub fn status_message(
-    theme: &'static crate::theme::Palette,
+    theme: &'static rivu_format::palette::Palette,
     message: impl Into<SharedString>,
     kind: StatusKind,
 ) -> Div {
@@ -64,7 +64,7 @@ pub fn panel_surface(id: impl Into<ElementId>) -> Stateful<Div> {
 
 /// Shared heading block for content panels.
 pub fn panel_header(
-    theme: &'static crate::theme::Palette,
+    theme: &'static rivu_format::palette::Palette,
     title: impl Into<SharedString>,
     subtitle: impl Into<SharedString>,
 ) -> Div {
@@ -82,7 +82,7 @@ pub fn panel_header(
 
 /// Two-line list heading whose title and count each truncate without wrapping.
 pub fn list_panel_header(
-    theme: &'static crate::theme::Palette,
+    theme: &'static rivu_format::palette::Palette,
     title: impl Into<SharedString>,
     subtitle: impl Into<SharedString>,
 ) -> Div {
@@ -117,7 +117,7 @@ pub fn list_viewport(child: impl IntoElement) -> Div {
 
 /// Shared heading and spacing for settings and metadata sections.
 pub fn section_group(
-    theme: &'static crate::theme::Palette,
+    theme: &'static rivu_format::palette::Palette,
     title: impl IntoElement,
     content: impl IntoElement,
 ) -> Div {
@@ -178,12 +178,12 @@ impl NumericInput {
 /// Shared label-and-control field with optional, content-sized feedback.
 pub struct FormField {
     surface: Div,
-    theme: &'static crate::theme::Palette,
+    theme: &'static rivu_format::palette::Palette,
 }
 
 impl FormField {
     pub fn new(
-        theme: &'static crate::theme::Palette,
+        theme: &'static rivu_format::palette::Palette,
         label: impl Into<SharedString>,
         control: impl IntoElement,
     ) -> Self {
@@ -225,7 +225,7 @@ impl FormField {
 
 /// Baseline-aligned label/value row with a stable trailing action hit area.
 pub fn label_value_row(
-    theme: &'static crate::theme::Palette,
+    theme: &'static rivu_format::palette::Palette,
     label: impl Into<SharedString>,
     value: impl Into<SharedString>,
     label_width: gpui::Pixels,
@@ -256,7 +256,10 @@ pub fn label_value_row(
 }
 
 /// Secondary text used throughout panels and controls.
-pub fn caption(theme: &'static crate::theme::Palette, text: impl Into<SharedString>) -> Div {
+pub fn caption(
+    theme: &'static rivu_format::palette::Palette,
+    text: impl Into<SharedString>,
+) -> Div {
     div()
         .text_xs()
         .text_color(rgb(theme.secondary))

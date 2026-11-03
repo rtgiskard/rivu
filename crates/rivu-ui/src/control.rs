@@ -17,7 +17,7 @@ pub fn activate_control<T: 'static>(
 
 /// Selected appearance only; callers supply role-specific selected/toggled semantics.
 pub fn active_control(
-    theme: &'static crate::theme::Palette,
+    theme: &'static rivu_format::palette::Palette,
     control: Stateful<Div>,
     active: bool,
 ) -> Stateful<Div> {
@@ -31,7 +31,7 @@ pub fn active_control(
 /// Shared geometry and interaction surface for buttons and select triggers.
 /// Variants replace the shared group's hover material; focus retains its own border.
 fn control_surface(
-    theme: &'static crate::theme::Palette,
+    theme: &'static rivu_format::palette::Palette,
     id: impl Into<ElementId>,
 ) -> Stateful<Div> {
     div()
@@ -57,7 +57,7 @@ fn control_surface(
 
 /// Reusable visual button primitive. It has no application-specific behavior.
 pub fn button_style(
-    theme: &'static crate::theme::Palette,
+    theme: &'static rivu_format::palette::Palette,
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
 ) -> Stateful<Div> {
@@ -152,7 +152,7 @@ pub(crate) fn icon_button_height(window: &Window, cx: &gpui::App) -> gpui::Pixel
 }
 
 fn icon_button_surface(
-    theme: &'static crate::theme::Palette,
+    theme: &'static rivu_format::palette::Palette,
     id: impl Into<ElementId>,
     icon: impl Into<SharedString>,
     hint: impl Into<SharedString>,
@@ -406,7 +406,7 @@ impl IconButtonGroup {
 
 /// Unavailable actions retain owner guards and suppress all native activation paths.
 pub fn disabled_control(
-    theme: &'static crate::theme::Palette,
+    theme: &'static rivu_format::palette::Palette,
     control: Stateful<Div>,
     disabled: bool,
 ) -> Stateful<Div> {
@@ -456,7 +456,7 @@ fn disable_control_interaction(control: Stateful<Div>) -> Stateful<Div> {
 
 /// Destructive text remains visible on hover; keep the shared focus treatment.
 pub fn danger_control(
-    theme: &'static crate::theme::Palette,
+    theme: &'static rivu_format::palette::Palette,
     control: Stateful<Div>,
 ) -> Stateful<Div> {
     control
@@ -466,7 +466,7 @@ pub fn danger_control(
 
 /// Shared trigger for settings and other anchored dropdowns.
 pub fn dropdown_trigger(
-    theme: &'static crate::theme::Palette,
+    theme: &'static rivu_format::palette::Palette,
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
     expanded: bool,

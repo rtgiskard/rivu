@@ -5135,7 +5135,6 @@ name = "rivu"
 version = "0.2.8"
 dependencies = [
  "anyhow",
- "ashpd",
  "async-channel",
  "async-executor",
  "async-io",
@@ -5147,14 +5146,9 @@ dependencies = [
  "chrono",
  "clap",
  "crossbeam-channel",
- "crossterm",
  "event-listener",
- "fluent-bundle",
- "fluent-syntax",
  "futures",
  "futures-lite",
- "gpui",
- "gpui_platform",
  "hound",
  "image",
  "libc",
@@ -5162,28 +5156,25 @@ dependencies = [
  "parking_lot",
  "postcard",
  "rand 0.10.3",
- "ratatui",
  "realfft",
  "ringbuf",
  "rivu-audio",
  "rivu-client",
  "rivu-dsp",
  "rivu-format",
+ "rivu-gui",
  "rivu-metadata",
+ "rivu-presentation",
  "rivu-protocol",
- "rivu-ui",
+ "rivu-tui",
  "rivu-utils",
- "rivu-visuals",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2",
- "signal-hook 0.4.5",
  "tempfile",
  "toml 1.1.8+spec-1.1.0",
  "tracing",
- "unic-langid",
- "unicode-segmentation",
  "url",
  "zbus",
 ]
@@ -5209,6 +5200,7 @@ dependencies = [
  "rivu-dsp",
  "rivu-format",
  "rivu-metadata",
+ "rivu-protocol",
  "rivu-utils",
  "rustfft",
  "serde",
@@ -5260,6 +5252,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "rivu-gui"
+version = "0.2.8"
+dependencies = [
+ "anyhow",
+ "ashpd",
+ "blake3",
+ "chrono",
+ "futures",
+ "gpui",
+ "gpui_platform",
+ "image",
+ "libc",
+ "parking_lot",
+ "ringbuf",
+ "rivu",
+ "rivu-audio",
+ "rivu-dsp",
+ "rivu-format",
+ "rivu-metadata",
+ "rivu-presentation",
+ "rivu-protocol",
+ "rivu-ui",
+ "rivu-utils",
+ "rivu-visuals",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "unicode-segmentation",
+ "url",
+]
+
+[[package]]
 name = "rivu-metadata"
 version = "0.2.0"
 dependencies = [
@@ -5293,6 +5318,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rivu-presentation"
+version = "0.2.0"
+dependencies = [
+ "fluent-bundle",
+ "fluent-syntax",
+ "rivu-format",
+ "rivu-protocol",
+]
+
+[[package]]
 name = "rivu-protocol"
 version = "0.2.0"
 dependencies = [
@@ -5311,11 +5346,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "rivu-tui"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "crossbeam-channel",
+ "crossterm",
+ "parking_lot",
+ "ratatui",
+ "rivu",
+ "rivu-client",
+ "rivu-format",
+ "rivu-presentation",
+ "rivu-protocol",
+ "signal-hook 0.4.5",
+ "tempfile",
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "rivu-ui"
 version = "0.2.0"
 dependencies = [
  "gpui",
  "gpui_platform",
+ "rivu-format",
  "unicode-segmentation",
 ]
 
@@ -5341,7 +5397,6 @@ dependencies = [
  "futures",
  "gpui",
  "parking_lot",
- "rivu-audio",
  "rivu-format",
  "rivu-protocol",
  "rivu-ui",

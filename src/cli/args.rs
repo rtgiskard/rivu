@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand, ValueEnum};
-use rivu::i18n::Localizer;
+use rivu_presentation::i18n::Localizer;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -7,7 +7,6 @@ use std::path::PathBuf;
     name = "rivu",
     version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("RIVU_GIT_VERSION"), ")"),
     about = "A quiet, local-first music player",
-    long_about = "Run without a command to open the desktop UI. GUI and serve own one shared core per data directory; control commands connect to it."
 )]
 pub(super) struct Args {
     #[arg(long, global = true, value_name = "DIRECTORY")]
@@ -37,10 +36,12 @@ fn parse_log_level(value: &str) -> Result<rivu_utils::logging::LogLevel, String>
 #[derive(Subcommand)]
 pub(super) enum Action {
     /// Open the desktop UI and optionally import paths.
+    #[cfg(feature = "gui")]
     Gui { paths: Vec<PathBuf> },
     /// Run the shared core without a GUI (foreground).
     Serve { paths: Vec<PathBuf> },
     /// Control the running instance in a minimal terminal UI.
+    #[cfg(feature = "tui")]
     Tui,
     /// Show playback and library state from the running instance.
     Status,
@@ -523,14 +524,17 @@ impl Args {
     /// Validate relationships that require parsed values or command-line provenance.
     pub(super) fn validate(&self, matches: &clap::ArgMatches) -> Result<(), clap::Error> {
         let invalid = |message| clap::Error::raw(clap::error::ErrorKind::ArgumentConflict, message);
-        if self.json
-            && matches!(
-                self.action,
-                None | Some(Action::Gui { .. } | Action::Serve { .. } | Action::Tui)
-            )
-        {
+        let persistent = match self.action {
+            None | Some(Action::Serve { .. }) => true,
+            #[cfg(feature = "gui")]
+            Some(Action::Gui { .. }) => true,
+            #[cfg(feature = "tui")]
+            Some(Action::Tui) => true,
+            _ => false,
+        };
+        if self.json && persistent {
             return Err(invalid(
-                "--json requires a finite control command; it cannot be used with gui, serve, tui, or default GUI startup",
+                "--json requires a finite control command; startup and interactive commands are not supported",
             ));
         }
         match &self.action {
@@ -601,7 +605,14 @@ pub(super) fn localize_help(command: &mut clap::Command, i18n: &Localizer, path:
             .long_about(text.to_owned());
     }
     if path.is_empty() {
-        *command = std::mem::take(command).long_about(i18n.text("core-help-long").to_owned());
+        let key = if cfg!(feature = "gui") {
+            "core-help-long"
+        } else if cfg!(feature = "tui") {
+            "core-help-long-tui"
+        } else {
+            "core-help-long-serve"
+        };
+        *command = std::mem::take(command).long_about(i18n.text(key).to_owned());
     }
     let invocation = command
         .get_bin_name()

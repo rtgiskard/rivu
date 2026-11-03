@@ -14,7 +14,7 @@ mod waveform;
 
 pub use frequency_views::FrequencyViews;
 pub use labels::VisualLabels;
-pub use parameters::{VisualParameters, WaveformScanParameters};
+pub use parameters::VisualParameters;
 pub use style_coordinator::StyleCoordinator;
 pub use waveform::{Waveform, WaveformEvent, WaveformViewState};
 

@@ -1,12 +1,12 @@
 use super::*;
 
 #[test]
-fn gui_snapshot_skips_unchanged_revision_and_projects_current_state() {
+fn display_state_skips_unchanged_revision_and_projects_current_state() {
     let (handle, _worker, _receiver) = display_fixture();
-    let initial = handle.gui_snapshot();
+    let initial = handle.display_state();
     assert!(
         handle
-            .gui_snapshot_if_changed(initial.system.revision)
+            .display_state_if_changed(initial.system.revision)
             .is_none()
     );
 
@@ -16,7 +16,7 @@ fn gui_snapshot_skips_unchanged_revision_and_projects_current_state() {
         state.system.shutting_down = true;
     }
     let changed = handle
-        .gui_snapshot_if_changed(initial.system.revision)
+        .display_state_if_changed(initial.system.revision)
         .expect("changed state is projected");
     assert_eq!(
         changed.system.revision,
@@ -26,7 +26,7 @@ fn gui_snapshot_skips_unchanged_revision_and_projects_current_state() {
     assert!(!initial.system.shutting_down);
     assert!(
         handle
-            .gui_snapshot_if_changed(changed.system.revision)
+            .display_state_if_changed(changed.system.revision)
             .is_none()
     );
 }
@@ -66,7 +66,7 @@ fn display_off_clears_results_with_a_saturated_business_queue_and_reopens() {
     let (handle, worker, _receiver) = display_fixture();
     let demand = DisplayDemand {
         enabled: true,
-        visualizer: rivu_audio::analysis::VisualizerDemand {
+        visualizer: rivu_protocol::analysis::VisualizerDemand {
             stereo_density: true,
             ..Default::default()
         },

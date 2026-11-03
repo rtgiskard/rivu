@@ -647,7 +647,7 @@ fn random_draws_include_current_weight_duplicates_and_ignore_forward_history() {
 
 #[test]
 fn repeated_keyboard_intents_accumulate_from_one_snapshot_in_execution_order() {
-    use crate::keyboard::{self, Action};
+    use rivu_presentation::keyboard::{self, Action};
 
     let (_directory, mut core) = navigation_fixture(PlaybackStatus::Paused);
     let _commands = recording_audio(&mut core);
@@ -744,7 +744,7 @@ fn relative_intents_clamp_owner_values_and_reject_nonfinite_deltas() {
 
 #[test]
 fn delayed_keyboard_seeks_cannot_target_next_duplicate_occurrence_or_stopped_playback() {
-    use crate::keyboard::{self, Action};
+    use rivu_presentation::keyboard::{self, Action};
 
     let (_directory, mut core) = navigation_fixture(PlaybackStatus::Paused);
     let _commands = recording_audio(&mut core);

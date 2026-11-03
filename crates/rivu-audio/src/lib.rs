@@ -99,7 +99,7 @@ mod ffmpeg {
             unreachable!("FFmpeg decoder cannot be opened without the ffmpeg feature")
         }
 
-        pub(super) fn identity(&self) -> super::source::SourceIdentity {
+        pub(super) fn identity(&self) -> rivu_protocol::waveform::SourceIdentity {
             unreachable!("FFmpeg decoder cannot be opened without the ffmpeg feature")
         }
 
@@ -147,10 +147,12 @@ pub use channels::Channel;
 pub use graph::GraphRunner;
 pub use output::devices;
 pub use render::{RenderFormat, SourceRenderer};
+use rivu_protocol::waveform::{PlaybackRange, SourceIdentity, WaveformFrame};
 pub use source::{
-    AudioBackend, ProbeResult, SourceIdentity, probe, probe_details, probe_file, probe_with_cancel,
+    AudioBackend, ProbeResult, probe, probe_details, probe_file, probe_with_cancel,
+    source_identity, source_identity_from_metadata,
 };
-pub use waveform::{WaveformFrame, WaveformIdentity};
+pub use waveform::WaveformControl;
 
 /// Read the published runtime status without starting or waiting for a load.
 pub fn ffmpeg_status() -> anyhow::Result<String> {
@@ -208,7 +210,7 @@ pub fn waveform(
     source::Source::waveform(snapshot, media_read_buffer_mib, ffmpeg_enabled, cancelled)
 }
 
-use crate::analysis::{AnalysisControl, AnalysisFrame, AnalysisSettings, AnalysisWorker};
+use crate::analysis::{AnalysisControl, AnalysisWorker};
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender, bounded};
 use futures::{
@@ -217,6 +219,7 @@ use futures::{
     future::{BoxFuture, Either},
 };
 use parking_lot::{Mutex, RwLock};
+use rivu_protocol::analysis::{AnalysisFrame, AnalysisSettings};
 use std::{
     path::PathBuf,
     sync::Arc,
@@ -226,12 +229,6 @@ use std::{
 use worker::Worker;
 
 const BYTES_PER_MEBIBYTE: usize = 1024 * 1024;
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct PlaybackRange {
-    pub start_seconds: f64,
-    pub end_seconds: Option<f64>,
-}
 
 /// Authoritative library/display metadata, independent of decoder source tags.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -405,6 +402,7 @@ pub struct AudioEngine {
     pub analysis: Arc<RwLock<AnalysisFrame>>,
     pub analysis_control: Arc<AnalysisControl>,
     pub waveform: Arc<RwLock<WaveformFrame>>,
+    pub waveform_control: Arc<WaveformControl>,
     worker: Option<JoinHandle<()>>,
     shutdown: Mutex<Option<AudioShutdown>>,
 }
@@ -417,6 +415,8 @@ impl AudioEngine {
         let analysis = Arc::new(RwLock::new(AnalysisFrame::default()));
         let waveform = Arc::new(RwLock::new(WaveformFrame::default()));
         let worker_waveform = waveform.clone();
+        let waveform_control = Arc::new(WaveformControl::default());
+        let worker_waveform_control = Arc::clone(&waveform_control);
         let analyzer = AnalysisWorker::new(analysis.clone())?;
         let analysis_control = Arc::clone(&analyzer.control);
         let media_read_buffer_len = usize::try_from(media_read_buffer_mib)
@@ -431,7 +431,7 @@ impl AudioEngine {
                     send_events,
                     cancelled,
                     analyzer,
-                    worker_waveform,
+                    (worker_waveform, worker_waveform_control),
                     media_read_buffer_len,
                 )
                 .run()
@@ -443,6 +443,7 @@ impl AudioEngine {
             analysis,
             analysis_control,
             waveform,
+            waveform_control,
             worker: Some(worker),
             shutdown: Mutex::new(Some(shutdown)),
         })

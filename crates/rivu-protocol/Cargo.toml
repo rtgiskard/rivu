@@ -4,6 +4,9 @@ version = "0.2.0"
 edition = "2024"
 description = "Rivu IPC contracts, wire encoding, and bounded transport"
 
+[features]
+test-support = []
+
 [dependencies]
 anyhow = "1"
 async-io = "2"

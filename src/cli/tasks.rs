@@ -3,7 +3,7 @@ use super::{
     output::show_scan,
 };
 use anyhow::{Context, Result, bail, ensure};
-use rivu::i18n::Localizer;
+use rivu_presentation::i18n::Localizer;
 use rivu_protocol::{
     model::{
         Command, ProcessingPhase, ProcessingTaskStatus, Query, RelocationPhase,

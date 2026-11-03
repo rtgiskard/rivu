@@ -1,8 +1,8 @@
 use super::ScanCancellation;
 use crate::execution::BlockingExecutor;
 use anyhow::{Context, Result, bail};
-use rivu_audio::{MediaInfo, SourceIdentity, probe_file};
-use rivu_protocol::model::CueSegment;
+use rivu_audio::{MediaInfo, probe_file, source_identity_from_metadata};
+use rivu_protocol::{model::CueSegment, waveform::SourceIdentity};
 use rivu_utils::regular_file::open_regular_file;
 use std::collections::HashMap;
 use std::fs;
@@ -332,7 +332,7 @@ impl PendingSource {
             }
         }
         cancellation.check()?;
-        if SourceIdentity::from_metadata(&self.file.metadata()?) != self.identity {
+        if source_identity_from_metadata(&self.file.metadata()?) != self.identity {
             bail!(
                 "Audio source {} changed while scanning",
                 self.path.display()
@@ -456,7 +456,7 @@ where
             .map(|((path, file, metadata), known)| PendingSource {
                 path,
                 file,
-                identity: SourceIdentity::from_metadata(&metadata),
+                identity: source_identity_from_metadata(&metadata),
                 size: metadata.len(),
                 modified_ns: cache_modified_ns(metadata.modified().ok()),
                 known,

@@ -4,3 +4,4 @@ pub mod config;
 pub mod database;
 pub mod decoder_hint;
 pub mod ownership;
+pub mod palette;

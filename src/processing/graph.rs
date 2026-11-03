@@ -1241,7 +1241,7 @@ mod tests {
         let metadata = fs::metadata(std::env::current_exe().unwrap()).unwrap();
         let renderer = audio::SourceRenderer::from_pcm(
             input.clone(),
-            audio::SourceIdentity::from_metadata(&metadata),
+            audio::source_identity_from_metadata(&metadata),
         )
         .unwrap();
         let target = engine
@@ -1330,7 +1330,7 @@ mod tests {
         }
         let metadata = fs::metadata(std::env::current_exe().unwrap()).unwrap();
         let renderer =
-            audio::SourceRenderer::from_pcm(input, audio::SourceIdentity::from_metadata(&metadata))
+            audio::SourceRenderer::from_pcm(input, audio::source_identity_from_metadata(&metadata))
                 .unwrap();
         let cancel = AtomicBool::new(false);
         let mut engine = Engine::for_decoder(48000, Arc::clone(&renderer.format().layout));
@@ -1401,7 +1401,7 @@ mod tests {
         collector.push_block(&data[..960], &mut || false).unwrap();
         let profiles = BTreeMap::from([(6, collector.finish().unwrap())]);
         let metadata = fs::metadata(std::env::current_exe().unwrap()).unwrap();
-        let identity = audio::SourceIdentity::from_metadata(&metadata);
+        let identity = audio::source_identity_from_metadata(&metadata);
         for length in 1..=kinds.len() {
             let graph = chain(kinds[..length].to_vec());
             let compile = |mut engine: Engine| {
@@ -1494,7 +1494,7 @@ mod tests {
                     let metadata = fs::metadata(std::env::current_exe().unwrap()).unwrap();
                     let renderer = audio::SourceRenderer::from_pcm(
                         input.clone(),
-                        audio::SourceIdentity::from_metadata(&metadata),
+                        audio::source_identity_from_metadata(&metadata),
                     )
                     .unwrap();
                     engine
@@ -1596,7 +1596,7 @@ mod tests {
         });
         let output = render(&graph, &input, &budget);
         let metadata = std::fs::metadata(std::env::current_exe().unwrap()).unwrap();
-        let identity = audio::SourceIdentity::from_metadata(&metadata);
+        let identity = audio::source_identity_from_metadata(&metadata);
         let renderer = audio::SourceRenderer::from_pcm(input.clone(), identity).unwrap();
         let mut decoder = Engine::for_decoder(48000, Arc::clone(input.layout()));
         let target = decoder

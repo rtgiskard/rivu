@@ -218,9 +218,10 @@ Run `make test` for all behavior suites, or select a suite:
 |===
 |Command |Coverage
 |`make test-rust`
-|Workspace tests with default, all, and no default features; standalone
-`rivu-dsp` and `rivu-format` tests without default features; standalone `rivu-utils`
-tests with no features, logging only, terminal only, and both features
+|Workspace tests with default, all, and no default features; application tests
+with GUI only and TUI only; standalone `rivu-dsp` and `rivu-format` tests without
+default features; standalone `rivu-utils` tests with no features, logging only,
+terminal only, and both features
 |`make test-python`
 |Audio-processing worker and evaluation tests with synthetic inputs; no model downloads
 |===
@@ -249,15 +250,41 @@ directly. Plain `cargo build --locked --release` builds only the application and
 Build outputs default to `.cache/target/`; `CARGO_TARGET_DIR` overrides that path.
 Local builds retain the compiler's default CPU target.
 
-Default builds enable `ffmpeg` and `onnx`. Native UL-UNAS/GTCRN speech inference
-requires `onnx` and a separately installed ONNX Runtime; see
+Default builds enable `gui`, `tui`, `ffmpeg`, and `onnx`. Native UL-UNAS/GTCRN
+speech inference requires `onnx` and a separately installed ONNX Runtime; see
 link:doc/27_audio_processing.adoc#explicit-neural-installation-and-offline-deployment[neural installation].
-To omit ONNX inference while keeping FFmpeg, build with
-`cargo build --locked --release --no-default-features --features ffmpeg`.
-`--no-default-features` alone disables both FFmpeg and ONNX inference;
-`--no-default-features --features onnx` keeps ONNX without FFmpeg.
+To omit ONNX inference while keeping both frontends and FFmpeg, build with
+`cargo build --locked --release --no-default-features --features gui,tui,ffmpeg`.
+Use `--no-default-features --features gui,tui,onnx` to keep both frontends and
+ONNX without FFmpeg.
 Python-backed models remain available without `onnx`; native ONNX manifests
 report an explicit disabled-feature error instead of falling back to Python.
+
+=== Frontend selection
+
+`gui` and `tui` select independent frontend libraries. The desktop and Core
+remain in one process; the TUI connects to an existing Core over IPC. Without
+`gui`, the application does not depend on GPUI, Wayland integration, or graphical
+controls. Selecting `tui` does not remove the application's Core/audio services;
+the standalone `rivu-tui` library itself has no engine or database dependency.
+
+[source,sh]
+----
+# Native service and control commands, without either frontend
+cargo build --locked -p rivu --release --no-default-features
+# Native TUI and service, without graphical dependencies
+cargo build --locked -p rivu --release --no-default-features --features tui
+----
+
+With no command, Rivu opens the GUI when available, otherwise the TUI when
+available, otherwise the foreground service. Disabled frontend commands are
+absent from help and rejected by argument parsing. Add `ffmpeg` or `onnx`
+explicitly to these builds when needed. Select `-p rivu` for a frontend-pruned
+application build: `--workspace` also builds the independent frontend packages.
+
+The frontend crates are `rivu-gui` and `rivu-tui`; `rivu-presentation` holds their
+shared non-graphical presentation resources. Ownership and the in-process GUI
+host contract are described in link:doc/21_ipc.adoc#consumer-and-application-lifetimes[frontend lifetimes].
 
 With GNU tar and zstd installed, `make package` creates
 `.cache/dist/rivu-linux-<host-architecture>.tar.zst` and its SHA-256 checksum
@@ -282,7 +309,7 @@ To build without FFmpeg support, omit the FFmpeg package and disable default fea
 
 [source,sh]
 ----
-cargo build --locked --workspace --release --no-default-features
+cargo build --locked --workspace --release --no-default-features --features gui,tui
 ----
 
 Install the resulting `.cache/target/release/rivu` and
@@ -305,7 +332,7 @@ cargo build --locked --release --features embed-nerd-font
 
 Embedding requires Fontconfig's `fc-list` and an installed Nerd Font on the build
 host; the build fails if none is available. No font is downloaded during the build.
-After changing the host font selection, rebuild with `cargo clean -p rivu` first.
+After changing the host font selection, rebuild with `cargo clean -p rivu-gui` first.
 Distributions of embedded-font builds must include the selected font's license.
 Embedding affects the GUI only; TUI glyphs come from the displaying terminal.
 
@@ -320,7 +347,7 @@ See link:doc/24_layout.adoc#reusable-gpui-controls[component boundaries and host
 and link:doc/23_visuals.adoc#pinned-gpu-extensions[pinned GPUI extensions].
 
 `rivu -V` prints `package-version (build-identity)`; About shows build identity
-and enabled Cargo features (`ffmpeg`, `onnx`, `embed-nerd-font`, or `none`).
+and enabled Cargo features (`gui`, `tui`, `ffmpeg`, `onnx`, `embed-nerd-font`, or `none`).
 `rivu-migrate -V` prints its package version.
 
 `make build` uses `git describe` (including `-dirty`) as the build identity;

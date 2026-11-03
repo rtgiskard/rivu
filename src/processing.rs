@@ -4,6 +4,7 @@ use anyhow::{Context, Result, ensure};
 use async_channel::{Receiver, Sender, bounded};
 use rivu_audio as audio;
 use rivu_protocol::model::*;
+use rivu_protocol::waveform::SourceIdentity;
 use std::{
     collections::BTreeMap,
     fs,
@@ -36,7 +37,7 @@ thread_local! {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct SourceStamp(audio::SourceIdentity);
+pub(crate) struct SourceStamp(SourceIdentity);
 impl SourceStamp {
     pub(crate) fn read(path: &Path) -> Result<Self> {
         let m = fs::metadata(path)?;
@@ -44,12 +45,12 @@ impl SourceStamp {
             m.is_file() && m.len() <= MAX_SOURCE_BYTES,
             "source must be a regular file no larger than 8 GiB"
         );
-        Ok(Self(audio::SourceIdentity::from_metadata(&m)))
+        Ok(Self(audio::source_identity_from_metadata(&m)))
     }
-    pub(crate) fn identity(self) -> audio::SourceIdentity {
+    pub(crate) fn identity(self) -> SourceIdentity {
         self.0
     }
-    pub(crate) fn validate_rendered(&self, identity: audio::SourceIdentity) -> Result<()> {
+    pub(crate) fn validate_rendered(&self, identity: SourceIdentity) -> Result<()> {
         ensure!(
             self.0 == identity,
             "Rendered source differs from the source admitted for processing"

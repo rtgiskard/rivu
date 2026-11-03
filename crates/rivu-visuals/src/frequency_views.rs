@@ -34,10 +34,10 @@ use gpui::{
 };
 use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc, time::Duration};
 
-use rivu_audio::analysis::AnalysisFrame;
 use rivu_format::config::{AnalysisWindow, VisualizationSignal};
 #[cfg(test)]
 use rivu_format::config::{SpectrumBarLayout, SpectrumStyle, VisualizationPalette};
+use rivu_protocol::analysis::AnalysisFrame;
 
 #[derive(Clone, Copy)]
 struct HeatSample {
@@ -295,7 +295,7 @@ impl FrequencyViews {
             return;
         }
         if !frame.settings.is_some_and(|settings| {
-            settings.signal_compatible_with(rivu_audio::analysis::AnalysisSettings {
+            settings.signal_compatible_with(rivu_protocol::analysis::AnalysisSettings {
                 fps: data.analysis_rate_hz,
                 fft_size: data.analysis_fft_size,
                 window: data.analysis_window,
@@ -462,7 +462,7 @@ impl FrequencyViews {
 
     pub fn spectrum(
         &self,
-        theme: &'static rivu_ui::theme::Palette,
+        theme: &'static rivu_format::palette::Palette,
         i18n: &Arc<VisualLabels>,
         panel_id: u64,
         options: rivu_format::config::AudioVisualizerOptions,
@@ -472,7 +472,7 @@ impl FrequencyViews {
 
     pub fn spectrogram(
         &self,
-        theme: &'static rivu_ui::theme::Palette,
+        theme: &'static rivu_format::palette::Palette,
         i18n: &Arc<VisualLabels>,
         panel_id: u64,
         options: rivu_format::config::AudioVisualizerOptions,
@@ -537,7 +537,7 @@ impl FrequencyViews {
 
     fn view(
         &self,
-        theme: &'static rivu_ui::theme::Palette,
+        theme: &'static rivu_format::palette::Palette,
         i18n: &Arc<VisualLabels>,
         panel_id: u64,
         mode: FrequencyKind,
@@ -1403,11 +1403,11 @@ mod tests {
             sample_time: Duration::from_secs_f64(time),
             frequencies_hz: vec![20.0, 200.0, 2000.0, 20_000.0],
             spectrum_db: vec![level; 4],
-            settings: Some(rivu_audio::analysis::AnalysisSettings::from(
+            settings: Some(rivu_protocol::analysis::AnalysisSettings::from(
                 &Config::default(),
             )),
-            visualizer: rivu_audio::analysis::VisualizerFrame {
-                demand: rivu_audio::analysis::VisualizerDemand {
+            visualizer: rivu_protocol::analysis::VisualizerFrame {
+                demand: rivu_protocol::analysis::VisualizerDemand {
                     spectrogram: true,
                     ..Default::default()
                 },
@@ -1519,7 +1519,7 @@ mod tests {
             assert!(visuals.data.borrow().latest_levels.is_empty());
             assert_eq!(visuals.data.borrow().spectrogram.len, 0);
             let mut fresh = frame(2.1, -60.0);
-            fresh.settings = Some(rivu_audio::analysis::AnalysisSettings::from(&config));
+            fresh.settings = Some(rivu_protocol::analysis::AnalysisSettings::from(&config));
             fresh.generation = 2;
             visuals.update(&fresh, fresh.sample_time);
             assert_eq!(visuals.data.borrow().spectrum.peaks, vec![-60.0; 4]);
@@ -1557,7 +1557,7 @@ mod tests {
 
         // Reusing a sequence is valid after switching the selected signal.
         let mut before = frame(1.1, -40.0);
-        before.settings = Some(rivu_audio::analysis::AnalysisSettings::from(&config));
+        before.settings = Some(rivu_protocol::analysis::AnalysisSettings::from(&config));
         visuals.update(&before, before.sample_time);
         assert_eq!(visuals.data.borrow().spectrogram.len, 1);
         assert_eq!(visuals.data.borrow().latest_levels, vec![-40.0; 4]);
@@ -3200,7 +3200,7 @@ mod tests {
             .insert(1, (400, 1024));
         visuals.finish_prepaint();
         let mut input = frame(1.0, -80.0);
-        input.settings = Some(rivu_audio::analysis::AnalysisSettings::from(&config));
+        input.settings = Some(rivu_protocol::analysis::AnalysisSettings::from(&config));
         let mut bins = vec![-140.0; 16384];
         bins[679] = -6.0;
         bins[693] = -12.0;
@@ -3244,7 +3244,7 @@ mod tests {
         let mut visuals = configured_visuals();
         visuals.configure_config(&config);
         let mut input = frame(1.0, -80.0);
-        input.settings = Some(rivu_audio::analysis::AnalysisSettings::from(&config));
+        input.settings = Some(rivu_protocol::analysis::AnalysisSettings::from(&config));
         let bins: Vec<_> = (0..4096)
             .map(|i| -140.0 + ((i * 7919) % 14000) as f32 / 100.0)
             .collect();

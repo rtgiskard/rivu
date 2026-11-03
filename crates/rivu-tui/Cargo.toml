@@ -1,0 +1,23 @@
+[package]
+name = "rivu-tui"
+version = "0.2.0"
+edition = "2024"
+description = "Rivu terminal IPC client library"
+
+[dependencies]
+rivu-client = { path = "../rivu-client" }
+rivu-protocol = { path = "../rivu-protocol" }
+rivu-format = { path = "../rivu-format", default-features = false }
+rivu-presentation = { path = "../rivu-presentation" }
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+crossbeam-channel = "0.5"
+crossterm = "0.29"
+parking_lot = "0.12"
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "crossterm_0_29", "std"] }
+signal-hook = "0.4.5"
+unicode-segmentation = "1.13.3"
+
+[dev-dependencies]
+rivu = { path = "../..", default-features = false, features = ["test-support"] }
+tempfile = "3.27"

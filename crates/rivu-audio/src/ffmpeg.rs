@@ -6,11 +6,12 @@
 use super::{
     Channel, MediaInfo,
     bitrate::PacketStats,
-    source::{DecodeStep, FrameTiming, SourceIdentity, check_cancelled, finite_sample},
+    source::{DecodeStep, FrameTiming, check_cancelled, finite_sample},
 };
 use anyhow::{Context, Result, bail};
 use libloading::Library;
 use rivu_metadata::Tags;
+use rivu_protocol::waveform::SourceIdentity;
 use std::{
     ffi::{CStr, CString, c_char, c_int},
     fs::File,
@@ -403,7 +404,7 @@ pub(super) struct Input {
 unsafe impl Send for Input {}
 impl Input {
     fn from_file(path: PathBuf, file: File, rt: &'static Runtime) -> Result<Self> {
-        let identity = SourceIdentity::from_file(&file)?;
+        let identity = crate::source_identity(&file)?;
         // FFmpeg opens its own independently seekable descriptor to this exact
         // checked object, never the original path that could now name a FIFO.
         let cpath = CString::new(format!("/proc/self/fd/{}", file.as_raw_fd()))?;

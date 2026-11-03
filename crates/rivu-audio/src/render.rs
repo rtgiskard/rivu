@@ -137,7 +137,7 @@ impl SourceRenderer {
     pub fn finish(&self, cancelled: &AtomicBool) -> Result<()> {
         check_cancelled(Some(cancelled)).context("Audio render cancelled")?;
         if let Some(file) = &self.identity_file
-            && SourceIdentity::from_file(file)? != self.format.source_identity
+            && crate::source_identity(file)? != self.format.source_identity
         {
             bail!("Audio render source changed while decoding");
         }
@@ -241,7 +241,7 @@ mod tests {
         }
         let retained = budget.used_bytes();
         let selected = pcm.slice_frames(17, 23).unwrap();
-        let identity = SourceIdentity::from_file(&File::open(&source).unwrap()).unwrap();
+        let identity = crate::source_identity(&File::open(&source).unwrap()).unwrap();
         let other_budget = super::super::PcmBudget::new(0);
         let alias = SourceRenderer::from_pcm(selected.clone(), identity)
             .unwrap()
@@ -347,7 +347,7 @@ mod tests {
         assert_eq!(pcm.read_frames(799, &mut samples), 1);
         assert_eq!(samples, [7.99, -3.995]);
         assert_ne!(
-            SourceIdentity::from_file(&File::open(source).unwrap()).unwrap(),
+            crate::source_identity(&File::open(source).unwrap()).unwrap(),
             identity
         );
     }

@@ -13,8 +13,9 @@ impl Core {
         config
     }
 
-    pub(in crate::core) fn update_gui_config(&mut self, change: GuiConfigChange) -> Result<()> {
-        if let GuiConfigChange::Settings(patch) = change {
+    #[cfg(any(test, feature = "gui", feature = "test-support"))]
+    pub(in crate::core) fn update_gui_config(&mut self, change: ConfigChange) -> Result<()> {
+        if let ConfigChange::Settings(patch) = change {
             // Playback controls can be newer than the last persisted config.
             // Only explicit draft changes override the owner's execution-time state.
             let mut config = self.effective_config();
@@ -27,34 +28,34 @@ impl Core {
                 .map_err(|error| error.error);
         }
         let mut config = self.effective_config();
-        let visualization_changed = matches!(change, GuiConfigChange::ToggleVisualization);
+        let visualization_changed = matches!(change, ConfigChange::ToggleVisualization);
         let roots_changed = matches!(
             change,
-            GuiConfigChange::AddLibraryRoot(_) | GuiConfigChange::RemoveLibraryRoot(_)
+            ConfigChange::AddLibraryRoot(_) | ConfigChange::RemoveLibraryRoot(_)
         );
         match change {
-            GuiConfigChange::ToggleVisualization => {
+            ConfigChange::ToggleVisualization => {
                 config.visualization_enabled = !config.visualization_enabled
             }
-            GuiConfigChange::ToggleWaveformSeek => {
+            ConfigChange::ToggleWaveformSeek => {
                 config.waveform_seek_enabled = !config.waveform_seek_enabled
             }
-            GuiConfigChange::ToggleLibraryColumn(column) => config.library_columns.toggle(column),
-            GuiConfigChange::AddLibraryRoot(path) => {
+            ConfigChange::ToggleLibraryColumn(column) => config.library_columns.toggle(column),
+            ConfigChange::AddLibraryRoot(path) => {
                 let path = library::logical_path(&path)?;
                 if config.library_roots.contains(&path) {
                     return Ok(());
                 }
                 config.library_roots.push(path);
             }
-            GuiConfigChange::RemoveLibraryRoot(path) => {
+            ConfigChange::RemoveLibraryRoot(path) => {
                 let path = library::logical_path(&path)?;
                 if !config.library_roots.contains(&path) {
                     return Ok(());
                 }
                 config.library_roots.retain(|root| root != &path);
             }
-            GuiConfigChange::Settings(_) => unreachable!(),
+            ConfigChange::Settings(_) => unreachable!(),
         }
         config.validate()?;
         if visualization_changed {

@@ -1,0 +1,257 @@
+core-ready = Rivu core ready. Data: { $path }
+core-command-accepted = Command accepted at revision { $revision }
+core-stats = Tracks: { $tracks }
+    Plays: { $plays }
+core-listing-changed = Listing incomplete: data changed while reading; retry the command.
+core-missing = [missing]
+core-favorite = [favorite]
+core-unknown = unknown
+core-playing = playing
+core-paused = paused
+core-stopped = stopped
+core-play = Play
+core-pause = Pause
+core-previous = Previous
+core-next = Next
+core-shuffle = Shuffle
+core-shuffle-on = Shuffle ✓
+core-repeat = Repeat
+core-repeat-on = Repeat ✓
+core-quit = Quit
+core-playlist-summary = { $id }	{ $name }	{ $count } entries
+core-playlist-entry = { $index }	entry { $entry }	track { $track }
+core-relocation-accepted = Relocation verification accepted: task { $id }
+core-duplicate-groups = Historical same-content groups: { $count } (cached hashes, not fresh verification)
+core-duplicate-members = Historical same-content members: { $count }
+core-duplicate-group = { $fingerprint }	{ $total } members	{ $missing } missing	{ $present } present
+core-duplicate-member = { $id }	{ $path }	{ $status }	favorite={ $favorite } overrides={ $overrides } plays={ $plays } playlist_refs={ $playlists } queue_refs={ $queue } independent={ $independent }
+core-present = present
+core-optimization = Database optimization completed
+    Database: { $before } -> { $after } bytes
+    WAL: { $wal-before } -> { $wal-after } bytes
+    Reclaimed total: { $reclaimed } bytes
+core-state-track = { $status }: { $artist } — { $title }  { $position }/{ $duration } s  volume { $volume }%
+core-state-empty = { $status } · { $tracks } tracks · { $queued } queued
+core-ffmpeg = FFmpeg extension audio decoding: { $status }
+core-scan-progress = Scan: { $phase } · { $processed }/{ $total } · { $errors } errors
+core-probe = { $path }
+      title: { $title }
+      artist: { $artist }
+      album: { $album }
+      codec: { $codec }
+      channels: { $channels }
+      sample rate: { $sample-rate } Hz
+      duration: { $duration }
+      bitrate: { $bitrate }
+      source bits/sample: { $bits }
+      track number: { $track }
+      disc number: { $disc }
+      release date: { $date }
+      probe backend: { $probe }
+      decoder backend: { $decoder }
+      FFmpeg extension audio decoding: { $ffmpeg }
+core-tags = Source tags: { $path }
+      title: { $title }
+      artist: { $artist }
+      album: { $album }
+      track number: { $track }
+      disc number: { $disc }
+      release date: { $date }
+core-tags-written = Source-file tags updated: { $path }
+    Original file backup: { $backup }
+    Library database overrides were not changed.
+core-tags-unchanged = Source-file tags unchanged: { $path } (no backup created)
+core-help-about = A quiet, local-first music player
+core-help-long = Run without a command to open the desktop UI. GUI and serve own one shared core per data directory; control commands connect to that instance. Output devices, file probing, and source-file tags work offline without an instance.
+core-help-long-tui = Run without a command to connect the terminal UI to an existing core. serve owns one core per data directory; the terminal UI and control commands connect to that instance. Exiting the terminal UI keeps the core running. Output devices, file probing, and source-file tags work offline without an instance.
+core-help-long-serve = Run without a command to start a headless core. serve owns one core per data directory; control commands connect to that instance. Output devices, file probing, and source-file tags work offline without an instance.
+core-help-usage = Usage:
+core-help-commands = Commands
+core-help-options = Options
+core-help-arguments = Arguments
+core-help-global-options = Global options
+core-help-help = Print help
+core-help-version = Print version
+core-help-help-subcommand = Command to show help for
+core-help-data-dir = Data directory and instance to start or control
+core-help-config = Startup/probe configuration file
+core-help-log-level = Override this process's stderr and enabled file logging: debug, info, warning, error
+core-help-json = Print one JSON result; not available for GUI, serve, or TUI
+core-help-gui = Open the desktop UI and optionally import paths
+core-help-serve = Run the shared core in the foreground without a GUI
+core-help-tui = Control the running instance in a terminal UI
+core-help-status = Show playback and library state from the running instance
+core-help-task = Inspect or cancel retained background tasks
+core-help-task-status = Show task status
+core-help-task-cancel = Request task cancellation
+core-help-playback = Control playback, volume, and audio output devices
+core-help-library = Import and manage tracks, metadata, and listening information
+core-help-queue = Manage the current playback queue
+core-help-playlist = Manage, import, and export playlists
+core-help-processing = Configure audio effects, run offline tasks, and audition retained outputs
+core-help-quit = Shut down the running GUI or headless core
+core-help-playback-play = Play a library track ID, or resume the current queue
+core-help-playback-pause = Pause playback
+core-help-playback-toggle = Toggle between playing and paused
+core-help-playback-stop = Stop playback
+core-help-playback-next = Play the next queue item
+core-help-playback-previous = Play the previous queue item
+core-help-playback-seek = Seek to an absolute position in seconds
+core-help-playback-volume = Set volume as a percentage from 0 to 100
+core-help-playback-shuffle = Turn queue shuffle on or off
+core-help-playback-repeat = Set repeat to off, all queue items, or one item
+core-help-playback-devices = List output devices without starting an instance
+core-help-playback-device = Select an exact output device name, or restore the default
+core-help-library-scan = Import audio files, CUE sheets, or directories
+core-help-library-other = Browse registered tracks outside configured roots; with no roots, includes all registered tracks
+core-help-library-list = List library tracks, optionally filtered by text, favorite, or missing state
+core-help-library-edit = Edit database-only library metadata; never modify the source file
+core-help-library-remove = Remove library records and references
+core-help-library-favorite = Set or clear favorites
+core-help-library-clean-missing = Remove missing library records and references
+core-help-library-stats = Show library size and aggregate play counts
+core-help-library-history = Show recent tracks, once per track
+core-help-library-probe = Read metadata and decoder support without starting an instance
+core-help-library-tags = Read source-file tags offline. With --title, --artist, or --album, write those fields to the source file with an original-file backup; no server or library database update. Unchanged values create no backup.
+core-help-library-tags-title = Write the source-file title; an empty string explicitly clears it
+core-help-library-tags-artist = Write the source-file artist; an empty string explicitly clears it
+core-help-library-tags-album = Write the source-file album; an empty string explicitly clears it
+core-help-library-optimize = Reclaim database space and refresh query statistics; stop playback and scans first
+core-help-library-duplicates = Read historical same-content groups; cached hashes are not fresh verification
+core-help-library-relocate = Preserve a missing track identity at a freshly verified target
+core-help-library-keep-independent = Exclude this ordinary file from future identity reuse
+core-help-library-other-list = Read one bounded page of tracks outside configured roots; no roots includes all registered tracks
+core-help-library-other-count = Count registered tracks outside configured roots; no roots counts all registered tracks
+core-help-library-other-locate = Locate a track in the filtered, sorted Other view; no roots searches all registered tracks
+core-help-library-other-check = Check registered files outside configured roots; no roots checks all registered files
+core-help-queue-list = List queue items with their stable queue IDs
+core-help-queue-add = Append library tracks in the given order
+core-help-queue-add-other = Append registered tracks outside configured roots; no roots appends all registered tracks
+core-help-queue-add-paths = Admit ordinary local audio files to the queue without configuring roots
+core-help-queue-remove = Remove an item by stable queue ID
+core-help-queue-move = Move a queue item to a zero-based index
+core-help-queue-play = Play an item by stable queue ID
+core-help-queue-clear = Remove all queue items and stop playback
+core-help-playlist-list = List playlist summaries
+core-help-playlist-show = List entries of one playlist in order
+core-help-playlist-create = Create an empty named playlist
+core-help-playlist-rename = Rename a playlist
+core-help-playlist-delete = Delete a playlist
+core-help-playlist-add = Append library tracks to a playlist in the given order
+core-help-playlist-remove = Remove a playlist entry by its stable entry ID
+core-help-playlist-move = Move a playlist entry to a zero-based index
+core-help-playlist-play = Replace the queue with this playlist and start playback
+core-help-playlist-import = Import an M3U/M3U8 playlist or CUE sheet in track order
+core-help-playlist-export = Export a playlist to an M3U/M3U8 file
+core-help-processing-show = Summarize processing settings and latest task; --json includes full settings
+core-help-processing-bypass = Bypass playback effects while retaining parameters and offline tasks
+core-help-processing-graph = Inspect, edit, and run the persisted audio node graph
+core-help-processing-eq = Apply an EqualizerEdit JSON value, including presets and A/B controls
+core-help-processing-denoise = Merge a DenoisePatch JSON object into current settings
+core-help-processing-neural = Merge a NeuralPatch JSON object for local interpreter and manifests
+core-help-processing-start = Process one library source; separation requires stereo
+core-help-processing-audition = Audition retained outputs, starting their original source queue item if needed
+core-help-processing-graph-show = Show the authoritative graph and optimistic edit revision
+core-help-processing-graph-edit = Apply one GraphEdit JSON value against an explicit expected revision
+core-help-processing-graph-run = Process a track through one node output and its ancestors only
+core-help-processing-graph-audition = Audition a retained node output from a completed graph task
+core-help-processing-graph-export = Render a retained graph snapshot offline to a client-relative path
+core-help-arg-paths = Absolute paths or paths relative to this client working directory
+core-help-arg-track-id = Library track ID
+core-help-arg-track-ids = Library track IDs in the desired order
+core-help-arg-seconds = Finite, nonnegative absolute position in seconds
+core-help-arg-percent = Volume percentage, 0 to 100
+core-help-arg-mode = Playback or processing mode
+core-help-arg-name = Name to use
+core-help-arg-id = Retained task reference, INSTANCE:TASK_ID
+core-help-arg-kind = Task family: scan (including imports and checks), relocation, or processing
+core-help-arg-operation = Offline operation: denoise, speech enhancement, or stereo separation
+core-help-arg-wait = Wait for terminal task status; JSON prints one terminal result
+core-help-arg-noise-start = Denoise-only noise interval start in seconds; requires --noise-end
+core-help-arg-noise-end = Denoise-only noise interval end in seconds, greater than its start
+core-help-arg-vocal-gain-db = Mix-only vocal gain, finite -96 to 24 dB
+core-help-arg-accompaniment-gain-db = Mix-only accompaniment gain, finite -96 to 24 dB
+core-help-arg-edit = Edit encoded as one JSON value
+core-help-arg-patch = Settings patch encoded as one JSON object
+core-help-processing-graph-edit-expected-revision = Expected current graph revision; stale edits are rejected
+core-help-arg-node = Graph node ID whose output is selected
+core-help-arg-port = Zero-based node output port
+core-help-arg-path = Absolute file path or path relative to this client working directory
+core-help-arg-query = Text to match against track metadata
+core-help-arg-favorite = Match favorite (true) or non-favorite (false); omit for both
+core-help-arg-missing = Match missing (true) or present (false); omit for both
+core-help-arg-sort = Order tracks by ID, album, or most played
+core-help-arg-force = Reread metadata even if file size and modification time are unchanged
+core-help-arg-title = Replacement title; an empty string is allowed
+core-help-arg-artist = Replacement artist; an empty string is allowed
+core-help-arg-album = Replacement album; an empty string is allowed
+core-help-library-favorite-mode = Set favorites on or off for every following track ID
+core-help-arg-limit = Maximum number of results
+core-help-arg-offset = Zero-based result offset
+core-help-arg-enhanced = Load FFmpeg for enhanced probing regardless of the saved setting
+core-help-arg-fingerprint = Show members of one historical content hash instead of group summaries
+core-help-arg-source-id = Missing track ID whose identity must be preserved
+core-help-arg-target-id = Present target track ID to verify freshly
+core-help-arg-index = Zero-based destination position
+core-help-queue-add-paths-expected-revision = Queue revision observed when choosing the insertion index
+core-help-arg-queue-id = Stable queue item ID, not an index or track ID
+core-help-arg-playlist-id = Playlist ID
+core-help-arg-entry-id = Stable playlist entry ID, not an index or track ID
+core-help-arg-subcommand = Command to show help for
+core-help-library-duplicates-limit = Maximum page size, 0 to 256
+core-help-library-other-list-limit = Maximum page size, 0 to 256
+core-help-playback-device-name = Exact output device name; omit to restore the default
+core-help-playback-shuffle-mode = on enables shuffle; off restores queue order
+core-help-playback-repeat-mode = off disables repeat; all repeats the queue; one repeats one item
+core-help-processing-audition-mode = Retained output to audition; gains are accepted only with mix
+core-help-processing-graph-run-mode = Execution policy: auto, offline, realtime, or hybrid
+core-help-library-relocate-wait = Wait for fresh verification and atomic database commit
+core-help-queue-add-paths-index = Insert before this zero-based queue index; requires --expected-revision
+core-help-playlist-import-name = Override the imported playlist name
+core-help-playlist-export-path = Client-relative or absolute destination path; need not exist
+core-help-processing-graph-export-path = Client-relative or absolute destination for offline rendering
+core-processing-equalizer = Equalizer: { $enabled } · preamp { $preamp } dB · { $bands } bands
+core-processing-denoise = Denoise: { $enabled } · { $mode }
+core-processing-neural = Neural: { $device } · { $threads } threads
+core-processing-graph = Graph revision { $revision }: { $nodes } nodes · { $edges } connections
+core-processing-node = { $id }	{ $kind }
+core-processing-task = Task { $id }: { $phase } · { $completed }/{ $total }
+core-processing-latest = Latest task: none
+core-relocation-status = Relocation { $id }: { $source } -> { $target } · { $phase }
+core-verifying = verifying
+core-completed = completed
+core-cancelled = cancelled
+core-failed = failed
+core-discovering = discovering files
+core-reading-metadata = reading metadata
+core-saving = saving
+core-yes = yes
+core-no = no
+core-missing-marker = { " " }[missing]
+core-favorite-marker = { " " }[favorite]
+core-last-scan-missing = missing (last scan)
+core-last-scan-present = present (last scan)
+
+library-other = Other
+library-other-empty = Drop local audio files into Queue to add songs here. Songs inside configured roots appear under those roots instead.
+library-other-check = Other: Check files
+library-other-force = Other: Force reread
+library-cancel-task = Cancel file operation
+processing-graph-output = Output
+processing-source = Source track
+processing-queued = Queued
+processing-rendering = Decoding input
+processing-processing = Processing
+processing-complete = Complete
+processing-cancelled = Cancelled
+processing-failed = Failed
+processing-mix = Audition stem mix
+processing-speech = Strong speech enhancement
+processing-separation = Vocal / accompaniment separation
+processing-off = Off
+processing-stationary = Stationary
+processing-profile = Captured profile
+processing-adaptive = Adaptive
+processing-equalizer = Equalizer
+processing-restoration = Restoration
+

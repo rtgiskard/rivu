@@ -1,7 +1,7 @@
 use super::*;
 use crate::library::ScanRecord;
-use crate::query_tracking::QueryEpoch;
 use crossbeam_channel::{Receiver, bounded};
+use rivu_protocol::query_tracking::QueryEpoch;
 use std::sync::atomic::Ordering;
 
 mod admission;
@@ -240,6 +240,7 @@ fn navigation_runtime(
         analysis: core.engine.analysis.clone(),
         analysis_control: core.engine.analysis_control.clone(),
         waveform: core.engine.waveform.clone(),
+        waveform_control: core.engine.waveform_control.clone(),
         sender,
         revision_updates: core.revision_updates.clone(),
         wakeup: core.wakeup.clone(),
@@ -282,7 +283,7 @@ fn display_fixture() -> (
 ) {
     let analysis = Arc::new(RwLock::new(AnalysisFrame::default()));
     let worker = rivu_audio::analysis::AnalysisWorker::new(analysis.clone()).unwrap();
-    worker.configure(rivu_audio::analysis::AnalysisSettings {
+    worker.configure(rivu_protocol::analysis::AnalysisSettings {
         fps: 60,
         fft_size: 512,
         window: crate::config::AnalysisWindow::None,
@@ -294,7 +295,10 @@ fn display_fixture() -> (
         state: Arc::new(RwLock::new(CoreState::default())),
         analysis,
         analysis_control: worker.control.clone(),
-        waveform: Arc::new(RwLock::new(audio::WaveformFrame::default())),
+        waveform: Arc::new(RwLock::new(
+            rivu_protocol::waveform::WaveformFrame::default(),
+        )),
+        waveform_control: Arc::new(audio::WaveformControl::default()),
         sender,
         revision_updates: Arc::new(RwLock::new(Vec::new())),
         wakeup: Arc::new(RwLock::new(None)),
@@ -530,4 +534,11 @@ fn assert_queue_saved(core: &Core) {
         core.state.queue.current_position
     );
     assert_eq!(projection.total, core.state.queue.total);
+}
+
+fn display_scan_visible(
+    system: &rivu_protocol::display::DisplaySystemState,
+    owner: MediaTaskOwner,
+) -> bool {
+    system.scan_owner == Some(owner) && (system.scanning || system.scan_progress.is_some())
 }

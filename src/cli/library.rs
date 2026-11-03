@@ -4,9 +4,10 @@ use super::{
     client_path, output, submit_command, tasks,
 };
 use anyhow::{Context, Result, bail};
+use rivu::config;
 use rivu::config::ConfigPersistence;
-use rivu::{config, i18n::Localizer};
 use rivu_audio as audio;
+use rivu_presentation::i18n::Localizer;
 use rivu_protocol::{
     model::{Command, Query},
     response::{StateSections, ViewResponse},

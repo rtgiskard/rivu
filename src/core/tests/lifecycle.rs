@@ -80,7 +80,7 @@ fn startup_device_enumeration_keeps_restored_queue_queries_available() {
         .is_success()
     );
     assert!(!retired.load(Ordering::Acquire));
-    assert!(handle.gui_snapshot().system.devices.is_empty());
+    assert!(handle.display_state().system.devices.is_empty());
 
     let state = handle.state.clone();
     let (published, publication) = bounded(1);
@@ -248,7 +248,7 @@ fn shutdown_cancels_and_closes_an_async_scan_worker_before_retirement() {
                 playlist_id: None,
                 error: None,
             },
-            owner: crate::core::state::MediaTaskOwner::Library,
+            owner: rivu_protocol::model::MediaTaskOwner::Library,
             cancellation,
             worker: core.executor.spawn(async move {
                 observed.cancelled().await;
@@ -655,7 +655,7 @@ fn preparation_panic_publishes_a_terminal_failure_and_releases_scan_admission() 
             playlist_id: None,
             error: None,
         },
-        owner: crate::core::state::MediaTaskOwner::Library,
+        owner: rivu_protocol::model::MediaTaskOwner::Library,
         cancellation: library::ScanCancellation::default(),
         worker,
         pending_save: None,
@@ -702,7 +702,7 @@ fn owner_failure_retires_background_work_without_blocking_executor() {
                 playlist_id: None,
                 error: None,
             },
-            owner: crate::core::state::MediaTaskOwner::Library,
+            owner: rivu_protocol::model::MediaTaskOwner::Library,
             cancellation,
             worker: scan,
             pending_save: None,

@@ -8,6 +8,7 @@ pub(super) fn wait_handle(core: &Core) -> (CoreHandle, mpsc::Receiver<Request>) 
         analysis: Arc::clone(&core.engine.analysis),
         analysis_control: Arc::clone(&core.engine.analysis_control),
         waveform: Arc::clone(&core.engine.waveform),
+        waveform_control: Arc::clone(&core.engine.waveform_control),
         sender,
         revision_updates: Arc::clone(&core.revision_updates),
         wakeup: Arc::clone(&core.wakeup),
@@ -266,7 +267,7 @@ fn unknown_and_expired_waits_are_errors_and_core_drop_retires_pending_waits() {
     for id in 2..=MAX_RETAINED_SCAN_RESULTS as u64 + 1 {
         let mut retained = status.clone();
         retained.id = id;
-        core.retain_scan_outcome(retained, crate::core::state::MediaTaskOwner::Library);
+        core.retain_scan_outcome(retained, rivu_protocol::model::MediaTaskOwner::Library);
     }
     let (handle, requests) = wait_handle(&core);
     for (target, message) in [

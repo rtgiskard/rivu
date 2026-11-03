@@ -3,14 +3,15 @@
 //! Caller timeout never cancels admitted work or authorizes replay. Real-time
 //! audio stays independent; shutdown completion includes physical retirement.
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use crate::execution::TaskRuntime;
+#[cfg(feature = "gui")]
+use crate::projection::TraySnapshot;
 use crate::{
-    config::{Config, ConfigPatch, ConfigPersistence, LibraryColumn},
+    config::{Config, ConfigPersistence},
     execution::BlockingExecutor,
     library::{self, M3uItem, ScanResult},
-    projection::{GuiSnapshot, MprisSnapshot, TraySnapshot},
-    query_tracking::QueryTicket,
+    projection::MprisSnapshot,
     store::Store,
 };
 use anyhow::{Context, Result};
@@ -20,9 +21,15 @@ use futures::FutureExt;
 use futures::channel::oneshot;
 use parking_lot::{Mutex, RwLock};
 use rand::seq::SliceRandom;
-use rivu_audio::analysis::{AnalysisControl, AnalysisFrame, DisplayDemand};
+#[cfg(any(test, feature = "gui", feature = "test-support"))]
+use rivu_audio::analysis::AnalysisControl;
 use rivu_audio::{self as audio, AudioCommand, AudioEngine, AudioEvent, MediaInfo};
 use rivu_format::decoder_hint::DecoderHint;
+#[cfg(any(test, feature = "gui", feature = "test-support"))]
+use rivu_protocol::analysis::{AnalysisFrame, DisplayDemand};
+#[cfg(any(test, feature = "gui", feature = "test-support"))]
+use rivu_protocol::display::DisplayState;
+use rivu_protocol::query_tracking::QueryTicket;
 use rivu_protocol::{
     model::*,
     response::{
@@ -50,6 +57,8 @@ use runtime::CompletionGuard;
 pub(crate) use runtime::CoreLifecycle;
 pub use runtime::CoreRuntime;
 
+#[cfg(any(test, feature = "gui", feature = "test-support"))]
+mod display;
 mod query_worker;
 
 mod task_wait;
@@ -58,6 +67,7 @@ use task_wait::TaskWaiters;
 use rivu_protocol::{ADMISSION_TIMEOUT, REPLY_TIMEOUT, command_reply_timeout};
 
 type Wakeup = Arc<dyn Fn() + Send + Sync>;
+#[cfg(any(test, feature = "gui", feature = "test-support"))]
 type QueryTimeout = Arc<dyn Fn(QueryResponse) + Send + Sync>;
 
 /// Retire an admitted async worker exactly once and convert panics to a task error.
@@ -94,12 +104,14 @@ enum Operation {
         ticket: Option<QueryTicket>,
     },
     Command(Command),
-    GuiConfig(GuiConfigChange),
+    #[cfg(any(test, feature = "gui", feature = "test-support"))]
+    GuiConfig(ConfigChange),
     Navigate(Navigation),
     MprisSeek {
         queue_id: u64,
         offset: i64,
     },
+    #[cfg(any(test, feature = "gui", feature = "test-support"))]
     WaveformSnapshot(
         oneshot::Sender<std::result::Result<Option<audio::WaveformScanSnapshot>, String>>,
     ),
@@ -115,15 +127,6 @@ pub(crate) enum Navigation {
     Previous,
 }
 
-pub(crate) enum GuiConfigChange {
-    ToggleVisualization,
-    ToggleWaveformSeek,
-    ToggleLibraryColumn(LibraryColumn),
-    AddLibraryRoot(std::path::PathBuf),
-    RemoveLibraryRoot(std::path::PathBuf),
-    // Only the cold Settings request allocates; ordinary queue slots stay small.
-    Settings(Box<ConfigPatch>),
-}
 struct Request {
     operation: Operation,
     reply: Option<oneshot::Sender<CoreResponse>>,
@@ -133,14 +136,21 @@ struct Request {
 #[derive(Clone)]
 pub struct CoreHandle {
     state: Arc<RwLock<CoreState>>,
+    #[cfg(any(test, feature = "gui", feature = "test-support"))]
     pub(crate) analysis: Arc<RwLock<AnalysisFrame>>,
+    #[cfg(any(test, feature = "gui", feature = "test-support"))]
     analysis_control: Arc<AnalysisControl>,
-    pub(crate) waveform: Arc<RwLock<audio::WaveformFrame>>,
+    #[cfg(any(test, feature = "gui", feature = "test-support"))]
+    pub(crate) waveform: Arc<RwLock<rivu_protocol::waveform::WaveformFrame>>,
+    #[cfg(any(test, feature = "gui", feature = "test-support"))]
+    pub(crate) waveform_control: Arc<audio::WaveformControl>,
     sender: mpsc::Sender<Request>,
     revision_updates: Arc<RwLock<Vec<mpsc::Sender<()>>>>,
+    #[cfg(any(test, feature = "gui", feature = "test-support"))]
     wakeup: Arc<RwLock<Option<Wakeup>>>,
     task_waiters: Arc<Mutex<TaskWaiters>>,
     // Window-scoped: cloning a GUI handle must not change IPC/CLI query policy.
+    #[cfg(any(test, feature = "gui", feature = "test-support"))]
     query_timeout: Option<QueryTimeout>,
 }
 
@@ -150,20 +160,24 @@ pub(crate) struct MprisServiceState {
 }
 
 impl CoreHandle {
+    #[cfg(any(test, feature = "gui", feature = "test-support"))]
     /// Publish complete display demand without entering the business command queue.
     pub(crate) fn set_display_demand(&self, demand: DisplayDemand) {
         self.analysis_control.set_display_demand(demand);
     }
 
+    #[cfg(any(test, feature = "gui", feature = "test-support"))]
     pub(crate) fn analysis_frame_is_current(&self, frame: &AnalysisFrame) -> bool {
         self.analysis_control.frame_is_current(frame)
     }
 
+    #[cfg(any(test, feature = "gui", feature = "test-support"))]
     /// Coalesce a GUI consumer frame into at most one pending analysis job.
     pub(crate) fn request_analysis_frame(&self) {
         self.analysis_control.request_frame();
     }
 
+    #[cfg(any(test, feature = "gui", feature = "test-support"))]
     /// Capture the active audio source and processing state without waiting on the GUI thread.
     pub(crate) fn waveform_snapshot(
         &self,
@@ -179,7 +193,8 @@ impl CoreHandle {
         Ok(receiver)
     }
 
-    pub(crate) fn update_gui_config(&self, change: GuiConfigChange) -> Result<()> {
+    #[cfg(any(test, feature = "gui", feature = "test-support"))]
+    pub(crate) fn update_gui_config(&self, change: ConfigChange) -> Result<()> {
         self.sender
             .try_send(Request {
                 operation: Operation::GuiConfig(change),
@@ -188,9 +203,10 @@ impl CoreHandle {
             .context("Rivu is busy or stopped")
     }
 
+    #[cfg(any(test, feature = "gui", feature = "test-support"))]
     pub(crate) async fn apply_gui_settings(&self, patch: ConfigPatch) -> Ack {
         self.operation_ack_async(
-            Operation::GuiConfig(GuiConfigChange::Settings(Box::new(patch))),
+            Operation::GuiConfig(ConfigChange::Settings(Box::new(patch))),
             REPLY_TIMEOUT,
         )
         .await
@@ -208,9 +224,11 @@ impl CoreHandle {
     pub fn is_shutting_down(&self) -> bool {
         self.state.read().system.shutting_down
     }
+    #[cfg(any(test, feature = "gui", feature = "test-support"))]
     pub fn config_snapshot(&self) -> Arc<Config> {
         Arc::clone(&self.state.read().configuration.config)
     }
+    #[cfg(any(test, feature = "gui", feature = "test-support"))]
     pub(crate) fn library_revision(&self) -> u64 {
         self.state.read().library.revision
     }
@@ -225,28 +243,34 @@ impl CoreHandle {
     pub fn publication_revision(&self) -> u64 {
         self.state.read().system.revision
     }
-    pub fn mpris_snapshot(&self) -> MprisSnapshot {
+    pub(crate) fn mpris_snapshot(&self) -> MprisSnapshot {
         MprisSnapshot::from_core(&self.state.read())
     }
-    pub fn gui_snapshot(&self) -> GuiSnapshot {
-        GuiSnapshot::from_core(&self.state.read())
+    #[cfg(any(test, feature = "gui", feature = "test-support"))]
+    pub(crate) fn display_state(&self) -> DisplayState {
+        crate::projection::display_state(&self.state.read())
     }
-    /// Compare and project under one lock so the returned revision owns its data.
-    pub(crate) fn gui_snapshot_if_changed(&self, revision: u64) -> Option<GuiSnapshot> {
+    #[cfg(any(test, feature = "gui", feature = "test-support"))]
+    /// Compare and publish under one lock so the revision owns its data.
+    pub(crate) fn display_state_if_changed(&self, revision: u64) -> Option<DisplayState> {
         let state = self.state.read();
-        (state.system.revision != revision).then(|| GuiSnapshot::from_core(&state))
+        (state.system.revision != revision).then(|| crate::projection::display_state(&state))
     }
+    #[cfg(feature = "gui")]
     pub(crate) fn tray_snapshot(&self) -> TraySnapshot {
         TraySnapshot::from_core(&self.state.read())
     }
+    #[cfg(any(test, feature = "gui", feature = "test-support"))]
     pub fn set_wakeup(&self, callback: impl Fn() + Send + Sync + 'static) {
         *self.wakeup.write() = Some(Arc::new(callback));
         self.notify_revisions();
     }
+    #[cfg(any(test, feature = "gui", feature = "test-support"))]
     pub fn clear_wakeup(&self) {
         *self.wakeup.write() = None;
         self.notify_revisions();
     }
+    #[cfg(any(test, feature = "gui", feature = "test-support"))]
     fn notify_revisions(&self) {
         self.revision_updates
             .write()
@@ -271,6 +295,7 @@ impl CoreHandle {
         futures::executor::block_on(self.query_async(query))
     }
 
+    #[cfg(any(test, feature = "gui", feature = "test-support"))]
     /// Report GUI waiting failures without treating them as physical completion.
     pub(crate) fn with_query_timeout(
         mut self,
@@ -280,12 +305,14 @@ impl CoreHandle {
         self
     }
 
+    #[cfg(any(test, feature = "gui", feature = "test-support"))]
     /// GUI reads retain their caller's physical slot until reply or disconnect.
     pub(crate) async fn query_for_gui(&self, query: Query) -> QueryResponse {
         self.query_with_ticket_async(query, None, true, REPLY_TIMEOUT)
             .await
     }
 
+    #[cfg(any(test, feature = "gui", feature = "test-support"))]
     /// Cancel stale queued reads without interrupting an already executing read.
     /// A timeout notifies the GUI, then drains and discards the actual reply.
     pub(crate) async fn query_if_current(
@@ -325,6 +352,7 @@ impl CoreHandle {
                 Err(error) => {
                     let message = format!("Core response unavailable: {error}");
                     if physical_retirement {
+                        #[cfg(any(test, feature = "gui", feature = "test-support"))]
                         if ticket.as_ref().is_none_or(QueryTicket::is_current)
                             && let Some(notify) = &self.query_timeout
                         {
@@ -439,6 +467,7 @@ struct Core {
     revision_updates: Arc<RwLock<Vec<mpsc::Sender<()>>>>,
     state: CoreState,
     shared: Arc<RwLock<CoreState>>,
+    #[cfg(any(test, feature = "gui", feature = "test-support"))]
     wakeup: Arc<RwLock<Option<Wakeup>>>,
     task_waiters: Arc<Mutex<TaskWaiters>>,
     task_completions_pending: bool,

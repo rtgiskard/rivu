@@ -256,10 +256,13 @@ impl Core {
                 path: track.path.clone(),
                 decoder_hint: track.decoder_hint,
                 metadata: Self::playback_metadata(&track),
-                range: track.cue.as_ref().map(|cue| audio::PlaybackRange {
-                    start_seconds: cue.start_seconds(),
-                    end_seconds: cue.end_seconds(),
-                }),
+                range: track
+                    .cue
+                    .as_ref()
+                    .map(|cue| rivu_protocol::waveform::PlaybackRange {
+                        start_seconds: cue.start_seconds(),
+                        end_seconds: cue.end_seconds(),
+                    }),
                 generation: self.generation,
                 start_seconds: 0.0,
                 paused: status == PlaybackStatus::Paused,

@@ -2,21 +2,14 @@ pub mod app;
 pub mod config;
 pub(crate) mod core;
 pub(crate) mod execution;
-pub(crate) mod gui;
-pub mod i18n;
 pub mod ipc;
-pub(crate) mod keyboard;
 pub(crate) mod library;
 pub(crate) mod mpris;
 mod processing;
-pub mod projection;
-pub(crate) mod query_tracking;
+pub(crate) mod projection;
 pub(crate) mod store;
-pub mod terminal;
-pub(crate) mod theme;
+#[cfg(feature = "gui")]
 pub(crate) mod tray;
-
-pub(crate) static DEFAULT_IMAGE: &[u8] = include_bytes!("../data/icons/rivu.png");
 
 pub(crate) fn artwork_source(
     track: &rivu_protocol::model::Track,
@@ -28,5 +21,6 @@ pub(crate) fn artwork_source(
     }
 }
 
-#[cfg(test)]
-mod test_support;
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod test_support;

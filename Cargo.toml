@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/rivu-ui", "crates/rivu-format", "crates/rivu-utils", "crates/rivu-migrate", "crates/rivu-metadata", "crates/rivu-dsp", "crates/rivu-audio", "crates/rivu-protocol", "crates/rivu-client", "crates/rivu-visuals"]
+members = ["crates/rivu-ui", "crates/rivu-format", "crates/rivu-utils", "crates/rivu-migrate", "crates/rivu-metadata", "crates/rivu-dsp", "crates/rivu-audio", "crates/rivu-protocol", "crates/rivu-client", "crates/rivu-visuals", "crates/rivu-presentation", "crates/rivu-tui", "crates/rivu-gui"]
 resolver = "3"
 
 [workspace.dependencies]
@@ -12,21 +12,25 @@ edition = "2024"
 description = "A lightweight, local-first Linux music player"
 
 [features]
-default = ["ffmpeg", "onnx"]
+default = ["gui", "tui", "ffmpeg", "onnx"]
+gui = ["dep:rivu-gui"]
+tui = ["dep:rivu-tui"]
+test-support = ["rivu-audio/test-support", "rivu-metadata/test-support", "rivu-protocol/test-support"]
 ffmpeg = ["rivu-audio/ffmpeg"]
 onnx = ["dep:ort", "dep:realfft", "dep:sha2"]
-embed-nerd-font = []
+embed-nerd-font = ["gui", "rivu-gui/embed-nerd-font"]
 
 [dependencies]
+rivu-gui = { path = "crates/rivu-gui", optional = true }
+rivu-tui = { path = "crates/rivu-tui", optional = true }
+rivu-presentation = { path = "crates/rivu-presentation" }
 rivu-format = { path = "crates/rivu-format", default-features = false, features = ["database"] }
 rivu-utils = { path = "crates/rivu-utils", default-features = false, features = ["logging", "terminal"] }
 rivu-audio = { path = "crates/rivu-audio", default-features = false }
 rivu-metadata = { path = "crates/rivu-metadata", features = ["artwork"] }
-rivu-ui = { path = "crates/rivu-ui" }
 rivu-dsp = { path = "crates/rivu-dsp", default-features = false, features = ["execution"] }
 rivu-protocol = { path = "crates/rivu-protocol" }
 rivu-client = { path = "crates/rivu-client" }
-rivu-visuals = { path = "crates/rivu-visuals" }
 hound = "3.5"
 anyhow = "1"
 blake3 = "1"
@@ -41,20 +45,11 @@ async-signal = "0.2"
 futures-lite = "2"
 event-listener = "5"
 blocking = "1"
-crossbeam-channel = "0.5"
-crossterm = "0.29"
-fluent-bundle = "0.16"
-fluent-syntax = "0.12"
-unic-langid = "0.9"
-gpui.workspace = true
-gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "df48a139ce9c292738b523252c12f044697e673f", default-features = false, features = ["wayland"] }
-ashpd = { version = "0.13.13", default-features = false, features = ["async-io", "file_chooser"] }
 futures = "0.3"
 tracing = "0.1"
 libc = "0.2"
 parking_lot = "0.12"
 rand = "0.10.3"
-ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "crossterm_0_29", "std"] }
 rusqlite = { version = "0.41.0", features = ["bundled", "functions"] }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
@@ -62,22 +57,20 @@ sha2 = { version = "0.10", optional = true }
 realfft = { version = "3.5", optional = true }
 # Load an explicitly installed runtime; never download/link a runtime at build time.
 ort = { version = "=2.0.0-rc.11", optional = true, default-features = false, features = ["std", "load-dynamic"] }
-signal-hook = "0.4.5"
 tempfile = "3.27"
 zbus = "5.19"
 url = "2"
-unicode-segmentation = "1.13.3"
 image = { version = "0.25", default-features = false, features = ["png", "gif", "webp"] }
 
 
 [dev-dependencies]
+crossbeam-channel = "0.5"
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 rivu-audio = { path = "crates/rivu-audio", default-features = false, features = ["test-support"] }
 rivu-metadata = { path = "crates/rivu-metadata", features = ["test-support"] }
-rivu-visuals = { path = "crates/rivu-visuals", features = ["test-support"] }
+rivu-protocol = { path = "crates/rivu-protocol", features = ["test-support"] }
 ringbuf = "0.5"
 toml = "1.1.8"
-gpui = { workspace = true, features = ["test-support"] }
 
 [build-dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

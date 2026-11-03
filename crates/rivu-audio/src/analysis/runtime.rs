@@ -3,7 +3,13 @@ use ringbuf::{
     HeapCons, HeapProd, HeapRb,
     traits::{Consumer, Observer, Producer},
 };
-use rivu_format::config::{AnalysisWindow, Config, VisualizationSignal};
+#[cfg(test)]
+use rivu_format::config::VisualizationSignal;
+use rivu_format::config::{AnalysisWindow, Config};
+use rivu_protocol::analysis::{
+    AnalysisFrame, AnalysisSettings, DENSITY_SIDE, DensitySnapshot, DisplayDemand, PcmSnapshot,
+    SpatialBin, SpectrumSnapshot, VisualizerDemand, VisualizerFrame,
+};
 use rustfft::{Fft, FftPlanner, num_complex::Complex32};
 use std::{
     sync::{
@@ -14,205 +20,28 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct VisualizerDemand {
-    pub stereo_density: bool,
-    pub spatial_spectrum: bool,
-    pub band_energy: bool,
-    /// Unwindowed stereo samples for the oscilloscope.
-    pub pcm: bool,
-    /// Full-resolution non-DC FFT bins for the spectrogram.
-    pub spectrogram: bool,
+const DISPLAY_DEMAND_MASK: u64 = 63;
+// Lower bits carry flags and a revision for every request transition;
+// upper bits fence PCM only when display capture is disabled/re-enabled.
+const DISPLAY_CAPTURE_SHIFT: u32 = 32;
+const DISPLAY_CAPTURE_STEP: u64 = 1 << DISPLAY_CAPTURE_SHIFT;
+const DISPLAY_REQUEST_MASK: u64 = DISPLAY_CAPTURE_STEP - 1;
+
+fn display_capture_token(token: u64) -> u64 {
+    token >> DISPLAY_CAPTURE_SHIFT
 }
-
-impl VisualizerDemand {
-    fn from_bits(bits: u64) -> Self {
-        Self {
-            stereo_density: bits & 1 != 0,
-            spatial_spectrum: bits & 2 != 0,
-            band_energy: bits & 4 != 0,
-            pcm: bits & 16 != 0,
-            spectrogram: bits & 32 != 0,
-        }
-    }
-
-    fn bits(self) -> u64 {
-        u64::from(self.stereo_density)
-            | (u64::from(self.spatial_spectrum) << 1)
-            | (u64::from(self.band_energy) << 2)
-            | (u64::from(self.pcm) << 4)
-            | (u64::from(self.spectrogram) << 5)
-    }
-}
-
-/// Complete coalesced demand from the display consumer, independent of playback.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct DisplayDemand {
-    pub enabled: bool,
-    pub visualizer: VisualizerDemand,
-}
-
-impl DisplayDemand {
-    const MASK: u64 = 63;
-    // Lower bits carry flags and a revision for every request transition;
-    // upper bits fence PCM only when display capture is disabled/re-enabled.
-    const CAPTURE_SHIFT: u32 = 32;
-    const CAPTURE_STEP: u64 = 1 << Self::CAPTURE_SHIFT;
-    const REQUEST_MASK: u64 = Self::CAPTURE_STEP - 1;
-
-    fn capture_token(token: u64) -> u64 {
-        token >> Self::CAPTURE_SHIFT
-    }
-
-    fn from_bits(bits: u64) -> Self {
-        Self {
-            enabled: bits & 8 != 0,
-            visualizer: VisualizerDemand::from_bits(bits),
-        }
-    }
-
-    fn bits(self) -> u64 {
-        self.visualizer.bits() | (u64::from(self.enabled) << 3)
-    }
-}
-
-pub const DENSITY_SIDE: usize = 256;
 // One accumulation field plus three immutable publication slots. Three slots
 // cover a GUI-held frame, the latest publication, and the next worker result.
 const DENSITY_SNAPSHOT_COUNT: usize = 3;
-
-/// Immutable density cells shared by publications, staging, and visible panels.
-/// An empty snapshot owns no allocation; only the analyzer creates live slots.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct DensitySnapshot(Option<Arc<Vec<f32>>>);
-
-impl std::ops::Deref for DensitySnapshot {
-    type Target = [f32];
-
-    fn deref(&self) -> &Self::Target {
-        self.0.as_deref().map_or(&[], Vec::as_slice)
-    }
-}
-
-#[cfg(any(test, feature = "test-support"))]
-impl From<Vec<f32>> for DensitySnapshot {
-    fn from(cells: Vec<f32>) -> Self {
-        Self(Some(Arc::new(cells)))
-    }
-}
-
-/// Immutable coherent-gain-calibrated stereo dB amplitudes, floored at -140 dB,
-/// for FFT bins `1..=fft_size / 2`. Bin k is at k * sample_rate / fft_size Hz.
-/// An empty snapshot is unavailable; clones share one bounded analyzer-owned
-/// slot. Use the publication's sample rate and settings to identify the axis.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct SpectrumSnapshot(Option<Arc<Vec<f32>>>);
-
-impl std::ops::Deref for SpectrumSnapshot {
-    type Target = [f32];
-
-    fn deref(&self) -> &Self::Target {
-        self.0.as_deref().map_or(&[], Vec::as_slice)
-    }
-}
-
-#[cfg(any(test, feature = "test-support"))]
-impl From<Vec<f32>> for SpectrumSnapshot {
-    fn from(bins: Vec<f32>) -> Self {
-        Self(Some(Arc::new(bins)))
-    }
-}
 
 // At FFT32768, three reusable slots retain at most 192 KiB of sample storage.
 // Retained publications never cause this optional pool to grow.
 const SPECTRUM_SNAPSHOT_COUNT: usize = 3;
 
-#[derive(Clone, Copy, Debug)]
-pub struct SpatialBin {
-    pub frequency_hz: f32,
-    /// Energy balance, not a phase-derived source position.
-    pub pan: f32,
-    /// Coherent-gain-normalized mean channel power. Finite values are in
-    /// 1e-14..=1; positive infinity remains missing data for the GUI to filter.
-    pub power: f32,
-}
-
-/// Immutable recent stereo PCM, shared without copying between displays.
-/// An empty snapshot owns no allocation; live publications use bounded slots.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct PcmSnapshot(Option<Arc<Vec<[f32; 2]>>>);
-
-impl std::ops::Deref for PcmSnapshot {
-    type Target = [[f32; 2]];
-
-    fn deref(&self) -> &Self::Target {
-        self.0.as_deref().map_or(&[], Vec::as_slice)
-    }
-}
-
-#[cfg(any(test, feature = "test-support"))]
-impl From<Vec<[f32; 2]>> for PcmSnapshot {
-    fn from(samples: Vec<[f32; 2]>) -> Self {
-        Self(Some(Arc::new(samples)))
-    }
-}
-
 // Each prepared analyzer owns at most 160 KiB of reusable PCM sample storage.
 // Slow consumers omit optional PCM instead of growing this pool.
 const PCM_SNAPSHOT_COUNT: usize = 5;
 const PCM_SNAPSHOT_FRAMES: usize = 4096;
-
-/// `demand` is the request mask. An empty requested snapshot means unavailable
-/// for this publication; it never prevents publishing the base spectrum/RMS.
-#[derive(Debug, Default)]
-pub struct VisualizerFrame {
-    pub demand: VisualizerDemand,
-    pub density: DensitySnapshot,
-    pub spatial: Vec<SpatialBin>,
-    pub pcm: PcmSnapshot,
-    pub spectrogram: SpectrumSnapshot,
-    pub correlation: Option<f32>,
-    pub balance: Option<f32>,
-    pub side_ratio: Option<f32>,
-    /// Window-power-normalized stereo RMS in 20–250, 250–2500, 2500–20000 Hz.
-    pub band_rms: [f32; 3],
-}
-
-impl Clone for VisualizerFrame {
-    fn clone(&self) -> Self {
-        let mut frame = Self::default();
-        frame.clone_from(self);
-        frame
-    }
-
-    fn clone_from(&mut self, source: &Self) {
-        self.demand = source.demand;
-        if source.demand.stereo_density {
-            self.density.clone_from(&source.density);
-        } else {
-            self.density = DensitySnapshot::default();
-        }
-        if source.demand.spatial_spectrum {
-            self.spatial.clone_from(&source.spatial);
-        } else {
-            self.spatial = Vec::new();
-        }
-        if source.demand.pcm {
-            self.pcm.clone_from(&source.pcm);
-        } else {
-            self.pcm = PcmSnapshot::default();
-        }
-        if source.demand.spectrogram {
-            self.spectrogram.clone_from(&source.spectrogram);
-        } else {
-            self.spectrogram = SpectrumSnapshot::default();
-        }
-        self.correlation = source.correlation;
-        self.balance = source.balance;
-        self.side_ratio = source.side_ratio;
-        self.band_rms = source.band_rms;
-    }
-}
 
 /// Lazy exponential decay keeps sample ingestion O(1), with bounded periodic
 /// renormalization. Weights are normalized by accepted sample time (tau=0.5s).
@@ -267,70 +96,12 @@ impl DensityField {
                 for (target, cell) in cells.iter_mut().zip(&self.cells) {
                     *target = cell * self.scale;
                 }
-                return DensitySnapshot(Some(Arc::clone(slot)));
+                return DensitySnapshot::from_shared(Arc::clone(slot));
             }
         }
         // A slow consumer may retain every slot. Omit this optional payload
         // rather than allocate, block, or delay the base spectrum publication.
         DensitySnapshot::default()
-    }
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct AnalysisFrame {
-    pub sequence: u64,
-    pub display_token: u64,
-    /// PCM fence epoch and admitted source/seek intent producing this publication.
-    pub audio_epoch: u64,
-    pub audio_intent: u64,
-    /// True signal continuity; pause and display capture restarts preserve it.
-    pub generation: u64,
-    /// Absent until the first publication; identifies the FFT producing this frame.
-    pub settings: Option<AnalysisSettings>,
-    pub sample_rate: u32,
-    /// Monotonic amount of accepted audio represented by this frame.
-    pub sample_time: Duration,
-    pub frequencies_hz: Vec<f32>,
-    pub spectrum_db: Vec<f32>,
-    pub rms_left: f32,
-    pub rms_right: f32,
-    pub visualizer: VisualizerFrame,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AnalysisSettings {
-    pub fps: u32,
-    pub fft_size: u32,
-    pub window: AnalysisWindow,
-    pub signal: VisualizationSignal,
-}
-
-impl From<&Config> for AnalysisSettings {
-    fn from(config: &Config) -> Self {
-        Self {
-            fps: config.analysis_rate_hz,
-            fft_size: config.analysis_fft_size,
-            window: config.analysis_window,
-            signal: config.visualization_signal,
-        }
-    }
-}
-
-impl AnalysisSettings {
-    /// Whether retained samples and publications have the same signal meaning.
-    /// Analysis cadence changes scheduling only, not the FFT or its continuity.
-    pub fn signal_compatible_with(self, other: Self) -> bool {
-        self.fft_size == other.fft_size
-            && self.window == other.window
-            && self.signal == other.signal
-    }
-
-    fn valid(self) -> bool {
-        (5..=60).contains(&self.fps)
-            && matches!(
-                self.fft_size,
-                512 | 1024 | 2048 | 4096 | 8192 | 16384 | 32768
-            )
     }
 }
 
@@ -365,9 +136,28 @@ pub struct AnalysisControl {
     worker_thread: OnceLock<thread::Thread>,
     // Low bit enables visualization; upper bits preserve quick destructive transitions.
     visualization_enabled: AtomicU64,
+    publications: RwLock<Vec<async_channel::Sender<()>>>,
 }
 
 impl AnalysisControl {
+    /// Event-driven publication notifications; each subscriber retains at most one wake.
+    pub fn subscribe_publications(&self) -> async_channel::Receiver<()> {
+        let (sender, receiver) = async_channel::bounded(1);
+        let mut publications = self.publications.write();
+        publications.retain(|sender| !sender.is_closed());
+        publications.push(sender);
+        receiver
+    }
+
+    fn notify_publication(&self) {
+        self.publications.write().retain(|sender| {
+            !matches!(
+                sender.try_send(()),
+                Err(async_channel::TrySendError::Closed(()))
+            )
+        });
+    }
+
     pub fn frame_is_current(&self, frame: &AnalysisFrame) -> bool {
         frame.display_token == self.display_token()
             && frame.audio_epoch == self.epoch.load(Ordering::Acquire)
@@ -409,6 +199,7 @@ impl AnalysisControl {
             tap_overflow: AtomicBool::new(false),
             worker_thread: OnceLock::new(),
             visualization_enabled: AtomicU64::new(1),
+            publications: RwLock::new(Vec::new()),
         }
     }
 
@@ -457,22 +248,20 @@ impl AnalysisControl {
                     let previous = DisplayDemand::from_bits(current);
                     let demand = update(previous);
                     (previous != demand).then(|| {
-                        let capture = current & !DisplayDemand::REQUEST_MASK;
+                        let capture = current & !DISPLAY_REQUEST_MASK;
                         let capture = if previous.enabled != demand.enabled {
-                            capture.wrapping_add(DisplayDemand::CAPTURE_STEP)
+                            capture.wrapping_add(DISPLAY_CAPTURE_STEP)
                         } else {
                             capture
                         };
-                        let request = current.wrapping_add(DisplayDemand::MASK + 1)
-                            & DisplayDemand::REQUEST_MASK
-                            & !DisplayDemand::MASK;
+                        let request = current.wrapping_add(DISPLAY_DEMAND_MASK + 1)
+                            & DISPLAY_REQUEST_MASK
+                            & !DISPLAY_DEMAND_MASK;
                         capture | request | demand.bits()
                     })
                 })
         {
-            if DisplayDemand::capture_token(previous)
-                != DisplayDemand::capture_token(self.display_token())
-            {
+            if display_capture_token(previous) != display_capture_token(self.display_token()) {
                 self.frame_requested.store(false, Ordering::Release);
             }
             if let Some(worker) = self.worker_thread.get() {
@@ -510,7 +299,7 @@ impl AnalysisProducer {
         (epoch.is_multiple_of(2) && self.control.accepts_audio_for(demand_token)).then_some(
             AnalysisAudioIdentity {
                 epoch,
-                capture_token: DisplayDemand::capture_token(demand_token),
+                capture_token: display_capture_token(demand_token),
             },
         )
     }
@@ -550,7 +339,7 @@ impl AnalysisProducer {
         }
         let gap = self.gap == Some(identity);
         let demand_token = self.control.display_token();
-        if DisplayDemand::capture_token(demand_token) != identity.capture_token {
+        if display_capture_token(demand_token) != identity.capture_token {
             return;
         }
         let frames = samples.len();
@@ -685,7 +474,7 @@ impl AnalysisWorker {
         }
     }
     pub fn configure(&self, settings: AnalysisSettings) {
-        if settings.valid() {
+        if settings.is_valid() {
             let mut current = self.control.settings.write();
             if *current == settings {
                 return;
@@ -1034,7 +823,7 @@ impl SpectrumAnalyzer {
                         * endpoint_gain;
                     *level = (power.sqrt() * self.normalization).max(1e-7).log10() * 20.0;
                 }
-                self.visualizer.spectrogram = SpectrumSnapshot(Some(Arc::clone(slot)));
+                self.visualizer.spectrogram = SpectrumSnapshot::from_shared(Arc::clone(slot));
                 return;
             }
         }
@@ -1056,7 +845,7 @@ impl SpectrumAnalyzer {
                 let (first, second) = samples.split_at_mut(first_len);
                 first.copy_from_slice(&self.rolling[start..start + first_len]);
                 second.copy_from_slice(&self.rolling[..second_len]);
-                self.visualizer.pcm = PcmSnapshot(Some(Arc::clone(slot)));
+                self.visualizer.pcm = PcmSnapshot::from_shared(Arc::clone(slot));
                 return;
             }
         }
@@ -1166,8 +955,8 @@ impl AnalysisRuntime {
             let mut controls_changed = false;
             for frame in first.iter().chain(second).take(remaining.min(1024)) {
                 if frame.epoch == epoch
-                    && DisplayDemand::capture_token(frame.demand_token)
-                        == DisplayDemand::capture_token(demand_token)
+                    && display_capture_token(frame.demand_token)
+                        == display_capture_token(demand_token)
                 {
                     if active {
                         if accepted == 0 {
@@ -1181,8 +970,8 @@ impl AnalysisRuntime {
                         accepted += 1;
                     }
                 } else if frame.epoch == control.epoch.load(Ordering::Acquire)
-                    && DisplayDemand::capture_token(frame.demand_token)
-                        == DisplayDemand::capture_token(control.display_token())
+                    && display_capture_token(frame.demand_token)
+                        == display_capture_token(control.display_token())
                     && control.accepts_audio_for(frame.demand_token)
                 {
                     // A control transition can finish while a cycle reads its
@@ -1285,8 +1074,7 @@ fn analyze(
         runtime.demand = demand;
         let semantic_reset = current_continuity != continuity;
         let capture_changed = current_epoch != epoch
-            || DisplayDemand::capture_token(current_demand_token)
-                != DisplayDemand::capture_token(demand_token);
+            || display_capture_token(current_demand_token) != display_capture_token(demand_token);
         if semantic_reset || capture_changed {
             if semantic_reset {
                 runtime.reset();
@@ -1301,6 +1089,7 @@ fn analyze(
                 current_intent,
                 demand,
             );
+            control.notify_publication();
             fresh = false;
         }
         epoch = current_epoch;
@@ -1398,6 +1187,8 @@ fn analyze(
                 frame.generation = runtime.generation;
                 frame.settings = None;
             }
+            drop(frame);
+            control.notify_publication();
         }
         if controls_changed || (active && consumer.occupied_len() != 0) {
             continue;
@@ -1422,6 +1213,23 @@ fn analyze(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn publication_notifications_coalesce_and_retire_disconnected_subscribers() {
+        let control = AnalysisControl::new();
+        let first = control.subscribe_publications();
+        control.notify_publication();
+        control.notify_publication();
+        assert_eq!(first.len(), 1);
+        drop(first);
+        let second = control.subscribe_publications();
+        assert_eq!(control.publications.read().len(), 1);
+        control.notify_publication();
+        assert_eq!(second.len(), 1);
+        drop(second);
+        control.notify_publication();
+        assert!(control.publications.read().is_empty());
+    }
 
     #[test]
     fn retired_actual_epoch_is_rejected_without_a_display_transition() {
@@ -1695,8 +1503,8 @@ mod tests {
             assert_eq!(frame.visualizer.spectrogram.as_ptr(), *pointer);
             let staged = frame.clone();
             assert!(Arc::ptr_eq(
-                frame.visualizer.spectrogram.0.as_ref().unwrap(),
-                staged.visualizer.spectrogram.0.as_ref().unwrap()
+                frame.visualizer.spectrogram.shared_storage().unwrap(),
+                staged.visualizer.spectrogram.shared_storage().unwrap()
             ));
             retained.push((staged, 20.0 * amplitude.log10()));
         }
@@ -1784,7 +1592,14 @@ mod tests {
         );
         worker.control.request_frame();
         wait_for_frame(&shared, |frame| !frame.visualizer.spectrogram.is_empty());
-        let slot = Arc::downgrade(shared.read().visualizer.spectrogram.0.as_ref().unwrap());
+        let slot = Arc::downgrade(
+            shared
+                .read()
+                .visualizer
+                .spectrogram
+                .shared_storage()
+                .unwrap(),
+        );
         worker.control.set_display_demand(DisplayDemand {
             enabled: true,
             visualizer: VisualizerDemand::default(),
@@ -1808,7 +1623,14 @@ mod tests {
         );
         worker.control.request_frame();
         wait_for_frame(&shared, |frame| !frame.visualizer.spectrogram.is_empty());
-        let slot = Arc::downgrade(shared.read().visualizer.spectrogram.0.as_ref().unwrap());
+        let slot = Arc::downgrade(
+            shared
+                .read()
+                .visualizer
+                .spectrogram
+                .shared_storage()
+                .unwrap(),
+        );
         worker.set_playback_active(false);
         wait_for_frame(&shared, |frame| frame.settings.is_none());
         assert!(shared.read().visualizer.spectrogram.is_empty());
@@ -2022,9 +1844,9 @@ mod tests {
             worker.control.request_frame();
             wait_for_frame(&shared, |frame| frame.settings.is_some());
             let retired = shared.read().clone();
-            let old_slot = Arc::downgrade(retired.visualizer.pcm.0.as_ref().unwrap());
+            let old_slot = Arc::downgrade(retired.visualizer.pcm.shared_storage().unwrap());
             let old_spectrum_slot =
-                Arc::downgrade(retired.visualizer.spectrogram.0.as_ref().unwrap());
+                Arc::downgrade(retired.visualizer.spectrogram.shared_storage().unwrap());
 
             match transition {
                 "hide" => {
@@ -2238,7 +2060,7 @@ mod tests {
     fn demand_tokens_preserve_request_and_capture_transition_identities() {
         let control = AnalysisControl::new();
         let mut previous = control.display_token();
-        for bits in 0..=DisplayDemand::MASK {
+        for bits in 0..=DISPLAY_DEMAND_MASK {
             let demand = DisplayDemand::from_bits(bits);
             assert_eq!(demand.bits(), bits);
             control.set_display_demand(demand);
@@ -2247,7 +2069,7 @@ mod tests {
             if bits != 0 {
                 assert_ne!(token, previous);
                 assert_eq!(
-                    DisplayDemand::capture_token(token) != DisplayDemand::capture_token(previous),
+                    display_capture_token(token) != display_capture_token(previous),
                     DisplayDemand::from_bits(previous).enabled != demand.enabled,
                 );
             }
@@ -2260,11 +2082,11 @@ mod tests {
             enabled: true,
             visualizer: PCM_DEMAND,
         });
-        control.set_display_demand(DisplayDemand::from_bits(DisplayDemand::MASK));
+        control.set_display_demand(DisplayDemand::from_bits(DISPLAY_DEMAND_MASK));
         assert_ne!(control.display_token(), before);
         assert_eq!(
-            DisplayDemand::capture_token(control.display_token()),
-            DisplayDemand::capture_token(before)
+            display_capture_token(control.display_token()),
+            display_capture_token(before)
         );
         let retired = AnalysisFrame {
             display_token: before,
@@ -2273,8 +2095,8 @@ mod tests {
         assert!(!control.frame_is_current(&retired));
 
         // Request-revision overflow must not spill into the capture fence.
-        let wrapped = (7 << DisplayDemand::CAPTURE_SHIFT)
-            | (DisplayDemand::REQUEST_MASK & !DisplayDemand::MASK)
+        let wrapped = (7 << DISPLAY_CAPTURE_SHIFT)
+            | (DISPLAY_REQUEST_MASK & !DISPLAY_DEMAND_MASK)
             | DisplayDemand {
                 enabled: true,
                 visualizer: VisualizerDemand::default(),
@@ -2286,10 +2108,10 @@ mod tests {
             visualizer: SPECTROGRAM_DEMAND,
         });
         let token = control.display_token();
-        assert_eq!(DisplayDemand::capture_token(token), 7);
-        assert_eq!(token & DisplayDemand::REQUEST_MASK, 8 | 32);
+        assert_eq!(display_capture_token(token), 7);
+        assert_eq!(token & DISPLAY_REQUEST_MASK, 8 | 32);
         control.set_display_enabled(false);
-        assert_eq!(DisplayDemand::capture_token(control.display_token()), 8);
+        assert_eq!(display_capture_token(control.display_token()), 8);
         assert_eq!(
             DisplayDemand::from_bits(control.display_token()).visualizer,
             SPECTROGRAM_DEMAND
@@ -3150,10 +2972,7 @@ mod tests {
             (0, false)
         );
         assert!(runtime.analyzer.is_none());
-        for (epoch, demand_token) in [
-            (2, token),
-            (0, token.wrapping_sub(DisplayDemand::CAPTURE_STEP)),
-        ] {
+        for (epoch, demand_token) in [(2, token), (0, token.wrapping_sub(DISPLAY_CAPTURE_STEP))] {
             assert!(
                 producer
                     .try_push(TapFrame {
@@ -3495,7 +3314,7 @@ mod tests {
             let old_token = if epoch_change {
                 token
             } else {
-                token.wrapping_sub(DisplayDemand::CAPTURE_STEP)
+                token.wrapping_sub(DISPLAY_CAPTURE_STEP)
             };
             push_window(&mut producer, old_epoch, old_token, [0.25; 2]);
             push_window(&mut producer, epoch, token, [0.75; 2]);

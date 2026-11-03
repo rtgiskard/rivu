@@ -34,6 +34,31 @@ metadata saves retain their independent owners; inline fields cancel on blur and
 unused graphics retire rather than forming a hidden-layout cache. Renaming the active layout or deleting
 an inactive one does not replace the tree.
 
+=== Frontend crate boundary
+
+`rivu-gui` owns the GPUI event loop, display connection, session and window
+resources. The application host injects a narrow in-process interface for
+published state, commands, queries, display demand and shutdown. Core, storage,
+IPC, MPRIS and tray services retain their application lifetime; moving the GUI
+into a library does not create another process or another Core owner.
+
+The GUI releases display demand and window resources on close, retains the
+session's accepted layouts for reopening, and flushes the final layout outside
+GPUI's deadline-limited quit observer. Core acknowledgment and service joins
+remain outside the graphical event loop. User Quit passes through draft guards;
+forced application shutdown does not depend on an open window.
+
+`rivu-tui` owns terminal input, restoration and its IPC workers. Each frontend
+keeps its own projection and transient state. `rivu-presentation` shares only
+toolkit-neutral localization, shortcut policy, theme presets and application
+icons; `rivu-ui` remains the reusable GPUI controls package. Semantic RGB palette
+values belong to `rivu-format`; engine-independent display and query contracts
+belong to `rivu-protocol`.
+
+Frontend-local tests run in their owning crates. Tests requiring a real Core
+use feature-gated application fixtures through the host boundary, not a second
+compilation of GUI source modules inside the application crate.
+
 === Initial layouts
 
 The initial collection contains Default, Album and Visual, with Default active.

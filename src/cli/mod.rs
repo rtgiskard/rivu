@@ -12,8 +12,9 @@ use self::{
 };
 use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, FromArgMatches};
-use rivu::{app::App, config, i18n::Localizer, terminal};
+use rivu::{app::App, config};
 use rivu_audio as audio;
+use rivu_presentation::i18n::Localizer;
 use rivu_protocol::{
     model::{Command, RepeatMode},
     response::StateSections,
@@ -52,9 +53,10 @@ fn execute(args: Args, i18n: Localizer) -> Result<()> {
         config: config_path,
         data_dir,
     } = config::paths::Paths::resolve(args.data_dir, args.config);
-    let action = args.action.unwrap_or(Action::Gui { paths: Vec::new() });
+    let action = args.action.unwrap_or_else(default_action);
     match action {
         Action::Processing(action) => processing::run(&i18n, &data_dir, action, args.json),
+        #[cfg(feature = "gui")]
         Action::Gui { paths } => App::open_gui(
             data_dir,
             config_path,
@@ -67,7 +69,8 @@ fn execute(args: Args, i18n: Localizer) -> Result<()> {
             false,
         )?
         .run(),
-        Action::Tui => terminal::run(&data_dir, "auto"),
+        #[cfg(feature = "tui")]
+        Action::Tui => rivu_tui::run(&data_dir, "auto"),
         Action::Library(action) => library::run(&i18n, &data_dir, &config_path, action, args.json),
         Action::Playback(PlaybackAction::Devices) => {
             let devices = audio::devices()?;
@@ -98,6 +101,21 @@ fn execute(args: Args, i18n: Localizer) -> Result<()> {
             let (command, wait_scan) = translate(action)?;
             submit_command(&i18n, &data_dir, command, wait_scan, args.json)
         }
+    }
+}
+
+fn default_action() -> Action {
+    #[cfg(feature = "gui")]
+    {
+        Action::Gui { paths: Vec::new() }
+    }
+    #[cfg(all(not(feature = "gui"), feature = "tui"))]
+    {
+        Action::Tui
+    }
+    #[cfg(not(any(feature = "gui", feature = "tui")))]
+    {
+        Action::Serve { paths: Vec::new() }
     }
 }
 
@@ -219,10 +237,12 @@ fn translate(action: Action) -> Result<(Command, bool)> {
             PlaylistAction::List | PlaylistAction::Show { .. } => unreachable!(),
         },
         Action::Playback(PlaybackAction::Device { name }) => Command::Device { name },
-        Action::Gui { .. }
-        | Action::Library(_)
+        #[cfg(feature = "gui")]
+        Action::Gui { .. } => bail!("This action is not a playback command"),
+        #[cfg(feature = "tui")]
+        Action::Tui => bail!("This action is not a playback command"),
+        Action::Library(_)
         | Action::Serve { .. }
-        | Action::Tui
         | Action::Quit
         | Action::Status
         | Action::Task(_)

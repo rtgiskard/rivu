@@ -6,32 +6,39 @@ mod startup;
 
 #[cfg(test)]
 use crate::config::ConfigPersistence;
+#[cfg(feature = "gui")]
+use crate::tray::TrayController;
 use crate::{
     core::{CoreHandle, CoreLifecycle, CoreRuntime},
     execution::TaskRuntime,
-    gui::{self, session::UiSession},
     ipc, mpris,
-    tray::TrayController,
 };
 use anyhow::{Context, Result, bail};
 use async_signal::{Signal, Signals};
 #[cfg(test)]
 use crossbeam_channel::bounded;
-use futures::{FutureExt, StreamExt, channel::mpsc};
-use gpui::{App as GpuiApp, GraphicalEnvironment, QuitMode, Subscription, Task, WindowingRequest};
+use futures::{FutureExt, StreamExt};
+#[cfg(feature = "gui")]
+mod gui_adapter;
+#[cfg(feature = "gui")]
+use rivu_gui::GuiHost;
 use rivu_protocol::AppCommand;
 use rivu_protocol::{model::Command, response::Ack};
 #[cfg(test)]
 use std::thread;
 #[cfg(test)]
 use std::time::Duration;
-use std::{cell::RefCell, panic::AssertUnwindSafe, path::PathBuf, rc::Rc, sync::Arc};
+use std::{panic::AssertUnwindSafe, path::PathBuf, sync::Arc};
 #[derive(Default)]
-struct ControlState {
+pub(crate) struct ControlState {
+    #[cfg(any(test, feature = "gui", feature = "test-support"))]
     graphical: bool,
-    raise_pending: bool,
+    #[cfg(any(test, feature = "gui", feature = "test-support"))]
+    pub(crate) raise_pending: bool,
+    #[cfg(any(test, feature = "gui", feature = "test-support"))]
     quit_pending: bool,
     shutting_down: bool,
+    #[cfg(any(test, feature = "gui", feature = "test-support"))]
     wakeup: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
@@ -40,12 +47,15 @@ struct ControlState {
 pub(crate) struct AppHandle {
     core: CoreHandle,
     runtime: CoreLifecycle,
-    state: Arc<parking_lot::Mutex<ControlState>>,
+    pub(crate) state: Arc<parking_lot::Mutex<ControlState>>,
 }
 
 impl AppHandle {
     pub(crate) fn new(runtime: &CoreRuntime, graphical: bool) -> Self {
+        #[cfg(not(any(test, feature = "gui", feature = "test-support")))]
+        debug_assert!(!graphical);
         let state = Arc::new(parking_lot::Mutex::new(ControlState {
+            #[cfg(any(test, feature = "gui", feature = "test-support"))]
             graphical,
             ..ControlState::default()
         }));
@@ -53,12 +63,15 @@ impl AppHandle {
         runtime.control.set_completion_callback(move || {
             let mut state = completion_state.lock();
             state.shutting_down = true;
-            state.raise_pending = false;
-            state.quit_pending = false;
-            let wakeup = state.wakeup.clone();
-            drop(state);
-            if let Some(wakeup) = wakeup {
-                wakeup();
+            #[cfg(any(test, feature = "gui", feature = "test-support"))]
+            {
+                state.raise_pending = false;
+                state.quit_pending = false;
+                let wakeup = state.wakeup.clone();
+                drop(state);
+                if let Some(wakeup) = wakeup {
+                    wakeup();
+                }
             }
         });
         Self {
@@ -68,11 +81,23 @@ impl AppHandle {
         }
     }
 
+    #[cfg(any(test, feature = "gui", feature = "test-support"))]
     pub(crate) fn can_raise(&self) -> bool {
         let state = self.state.lock();
         state.graphical && !state.shutting_down
     }
 
+    #[cfg(not(any(test, feature = "gui", feature = "test-support")))]
+    pub(crate) fn can_raise(&self) -> bool {
+        false
+    }
+
+    #[cfg(not(any(test, feature = "gui", feature = "test-support")))]
+    pub(crate) fn raise(&self) -> Result<()> {
+        bail!("Rivu has no graphical host")
+    }
+
+    #[cfg(any(test, feature = "gui", feature = "test-support"))]
     pub(crate) fn raise(&self) -> Result<()> {
         let mut state = self.state.lock();
         if !state.graphical {
@@ -94,6 +119,7 @@ impl AppHandle {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "gui"))]
     /// User-driven Quit is offered to the GUI draft guard before core shutdown.
     /// A single pending bit keeps tray callbacks bounded and nonblocking.
     pub(crate) fn request_user_shutdown(&self) -> Result<()> {
@@ -125,22 +151,29 @@ impl AppHandle {
             return Ok(());
         }
         state.shutting_down = true;
-        state.raise_pending = false;
-        state.quit_pending = false;
+        #[cfg(any(test, feature = "gui", feature = "test-support"))]
+        {
+            state.raise_pending = false;
+            state.quit_pending = false;
+        }
+        #[cfg(any(test, feature = "gui", feature = "test-support"))]
         let wakeup = state.wakeup.clone();
         drop(state);
         let result = self.runtime.request_shutdown();
+        #[cfg(any(test, feature = "gui", feature = "test-support"))]
         if let Some(wakeup) = wakeup {
             wakeup();
         }
         result
     }
 
-    fn is_shutting_down(&self) -> bool {
+    #[cfg(any(test, feature = "gui", feature = "test-support"))]
+    pub(crate) fn is_shutting_down(&self) -> bool {
         self.state.lock().shutting_down
     }
 
-    fn set_wakeup(&self, callback: impl Fn() + Send + Sync + 'static) {
+    #[cfg(any(test, feature = "gui", feature = "test-support"))]
+    pub(crate) fn set_wakeup(&self, callback: impl Fn() + Send + Sync + 'static) {
         let wakeup: Arc<dyn Fn() + Send + Sync> = Arc::new(callback);
         let mut state = self.state.lock();
         state.wakeup = Some(Arc::clone(&wakeup));
@@ -151,7 +184,8 @@ impl AppHandle {
         }
     }
 
-    fn withdraw_gui(&self) {
+    #[cfg(any(test, feature = "gui", feature = "test-support"))]
+    pub(crate) fn withdraw_gui(&self) {
         let mut state = self.state.lock();
         state.graphical = false;
         state.raise_pending = false;
@@ -159,12 +193,14 @@ impl AppHandle {
         state.wakeup = None;
     }
 
-    fn take_raise_request(&self) -> bool {
+    #[cfg(any(test, feature = "gui", feature = "test-support"))]
+    pub(crate) fn take_raise_request(&self) -> bool {
         let mut state = self.state.lock();
         std::mem::take(&mut state.raise_pending) && !state.shutting_down
     }
 
-    fn take_quit_request(&self) -> bool {
+    #[cfg(any(test, feature = "gui", feature = "test-support"))]
+    pub(crate) fn take_quit_request(&self) -> bool {
         let mut state = self.state.lock();
         std::mem::take(&mut state.quit_pending) && !state.shutting_down
     }
@@ -194,7 +230,9 @@ pub struct App {
     signals: Option<ShutdownSignals>,
     media: Option<mpris::MprisController>,
     artwork: Arc<ArtworkManager>,
+    #[cfg(feature = "gui")]
     tray: Option<TrayController>,
+    #[cfg(feature = "gui")]
     gui: Option<GuiHost>,
     server: Option<ipc::Server>,
     session: Option<rivu_utils::logging::Session>,
@@ -204,23 +242,10 @@ pub struct App {
     _socket_owner: ipc::SocketOwner,
 }
 
-/// GPUI integration state, not a second application or services owner.
-struct GuiHost {
-    session: Rc<RefCell<UiSession>>,
-    i18n: Arc<crate::i18n::Localizer>,
-    window_closed: Option<Subscription>,
-    app_quit: Option<Subscription>,
-    wake_task: Option<Task<()>>,
-    windowing_task: Option<Task<()>>,
-    environment: Option<GraphicalEnvironment>,
-    headless: bool,
-    error: Option<anyhow::Error>,
-    quitting: bool,
-}
-
 impl App {
     /// Show an existing instance, or start a graphical application if none exists.
     /// Import paths must already be resolved against the calling client's cwd.
+    #[cfg(feature = "gui")]
     pub fn open_gui(data_dir: PathBuf, config_path: PathBuf, paths: Vec<PathBuf>) -> Result<()> {
         match rivu_client::request_ack(&data_dir, AppCommand::ShowWindow) {
             Ok(ack) if ack.is_success() => {
@@ -254,6 +279,10 @@ impl App {
         paths: Vec<PathBuf>,
         graphical: bool,
     ) -> Result<Self> {
+        #[cfg(not(feature = "gui"))]
+        if graphical {
+            bail!("Rivu was built without the graphical frontend");
+        }
         rivu_utils::logging::init(None)?;
         let socket_owner = startup::acquire_storage(&data_dir, &config_path)?;
         let signals =
@@ -261,19 +290,20 @@ impl App {
         let config = CoreRuntime::load_startup_config(&config_path)?;
         let artwork_limit_bytes = config.artwork_file_limit_mib as usize * 1024 * 1024;
         let tasks = TaskRuntime::start()?;
+        #[cfg(feature = "gui")]
         let layouts = graphical.then(|| {
             let path = data_dir.join("layout.json");
             let workers = Arc::clone(&tasks.workers);
             tasks.handle.spawn(async move {
                 workers
-                    .execute(move || gui::session::LoadedLayouts::load(path))
+                    .execute(move || rivu_gui::LoadedLayouts::load(path))
                     .await
             })
         });
         let i18n = Arc::new(if graphical {
-            crate::i18n::Localizer::new(&config.ui_language)
+            rivu_presentation::i18n::Localizer::new(&config.ui_language)
         } else {
-            crate::i18n::Localizer::for_cli("auto")
+            rivu_presentation::i18n::Localizer::for_cli("auto")
         });
         let session = rivu_utils::logging::Session::start(
             &data_dir,
@@ -297,7 +327,7 @@ impl App {
         )?;
         let artwork = Arc::new(
             ArtworkManager::new(&data_dir)
-                .with_default_image(crate::DEFAULT_IMAGE)
+                .with_default_image(rivu_presentation::DEFAULT_IMAGE)
                 .with_max_image_bytes(artwork_limit_bytes),
         );
         let mut app = Self {
@@ -306,7 +336,9 @@ impl App {
             signals: Some(signals),
             media: None,
             artwork,
+            #[cfg(feature = "gui")]
             tray: None,
+            #[cfg(feature = "gui")]
             gui: None,
             server: Some(server),
             session: Some(session),
@@ -327,24 +359,28 @@ impl App {
             })?;
         }
         if graphical {
-            app.gui = Some(GuiHost {
-                session: UiSession::new(
+            #[cfg(feature = "gui")]
+            {
+                let port = gui_adapter::GuiAdapter::new(
                     app.runtime.handle.clone(),
                     app.handle.clone(),
+                    Arc::clone(&app.tasks.workers),
+                );
+                app.gui = Some(GuiHost::new(
+                    rivu_gui::HostHandle::new(port),
                     futures::executor::block_on(layouts.expect("graphical layout preparation"))?,
                     Arc::clone(&app.artwork),
                     Arc::clone(&i18n),
-                ),
-                i18n: Arc::clone(&i18n),
-                window_closed: None,
-                app_quit: None,
-                wake_task: None,
-                windowing_task: None,
-                environment: None,
-                headless: false,
-                error: None,
-                quitting: false,
-            });
+                ));
+                if app.runtime.handle.config_snapshot().tray_enabled {
+                    app.tray = Some(TrayController::start(
+                        app.runtime.handle.clone(),
+                        app.handle.clone(),
+                        Arc::clone(&i18n),
+                        &app.tasks.handle,
+                    ));
+                }
+            }
         } else {
             println!(
                 "{}",
@@ -357,254 +393,15 @@ impl App {
         Ok(app)
     }
 
-    /// Run until application shutdown; a headless instance waits for its core.
+    /// Run until application shutdown. Core and services retire outside GPUI.
     pub fn run(mut self) -> Result<()> {
-        if self.gui.is_some() {
-            self.run_gui()
-        } else {
-            self.finish(Ok(()))
+        #[cfg(feature = "gui")]
+        if let Some(gui) = self.gui.take() {
+            let result = gui.run();
+            drop(self.tray.take());
+            return self.finish(result);
         }
-    }
-
-    fn show_window(&mut self, cx: &mut GpuiApp) {
-        let gui = self.gui.as_mut().expect("graphical application");
-        match gui.session.borrow_mut().show_window(cx) {
-            Ok(()) => gui.error = None,
-            Err(error) => {
-                tracing::error!(%error, "Could not open Rivu window; activate the tray icon or use rivu gui to retry");
-                gui.error = Some(error.context("Could not open Rivu window"));
-            }
-        }
-    }
-
-    fn handle_requests(owner: &Rc<RefCell<Self>>, cx: &mut GpuiApp) {
-        let mut app = owner.borrow_mut();
-        let Some(gui) = app.gui.as_ref().filter(|gui| !gui.quitting) else {
-            return;
-        };
-        if app.handle.is_shutting_down() {
-            app.quit_gui(cx);
-            return;
-        }
-        if app.handle.take_quit_request() {
-            let session = Rc::clone(&gui.session);
-            // The draft guard updates the root entity. Do not retain the App
-            // owner borrow across that update or its eventual close observers.
-            drop(app);
-            session.borrow().request_shutdown(cx);
-            return;
-        }
-        // Leave Raise pending while a connection switch is in flight. Its
-        // completion reconciles the coalesced request, including a late Quit.
-        if gui.windowing_task.is_some() || !app.handle.take_raise_request() {
-            return;
-        }
-        if gui.headless {
-            let environment = gui
-                .environment
-                .clone()
-                .expect("detached display environment");
-            drop(app);
-            Self::switch_display(owner, WindowingRequest::Windowed(environment), cx);
-        } else {
-            app.show_window(cx);
-        }
-    }
-
-    fn idle_display(owner: &Rc<RefCell<Self>>, cx: &mut GpuiApp) {
-        let app = owner.borrow();
-        let Some(gui) = app.gui.as_ref() else {
-            return;
-        };
-        if gui.quitting
-            || gui.headless
-            || gui.windowing_task.is_some()
-            || gui.environment.is_none()
-            || gui.session.borrow().has_window()
-            || app.handle.is_shutting_down()
-        {
-            return;
-        }
-        let raising = app.handle.state.lock().raise_pending;
-        drop(app);
-        if raising {
-            Self::handle_requests(owner, cx);
-        } else {
-            Self::switch_display(owner, WindowingRequest::Headless, cx);
-        }
-    }
-
-    fn switch_display(owner: &Rc<RefCell<Self>>, request: WindowingRequest, cx: &mut GpuiApp) {
-        let headless = matches!(request, WindowingRequest::Headless);
-        let transition = cx.request_windowing(request);
-        let weak_owner = Rc::downgrade(owner);
-        let task = cx.spawn(async move |cx| {
-            let result = transition.await;
-            cx.update(|cx| {
-                let Some(owner) = weak_owner.upgrade() else {
-                    return;
-                };
-                let mut app = owner.borrow_mut();
-                let gui = app.gui.as_mut().expect("graphical application");
-                gui.windowing_task.take();
-                match result {
-                    Ok(()) => {
-                        gui.headless = headless;
-                        if headless && !app.handle.state.lock().raise_pending {
-                            cx.release_unused_resources();
-                        }
-                        if !headless && !app.handle.is_shutting_down() {
-                            app.show_window(cx);
-                        }
-                    }
-                    Err(error) if headless => {
-                        tracing::warn!(%error, "Could not release the idle display connection");
-                    }
-                    Err(error) => {
-                        tracing::error!(%error, "Could not reconnect the display; activate the tray icon or use rivu gui to retry");
-                        gui.error = Some(error.context("Could not reconnect the display"));
-                    }
-                }
-                drop(app);
-                Self::handle_requests(&owner, cx);
-            });
-        });
-        owner
-            .borrow_mut()
-            .gui
-            .as_mut()
-            .expect("graphical application")
-            .windowing_task = Some(task);
-    }
-
-    fn shutdown_gui(&mut self) {
-        let Some(gui) = self.gui.as_mut() else {
-            return;
-        };
-        if gui.quitting {
-            return;
-        }
-        gui.quitting = true;
-        let _ = self.handle.request_shutdown();
-        // Withdraw CanRaise and stop producers before releasing the UI receiver.
-        self.handle.withdraw_gui();
-        gui.wake_task.take();
-        gui.windowing_task.take();
-        gui.window_closed.take();
-        gui.app_quit.take();
-        gui.session.borrow_mut().release_window();
-        // Tray/service teardown may join workers and must stay outside GPUI's
-        // deadline-limited quit observer.
-    }
-
-    fn quit_gui(&mut self, cx: &mut GpuiApp) {
-        self.shutdown_gui();
-        cx.quit();
-    }
-
-    fn run_gui(mut self) -> Result<()> {
-        if let Some(gui) = &self.gui
-            && self.runtime.handle.config_snapshot().tray_enabled
-        {
-            self.tray = Some(TrayController::start(
-                self.runtime.handle.clone(),
-                self.handle.clone(),
-                Arc::clone(&gui.i18n),
-                &self.tasks.handle,
-            ));
-        }
-        let app = Rc::new(RefCell::new(self));
-        let gpui_owner = Rc::clone(&app);
-        gpui_platform::application()
-            .with_quit_mode(QuitMode::Explicit)
-            .run(move |cx: &mut GpuiApp| {
-                if let Err(error) = gui::init(cx) {
-                    let mut app = gpui_owner.borrow_mut();
-                    app.gui.as_mut().expect("graphical application").error = Some(error);
-                    app.quit_gui(cx);
-                    return;
-                }
-
-                // App owns these listeners across window close; weak captures
-                // cannot retain the application after the event loop returns.
-                let closed_owner = Rc::downgrade(&gpui_owner);
-                let window_closed = cx.on_window_closed(move |cx, id| {
-                    if let Some(owner) = closed_owner.upgrade() {
-                        if let Some(gui) = owner.borrow().gui.as_ref() {
-                            gui.session.borrow_mut().window_closed(id);
-                        }
-                        // The close observer still runs inside the removed
-                        // Window's stack frame. Detach only after it is dropped.
-                        let owner = Rc::downgrade(&owner);
-                        cx.defer(move |cx| {
-                            if let Some(owner) = owner.upgrade() {
-                                Self::idle_display(&owner, cx);
-                            }
-                        });
-                    }
-                });
-                let quit_owner = Rc::downgrade(&gpui_owner);
-                let app_quit = cx.on_app_quit(move |_| {
-                    if let Some(app) = quit_owner.upgrade() {
-                        app.borrow_mut().shutdown_gui();
-                    }
-                    futures::future::ready(())
-                });
-
-                // Playback wakes the view separately; this persistent receiver
-                // handles Raise and shutdown even when no window exists.
-                let (wake_sender, mut wake_receiver) = mpsc::channel::<()>(1);
-                let wake_sender = parking_lot::Mutex::new(wake_sender);
-                gpui_owner.borrow().handle.set_wakeup(move || {
-                    let _ = wake_sender.lock().try_send(());
-                });
-                let request_owner = Rc::downgrade(&gpui_owner);
-                let wake_task = cx.spawn(async move |cx| {
-                    while wake_receiver.next().await.is_some() {
-                        let Some(app) = request_owner.upgrade() else {
-                            break;
-                        };
-                        cx.update(|cx| Self::handle_requests(&app, cx));
-                    }
-                });
-                let mut app = gpui_owner.borrow_mut();
-                let gui = app.gui.as_mut().expect("graphical application");
-                gui.environment = cx.graphical_environment();
-                gui.window_closed = Some(window_closed);
-                gui.app_quit = Some(app_quit);
-                gui.wake_task = Some(wake_task);
-
-                // Reconcile signals and Raise accepted before registration.
-                if app.handle.is_shutting_down() {
-                    app.quit_gui(cx);
-                } else {
-                    app.handle.take_raise_request();
-                    app.show_window(cx);
-                }
-            });
-
-        let mut app = app.borrow_mut();
-        app.shutdown_gui();
-        let layout_save = app
-            .gui
-            .as_ref()
-            .expect("graphical application")
-            .session
-            .borrow()
-            .flush_layouts();
-        if let Err(error) = &layout_save {
-            tracing::error!(%error, "Could not save final desktop layout");
-        }
-        drop(app.tray.take());
-        // Blocking core acknowledgment and worker joins are outside GPUI.
-        let shutdown = app.handle.request_shutdown();
-        let error = app
-            .gui
-            .as_mut()
-            .expect("graphical application")
-            .error
-            .take();
-        app.finish(error.map_or(shutdown.and(layout_save), Err))
+        self.finish(Ok(()))
     }
 
     fn finish(&mut self, interface_result: Result<()>) -> Result<()> {
@@ -632,7 +429,9 @@ impl App {
 
 impl Drop for App {
     fn drop(&mut self) {
-        self.shutdown_gui();
+        #[cfg(feature = "gui")]
+        drop(self.gui.take());
+        #[cfg(feature = "gui")]
         drop(self.tray.take());
         if !self.runtime.is_finished() {
             let _ = self.handle.request_shutdown();
@@ -723,6 +522,7 @@ mod tests {
         assert!(ipc::SocketOwner::acquire(&data_dir).is_ok());
     }
 
+    #[cfg(feature = "gui")]
     #[test]
     fn opening_existing_gui_does_not_validate_unused_config_path() {
         use std::{ffi::OsString, os::unix::ffi::OsStringExt};
@@ -754,6 +554,20 @@ mod tests {
         runtime.join().unwrap();
         drop(server);
         drop(owner);
+    }
+
+    #[cfg(not(feature = "gui"))]
+    #[test]
+    fn disabled_graphical_start_rejects_before_touching_storage() {
+        let directory = tempfile::tempdir().unwrap();
+        let data_dir = directory.path().join("data");
+        let config = directory.path().join("config.toml");
+        let error = App::start(data_dir.clone(), config.clone(), Vec::new(), true)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("without the graphical frontend"));
+        assert!(!data_dir.exists());
+        assert!(!config.exists());
     }
 
     #[test]

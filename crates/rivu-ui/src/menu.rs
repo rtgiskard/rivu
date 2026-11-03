@@ -34,11 +34,14 @@ pub fn menu_item<T: 'static>(
     )
 }
 
-pub fn menu_separator(theme: &'static crate::theme::Palette) -> Div {
+pub fn menu_separator(theme: &'static rivu_format::palette::Palette) -> Div {
     div().h(gpui::px(1.)).mx_2().my_1().bg(rgb(theme.border))
 }
 
-pub fn menu_title(theme: &'static crate::theme::Palette, title: impl Into<SharedString>) -> Div {
+pub fn menu_title(
+    theme: &'static rivu_format::palette::Palette,
+    title: impl Into<SharedString>,
+) -> Div {
     let title = title.into();
     div()
         .px_2()
@@ -64,7 +67,7 @@ pub fn menu_back<T: 'static>(
 
 /// Destructive menu rows use text, not a button border, to identify the action.
 pub fn danger_menu_item(
-    theme: &'static crate::theme::Palette,
+    theme: &'static rivu_format::palette::Palette,
     control: Stateful<Div>,
 ) -> Stateful<Div> {
     control.text_color(rgb(theme.error))
@@ -72,7 +75,7 @@ pub fn danger_menu_item(
 
 /// Custom menu content must supply its actual accessible text, never a glyph or debug name.
 pub fn menu_item_style(
-    theme: &'static crate::theme::Palette,
+    theme: &'static rivu_format::palette::Palette,
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
     content: impl IntoElement,

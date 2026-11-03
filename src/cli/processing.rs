@@ -3,7 +3,7 @@ use super::args::{
     ProcessingKind,
 };
 use anyhow::{Context, Result};
-use rivu::i18n::Localizer;
+use rivu_presentation::i18n::Localizer;
 use rivu_protocol::{model::*, response::StateSections};
 use std::path::Path;
 

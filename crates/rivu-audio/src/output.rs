@@ -1410,8 +1410,8 @@ pub(super) fn test_backend_with_capacity(
 #[cfg(test)]
 mod pcm_tests {
     use super::*;
-    use crate::analysis::AnalysisFrame;
     use parking_lot::RwLock;
+    use rivu_protocol::analysis::AnalysisFrame;
 
     #[test]
     fn pcm_capacity_preserves_normal_high_rate_and_multichannel_queues() {

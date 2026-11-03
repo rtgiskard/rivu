@@ -1,0 +1,382 @@
+use rivu_format::config::ArtworkOptions;
+use rivu_protocol::model::{Config, ConfigPatch};
+use std::sync::Arc;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Target {
+    Global,
+    Artwork(u64),
+}
+
+pub(super) enum PanelApply {
+    Artwork {
+        panel_id: u64,
+        options: ArtworkOptions,
+        session: u64,
+    },
+}
+
+/// Consumed on completion; text snapshots and Input entities belong to the view.
+pub(super) struct Submission {
+    session: u64,
+    config: Config,
+    edit_revision: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Completion {
+    Stale,
+    Failed,
+    Committed,
+}
+
+/// Owns edit-session transitions, not persistence or control text. Only the draft
+/// is directly editable; callers cannot independently change lifecycle fields.
+pub(super) struct SettingsModel {
+    baseline: Arc<Config>,
+    pub(super) draft: Config,
+    session: u64,
+    target: Target,
+    applying: bool,
+    feedback: Option<Result<(), String>>,
+    edit_revision: u64,
+    submitted_revision: u64,
+}
+
+impl SettingsModel {
+    pub(super) fn new(config: &Arc<Config>) -> Self {
+        Self {
+            baseline: Arc::clone(config),
+            draft: config.as_ref().clone(),
+            session: 0,
+            target: Target::Global,
+            applying: false,
+            feedback: None,
+            edit_revision: 0,
+            submitted_revision: 0,
+        }
+    }
+
+    pub(super) fn session(&self) -> u64 {
+        self.session
+    }
+
+    pub(super) fn target(&self) -> Target {
+        self.target
+    }
+
+    pub(super) fn applying(&self) -> bool {
+        self.applying
+    }
+
+    pub(super) fn feedback(&self) -> &Option<Result<(), String>> {
+        &self.feedback
+    }
+
+    #[cfg(test)]
+    pub(super) fn baseline(&self) -> &Config {
+        &self.baseline
+    }
+
+    pub(super) fn reset(&mut self, config: &Arc<Config>) {
+        self.session = self.session.wrapping_add(1);
+        self.baseline = Arc::clone(config);
+        self.draft = config.as_ref().clone();
+        self.target = Target::Global;
+        self.applying = false;
+        self.feedback = None;
+        self.edit_revision = 0;
+        self.submitted_revision = 0;
+    }
+
+    pub(super) fn reset_artwork(
+        &mut self,
+        config: &Arc<Config>,
+        panel_id: u64,
+        options: ArtworkOptions,
+    ) {
+        self.reset(config);
+        self.target = Target::Artwork(panel_id);
+        self.draft.artwork_style = options.style;
+        self.draft.artwork_mode = options.mode;
+        self.draft.artwork_direction = options.direction;
+        self.draft.artwork_period_seconds = options.period_seconds;
+    }
+
+    pub(super) fn edited(&mut self) {
+        self.edit_revision = self.edit_revision.wrapping_add(1);
+        self.feedback = None;
+    }
+
+    pub(super) fn clear_success(&mut self) {
+        if matches!(self.feedback, Some(Ok(()))) {
+            self.feedback = None;
+        }
+    }
+
+    pub(super) fn reject_input(&mut self, error: String) {
+        if !self.applying {
+            self.feedback = Some(Err(error));
+        }
+    }
+
+    pub(super) fn begin_apply(&mut self, config: Config) -> Option<(ConfigPatch, Submission)> {
+        if self.applying || self.target != Target::Global {
+            return None;
+        }
+        let patch = ConfigPatch::between(&self.baseline, &config);
+        // Parsed controls establish the same origin as toggle/dropdown edits.
+        self.draft = config.clone();
+        self.applying = true;
+        self.feedback = None;
+        Some((
+            patch,
+            Submission {
+                session: self.session,
+                config,
+                edit_revision: self.edit_revision,
+            },
+        ))
+    }
+
+    /// The view parses artwork's text before submitting instance options.
+    pub(super) fn begin_panel_apply(&mut self, artwork_period: Option<f32>) -> Option<PanelApply> {
+        if self.applying {
+            return None;
+        }
+        let request = match self.target {
+            Target::Global => return None,
+            Target::Artwork(panel_id) => {
+                let period_seconds = artwork_period?;
+                if !period_seconds.is_finite() || period_seconds <= 0.0 {
+                    return None;
+                }
+                self.draft.artwork_period_seconds = period_seconds;
+                PanelApply::Artwork {
+                    panel_id,
+                    options: ArtworkOptions {
+                        style: self.draft.artwork_style,
+                        mode: self.draft.artwork_mode,
+                        direction: self.draft.artwork_direction,
+                        period_seconds,
+                    },
+                    session: self.session,
+                }
+            }
+        };
+        self.applying = true;
+        self.submitted_revision = self.edit_revision;
+        self.feedback = None;
+        Some(request)
+    }
+
+    pub(super) fn complete_apply(
+        &mut self,
+        submission: Submission,
+        committed: Arc<Config>,
+        result: Result<(), String>,
+    ) -> Completion {
+        if self.session != submission.session || self.target != Target::Global || !self.applying {
+            return Completion::Stale;
+        }
+        self.applying = false;
+        let completion = if result.is_ok() {
+            let later_edits = ConfigPatch::between(&submission.config, &self.draft);
+            self.draft = committed.as_ref().clone();
+            later_edits.apply_to(&mut self.draft);
+            self.baseline = committed;
+            Completion::Committed
+        } else {
+            Completion::Failed
+        };
+        self.feedback = if result.is_ok() && self.edit_revision != submission.edit_revision {
+            None
+        } else {
+            Some(result)
+        };
+        completion
+    }
+
+    pub(super) fn complete_panel_apply(
+        &mut self,
+        session: u64,
+        result: Result<(), String>,
+    ) -> bool {
+        if self.session != session || self.target == Target::Global || !self.applying {
+            return false;
+        }
+        self.applying = false;
+        self.feedback = if result.is_ok() && self.edit_revision != self.submitted_revision {
+            None
+        } else {
+            Some(result)
+        };
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rivu_format::config::{ArtworkMode, Theme, VisualizationPalette};
+
+    #[test]
+    fn switching_targets_rejects_old_completions_and_routes_panel_options() {
+        let config = Arc::new(Config::default());
+        let mut model = SettingsModel::new(&config);
+        let (_, global) = model.begin_apply(model.draft.clone()).unwrap();
+        assert!(model.begin_apply(model.draft.clone()).is_none());
+        assert!(!model.complete_panel_apply(model.session(), Ok(())));
+
+        let artwork = ArtworkOptions {
+            mode: ArtworkMode::Rotating,
+            period_seconds: 13.0,
+            ..ArtworkOptions::from(config.as_ref())
+        };
+        model.reset_artwork(&config, 22, artwork);
+        assert_eq!(model.target(), Target::Artwork(22));
+        assert_eq!(ArtworkOptions::from(&model.draft), artwork);
+        assert_eq!(model.baseline(), config.as_ref());
+        assert!(model.begin_apply(model.draft.clone()).is_none());
+        let Some(PanelApply::Artwork {
+            panel_id,
+            options,
+            session: artwork_session,
+        }) = model.begin_panel_apply(Some(17.0))
+        else {
+            panic!("expected artwork apply");
+        };
+        assert_eq!(panel_id, 22);
+        assert_eq!(
+            options,
+            ArtworkOptions {
+                period_seconds: 17.0,
+                ..artwork
+            }
+        );
+        assert_eq!(
+            model.complete_apply(global, Arc::clone(&config), Ok(())),
+            Completion::Stale,
+        );
+        assert!(model.applying());
+        assert!(model.feedback().is_none());
+        assert!(model.complete_panel_apply(artwork_session, Ok(())));
+        assert_eq!(model.feedback(), &Some(Ok(())));
+        assert!(!model.complete_panel_apply(artwork_session, Err("duplicate".into())));
+
+        model.reset_artwork(&config, 33, artwork);
+        let Some(PanelApply::Artwork { session, .. }) = model.begin_panel_apply(Some(19.0)) else {
+            panic!("expected new artwork apply");
+        };
+        assert!(!model.complete_panel_apply(artwork_session, Err("old failure".into())));
+        assert!(model.applying());
+        assert!(model.feedback().is_none());
+        assert!(model.complete_panel_apply(session, Ok(())));
+
+        model.reset(&config);
+        assert_eq!(model.target(), Target::Global);
+        assert_eq!(model.draft, *config);
+        assert!(!model.applying());
+        assert!(model.feedback().is_none());
+        assert!(model.begin_panel_apply(Some(17.0)).is_none());
+    }
+
+    #[test]
+    fn panel_validation_and_failure_preserve_edits_for_retry() {
+        let config = Arc::new(Config::default());
+        let mut model = SettingsModel::new(&config);
+        model.reset_artwork(&config, 1, ArtworkOptions::from(config.as_ref()));
+        for period in [
+            None,
+            Some(0.0),
+            Some(-1.0),
+            Some(f32::NAN),
+            Some(f32::INFINITY),
+        ] {
+            assert!(model.begin_panel_apply(period).is_none());
+            assert!(!model.applying());
+        }
+        model.reject_input("invalid period".into());
+        assert!(matches!(model.feedback(), Some(Err(_))));
+        assert!(model.begin_panel_apply(Some(20.0)).is_some());
+        assert!(model.feedback().is_none());
+        assert!(model.begin_panel_apply(Some(30.0)).is_none());
+        model.draft.artwork_mode = ArtworkMode::Static;
+        model.reject_input("must not replace pending feedback".into());
+        assert!(model.feedback().is_none());
+        assert!(model.complete_panel_apply(model.session(), Err("save failed".into())));
+        assert!(!model.applying());
+        assert!(matches!(model.feedback(), Some(Err(_))));
+        assert_eq!(model.draft.artwork_mode, ArtworkMode::Static);
+        let Some(PanelApply::Artwork { options, .. }) = model.begin_panel_apply(Some(30.0)) else {
+            panic!("expected retry");
+        };
+        assert_eq!(options.mode, ArtworkMode::Static);
+        assert_eq!(options.period_seconds, 30.0);
+        assert!(model.feedback().is_none());
+    }
+
+    #[test]
+    fn global_and_panel_apply_preserve_later_edits_and_discard() {
+        let config = Arc::new(Config::default());
+        let mut model = SettingsModel::new(&config);
+        model.draft.visualization_palette = VisualizationPalette::Viridis;
+        model.edited();
+        let (patch, submission) = model.begin_apply(model.draft.clone()).unwrap();
+        let mut committed = Config {
+            ui_theme: Theme::TokyoNight,
+            ..config.as_ref().clone()
+        };
+        patch.apply_to(&mut committed);
+        assert_eq!(config.visualization_palette, VisualizationPalette::Deadbeef);
+        assert_eq!(
+            committed.visualization_palette,
+            VisualizationPalette::Viridis
+        );
+        let committed = Arc::new(committed);
+        assert_eq!(
+            model.complete_apply(submission, Arc::clone(&committed), Ok(())),
+            Completion::Committed
+        );
+        assert_eq!(model.feedback(), &Some(Ok(())));
+        assert_eq!(model.draft, *committed);
+        assert_eq!(model.draft.ui_theme, Theme::TokyoNight);
+        assert_eq!(
+            model.draft.visualization_palette,
+            VisualizationPalette::Viridis
+        );
+        model.draft.visualization_palette = VisualizationPalette::Magma;
+        model.edited();
+        assert!(model.feedback().is_none());
+        let (patch, submission) = model.begin_apply(model.draft.clone()).unwrap();
+        let mut committed = committed.as_ref().clone();
+        patch.apply_to(&mut committed);
+        let committed = Arc::new(committed);
+        model.draft.visualization_palette = VisualizationPalette::Cividis;
+        model.edited();
+        assert_eq!(
+            model.complete_apply(submission, Arc::clone(&committed), Ok(())),
+            Completion::Committed
+        );
+        assert!(model.feedback().is_none());
+        assert_eq!(
+            model.baseline().visualization_palette,
+            VisualizationPalette::Magma
+        );
+        assert_eq!(
+            model.draft.visualization_palette,
+            VisualizationPalette::Cividis
+        );
+        model.reset(&committed);
+        assert_eq!(model.draft, *committed);
+        model.reset_artwork(&config, 1, ArtworkOptions::from(config.as_ref()));
+        let Some(PanelApply::Artwork { session, .. }) = model.begin_panel_apply(Some(20.0)) else {
+            panic!("expected panel apply");
+        };
+        model.draft.artwork_mode = ArtworkMode::Rotating;
+        model.edited();
+        assert!(model.complete_panel_apply(session, Ok(())));
+        assert!(model.feedback().is_none());
+        assert_eq!(model.draft.artwork_mode, ArtworkMode::Rotating);
+    }
+}

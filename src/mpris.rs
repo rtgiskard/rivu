@@ -1137,7 +1137,7 @@ mod tests {
         async_io::block_on(rivu_protocol::transport::timeout(
             Duration::from_secs(5),
             async {
-                while handle.gui_snapshot().system.mpris_status != expected {
+                while handle.display_state().system.mpris_status != expected {
                     changes.recv().await.unwrap();
                 }
             },
@@ -1160,7 +1160,8 @@ mod tests {
             runtime.handle.clone(),
             AppHandle::new(&runtime, false),
             Arc::new(
-                ArtworkManager::new(directory.path()).with_default_image(crate::DEFAULT_IMAGE),
+                ArtworkManager::new(directory.path())
+                    .with_default_image(rivu_presentation::DEFAULT_IMAGE),
             ),
             runtime.test_executor(),
             Arc::clone(runtime.test_workers()),
@@ -1246,7 +1247,8 @@ mod tests {
     fn cancelling_unstarted_artwork_preserves_cache_only_behavior() {
         let (directory, mut runtime) = runtime_fixture();
         let artwork = Arc::new(
-            ArtworkManager::new(directory.path()).with_default_image(crate::DEFAULT_IMAGE),
+            ArtworkManager::new(directory.path())
+                .with_default_image(rivu_presentation::DEFAULT_IMAGE),
         );
         let state = MprisSnapshot {
             queue: QueueState {
@@ -1291,7 +1293,14 @@ mod tests {
         cancel.send(()).unwrap();
         assert!(!async_io::block_on(publisher));
         assert!(dropped.load(Ordering::SeqCst));
-        assert!(runtime.handle.gui_snapshot().system.mpris_status.is_empty());
+        assert!(
+            runtime
+                .handle
+                .display_state()
+                .system
+                .mpris_status
+                .is_empty()
+        );
         runtime.control.request_shutdown().unwrap();
         runtime.join().unwrap();
     }
@@ -1322,7 +1331,7 @@ mod tests {
                 panic!("cancelled publication must not be polled");
             }
         )));
-        assert_eq!(handle.gui_snapshot().system.mpris_status, failure);
+        assert_eq!(handle.display_state().system.mpris_status, failure);
         runtime.control.request_shutdown().unwrap();
         runtime.join().unwrap();
     }
@@ -1552,7 +1561,7 @@ mod tests {
         let other_path = directory.path().join("other.wav");
         std::fs::copy(&path, &other_path).unwrap();
         // Distinct from the default export, so a fallback cannot satisfy the test.
-        let mut cover = crate::DEFAULT_IMAGE.to_vec();
+        let mut cover = rivu_presentation::DEFAULT_IMAGE.to_vec();
         cover.push(1);
         std::fs::write(directory.path().join("cover.png"), cover).unwrap();
         let ack = async_io::block_on(runtime.handle.request_ack(Command::QueueExternalPaths {
@@ -1584,7 +1593,8 @@ mod tests {
         assert_ne!(other.id, selected_track.id);
         assert!(async_io::block_on(runtime.handle.navigate(Navigation::Previous)).is_success());
         let artwork = Arc::new(
-            ArtworkManager::new(directory.path()).with_default_image(crate::DEFAULT_IMAGE),
+            ArtworkManager::new(directory.path())
+                .with_default_image(rivu_presentation::DEFAULT_IMAGE),
         );
         let app = AppHandle::new(&runtime, false);
         let connection = bus.serve_root(app.clone());
@@ -1786,8 +1796,8 @@ mod tests {
         assert!(async_io::block_on(runtime.handle.navigate(Navigation::Next)).is_success());
         let current = runtime.handle.mpris_snapshot();
         assert_ne!(old.queue.current_id, current.queue.current_id);
-        let artwork =
-            ArtworkManager::new(directory.path()).with_default_image(crate::DEFAULT_IMAGE);
+        let artwork = ArtworkManager::new(directory.path())
+            .with_default_image(rivu_presentation::DEFAULT_IMAGE);
         let mut metadata = TrackMetadata::from_snapshot(&current, &artwork);
         let mut loaded = None;
         let connection = bus.connect();
@@ -1813,8 +1823,8 @@ mod tests {
     #[test]
     fn metadata_getter_leaves_cold_and_replaced_fingerprints_unprobed() {
         let directory = tempfile::tempdir().unwrap();
-        let artwork =
-            ArtworkManager::new(directory.path()).with_default_image(crate::DEFAULT_IMAGE);
+        let artwork = ArtworkManager::new(directory.path())
+            .with_default_image(rivu_presentation::DEFAULT_IMAGE);
         let mut current = track(7);
         current.path = directory.path().join("missing.flac");
         current.fingerprint = Some("original".into());
@@ -1875,7 +1885,8 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let blocked = directory.path().join("blocked");
         std::fs::write(&blocked, b"not a directory").unwrap();
-        let artwork = ArtworkManager::new(&blocked).with_default_image(crate::DEFAULT_IMAGE);
+        let artwork =
+            ArtworkManager::new(&blocked).with_default_image(rivu_presentation::DEFAULT_IMAGE);
         assert!(artwork.export_default().is_none());
         std::fs::remove_file(&blocked).unwrap();
         std::fs::create_dir(&blocked).unwrap();
@@ -1901,8 +1912,8 @@ mod tests {
     #[test]
     fn metadata_notification_follows_path_changes_without_queue_revision_changes() {
         let directory = tempfile::tempdir().unwrap();
-        let artwork =
-            ArtworkManager::new(directory.path()).with_default_image(crate::DEFAULT_IMAGE);
+        let artwork = ArtworkManager::new(directory.path())
+            .with_default_image(rivu_presentation::DEFAULT_IMAGE);
         let previous = MprisSnapshot {
             queue: QueueState {
                 total: 1,
@@ -2017,8 +2028,8 @@ mod tests {
     #[test]
     fn metadata_has_dbus_types_and_queue_occurrence_identity() {
         let directory = tempfile::tempdir().unwrap();
-        let artwork =
-            ArtworkManager::new(directory.path()).with_default_image(crate::DEFAULT_IMAGE);
+        let artwork = ArtworkManager::new(directory.path())
+            .with_default_image(rivu_presentation::DEFAULT_IMAGE);
         let art = artwork.export_default().unwrap();
         let expected_uri = art.uri().to_owned();
         let track = TrackMetadata {

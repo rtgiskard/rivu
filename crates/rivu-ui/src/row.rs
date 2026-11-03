@@ -120,7 +120,7 @@ impl gpui::Element for ListDropOverlay {
 }
 
 pub fn row_background(
-    theme: &'static crate::theme::Palette,
+    theme: &'static rivu_format::palette::Palette,
     selected: bool,
     hovered: bool,
 ) -> gpui::Rgba {
@@ -133,7 +133,7 @@ pub fn row_background(
 }
 
 pub fn tree_row(
-    theme: &'static crate::theme::Palette,
+    theme: &'static rivu_format::palette::Palette,
     id: impl Into<ElementId>,
     depth: usize,
     selected: bool,
@@ -160,7 +160,7 @@ pub fn tree_row(
 
 /// Standard compact option row used by anchored dropdowns.
 pub fn dropdown_row(
-    theme: &'static crate::theme::Palette,
+    theme: &'static rivu_format::palette::Palette,
     id: impl Into<ElementId>,
     selected: bool,
     label: impl Into<SharedString>,
@@ -209,7 +209,7 @@ pub fn tree_row_height(window: &Window, cx: &gpui::App) -> gpui::Pixels {
 
 /// Shared row geometry and idle background; each caller owns its single hover style.
 fn list_row_surface(
-    theme: &'static crate::theme::Palette,
+    theme: &'static rivu_format::palette::Palette,
     id: impl Into<ElementId>,
     selected: bool,
     height: gpui::Pixels,
@@ -234,7 +234,7 @@ fn list_row_surface(
 
 /// Standard selectable row shared by library, queue, playlist, and history.
 pub fn list_row(
-    theme: &'static crate::theme::Palette,
+    theme: &'static rivu_format::palette::Palette,
     id: impl Into<ElementId>,
     selected: bool,
     height: gpui::Pixels,
@@ -246,7 +246,7 @@ pub fn list_row(
 /// Two independently truncated text lines, without tooltip or input behavior.
 /// The primary line inherits its color; callers can override it on the returned view.
 pub fn two_line_text(
-    theme: &'static crate::theme::Palette,
+    theme: &'static rivu_format::palette::Palette,
     title: impl Into<SharedString>,
     detail: impl Into<SharedString>,
 ) -> Div {
@@ -289,7 +289,7 @@ fn hover_reveal_surface(id: impl Into<ElementId>, group: &'static str) -> Statef
 
 // Out-of-flow actions leave the full text width available until the row is hovered.
 pub fn hover_actions(
-    theme: &'static crate::theme::Palette,
+    theme: &'static rivu_format::palette::Palette,
     id: impl Into<ElementId>,
     group: &'static str,
     selected: bool,

@@ -168,7 +168,7 @@ pub struct CoreRuntime {
     pub(crate) control: CoreLifecycle,
     worker: Option<JoinHandle<()>>,
     // Standalone test fixtures own execution; production ownership stays in App.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     _test_tasks: Option<TaskRuntime>,
 }
 impl CoreRuntime {
@@ -181,7 +181,7 @@ impl CoreRuntime {
             .handle
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn test_workers(&self) -> &Arc<BlockingExecutor> {
         &self
             ._test_tasks
@@ -198,7 +198,7 @@ impl CoreRuntime {
         Config::load(config_path)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     /// Start a standalone core without installing or owning process logging.
     pub fn start(data_dir: &Path, config_path: &Path) -> Result<Self> {
         let tasks = TaskRuntime::start()?;
@@ -263,6 +263,7 @@ impl CoreRuntime {
         let (sender, receiver) = async_channel::bounded(64);
         let (control, shutdown_receiver) = CoreLifecycle::new();
         let shared = Arc::new(RwLock::new(CoreState::default()));
+        #[cfg(any(test, feature = "gui", feature = "test-support"))]
         let wakeup = Arc::new(RwLock::new(None));
         let initial = {
             let mut state = CoreState::default();
@@ -279,13 +280,20 @@ impl CoreRuntime {
         let task_waiters = Arc::new(Mutex::new(TaskWaiters::default()));
         let handle = CoreHandle {
             state: shared.clone(),
+            #[cfg(any(test, feature = "gui", feature = "test-support"))]
             analysis: engine.analysis.clone(),
+            #[cfg(any(test, feature = "gui", feature = "test-support"))]
             analysis_control: Arc::clone(&engine.analysis_control),
+            #[cfg(any(test, feature = "gui", feature = "test-support"))]
             waveform: Arc::clone(&engine.waveform),
+            #[cfg(any(test, feature = "gui", feature = "test-support"))]
+            waveform_control: Arc::clone(&engine.waveform_control),
             sender,
             revision_updates: Arc::clone(&revision_updates),
+            #[cfg(any(test, feature = "gui", feature = "test-support"))]
             wakeup: wakeup.clone(),
             task_waiters: Arc::clone(&task_waiters),
+            #[cfg(any(test, feature = "gui", feature = "test-support"))]
             query_timeout: None,
         };
         let (scan_tx, scan_rx) = async_channel::bounded(3);
@@ -301,6 +309,7 @@ impl CoreRuntime {
             revision_updates,
             state: initial,
             shared,
+            #[cfg(any(test, feature = "gui", feature = "test-support"))]
             wakeup,
             task_waiters,
             task_completions_pending: false,
@@ -354,7 +363,7 @@ impl CoreRuntime {
             handle,
             control,
             worker: Some(worker),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             _test_tasks: None,
         })
     }

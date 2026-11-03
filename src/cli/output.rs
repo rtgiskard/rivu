@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use rivu::i18n::Localizer;
+use rivu_presentation::i18n::Localizer;
 use rivu_protocol::{
     model::{MAX_QUERY_ROWS, PlaybackStatus, Query},
     response::{QueryError, StateResponse, StateSections, ViewResponse},

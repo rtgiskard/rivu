@@ -11,6 +11,7 @@ use super::{
 use anyhow::{Context, Result, anyhow, bail};
 use rivu_format::decoder_hint::DecoderHint;
 use rivu_metadata::{Tags, read_tags};
+use rivu_protocol::waveform::SourceIdentity;
 use rivu_utils::regular_file::open_regular_file;
 use std::{
     fs::File,
@@ -80,40 +81,23 @@ fn metadata_budget() -> symphonia_metadata::budget::MetadataBudget {
     )
 }
 
-/// Content version of an opened file or an immutable retained PCM span.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SourceIdentity {
-    File {
-        device: u64,
-        inode: u64,
-        len: u64,
-        modified: (i64, i64),
-        changed: (i64, i64),
-    },
-    Pcm {
-        storage: u64,
-        start: u64,
-        frames: u64,
-    },
+/// Capture the content version of an already admitted ordinary file.
+pub fn source_identity(file: &File) -> Result<SourceIdentity> {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        bail!("Audio source is not an ordinary file");
+    }
+    Ok(source_identity_from_metadata(&metadata))
 }
 
-impl SourceIdentity {
-    pub fn from_file(file: &File) -> Result<Self> {
-        let metadata = file.metadata()?;
-        if !metadata.is_file() {
-            bail!("Audio source is not an ordinary file");
-        }
-        Ok(Self::from_metadata(&metadata))
-    }
-
-    pub fn from_metadata(metadata: &std::fs::Metadata) -> Self {
-        Self::File {
-            device: metadata.dev(),
-            inode: metadata.ino(),
-            len: metadata.len(),
-            modified: (metadata.mtime(), metadata.mtime_nsec()),
-            changed: (metadata.ctime(), metadata.ctime_nsec()),
-        }
+/// Convert an existing metadata snapshot without opening or refreshing a path.
+pub fn source_identity_from_metadata(metadata: &std::fs::Metadata) -> SourceIdentity {
+    SourceIdentity::File {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        len: metadata.len(),
+        modified: (metadata.mtime(), metadata.mtime_nsec()),
+        changed: (metadata.ctime(), metadata.ctime_nsec()),
     }
 }
 
@@ -202,7 +186,7 @@ pub fn probe_with_cancel(
 
 /// Probe the already opened object without looking up its original path again.
 pub fn probe_file(path: &Path, mut file: File, ffmpeg_enabled: bool) -> Result<MediaInfo> {
-    SourceIdentity::from_file(&file)?;
+    crate::source_identity(&file)?;
     file.rewind()
         .context("Rewinding audio source for probing")?;
     Ok(Source::open_file_with_cancel(
@@ -607,7 +591,7 @@ impl Source {
         cancelled: Option<&AtomicBool>,
     ) -> Result<Self> {
         check_cancelled(cancelled)?;
-        SourceIdentity::from_file(&file)?;
+        crate::source_identity(&file)?;
         // Playback already receives authoritative library/CUE metadata. Only
         // probing needs an additional descriptive-tag pass over this object.
         let tags = if descriptive {
@@ -740,7 +724,7 @@ impl Source {
         file: File,
         cancelled: Option<&AtomicBool>,
     ) -> Result<Self> {
-        let identity = SourceIdentity::from_file(&file)?;
+        let identity = crate::source_identity(&file)?;
         let mut hint = Hint::new();
         if let Some(extension) = path.extension().and_then(|value| value.to_str()) {
             hint.with_extension(extension);
@@ -1377,7 +1361,7 @@ impl Source {
         mut graph: Option<super::GraphRunner>,
         context: Option<(usize, Option<u64>)>,
     ) -> Result<super::WaveformFrame> {
-        let mut frame = super::WaveformFrame::default();
+        let mut frame = super::waveform::WaveformBuffer::default();
         let sample_rate = self.info.sample_rate;
         let channels = self.layout.len();
         frame.select(
@@ -1519,7 +1503,7 @@ impl Source {
         }
         check_cancelled(Some(cancelled))?;
         frame.finish_scan(end_frames as f64 / f64::from(sample_rate));
-        Ok(frame)
+        Ok(frame.data)
     }
 
     // Both backends supply codec-trimmed interleaved PCM and an absolute timestamp.
@@ -3275,7 +3259,7 @@ pub(super) mod tests {
         let directory = tempfile::tempdir().unwrap();
         let alias = directory.path().join("alias.wav");
         std::os::unix::fs::symlink(file.path(), &alias).unwrap();
-        let identity = SourceIdentity::from_file(file.as_file()).unwrap();
+        let identity = crate::source_identity(file.as_file()).unwrap();
         let mut reference =
             Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
         let expected = decode_remaining(&mut reference);
@@ -3607,8 +3591,8 @@ pub(super) mod tests {
         std::fs::copy(replacement.path(), &next).unwrap();
         std::fs::rename(next, &path).unwrap();
         // Replacing the pathname also updates the unlinked original's ctime.
-        let original = SourceIdentity::from_file(&file).unwrap();
-        let replacement = SourceIdentity::from_file(&open_regular_file(&path).unwrap()).unwrap();
+        let original = crate::source_identity(&file).unwrap();
+        let replacement = crate::source_identity(&open_regular_file(&path).unwrap()).unwrap();
         assert_ne!(original, replacement);
         let mut source = Source::open_file_unprimed(
             &path,
@@ -4194,7 +4178,7 @@ pub(super) mod tests {
         let mut source = open_selected(file.path(), DecoderHint::Auto, false, Some(range));
         let rate = source.info.sample_rate;
         let channels = source.layout.len();
-        let mut frame = crate::WaveformFrame::default();
+        let mut frame = crate::waveform::WaveformBuffer::default();
         frame.select(
             file.path(),
             Some(range),
@@ -4254,7 +4238,7 @@ pub(super) mod tests {
                 }
                 let rate = source.info.sample_rate;
                 let channels = source.layout.len();
-                let mut frame = crate::WaveformFrame::default();
+                let mut frame = crate::waveform::WaveformBuffer::default();
                 frame.select(
                     file.path(),
                     range,
@@ -4639,7 +4623,7 @@ pub(super) mod tests {
             Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Ffmpeg, true).unwrap();
         let rate = source.info.sample_rate;
         let channels = source.layout.len();
-        let mut frame = crate::WaveformFrame::default();
+        let mut frame = crate::waveform::WaveformBuffer::default();
         frame.select(file.path(), None, DecoderHint::Ffmpeg, None, rate);
         let tolerance = source.waveform_timestamp_tolerance();
         let mut coverage = crate::waveform::WaveformCoverage::new(0.0, tolerance);
@@ -4669,7 +4653,7 @@ pub(super) mod tests {
         source.info.duration = None;
         let rate = source.info.sample_rate;
         let channels = source.layout.len();
-        let mut frame = crate::WaveformFrame::default();
+        let mut frame = crate::waveform::WaveformBuffer::default();
         frame.select(file.path(), None, DecoderHint::Auto, None, rate);
         let (samples, timestamp) = source.next_frames().unwrap().unwrap();
         let first_count = samples.len().min(441 * channels);

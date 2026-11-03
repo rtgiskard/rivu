@@ -278,6 +278,7 @@ impl Core {
             } => {
                 self.register_task_wait(target, registration);
             }
+            #[cfg(any(test, feature = "gui", feature = "test-support"))]
             Operation::WaveformSnapshot(reply) => {
                 let _ = self.engine.send(AudioCommand::WaveformSnapshot(reply));
             }
@@ -318,14 +319,13 @@ impl Core {
                     let _ = reply.send(CoreResponse::Ack(ack));
                 }
             }
-            operation @ (Operation::GuiConfig(_)
-            | Operation::Navigate(_)
-            | Operation::MprisSeek { .. }) => {
+            operation => {
                 let result = match operation {
                     Operation::MprisSeek { queue_id, offset } => self.mpris_seek(queue_id, offset),
                     _ if self.database_maintenance_active() => Err(anyhow::anyhow!(
                         "Database maintenance is in progress; this operation was not executed"
                     )),
+                    #[cfg(any(test, feature = "gui", feature = "test-support"))]
                     Operation::GuiConfig(change) => self.update_gui_config(change),
                     Operation::Navigate(direction) => self.navigate(direction),
                     _ => unreachable!("operation matched above"),
@@ -481,9 +481,12 @@ impl Core {
                 !matches!(sender.try_send(()), Err(mpsc::TrySendError::Closed(_)))
             });
         }
-        let callback = self.wakeup.read().clone();
-        if let Some(callback) = callback {
-            callback();
+        #[cfg(any(test, feature = "gui", feature = "test-support"))]
+        {
+            let callback = self.wakeup.read().clone();
+            if let Some(callback) = callback {
+                callback();
+            }
         }
     }
 

@@ -6,8 +6,8 @@ use gpui::{
     AnyElement, App, Bounds, GpuFrame, GpuLimits, GpuPalette, GpuSegment, GpuSource,
     GpuStrokeLayer, Pixels, TextAlign, Window, canvas, div, fill, point, prelude::*, px, rgb, size,
 };
-use rivu_audio::analysis::{AnalysisFrame, AnalysisSettings};
 use rivu_format::config::{AudioVisualizerOptions, AudioVisualizerStyle};
+use rivu_protocol::analysis::{AnalysisFrame, AnalysisSettings};
 use std::{cell::RefCell, rc::Rc, sync::Arc, time::Duration};
 
 #[derive(Clone, Copy, Default)]
@@ -753,7 +753,7 @@ mod tests {
             }
         }
     }
-    use rivu_audio::analysis::{VisualizerDemand, VisualizerFrame};
+    use rivu_protocol::analysis::{VisualizerDemand, VisualizerFrame};
 
     fn plot(style: AudioVisualizerStyle) -> FractalRenderer {
         let plot = FractalRenderer::new(style);

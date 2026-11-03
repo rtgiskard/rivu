@@ -1,10 +1,9 @@
 //! Concrete rendering parameters, captured by the host when configuration changes.
-use rivu_audio::analysis::AnalysisSettings;
 use rivu_format::config::{
     AnalysisWindow, Config, RgbColor, SpectrumBarLayout, SpectrumStyle, VisualizationPalette,
     VisualizationSignal,
 };
-use std::sync::Arc;
+use rivu_protocol::analysis::AnalysisSettings;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VisualParameters {
@@ -126,24 +125,5 @@ impl VisualParameters {
     }
     pub fn gpu_material_budget_bytes(&self) -> u64 {
         self.gpu_material_budget_bytes
-    }
-}
-
-/// Explicit scan setup; unlike rendering, preparation may clone equalizer state.
-pub struct WaveformScanParameters {
-    pub signal: VisualizationSignal,
-    pub equalizer: Arc<rivu_format::config::EqualizerConfig>,
-    pub buffer_mib: u32,
-    pub ffmpeg_enabled: bool,
-}
-
-impl From<&Config> for WaveformScanParameters {
-    fn from(config: &Config) -> Self {
-        Self {
-            signal: config.visualization_signal,
-            equalizer: Arc::new(config.equalizer.clone()),
-            buffer_mib: config.media_read_buffer_mib,
-            ffmpeg_enabled: config.ffmpeg_enabled,
-        }
     }
 }

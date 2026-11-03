@@ -5,7 +5,7 @@ use super::{
     graph::GraphRunner,
     output::{Output, OutputError, OutputOptions},
     source::{DECODE_WORK_BUDGET, DecodeStep, Source},
-    waveform::{WaveformAccumulator, WaveformCoverage},
+    waveform::{WaveformAccumulator, WaveformBuffer, WaveformControl, WaveformCoverage},
 };
 use crate::analysis::{AnalysisAudioIdentity, AnalysisProducer, AnalysisWorker};
 use anyhow::{Result, bail};
@@ -81,9 +81,10 @@ pub(super) struct Playback {
 
 struct VisualizationCapture {
     waveform: Arc<RwLock<WaveformFrame>>,
+    waveform_control: Arc<WaveformControl>,
     accumulator: Option<WaveformAccumulator>,
     // Captured at load/Still boundaries, so first PCM never needs a GUI lock.
-    seed: Option<WaveformFrame>,
+    seed: Option<WaveformBuffer>,
     weights: Vec<[f32; 2]>,
     coverage: WaveformCoverage,
     visualization_enabled: bool,
@@ -132,14 +133,14 @@ impl VisualizationCapture {
         if let Some(accumulator) = &mut self.accumulator
             && let Some(mut waveform) = self.waveform.try_write()
         {
-            accumulator.publish(&mut waveform);
+            accumulator.publish_to(&mut waveform, &self.waveform_control);
         }
     }
 
     // Control/teardown boundaries must not discard an unpublished dirty range.
     fn flush(&mut self) {
         if let Some(accumulator) = &mut self.accumulator {
-            accumulator.publish(&mut self.waveform.write());
+            accumulator.publish_to(&mut self.waveform.write(), &self.waveform_control);
         }
     }
 
@@ -230,7 +231,7 @@ impl VisualizationCapture {
     fn finish(&mut self) {
         if let Some(accumulator) = &mut self.accumulator {
             accumulator.finish(&self.coverage);
-            accumulator.publish(&mut self.waveform.write());
+            accumulator.publish_to(&mut self.waveform.write(), &self.waveform_control);
         }
     }
 }
@@ -246,6 +247,7 @@ impl Playback {
         options: PlaybackOptions,
         analyzer: &AnalysisWorker,
         waveform: Arc<RwLock<WaveformFrame>>,
+        waveform_control: Arc<WaveformControl>,
     ) -> Result<Self> {
         let PlaybackOptions {
             path,
@@ -301,22 +303,23 @@ impl Playback {
         let waveform_weights = super::channels::analysis_weights(source.layout());
         let waveform_seed = {
             let mut waveform = waveform.write();
-            waveform.set_visualization_enabled(visualization_enabled);
-            if let Some(info) = &source_info {
-                let display_path = waveform.path.clone().unwrap_or_else(|| path.clone());
-                let display_range = waveform.range;
-                let display_hint = waveform.decoder_hint;
-                waveform.select_audition_source(
-                    &display_path,
-                    display_range,
-                    display_hint,
-                    &source,
-                    info.duration,
-                );
-            } else {
-                waveform.select_source(&path, range, decoder_hint, &source);
-            }
-            visualization_enabled.then(|| waveform.clone())
+            waveform_control.set_visualization_enabled(&mut waveform, visualization_enabled);
+            waveform_control.capture(&mut waveform, visualization_enabled, |waveform| {
+                if let Some(info) = &source_info {
+                    let display_path = waveform.path.clone().unwrap_or_else(|| path.clone());
+                    let display_range = waveform.range;
+                    let display_hint = waveform.decoder_hint;
+                    waveform.select_audition_source(
+                        &display_path,
+                        display_range,
+                        display_hint,
+                        &source,
+                        info.duration,
+                    );
+                } else {
+                    waveform.select_source(&path, range, decoder_hint, &source);
+                }
+            })
         };
         let timestamp_tolerance = source.waveform_timestamp_tolerance();
         let waveform_coverage = WaveformCoverage::new(start, timestamp_tolerance);
@@ -359,6 +362,7 @@ impl Playback {
             paused,
             visualization: VisualizationCapture {
                 waveform,
+                waveform_control,
                 accumulator: None,
                 seed: waveform_seed,
                 weights: waveform_weights,
@@ -539,8 +543,13 @@ impl Playback {
             self.visualization.before = VecDeque::new();
         }
         let mut waveform = self.visualization.waveform.write();
-        waveform.set_visualization_enabled(enabled);
-        self.visualization.seed = enabled.then(|| waveform.clone());
+        self.visualization
+            .waveform_control
+            .set_visualization_enabled(&mut waveform, enabled);
+        self.visualization.seed =
+            self.visualization
+                .waveform_control
+                .capture(&mut waveform, enabled, |_| {});
         self.visualization.visualization_enabled = enabled;
     }
 
@@ -951,8 +960,8 @@ pub(super) mod tests {
 
     #[test]
     fn before_staging_survives_optional_demand_changes_without_a_gap() {
-        use crate::analysis::{DisplayDemand, VisualizerDemand};
         use ringbuf::traits::Consumer;
+        use rivu_protocol::analysis::{DisplayDemand, VisualizerDemand};
 
         let file = pcm();
         let (mut playback, _) = test_playback_with_waveform(file.path(), None, Arc::default());
@@ -1089,9 +1098,10 @@ pub(super) mod tests {
         )
         .unwrap();
         while !source.poll_open().unwrap() {}
-        waveform
-            .write()
-            .select_source(path, range, DecoderHint::Auto, &source);
+        let waveform_control = Arc::new(WaveformControl::for_snapshot(&waveform.read()));
+        let waveform_seed = waveform_control.capture(&mut waveform.write(), true, |buffer| {
+            buffer.select_source(path, range, DecoderHint::Auto, &source);
+        });
         let rate = source.info().sample_rate;
         let (output, render) = crate::output::test_backend(rate, false, source.layout());
         let waveform_weights = crate::channels::analysis_weights(source.layout());
@@ -1099,7 +1109,6 @@ pub(super) mod tests {
         let waveform_coverage = WaveformCoverage::new(0.0, timestamp_tolerance);
         let equalizer =
             Equalizer::new(&EqualizerConfig::default(), rate, source.layout().len()).unwrap();
-        let waveform_seed = Some(waveform.read().clone());
         let playback = Playback {
             source,
             output,
@@ -1128,6 +1137,7 @@ pub(super) mod tests {
             paused: false,
             visualization: VisualizationCapture {
                 waveform,
+                waveform_control,
                 accumulator: None,
                 seed: waveform_seed,
                 weights: waveform_weights,
@@ -1153,8 +1163,8 @@ pub(super) mod tests {
 
     #[test]
     fn large_decoder_packet_publishes_before_its_pending_audio_finishes() {
-        use crate::analysis::{AnalysisFrame, AnalysisSettings};
         use rivu_format::config::AnalysisWindow;
+        use rivu_protocol::analysis::{AnalysisFrame, AnalysisSettings};
         use std::time::{Duration, Instant};
 
         for rate in [48_000, 192_000] {
@@ -2527,9 +2537,9 @@ pub(super) mod tests {
 
     #[test]
     fn before_analysis_stays_continuous_across_monitor_eq_bypass_roundtrip() {
-        use crate::analysis::{AnalysisFrame, AnalysisSettings};
         use ringbuf::traits::{Consumer, Producer};
         use rivu_format::config::AnalysisWindow;
+        use rivu_protocol::analysis::{AnalysisFrame, AnalysisSettings};
         use std::time::{Duration, Instant};
 
         let file = pcm_samples(24_000);
@@ -3054,13 +3064,19 @@ pub(super) mod tests {
             test_playback_with_waveform(processed.path(), None, Arc::default());
         audition.visualization.waveform = waveform.clone();
         audition.source_info = Some(info.clone());
-        waveform.write().select_audition_source(
-            original.path(),
-            None,
-            DecoderHint::Auto,
-            &audition.source,
-            info.duration,
-        );
+        audition.visualization.seed =
+            audition
+                .visualization
+                .waveform_control
+                .capture(&mut waveform.write(), true, |frame| {
+                    frame.select_audition_source(
+                        original.path(),
+                        None,
+                        DecoderHint::Auto,
+                        &audition.source,
+                        info.duration,
+                    );
+                });
         audition.prior_heard = 1.25;
         audition.fill().unwrap();
         let mut samples = [0.0; 320];

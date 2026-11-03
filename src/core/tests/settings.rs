@@ -1,4 +1,5 @@
 use super::*;
+use rivu_format::config::LibraryColumn;
 
 #[test]
 fn configuration_only_publication_wakes_watchers_without_invalidating_runtime() {
@@ -10,7 +11,7 @@ fn configuration_only_publication_wakes_watchers_without_invalidating_runtime() 
     let mut snapshot = ClientSnapshot::default();
     initial.clone().apply_to(&mut snapshot);
     let before = initial.revisions;
-    core.update_gui_config(GuiConfigChange::ToggleWaveformSeek)
+    core.update_gui_config(ConfigChange::ToggleWaveformSeek)
         .unwrap();
     // Desired state does not leak before the owner's publication boundary.
     assert_eq!(handle.state_revisions(), before);
@@ -34,7 +35,7 @@ fn configuration_only_publication_wakes_watchers_without_invalidating_runtime() 
         initial.configuration.unwrap().config.waveform_seek_enabled
     );
     assert_eq!(snapshot.system.revision, initial.system.unwrap().revision);
-    let projected = handle.gui_snapshot();
+    let projected = handle.display_state();
     assert!(Arc::ptr_eq(
         &projected.system.config,
         &snapshot.configuration.config
@@ -60,7 +61,8 @@ fn runtime_and_configuration_responses_derive_from_one_publication() {
     let (handle, _requests) = super::task_wait::wait_handle(&core);
     let initial = handle.state(StateSections::ALL);
     Arc::make_mut(&mut core.state.configuration.config).query_batch_size = 91;
-    Arc::make_mut(&mut core.state.configuration.config).ui_theme = crate::theme::Theme::TokyoNight;
+    Arc::make_mut(&mut core.state.configuration.config).ui_theme =
+        rivu_presentation::theme::Theme::TokyoNight;
     core.state.system.last_error = Some("new runtime".into());
     let unpublished = handle.state(StateSections::ALL);
     assert_eq!(unpublished.revisions, initial.revisions);
@@ -108,10 +110,12 @@ fn runtime_and_configuration_responses_derive_from_one_publication() {
     );
     let mut snapshot = ClientSnapshot::default();
     response.apply_to(&mut snapshot);
-    let tui = crate::projection::TuiSnapshot::from_client(&snapshot, None);
-    assert_eq!(tui.system.query_batch_size, 91);
-    assert_eq!(tui.system.ui_theme, crate::theme::Theme::TokyoNight);
-    assert_eq!(tui.system.last_error.as_deref(), Some("new runtime"));
+    assert_eq!(snapshot.configuration.config.query_batch_size, 91);
+    assert_eq!(
+        snapshot.configuration.config.ui_theme,
+        rivu_presentation::theme::Theme::TokyoNight
+    );
+    assert_eq!(snapshot.system.last_error.as_deref(), Some("new runtime"));
 }
 
 #[test]
@@ -204,13 +208,13 @@ fn missing_config_is_created_only_at_apply_or_orderly_exit() {
         let path = core.state.configuration.config_path.clone();
         assert!(!path.exists());
         core.command(Command::Volume { value: 0.25 }).unwrap();
-        core.update_gui_config(GuiConfigChange::ToggleWaveformSeek)
+        core.update_gui_config(ConfigChange::ToggleWaveformSeek)
             .unwrap();
         core.publish();
         assert!(!path.exists());
         if apply {
             let baseline = core.state.configuration.config.clone();
-            core.update_gui_config(GuiConfigChange::Settings(Box::new(ConfigPatch::between(
+            core.update_gui_config(ConfigChange::Settings(Box::new(ConfigPatch::between(
                 &baseline, &baseline,
             ))))
             .unwrap();
@@ -251,7 +255,7 @@ fn changed_apply_and_exit_preserve_comments_and_untouched_normalized_settings() 
         core.command(Command::Volume { value: 0.25 }).unwrap();
         if apply {
             let baseline = core.state.configuration.config.clone();
-            core.update_gui_config(GuiConfigChange::Settings(Box::new(ConfigPatch::between(
+            core.update_gui_config(ConfigChange::Settings(Box::new(ConfigPatch::between(
                 &baseline, &baseline,
             ))))
             .unwrap();
@@ -320,7 +324,7 @@ fn apply_clears_optional_device_without_rewriting_unrelated_settings() {
     let baseline = core.state.configuration.config.clone();
     let mut draft = baseline.as_ref().clone();
     draft.output_device = None;
-    core.update_gui_config(GuiConfigChange::Settings(Box::new(ConfigPatch::between(
+    core.update_gui_config(ConfigChange::Settings(Box::new(ConfigPatch::between(
         &baseline, &draft,
     ))))
     .unwrap();
@@ -399,9 +403,9 @@ fn no_op_apply_and_change_back_exit_do_not_replace_saved_config() {
         enabled: !baseline.shuffle,
     })
     .unwrap();
-    core.update_gui_config(GuiConfigChange::ToggleWaveformSeek)
+    core.update_gui_config(ConfigChange::ToggleWaveformSeek)
         .unwrap();
-    core.update_gui_config(GuiConfigChange::ToggleLibraryColumn(LibraryColumn::Artist))
+    core.update_gui_config(ConfigChange::ToggleLibraryColumn(LibraryColumn::Artist))
         .unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), original);
     core.command(Command::Volume {
@@ -412,11 +416,11 @@ fn no_op_apply_and_change_back_exit_do_not_replace_saved_config() {
         enabled: baseline.shuffle,
     })
     .unwrap();
-    core.update_gui_config(GuiConfigChange::ToggleWaveformSeek)
+    core.update_gui_config(ConfigChange::ToggleWaveformSeek)
         .unwrap();
-    core.update_gui_config(GuiConfigChange::ToggleLibraryColumn(LibraryColumn::Artist))
+    core.update_gui_config(ConfigChange::ToggleLibraryColumn(LibraryColumn::Artist))
         .unwrap();
-    core.update_gui_config(GuiConfigChange::Settings(Box::new(ConfigPatch::between(
+    core.update_gui_config(ConfigChange::Settings(Box::new(ConfigPatch::between(
         &baseline, &baseline,
     ))))
     .unwrap();
@@ -434,7 +438,7 @@ fn queue_save_failure_does_not_prevent_final_config_save() {
     let (directory, mut core) = fixture_with_database(Some(10.0));
     let _audio = recording_audio(&mut core);
     core.command(Command::Volume { value: 0.25 }).unwrap();
-    core.update_gui_config(GuiConfigChange::ToggleWaveformSeek)
+    core.update_gui_config(ConfigChange::ToggleWaveformSeek)
         .unwrap();
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     connection
@@ -515,7 +519,7 @@ fn busy_audio_configuration_rejects_the_whole_batch_before_persistence() {
             assert_eq!(receive.len(), 64 - available);
             if available == 0 {
                 assert!(
-                    core.update_gui_config(GuiConfigChange::ToggleVisualization)
+                    core.update_gui_config(ConfigChange::ToggleVisualization)
                         .is_err()
                 );
                 assert_eq!(
@@ -657,7 +661,7 @@ fn visualization_enabled_toggle_preserves_unsaved_playback_and_device_settings()
     // A live output selection must survive unrelated quick changes.
     core.state.system.selected_device = Some("pending-output".into());
     for enabled in [false, true] {
-        core.update_gui_config(GuiConfigChange::ToggleVisualization)
+        core.update_gui_config(ConfigChange::ToggleVisualization)
             .unwrap();
         assert_eq!(
             core.state.configuration.config.visualization_enabled,
@@ -763,7 +767,7 @@ fn library_column_toggles_merge_latest_config_without_audio_side_effects() {
             },
         ),
     ] {
-        core.update_gui_config(GuiConfigChange::ToggleLibraryColumn(column))
+        core.update_gui_config(ConfigChange::ToggleLibraryColumn(column))
             .unwrap();
         expected.library_columns = columns;
         assert_eq!(*core.state.configuration.config, expected);
@@ -790,10 +794,8 @@ fn library_column_toggle_commits_without_accessing_unwritable_config_path() {
         .library_columns
         .duration = true;
     std::fs::create_dir(&core.state.configuration.config_path).unwrap();
-    core.update_gui_config(GuiConfigChange::ToggleLibraryColumn(
-        LibraryColumn::Duration,
-    ))
-    .unwrap();
+    core.update_gui_config(ConfigChange::ToggleLibraryColumn(LibraryColumn::Duration))
+        .unwrap();
     core.publish();
     assert!(
         !core
@@ -824,7 +826,7 @@ fn overlapping_root_changes_leave_published_and_saved_configuration_unchanged() 
     let saved = std::fs::read(&core.state.configuration.config_path).unwrap();
     for root in [directory.path().join("child"), directory.path().join("..")] {
         assert!(
-            core.update_gui_config(GuiConfigChange::AddLibraryRoot(root.clone()))
+            core.update_gui_config(ConfigChange::AddLibraryRoot(root.clone()))
                 .is_err()
         );
         let mut config = before.as_ref().clone();
@@ -857,11 +859,11 @@ fn desktop_config_edits_preserve_live_playback_and_merge_roots() {
     core.state.system.selected_device = Some("pending-output".into());
     let root = directory.path().join("added");
     let seek = core.state.configuration.config.waveform_seek_enabled;
-    core.update_gui_config(GuiConfigChange::ToggleWaveformSeek)
+    core.update_gui_config(ConfigChange::ToggleWaveformSeek)
         .unwrap();
-    core.update_gui_config(GuiConfigChange::AddLibraryRoot(root.clone()))
+    core.update_gui_config(ConfigChange::AddLibraryRoot(root.clone()))
         .unwrap();
-    core.update_gui_config(GuiConfigChange::AddLibraryRoot(root))
+    core.update_gui_config(ConfigChange::AddLibraryRoot(root))
         .unwrap();
     assert_eq!(core.state.configuration.config.library_roots.len(), 2);
     assert_eq!(core.state.configuration.config.waveform_seek_enabled, !seek);
@@ -903,14 +905,14 @@ fn settings_apply_merges_every_unedited_field_at_execution() {
     })
     .unwrap();
     let added = directory.path().join("added");
-    core.update_gui_config(GuiConfigChange::AddLibraryRoot(added.clone()))
+    core.update_gui_config(ConfigChange::AddLibraryRoot(added.clone()))
         .unwrap();
-    core.update_gui_config(GuiConfigChange::ToggleVisualization)
+    core.update_gui_config(ConfigChange::ToggleVisualization)
         .unwrap();
-    core.update_gui_config(GuiConfigChange::ToggleWaveformSeek)
+    core.update_gui_config(ConfigChange::ToggleWaveformSeek)
         .unwrap();
     for column in LibraryColumn::ALL {
-        core.update_gui_config(GuiConfigChange::ToggleLibraryColumn(column))
+        core.update_gui_config(ConfigChange::ToggleLibraryColumn(column))
             .unwrap();
     }
     let mut expected = core.state.configuration.config.as_ref().clone();
@@ -924,10 +926,10 @@ fn settings_apply_merges_every_unedited_field_at_execution() {
     expected.volume = 0.3;
     expected.output_device = Some("pending-output".into());
     assert!(!core.state.configuration.config_path.exists());
-    core.update_gui_config(GuiConfigChange::Settings(Box::new(patch)))
+    core.update_gui_config(ConfigChange::Settings(Box::new(patch)))
         .unwrap();
     core.publish();
-    let visible = GuiSnapshot::from_core(&core.shared.read());
+    let visible = crate::projection::display_state(&core.shared.read());
     assert_eq!(*visible.system.config, expected);
     assert_eq!(visible.playback.volume, 0.3);
     assert!(visible.playback.shuffle);
@@ -962,16 +964,16 @@ fn settings_apply_explicit_fields_override_newer_conflicting_values() {
         name: Some("external-output".into()),
     })
     .unwrap();
-    core.update_gui_config(GuiConfigChange::AddLibraryRoot(
+    core.update_gui_config(ConfigChange::AddLibraryRoot(
         directory.path().join("external"),
     ))
     .unwrap();
-    core.update_gui_config(GuiConfigChange::Settings(Box::new(patch)))
+    core.update_gui_config(ConfigChange::Settings(Box::new(patch)))
         .unwrap();
     core.publish();
-    let visible = GuiSnapshot::from_core(&core.shared.read());
+    let visible = crate::projection::display_state(&core.shared.read());
     assert_eq!(visible.playback.volume, 0.4);
-    assert_eq!(visible.system.selected_device, None);
+    assert_eq!(core.shared.read().system.selected_device, None);
     assert!(visible.system.config.library_roots.is_empty());
     assert!(!visible.system.config.visualization_enabled);
     assert_eq!(
@@ -991,7 +993,7 @@ fn settings_failed_save_retry_merges_against_latest_runtime() {
     let patch = ConfigPatch::between(&baseline, &draft);
     std::fs::create_dir(&core.state.configuration.config_path).unwrap();
     assert!(
-        core.update_gui_config(GuiConfigChange::Settings(Box::new(patch.clone())))
+        core.update_gui_config(ConfigChange::Settings(Box::new(patch.clone())))
             .is_err()
     );
     assert_eq!(*core.state.configuration.config, *baseline);
@@ -1001,10 +1003,10 @@ fn settings_failed_save_retry_merges_against_latest_runtime() {
     ));
     std::fs::remove_dir(&core.state.configuration.config_path).unwrap();
     core.command(Command::Volume { value: 0.2 }).unwrap();
-    core.update_gui_config(GuiConfigChange::Settings(Box::new(patch)))
+    core.update_gui_config(ConfigChange::Settings(Box::new(patch)))
         .unwrap();
     core.publish();
-    let visible = GuiSnapshot::from_core(&core.shared.read());
+    let visible = crate::projection::display_state(&core.shared.read());
     assert_eq!(visible.playback.volume, 0.2);
     assert_eq!(visible.system.config.scan_max_depth, 7);
     assert_eq!(
@@ -1023,13 +1025,13 @@ fn settings_saved_audio_failure_keeps_committed_desired_configuration() {
     let mut draft = baseline.as_ref().clone();
     draft.scan_max_depth = 7;
     let error = core
-        .update_gui_config(GuiConfigChange::Settings(Box::new(ConfigPatch::between(
+        .update_gui_config(ConfigChange::Settings(Box::new(ConfigPatch::between(
             &baseline, &draft,
         ))))
         .unwrap_err();
     assert!(format!("{error:#}").contains("Configuration saved, but audio application failed"));
     core.publish();
-    let visible = GuiSnapshot::from_core(&core.shared.read());
+    let visible = crate::projection::display_state(&core.shared.read());
     assert_eq!(visible.system.config.scan_max_depth, 7);
     assert_eq!(
         Config::load(&core.state.configuration.config_path).unwrap(),
@@ -1269,7 +1271,7 @@ fn visualization_enabled_toggle_commits_without_accessing_unwritable_config_path
     let _audio = recording_audio(&mut core);
     let previous = core.state.configuration.config.visualization_enabled;
     std::fs::create_dir(&core.state.configuration.config_path).unwrap();
-    core.update_gui_config(GuiConfigChange::ToggleVisualization)
+    core.update_gui_config(ConfigChange::ToggleVisualization)
         .unwrap();
     assert_eq!(
         core.state.configuration.config.visualization_enabled,
@@ -1297,7 +1299,7 @@ fn visualization_enabled_applied_but_disconnected_audio_retains_unsaved_settings
 
     for enabled in [false, true] {
         expected.visualization_enabled = enabled;
-        core.update_gui_config(GuiConfigChange::ToggleVisualization)
+        core.update_gui_config(ConfigChange::ToggleVisualization)
             .unwrap_err();
 
         assert_eq!(*core.state.configuration.config, expected);

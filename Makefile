@@ -25,6 +25,8 @@ test-rust:
 	cargo test --locked --workspace
 	cargo test --locked --workspace --all-features
 	cargo test --locked --workspace --no-default-features
+	cargo test --locked -p rivu --no-default-features --features gui
+	cargo test --locked -p rivu --no-default-features --features tui
 	cargo test --locked -p rivu-dsp --no-default-features
 	cargo test --locked -p rivu-format --no-default-features
 	cargo test --locked -p rivu-utils --no-default-features
@@ -45,8 +47,8 @@ clean:
 install: build
 	install -Dm755 "$(CARGO_TARGET_DIR)/release/rivu" "$(DESTDIR)$(PREFIX)/bin/rivu"
 	install -Dm755 "$(CARGO_TARGET_DIR)/release/rivu-migrate" "$(DESTDIR)$(PREFIX)/bin/rivu-migrate"
-	install -Dm644 data/icons/rivu.svg "$(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps/rivu.svg"
-	install -Dm644 data/icons/rivu.png "$(DESTDIR)$(PREFIX)/share/icons/hicolor/256x256/apps/rivu.png"
+	install -Dm644 crates/rivu-presentation/data/icons/rivu.svg "$(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps/rivu.svg"
+	install -Dm644 crates/rivu-presentation/data/icons/rivu.png "$(DESTDIR)$(PREFIX)/share/icons/hicolor/256x256/apps/rivu.png"
 	install -Dm644 data/applications/rivu.desktop "$(DESTDIR)$(PREFIX)/share/applications/rivu.desktop"
 
 package:
@@ -57,7 +59,7 @@ package:
 	trap 'exit 1' HUP INT TERM; \
 	$(MAKE) install PREFIX= DESTDIR="$$stage/$(PACKAGE_NAME)"; \
 	{ \
-		printf 'Build: %s\nFeatures: ffmpeg, onnx (default); no embedded font\n' "$(RIVU_GIT_VERSION)"; \
+		printf 'Build: %s\nFeatures: gui, tui, ffmpeg, onnx (default); no embedded font\n' "$(RIVU_GIT_VERSION)"; \
 		printf 'RUSTFLAGS: %s\n' "$${RUSTFLAGS:-<unset>}"; \
 		rustc --version; \
 		getconf GNU_LIBC_VERSION; \

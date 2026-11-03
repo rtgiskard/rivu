@@ -1,8 +1,12 @@
 //! Shared IPC contracts and transport, independent of the application owner.
 
+pub mod analysis;
+pub mod display;
 pub mod model;
+pub mod query_tracking;
 pub mod response;
 pub mod transport;
+pub mod waveform;
 pub mod wire;
 
 #[cfg(test)]

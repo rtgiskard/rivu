@@ -12,7 +12,7 @@ fn normalized(value: f32) -> f32 {
     }
 }
 
-fn track(theme: &'static crate::theme::Palette, value: f32) -> Div {
+fn track(theme: &'static rivu_format::palette::Palette, value: f32) -> Div {
     div()
         .w_full()
         .h(rems(4. / 16.))

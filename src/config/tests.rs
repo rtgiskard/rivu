@@ -1,5 +1,9 @@
 use super::*;
-use std::{fs, path::Path};
+use rivu_protocol::model::ConfigPatch;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 #[test]
 fn common_palette_patch_preserves_unrelated_theme_and_supports_reset() {

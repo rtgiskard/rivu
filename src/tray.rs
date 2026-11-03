@@ -1,8 +1,7 @@
-use crate::{
-    DEFAULT_IMAGE, app::AppHandle, core::CoreHandle, i18n::Localizer, projection::TraySnapshot,
-};
+use crate::{app::AppHandle, core::CoreHandle, projection::TraySnapshot};
 use futures::{FutureExt, StreamExt, channel::oneshot, future::Shared};
 use parking_lot::RwLock;
+use rivu_presentation::{DEFAULT_IMAGE, i18n::Localizer};
 use rivu_protocol::model::{Command, PlaybackStatus, RepeatMode};
 use serde::Serialize;
 use std::{

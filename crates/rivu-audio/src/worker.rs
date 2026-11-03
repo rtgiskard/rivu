@@ -147,6 +147,7 @@ pub(super) struct Worker {
     shutdown: AudioShutdownReceiver,
     analyzer: AnalysisWorker,
     waveform: Arc<RwLock<WaveformFrame>>,
+    waveform_control: Arc<super::WaveformControl>,
     playback: Option<Playback>,
     opening: Option<Opening>,
     device: Option<String>,
@@ -167,7 +168,7 @@ impl Worker {
         events: async_channel::Sender<AudioEvent>,
         shutdown: AudioShutdownReceiver,
         analyzer: AnalysisWorker,
-        waveform: Arc<RwLock<WaveformFrame>>,
+        (waveform, waveform_control): (Arc<RwLock<WaveformFrame>>, Arc<super::WaveformControl>),
         media_read_buffer_len: usize,
     ) -> Self {
         Self {
@@ -181,6 +182,7 @@ impl Worker {
             shutdown,
             analyzer,
             waveform,
+            waveform_control,
             playback: None,
             opening: None,
             device: None,
@@ -241,7 +243,8 @@ impl Worker {
                 if let Some(playback) = self.playback.as_mut() {
                     playback.set_visualization_enabled(enabled);
                 } else {
-                    self.waveform.write().set_visualization_enabled(enabled);
+                    self.waveform_control
+                        .set_visualization_enabled(&mut self.waveform.write(), enabled);
                 }
                 self.refresh_analysis();
             }
@@ -598,6 +601,7 @@ impl Worker {
                     },
                     &self.analyzer,
                     self.waveform.clone(),
+                    Arc::clone(&self.waveform_control),
                 );
                 if matches!(
                     self.shutdown.signal.try_recv(),
@@ -820,13 +824,13 @@ mod tests {
                 })
                 .unwrap();
         }
-        assert!(!control.frame_is_current(&crate::analysis::AnalysisFrame::default()));
+        assert!(!control.frame_is_current(&rivu_protocol::analysis::AnalysisFrame::default()));
         assert!(worker.control_round());
         assert_eq!(control.epoch.load(Ordering::Acquire), epoch + 4);
-        let current = crate::analysis::AnalysisFrame {
+        let current = rivu_protocol::analysis::AnalysisFrame {
             audio_epoch: control.epoch.load(Ordering::Acquire),
             audio_intent: count,
-            ..crate::analysis::AnalysisFrame::default()
+            ..rivu_protocol::analysis::AnalysisFrame::default()
         };
         assert!(control.frame_is_current(&current));
     }
@@ -842,7 +846,7 @@ mod tests {
         let (events, receive) = async_channel::bounded(16);
         let (stop, shutdown) = shutdown_channel();
         let analyzer = AnalysisWorker::new(Arc::new(RwLock::new(
-            crate::analysis::AnalysisFrame::default(),
+            rivu_protocol::analysis::AnalysisFrame::default(),
         )))
         .unwrap();
         let worker = Worker::new(
@@ -851,7 +855,10 @@ mod tests {
             events,
             shutdown,
             analyzer,
-            Arc::new(RwLock::new(WaveformFrame::default())),
+            (
+                Arc::new(RwLock::new(WaveformFrame::default())),
+                Arc::new(crate::WaveformControl::default()),
+            ),
             65536,
         );
         (worker, send, receive, stop)
@@ -874,7 +881,7 @@ mod tests {
         for hint in opening_hints() {
             let original = crate::source::opening_prefix_file(0, true);
             let replacement = crate::source::opening_prefix_file(0, true);
-            let expected_identity = crate::SourceIdentity::from_file(original.as_file()).unwrap();
+            let expected_identity = crate::source_identity(original.as_file()).unwrap();
             let runner = GraphRunner::compile(
                 &ProcessingGraph::default(),
                 GraphPort { node: 2, port: 0 },
@@ -920,7 +927,7 @@ mod tests {
         let opened = Source::open(original.path(), 65536, DecoderHint::Native, false).unwrap();
         let admitted = opened.identity();
         let duration = opened.info().duration;
-        let mut waveform = crate::WaveformFrame::default();
+        let mut waveform = crate::waveform::WaveformBuffer::default();
         waveform.select_source(original.path(), None, DecoderHint::Native, &opened);
         waveform.prepare_bins(8000);
         waveform.push(0.0, &[0.75; 8], 8000, 1);
@@ -1553,7 +1560,7 @@ mod tests {
         let (events, receive) = async_channel::bounded(2);
         let (_stop, shutdown) = shutdown_channel();
         let analyzer = AnalysisWorker::new(Arc::new(RwLock::new(
-            crate::analysis::AnalysisFrame::default(),
+            rivu_protocol::analysis::AnalysisFrame::default(),
         )))
         .unwrap();
         let mut worker = Worker::new(
@@ -1562,7 +1569,10 @@ mod tests {
             events,
             shutdown,
             analyzer,
-            Arc::new(RwLock::new(WaveformFrame::default())),
+            (
+                Arc::new(RwLock::new(WaveformFrame::default())),
+                Arc::new(crate::WaveformControl::default()),
+            ),
             1024,
         );
         for (index, target) in [
@@ -1604,7 +1614,7 @@ mod tests {
                 .unwrap();
             let (shutdown, cancelled) = shutdown_channel();
             let analyzer = AnalysisWorker::new(Arc::new(RwLock::new(
-                crate::analysis::AnalysisFrame::default(),
+                rivu_protocol::analysis::AnalysisFrame::default(),
             )))
             .unwrap();
             let worker = Worker::new(
@@ -1613,7 +1623,10 @@ mod tests {
                 events,
                 cancelled,
                 analyzer,
-                Arc::new(RwLock::new(WaveformFrame::default())),
+                (
+                    Arc::new(RwLock::new(WaveformFrame::default())),
+                    Arc::new(crate::WaveformControl::default()),
+                ),
                 1024,
             );
             let worker = std::thread::spawn(move || {
@@ -1758,10 +1771,10 @@ mod tests {
         let (events, _receive) = async_channel::bounded(1);
         let (_stop, shutdown) = shutdown_channel();
         let analyzer = AnalysisWorker::new(Arc::new(RwLock::new(
-            crate::analysis::AnalysisFrame::default(),
+            rivu_protocol::analysis::AnalysisFrame::default(),
         )))
         .unwrap();
-        let mut frame = WaveformFrame::default();
+        let mut frame = crate::waveform::WaveformBuffer::default();
         frame.select(
             std::path::Path::new("stopped.wav"),
             None,
@@ -1772,14 +1785,17 @@ mod tests {
         frame.push(0.0, &[0.5; 8000], 8000, 1);
         frame.finish_scan(1.0);
         let completed = frame.clone();
-        let waveform = Arc::new(RwLock::new(frame));
+        let waveform = Arc::new(RwLock::new(frame.data));
         let mut worker = Worker::new(
             commands,
             commands_ready,
             events,
             shutdown,
             analyzer,
-            waveform.clone(),
+            (
+                waveform.clone(),
+                Arc::new(crate::WaveformControl::default()),
+            ),
             65536,
         );
         worker.command(AudioCommand::Volume(0.3));
@@ -1794,7 +1810,7 @@ mod tests {
                 revision: 0,
             },
             AudioCommand::Pause(true),
-            AudioCommand::AnalysisSettings(crate::analysis::AnalysisSettings::from(
+            AudioCommand::AnalysisSettings(rivu_protocol::analysis::AnalysisSettings::from(
                 &rivu_format::config::Config::default(),
             )),
         ] {
@@ -1840,7 +1856,7 @@ mod tests {
             AudioCommand::VisualizationEnabled(false),
             AudioCommand::MediaReadBuffer(2),
             AudioCommand::FfmpegEnabled(false),
-            AudioCommand::AnalysisSettings(crate::analysis::AnalysisSettings::from(
+            AudioCommand::AnalysisSettings(rivu_protocol::analysis::AnalysisSettings::from(
                 &rivu_format::config::Config::default(),
             )),
             AudioCommand::StopAndSnapshot(reply),
@@ -2039,8 +2055,8 @@ mod tests {
     #[test]
     fn engine_shutdown_and_drop_cancel_full_command_and_event_queues() {
         use crate::AudioEngine;
-        use crate::analysis::AnalysisFrame;
         use parking_lot::Mutex;
+        use rivu_protocol::analysis::AnalysisFrame;
 
         for explicit in [false, true] {
             for borrowed in [false, true] {
@@ -2065,9 +2081,13 @@ mod tests {
                     events,
                     cancelled,
                     analyzer,
-                    waveform.clone(),
+                    (
+                        waveform.clone(),
+                        Arc::new(crate::WaveformControl::default()),
+                    ),
                     1024,
                 );
+                let waveform_control = Arc::clone(&worker.waveform_control);
                 let worker = std::thread::spawn(move || {
                     worker.event(AudioEvent::Ended {
                         generation: 2,
@@ -2082,6 +2102,7 @@ mod tests {
                     analysis,
                     analysis_control,
                     waveform,
+                    waveform_control,
                     worker: Some(worker),
                     shutdown: Mutex::new(Some(shutdown)),
                 };

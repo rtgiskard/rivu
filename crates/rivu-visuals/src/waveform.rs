@@ -32,9 +32,9 @@ use gpui::{
 use parking_lot::RwLock;
 
 use crate::VisualParameters;
-use rivu_audio::{PlaybackRange, WaveformFrame};
 use rivu_format::decoder_hint::DecoderHint;
 use rivu_protocol::model::Track;
+use rivu_protocol::waveform::{PlaybackRange, WaveformFrame};
 
 #[cfg(feature = "test-support")]
 mod test_support;
@@ -78,7 +78,7 @@ struct ManualRequest {
     suspension_generation: u64,
     cancelled: Arc<AtomicBool>,
     progressive_revision: u64,
-    identity: Option<rivu_audio::WaveformIdentity>,
+    identity: Option<rivu_protocol::waveform::WaveformIdentity>,
 }
 
 struct FullPreview {
@@ -88,7 +88,7 @@ struct FullPreview {
     frame: WaveformFrame,
     progressive_revision: u64,
     baseline_revision: u64,
-    identity: Option<rivu_audio::WaveformIdentity>,
+    identity: Option<rivu_protocol::waveform::WaveformIdentity>,
 }
 
 impl FullPreview {
@@ -103,22 +103,12 @@ impl FullPreview {
 
 fn scan_matches_progressive(scan: &WaveformFrame, progressive: &WaveformFrame) -> bool {
     match (scan.scan_source_identity, progressive.identity) {
-        (Some(scanned), Some(rivu_audio::WaveformIdentity::Progressive { content, .. })) => {
-            scanned == content
-        }
+        (
+            Some(scanned),
+            Some(rivu_protocol::waveform::WaveformIdentity::Progressive { content, .. }),
+        ) => scanned == content,
         _ => true,
     }
-}
-
-type SnapshotReply =
-    futures::channel::oneshot::Receiver<Result<Option<rivu_audio::WaveformScanSnapshot>, String>>;
-
-struct PreparedScan {
-    generation: u64,
-    snapshot: Option<anyhow::Result<SnapshotReply>>,
-    fallback: rivu_audio::WaveformScanSnapshot,
-    buffer_mib: u32,
-    ffmpeg_enabled: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -138,8 +128,12 @@ fn waveform_gcd(mut left: u128, mut right: u128) -> u128 {
 impl WaveformBinGeometry {
     fn from_frame(frame: &WaveformFrame) -> Option<Self> {
         let sample_rate = match frame.identity {
-            Some(rivu_audio::WaveformIdentity::Progressive { sample_rate, .. })
-            | Some(rivu_audio::WaveformIdentity::FullScan { sample_rate, .. }) => sample_rate,
+            Some(rivu_protocol::waveform::WaveformIdentity::Progressive {
+                sample_rate, ..
+            })
+            | Some(rivu_protocol::waveform::WaveformIdentity::FullScan { sample_rate, .. }) => {
+                sample_rate
+            }
             None => 0,
         };
         if frame.bin_frames == 0 || frame.bin_count == 0 || sample_rate == 0 {
@@ -853,7 +847,6 @@ pub struct Waveform {
     plot: Rc<RefCell<WaveformPlot>>,
     generation: u64,
     manual: Option<ManualRequest>,
-    prepared_scan: Option<PreparedScan>,
     full: Option<FullPreview>,
     manual_error: Option<SharedString>,
     interaction: Rc<RefCell<WaveformInteraction>>,
@@ -872,7 +865,6 @@ impl Waveform {
             plot: Rc::new(RefCell::new(WaveformPlot::default())),
             generation: 0,
             manual: None,
-            prepared_scan: None,
             full: None,
             manual_error: None,
             interaction: Rc::new(RefCell::new(WaveformInteraction::default())),
@@ -1073,106 +1065,47 @@ impl Waveform {
         false
     }
 
-    /// Capture the click before querying the saved hint; keep the old display.
+    /// Capture display identity before the host starts an explicit full scan.
+    /// The host registers this cancellation flag with the audio producer.
     pub fn prepare_full(
         &mut self,
         track: &Track,
-        config: &crate::WaveformScanParameters,
-        snapshot: Option<anyhow::Result<SnapshotReply>>,
+        cx: &mut Context<Self>,
+    ) -> (u64, Arc<AtomicBool>) {
+        self.sync(Some(track), cx);
+        let request = self.start_full(track.decoder_hint);
+        cx.notify();
+        request
+    }
+
+    /// Accept the current saved hint without replacing the admitted scan or its cancellation flag.
+    pub fn set_full_hint(&mut self, generation: u64, decoder_hint: DecoderHint) -> bool {
+        if !self.enabled || generation != self.generation {
+            return false;
+        }
+        let Some(request) = self.manual.as_mut() else {
+            return false;
+        };
+        Rc::make_mut(&mut request.source).decoder_hint = decoder_hint;
+        true
+    }
+
+    pub fn complete_full(
+        &mut self,
+        generation: u64,
+        result: anyhow::Result<WaveformFrame>,
         cx: &mut Context<Self>,
     ) {
-        self.sync(Some(track), cx);
-        let (generation, _) = self.start_full(track.decoder_hint);
-        self.prepared_scan = Some(PreparedScan {
-            generation,
-            snapshot,
-            fallback: rivu_audio::WaveformScanSnapshot::original(
-                track.path.clone(),
-                track_range(track),
-                track.decoder_hint,
-                config.signal,
-                Arc::clone(&config.equalizer),
-            ),
-            buffer_mib: config.buffer_mib,
-            ffmpeg_enabled: config.ffmpeg_enabled,
-        });
-        cx.notify();
-    }
-
-    pub fn fail_full_query(&mut self, error: String, cx: &mut Context<Self>) {
-        if let Some(request) = self.manual.take() {
-            request.cancelled.store(true, Ordering::Relaxed);
+        if self.finish_full(generation, result) {
+            cx.notify();
         }
-        self.prepared_scan = None;
-        self.manual_error = Some(error.into());
-        cx.notify();
-    }
-
-    /// Explicit context-menu action; ordinary sync never opens a decoder.
-    pub fn load_full(&mut self, track: &Track, cx: &mut Context<Self>) {
-        let Some(mut setup) = self.prepared_scan.take() else {
-            return;
-        };
-        let Some(request) = self.manual.as_mut() else {
-            return;
-        };
-        if !self.enabled || setup.generation != self.generation {
-            return;
-        }
-        Rc::make_mut(&mut request.source).decoder_hint = track.decoder_hint;
-        setup.fallback.decoder_hint = track.decoder_hint;
-        let display_source = request.source.as_ref().clone();
-        let cancelled = Arc::clone(&request.cancelled);
-        let generation = setup.generation;
-        cx.spawn(async move |this, cx| {
-            let result = async {
-                let snapshot = match setup.snapshot {
-                    Some(reply) => reply?
-                        .await
-                        .map_err(|error| anyhow::anyhow!(error))?
-                        .map_err(|error| anyhow::anyhow!(error))?
-                        .unwrap_or(setup.fallback),
-                    None => setup.fallback,
-                };
-                cx.background_executor()
-                    .spawn(async move {
-                        let mut snapshot = snapshot;
-                        // Saved original-file hints must not be applied to an audition cache.
-                        if snapshot.path == display_source.path
-                            && snapshot.range == display_source.range
-                        {
-                            snapshot.decoder_hint = display_source.decoder_hint;
-                        }
-                        let mut frame = rivu_audio::waveform(
-                            &snapshot,
-                            setup.buffer_mib,
-                            setup.ffmpeg_enabled,
-                            &cancelled,
-                        )?;
-                        // Scan validates the actual opened source. Display metadata and
-                        // seek interaction intentionally retain the original timeline.
-                        frame.path = Some(display_source.path.clone());
-                        frame.range = display_source.range;
-                        frame.decoder_hint = display_source.decoder_hint;
-                        Ok(frame)
-                    })
-                    .await
-            }
-            .await;
-            let _ = this.update(cx, |this, cx| {
-                if this.finish_full(generation, result) {
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
     }
 
     fn start_full(&mut self, decoder_hint: DecoderHint) -> (u64, Arc<AtomicBool>) {
         self.cancel_pending();
         let cancelled = Arc::new(AtomicBool::new(false));
-        let mut shared = self.shared.write();
-        shared.cancel_scan_on_suspend(&cancelled);
+        let shared = self.shared.read();
+        cancelled.store(shared.is_suspended(), Ordering::Relaxed);
         self.manual = Some(ManualRequest {
             source: Rc::new(Source {
                 decoder_hint,
@@ -1205,7 +1138,6 @@ impl Waveform {
 
     fn cancel_pending(&mut self) {
         self.generation = self.generation.wrapping_add(1);
-        self.prepared_scan = None;
         if let Some(request) = self.manual.take() {
             request.cancelled.store(true, Ordering::Relaxed);
         }
@@ -1393,7 +1325,7 @@ impl Waveform {
     /// playback position. The caller observes this entity for data changes.
     pub fn view(
         &mut self,
-        theme: &'static rivu_ui::theme::Palette,
+        theme: &'static rivu_format::palette::Palette,
         i18n: &Arc<VisualLabels>,
         state: WaveformViewState,
         config: &VisualParameters,
@@ -1745,8 +1677,8 @@ mod tests {
         drop(selected);
         {
             let mut frame = waveform.shared.write();
-            frame.set_visualization_enabled(false);
-            frame.set_visualization_enabled(true);
+            publish_enabled(&mut frame, false);
+            publish_enabled(&mut frame, true);
         }
         assert!(waveform.paint_frame(&source, Some(generation)).is_none());
         let selected = waveform.paint_frame(&source, None).unwrap();
@@ -2119,6 +2051,27 @@ mod tests {
         assert!(cursor_wobble(4.0).is_finite());
     }
 
+    fn publish_enabled(frame: &mut WaveformFrame, enabled: bool) {
+        if enabled {
+            frame.set_producer_metadata(
+                frame.traversal_epoch(),
+                false,
+                frame.suspension_generation(),
+            );
+        } else {
+            let previous = std::mem::take(frame);
+            let generation = previous.suspension_generation().wrapping_add(1);
+            frame.revision = previous.revision.wrapping_add(1);
+            frame.path = previous.path;
+            frame.range = previous.range;
+            frame.decoder_hint = previous.decoder_hint;
+            frame.identity = previous.identity;
+            frame.duration = previous.duration;
+            frame.span_seconds = previous.span_seconds;
+            frame.set_producer_metadata(1, true, generation);
+        }
+    }
+
     fn frame(peaks: Vec<Option<f32>>) -> WaveformFrame {
         let counts: Vec<_> = peaks
             .iter()
@@ -2131,7 +2084,7 @@ mod tests {
         frame.span_seconds = 10.0;
         frame.bin_frames = 80_000;
         frame.bin_count = peaks.len() as u64;
-        frame.identity = Some(rivu_audio::WaveformIdentity::FullScan {
+        frame.identity = Some(rivu_protocol::waveform::WaveformIdentity::FullScan {
             duration: Some(10.0),
             sample_rate: 8_000,
         });
@@ -2162,7 +2115,7 @@ mod tests {
             / bin_count as f64
             / f64::from(sample_rate);
         result.duration = Some(result.span_seconds);
-        result.identity = Some(rivu_audio::WaveformIdentity::FullScan {
+        result.identity = Some(rivu_protocol::waveform::WaveformIdentity::FullScan {
             duration: result.duration,
             sample_rate,
         });
@@ -2422,11 +2375,10 @@ mod tests {
             [(false, false), (false, true), (true, false), (true, true)]
         {
             let mut waveform = preview(frame(vec![Some(0.25), None]));
-            let (request, cancelled) = waveform.start_full(DecoderHint::Auto);
-            waveform.shared.write().set_visualization_enabled(false);
-            assert!(cancelled.load(Ordering::Relaxed));
+            let (request, _) = waveform.start_full(DecoderHint::Auto);
+            publish_enabled(&mut waveform.shared.write(), false);
             if resume_before_completion {
-                waveform.shared.write().set_visualization_enabled(true);
+                publish_enabled(&mut waveform.shared.write(), true);
             }
             let revision = waveform.shared.read().revision;
             let result = if decoder_cancelled {
@@ -2472,8 +2424,8 @@ mod tests {
         };
         {
             let mut shared = waveform.shared.write();
-            shared.set_visualization_enabled(false);
-            shared.set_visualization_enabled(true);
+            publish_enabled(&mut shared, false);
+            publish_enabled(&mut shared, true);
         }
         assert!(
             waveform.enabled,
@@ -2502,10 +2454,10 @@ mod tests {
     fn scan_registered_while_suspended_stays_cancelled_after_resume() {
         for decoder_cancelled in [false, true] {
             let mut waveform = preview(frame(vec![Some(0.25), None]));
-            waveform.shared.write().set_visualization_enabled(false);
+            publish_enabled(&mut waveform.shared.write(), false);
             let (request, cancelled) = waveform.start_full(DecoderHint::Auto);
             assert!(cancelled.load(Ordering::Relaxed));
-            waveform.shared.write().set_visualization_enabled(true);
+            publish_enabled(&mut waveform.shared.write(), true);
             let revision = waveform.shared.read().revision;
             let result = if decoder_cancelled {
                 Err(anyhow::anyhow!("Waveform loading cancelled"))
@@ -2907,10 +2859,16 @@ mod tests {
 
     #[test]
     fn scan_provenance_retires_a_preplay_baseline_when_actual_source_changes() {
-        let original = tempfile::tempfile().unwrap();
-        let replacement = tempfile::tempfile().unwrap();
-        let original = rivu_audio::SourceIdentity::from_file(&original).unwrap();
-        let replacement = rivu_audio::SourceIdentity::from_file(&replacement).unwrap();
+        let original = rivu_protocol::waveform::SourceIdentity::Pcm {
+            storage: 1,
+            start: 0,
+            frames: 80_000,
+        };
+        let replacement = rivu_protocol::waveform::SourceIdentity::Pcm {
+            storage: 2,
+            start: 0,
+            frames: 80_000,
+        };
         let mut waveform = preview(frame(vec![None; 2]));
         let (request, _) = waveform.start_full(DecoderHint::Auto);
         let mut baseline = frame(vec![Some(0.75); 2]);
@@ -2919,7 +2877,7 @@ mod tests {
         let source = Rc::clone(waveform.source.as_ref().unwrap());
         {
             let mut shared = waveform.shared.write();
-            shared.identity = Some(rivu_audio::WaveformIdentity::Progressive {
+            shared.identity = Some(rivu_protocol::waveform::WaveformIdentity::Progressive {
                 content: replacement,
                 ffmpeg: false,
                 duration: Some(10.0),
@@ -3161,6 +3119,20 @@ mod tests {
         assert_eq!(waveform.shared.read().peaks, vec![Some(0.25), None]);
         waveform.set_enabled(true);
         assert!(waveform.full.is_none());
+    }
+
+    #[test]
+    fn saved_hint_update_preserves_scan_identity_and_rejects_retired_requests() {
+        let mut waveform = preview(frame(vec![Some(0.25), None]));
+        let (generation, cancelled) = waveform.start_full(DecoderHint::Auto);
+        assert!(waveform.set_full_hint(generation, DecoderHint::Native));
+        let request = waveform.manual.as_ref().unwrap();
+        assert_eq!(request.source.decoder_hint, DecoderHint::Native);
+        assert!(Arc::ptr_eq(&cancelled, &request.cancelled));
+        assert!(!cancelled.load(Ordering::Relaxed));
+        waveform.cancel_pending();
+        assert!(!waveform.set_full_hint(generation, DecoderHint::Ffmpeg));
+        assert!(cancelled.load(Ordering::Relaxed));
     }
 
     #[test]

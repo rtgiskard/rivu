@@ -25,7 +25,7 @@ pub(super) enum ScanEvent {
 pub(super) const MAX_RETAINED_SCAN_RESULTS: usize = 32;
 pub(super) struct ScanTask {
     pub(super) status: ScanTaskStatus,
-    pub(super) owner: state::MediaTaskOwner,
+    pub(super) owner: MediaTaskOwner,
     pub(super) cancellation: library::ScanCancellation,
     pub(super) worker: async_executor::Task<()>,
     pub(super) pending_save: Option<ScanFinished>,
@@ -309,9 +309,9 @@ impl Core {
         let config = Arc::clone(&self.state.configuration.config);
         let other_tracks_check = matches!(input, ScanInput::OtherTracks { .. });
         let owner = if matches!(input, ScanInput::Import { .. }) {
-            crate::core::state::MediaTaskOwner::Playlist
+            rivu_protocol::model::MediaTaskOwner::Playlist
         } else {
-            crate::core::state::MediaTaskOwner::Library
+            rivu_protocol::model::MediaTaskOwner::Library
         };
         if !other_tracks_check && config.library_roots.is_empty() {
             bail!(
@@ -563,7 +563,7 @@ impl Core {
         if let Some(task) = &self.active_scan {
             self.state.scan_owner = Some(task.owner);
         } else if self.active_external_admission.is_some() {
-            self.state.scan_owner = Some(crate::core::state::MediaTaskOwner::Queue);
+            self.state.scan_owner = Some(rivu_protocol::model::MediaTaskOwner::Queue);
         }
         self.state.system.scanning =
             self.active_scan.is_some() || self.active_external_admission.is_some();
@@ -945,11 +945,11 @@ impl Core {
     pub(in crate::core) fn retain_scan_outcome(
         &mut self,
         mut status: ScanTaskStatus,
-        owner: crate::core::state::MediaTaskOwner,
+        owner: rivu_protocol::model::MediaTaskOwner,
     ) {
         self.state.scan_owner = Some(owner);
         if let Some(error) = &status.error {
-            if owner == crate::core::state::MediaTaskOwner::Library {
+            if owner == rivu_protocol::model::MediaTaskOwner::Library {
                 // The retained Library result is its error surface, not the
                 // unrelated window-global notification used by other features.
                 status.message.clone_from(error);
@@ -996,7 +996,7 @@ mod tests {
                     playlist_id: None,
                     error: None,
                 },
-                owner: crate::core::state::MediaTaskOwner::Library,
+                owner: rivu_protocol::model::MediaTaskOwner::Library,
                 cancellation: library::ScanCancellation::default(),
                 worker: core.executor.spawn(async move {
                     assert!(!supervisor_panicked, "supervisor failed after completion");
@@ -1137,7 +1137,7 @@ mod tests {
                     playlist_id: None,
                     error: None,
                 },
-                owner: crate::core::state::MediaTaskOwner::Library,
+                owner: rivu_protocol::model::MediaTaskOwner::Library,
                 cancellation: library::ScanCancellation::default(),
                 worker: core.executor.spawn(async {}),
                 pending_save: None,

@@ -1,0 +1,11 @@
+[package]
+name = "rivu-presentation"
+version = "0.2.0"
+edition = "2024"
+description = "Toolkit-neutral Rivu localization, keyboard bindings, and color presets"
+
+[dependencies]
+rivu-format = { path = "../rivu-format", default-features = false }
+rivu-protocol = { path = "../rivu-protocol" }
+fluent-bundle = "0.16"
+fluent-syntax = "0.12"

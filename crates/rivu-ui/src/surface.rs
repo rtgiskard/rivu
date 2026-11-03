@@ -1,5 +1,6 @@
-use crate::{layout::column, menu::menu_item, theme::Palette};
+use crate::{layout::column, menu::menu_item};
 use gpui::{prelude::*, *};
+use rivu_format::palette::Palette;
 
 /// Opaque elevated material for menus, dropdowns, and tooltips only.
 pub(crate) fn floating_surface(theme: &'static Palette) -> Div {

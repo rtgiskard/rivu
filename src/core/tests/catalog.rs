@@ -821,9 +821,9 @@ fn save_prepared_scan(core: &mut Core, scan: ScanFinished) -> ScanTaskStatus {
             error: None,
         },
         owner: if scan.import.is_some() {
-            crate::core::state::MediaTaskOwner::Playlist
+            rivu_protocol::model::MediaTaskOwner::Playlist
         } else {
-            crate::core::state::MediaTaskOwner::Library
+            rivu_protocol::model::MediaTaskOwner::Library
         },
         cancellation: library::ScanCancellation::default(),
         worker: core.executor.spawn(async {}),
@@ -1087,7 +1087,7 @@ fn rejected_library_scan_ack_preserves_unrelated_global_errors() {
 
 #[test]
 fn library_scan_failures_stay_in_their_result_while_import_errors_remain_global() {
-    use crate::{core::state::MediaTaskOwner, projection::GuiSnapshot};
+    use rivu_protocol::model::MediaTaskOwner;
     for import in [false, true] {
         let (_directory, mut core) = fixture();
         core.state.system.last_error = Some("Unrelated audio failure".into());
@@ -1110,16 +1110,19 @@ fn library_scan_failures_stay_in_their_result_while_import_errors_remain_global(
         assert_eq!(status.progress.phase, ScanPhase::Failed);
         assert_eq!(status.error.as_deref(), Some("Unreadable scan source"));
         core.publish();
-        let snapshot = GuiSnapshot::from_core(&core.shared.read());
+        let snapshot = crate::projection::display_state(&core.shared.read());
         assert_eq!(
-            snapshot.system.scan_visible(MediaTaskOwner::Library),
+            display_scan_visible(&snapshot.system, MediaTaskOwner::Library),
             !import
         );
         assert_eq!(
-            snapshot.system.scan_visible(MediaTaskOwner::Playlist),
+            display_scan_visible(&snapshot.system, MediaTaskOwner::Playlist),
             import
         );
-        assert!(!snapshot.system.scan_visible(MediaTaskOwner::Queue));
+        assert!(!display_scan_visible(
+            &snapshot.system,
+            MediaTaskOwner::Queue
+        ));
         assert_eq!(
             snapshot.system.last_error.as_deref(),
             Some(if import {

@@ -111,10 +111,13 @@ pub(super) fn run(
     let open_source = || -> Result<audio::SourceRenderer> {
         let renderer = audio::SourceRenderer::open(
             &track.path,
-            track.cue.as_ref().map(|cue| audio::PlaybackRange {
-                start_seconds: cue.start_seconds(),
-                end_seconds: cue.end_seconds(),
-            }),
+            track
+                .cue
+                .as_ref()
+                .map(|cue| rivu_protocol::waveform::PlaybackRange {
+                    start_seconds: cue.start_seconds(),
+                    end_seconds: cue.end_seconds(),
+                }),
             track.decoder_hint,
             config.media_read_buffer_mib,
             config.ffmpeg_enabled,

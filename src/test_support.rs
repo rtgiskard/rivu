@@ -1,8 +1,17 @@
-use crate::DEFAULT_IMAGE;
+pub mod catalog;
+pub mod frontend;
+pub mod ipc;
+
+#[cfg(test)]
 use rivu_metadata::artwork::test_support::{budget_unsynchronised_wav, pictures_wav};
+#[cfg(test)]
+use rivu_presentation::DEFAULT_IMAGE;
+#[cfg(test)]
 use rivu_protocol::model::Track;
+#[cfg(test)]
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
 pub(crate) fn artwork_track(path: PathBuf) -> Track {
     Track {
         id: 1,
@@ -30,6 +39,7 @@ pub(crate) fn artwork_track(path: PathBuf) -> Track {
     }
 }
 
+#[cfg(test)]
 fn assert_budget_audio(path: &Path) {
     use rivu_audio::{AudioBackend, PcmBudget, SourceRenderer};
     use rivu_format::decoder_hint::DecoderHint;

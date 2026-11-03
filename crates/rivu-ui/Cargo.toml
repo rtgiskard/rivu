@@ -9,6 +9,7 @@ default = []
 showcase = ["dep:gpui_platform"]
 
 [dependencies]
+rivu-format = { path = "../rivu-format", default-features = false }
 gpui.workspace = true
 unicode-segmentation = "1.13.3"
 

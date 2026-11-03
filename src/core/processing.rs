@@ -80,7 +80,7 @@ impl Core {
             let track_id = result.track.id;
             self.establish_graph_source_context(track_id)?;
             self.audition_pcm(id, Some(pcm))?;
-            self.state.processing_audition = Some(crate::core::state::ProcessingAudition {
+            self.state.processing_audition = Some(rivu_protocol::model::ProcessingAudition {
                 id,
                 output: Some(node),
                 mode: Some(GraphExecutionMode::Offline),
@@ -995,10 +995,13 @@ impl Core {
             })
         };
         let path = track.path.clone();
-        let range = track.cue.as_ref().map(|cue| audio::PlaybackRange {
-            start_seconds: cue.start_seconds(),
-            end_seconds: cue.end_seconds(),
-        });
+        let range = track
+            .cue
+            .as_ref()
+            .map(|cue| rivu_protocol::waveform::PlaybackRange {
+                start_seconds: cue.start_seconds(),
+                end_seconds: cue.end_seconds(),
+            });
         let decoder_hint = track.decoder_hint;
         let command = if let Some(runner) = graph {
             AudioCommand::GraphAudition {
@@ -1035,7 +1038,7 @@ impl Core {
         }
         let selected = (!original || is_graph).then_some((id, self.generation));
         self.processing.select_audition(selected);
-        self.state.processing_audition = selected.map(|(id, _)| state::ProcessingAudition {
+        self.state.processing_audition = selected.map(|(id, _)| ProcessingAudition {
             id,
             output: is_graph.then_some(status.settings.graph_target).flatten(),
             mode: is_graph.then_some(status.settings.graph_mode).flatten(),

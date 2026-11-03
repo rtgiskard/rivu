@@ -1,6 +1,7 @@
 //! Run with `cargo run -p rivu-ui --example showcase --features showcase` on Wayland.
 //! A component consumer: all values, filtering and loading transitions are host-owned.
 use gpui::{prelude::*, *};
+use rivu_format::palette::Palette;
 use rivu_ui::{
     ChoiceItem, ChoicePopup, ChoiceSelect, ChoiceState, FocusScope, FormField, IconButton,
     IconButtonDensity, IconButtonGroup, IconButtonStyle, ProgressBar, Slider, SliderInput,
@@ -10,8 +11,7 @@ use rivu_ui::{
     loading::{LoadingRowLabels, LoadingText, paged_loading_row},
     row, row_tooltip,
     search::{SearchEvent, SearchField, SearchLabels},
-    theme::{self, Palette},
-    two_line_text,
+    theme, two_line_text,
 };
 use std::{
     cell::Cell,
