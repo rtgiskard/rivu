@@ -407,8 +407,9 @@ Search does not start playback. Press `/` again to edit the query.
 Enter on the filtered list keeps its normal play or open action. The editor owns
 all printable characters, including Space, `m`, `q`, and `?`; F1 opens help and
 Ctrl-C exits even while editing.
-The search icon and query appear in indigo (`#6366F1`) at the left of the bottom
-line, without reducing the list viewport. While editing, search owns that line
+The search icon and query use the theme's search color at the left of the bottom
+line, without reducing the list viewport. Rivu Dark uses cyan (`#02D2DC`) for search
+and indigo (`#6366F1`) for playback track properties. While editing, search owns that line
 and messages are hidden. After submission, notices, errors, and scan progress
 appear right-aligned in the remaining space; narrow terminals prioritize the query.
 Hiding a message does not clear it.

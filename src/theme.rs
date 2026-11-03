@@ -45,6 +45,8 @@ static RIVU_DARK: Palette = Palette {
     error: 0xf7768e,
     error_bg: 0x3b2330,
     warning: 0xe0af68,
+    cyan: 0x02d2dc,
+    lavender: 0x6366f1,
 };
 
 // Night: bg_dark frames the normal bg and backs popup/control surfaces;
@@ -70,6 +72,8 @@ static TOKYO_NIGHT: Palette = Palette {
     error: 0xdb4b4b,
     error_bg: blend(0x1a1b26, 0xdb4b4b, 12),
     warning: 0xe0af68,
+    cyan: 0x7dcfff,
+    lavender: 0xbb9af7,
 };
 
 // Day retains upstream fg, fg_dark, blue and bg_visual hues. Small black/white
@@ -96,6 +100,8 @@ static TOKYO_NIGHT_DAY: Palette = Palette {
     error: 0xc64343,
     error_bg: 0xdababe,
     warning: 0x8c6c3e,
+    cyan: 0x007197,
+    lavender: 0x7847bd,
 };
 
 #[cfg(test)]

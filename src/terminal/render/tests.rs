@@ -314,8 +314,6 @@ fn bottom_search_preserves_viewport_and_shares_messages_without_overlap() {
             if editing {
                 assert_eq!(terminal.backend().cursor_position().y, 15);
             }
-            let buffer = terminal.backend().buffer();
-            assert_eq!(buffer[(1, 15)].fg, ratatui::style::Color::Rgb(99, 102, 241));
         }
         assert_eq!(state.system.last_error.as_deref(), Some("failure"));
     }

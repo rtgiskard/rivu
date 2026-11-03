@@ -24,6 +24,8 @@ pub struct Palette {
     pub error: u32,
     pub error_bg: u32,
     pub warning: u32,
+    pub cyan: u32,
+    pub lavender: u32,
 }
 
 struct ActivePalette(&'static Palette);
@@ -111,6 +113,8 @@ pub(crate) fn init_test(cx: &mut App) {
         error: 0xff8080,
         error_bg: 0x402020,
         warning: 0xffdd80,
+        cyan: 0x80dddd,
+        lavender: 0xaaaaff,
     };
     set_palette(&PALETTE, cx);
     set_typography(gpui::font("sans-serif"), "sans-serif", 14, cx);

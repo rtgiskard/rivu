@@ -365,6 +365,7 @@ Settings → Interface → Appearance & layout, then Apply to save and update op
 clients without restarting. Choosing a theme only edits the settings draft;
 Discard leaves the active theme unchanged. Editing the configuration file takes
 effect when starting the core; the running core does not watch the file.
+The TUI uses the selected theme for search highlights and playback-property colors.
 
 [cols="1,2"]
 |===

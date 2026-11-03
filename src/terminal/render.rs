@@ -46,6 +46,8 @@ struct TerminalColors {
     structure_border: ratatui::style::Color,
     disabled: ratatui::style::Color,
     accent: ratatui::style::Color,
+    search: ratatui::style::Color,
+    metadata: ratatui::style::Color,
     selected: ratatui::style::Color,
     warning: ratatui::style::Color,
     error: ratatui::style::Color,
@@ -65,6 +67,8 @@ impl TerminalColors {
             structure_border: rgb(palette.structure_border),
             disabled: rgb(palette.disabled),
             accent: rgb(palette.accent),
+            search: rgb(palette.cyan),
+            metadata: rgb(palette.lavender),
             selected: rgb(palette.selected),
             warning: rgb(palette.warning),
             error: rgb(palette.error),
@@ -904,7 +908,7 @@ fn draw_status(
         frame.render_widget(
             Paragraph::new(cell_text(&metadata, columns[1].width as usize, true))
                 .alignment(ratatui::layout::Alignment::Right)
-                .style(Style::default().fg(colors.accent)),
+                .style(Style::default().fg(colors.metadata)),
             columns[1],
         );
     }
@@ -1493,11 +1497,11 @@ fn draw_search_input(
     );
     let line = Line::from(vec![Span::raw(prefix), Span::raw(tail)]);
     frame.render_widget(
-        Paragraph::new(line).style(
-            Style::default()
-                .fg(ratatui::style::Color::Rgb(99, 102, 241))
-                .bg(if focused { colors.selected } else { colors.bg }),
-        ),
+        Paragraph::new(line).style(Style::default().fg(colors.search).bg(if focused {
+            colors.selected
+        } else {
+            colors.bg
+        })),
         area,
     );
     if focused && input_width > 0 && area.height > 0 {

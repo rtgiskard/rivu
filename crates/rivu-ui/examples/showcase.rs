@@ -38,6 +38,8 @@ static DARK: Palette = Palette {
     error: 0xffa8a8,
     error_bg: 0x512e36,
     warning: 0xf2d28b,
+    cyan: 0x80dddd,
+    lavender: 0xaaaaff,
 };
 static LIGHT: Palette = Palette {
     bg: 0xf6f7fa,
@@ -59,6 +61,8 @@ static LIGHT: Palette = Palette {
     error: 0xa72132,
     error_bg: 0xffe5e9,
     warning: 0x795800,
+    cyan: 0x007197,
+    lavender: 0x7847bd,
 };
 
 fn row_title(index: usize) -> String {
