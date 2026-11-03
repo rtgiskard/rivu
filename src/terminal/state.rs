@@ -723,7 +723,7 @@ impl UiState {
         let (target, source_label, container) = match &self.view {
             View::Recent(recent) => (
                 recent.selected().map(|entry| entry.track_id),
-                "shell-panel-history",
+                "terminal-recent",
                 None,
             ),
             View::Queue => (

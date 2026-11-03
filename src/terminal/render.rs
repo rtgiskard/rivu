@@ -553,7 +553,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, area: Rect, ui: &mut UiState, color
     let context = ui.keyboard_context();
     let context_label = match context {
         KeyboardContext::TuiQueue => "shell-panel-queue",
-        KeyboardContext::TuiRecent => "shell-panel-history",
+        KeyboardContext::TuiRecent => "terminal-recent",
         KeyboardContext::TuiPlaylists | KeyboardContext::TuiPlaylistTracks => {
             "shell-panel-playlists"
         }
@@ -728,7 +728,7 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut
         (TopTab::Queue, "shell-panel-queue"),
         (TopTab::Playlists, "shell-panel-playlists"),
         (TopTab::Library, "shell-panel-library"),
-        (TopTab::Recent, "shell-panel-history"),
+        (TopTab::Recent, "terminal-recent"),
     ] {
         let style = if tab == active_tab {
             Style::default()
@@ -1217,7 +1217,7 @@ fn draw_recent(
     draw_paged_list(
         frame,
         area,
-        i18n.text("shell-panel-history").into(),
+        i18n.text("terminal-recent").into(),
         &mut recent.entries,
         |index| {
             let entry = &source[*index];
@@ -1510,7 +1510,7 @@ fn draw_tree(
             i18n.text("terminal-other-tracks-help")
         )
     } else if tree.directory.as_os_str().is_empty() {
-        i18n.text("terminal-library-tree").into()
+        i18n.text("shell-panel-library").into()
     } else {
         tree.directory.to_string_lossy().into_owned()
     };

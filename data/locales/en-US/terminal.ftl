@@ -13,7 +13,7 @@ terminal-playlist-count = { $name }  ({ $count ->
     [one] { $count } track
    *[other] { $count } tracks
     })
-terminal-library-tree = Library tree
+terminal-recent = Recent
 keyboard-help = Toggle help
 keyboard-cancel = Go back
 keyboard-close = Close client
@@ -48,7 +48,7 @@ keyboard-list-edges = First / last
 keyboard-page-pair = Page up / down
 keyboard-extend-pair = Extend up / down
 keyboard-add-extend-pair = Add range up / down
-terminal-details-no-target = Select a track in Queue, Library, Recent tracks, or playlist tracks, then press i to view its details.
+terminal-details-no-target = Select a track in Queue, Library, Recent, or playlist tracks, then press i to view its details.
 terminal-details-loading = Loading track details…
 terminal-details-removed = This track is no longer in the library.
 terminal-details-tags = Tags

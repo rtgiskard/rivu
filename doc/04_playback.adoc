@@ -383,13 +383,13 @@ already selected decoder and never loads FFmpeg or changes decoder selection.
 == Terminal client
 
 The TUI controls the running core. Leaving it does not stop playback. `Tab` cycles
-Queue → Playlists → Library → Recent tracks; `Shift+Tab` reverses direction.
+Queue → Playlists → Library → Recent; `Shift+Tab` reverses direction.
 Without a search, each page retains its selection and scroll position.
 `Right` opens a playlist; Enter plays the selected
 playlist, track, or queue occurrence. In playlist details, `a` enqueues the selected
 track. Selecting a row alone does not change playback.
 
-Recent tracks is always available, including when empty. It shows the published
+Recent is always available, including when empty. It shows the published
 history of up to 256 unique tracks in recent-play order, with titles and local
 last-played timestamps where width permits. Enter plays the selected track,
 `i` opens its details, and `m` toggles its favorite. Navigation and shared playback
@@ -412,7 +412,7 @@ The search scope follows the page:
   immediate tracks and directories with matching descendants, using the same
   fields. In Other, search stays within that collection and preserves its
   favorite/missing filters and sort order.
-* Recent tracks filters only the displayed titles in its published history of
+* Recent filters only the displayed titles in its published history of
   at most 256 tracks.
 
 Searches use case-insensitive literal substrings, not wildcard patterns. There is

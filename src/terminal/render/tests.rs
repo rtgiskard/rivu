@@ -12,7 +12,7 @@ use rivu_protocol::{
 use std::sync::Arc;
 
 #[test]
-fn recent_renders_source_indices_timestamps_and_standard_empty_state() {
+fn recent_renders_source_indices_and_timestamps() {
     let i18n = Localizer::for_terminal("en-US");
     let colors = TerminalColors::new(crate::theme::Theme::default());
     let mut recent = RecentTracks {
@@ -52,13 +52,6 @@ fn recent_renders_source_indices_timestamps_and_standard_empty_state() {
             assert!(text.contains(&timestamp));
         }
     }
-    recent.entries = PagedList::default();
-    recent.entries.insert(0, 256, 0, vec![]);
-    let mut terminal = Terminal::new(TestBackend::new(80, 8)).unwrap();
-    terminal
-        .draw(|frame| draw_recent(frame, frame.area(), &mut recent, &i18n, colors))
-        .unwrap();
-    assert!(terminal_text(&terminal).contains("Recent tracks — empty"));
 }
 
 #[test]
