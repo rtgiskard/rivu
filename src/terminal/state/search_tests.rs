@@ -550,3 +550,90 @@ fn empty_queue_search_never_leaves_an_unloadable_result_page() {
     assert!(!ui.search.active);
     assert!(ui.queue.loaded);
 }
+
+#[test]
+fn playlist_metadata_filter_changes_relocate_the_selected_occurrence_before_refilling() {
+    for navigate_after_locate in [false, true] {
+        let state = query_snapshot();
+        let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
+        tui.ui.view = playlist_view(1);
+        submit(&mut tui.ui, &state, "song");
+        let first = tui.ui.query_request(&state).unwrap();
+        let mut initial = response(&first, 3);
+        let ViewResponse::PlaylistEntries(page) = &mut initial.view else {
+            panic!("playlist entries");
+        };
+        // B and C are separate occurrences of the same track.
+        page.rows[1].track_id = 7;
+        page.rows[2].track_id = 7;
+        assert!(tui.ui.apply_query(&state, &first, Ok(initial)));
+        key(&mut tui.ui, &state, KeyCode::Down);
+
+        // A stops matching after a metadata edit; playlist membership/order did
+        // not change, but B's filtered offset moved from 1 to 0.
+        let mut next = state.clone();
+        next.library.revision += 1;
+        tui.apply_snapshot(next.clone());
+        let stale = tui.ui.query_request(&next).unwrap();
+        assert_eq!(
+            stale.query(),
+            Query::PlaylistEntryLocations {
+                playlist_id: 1,
+                query: Some("song".into()),
+                entry_ids: vec![1],
+            }
+        );
+        // A second metadata publication must retain B's occurrence identity
+        // even while the old pages have already been invalidated.
+        next.library.revision += 1;
+        tui.apply_snapshot(next.clone());
+        assert_eq!(
+            next.library.playlist_entry_revisions,
+            state.library.playlist_entry_revisions
+        );
+        assert!(!tui.ui.apply_query(&next, &stale, Ok(response(&stale, 2))));
+        let lookup = tui.ui.query_request(&next).unwrap();
+        assert_eq!(lookup.kind, stale.kind);
+        let located = result(
+            &lookup,
+            ViewResponse::PlaylistEntryLocations(vec![PlaylistEntryLocation {
+                id: 1,
+                playlist_id: 1,
+                track_id: 7,
+                position: 1,
+                offset: 0,
+                total: 2,
+            }]),
+        );
+        assert!(tui.ui.apply_query(&next, &lookup, Ok(located)));
+        if navigate_after_locate {
+            key(&mut tui.ui, &next, KeyCode::Down);
+            // A late location result cannot override the newer navigation.
+            assert!(!tui.ui.apply_query(&next, &lookup, Ok(response(&lookup, 2))));
+        }
+        let request = tui.ui.query_request(&next).unwrap();
+        assert_eq!(request.kind, QueryKind::Playlist(1));
+        assert_eq!(request.offset, 0);
+        let mut refreshed = response(&request, 2);
+        let ViewResponse::PlaylistEntries(page) = &mut refreshed.view else {
+            panic!("playlist entries");
+        };
+        for entry in &mut page.rows {
+            entry.id += 1;
+            entry.position += 1;
+            entry.track_id = 7;
+        }
+        assert!(tui.ui.apply_query(&next, &request, Ok(refreshed)));
+        let expected_id = if navigate_after_locate { 2 } else { 1 };
+        let View::PlaylistDetail { detail, .. } = &tui.ui.view else {
+            panic!("playlist detail");
+        };
+        assert_eq!(detail.entries.total, 2);
+        assert_eq!(detail.entries.selected().unwrap().id, expected_id);
+        assert_eq!(detail.selected_entry_id, Some(expected_id));
+        assert!(matches!(
+            key(&mut tui.ui, &next, KeyCode::Delete),
+            KeyAction::Command(Command::RemovePlaylistEntry { entry_id }) if entry_id == expected_id
+        ));
+    }
+}

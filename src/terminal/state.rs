@@ -46,7 +46,13 @@ impl TuiState {
             .ui
             .view
             .query_kind(false)
-            .filter(|kind| kind.clone().changed_without_bitrate(&self.snapshot, &next))
+            .filter(|kind| {
+                kind.clone().changed_without_bitrate(
+                    &self.snapshot,
+                    &next,
+                    &self.ui.search.applied_query,
+                )
+            })
             .and_then(|_| self.ui.selected_identity());
         self.ui.sync_queue(&self.snapshot, &next);
         if page_size_changed {
@@ -245,20 +251,20 @@ impl View {
         }
         let rows_changed = self
             .query_kind(false)
-            .is_some_and(|kind| kind.changed(previous, next));
+            .is_some_and(|kind| kind.changed(previous, next, query));
         let coordinates_changed = self
             .query_kind(false)
-            .is_some_and(|kind| kind.changed_without_bitrate(previous, next));
+            .is_some_and(|kind| kind.changed_without_bitrate(previous, next, query));
         let query_changed = if matches!(self, Self::PlaylistDetail { detail, .. } if detail.entry_anchor.is_some())
         {
             self.query_kind(true)
-                .is_some_and(|kind| kind.changed(previous, next))
+                .is_some_and(|kind| kind.changed(previous, next, query))
         } else {
             rows_changed
         };
         if let Self::PlaylistDetail { detail, .. } = self {
             let compact = Query::PlaylistEntryLocations {
-                query: None,
+                query: (!query.is_empty()).then(|| query.to_owned()),
                 playlist_id: detail.playlist_id,
                 entry_ids: Vec::new(),
             };
@@ -288,7 +294,7 @@ impl View {
             }
         }
         if let Self::Tree(tree) = self
-            && QueryKind::OtherTracksCount.changed(previous, next)
+            && QueryKind::OtherTracksCount.changed(previous, next, "")
         {
             tree.other_present = None;
         }
@@ -839,10 +845,15 @@ impl UiState {
     }
 
     fn sync_queue(&mut self, previous: &TuiSnapshot, next: &TuiSnapshot) {
-        if !QueryKind::Queue.changed(previous, next) {
+        let filter = if matches!(self.view, View::Queue) {
+            self.search.applied_query.as_str()
+        } else {
+            ""
+        };
+        if !QueryKind::Queue.changed(previous, next, filter) {
             return;
         }
-        if !QueryKind::Queue.changed_without_bitrate(previous, next) {
+        if !QueryKind::Queue.changed_without_bitrate(previous, next, filter) {
             self.queue.pages.clear();
             if matches!(self.view, View::Queue) {
                 self.cancel_query();

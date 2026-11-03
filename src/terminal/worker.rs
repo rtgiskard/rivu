@@ -274,6 +274,28 @@ impl QueryKind {
         self.clone().into_query(offset, limit)
     }
 
+    fn filtered_query(self, offset: usize, limit: usize, filter: &str) -> Query {
+        let mut query = self.into_query(offset, limit);
+        match &mut query {
+            Query::QueuePage { query, .. }
+            | Query::QueueEntries { query, .. }
+            | Query::LibraryPage { query, .. }
+            | Query::DirectoryPage { query, .. }
+            | Query::LibraryLocate { query, .. }
+            | Query::OtherTracksPage { query, .. }
+            | Query::OtherTracksLocate { query, .. }
+            | Query::PlaylistSummaries { query, .. }
+            | Query::PlaylistEntries { query, .. }
+            | Query::PlaylistEntryLocations { query, .. }
+                if !filter.is_empty() =>
+            {
+                *query = Some(filter.into());
+            }
+            _ => {}
+        }
+        query
+    }
+
     fn into_query(self, offset: usize, limit: usize) -> Query {
         match self {
             QueryKind::OtherTracksCount => Query::OtherTracksCount,
@@ -376,9 +398,9 @@ impl QueryKind {
         }
     }
 
-    pub(super) fn changed(self, previous: &TuiSnapshot, next: &TuiSnapshot) -> bool {
+    pub(super) fn changed(self, previous: &TuiSnapshot, next: &TuiSnapshot, filter: &str) -> bool {
         let playlist_id = self.playlist_id();
-        let query = self.into_query(0, 0);
+        let query = self.filtered_query(0, 0, filter);
         query.stamp(previous.query_revisions(playlist_id))
             != query.stamp(next.query_revisions(playlist_id))
     }
@@ -387,9 +409,10 @@ impl QueryKind {
         self,
         previous: &TuiSnapshot,
         next: &TuiSnapshot,
+        filter: &str,
     ) -> bool {
         let playlist_id = self.playlist_id();
-        let query = self.into_query(0, 0);
+        let query = self.filtered_query(0, 0, filter);
         query.stamp(
             previous
                 .query_revisions(playlist_id)
@@ -400,25 +423,11 @@ impl QueryKind {
 
 impl QueryRequest {
     pub(super) fn query(&self) -> Query {
-        let mut query = self.kind.query(self.offset, self.limit);
-        match &mut query {
-            Query::QueuePage { query, .. }
-            | Query::QueueEntries { query, .. }
-            | Query::LibraryPage { query, .. }
-            | Query::DirectoryPage { query, .. }
-            | Query::LibraryLocate { query, .. }
-            | Query::OtherTracksPage { query, .. }
-            | Query::OtherTracksLocate { query, .. }
-            | Query::PlaylistSummaries { query, .. }
-            | Query::PlaylistEntries { query, .. }
-            | Query::PlaylistEntryLocations { query, .. } => {
-                if let Some(filter) = &self.filter {
-                    *query = Some(filter.clone());
-                }
-            }
-            _ => {}
-        }
-        query
+        self.kind.clone().filtered_query(
+            self.offset,
+            self.limit,
+            self.filter.as_deref().unwrap_or_default(),
+        )
     }
 }
 
