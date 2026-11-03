@@ -520,7 +520,11 @@ fn details_pin_search_target_reject_late_reads_and_restore_source() {
     assert!(matches!(ui.details.state, DetailState::Removed));
     ui.details.stamp = None;
     let failed = ui.query_request(&state).unwrap();
-    assert!(ui.apply_query(&state, &failed, Err("read failed".into())));
+    assert!(ui.apply_query(
+        &state,
+        &failed,
+        Err(QueryError::Message("read failed".into()))
+    ));
     assert!(matches!(&ui.details.state, DetailState::Error(error) if error == "read failed"));
     assert!(ui.query_request(&state).is_none());
 }
@@ -681,10 +685,11 @@ fn queue_rejects_delayed_pages_and_selection_lookups_after_navigation() {
     assert!(!tui.ui.apply_query(&state, &request, Ok(stale)));
     assert!(tui.ui.queue.pages.is_empty());
     assert!(tui.ui.requested.is_none());
-    assert!(
-        tui.ui
-            .apply_query(&state, &request, Err("queue unavailable".into()))
-    );
+    assert!(tui.ui.apply_query(
+        &state,
+        &request,
+        Err(QueryError::Message("queue unavailable".into()))
+    ));
     assert!(tui.ui.query_request(&state).is_none());
     for key in [
         KeyEvent::from(KeyCode::F(5)),
@@ -1561,10 +1566,11 @@ fn failed_playlist_pages_ignore_retry_keys_and_recover_after_reopening() {
     let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
     tui.ui.view = View::Playlists(PagedList::default());
     let request = tui.ui.query_request(&state).unwrap();
-    assert!(
-        tui.ui
-            .apply_query(&state, &request, Err("unavailable".into()))
-    );
+    assert!(tui.ui.apply_query(
+        &state,
+        &request,
+        Err(QueryError::Message("unavailable".into()))
+    ));
     let mut next = state.clone();
     next.queue.revision += 1;
     tui.apply_snapshot(next.clone());
@@ -2845,10 +2851,11 @@ fn failed_playlist_entries_do_not_block_title_refresh_or_retry_after_it() {
         }
         let failed = tui.ui.query_request(&state).unwrap();
         assert_eq!(failed.offset, if prefetch { 3 } else { 0 });
-        assert!(
-            tui.ui
-                .apply_query(&state, &failed, Err("read failed".into()))
-        );
+        assert!(tui.ui.apply_query(
+            &state,
+            &failed,
+            Err(QueryError::Message("read failed".into()))
+        ));
         let View::PlaylistDetail { detail, .. } = &tui.ui.view else {
             panic!("playlist detail");
         };
@@ -2902,10 +2909,11 @@ fn failed_playlist_title_does_not_block_pages_or_retry_when_they_load() {
     tui.apply_snapshot(next.clone());
     let summary = tui.ui.query_request(&next).unwrap();
     assert_eq!(summary.kind, QueryKind::PlaylistSummary(1));
-    assert!(
-        tui.ui
-            .apply_query(&next, &summary, Err("summary failed".into()))
-    );
+    assert!(tui.ui.apply_query(
+        &next,
+        &summary,
+        Err(QueryError::Message("summary failed".into()))
+    ));
     for _ in 0..3 {
         tui.ui.key_action(KeyEvent::from(KeyCode::Down), &next);
     }
@@ -2925,21 +2933,140 @@ fn failed_playlist_title_does_not_block_pages_or_retry_when_they_load() {
     tui.apply_snapshot(next.clone());
     let refreshed = tui.ui.query_request(&next).expect("new title revision");
     assert_eq!(refreshed.kind, QueryKind::PlaylistSummary(1));
-    assert!(
-        tui.ui
-            .apply_query(&next, &refreshed, Err("summary still unavailable".into()))
-    );
+    assert!(tui.ui.apply_query(
+        &next,
+        &refreshed,
+        Err(QueryError::Message("summary still unavailable".into()))
+    ));
     tui.ui.key_action(KeyEvent::from(KeyCode::Down), &next);
     tui.ui.key_action(KeyEvent::from(KeyCode::Down), &next);
     tui.ui.key_action(KeyEvent::from(KeyCode::Down), &next);
     let page = tui.ui.query_request(&next).unwrap();
     assert_eq!(page.kind, QueryKind::Playlist(1));
-    assert!(
-        tui.ui
-            .apply_query(&next, &page, Err("entries unavailable".into()))
-    );
+    assert!(tui.ui.apply_query(
+        &next,
+        &page,
+        Err(QueryError::Message("entries unavailable".into()))
+    ));
     assert!(
         tui.ui.query_request(&next).is_none(),
         "neither failure retries the other"
     );
+}
+
+#[test]
+fn unexpected_query_payload_retires_demand_without_retrying_or_touching_newer_reads() {
+    let state = query_snapshot();
+    let mut ui = UiState {
+        view: View::Playlists(PagedList::default()),
+        ..UiState::default()
+    };
+    let request = ui.query_request(&state).unwrap();
+    ui.requested = Some(request.clone());
+    let malformed = || QueryResult {
+        revisions: request.stamp.revisions(),
+        view: ViewResponse::Track(None),
+    };
+    assert!(ui.apply_query(&state, &request, Ok(malformed())));
+    assert!(
+        ui.requested.is_none(),
+        "completed malformed read is not in flight"
+    );
+    assert!(
+        ui.query_request(&state).is_none(),
+        "invalid payload is a terminal failure"
+    );
+    assert!(
+        ui.message
+            .as_ref()
+            .is_some_and(|notice| notice.kind == NoticeKind::Error)
+    );
+    ui.switch_tab(false, &state);
+    let current = ui.query_request(&state).unwrap();
+    ui.requested = Some(current.clone());
+    assert!(!ui.apply_query(&state, &request, Ok(malformed())));
+    assert_eq!(ui.requested, Some(current));
+}
+
+#[test]
+fn obsolete_query_errors_park_quietly_until_freshness_changes() {
+    for error in [QueryError::RevisionChanged, QueryError::Cancelled] {
+        for details in [false, true] {
+            let mut state = query_snapshot();
+            let mut ui = UiState {
+                view: playlist_view(1),
+                ..UiState::default()
+            };
+            if details {
+                ui.details_active = true;
+                ui.details.target = Some(1);
+                ui.details.scroll = 7;
+            }
+            let request = ui.query_request(&state).unwrap();
+            ui.requested = Some(request.clone());
+            assert!(!ui.apply_query(&state, &request, Err(error.clone())));
+            assert!(ui.requested.is_none());
+            assert!(ui.message.is_none());
+            assert!(
+                ui.query_request(&state).is_none(),
+                "same stale demand must not spin"
+            );
+            assert!(!matches!(ui.details.state, DetailState::Error(_)));
+            state.library.revision += 1;
+            if !details {
+                *Arc::make_mut(&mut state.library.playlist_entry_revisions)
+                    .get_mut(&1)
+                    .unwrap() += 1;
+            }
+            let fresh = ui
+                .query_request(&state)
+                .expect("new freshness resumes demand");
+            assert_ne!(fresh.stamp, request.stamp);
+            ui.requested = Some(fresh.clone());
+            assert!(!ui.apply_query(&state, &request, Err(error.clone())));
+            assert_eq!(ui.requested, Some(fresh));
+            if details {
+                assert_eq!(ui.details.scroll, 7);
+            }
+        }
+    }
+}
+
+#[test]
+fn malformed_title_response_cannot_overwrite_entries_or_block_page_loading() {
+    let state = query_snapshot();
+    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
+    tui.ui.view = playlist_view(1);
+    load_visible(&mut tui.ui, &state);
+    let mut next = state.clone();
+    next.library.playlist_revision += 1;
+    tui.apply_snapshot(next.clone());
+    let request = tui.ui.query_request(&next).unwrap();
+    assert_eq!(request.kind, QueryKind::PlaylistSummary(1));
+    let View::PlaylistDetail { detail, .. } = &tui.ui.view else {
+        panic!("playlist detail")
+    };
+    let coordinates = page_coordinates(&detail.entries);
+    let wrong_page = QueryResult {
+        revisions: rivu_protocol::response::QueryRevisions {
+            playlist: u64::MAX,
+            ..request.stamp.revisions()
+        },
+        view: ViewResponse::PlaylistEntries(Page {
+            total: 0,
+            rows: Vec::new(),
+        }),
+    };
+    assert!(tui.ui.apply_query(&next, &request, Ok(wrong_page)));
+    let View::PlaylistDetail { detail, .. } = &tui.ui.view else {
+        panic!("playlist detail")
+    };
+    assert_eq!(page_coordinates(&detail.entries), coordinates);
+    for _ in 0..3 {
+        tui.ui.key_action(KeyEvent::from(KeyCode::Down), &next);
+    }
+    let page = tui.ui.query_request(&next).unwrap();
+    assert_eq!(page.kind, QueryKind::Playlist(1));
+    assert!(tui.ui.apply_query(&next, &page, Ok(response(&page, 12))));
+    assert!(tui.ui.query_request(&next).is_none());
 }

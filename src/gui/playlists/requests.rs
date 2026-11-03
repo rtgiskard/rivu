@@ -3,7 +3,7 @@ use super::{PlaylistBrowser, PlaylistModel, PlaylistRefresh};
 use crate::query_tracking::QueryTracker;
 use rivu_protocol::{
     model::{Page, PlaylistSummary, Query},
-    response::{QueryResponse, QueryRevisions, ViewResponse},
+    response::{QueryError, QueryResponse, QueryRevisions, ViewResponse},
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -31,6 +31,7 @@ struct ViewDemand {
     stamp: rivu_protocol::model::QueryStamp,
     selection_generation: u64,
     quiet_until: Instant,
+    retired: bool,
 }
 
 pub(in crate::gui) type SelectionKey = (u64, rivu_protocol::model::QueryStamp);
@@ -70,6 +71,7 @@ impl ViewRequests {
             stamp,
             selection_generation,
             quiet_until: now + Duration::from_millis(80),
+            retired: false,
         });
         if demand.query != query
             || demand.stamp != stamp
@@ -80,10 +82,16 @@ impl ViewRequests {
                 stamp,
                 selection_generation,
                 quiet_until: now + Duration::from_millis(80),
+                retired: false,
             };
         }
         if self.immediate.remove(&kind) {
             demand.quiet_until = now;
+        }
+        // A rejected snapshot cannot be repaired by replaying the same demand.
+        // Changed identity/freshness above, or an explicit request, reopens it.
+        if demand.retired {
+            return None;
         }
         let delay = demand.quiet_until.saturating_duration_since(now);
         let replaced = self
@@ -435,7 +443,11 @@ impl PlaylistModel {
         }
         let query = self.playlists.prepare_page(entries, offset, page_size);
         let generation = self.requests.next_generation();
-        self.prepare_playlist_read(query, generation, revisions)
+        let request = self.prepare_playlist_read(query, generation, revisions);
+        if request.pending_generation().is_none() {
+            self.playlists.cancel_page(entries);
+        }
+        request
     }
 
     fn demand_playlist_page(
@@ -648,31 +660,39 @@ impl PlaylistModel {
         if !self.requests.is_current(read.kind, read.generation) {
             return None;
         }
-        if !self.playlist_read_current(read, current)
-            || (response.result.is_ok()
-                && !self.requests.projections[&read.kind].accepts(
-                    &read.query,
-                    read.owner_generation,
-                    response.revisions,
-                ))
-        {
+        if !self.playlist_read_current(read, current) {
             self.cancel_playlist_read(read.kind);
+            return None;
+        }
+        let expected_payload = matches!(
+            (&response.result, read.kind),
+            (
+                Ok(ViewResponse::PlaylistSummaries(_)),
+                ViewRequestKind::Summaries
+            ) | (
+                Ok(ViewResponse::PlaylistEntries(_)),
+                ViewRequestKind::Entries
+            ) | (
+                Ok(ViewResponse::PlaylistSummary(_)),
+                ViewRequestKind::Selection
+            )
+        );
+        if matches!(
+            &response.result,
+            Err(QueryError::RevisionChanged | QueryError::Cancelled)
+        ) || (expected_payload
+            && !self.requests.projections[&read.kind].accepts(
+                &read.query,
+                read.owner_generation,
+                response.revisions,
+            ))
+        {
+            self.retire_playlist_read(read);
             return None;
         }
         self.requests.finish(read.kind, read.generation);
         match response.result {
-            Err(error) => {
-                let message = error.to_string();
-                match read.kind {
-                    ViewRequestKind::Summaries => self.playlists.fail_page(false, message.clone()),
-                    ViewRequestKind::Entries => self.playlists.fail_page(true, message.clone()),
-                    ViewRequestKind::Selection => {
-                        let key = (read.selection_generation, read.query.stamp(current));
-                        self.requests.selection_failure = Some((key, message.clone()));
-                    }
-                }
-                Some(message)
-            }
+            Err(error) => self.fail_playlist_read(read, current, error.to_string()),
             Ok(ViewResponse::PlaylistSummaries(page))
                 if read.kind == ViewRequestKind::Summaries =>
             {
@@ -692,10 +712,42 @@ impl PlaylistModel {
                 None
             }
             _ => {
-                self.cancel_playlist_read(read.kind);
-                None
+                self.fail_playlist_read(read, current, "Unexpected playlist query response".into())
             }
         }
+    }
+
+    fn retire_playlist_read(&mut self, read: &ViewRead) {
+        self.requests.finish(read.kind, read.generation);
+        self.requests
+            .projections
+            .get_mut(&read.kind)
+            .unwrap()
+            .cancel();
+        self.requests.demands.get_mut(&read.kind).unwrap().retired = true;
+        match read.kind {
+            ViewRequestKind::Summaries => self.playlists.cancel_page(false),
+            ViewRequestKind::Entries => self.playlists.cancel_page(true),
+            // Preserve the baseline so render cannot resubmit this lookup.
+            ViewRequestKind::Selection => {}
+        }
+    }
+
+    fn fail_playlist_read(
+        &mut self,
+        read: &ViewRead,
+        current: QueryRevisions,
+        message: String,
+    ) -> Option<String> {
+        match read.kind {
+            ViewRequestKind::Summaries => self.playlists.fail_page(false, message.clone()),
+            ViewRequestKind::Entries => self.playlists.fail_page(true, message.clone()),
+            ViewRequestKind::Selection => {
+                let key = (read.selection_generation, read.query.stamp(current));
+                self.requests.selection_failure = Some((key, message.clone()));
+            }
+        }
+        Some(message)
     }
 }
 
@@ -835,8 +887,14 @@ mod tests {
         );
         assert!(browser.playlists.entries().rows.get(0).is_none());
         assert!(!browser.requests.workers.contains(&ViewRequestKind::Entries));
+        assert!(
+            browser
+                .demand_playlist_entries(0..1, 20, revisions)
+                .into_read()
+                .is_none()
+        );
         let (read, _) = browser
-            .demand_playlist_entries(0..1, 20, revisions)
+            .request_playlist_entries(1, 0, 20, revisions)
             .into_read()
             .unwrap();
         let mut row = entry(10, 0);
@@ -1812,6 +1870,160 @@ mod tests {
         for kind in [ViewRequestKind::Selection, ViewRequestKind::Entries] {
             assert!(!browser.requests.pending(kind));
             assert!(!browser.requests.finish(kind, 1));
+        }
+    }
+
+    fn automatic_request(
+        browser: &mut PlaylistModel,
+        kind: ViewRequestKind,
+        revisions: QueryRevisions,
+    ) -> ViewRequest {
+        match kind {
+            ViewRequestKind::Summaries => browser.demand_playlist_summaries(0..1, 20, revisions),
+            ViewRequestKind::Entries => browser.demand_playlist_entries(0..1, 20, revisions),
+            ViewRequestKind::Selection => browser.prepare_playlist_lookup(revisions),
+        }
+    }
+
+    #[test]
+    fn structured_retirement_parks_only_rejected_demand_until_its_stamp_changes() {
+        for kind in [
+            ViewRequestKind::Summaries,
+            ViewRequestKind::Entries,
+            ViewRequestKind::Selection,
+        ] {
+            for error in [QueryError::RevisionChanged, QueryError::Cancelled] {
+                let mut browser = PlaylistModel::default();
+                let revisions = QueryRevisions::default();
+                browser.select_playlist(1, "one".into(), 0);
+                let (read, ticket) = automatic_request(&mut browser, kind, revisions)
+                    .into_read()
+                    .unwrap();
+                let other = if kind == ViewRequestKind::Summaries {
+                    ViewRequestKind::Entries
+                } else {
+                    ViewRequestKind::Summaries
+                };
+                let (other_read, other_ticket) = automatic_request(&mut browser, other, revisions)
+                    .into_read()
+                    .unwrap();
+                assert_eq!(
+                    browser.complete_playlist_read(
+                        &read,
+                        revisions,
+                        QueryResponse {
+                            revisions,
+                            result: Err(error)
+                        },
+                    ),
+                    None
+                );
+                assert!(!ticket.is_current());
+                assert!(!browser.view_pending(kind));
+                assert_eq!(browser.playlist_lookup_failure(), None);
+                assert_eq!(browser.playlists.summaries().rows.error(0), None);
+                assert_eq!(browser.playlists.entries().rows.error(0), None);
+                for _ in 0..3 {
+                    let parked = automatic_request(&mut browser, kind, revisions);
+                    assert_eq!(parked.pending_generation(), None);
+                    assert!(parked.into_read().is_none());
+                }
+                assert!(other_ticket.is_current());
+                assert!(browser.playlist_read_current(&other_read, revisions));
+                let current = QueryRevisions {
+                    library: 1,
+                    playlist: 1,
+                    ..revisions
+                };
+                assert!(
+                    automatic_request(&mut browser, kind, current)
+                        .into_read()
+                        .is_some()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unexpected_payload_is_terminal_for_each_kind_and_existing_retry_recovers() {
+        for kind in [
+            ViewRequestKind::Summaries,
+            ViewRequestKind::Entries,
+            ViewRequestKind::Selection,
+        ] {
+            let mut browser = PlaylistModel::default();
+            let revisions = QueryRevisions {
+                library: 7,
+                playlist: 7,
+                ..Default::default()
+            };
+            browser.select_playlist(1, "one".into(), 0);
+            let (read, _) = automatic_request(&mut browser, kind, revisions)
+                .into_read()
+                .unwrap();
+            let message = browser
+                .complete_playlist_read(
+                    &read,
+                    revisions,
+                    QueryResponse {
+                        // An abnormal variant has no usable payload stamp.
+                        revisions: QueryRevisions::default(),
+                        result: Ok(ViewResponse::Track(None)),
+                    },
+                )
+                .expect("unexpected payload must fail");
+            assert!(!browser.view_pending(kind));
+            assert!(
+                automatic_request(&mut browser, kind, revisions)
+                    .into_read()
+                    .is_none()
+            );
+            let retry = match kind {
+                ViewRequestKind::Summaries => {
+                    assert_eq!(
+                        browser.playlists.summaries().rows.error(0),
+                        Some(message.as_str())
+                    );
+                    browser.retry_playlist_summaries(20, revisions)
+                }
+                ViewRequestKind::Entries => {
+                    assert_eq!(
+                        browser.playlists.entries().rows.error(0),
+                        Some(message.as_str())
+                    );
+                    browser.retry_playlist_entries(20, revisions)
+                }
+                ViewRequestKind::Selection => {
+                    let (key, error) = browser.playlist_lookup_failure().unwrap();
+                    assert_eq!(error, message);
+                    browser.retry_playlist_lookup(key, revisions)
+                }
+            };
+            let (retry, _) = retry.into_read().unwrap();
+            let result = match kind {
+                ViewRequestKind::Summaries => ViewResponse::PlaylistSummaries(Page {
+                    total: 1,
+                    rows: vec![summary(1, 0)],
+                }),
+                ViewRequestKind::Entries => ViewResponse::PlaylistEntries(Page {
+                    total: 0,
+                    rows: Vec::new(),
+                }),
+                ViewRequestKind::Selection => ViewResponse::PlaylistSummary(Some(summary(1, 0))),
+            };
+            assert_eq!(
+                browser.complete_playlist_read(
+                    &retry,
+                    revisions,
+                    QueryResponse {
+                        revisions,
+                        result: Ok(result)
+                    },
+                ),
+                None
+            );
+            assert!(!browser.view_pending(kind));
+            assert_eq!(browser.playlist_lookup_failure(), None);
         }
     }
 }

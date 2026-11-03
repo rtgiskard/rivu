@@ -434,6 +434,9 @@ their track selection or scroll position.
 Entry loading and title refresh are independent: failure of one neither blocks
 nor retries the other. Failed queries stay suppressed until their demand or
 relevant revision changes, or the view is reopened.
+Version changes and cancelled reads retire quietly rather than showing an error;
+the same obsolete demand is not resubmitted until its identity or freshness changes.
+Unexpected response types end as query failures instead of remaining in flight.
 
 Library's link:02_library.adoc#other[Other] entry is hidden at the top level when
 the unfiltered collection is empty.

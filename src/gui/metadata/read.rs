@@ -218,8 +218,12 @@ impl MetadataReadCoordinator {
         // revisions. Identity and current environment were already admitted above.
         let result = match response.result {
             Ok(result) => result,
-            Err(QueryError::RevisionChanged) => {
-                self.retire();
+            Err(QueryError::RevisionChanged | QueryError::Cancelled) => {
+                // Core rejected this snapshot, not the read itself. Wait for a
+                // changed projection or an explicit request instead of replaying
+                // identical demand against a GUI snapshot that may still lag.
+                self.projection.cancel();
+                session.retire_load(read.token);
                 return ReadCompletion::Retired;
             }
             Err(error) => {
@@ -227,19 +231,19 @@ impl MetadataReadCoordinator {
                 return ReadCompletion::Failed;
             }
         };
+        let ViewResponse::Track(track) = result else {
+            session.fail_load(read.token, unexpected_response());
+            return ReadCompletion::Failed;
+        };
         if !self
             .projection
             .accepts(&read.query(), read.generation, response.revisions)
         {
-            self.needs_refresh = self.selected.is_some();
+            self.projection.cancel();
+            session.retire_load(read.token);
             return ReadCompletion::Retired;
         }
-        if let ViewResponse::Track(track) = result {
-            ReadCompletion::Loaded(session.accept_load(read.token, track))
-        } else {
-            session.fail_load(read.token, unexpected_response());
-            ReadCompletion::Failed
-        }
+        ReadCompletion::Loaded(session.accept_load(read.token, track))
     }
 }
 
@@ -640,7 +644,7 @@ mod tests {
     }
 
     #[test]
-    fn mismatched_response_revisions_restore_demand_without_overwriting_session() {
+    fn mismatched_response_revisions_park_unchanged_demand_until_freshness_changes() {
         let now = Instant::now();
         let mut owner = MetadataReadCoordinator::default();
         let mut session = MetadataSession::default();
@@ -655,7 +659,13 @@ mod tests {
             },),
             ReadCompletion::Retired
         ));
-        assert!(session.accepts_load(first.read.token));
+        assert!(!session.accepts_load(first.read.token));
+        assert!(owner.prepare(&mut session, true, now).is_none());
+        let revisions = QueryRevisions {
+            library: 1,
+            ..Default::default()
+        };
+        owner.sync(Some(1), revisions, now);
         assert!(owner.prepare(&mut session, true, now).is_some());
     }
 
@@ -675,6 +685,81 @@ mod tests {
         ));
         assert!(owner.prepare(&mut session, true, now).is_none());
         request(&mut owner, &mut session, 2, now);
+        assert!(owner.prepare(&mut session, true, now).is_some());
+    }
+
+    #[test]
+    fn structured_retirement_settles_loading_and_parks_unchanged_demand() {
+        use super::super::session::MetadataReadState;
+
+        for error in [QueryError::RevisionChanged, QueryError::Cancelled] {
+            let now = Instant::now();
+            let mut owner = MetadataReadCoordinator::default();
+            let mut session = MetadataSession::default();
+            request(&mut owner, &mut session, 1, now);
+            let first = owner.prepare(&mut session, true, now).unwrap();
+            assert!(owner.submit(first.read, &session, environment(true)));
+            assert!(matches!(
+                owner.finish(
+                    first.read,
+                    &mut session,
+                    environment(true),
+                    QueryResponse {
+                        revisions: QueryRevisions::default(),
+                        result: Err(error),
+                    },
+                    || "wrong response".into(),
+                ),
+                ReadCompletion::Retired
+            ));
+            assert_eq!(session.read_state(), &MetadataReadState::Idle);
+            assert!(!first.ticket.is_current());
+            for _ in 0..3 {
+                owner.sync(Some(1), QueryRevisions::default(), now);
+                assert!(owner.prepare(&mut session, true, now).is_none());
+            }
+            // An existing explicit request can reopen unchanged demand.
+            request(&mut owner, &mut session, 1, now);
+            let retry = owner.prepare(&mut session, true, now).unwrap();
+            assert!(!session.retire_load(first.read.token));
+            assert!(owner.prepare(&mut session, true, now).is_none());
+            assert!(session.accepts_load(retry.read.token));
+            assert!(owner.submit(retry.read, &session, environment(true)));
+        }
+    }
+
+    #[test]
+    fn unexpected_payload_fails_even_with_unusable_stamp_without_automatic_retry() {
+        use super::super::session::MetadataReadState;
+
+        let now = Instant::now();
+        let mut owner = MetadataReadCoordinator::default();
+        let mut session = MetadataSession::default();
+        request(&mut owner, &mut session, 1, now);
+        let first = owner.prepare(&mut session, true, now).unwrap();
+        assert!(owner.submit(first.read, &session, environment(true)));
+        assert!(matches!(
+            owner.finish(
+                first.read,
+                &mut session,
+                environment(true),
+                QueryResponse {
+                    revisions: QueryRevisions {
+                        library: 1,
+                        ..Default::default()
+                    },
+                    result: Ok(ViewResponse::PlaylistSummary(None)),
+                },
+                || "wrong response".into(),
+            ),
+            ReadCompletion::Failed
+        ));
+        assert_eq!(
+            session.read_state(),
+            &MetadataReadState::Failed("wrong response".into())
+        );
+        assert!(owner.prepare(&mut session, true, now).is_none());
+        request(&mut owner, &mut session, 1, now);
         assert!(owner.prepare(&mut session, true, now).is_some());
     }
 }

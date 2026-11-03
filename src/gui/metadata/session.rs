@@ -205,6 +205,14 @@ impl MetadataSession {
             && self.identity == Some(token.track_id)
     }
 
+    pub(in crate::gui) fn retire_load(&mut self, token: LoadToken) -> bool {
+        if !self.accepts_load(token) {
+            return false;
+        }
+        self.read_state = MetadataReadState::Idle;
+        true
+    }
+
     pub(in crate::gui) fn fail_load(&mut self, token: LoadToken, error: String) -> bool {
         if !self.accepts_load(token) {
             return false;

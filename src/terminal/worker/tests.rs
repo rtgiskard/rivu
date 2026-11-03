@@ -417,8 +417,9 @@ fn command_worker_reports_ambiguous_failure_without_replaying_the_mutation() {
         .recv_timeout(Duration::from_secs(5))
         .unwrap()
         .unwrap_err();
-    assert!(failure.message.contains("Command outcome unknown"));
-    assert!(failure.message.contains("do not automatically retry"));
+    let message = failure.into_message().unwrap();
+    assert!(message.contains("Command outcome unknown"));
+    assert!(message.contains("do not automatically retry"));
     worker
         .sender
         .as_ref()

@@ -224,7 +224,7 @@ where
             // even a superseded query must exit on a replacement server.
             let result = match result {
                 Ok(result) => Ok(result),
-                Err(error) => Err(error.into_message()?),
+                Err(error) => Err(error.into_query_error()?),
             };
             if tui.ui.apply_query(&tui.snapshot, &request, result) {
                 redraw = true;

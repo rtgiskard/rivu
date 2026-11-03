@@ -15,7 +15,7 @@ use rivu_protocol::{
         Command, DirectoryRow, HistoryEntry, LibraryRow, PlaylistEntryRow, PlaylistSummary, Query,
         QueueRow,
     },
-    response::ViewResponse,
+    response::{QueryError, ViewResponse},
 };
 use std::{
     path::PathBuf,
@@ -462,15 +462,26 @@ impl UiState {
             if self.details.stamp == Some(stamp) {
                 return None;
             }
-            self.details.state = DetailState::Loading;
-            self.projection.sync(&query, revisions);
-            return Some(QueryRequest {
+            let request = QueryRequest {
                 kind,
                 filter: None,
                 offset: 0,
                 limit: 1,
-                generation: self.projection.generation(),
+                generation: 0,
                 stamp,
+            };
+            if self
+                .failed_request
+                .as_ref()
+                .is_some_and(|failed| failed.same_demand(&request))
+            {
+                return None;
+            }
+            self.details.state = DetailState::Loading;
+            self.projection.sync(&query, revisions);
+            return Some(QueryRequest {
+                generation: self.projection.generation(),
+                ..request
             });
         }
         let limit = state.system.query_batch_size as usize;
@@ -597,11 +608,37 @@ impl UiState {
         }
     }
 
+    fn fail_query(&mut self, request: &QueryRequest, error: QueryError) -> bool {
+        self.requested = None;
+        *self.failure_slot(&request.kind) = Some(request.clone());
+        // An obsolete demand is parked quietly until its identity or freshness changes.
+        if matches!(error, QueryError::RevisionChanged | QueryError::Cancelled) {
+            return false;
+        }
+        let message = error.to_string();
+        if self.details_active {
+            self.details.stamp = Some(request.stamp);
+            self.details.error_scroll = 0;
+            self.details.state = DetailState::Error(message);
+            self.mark_local_change();
+        } else {
+            self.set_notice(message, NoticeKind::Error);
+        }
+        true
+    }
+
+    fn unexpected_query(&mut self, request: &QueryRequest) -> bool {
+        self.fail_query(
+            request,
+            QueryError::Message(self.i18n.text("terminal-unexpected-response").into()),
+        )
+    }
+
     pub(super) fn apply_query(
         &mut self,
         state: &TuiSnapshot,
         request: &QueryRequest,
-        result: Result<QueryResult, String>,
+        result: Result<QueryResult, QueryError>,
     ) -> bool {
         if self.query_request(state).as_ref() != Some(request) {
             if self.requested.as_ref() == Some(request) {
@@ -611,20 +648,11 @@ impl UiState {
         }
         let result = match result {
             Ok(result) => result,
-            Err(error) => {
-                self.requested = None;
-                *self.failure_slot(&request.kind) = Some(request.clone());
-                if self.details_active {
-                    self.details.stamp = Some(request.stamp);
-                    self.details.error_scroll = 0;
-                    self.details.state = DetailState::Error(error);
-                    self.mark_local_change();
-                    return true;
-                }
-                self.set_notice(error, NoticeKind::Error);
-                return true;
-            }
+            Err(error) => return self.fail_query(request, error),
         };
+        if !request.accepts_view(&result.view) {
+            return self.unexpected_query(request);
+        }
         if !self
             .projection
             .accepts(&request.query(), request.generation, result.revisions)
@@ -639,7 +667,7 @@ impl UiState {
                     DetailState::Ready(Box::new(track))
                 }
                 ViewResponse::Track(None) => DetailState::Removed,
-                _ => DetailState::Error(self.i18n.text("terminal-unexpected-response").into()),
+                _ => return self.unexpected_query(request),
             };
             self.details.stamp = Some(request.stamp);
             self.requested = None;
@@ -662,10 +690,7 @@ impl UiState {
                         rows.iter().find(|row| row.id == queue_id).map(|row| row.id);
                     self.queue_anchor = None;
                 } else {
-                    self.set_notice(
-                        self.i18n.text("terminal-unexpected-response").into(),
-                        NoticeKind::Error,
-                    );
+                    return self.unexpected_query(request);
                 }
             }
             (View::LibraryResults(rows), ViewResponse::LibraryLocate(location)) => {
@@ -761,18 +786,11 @@ impl UiState {
                     }
                     detail.entry_anchor = None;
                 } else {
-                    self.set_notice(
-                        self.i18n.text("terminal-unexpected-response").into(),
-                        NoticeKind::Error,
-                    );
+                    return self.unexpected_query(request);
                 }
             }
             _ => {
-                self.set_notice(
-                    self.i18n.text("terminal-unexpected-response").into(),
-                    NoticeKind::Error,
-                );
-                return true;
+                return self.unexpected_query(request);
             }
         }
         self.prepare_local_view(state);

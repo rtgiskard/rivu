@@ -343,6 +343,12 @@ Desktop queries time out after 12 seconds; retry without rescanning. Row-navigat
 and selection keys target the explicitly focused visible panel, never an earlier
 selection in another panel. Library, Queue, and playlist tracks support Home/End.
 
+Desktop playlist and Track details queries retire version races and cancelled
+reads without displaying a query error. An unchanged obsolete demand waits for a
+relevant revision or selection change, or an explicit retry/reload. Timeouts still
+report failure; retry does not start a second physical reader while the earlier
+reader is still finishing. An unexpected response type is a failure, not a retry.
+
 The TUI Library tree lists configured roots, including empty roots, followed by
 Other when its unfiltered collection is nonempty. The Other entry shows its name
 without a track count. With no roots, Other contains all registered tracks;

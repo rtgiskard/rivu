@@ -4,7 +4,7 @@ use crossbeam_channel::{Receiver, Sender, TryRecvError, bounded};
 use parking_lot::Mutex;
 use rivu_protocol::{
     model::{ClientSnapshot, Command, LibrarySort, Query, QueryStamp},
-    response::{Ack, StateSections, ViewResponse},
+    response::{Ack, QueryError, StateSections, ViewResponse},
 };
 use std::{
     path::{Path, PathBuf},
@@ -147,7 +147,7 @@ pub(super) fn spawn_watcher(data_dir: &Path) -> Watcher {
 
 #[derive(Clone, Debug)]
 pub(super) struct WorkerFailure {
-    message: String,
+    error: QueryError,
     instance_changed: bool,
 }
 
@@ -155,17 +155,33 @@ impl From<anyhow::Error> for WorkerFailure {
     fn from(error: anyhow::Error) -> Self {
         Self {
             instance_changed: error.is::<rivu_client::InstanceChanged>(),
-            message: format!("{error:#}"),
+            error: QueryError::Message(format!("{error:#}")),
+        }
+    }
+}
+
+impl From<QueryError> for WorkerFailure {
+    fn from(error: QueryError) -> Self {
+        Self {
+            error,
+            instance_changed: false,
         }
     }
 }
 
 impl WorkerFailure {
     pub(super) fn into_message(self) -> Result<String> {
+        Ok(match self.into_query_error()? {
+            QueryError::Message(message) => message,
+            error => error.to_string(),
+        })
+    }
+
+    pub(super) fn into_query_error(self) -> Result<QueryError> {
         if self.instance_changed {
-            return Err(anyhow::Error::msg(self.message));
+            return Err(anyhow::Error::new(self.error));
         }
-        Ok(self.message)
+        Ok(self.error)
     }
 }
 
@@ -433,6 +449,39 @@ impl QueryRequest {
             && self.stamp == other.stamp
     }
 
+    pub(super) fn accepts_view(&self, view: &ViewResponse) -> bool {
+        match (&self.kind, view) {
+            (QueryKind::Queue, ViewResponse::QueuePage(_))
+            | (QueryKind::QueueSelection(_), ViewResponse::QueueEntries(_))
+            | (
+                QueryKind::Search(_) | QueryKind::OtherTracks { anchor: None, .. },
+                ViewResponse::LibraryPage(_),
+            )
+            | (
+                QueryKind::LibrarySelection(_)
+                | QueryKind::DirectorySelection { .. }
+                | QueryKind::OtherTracks {
+                    anchor: Some(_), ..
+                },
+                ViewResponse::LibraryLocate(_),
+            )
+            | (QueryKind::Directory(_), ViewResponse::DirectoryPage(_))
+            | (QueryKind::OtherTracksCount, ViewResponse::OtherTracksCount(_))
+            | (QueryKind::Playlists, ViewResponse::PlaylistSummaries(_))
+            | (QueryKind::Playlist(_), ViewResponse::PlaylistEntries(_))
+            | (QueryKind::PlaylistSelection { .. }, ViewResponse::PlaylistEntryLocations(_)) => {
+                true
+            }
+            (QueryKind::Track(id), ViewResponse::Track(track)) => {
+                track.as_ref().is_none_or(|track| track.id == *id)
+            }
+            (QueryKind::PlaylistSummary(id), ViewResponse::PlaylistSummary(summary)) => {
+                summary.as_ref().is_none_or(|summary| summary.id == *id)
+            }
+            _ => false,
+        }
+    }
+
     pub(super) fn query(&self) -> Query {
         self.kind.clone().filtered_query(
             self.offset,
@@ -524,10 +573,7 @@ pub(super) fn spawn_query_worker(data_dir: &Path, instance_id: u32) -> QueryWork
                     .query(job.request.query())
                     .map_err(WorkerFailure::from)
                     .and_then(|response| {
-                        let view = response.result.map_err(|error| WorkerFailure {
-                            message: error.to_string(),
-                            instance_changed: false,
-                        })?;
+                        let view = response.result.map_err(WorkerFailure::from)?;
                         Ok(QueryResult {
                             revisions: response.revisions,
                             view,
