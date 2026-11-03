@@ -692,7 +692,7 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut
         Constraint::Length(1 + spacing),
         Constraint::Min(1),
         Constraint::Length(2 + spacing),
-        Constraint::Length(1 + spacing),
+        Constraint::Length(2),
     ])
     .split(area);
     if spacing != 0 {
@@ -797,13 +797,45 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut
         Paragraph::new(time).style(Style::default().fg(colors.secondary)),
         progress[1],
     );
-    draw_status(frame, status, ui, state, colors);
+    draw_status(frame, status, state, colors);
+    let messages = Rect {
+        y: outer[3].bottom().saturating_sub(1),
+        height: 1.min(outer[3].height),
+        ..outer[3]
+    };
+    if ui.search.active {
+        let search_width = if ui.search.editing {
+            messages.width
+        } else {
+            (Line::from(ui.search.query.as_str()).width() + 4).min(messages.width as usize) as u16
+        };
+        let search_area = Rect {
+            width: search_width,
+            ..messages
+        };
+        draw_search_input(frame, search_area, &ui.search, i18n, colors);
+        let remaining = messages.width.saturating_sub(search_width + 2);
+        if remaining > 0 {
+            draw_messages(
+                frame,
+                Rect {
+                    x: messages.x + search_width + 2,
+                    width: remaining,
+                    ..messages
+                },
+                ui,
+                state,
+                colors,
+            );
+        }
+    } else {
+        draw_messages(frame, messages, ui, state, colors);
+    }
 }
 
 fn draw_status(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
-    ui: &UiState,
     state: &TuiSnapshot,
     colors: TerminalColors,
 ) {
@@ -845,6 +877,36 @@ fn draw_status(
     ])
     .split(area);
     frame.render_widget(Paragraph::new(modes), columns[0]);
+    if let Some(track) = state.current_track() {
+        let mut metadata = track.codec.to_ascii_lowercase();
+        if track.sample_rate != 0 {
+            if !metadata.is_empty() {
+                metadata.push_str(" · ");
+            }
+            metadata.push_str(&format!("{:.1} kHz", track.sample_rate as f64 / 1000.0));
+        }
+        if let Some(bits) = track.bits_per_sample {
+            if !metadata.is_empty() {
+                metadata.push_str(" · ");
+            }
+            metadata.push_str(&format!("{bits} bit"));
+        }
+        frame.render_widget(
+            Paragraph::new(cell_text(&metadata, columns[1].width as usize, true))
+                .alignment(ratatui::layout::Alignment::Right)
+                .style(Style::default().fg(colors.accent)),
+            columns[1],
+        );
+    }
+}
+
+fn draw_messages(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    ui: &UiState,
+    state: &TuiSnapshot,
+    colors: TerminalColors,
+) {
     if let Some(notice) = &ui.message {
         let (symbol, color) = match notice.kind {
             NoticeKind::Information => ("", colors.secondary),
@@ -853,9 +915,10 @@ fn draw_status(
         };
         let text = format!("{symbol} {}", notice.text);
         frame.render_widget(
-            Paragraph::new(cell_text(&text, columns[1].width as usize, true))
+            Paragraph::new(cell_text(&text, area.width as usize, true))
+                .alignment(ratatui::layout::Alignment::Right)
                 .style(Style::default().fg(color)),
-            columns[1],
+            area,
         );
     } else if state.system.scanning || state.system.scan_progress.is_some() {
         let color = if state.system.scan_progress.as_ref().is_some_and(|progress| {
@@ -888,45 +951,28 @@ fn draw_status(
             state.system.scan_message.clone()
         };
         frame.render_widget(
-            Paragraph::new(cell_text(&text, columns[1].width as usize, true))
+            Paragraph::new(cell_text(&text, area.width as usize, true))
+                .alignment(ratatui::layout::Alignment::Right)
                 .style(Style::default().fg(color)),
-            columns[1],
+            area,
         );
     } else if let Some(error) = &state.system.last_error {
         frame.render_widget(
-            Paragraph::new(cell_text(error, columns[1].width as usize, true))
+            Paragraph::new(cell_text(error, area.width as usize, true))
+                .alignment(ratatui::layout::Alignment::Right)
                 .style(Style::default().fg(colors.error)),
-            columns[1],
+            area,
         );
     } else if matches!(ui.view, View::Queue) && ui.startup_hint_deadline.is_some() {
         frame.render_widget(
             Paragraph::new(cell_text(
                 ui.i18n.text("terminal-startup-help"),
-                columns[1].width as usize,
+                area.width as usize,
                 true,
             ))
+            .alignment(ratatui::layout::Alignment::Right)
             .style(Style::default().fg(colors.secondary)),
-            columns[1],
-        );
-    } else if let Some(track) = state.current_track() {
-        let mut metadata = track.codec.to_ascii_lowercase();
-        if track.sample_rate != 0 {
-            if !metadata.is_empty() {
-                metadata.push_str(" · ");
-            }
-            metadata.push_str(&format!("{:.1} kHz", track.sample_rate as f64 / 1000.0));
-        }
-        if let Some(bits) = track.bits_per_sample {
-            if !metadata.is_empty() {
-                metadata.push_str(" · ");
-            }
-            metadata.push_str(&format!("{bits} bit"));
-        }
-        frame.render_widget(
-            Paragraph::new(cell_text(&metadata, columns[1].width as usize, true))
-                .alignment(ratatui::layout::Alignment::Right)
-                .style(Style::default().fg(colors.accent)),
-            columns[1],
+            area,
         );
     }
 }
@@ -1407,34 +1453,24 @@ fn draw_search_input(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     search: &SearchState,
-    i18n: &Localizer,
+    _i18n: &Localizer,
     colors: TerminalColors,
 ) {
     let focused = search.editing;
-    let prefix = format!(" 󰍉 {} › ", i18n.text("terminal-search"));
-    let prefix_width = Line::from(prefix.as_str()).width().min(area.width as usize);
+    let prefix = "󰍉 ";
+    let prefix_width = Line::from(prefix).width().min(area.width as usize);
     let input_width = area.width as usize - prefix_width;
     let (tail, cursor) = query_tail(
         &search.query,
         input_width.saturating_sub(usize::from(focused)),
     );
-    let line = Line::from(vec![
-        Span::styled(
-            prefix,
-            Style::default().fg(if focused {
-                colors.accent
-            } else {
-                colors.secondary
-            }),
-        ),
-        Span::raw(tail),
-    ]);
+    let line = Line::from(vec![Span::raw(prefix), Span::raw(tail)]);
     frame.render_widget(
-        Paragraph::new(line).style(if focused {
-            Style::default().bg(colors.selected)
-        } else {
+        Paragraph::new(line).style(
             Style::default()
-        }),
+                .fg(ratatui::style::Color::Rgb(99, 102, 241))
+                .bg(if focused { colors.selected } else { colors.bg }),
+        ),
         area,
     );
     if focused && input_width > 0 && area.height > 0 {
@@ -1450,13 +1486,7 @@ fn draw_current_page(
     colors: TerminalColors,
 ) {
     let i18n = &ui.i18n;
-    let list_area = if ui.search.active {
-        let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
-        draw_search_input(frame, rows[0], &ui.search, i18n, colors);
-        rows[1]
-    } else {
-        area
-    };
+    let list_area = area;
     ui.page_size = list_area.height.saturating_sub(1).max(1) as usize;
     match &mut ui.view {
         View::LibraryResults(results) => draw_paged_list(

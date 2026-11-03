@@ -224,8 +224,8 @@ fn query_tail_preserves_graphemes_and_keeps_input_cursor_visible() {
                     )
                 })
                 .unwrap();
-            let prefix = format!(" 󰍉 {} › ", i18n.text("terminal-search"));
-            if width as usize > Span::raw(prefix.as_str()).width() {
+            let prefix = "󰍉 ";
+            if width as usize > Span::raw(prefix).width() {
                 assert!(terminal.backend().cursor_visible());
                 let cursor = terminal.backend().cursor_position();
                 assert!(cursor.x < width);
@@ -253,86 +253,36 @@ fn query_tail_preserves_graphemes_and_keeps_input_cursor_visible() {
 }
 
 #[test]
-fn global_search_row_wraps_every_current_page_without_replacing_it() {
-    for language in ["en-US", "zh-CN"] {
-        let mut other = LibraryTree::default();
-        other.other_tracks = true;
-        for view in [
-            View::Queue,
-            View::LibraryResults(PagedList::default()),
-            View::Tree(LibraryTree::default()),
-            View::Tree(other),
-            View::Playlists(PagedList::default()),
-            View::PlaylistDetail {
-                playlists: (ListState::default(), 0),
-                detail: PlaylistDetail {
-                    playlist_id: 1,
-                    name: "Playlist detail".into(),
-                    entries: PagedList::default(),
-                    entry_anchor: None,
-                    selected_entry_id: None,
-                },
-            },
-            View::Recent(RecentTracks::default()),
-        ] {
-            let mut ui = UiState::new(Arc::new(Localizer::for_terminal(language)));
-            ui.view = view;
-            ui.search.query = "draft query".into();
-            ui.search.applied_query = "applied query".into();
-            let mut terminal = Terminal::new(TestBackend::new(100, 6)).unwrap();
-            for active in [false, true] {
-                for editing in [false, true] {
-                    ui.search.active = active;
-                    ui.search.editing = editing;
-                    terminal
-                        .draw(|frame| {
-                            draw_current_page(
-                                frame,
-                                frame.area(),
-                                &TuiSnapshot::default(),
-                                &mut ui,
-                                TerminalColors::new(crate::theme::Theme::default()),
-                            );
-                        })
-                        .unwrap();
-                    let text = terminal_text(&terminal);
-                    assert_eq!(text.contains("draft query"), active, "{text}");
-                    assert!(!text.contains("applied query"), "{text}");
-                    assert_eq!(terminal.backend().cursor_visible(), active && editing);
-                    assert_eq!(ui.page_size, if active { 4 } else { 5 });
-                }
+fn bottom_search_preserves_viewport_and_shares_messages_without_overlap() {
+    for width in [8, 40, 100] {
+        let mut ui = UiState::default();
+        let mut state = TuiSnapshot::default();
+        state.system.last_error = Some("failure".into());
+        let mut terminal = Terminal::new(TestBackend::new(width, 16)).unwrap();
+        terminal.draw(|frame| draw(frame, &state, &mut ui)).unwrap();
+        let page_size = ui.page_size;
+        ui.search.active = true;
+        ui.search.query = "夜航".into();
+        for editing in [true, false] {
+            ui.search.editing = editing;
+            terminal.draw(|frame| draw(frame, &state, &mut ui)).unwrap();
+            assert_eq!(ui.page_size, page_size);
+            let text = terminal_text(&terminal);
+            let bottom = text.lines().last().unwrap();
+            assert!(bottom.contains("󰍉"), "{text}");
+            if width >= 40 {
+                assert!(bottom.contains("夜航"), "{text}");
+                assert_eq!(bottom.contains("failure"), !editing, "{text}");
             }
+            assert_eq!(terminal.backend().cursor_visible(), editing);
+            if editing {
+                assert_eq!(terminal.backend().cursor_position().y, 15);
+            }
+            let buffer = terminal.backend().buffer();
+            assert_eq!(buffer[(1, 15)].fg, ratatui::style::Color::Rgb(99, 102, 241));
         }
+        assert_eq!(state.system.last_error.as_deref(), Some("failure"));
     }
-}
-
-#[test]
-fn full_library_results_keep_normal_rows_below_the_shared_editor() {
-    let mut results = PagedList::default();
-    results.insert(0, 2, 2, vec![track(0), track(1)]);
-    let mut ui = UiState::default();
-    ui.view = View::LibraryResults(results);
-    ui.search.active = true;
-    ui.search.editing = true;
-    ui.search.query = "draft".into();
-    let mut terminal = Terminal::new(TestBackend::new(80, 4)).unwrap();
-    terminal
-        .draw(|frame| {
-            draw_current_page(
-                frame,
-                frame.area(),
-                &TuiSnapshot::default(),
-                &mut ui,
-                TerminalColors::new(crate::theme::Theme::default()),
-            );
-        })
-        .unwrap();
-    let text = terminal_text(&terminal);
-    let lines = text.lines().collect::<Vec<_>>();
-    assert!(lines[0].contains("draft"), "{text}");
-    assert!(lines[1].contains("Library"), "{text}");
-    assert!(lines[2].contains("row-0"), "{text}");
-    assert!(lines[3].contains("row-1"), "{text}");
 }
 
 #[test]
@@ -728,44 +678,64 @@ pub(in crate::terminal) fn render_view(ui: &mut UiState) -> String {
 }
 
 #[test]
-fn idle_footer_properties_yield_to_notices_and_return_after_expiration() {
-    for width in [40, 89, 90, 120] {
-        let mut state = TuiSnapshot {
-            current_track: Some(Arc::new(full_track(1))),
-            ..Default::default()
-        };
-        state.playback.duration = Some(125.);
-        let mut ui = UiState::default();
-        ui.startup_hint_deadline = None;
-        let mut terminal = Terminal::new(TestBackend::new(width, 12)).unwrap();
-        let colors = TerminalColors::new(state.system.ui_theme);
-        for notice in [false, true, false] {
-            if notice {
-                ui.set_notice("Temporary warning".into(), NoticeKind::Warning);
-            } else if let Some(message) = ui.message.as_mut() {
-                message.expires_at = std::time::Instant::now();
-                assert!(ui.expire_message());
-            }
-            terminal.draw(|frame| draw(frame, &state, &mut ui)).unwrap();
-            let buffer = terminal.backend().buffer();
-            let footer: String = (0..width).map(|x| buffer[(x, 11)].symbol()).collect();
-            if notice {
-                assert!(footer.contains("Temporary warning"), "{footer}");
-                assert!(!footer.contains("flac"));
-            } else {
-                let properties = "flac · 96.0 kHz · 24 bit";
-                if width >= 89 {
-                    assert!(footer.trim_end().ends_with(properties), "{footer}");
+fn dynamic_messages_use_last_row_without_replacing_playback_properties() {
+    for height in [8, 12, 16, 24] {
+        for width in [40, 90, 120] {
+            let mut state = TuiSnapshot {
+                current_track: Some(Arc::new(full_track(1))),
+                ..Default::default()
+            };
+            let mut ui = UiState::default();
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            let hint = ui.i18n.text("terminal-startup-help").to_owned();
+            for phase in 0..6 {
+                let expected = match phase {
+                    0 => hint.as_str(),
+                    1 => {
+                        state.system.scanning = true;
+                        state.system.scan_message = "Scanning marker".into();
+                        "Scanning marker"
+                    }
+                    2 => {
+                        state.system.scanning = false;
+                        state.system.last_error = Some("Core error marker".into());
+                        "Core error marker"
+                    }
+                    3 => {
+                        ui.set_notice("Notice marker".into(), NoticeKind::Warning);
+                        "Notice marker"
+                    }
+                    4 => {
+                        ui.message.as_mut().unwrap().expires_at = std::time::Instant::now();
+                        assert!(ui.expire_message());
+                        "Core error marker"
+                    }
+                    _ => {
+                        state.system.last_error = None;
+                        ""
+                    }
+                };
+                terminal.draw(|frame| draw(frame, &state, &mut ui)).unwrap();
+                let buffer = terminal.backend().buffer();
+                let row = |y| -> String { (0..width).map(|x| buffer[(x, y)].symbol()).collect() };
+                let message = row(height - 1);
+                if expected.is_empty() {
+                    assert!(message.trim().is_empty(), "{message}");
                 } else {
-                    assert!(footer.contains("flac · 96.0 kHz"), "{footer}");
-                    assert!(footer.contains('…'), "{footer}");
+                    assert!(message.contains(expected), "{message}");
                 }
-                assert_eq!(buffer[(width - 2, 11)].fg, colors.accent);
-                assert_ne!(buffer[(width - 2, 11)].fg, colors.secondary);
-                assert_ne!(buffer[(width - 2, 11)].fg, colors.text);
+                let status = row(height - 2);
+                assert!(status.contains("flac · 96.0 kHz"), "{status}");
+                assert!(!message.contains("flac"), "{message}");
+                for marker in [
+                    &hint,
+                    "Scanning marker",
+                    "Core error marker",
+                    "Notice marker",
+                ] {
+                    assert!(!status.contains(marker), "{status}");
+                }
             }
-            let playback_title: String = (0..width).map(|x| buffer[(x, 9)].symbol()).collect();
-            assert!(!playback_title.contains("flac"));
         }
     }
 }

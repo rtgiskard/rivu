@@ -400,6 +400,12 @@ typing alone does not change the results. Press `/` again to edit the query.
 Enter on the filtered list keeps its normal play or open action. The editor owns
 all printable characters, including Space, `m`, `q`, and `?`; F1 opens help and
 Ctrl-C exits even while editing.
+The search icon and query appear in indigo (`#6366F1`) at the left of the bottom
+line, without reducing the list viewport. While editing, search owns that line
+and messages are hidden. After submission, notices, errors, and scan progress
+appear right-aligned in the remaining space; narrow terminals prioritize the query.
+Hiding a message does not clear it.
+
 
 The search scope follows the page:
 
@@ -437,10 +443,12 @@ playlist. Track lists prioritize titles as the terminal narrows and keep compact
 metadata, favorite, playback-state, and missing-file indicators where space permits.
 Truncation does not change stored metadata.
 
-The bottom-right status area shows current-track codec, sample rate, and bit depth
-in the theme accent color, distinct from the time display, when no message is active. Notices,
-scan status, errors, and startup hints take precedence; properties return when
-the message clears.
+The status row shows volume, shuffle, and repeat on the left and current-track
+codec, sample rate, and bit depth on the right, in the theme accent color.
+Dynamic messages occupy a separate, fixed last row at every terminal height;
+without a message that row stays blank. Notices take precedence over scan status,
+core errors, and the startup help hint, in that order. Startup help lasts four
+seconds; notices last six seconds. Messages never replace playback properties.
 Track changes and play/pause/stop transitions do not create notices; the fixed
 playback display shows those states.
 Properties fit the available width rather than requiring a 90-column terminal.
