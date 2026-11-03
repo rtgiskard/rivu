@@ -479,13 +479,19 @@ fn draw_details(
             );
         }
     }
-    // Loading and transient failures must not erase the retained track position.
-    let scroll = if matches!(details.state, DetailState::Loading | DetailState::Error(_)) {
-        0
-    } else {
-        details.max_scroll = lines.len().saturating_sub(area.height as usize);
-        details.scroll = details.scroll.min(details.max_scroll);
-        details.scroll
+    // Error navigation is independent of the retained track reading position.
+    let scroll = match details.state {
+        DetailState::Loading => 0,
+        DetailState::Error(_) => {
+            details.error_max_scroll = lines.len().saturating_sub(area.height as usize);
+            details.error_scroll = details.error_scroll.min(details.error_max_scroll);
+            details.error_scroll
+        }
+        _ => {
+            details.max_scroll = lines.len().saturating_sub(area.height as usize);
+            details.scroll = details.scroll.min(details.max_scroll);
+            details.scroll
+        }
     };
     frame.render_widget(
         Paragraph::new(

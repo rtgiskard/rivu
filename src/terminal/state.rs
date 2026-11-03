@@ -125,6 +125,8 @@ pub(super) struct Details {
     pub(super) stamp: Option<rivu_protocol::model::QueryStamp>,
     pub(super) scroll: usize,
     pub(super) max_scroll: usize,
+    pub(super) error_scroll: usize,
+    pub(super) error_max_scroll: usize,
 }
 
 #[derive(Default)]
@@ -569,6 +571,7 @@ impl UiState {
                 self.failed_request = Some(request.clone());
                 if self.details_active {
                     self.details.stamp = Some(request.stamp);
+                    self.details.error_scroll = 0;
                     self.details.state = DetailState::Error(error);
                     self.mark_local_change();
                     return true;
@@ -585,6 +588,7 @@ impl UiState {
             return false;
         }
         if self.details_active {
+            self.details.error_scroll = 0;
             self.details.state = match result.view {
                 ViewResponse::Track(Some(track)) if Some(track.id) == self.details.target => {
                     DetailState::Ready(Box::new(track))
@@ -1056,28 +1060,28 @@ impl UiState {
             return KeyAction::Quit;
         }
         if self.details_active {
-            let details = &mut self.details;
-            match resolve_key(key, KeyboardContext::TuiHelp) {
-                Some(Action::Cancel) => {
-                    self.details_active = false;
-                    self.cancel_query();
+            let action = resolve_key(key, KeyboardContext::TuiHelp);
+            if action == Some(Action::Cancel) {
+                self.details_active = false;
+                self.cancel_query();
+            } else {
+                let details = &mut self.details;
+                let (scroll, max_scroll) = match details.state {
+                    DetailState::Loading => return KeyAction::Ignored,
+                    DetailState::Error(_) => (&mut details.error_scroll, details.error_max_scroll),
+                    _ => (&mut details.scroll, details.max_scroll),
+                };
+                match action {
+                    Some(Action::Up) => *scroll = scroll.saturating_sub(1),
+                    Some(Action::Down) => *scroll = scroll.saturating_add(1).min(max_scroll),
+                    Some(Action::PageUp) => *scroll = scroll.saturating_sub(self.page_size),
+                    Some(Action::PageDown) => {
+                        *scroll = scroll.saturating_add(self.page_size).min(max_scroll)
+                    }
+                    Some(Action::First) => *scroll = 0,
+                    Some(Action::Last) => *scroll = max_scroll,
+                    _ => return KeyAction::Ignored,
                 }
-                Some(Action::Up) => details.scroll = details.scroll.saturating_sub(1),
-                Some(Action::Down) => {
-                    details.scroll = details.scroll.saturating_add(1).min(details.max_scroll)
-                }
-                Some(Action::PageUp) => {
-                    details.scroll = details.scroll.saturating_sub(self.page_size)
-                }
-                Some(Action::PageDown) => {
-                    details.scroll = details
-                        .scroll
-                        .saturating_add(self.page_size)
-                        .min(details.max_scroll)
-                }
-                Some(Action::First) => details.scroll = 0,
-                Some(Action::Last) => details.scroll = details.max_scroll,
-                _ => return KeyAction::Ignored,
             }
             self.mark_local_change();
             return KeyAction::Ignored;

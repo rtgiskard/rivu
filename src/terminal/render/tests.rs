@@ -55,37 +55,62 @@ fn recent_renders_source_indices_and_timestamps() {
 }
 
 #[test]
-fn details_loading_and_errors_preserve_scroll_until_fresh_track_is_rendered() {
-    let i18n = Localizer::for_terminal("en-US");
-    let colors = TerminalColors::new(crate::theme::Theme::default());
-    let mut details = Details {
-        target: Some(2),
-        source_label: "shell-panel-queue",
-        state: DetailState::Ready(Box::new(full_track(2))),
-        scroll: 4,
-        ..Details::default()
-    };
-    let mut terminal = Terminal::new(TestBackend::new(80, 8)).unwrap();
-    terminal
-        .draw(|frame| draw_details(frame, frame.area(), &mut details, &i18n, colors))
-        .unwrap();
-    let position = (details.scroll, details.max_scroll);
-    assert_eq!(position.0, 4);
-    for state in [
-        DetailState::Loading,
-        DetailState::Error("retry failed".into()),
-    ] {
-        details.state = state;
-        terminal
-            .draw(|frame| draw_details(frame, frame.area(), &mut details, &i18n, colors))
-            .unwrap();
-        assert_eq!((details.scroll, details.max_scroll), position);
+fn long_detail_errors_scroll_independently_and_loading_preserves_ready_position() {
+    let state = TuiSnapshot::default();
+    for width in [2, 7, 40, 80] {
+        let mut ui = UiState::new(Arc::new(Localizer::for_terminal("en-US")));
+        ui.details_active = true;
+        ui.details = Details {
+            target: Some(2),
+            source_label: "shell-panel-queue",
+            state: DetailState::Ready(Box::new(full_track(2))),
+            scroll: 4,
+            ..Details::default()
+        };
+        let mut terminal = Terminal::new(TestBackend::new(width, 8)).unwrap();
+        terminal.draw(|frame| draw(frame, &state, &mut ui)).unwrap();
+        let ready_text = terminal_text(&terminal);
+        let position = (ui.details.scroll, ui.details.max_scroll);
+        assert_eq!(position.0, 4);
+
+        ui.details.state = DetailState::Error(format!("{}\n终", "夜航e\u{301}👩‍🚀/\n".repeat(20)));
+        terminal.draw(|frame| draw(frame, &state, &mut ui)).unwrap();
+        assert!(ui.details.error_max_scroll > ui.page_size);
+        assert!(!terminal_text(&terminal).contains('终'));
+        for (key, expected) in [
+            (KeyCode::Down, 1),
+            (KeyCode::Up, 0),
+            (KeyCode::PageDown, ui.page_size),
+            (KeyCode::PageUp, 0),
+            (KeyCode::End, ui.details.error_max_scroll),
+        ] {
+            ui.key_action(KeyEvent::from(key), &state);
+            terminal.draw(|frame| draw(frame, &state, &mut ui)).unwrap();
+            assert_eq!(ui.details.error_scroll, expected);
+            assert_eq!((ui.details.scroll, ui.details.max_scroll), position);
+        }
+        assert!(terminal_text(&terminal).contains('终'));
+        ui.key_action(KeyEvent::from(KeyCode::Home), &state);
+        assert_eq!(ui.details.error_scroll, 0);
+
+        ui.details.state = DetailState::Loading;
+        terminal.draw(|frame| draw(frame, &state, &mut ui)).unwrap();
+        for key in [
+            KeyCode::Home,
+            KeyCode::End,
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+        ] {
+            ui.key_action(KeyEvent::from(key), &state);
+            assert_eq!((ui.details.scroll, ui.details.max_scroll), position);
+        }
+        ui.details.state = DetailState::Ready(Box::new(full_track(2)));
+        terminal.draw(|frame| draw(frame, &state, &mut ui)).unwrap();
+        assert_eq!((ui.details.scroll, ui.details.max_scroll), position);
+        assert_eq!(terminal_text(&terminal), ready_text);
     }
-    details.state = DetailState::Ready(Box::new(full_track(2)));
-    terminal
-        .draw(|frame| draw_details(frame, frame.area(), &mut details, &i18n, colors))
-        .unwrap();
-    assert_eq!((details.scroll, details.max_scroll), position);
 }
 
 #[test]

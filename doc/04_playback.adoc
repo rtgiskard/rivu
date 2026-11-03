@@ -463,8 +463,9 @@ and estimated bitrates `≈`. Loading, query failure, removal, and no selection 
 distinct states. This is not a tag editor or decoder control.
 
 Scroll details with arrows, PageUp/PageDown, or Home/End; Esc closes it and restores
-the source position. Help and details own navigation while open; actions do not
-reach the underlying list.
+the source position. Long query errors can be scrolled independently; loading and
+errors preserve the track details' reading position for a later successful refresh.
+Help and details own navigation while open; actions do not reach the underlying list.
 
 The bottom area keeps position, duration, volume, shuffle, and repeat available
 while browsing. Notifications distinguish warnings and errors; ordinary playback
