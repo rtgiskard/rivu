@@ -12,8 +12,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::ListState;
 use rivu_protocol::{
     model::{
-        Command, DirectoryRow, HistoryEntry, LibraryRow, PlaylistEntryRow, PlaylistSummary, Query,
-        QueueRow,
+        Command, DirectoryRow, HistoryEntry, LibraryRow, PlaybackStatus, PlaylistEntryRow,
+        PlaylistSummary, Query, QueueRow,
     },
     response::{QueryError, ViewResponse},
 };
@@ -143,6 +143,7 @@ pub(super) enum DetailState {
 pub(super) struct RecentTracks {
     pub(super) source: Arc<Vec<HistoryEntry>>,
     pub(super) entries: PagedList<usize>,
+    pub(super) playback: Option<(i64, i64)>,
 }
 
 impl RecentTracks {
@@ -150,24 +151,93 @@ impl RecentTracks {
         self.source.get(*self.entries.selected()?)
     }
 
-    fn sync(&mut self, source: &Arc<Vec<HistoryEntry>>, query: &str) {
-        if self.entries.loaded && Arc::ptr_eq(&self.source, source) {
+    pub(super) fn played_at(&self, entry: &HistoryEntry) -> i64 {
+        Self::recent_key(entry, self.playback).0
+    }
+
+    fn recent_key(entry: &HistoryEntry, playback: Option<(i64, i64)>) -> (i64, bool) {
+        let current = playback.filter(|&(id, _)| id == entry.track_id);
+        (
+            current.map_or(entry.played_at, |(_, time)| time),
+            current.is_some(),
+        )
+    }
+
+    fn sync(&mut self, state: &TuiSnapshot, query: &str) {
+        let source = &state.library.history;
+        let playback = (state.playback.status != PlaybackStatus::Stopped)
+            .then(|| {
+                state
+                    .current_track()
+                    .map(|track| track.id)
+                    .zip(state.playback.last_heard_at)
+            })
+            .flatten();
+        let rebuild = !self.entries.loaded || !Arc::ptr_eq(&self.source, source);
+        let previous_playback = self.playback;
+        if !rebuild && previous_playback == playback {
             return;
         }
         let selected_id = self.selected().map(|entry| entry.track_id);
         let old_position = self.entries.selection.selected().unwrap_or(0);
-        let mut indices = self.entries.pages.remove(&0).unwrap_or_default();
-        indices.clear();
-        let query = query.to_lowercase();
-        indices.extend((0..source.len().min(256)).filter(|&index| {
-            query.is_empty() || source[index].title.to_lowercase().contains(&query)
-        }));
-        indices.sort_unstable_by_key(|&index| {
+        self.playback = playback;
+        let key = |&index: &usize| {
             (
-                std::cmp::Reverse(source[index].played_at),
-                std::cmp::Reverse(source[index].track_id),
+                std::cmp::Reverse(Self::recent_key(&source[index], playback)),
+                index,
             )
-        });
+        };
+        if rebuild {
+            let mut indices = self.entries.pages.remove(&0).unwrap_or_default();
+            indices.clear();
+            let normalized_query = query.to_lowercase();
+            indices.extend((0..source.len().min(256)).filter(|&index| {
+                normalized_query.is_empty()
+                    || source[index]
+                        .title
+                        .to_lowercase()
+                        .contains(&normalized_query)
+            }));
+            indices.sort_unstable_by_key(key);
+            self.source = Arc::clone(source);
+            let total = indices.len();
+            self.entries.clear();
+            self.entries.insert(0, total.max(1), total, indices);
+        } else if let Some(indices) = self.entries.pages.get_mut(&0) {
+            let mut affected = [previous_playback, playback].map(|current| {
+                current.and_then(|(id, _)| {
+                    indices
+                        .iter()
+                        .position(|&index| source[index].track_id == id)
+                })
+            });
+            if affected[0] == affected[1] {
+                affected[1] = None;
+            }
+            // Only the old and new current rows change keys. Ordinary playback
+            // ticks keep the projection and its allocation untouched.
+            let needs_reorder = affected.iter().flatten().any(|&position| {
+                (position > 0 && key(&indices[position - 1]) > key(&indices[position]))
+                    || (position + 1 < indices.len()
+                        && key(&indices[position]) > key(&indices[position + 1]))
+            });
+            if !needs_reorder {
+                return;
+            }
+            // Remove both changed keys before searching the otherwise sorted rows.
+            affected.sort_unstable_by(|a, b| b.cmp(a));
+            let mut removed = [None, None];
+            for (slot, position) in removed.iter_mut().zip(affected) {
+                if let Some(position) = position {
+                    *slot = Some(indices.remove(position));
+                }
+            }
+            for index in removed.into_iter().flatten() {
+                let position = indices.partition_point(|other| key(other) < key(&index));
+                indices.insert(position, index);
+            }
+        }
+        let indices = &self.entries.pages[&0];
         let selected = selected_id
             .and_then(|id| {
                 indices
@@ -175,13 +245,10 @@ impl RecentTracks {
                     .position(|&index| source[index].track_id == id)
             })
             .unwrap_or(old_position.min(indices.len().saturating_sub(1)));
-        self.source = Arc::clone(source);
-        let total = indices.len();
-        self.entries.clear();
         self.entries
             .selection
-            .select((total != 0).then_some(selected));
-        self.entries.insert(0, total.max(1), total, indices);
+            .select((!indices.is_empty()).then_some(selected));
+        self.entries.set_viewport(self.entries.viewport_rows);
     }
 }
 
@@ -248,7 +315,7 @@ impl View {
         query: &str,
     ) -> bool {
         if let Self::Recent(recent) = self {
-            recent.sync(&next.library.history, query);
+            recent.sync(next, query);
             return false;
         }
         let rows_changed = self
@@ -1078,7 +1145,7 @@ impl UiState {
             View::Recent(recent) => {
                 let selected_id = recent.selected().map(|entry| entry.track_id);
                 recent.entries.loaded = false;
-                recent.sync(&state.library.history, &self.search.applied_query);
+                recent.sync(state, &self.search.applied_query);
                 if selected_id
                     .is_some_and(|id| recent.selected().is_none_or(|entry| entry.track_id != id))
                 {
@@ -1186,7 +1253,7 @@ impl UiState {
                 .unwrap_or_else(|| View::Tree(LibraryTree::new(&state.system.library_roots))),
             TopTab::Recent => self.cached_recent.take().unwrap_or_else(|| {
                 let mut recent = RecentTracks::default();
-                recent.sync(&state.library.history, "");
+                recent.sync(state, "");
                 View::Recent(recent)
             }),
         };

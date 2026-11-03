@@ -982,6 +982,177 @@ fn recent_entry(id: i64, played_at: i64) -> HistoryEntry {
     }
 }
 
+fn recent_ids(recent: &RecentTracks) -> Vec<i64> {
+    (0..recent.entries.total)
+        .map(|position| recent.source[*recent.entries.get(position).unwrap()].track_id)
+        .collect()
+}
+
+#[test]
+fn recent_playback_overrides_time_and_breaks_ties_before_source_order() {
+    let mut state = query_snapshot();
+    state.library.history = Arc::new(vec![
+        recent_entry(90, 20),
+        recent_entry(4, 20),
+        recent_entry(60, 20),
+    ]);
+    state.current_track = Some(Arc::new(full_track(60)));
+    state.playback.status = PlaybackStatus::Playing;
+    state.playback.last_heard_at = Some(20);
+    let mut recent = RecentTracks::default();
+    recent.sync(&state, "");
+    assert_eq!(recent_ids(&recent), [60, 90, 4]);
+    assert_eq!(recent.played_at(&recent.source[2]), 20);
+
+    state.playback.status = PlaybackStatus::Paused;
+    state.playback.last_heard_at = Some(10);
+    recent.sync(&state, "");
+    assert_eq!(recent_ids(&recent), [90, 4, 60]);
+    assert_eq!(recent.played_at(&recent.source[2]), 10);
+    assert_eq!(recent.source[2].played_at, 20);
+    assert_eq!(recent.source[2].play_count, 1);
+
+    state.playback.last_heard_at = Some(30);
+    recent.sync(&state, "");
+    assert_eq!(recent_ids(&recent), [60, 90, 4]);
+    state.playback.status = PlaybackStatus::Stopped;
+    recent.sync(&state, "");
+    assert_eq!(recent_ids(&recent), [90, 4, 60]);
+    assert_eq!(recent.played_at(&recent.source[2]), 20);
+
+    state.playback.status = PlaybackStatus::Playing;
+    state.playback.last_heard_at = None;
+    recent.sync(&state, "");
+    assert_eq!(recent_ids(&recent), [90, 4, 60]);
+    state.playback.last_heard_at = Some(30);
+    state.current_track = None;
+    recent.sync(&state, "");
+    assert_eq!(recent_ids(&recent), [90, 4, 60]);
+}
+
+#[test]
+fn recent_track_switch_reorders_both_playback_rows_and_preserves_selection() {
+    let mut state = query_snapshot();
+    state.library.history = Arc::new(vec![
+        recent_entry(9, 40),
+        recent_entry(4, 30),
+        recent_entry(7, 20),
+        recent_entry(2, 30),
+    ]);
+    state.current_track = Some(Arc::new(full_track(7)));
+    state.playback.status = PlaybackStatus::Playing;
+    state.playback.last_heard_at = Some(50);
+    let mut recent = RecentTracks::default();
+    recent.sync(&state, "");
+    assert_eq!(recent_ids(&recent), [7, 9, 4, 2]);
+    recent.entries.selection.select(Some(2));
+
+    state.current_track = Some(Arc::new(full_track(2)));
+    state.playback.last_heard_at = Some(40);
+    recent.sync(&state, "");
+    assert_eq!(recent_ids(&recent), [2, 9, 4, 7]);
+    assert_eq!(recent.selected().unwrap().track_id, 4);
+    state.playback.status = PlaybackStatus::Stopped;
+    recent.sync(&state, "");
+    assert_eq!(recent_ids(&recent), [9, 4, 2, 7]);
+    assert_eq!(recent.selected().unwrap().track_id, 4);
+    assert_eq!(recent.entries.selection.selected(), Some(1));
+}
+
+#[test]
+fn recent_playback_ticks_keep_filtered_selection_and_history_limit() {
+    let mut state = query_snapshot();
+    state.library.history = Arc::new((1..=257).map(|id| recent_entry(id, id)).collect());
+    state.current_track = Some(Arc::new(full_track(256)));
+    state.playback.status = PlaybackStatus::Playing;
+    state.playback.last_heard_at = Some(300);
+    let mut recent = RecentTracks::default();
+    recent.sync(&state, "recent-2");
+    assert_eq!(recent.entries.total, 68);
+    assert!(!recent_ids(&recent).contains(&257));
+    recent.entries.set_viewport(4);
+    recent.entries.selection.select(Some(5));
+    recent.entries.set_viewport(4);
+    let selected = recent.selected().unwrap().track_id;
+    let offset = recent.entries.selection.offset();
+    for time in [301, 319] {
+        state.playback.last_heard_at = Some(time);
+        recent.sync(&state, "recent-2");
+        assert_eq!(recent.entries.selection.offset(), offset);
+        assert_eq!(recent.selected().unwrap().track_id, selected);
+        assert_eq!(recent.played_at(&recent.source[255]), time);
+    }
+    state.current_track = Some(Arc::new(full_track(257)));
+    recent.sync(&state, "recent-2");
+    assert_eq!(recent.entries.total, 68);
+    assert!(!recent_ids(&recent).contains(&257));
+    assert!(recent.source.iter().all(|entry| entry.play_count == 1));
+}
+
+#[test]
+fn recent_search_clear_and_cached_playback_updates_follow_selection_rules() {
+    let mut state = query_snapshot();
+    let mut first = recent_entry(1, 10);
+    first.title = "keep first".into();
+    let mut second = recent_entry(2, 20);
+    second.title = "keep second".into();
+    state.library.history = Arc::new(vec![first, second, recent_entry(3, 30)]);
+    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
+    tui.ui.key_action(KeyEvent::from(KeyCode::BackTab), &state);
+    tui.ui.open_search();
+    tui.ui.search.query = "KEEP".into();
+    tui.ui.key_action(KeyEvent::from(KeyCode::Enter), &state);
+    tui.ui.key_action(KeyEvent::from(KeyCode::Down), &state);
+
+    state.current_track = Some(Arc::new(full_track(1)));
+    state.playback.status = PlaybackStatus::Playing;
+    state.playback.last_heard_at = Some(40);
+    tui.apply_snapshot(state.clone());
+    let View::Recent(recent) = &tui.ui.view else {
+        unreachable!()
+    };
+    assert_eq!(recent_ids(recent), [1, 2]);
+    assert_eq!(recent.selected().unwrap().track_id, 1);
+    assert_eq!(recent.entries.selection.selected(), Some(0));
+
+    state.playback.status = PlaybackStatus::Stopped;
+    tui.apply_snapshot(state.clone());
+    let View::Recent(recent) = &tui.ui.view else {
+        unreachable!()
+    };
+    assert_eq!(recent_ids(recent), [2, 1]);
+    assert_eq!(recent.selected().unwrap().track_id, 1);
+    tui.ui.key_action(KeyEvent::from(KeyCode::Tab), &state);
+    let Some(View::Recent(recent)) = &tui.ui.cached_recent else {
+        unreachable!()
+    };
+    assert_eq!(recent_ids(recent), [3, 2, 1]);
+    assert_eq!(recent.selected().unwrap().track_id, 1);
+
+    for (id, time, expected) in [(2, 50, [2, 3, 1]), (3, 60, [3, 2, 1])] {
+        state.current_track = Some(Arc::new(full_track(id)));
+        state.playback.status = PlaybackStatus::Playing;
+        state.playback.last_heard_at = Some(time);
+        tui.apply_snapshot(state.clone());
+        let Some(View::Recent(recent)) = &tui.ui.cached_recent else {
+            unreachable!()
+        };
+        assert_eq!(recent_ids(recent), expected);
+        assert_eq!(recent.selected().unwrap().track_id, 1);
+        assert_eq!(recent.played_at(&recent.source[(id - 1) as usize]), time);
+    }
+    tui.ui.key_action(KeyEvent::from(KeyCode::BackTab), &state);
+    let View::Recent(recent) = &tui.ui.view else {
+        unreachable!()
+    };
+    assert_eq!(recent_ids(recent), [3, 2, 1]);
+    assert_eq!(recent.selected().unwrap().track_id, 1);
+    assert!(matches!(
+        tui.ui.key_action(KeyEvent::from(KeyCode::Enter), &state),
+        KeyAction::Command(Command::Play { track_id: 1 })
+    ));
+}
+
 #[test]
 fn recent_refresh_preserves_selected_track_across_reorder_and_hidden_updates() {
     let mut state = query_snapshot();

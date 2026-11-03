@@ -1277,31 +1277,38 @@ fn draw_recent(
     i18n: &Localizer,
     colors: TerminalColors,
 ) {
-    let width = area.width.saturating_sub(4) as usize;
-    let source = &recent.source;
+    let width = area.width.saturating_sub(2) as usize;
+    let mut entries = std::mem::take(&mut recent.entries);
     draw_paged_list(
         frame,
         area,
         i18n.text("terminal-recent").into(),
-        &mut recent.entries,
+        &mut entries,
         |index| {
-            let entry = &source[*index];
-            let title = if width >= 35 {
-                chrono::DateTime::from_timestamp(entry.played_at, 0).map_or_else(
-                    || Cow::Owned(entry.title.clone()),
-                    |time| {
-                        Cow::Owned(format!(
-                            "{}  {}",
-                            cell_text(&entry.title, width - 21, false),
-                            time.with_timezone(&chrono::Local)
-                                .format("%Y-%m-%d %H:%M:%S")
-                        ))
-                    },
-                )
-            } else {
-                Cow::Owned(entry.title.clone())
-            };
-            RowContent::label(title, " ")
+            let entry = &recent.source[*index];
+            let count = entry.play_count.to_string();
+            let count_width = count.len().min(width.saturating_sub(1));
+            let time = (width >= count_width + 2 + 19 + 2 + 12)
+                .then(|| recent.played_at(entry))
+                .and_then(|timestamp| chrono::DateTime::from_timestamp(timestamp, 0));
+            let time_width = if time.is_some() { 21 } else { 0 };
+            let gap = usize::from(width > count_width);
+            let title_width = width.saturating_sub(count_width + gap + time_width);
+            let mut title = cell_text(&entry.title, title_width, false);
+            if gap != 0 {
+                title.push(' ');
+            }
+            title.push_str(&cell_text(&count, count_width, true));
+            if let Some(time) = time {
+                title.push_str("  ");
+                title.push_str(
+                    &time
+                        .with_timezone(&chrono::Local)
+                        .format("%Y-%m-%d %H:%M:%S")
+                        .to_string(),
+                );
+            }
+            RowContent::label(Cow::Owned(title), " ")
         },
         i18n,
         BrowserStyle {
@@ -1309,6 +1316,7 @@ fn draw_recent(
             colors,
         },
     );
+    recent.entries = entries;
 }
 
 #[derive(Clone, Copy)]

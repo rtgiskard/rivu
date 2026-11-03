@@ -318,8 +318,9 @@ History records the last playback activity, not necessarily a counted play;
 it is not a per-play log. Timestamps are Unix seconds in JSON.
 Recent entries reflect edited titles and current counts. Crossing the counting
 threshold refreshes activity; editing a title does not. GUI Last played sorting
-uses the current playing or paused track's live timestamp, placing it first among
-equal-second timestamps when newest-first. Up to 256 recent tracks are retained.
+and TUI Recent ordering use the current playing or paused track's live timestamp,
+placing it first among equal-second timestamps when newest-first.
+Up to 256 recent tracks are retained.
 
 If saving final listening statistics fails, Rivu keeps the pending facts in memory
 and retries on playback transitions and orderly shutdown, without double-counting

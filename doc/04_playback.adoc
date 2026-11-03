@@ -391,10 +391,13 @@ track. `Alt+e` enqueues the selected Library directory or the complete Other
 collection, regardless of filters. Selecting a row alone does not change playback.
 
 Recent is always available, including when empty. It shows the published
-history of up to 256 unique tracks in recent-play order, with titles and local
-last-played timestamps where width permits. Enter plays the selected track,
-`i` opens its details, and `m` toggles its favorite. Navigation and shared playback
-shortcuts work as on other track lists; Recent has no sorting or removal.
+history of up to 256 unique tracks in recent-play order, with titles, play counts,
+and local last-played timestamps where width permits. Narrow terminals hide the
+timestamp before the count. The playing or paused track uses its live activity
+time for ordering and display. Reordering preserves the selected track.
+Enter plays the selected track, `i` opens its details, and `m` toggles its favorite.
+Navigation and shared playback shortcuts work as on other track lists; Recent has
+no user-selectable sorting or removal.
 
 Use `/` to search the current page, then Enter to apply; typing alone does not
 change the results. Applying or clearing search keeps the selected entry if it

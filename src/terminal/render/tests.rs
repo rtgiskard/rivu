@@ -27,24 +27,35 @@ fn recent_renders_source_indices_and_timestamps() {
             rivu_protocol::model::HistoryEntry {
                 track_id: 2,
                 title: "Recent title".into(),
-                play_count: 2,
+                play_count: 12345,
                 played_at: 1_700_000_000,
                 favorite: true,
             },
         ]),
-        entries: PagedList::default(),
+        playback: Some((2, 1_700_000_100)),
+        ..RecentTracks::default()
     };
     recent.entries.insert(0, 256, 1, vec![1]);
-    for width in [24, 80] {
+    for width in [1, 2, 8, 24, 80] {
         let mut terminal = Terminal::new(TestBackend::new(width, 8)).unwrap();
         terminal
             .draw(|frame| draw_recent(frame, frame.area(), &mut recent, &i18n, colors))
             .unwrap();
         let text = terminal_text(&terminal);
-        assert!(text.contains("Recent title"));
+        if width >= 24 {
+            assert!(text.contains("Recent title"));
+            let row: String = (0..width)
+                .map(|x| terminal.backend().buffer()[(x, 1)].symbol())
+                .collect();
+            assert!(row.contains("12345"), "{row}");
+            if width == 24 {
+                assert!(row.trim_end().ends_with("12345"), "{row}");
+                assert!(!row.contains("2023-"), "{row}");
+            }
+        }
         assert!(!text.contains("Not selected"));
         if width == 80 {
-            let timestamp = chrono::DateTime::from_timestamp(1_700_000_000, 0)
+            let timestamp = chrono::DateTime::from_timestamp(1_700_000_100, 0)
                 .unwrap()
                 .with_timezone(&chrono::Local)
                 .format("%Y-%m-%d %H:%M:%S")

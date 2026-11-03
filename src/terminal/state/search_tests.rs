@@ -415,7 +415,7 @@ fn recent_filters_only_titles_locally_and_preserves_same_query_selection() {
     ]);
     let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
     let mut recent = RecentTracks::default();
-    recent.sync(&state.library.history, "");
+    recent.sync(&state, "");
     tui.ui.view = View::Recent(recent);
     tui.ui.open_search();
     tui.ui.search.query = "NEEDLE".into();
@@ -1328,7 +1328,7 @@ fn recent_search_preserves_current_track_or_first_without_hidden_selection() {
             .collect(),
     );
     let mut recent = RecentTracks::default();
-    recent.sync(&state.library.history, "");
+    recent.sync(&state, "");
     let mut ui = UiState {
         view: View::Recent(recent),
         ..UiState::default()
