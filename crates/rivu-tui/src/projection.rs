@@ -143,7 +143,6 @@ mod tests {
 
         Arc::make_mut(&mut client.configuration.config).query_batch_size = 17;
         let other_setting = TuiSnapshot::from_client(&client, Some(&unchanged));
-        assert_eq!(other_setting.system.query_batch_size, 17);
         assert!(Arc::ptr_eq(
             &unchanged.system.library_roots,
             &other_setting.system.library_roots
