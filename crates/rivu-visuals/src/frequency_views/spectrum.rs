@@ -31,6 +31,9 @@ pub(super) struct Spectrum {
     pub(super) rectangles: Vec<GpuRectangle>,
     pub(super) mappings: HashMap<u64, SpectrumMapping>,
     pub(super) presentations: HashMap<u64, SpectrumPresentation>,
+    // Advances only when drawable envelope values or labels change. Analysis
+    // sequence and hold deadlines are not publication identities.
+    pub(super) output_revision: u64,
     pub(super) last_update: Option<Duration>,
     pub(super) top_db: f32,
     pub(super) db_range: f32,
@@ -64,6 +67,7 @@ impl Spectrum {
             rectangles: Vec::new(),
             mappings: HashMap::new(),
             presentations: HashMap::new(),
+            output_revision: 0,
             last_update: None,
             top_db: 0.0,
             db_range: config.spectrum_db_range(),
@@ -78,6 +82,10 @@ impl Spectrum {
             bar_gravity: config.spectrum_bar_gravity,
             smoothing_ms: config.spectrum_smoothing_ms,
         }
+    }
+
+    pub(super) fn mark_output_changed(&mut self) {
+        self.output_revision = self.output_revision.wrapping_add(1);
     }
 }
 
@@ -96,10 +104,27 @@ pub(super) struct SpectrumMapping {
 }
 
 pub(super) struct SpectrumPresentation {
+    key: SpectrumPresentationKey,
     pub(super) body: Option<Arc<GpuFrame>>,
     pub(super) peaks: Vec<(Bounds<f32>, f32, u32)>,
     pub(super) labels: [SharedString; 2],
     pub(super) db_labels: [SharedString; 4],
+}
+
+#[derive(PartialEq)]
+struct SpectrumPresentationKey {
+    output_revision: u64,
+    plot: Bounds<Pixels>,
+    grouping: SpectrumGroupingKey,
+    top_db: f32,
+    db_range: f32,
+    style: SpectrumStyle,
+    gap: f32,
+    interpolate: bool,
+    show_peaks: bool,
+    bar_gravity: f32,
+    palette: rivu_format::config::VisualizationPalette,
+    background: u32,
 }
 
 impl FrequencyState {
@@ -108,6 +133,7 @@ impl FrequencyState {
             for (_, fraction, color) in &mut presentation.peaks {
                 *color = stop_color(self.palette_lut.lookup_rgb(*fraction));
             }
+            presentation.key.palette = self.palette_lut.palette;
             let Some(body) = &mut presentation.body else {
                 continue;
             };
@@ -153,7 +179,7 @@ impl FrequencyState {
         let mut changed = false;
         for index in 0..self.spectrum.peaks.len() {
             let before = self.display_level(index);
-            let peak_before = self.spectrum.peaks[index];
+            let peak_before = finite_level(self.spectrum.peaks[index]);
             let value = finite_level(self.latest_levels[index]);
             // Only accepted input can renew hold deadlines.
             self.spectrum.peaks[index] = advance_envelope(
@@ -178,8 +204,12 @@ impl FrequencyState {
             .0;
             self.spectrum.smoothed_levels[index] =
                 smooth_release(self.spectrum.smoothed_levels[index], value, decay);
-            changed |=
-                before != self.display_level(index) || peak_before != self.spectrum.peaks[index];
+            changed |= before != self.display_level(index)
+                || (self.spectrum.show_peaks
+                    && peak_before != finite_level(self.spectrum.peaks[index]));
+        }
+        if changed {
+            self.spectrum.mark_output_changed();
         }
         changed
     }
@@ -241,9 +271,13 @@ impl FrequencyState {
     }
 
     pub(super) fn refresh_db_labels(&mut self) {
-        self.spectrum.db_labels = std::array::from_fn(|step| {
+        let labels = std::array::from_fn(|step| {
             db_label(self.spectrum.top_db - self.spectrum.db_range * step as f32 / 3.0)
         });
+        if self.spectrum.db_labels != labels {
+            self.spectrum.db_labels = labels;
+            self.spectrum.mark_output_changed();
+        }
     }
 
     pub(super) fn spectrum_render_range(&self) -> Option<(usize, usize, f32, f32)> {
@@ -521,6 +555,33 @@ impl FrequencyState {
             self.spectrum.bar_layout,
             self.spectrum.gap,
         );
+        let key = SpectrumPresentationKey {
+            output_revision: self.spectrum.output_revision,
+            plot,
+            grouping: SpectrumGroupingKey {
+                bars,
+                generation: self.stream_generation,
+                low,
+                high,
+            },
+            top_db: self.spectrum.top_db,
+            db_range: self.spectrum.db_range,
+            style: self.spectrum.style,
+            gap: self.spectrum.gap,
+            interpolate: self.spectrum.interpolate,
+            show_peaks: self.spectrum.show_peaks,
+            bar_gravity: self.spectrum.bar_gravity,
+            palette: self.palette_lut.palette,
+            background: self.visualization_background,
+        };
+        if self
+            .spectrum
+            .presentations
+            .get(&panel_id)
+            .is_some_and(|presentation| presentation.key == key)
+        {
+            return Ok(());
+        }
         let body = self.prepare_spectrum_body(panel_id, plot, bars, low, high)?;
         let mut peaks = self
             .spectrum
@@ -580,6 +641,7 @@ impl FrequencyState {
         self.spectrum.presentations.insert(
             panel_id,
             SpectrumPresentation {
+                key,
                 body,
                 peaks,
                 labels: self.spectrum.labels.clone(),
@@ -598,12 +660,15 @@ impl FrequencyState {
         cx: &mut App,
     ) -> Result<(), String> {
         let show_labels = spectrum_labels_visible(options.labels, bounds.size.height);
-        let labels = self
-            .spectrum
-            .presentations
-            .get(&panel_id)
-            .map(|presentation| &presentation.labels)
-            .unwrap_or(&self.spectrum.labels);
+        let labels = if self.spectrum_render_range().is_some() {
+            &self.spectrum.labels
+        } else {
+            self.spectrum
+                .presentations
+                .get(&panel_id)
+                .map(|presentation| &presentation.labels)
+                .unwrap_or(&self.spectrum.labels)
+        };
         let left_margin = axis_label_margin(show_labels, labels);
         let bottom_margin = if show_labels { 22.0 } else { 8.0 };
         let plot = Bounds::new(

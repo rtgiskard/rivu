@@ -291,7 +291,7 @@ impl FrequencyViews {
 
     pub fn update(&mut self, frame: &AnalysisFrame, presentation_time: Duration) {
         let mut data = self.data.borrow_mut();
-        if !data.enabled {
+        if !data.enabled || (!data.spectrum.visible && !data.spectrogram.visible) {
             return;
         }
         if !frame.settings.is_some_and(|settings| {
@@ -379,6 +379,7 @@ impl FrequencyViews {
             return;
         }
         data.spectrum.last_update = Some(now);
+        let mut output_changed = false;
         if !data.spectrum.envelope_initialized
             || data.spectrum.peaks.len() != frame.spectrum_db.len()
         {
@@ -396,9 +397,12 @@ impl FrequencyViews {
                 .bar_deadlines
                 .resize(frame.spectrum_db.len(), bar_deadline);
             data.spectrum.envelope_initialized = true;
+            output_changed = true;
         }
         // Only accepted input may raise levels or renew hold deadlines.
         for index in 0..data.spectrum.peaks.len() {
+            let before = data.display_level(index);
+            let peak_before = finite_level(data.spectrum.peaks[index]);
             let value = finite_level(frame.spectrum_db[index]);
             if value >= data.spectrum.peaks[index] {
                 data.spectrum.peaks[index] = value;
@@ -411,6 +415,12 @@ impl FrequencyViews {
                     now + Duration::from_millis(data.spectrum.bar_hold_ms as u64);
             }
             data.spectrum.smoothed_levels[index] = data.spectrum.smoothed_levels[index].max(value);
+            output_changed |= before != data.display_level(index)
+                || (data.spectrum.show_peaks
+                    && peak_before != finite_level(data.spectrum.peaks[index]));
+        }
+        if output_changed {
+            data.spectrum.mark_output_changed();
         }
         let top_levels = if data.spectrum.show_peaks {
             &data.spectrum.peaks
@@ -427,7 +437,10 @@ impl FrequencyViews {
     /// Evolve retained display state without accepting or pooling analysis again.
     pub fn animate(&mut self, presentation_time: Duration) -> bool {
         let mut data = self.data.borrow_mut();
-        if !data.enabled || data.error.is_some() {
+        if !data.enabled
+            || (!data.spectrum.visible && !data.spectrogram.visible)
+            || data.error.is_some()
+        {
             return false;
         }
         let Some(latest) = data.latest_sample_time else {
@@ -683,7 +696,11 @@ impl FrequencyState {
             self.spectrogram.frequency_labels = [frequency_label(low), frequency_label(high)];
         }
         if let Some((_, _, low, high)) = self.spectrum_range() {
-            self.spectrum.labels = [note_label(low), note_label(high)];
+            let labels = [note_label(low), note_label(high)];
+            if self.spectrum.labels != labels {
+                self.spectrum.labels = labels;
+                self.spectrum.mark_output_changed();
+            }
         }
     }
 
@@ -1857,6 +1874,141 @@ mod tests {
         data.prepare_spectrum_presentation(panel_id, retention_plot())
             .unwrap();
         data.prepare_spectrogram_presentation(panel_id).unwrap();
+    }
+
+    fn published_spectrum_rectangles(
+        visuals: &FrequencyViews,
+        panel_id: u64,
+        plot: Bounds<Pixels>,
+    ) -> Vec<[f32; 4]> {
+        let mut data = visuals.data.borrow_mut();
+        data.prepare_spectrum_presentation(panel_id, plot).unwrap();
+        let body = data.spectrum.presentations[&panel_id]
+            .body
+            .as_ref()
+            .unwrap();
+        let gpui::GpuContent::Rectangles { rectangles, .. } = body.content() else {
+            panic!("expected spectrum rectangles");
+        };
+        rectangles
+            .iter()
+            .map(|rectangle| rectangle.bounds)
+            .collect()
+    }
+
+    #[test]
+    fn spectrum_envelope_scale_labels_and_resize_publish_matching_geometry() {
+        let mut visuals = configured_visuals();
+        let config = Config {
+            spectrum_style: SpectrumStyle::Bars,
+            spectrum_peaks: true,
+            spectrum_db_range: Some(100.0),
+            spectrum_bar_layout: SpectrumBarLayout::Fixed { count: 4 },
+            spectrum_gap: 2.0,
+            spectrum_interpolate: true,
+            spectrum_peak_hold_ms: 0,
+            spectrum_peak_gravity: 0.0,
+            spectrum_bar_hold_ms: 0,
+            spectrum_bar_gravity: 0.0,
+            spectrum_smoothing_ms: 0,
+            ..Config::default()
+        };
+        visuals.configure_config(&config);
+        let start = Duration::from_secs(1);
+        visuals.update(&frame(1.0, -12.0), start);
+        let high = published_spectrum_rectangles(&visuals, 1, retention_plot());
+        assert!(high.iter().all(|bounds| (bounds[3] - 0.88).abs() < 1e-6));
+        let quieter = frame(1.2, -48.0);
+        visuals.update(&quieter, start);
+        assert_eq!(
+            high,
+            published_spectrum_rectangles(&visuals, 1, retention_plot())
+        );
+        visuals.animate(Duration::from_millis(1100));
+        let released = published_spectrum_rectangles(&visuals, 1, retention_plot());
+        assert!(
+            released
+                .iter()
+                .all(|bounds| (bounds[3] - 0.52).abs() < 1e-6)
+        );
+        assert!(
+            visuals.data.borrow().spectrum.presentations[&1]
+                .peaks
+                .iter()
+                .all(|(_, fraction, _)| (*fraction - 0.52).abs() < 1e-6)
+        );
+
+        let mut boosted = frame(1.3, 10.0);
+        visuals.update(&boosted, boosted.sample_time);
+        let scaled = published_spectrum_rectangles(&visuals, 1, retention_plot());
+        assert!(scaled.iter().all(|bounds| (bounds[3] - 0.98).abs() < 1e-6));
+        assert_eq!(
+            visuals.data.borrow().spectrum.presentations[&1].db_labels[0],
+            "+12 dB"
+        );
+        let labels = visuals.data.borrow().spectrum.presentations[&1]
+            .labels
+            .clone();
+        boosted.frequencies_hz = vec![40.0, 400.0, 4000.0, 16_000.0];
+        visuals.update(&boosted, boosted.sample_time);
+        let regrouped = published_spectrum_rectangles(&visuals, 1, retention_plot());
+        assert!(
+            regrouped
+                .iter()
+                .all(|bounds| (bounds[3] - 0.98).abs() < 1e-6)
+        );
+        assert_ne!(
+            visuals.data.borrow().spectrum.presentations[&1].labels,
+            labels
+        );
+        let resized = Bounds::new(point(px(23.0), px(8.0)), size(px(100.0), px(50.0)));
+        let rectangles = published_spectrum_rectangles(&visuals, 1, resized);
+        assert_eq!(rectangles.len(), 4);
+        assert!((rectangles[0][0] - 0.01).abs() < 1e-6);
+        assert!((rectangles[0][2] - 0.23).abs() < 1e-6);
+        assert!(
+            visuals.data.borrow().spectrum.presentations[&1]
+                .peaks
+                .iter()
+                .all(|(bounds, _, _)| (bounds.size.height - 0.02).abs() < 1e-6)
+        );
+    }
+
+    #[test]
+    fn no_frequency_consumers_retain_output_without_accepting_live_audio() {
+        let mut visuals = configured_visuals();
+        visuals.configure_config(&Config {
+            spectrum_style: SpectrumStyle::Bars,
+            spectrum_db_range: Some(100.0),
+            ..Config::default()
+        });
+        let audio = frame(1.0, -12.0);
+        visuals.update(&audio, audio.sample_time);
+        let first = published_spectrum_rectangles(&visuals, 1, retention_plot());
+        visuals.retain_presentation_panels(&[1], &[1]);
+        visuals.set_spectrum_visible(false);
+        visuals.retain_spectrogram_panels(&[]);
+        let hidden = frame(2.0, -48.0);
+        visuals.update(&hidden, hidden.sample_time);
+        assert!(!visuals.animate(hidden.sample_time));
+        assert_eq!(
+            visuals.data.borrow().last_analysis_sequence,
+            Some(audio.sequence)
+        );
+        assert_eq!(
+            first,
+            published_spectrum_rectangles(&visuals, 1, retention_plot())
+        );
+        assert!(visuals.set_spectrum_visible(true));
+        // Restoration accepts the retained frame even though its sequence has
+        // not advanced since the last accepted input.
+        visuals.update(&audio, audio.sample_time);
+        let restored = published_spectrum_rectangles(&visuals, 1, retention_plot());
+        assert!(
+            restored
+                .iter()
+                .all(|bounds| (bounds[3] - 0.88).abs() < 1e-6)
+        );
     }
 
     #[test]

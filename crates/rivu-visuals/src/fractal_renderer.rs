@@ -392,7 +392,9 @@ impl FractalState {
     }
 
     fn publish(&mut self) {
-        if !self.visible || self.last_time.is_none() || self.scene.is_none() {
+        // Material changes can republish a suspended scene without a live clock.
+        // Retired hidden scenes have no geometry and keep their final frame.
+        if self.scene.is_none() {
             if !self.retained {
                 self.gpu_frame = None;
             }
@@ -402,7 +404,9 @@ impl FractalState {
         match result {
             Ok(frame) => {
                 self.gpu_frame = Some(frame);
-                self.retained = false;
+                if self.visible && self.last_time.is_some() {
+                    self.retained = false;
+                }
                 self.gpu_error_reported = false;
             }
             Err(error) => {
@@ -926,6 +930,107 @@ mod tests {
     }
 
     #[test]
+    fn paused_material_changes_preserve_geometry_and_resume_without_audio_replay() {
+        for style in [
+            AudioVisualizerStyle::FractalBeams,
+            AudioVisualizerStyle::FractalFlow,
+        ] {
+            for inactive_tab in [false, true] {
+                let visual = plot(style);
+                let reference = plot(style);
+                for t in (50..=1000).step_by(50) {
+                    accept(&visual, &frame(t));
+                    accept(&reference, &frame(t));
+                }
+                let geometry = visual.data.borrow().segments().to_vec();
+                let drawing = published_segments(&publication(&visual));
+                assert!(!drawing.is_empty());
+                if inactive_tab {
+                    visual.set_activity(true, false);
+                } else {
+                    visual.suspend();
+                }
+                reference.suspend();
+                let drive = visual.data.borrow().drive;
+                let target = visual.data.borrow().target;
+                let source = visual.data.borrow().source;
+                let previous_energy = visual.data.borrow().previous_energy;
+                let mut config = Config::default();
+                for change in 0..4 {
+                    let before = publication(&visual);
+                    match change {
+                        0 => config.effect_primary_color = "#ff0000".parse().unwrap(),
+                        1 => config.effect_secondary_color = "#0000ff".parse().unwrap(),
+                        2 => config.reactive_bloom_intensity = 0.9,
+                        _ => config.reactive_bloom_intensity = 0.0,
+                    }
+                    assert!(visual.configure_config(&config));
+                    let after = publication(&visual);
+                    assert_ne!(before.palette().colors(), after.palette().colors());
+                    assert_eq!(after.palette().colors()[0][0..3], [1.0, 0.0, 0.0]);
+                    if change >= 1 {
+                        assert_eq!(after.palette().colors()[6][0..3], [0.0, 0.0, 1.0]);
+                    }
+                    if change >= 2 {
+                        let expected_alpha = 0.045 * config.reactive_bloom_intensity / 6.0;
+                        assert!((after.palette().colors()[0][3] - expected_alpha).abs() < 1e-7);
+                    }
+                    let gpui::GpuContent::Segments { layers, .. } = after.content() else {
+                        panic!("expected fractal segments");
+                    };
+                    assert_eq!(layers.len(), if change == 3 { 1 } else { 3 });
+                    assert_eq!(layers.last().unwrap().width, 1.0);
+                    assert_eq!(layers.last().unwrap().palette_offset, 18);
+                    assert_eq!(published_segments(&after), drawing);
+                    assert!(!visual.configure_config(&config));
+                    assert!(!visual.animate(Duration::from_secs(60)));
+                    let data = visual.data.borrow();
+                    assert_eq!(data.segments(), geometry);
+                    assert_eq!(data.last_time, None);
+                    assert_eq!(data.last_presentation_time, None);
+                    assert_eq!(data.source, source);
+                    assert_eq!(data.drive.bands, drive.bands);
+                    assert_eq!(data.drive.energy, drive.energy);
+                    assert_eq!(data.drive.onset, 0.0);
+                    assert_eq!(data.target.bands, target.bands);
+                    assert_eq!(data.target.energy, target.energy);
+                    assert_eq!(data.previous_energy, previous_energy);
+                    assert_eq!(data.pending_onset, 0.0);
+                    assert!(data.retained);
+                }
+                if inactive_tab {
+                    visual.set_activity(true, true);
+                }
+                let material = publication(&visual);
+                let mut resumed = frame(60_000);
+                resumed.rms_left = 1.0;
+                resumed.rms_right = 1.0;
+                resumed.visualizer.band_rms = [1.0; 3];
+                visual.update(&resumed, resumed.sample_time);
+                reference.update(&resumed, resumed.sample_time);
+                assert_eq!(visual.data.borrow().segments(), geometry);
+                assert_eq!(visual.data.borrow().pending_onset, 0.0);
+                assert_eq!(
+                    publication(&visual).palette().colors(),
+                    material.palette().colors()
+                );
+                assert_eq!(published_segments(&publication(&visual)), drawing);
+                assert!(!visual.animate(resumed.sample_time));
+                assert!(visual.animate(resumed.sample_time + Duration::from_millis(16)));
+                assert!(reference.animate(resumed.sample_time + Duration::from_millis(16)));
+                assert_eq!(
+                    visual.data.borrow().segments(),
+                    reference.data.borrow().segments()
+                );
+                assert_eq!(
+                    publication(&visual).palette().colors(),
+                    material.palette().colors()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn fft_and_window_reset_drop_publication_until_matching_audio_is_accepted() {
         for style in [
             AudioVisualizerStyle::FractalBeams,
@@ -1316,6 +1421,21 @@ mod tests {
             assert!(visual.data.borrow().scene.is_none());
             assert_eq!(visual.data.borrow().gpu_segments.capacity(), 0);
             assert!(visual.data.borrow().gpu_palette.is_none());
+            let config = Config {
+                effect_primary_color: "#ff0000".parse().unwrap(),
+                reactive_bloom_intensity: 0.0,
+                ..Config::default()
+            };
+            assert!(visual.configure_config(&config));
+            assert_eq!(
+                publication(&visual).palette().colors(),
+                retained.palette().colors()
+            );
+            assert_eq!(
+                published_segments(&publication(&visual)),
+                published_segments(&retained)
+            );
+            assert!(visual.data.borrow().scene.is_none());
             accept(&visual, &frame(100));
             assert!(visual.data.borrow().scene.is_none());
             visual.set_activity(true, true);
@@ -1329,10 +1449,19 @@ mod tests {
             assert!(Arc::ptr_eq(&retained, &publication(&visual)));
             accept(&visual, &frame(200));
             let fresh = plot(style);
+            fresh.configure_config(&config);
             accept(&fresh, &frame(200));
             assert_eq!(
                 visual.data.borrow().segments(),
                 fresh.data.borrow().segments()
+            );
+            assert_eq!(
+                publication(&visual).palette().colors(),
+                publication(&fresh).palette().colors()
+            );
+            assert_eq!(
+                published_segments(&publication(&visual)),
+                published_segments(&publication(&fresh))
             );
             assert!(!Arc::ptr_eq(&retained, &publication(&visual)));
             visual.set_activity(false, false);

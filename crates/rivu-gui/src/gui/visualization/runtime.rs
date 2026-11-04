@@ -113,6 +113,7 @@ pub(in crate::gui) struct VisualizerRuntime {
     parameters: visualization::VisualParameters,
     config: Arc<Config>,
     frequency_views: visualization::FrequencyViews,
+    frequency_enabled: bool,
     style_coordinator: visualization::StyleCoordinator,
     waveform: Entity<visualization::Waveform>,
     panels: HashMap<u64, PanelKind>,
@@ -158,6 +159,7 @@ impl VisualizerRuntime {
             parameters: visualization::VisualParameters::from(config.as_ref()),
             config,
             frequency_views: visualization::FrequencyViews::new(),
+            frequency_enabled: false,
             style_coordinator: visualization::StyleCoordinator::new(),
             waveform,
             panels: HashMap::new(),
@@ -293,7 +295,7 @@ impl VisualizerRuntime {
         }
         let enabled = self.active();
         let demand_changed = panels_changed || visibility_changed || visualization_changed;
-        let mut spectrum_restored = false;
+        let mut frequency_restored = false;
         if layout_panels_changed {
             let mut retained_spectrum = Vec::new();
             let mut retained_spectrogram = Vec::new();
@@ -311,7 +313,6 @@ impl VisualizerRuntime {
             self.style_coordinator.retain_presentations(retained_audio);
         }
         if demand_changed {
-            self.frequency_views.set_enabled(enabled);
             let spectrum_ids = self
                 .panels
                 .iter()
@@ -324,10 +325,15 @@ impl VisualizerRuntime {
                 .filter(|(_, kind)| enabled && matches!(kind, PanelKind::Spectrogram(_)))
                 .map(|(id, _)| *id)
                 .collect::<Vec<_>>();
+            let frequency_enabled = !spectrum_ids.is_empty() || !spectrogram_ids.is_empty();
+            frequency_restored = frequency_enabled && !self.frequency_enabled
+                || !spectrogram_ids.is_empty() && !self.demand.visualizer.spectrogram;
+            self.frequency_enabled = frequency_enabled;
+            self.frequency_views.set_enabled(frequency_enabled);
             self.frequency_views.retain_spectrum_panels(&spectrum_ids);
             self.frequency_views
                 .retain_spectrogram_panels(&spectrogram_ids);
-            spectrum_restored = self
+            frequency_restored |= self
                 .frequency_views
                 .set_spectrum_visible(!spectrum_ids.is_empty());
             let mut visualizer = VisualizerDemand {
@@ -375,8 +381,9 @@ impl VisualizerRuntime {
                 enabled,
             );
             if self.demand.enabled {
-                let spectrum_changed = self.frequency_views.configure(&self.parameters);
-                self.needs_refresh |= spectrum_restored || spectrum_changed || audio_changed;
+                let frequency_changed =
+                    self.frequency_enabled && self.frequency_views.configure(&self.parameters);
+                self.needs_refresh |= frequency_restored || frequency_changed || audio_changed;
             } else {
                 self.needs_refresh = false;
             }
@@ -473,7 +480,7 @@ impl VisualizerRuntime {
             self.consume_analysis(now, cx);
             if !self.awaiting_replacement {
                 let time = self.animation_clock.advance(now);
-                let visuals_changed = self.frequency_views.animate(time);
+                let visuals_changed = self.frequency_enabled && self.frequency_views.animate(time);
                 let audio_changed = self.style_coordinator.animate(time);
                 self.notify_animation(visuals_changed, audio_changed, cx);
             }
@@ -514,7 +521,9 @@ impl VisualizerRuntime {
         self.awaiting_replacement = false;
         self.animation_clock.accept(&self.staging, now);
         let time = self.animation_clock.advance(now);
-        self.frequency_views.update(&self.staging, time);
+        if self.frequency_enabled {
+            self.frequency_views.update(&self.staging, time);
+        }
         self.style_coordinator.update(&self.staging, time);
         for (id, view) in &self.views {
             if let Some(kind) = self.panels.get(id)
@@ -636,6 +645,7 @@ impl VisualizerRuntime {
         self.awaiting_replacement = false;
         self.frequency_views.clear_presentation();
         self.style_coordinator.clear();
+        self.frequency_enabled = false;
         self.frequency_views.set_enabled(false);
         self.frequency_views.retain_spectrogram_panels(&[]);
         self.frequency_views.retain_spectrum_panels(&[]);
@@ -716,8 +726,9 @@ pub(in crate::gui) fn stage_analysis_frame(
         && frame.display_token == staging.display_token
         && frame.audio_epoch == staging.audio_epoch
         && frame.audio_intent == staging.audio_intent
+        && (!needs_refresh || frame.settings.is_none())
     {
-        return needs_refresh && staging.settings.is_some();
+        return false;
     }
     staging.clone_from(frame);
     *sequence = frame.sequence;
@@ -879,6 +890,52 @@ mod tests {
             &frame,
             true
         ));
+    }
+
+    #[test]
+    fn same_sequence_restore_refreshes_payload_pruned_by_inactive_demand() {
+        let mut frame = AnalysisFrame {
+            sequence: 7,
+            generation: 1,
+            settings: Some((&Config::default()).into()),
+            ..Default::default()
+        };
+        frame.visualizer.demand.band_energy = true;
+        frame.visualizer.band_rms = [0.25, 0.5, 0.75];
+        let mut staging = frame.clone();
+        let mut sequence = frame.sequence;
+        retain_analysis_staging(
+            &mut staging,
+            DisplayDemand {
+                enabled: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(staging.visualizer.band_rms, [0.0; 3]);
+        assert!(!stage_analysis_frame(
+            &mut staging,
+            &mut sequence,
+            false,
+            &frame,
+            true,
+        ));
+        assert!(!stage_analysis_frame(
+            &mut staging,
+            &mut sequence,
+            true,
+            &frame,
+            false,
+        ));
+        assert!(stage_analysis_frame(
+            &mut staging,
+            &mut sequence,
+            true,
+            &frame,
+            true,
+        ));
+        assert_eq!(sequence, frame.sequence);
+        assert_eq!(staging.visualizer.band_rms, frame.visualizer.band_rms);
+        assert_eq!(staging.visualizer.demand, frame.visualizer.demand);
     }
 
     #[gpui::test]

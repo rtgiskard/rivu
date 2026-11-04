@@ -28,7 +28,9 @@ accepts source/seek identities and owns scheduling; the host routes Waveform see
 scan and decoder-hint events through existing playback and scan owners. Rendering
 introduces no additional analysis worker, PCM pool or animation loop. Constructors
 share configuration-projection defaults; history and GPU allocation are demand-driven.
-Frequency views share analysis while each style owns its rendering state.
+Frequency views ingest shared analysis only while Spectrum or Spectrogram is
+active; other styles do not advance their history. Each style owns its rendering
+state.
 Resource capacities and release points belong to
 link:22_cache.adoc#visualization-caching[Visualization caching].
 
@@ -215,6 +217,13 @@ range and axis settings invalidate only affected retained drawings and rebuild
 from compatible working levels/history. Spectrum, Spectrogram and Waveform share
 one signal palette; palette changes preserve Spectrum geometry and retained
 Spectrogram scalar history.
+Peak envelopes continue evolving while their markers are disabled, but peak-only
+changes do not refresh visible Spectrum output.
+
+Fractal color and bloom edits republish the frozen scene's material without
+advancing its simulation or accepting audio. Hidden-window retirement still
+prevents material edits from recreating released Fractal geometry.
+
 Shared background changes affect both frequency views. A suspended panel whose
 working data has been released cannot reconstruct that data from its final drawing.
 It waits for fresh input after an incompatible mapping change; a final drawing cannot authorize
