@@ -22,7 +22,6 @@ async-channel = "2"
 async-io = "2"
 crossbeam-channel = "0.5"
 futures = "0.3"
-hound = "3.5"
 libc = "0.2"
 libloading = { version = "0.9", optional = true }
 opus = "0.4"
@@ -38,6 +37,7 @@ tracing = "0.1"
 pipewire = { version = "0.10.1", features = ["v1_2_0"] }
 
 [dev-dependencies]
+hound = "3.5"
 tempfile = "3.27"
 rivu-protocol = { path = "../rivu-protocol", features = ["test-support"] }
 

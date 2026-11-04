@@ -21,4 +21,3 @@ futures = "0.3"
 gpui = { workspace = true, features = ["test-support"] }
 rivu-protocol = { path = "../rivu-protocol", features = ["test-support"] }
 rivu-analysis = { path = "../rivu-analysis", features = ["test-support"] }
-tempfile = "3.27"

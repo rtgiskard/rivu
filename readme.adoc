@@ -219,6 +219,12 @@ Keep `Cargo.lock` to retain the resolved dependency versions. Run `make lint`
 to check formatting and all workspace targets with all features, including
 font embedding; install its additional prerequisites below first.
 
+The workspace centralizes the GPUI and platform source pins; platform consumers
+share Wayland-only configuration, with the UI showcase keeping its platform
+dependency optional. Keep dependency features with the consumers that need them:
+the application enables SQLite functions, while the format library's `database`
+feature only requires bundled SQLite.
+
 Run `make test` for all behavior suites, or select a suite:
 
 [cols="1,3",options="header"]
