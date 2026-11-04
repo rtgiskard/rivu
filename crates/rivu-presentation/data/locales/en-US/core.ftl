@@ -58,9 +58,9 @@ core-tags-written = Source-file tags updated: { $path }
     Library database overrides were not changed.
 core-tags-unchanged = Source-file tags unchanged: { $path } (no backup created)
 core-help-about = A lightweight, local-first music player
-core-help-long = Run without a command to open the desktop UI, connecting to the existing core or starting an independent core service if absent. Each data directory shares one core; control commands connect to it. Closing the window keeps the core running. Output devices, file probing, and source-file tags work offline without an instance.
-core-help-long-tui = Run without a command to open the terminal UI, connecting to the existing core or starting an independent core service if absent. q or :q closes only this TUI; :qa quits the application and stops the core. Output devices, file probing, and source-file tags work offline without an instance.
-core-help-long-serve = Run without a command to start a headless core. serve owns one core per data directory; control commands connect to that instance. Output devices, file probing, and source-file tags work offline without an instance.
+core-help-long = Run without a command to print help. Use gui to open the desktop UI, connecting to the existing core or starting an independent core service if absent. Each data directory shares one core; control commands connect to it. Closing the window keeps the core running. Output devices, file probing, and source-file tags work offline without an instance.
+core-help-long-tui = Run without a command to print help. Use tui to open the terminal UI, connecting to the existing core or starting an independent core service if absent. q or :q closes only this TUI; :qa quits the application and stops the core. Output devices, file probing, and source-file tags work offline without an instance.
+core-help-long-serve = Run without a command to print help. Use serve to start a headless core. serve owns one core per data directory; control commands connect to that instance. Output devices, file probing, and source-file tags work offline without an instance.
 core-help-usage = Usage:
 core-help-commands = Commands
 core-help-options = Options

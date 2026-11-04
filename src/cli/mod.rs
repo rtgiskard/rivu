@@ -35,14 +35,20 @@ pub(super) fn run() -> std::result::Result<(), CliError> {
     // Command-line surfaces use the process locale, independently of GUI settings.
     let i18n = Localizer::for_cli("auto");
     let mut command = Args::command();
-    command.build();
     localize_help(&mut command, &i18n, "");
     let matches = command
-        .try_get_matches()
+        .try_get_matches_from_mut(std::env::args_os())
         .unwrap_or_else(|error| cli_error(error).exit());
     let args = Args::from_arg_matches(&matches).unwrap_or_else(|error| cli_error(error).exit());
     args.validate(&matches)
         .unwrap_or_else(|error| cli_error(error).exit());
+    if args.action.is_none() {
+        command.print_help().map_err(|error| CliError {
+            error: error.into(),
+            json: args.json,
+        })?;
+        return Ok(());
+    }
     let json = args.json;
     execute(args, i18n).map_err(|error| CliError { error, json })
 }
@@ -53,7 +59,7 @@ fn execute(args: Args, i18n: Localizer) -> Result<()> {
         config: config_path,
         data_dir,
     } = config::paths::Paths::resolve(args.data_dir, args.config);
-    let action = args.action.unwrap_or_else(default_action);
+    let action = args.action.expect("run requires an explicit subcommand");
     match action {
         Action::Processing(action) => processing::run(&i18n, &data_dir, action, args.json),
         #[cfg(feature = "gui")]
@@ -100,21 +106,6 @@ fn execute(args: Args, i18n: Localizer) -> Result<()> {
             let (command, wait_scan) = translate(action)?;
             submit_command(&i18n, &data_dir, command, wait_scan, args.json)
         }
-    }
-}
-
-fn default_action() -> Action {
-    #[cfg(feature = "gui")]
-    {
-        Action::Gui { paths: Vec::new() }
-    }
-    #[cfg(all(not(feature = "gui"), feature = "tui"))]
-    {
-        Action::Tui
-    }
-    #[cfg(not(any(feature = "gui", feature = "tui")))]
-    {
-        Action::Serve { paths: Vec::new() }
     }
 }
 

@@ -525,7 +525,7 @@ impl Args {
     pub(super) fn validate(&self, matches: &clap::ArgMatches) -> Result<(), clap::Error> {
         let invalid = |message| clap::Error::raw(clap::error::ErrorKind::ArgumentConflict, message);
         let persistent = match self.action {
-            None | Some(Action::Serve { .. }) => true,
+            Some(Action::Serve { .. }) => true,
             #[cfg(feature = "gui")]
             Some(Action::Gui { .. }) => true,
             #[cfg(feature = "tui")]
@@ -613,6 +613,9 @@ pub(super) fn localize_help(command: &mut clap::Command, i18n: &Localizer, path:
             "core-help-long-serve"
         };
         *command = std::mem::take(command).long_about(i18n.text(key).to_owned());
+        // clap caches whether long help exists during build. Set the root
+        // description first, then expose generated help flags and global args.
+        command.build();
     }
     let invocation = command
         .get_bin_name()
@@ -740,10 +743,8 @@ mod tests {
 
         for language in ["en-US", "zh-CN"] {
             let mut scoped = Args::command();
-            scoped.build();
             super::localize_help(&mut scoped, &super::Localizer::for_cli(language), "");
             let mut full = Args::command();
-            full.build();
             super::localize_help(&mut full, &super::Localizer::new(language), "");
             assert_help_matches(&mut scoped, &mut full);
 
@@ -894,7 +895,6 @@ mod tests {
     #[test]
     fn cross_field_validation_rejects_invalid_combinations_but_accepts_empty_edits() {
         for argv in [
-            vec!["rivu", "--json"],
             vec!["rivu", "--json", "gui"],
             vec!["rivu", "serve", "--json"],
             vec!["rivu", "tui", "--json"],

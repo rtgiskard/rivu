@@ -198,7 +198,7 @@ impl ClientSession {
                     if self.stream.is_none() {
                         self.stream = Some(rivu_protocol::wire::connect(&self.data_dir).await.with_context(|| {
                             format!(
-                                "Cannot connect to Rivu at {}. Start `rivu` or `rivu serve` first.",
+                                "Cannot connect to Rivu at {}. Start `rivu serve` first.",
                                 self.data_dir.display()
                             )
                         })?);

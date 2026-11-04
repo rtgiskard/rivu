@@ -38,7 +38,7 @@ The desktop requires Wayland; audio output requires a running PipeWire 1.2 or ne
 == First use
 
 . Install Rivu using the <<build-and-install,instructions below>>.
-. Run `rivu` (equivalent to `rivu gui`) to open the desktop UI.
+. Run `rivu gui` to open the desktop UI; `rivu` alone prints help.
 . Add a music directory with the Library `+` button, then hover its row and use
   the scan button to import tracks. Scanning is explicit: adding a directory or
   starting Rivu does not scan it automatically.
@@ -91,7 +91,8 @@ logging (`debug`, `info`, `warning`, `error`).
 See link:doc/01_config.adoc#logging-and-diagnostics[logging and diagnostics].
 `--json` writes one result to stdout and runtime diagnostics as JSON to stderr;
 it is not available for GUI, serve, or TUI.
-Use `rivu --help` or a subcommand's `--help` for exact arguments.
+Use `rivu` or `rivu -h` for concise help, `rivu --help` for startup details, and a
+subcommand's `--help` for exact arguments.
 
 [source,sh]
 ----
@@ -280,8 +281,8 @@ cargo build --locked -p rivu --release --no-default-features
 cargo build --locked -p rivu --release --no-default-features --features tui
 ----
 
-With no command, Rivu opens the GUI when available, otherwise the TUI when
-available, otherwise the foreground service. Disabled frontend commands are
+With no command, Rivu prints help and exits without starting a frontend or Core
+service. Disabled frontend commands are
 absent from help and rejected by argument parsing. Add `ffmpeg` or `onnx`
 explicitly to these builds when needed. Select `-p rivu` for a frontend-pruned
 application build: `--workspace` also builds the independent frontend packages.
