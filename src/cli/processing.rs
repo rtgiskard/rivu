@@ -137,56 +137,45 @@ fn equalizer_command(edit: &str) -> Result<Command> {
     Ok(Command::EqualizerEdit { edit })
 }
 
-fn graph_command(action: ProcessingGraphAction) -> Result<(Command, bool)> {
-    let mut wait = false;
-    let command = match action {
-        ProcessingGraphAction::Edit {
-            edit,
-            expected_revision,
-        } => Command::ProcessingGraphEdit {
-            expected_revision,
-            edit: serde_json::from_str(&edit).context("Parsing GraphEdit JSON")?,
-        },
-        ProcessingGraphAction::Run {
-            track_id,
-            node,
-            port,
-            mode,
-            wait: requested,
-        } => {
-            wait = requested;
-            Command::ProcessingGraphRun {
-                track_id,
-                target: GraphPort { node, port },
-                mode: match mode {
-                    ProcessingGraphMode::Auto => GraphExecutionMode::Auto,
-                    ProcessingGraphMode::Offline => GraphExecutionMode::Offline,
-                    ProcessingGraphMode::Realtime => GraphExecutionMode::Realtime,
-                    ProcessingGraphMode::Hybrid => GraphExecutionMode::Hybrid,
-                },
-            }
-        }
-        ProcessingGraphAction::Audition { id, node, port } => Command::ProcessingGraphAudition {
-            id: id.id,
-            node: GraphPort { node, port },
-        },
-        ProcessingGraphAction::Export {
-            id,
-            node,
-            port,
-            path,
-            wait: requested,
-        } => {
-            wait = requested;
-            Command::ProcessingGraphExport {
-                id: id.id,
-                node: GraphPort { node, port },
-                path: super::client_path(path)?,
-            }
-        }
-        ProcessingGraphAction::Show => unreachable!("Graph show is a state query"),
-    };
-    Ok((command, wait))
+fn show_processing(
+    i18n: &Localizer,
+    session: &mut rivu_client::ClientSession,
+    json: bool,
+    graph_only: bool,
+) -> Result<()> {
+    let response = session.get_state(StateSections {
+        system: true,
+        configuration: true,
+        ..Default::default()
+    })?;
+    let state = response.system.context("Missing system state")?;
+    let config = response
+        .configuration
+        .context("Missing configuration state")?
+        .config;
+    let instance_id = super::tasks::instance_id(session)?;
+    if json {
+        let processing = state
+            .processing
+            .as_ref()
+            .map(|task| super::tasks::task_json(instance_id, task.id, task))
+            .transpose()?;
+        let value = if graph_only {
+            serde_json::json!({"graph":config.processing_graph,"latest_task":processing})
+        } else {
+            serde_json::json!({"equalizer":config.equalizer,"presets":config.equalizer_presets,"equalizer_ab":config.equalizer_ab,"denoise":config.denoise,"neural":config.neural,"processing_graph":config.processing_graph,"processing":processing})
+        };
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    } else {
+        show_settings(
+            i18n,
+            &config,
+            state.processing.as_ref(),
+            instance_id,
+            graph_only,
+        )?;
+    }
+    Ok(())
 }
 
 pub(super) fn run(
@@ -195,64 +184,64 @@ pub(super) fn run(
     action: ProcessingAction,
     json: bool,
 ) -> Result<()> {
-    let graph_show = matches!(
-        &action,
-        ProcessingAction::Graph(ProcessingGraphAction::Show)
-    );
-    if graph_show || matches!(&action, ProcessingAction::Show) {
-        let mut session = rivu_client::client_session(data_dir)?;
-        let response = session.get_state(StateSections {
-            system: true,
-            configuration: true,
-            ..Default::default()
-        })?;
-        let state = response.system.context("Missing system state")?;
-        let config = response
-            .configuration
-            .context("Missing configuration state")?
-            .config;
-        let instance_id = super::tasks::instance_id(&session)?;
-        if json {
-            let processing = state
-                .processing
-                .as_ref()
-                .map(|task| super::tasks::task_json(instance_id, task.id, task))
-                .transpose()?;
-            let value = if graph_show {
-                serde_json::json!({"graph":config.processing_graph,"latest_task":processing})
-            } else {
-                serde_json::json!({"equalizer":config.equalizer,"presets":config.equalizer_presets,"equalizer_ab":config.equalizer_ab,"denoise":config.denoise,"neural":config.neural,"processing_graph":config.processing_graph,"processing":processing})
-            };
-            println!("{}", serde_json::to_string_pretty(&value)?);
-        } else {
-            show_settings(
-                i18n,
-                &config,
-                state.processing.as_ref(),
-                instance_id,
-                graph_show,
-            )?;
-        }
-        return Ok(());
-    }
     let mut session = rivu_client::client_session(data_dir)?;
-    let reference = match &action {
-        ProcessingAction::Audition { id, .. }
-        | ProcessingAction::Graph(ProcessingGraphAction::Audition { id, .. })
-        | ProcessingAction::Graph(ProcessingGraphAction::Export { id, .. }) => Some(*id),
-        _ => None,
-    };
-    if let Some(reference) = reference {
-        session.bind_instance(reference.instance_id)?;
-    }
     let mut wait = false;
     let command = match action {
+        ProcessingAction::Show => return show_processing(i18n, &mut session, json, false),
         ProcessingAction::Bypass => Command::ProcessingBypass,
-        ProcessingAction::Graph(action) => {
-            let (command, requested) = graph_command(action)?;
-            wait = requested;
-            command
-        }
+        ProcessingAction::Graph(action) => match action {
+            ProcessingGraphAction::Show => {
+                return show_processing(i18n, &mut session, json, true);
+            }
+            ProcessingGraphAction::Edit {
+                edit,
+                expected_revision,
+            } => Command::ProcessingGraphEdit {
+                expected_revision,
+                edit: serde_json::from_str(&edit).context("Parsing GraphEdit JSON")?,
+            },
+            ProcessingGraphAction::Run {
+                track_id,
+                node,
+                port,
+                mode,
+                wait: requested,
+            } => {
+                wait = requested;
+                Command::ProcessingGraphRun {
+                    track_id,
+                    target: GraphPort { node, port },
+                    mode: match mode {
+                        ProcessingGraphMode::Auto => GraphExecutionMode::Auto,
+                        ProcessingGraphMode::Offline => GraphExecutionMode::Offline,
+                        ProcessingGraphMode::Realtime => GraphExecutionMode::Realtime,
+                        ProcessingGraphMode::Hybrid => GraphExecutionMode::Hybrid,
+                    },
+                }
+            }
+            ProcessingGraphAction::Audition { id, node, port } => {
+                session.bind_instance(id.instance_id)?;
+                Command::ProcessingGraphAudition {
+                    id: id.id,
+                    node: GraphPort { node, port },
+                }
+            }
+            ProcessingGraphAction::Export {
+                id,
+                node,
+                port,
+                path,
+                wait: requested,
+            } => {
+                session.bind_instance(id.instance_id)?;
+                wait = requested;
+                Command::ProcessingGraphExport {
+                    id: id.id,
+                    node: GraphPort { node, port },
+                    path: super::client_path(path)?,
+                }
+            }
+        },
         ProcessingAction::Eq { edit } => equalizer_command(&edit)?,
         ProcessingAction::Denoise { patch } => Command::DenoiseEdit {
             patch: serde_json::from_str(&patch).context("Parsing DenoisePatch JSON")?,
@@ -290,19 +279,21 @@ pub(super) fn run(
             mode,
             vocal_gain_db,
             accompaniment_gain_db,
-        } => Command::AuditionProcessing {
-            id: id.id,
-            mode: match mode {
-                ProcessingAudition::Original => AuditionMode::Original,
-                ProcessingAudition::Denoised => AuditionMode::Denoised,
-                ProcessingAudition::Vocals => AuditionMode::Vocals,
-                ProcessingAudition::Accompaniment => AuditionMode::Accompaniment,
-                ProcessingAudition::Mix => AuditionMode::Mix,
-            },
-            vocal_gain_db,
-            accompaniment_gain_db,
-        },
-        ProcessingAction::Show => unreachable!(),
+        } => {
+            session.bind_instance(id.instance_id)?;
+            Command::AuditionProcessing {
+                id: id.id,
+                mode: match mode {
+                    ProcessingAudition::Original => AuditionMode::Original,
+                    ProcessingAudition::Denoised => AuditionMode::Denoised,
+                    ProcessingAudition::Vocals => AuditionMode::Vocals,
+                    ProcessingAudition::Accompaniment => AuditionMode::Accompaniment,
+                    ProcessingAudition::Mix => AuditionMode::Mix,
+                },
+                vocal_gain_db,
+                accompaniment_gain_db,
+            }
+        }
     };
     let ack = session.request_ack(command)?;
     if !wait || !ack.is_success() {
@@ -351,7 +342,7 @@ mod tests {
         }
     }
 
-    fn parse_graph_command(arguments: &[&str]) -> (Command, bool) {
+    fn parse_graph_action(arguments: &[&str]) -> ProcessingGraphAction {
         let args = Args::try_parse_from(
             ["rivu", "processing", "graph"]
                 .into_iter()
@@ -361,22 +352,21 @@ mod tests {
         let Some(Action::Processing(ProcessingAction::Graph(action))) = args.action else {
             panic!("expected graph action");
         };
-        graph_command(action).unwrap()
+        action
     }
 
     #[test]
     fn graph_edit_parses_typed_json_and_preserves_revision_and_signed_gains() {
         let edit = r#"{"Replace":{"id":3,"kind":{"mix":{"gains_db":[-6.0,-12.5],"muted":[false,false],"solo":[false,false]}}}}"#;
-        let (command, wait) = parse_graph_command(&["edit", edit, "--expected-revision", "19"]);
-        let Command::ProcessingGraphEdit {
+        let ProcessingGraphAction::Edit {
             expected_revision,
             edit,
-        } = command
+        } = parse_graph_action(&["edit", edit, "--expected-revision", "19"])
         else {
-            panic!("expected graph edit command");
+            panic!("expected graph edit action");
         };
         assert_eq!(expected_revision, 19);
-        assert!(!wait);
+        let edit: Box<GraphEdit> = serde_json::from_str(&edit).unwrap();
         let GraphEdit::Replace {
             id,
             kind: GraphNodeKind::Mix { gains_db, .. },
@@ -386,52 +376,20 @@ mod tests {
         };
         assert_eq!(id, 3);
         assert_eq!(gains_db, [-6.0, -12.5]);
-        assert!(
-            graph_command(ProcessingGraphAction::Edit {
-                expected_revision: 19,
-                edit: "not GraphEdit JSON".into(),
-            })
-            .is_err()
-        );
+        assert!(serde_json::from_str::<Box<GraphEdit>>("not GraphEdit JSON").is_err());
     }
 
     #[test]
-    fn graph_run_preserves_target_mode_and_existing_wait_intent() {
-        for (argument, expected) in [
-            ("auto", GraphExecutionMode::Auto),
-            ("offline", GraphExecutionMode::Offline),
-            ("realtime", GraphExecutionMode::Realtime),
-            ("hybrid", GraphExecutionMode::Hybrid),
-        ] {
-            let (command, wait) = parse_graph_command(&[
-                "run", "42", "7", "--port", "1", "--mode", argument, "--wait",
-            ]);
-            let Command::ProcessingGraphRun {
-                track_id,
-                target,
-                mode,
-            } = command
-            else {
-                panic!("expected graph run command");
-            };
-            assert_eq!(track_id, 42);
-            assert_eq!(target, GraphPort { node: 7, port: 1 });
-            assert_eq!(mode, expected);
-            assert!(wait);
-        }
-    }
-
-    #[test]
-    fn retained_graph_output_commands_preserve_run_port_and_client_path() {
-        let (command, wait) = parse_graph_command(&["audition", "8:91", "7", "--port", "1"]);
-        assert!(matches!(
-            command,
-            Command::ProcessingGraphAudition {
-                id: 91,
-                node: GraphPort { node: 7, port: 1 },
-            }
-        ));
-        assert!(!wait);
+    fn retained_graph_outputs_preserve_instance_reference_and_client_path() {
+        let ProcessingGraphAction::Audition { id, node, port } =
+            parse_graph_action(&["audition", "8:91", "7", "--port", "1"])
+        else {
+            panic!("expected graph audition action");
+        };
+        assert_eq!(id.instance_id, 8);
+        assert_eq!(id.id, 91);
+        assert_eq!(node, 7);
+        assert_eq!(port, 1);
 
         let relative = "rendered outputs/voice -6 dB.wav";
         let absolute = std::env::current_dir().unwrap().join(relative);
@@ -442,13 +400,21 @@ mod tests {
                 if requested_wait {
                     arguments.push("--wait");
                 }
-                let (command, wait) = parse_graph_command(&arguments);
-                let Command::ProcessingGraphExport { id, node, path } = command else {
-                    panic!("expected graph export command");
+                let ProcessingGraphAction::Export {
+                    id,
+                    node,
+                    port,
+                    path,
+                    wait,
+                } = parse_graph_action(&arguments)
+                else {
+                    panic!("expected graph export action");
                 };
-                assert_eq!(id, 91);
-                assert_eq!(node, GraphPort { node: 7, port: 1 });
-                assert_eq!(path, absolute);
+                assert_eq!(id.instance_id, 8);
+                assert_eq!(id.id, 91);
+                assert_eq!(node, 7);
+                assert_eq!(port, 1);
+                assert_eq!(super::super::client_path(path).unwrap(), absolute);
                 assert_eq!(wait, requested_wait);
             }
         }

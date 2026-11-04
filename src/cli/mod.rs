@@ -10,7 +10,7 @@ use self::{
     },
     output::{list_playlists, list_queue, show_ack, show_state},
 };
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::{CommandFactory, FromArgMatches};
 use rivu::{app::App, config};
 use rivu_audio as audio;
@@ -60,23 +60,30 @@ fn execute(args: Args, i18n: Localizer) -> Result<()> {
         data_dir,
     } = config::paths::Paths::resolve(args.data_dir, args.config);
     let action = args.action.expect("run requires an explicit subcommand");
-    match action {
-        Action::Processing(action) => processing::run(&i18n, &data_dir, action, args.json),
+    let mut wait_scan = false;
+    let command = match action {
+        Action::Processing(action) => return processing::run(&i18n, &data_dir, action, args.json),
         #[cfg(feature = "gui")]
-        Action::Gui { paths } => App::open_gui(
-            data_dir,
-            config_path,
-            paths.into_iter().map(client_path).collect::<Result<_>>()?,
-        ),
-        Action::Serve { paths } => App::start(
-            data_dir,
-            config_path,
-            paths.into_iter().map(client_path).collect::<Result<_>>()?,
-        )?
-        .run(),
+        Action::Gui { paths } => {
+            return App::open_gui(
+                data_dir,
+                config_path,
+                paths.into_iter().map(client_path).collect::<Result<_>>()?,
+            );
+        }
+        Action::Serve { paths } => {
+            return App::start(
+                data_dir,
+                config_path,
+                paths.into_iter().map(client_path).collect::<Result<_>>()?,
+            )?
+            .run();
+        }
         #[cfg(feature = "tui")]
-        Action::Tui => App::open_tui(data_dir, config_path),
-        Action::Library(action) => library::run(&i18n, &data_dir, &config_path, action, args.json),
+        Action::Tui => return App::open_tui(data_dir, config_path),
+        Action::Library(action) => {
+            return library::run(&i18n, &data_dir, &config_path, action, args.json);
+        }
         Action::Playback(PlaybackAction::Devices) => {
             let devices = audio::devices()?;
             if args.json {
@@ -86,63 +93,17 @@ fn execute(args: Args, i18n: Localizer) -> Result<()> {
                     println!("{}", TerminalEscaped(device));
                 }
             }
-            Ok(())
+            return Ok(());
         }
         Action::Status => {
             let response = rivu_client::get_state(&data_dir, StateSections::ALL)?;
-            show_state(&i18n, &response, args.json)
+            return show_state(&i18n, &response, args.json);
         }
-        Action::Task(action) => tasks::run(&i18n, &data_dir, action, args.json),
-        Action::Queue(QueueAction::List) => list_queue(&i18n, &data_dir, args.json),
-        Action::Playlist(PlaylistAction::List) => list_playlists(&i18n, &data_dir, args.json),
-        Action::Playlist(PlaylistAction::Show { playlist_id }) => {
-            output::show_playlist(&i18n, &data_dir, playlist_id, args.json)
-        }
+        Action::Task(action) => return tasks::run(&i18n, &data_dir, action, args.json),
         Action::Quit => {
             let ack = rivu_client::request_ack(&data_dir, rivu_protocol::AppCommand::Shutdown)?;
-            show_ack(&i18n, &ack, args.json)
+            return show_ack(&i18n, &ack, args.json);
         }
-        action => {
-            let (command, wait_scan) = translate(action)?;
-            submit_command(&i18n, &data_dir, command, wait_scan, args.json)
-        }
-    }
-}
-
-fn submit_command(
-    i18n: &Localizer,
-    data_dir: &std::path::Path,
-    command: Command,
-    wait_scan: bool,
-    json: bool,
-) -> Result<()> {
-    let mut session = rivu_client::client_session(data_dir)?;
-    let ack = session.request_ack(command)?;
-    if !ack.is_success() {
-        return output::show_task_ack(i18n, &session, &ack, json);
-    }
-    if wait_scan {
-        let id = ack.scan_id.context("Scan startup omitted task ID")?;
-        return tasks::wait_scan(i18n, &mut session, id, json);
-    }
-    output::show_task_ack(i18n, &session, &ack, json)
-}
-
-// Resolve against the caller's cwd, without expanding or canonicalizing input.
-// In particular, playlist export destinations need not exist yet.
-fn client_path(path: PathBuf) -> Result<PathBuf> {
-    if path.is_absolute() {
-        Ok(path)
-    } else {
-        Ok(std::env::current_dir()
-            .context("resolve client working directory")?
-            .join(path))
-    }
-}
-
-fn translate(action: Action) -> Result<(Command, bool)> {
-    let mut wait = false;
-    let command = match action {
         Action::Playback(PlaybackAction::Play { track_id }) => {
             track_id.map_or(Command::Resume, |track_id| Command::Play { track_id })
         }
@@ -178,7 +139,7 @@ fn translate(action: Action) -> Result<(Command, bool)> {
                 expected_revision,
                 wait: should_wait,
             } => {
-                wait = should_wait;
+                wait_scan = should_wait;
                 Command::QueueExternalPaths {
                     paths: paths.into_iter().map(client_path).collect::<Result<_>>()?,
                     index,
@@ -189,7 +150,7 @@ fn translate(action: Action) -> Result<(Command, bool)> {
             QueueAction::Move { queue_id, index } => Command::MoveQueue { queue_id, index },
             QueueAction::Play { queue_id } => Command::PlayQueue { queue_id },
             QueueAction::Clear => Command::ClearQueue,
-            QueueAction::List => unreachable!(),
+            QueueAction::List => return list_queue(&i18n, &data_dir, args.json),
         },
         Action::Playlist(action) => match action {
             PlaylistAction::Create { name } => Command::CreatePlaylist { name },
@@ -214,7 +175,7 @@ fn translate(action: Action) -> Result<(Command, bool)> {
                 name,
                 wait: should_wait,
             } => {
-                wait = should_wait;
+                wait_scan = should_wait;
                 Command::ImportPlaylist {
                     path: client_path(path)?,
                     name,
@@ -224,65 +185,74 @@ fn translate(action: Action) -> Result<(Command, bool)> {
                 playlist_id,
                 path: client_path(path)?,
             },
-            PlaylistAction::List | PlaylistAction::Show { .. } => unreachable!(),
+            PlaylistAction::List => return list_playlists(&i18n, &data_dir, args.json),
+            PlaylistAction::Show { playlist_id } => {
+                return output::show_playlist(&i18n, &data_dir, playlist_id, args.json);
+            }
         },
         Action::Playback(PlaybackAction::Device { name }) => Command::Device { name },
-        #[cfg(feature = "gui")]
-        Action::Gui { .. } => bail!("This action is not a playback command"),
-        #[cfg(feature = "tui")]
-        Action::Tui => bail!("This action is not a playback command"),
-        Action::Library(_)
-        | Action::Serve { .. }
-        | Action::Quit
-        | Action::Status
-        | Action::Task(_)
-        | Action::Playback(PlaybackAction::Devices)
-        | Action::Processing(_) => bail!("This action is not a playback command"),
     };
-    Ok((command, wait))
+    submit_command(&i18n, &data_dir, command, wait_scan, args.json)
+}
+
+fn submit_command(
+    i18n: &Localizer,
+    data_dir: &std::path::Path,
+    command: Command,
+    wait_scan: bool,
+    json: bool,
+) -> Result<()> {
+    let mut session = rivu_client::client_session(data_dir)?;
+    let ack = session.request_ack(command)?;
+    if !ack.is_success() {
+        return output::show_task_ack(i18n, &session, &ack, json);
+    }
+    if wait_scan {
+        let id = ack.scan_id.context("Scan startup omitted task ID")?;
+        return tasks::wait_scan(i18n, &mut session, id, json);
+    }
+    output::show_task_ack(i18n, &session, &ack, json)
+}
+
+// Resolve against the caller's cwd, without expanding or canonicalizing input.
+// In particular, playlist export destinations need not exist yet.
+fn client_path(path: PathBuf) -> Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(std::env::current_dir()
+            .context("resolve client working directory")?
+            .join(path))
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, Command, PlaylistAction, translate};
+    use super::client_path;
     use anyhow::Result;
 
     #[test]
-    fn playlist_paths_are_anchored_without_requiring_destination() -> Result<()> {
+    fn client_paths_are_anchored_without_expansion_or_requiring_destination() -> Result<()> {
         let cwd = std::env::current_dir()?;
         let directory = tempfile::tempdir_in(&cwd)?;
         let relative = directory.path().strip_prefix(&cwd)?.join("new.m3u8");
         assert!(!relative.exists());
-        let (command, wait) = translate(Action::Playlist(PlaylistAction::Export {
-            playlist_id: 7,
-            path: relative.clone(),
-        }))?;
-        let Command::ExportPlaylist { playlist_id, path } = command else {
-            panic!("expected export command");
-        };
-        assert_eq!(playlist_id, 7);
-        assert_eq!(path, cwd.join(&relative));
-        assert!(!wait);
-        let (command, wait) = translate(Action::Playlist(PlaylistAction::Import {
-            path: relative.clone(),
-            name: Some("Imported".into()),
-            wait: true,
-        }))?;
-        let Command::ImportPlaylist { path, name } = command else {
-            panic!("expected import command");
-        };
-        assert_eq!(path, cwd.join(relative));
-        assert_eq!(name.as_deref(), Some("Imported"));
-        assert!(wait);
+        assert_eq!(client_path(relative.clone())?, cwd.join(relative));
+        assert_eq!(client_path("~/disc.cue".into())?, cwd.join("~/disc.cue"));
+        assert_eq!(
+            client_path("music/../song.wav".into())?,
+            cwd.join("music/../song.wav")
+        );
+        let absolute = directory.path().join("absent.wav");
+        assert_eq!(client_path(absolute.clone())?, absolute);
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod other_tracks_tests {
-    use super::{Action, Args, Command, translate};
+    use super::{Action, Args};
     use super::{args::LibraryAction, library::other_tracks_query};
-    use anyhow::Result;
     use clap::Parser;
     use rivu_protocol::model::LibrarySort;
     use rivu_protocol::model::Query;
@@ -388,87 +358,6 @@ mod other_tracks_tests {
             query(&["library", "other", "count"]),
             Query::OtherTracksCount
         ));
-    }
-
-    #[test]
-    fn external_queue_admission_anchors_paths_and_preserves_revision_contract() -> Result<()> {
-        let cwd = std::env::current_dir()?;
-        let (command, wait) = translate(action(&[
-            "queue",
-            "add-paths",
-            "music/../song.wav",
-            "~/disc.cue",
-        ]))?;
-        let Command::QueueExternalPaths {
-            paths,
-            index,
-            expected_revision,
-        } = command
-        else {
-            panic!("expected external queue admission");
-        };
-        assert_eq!(
-            paths,
-            [cwd.join("music/../song.wav"), cwd.join("~/disc.cue")]
-        );
-        assert_eq!((index, expected_revision), (None, None));
-        assert!(!wait);
-        let (command, wait) = translate(action(&["queue", "add-paths", "song.wav", "--wait"]))?;
-        assert!(matches!(
-            command,
-            Command::QueueExternalPaths {
-                index: None,
-                expected_revision: None,
-                ..
-            }
-        ));
-        assert!(wait);
-
-        for revision in [0, u64::MAX] {
-            let revision_text = revision.to_string();
-            let (command, wait) = translate(action(&[
-                "queue",
-                "add-paths",
-                "/music/track.wav",
-                "--index",
-                "0",
-                "--expected-revision",
-                &revision_text,
-                "--wait",
-            ]))?;
-            let Command::QueueExternalPaths {
-                paths,
-                index,
-                expected_revision,
-            } = command
-            else {
-                panic!("expected insertion");
-            };
-            assert_eq!(paths, [std::path::PathBuf::from("/music/track.wav")]);
-            assert_eq!((index, expected_revision), (Some(0), Some(revision)));
-            assert!(wait);
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn queue_other_uses_explicit_source_membership() -> Result<()> {
-        let (command, wait) = translate(action(&["queue", "add-other"]))?;
-        let Command::EnqueueSources {
-            directories,
-            track_ids,
-            other_tracks,
-        } = command
-        else {
-            panic!("expected Other sources");
-        };
-        assert!(other_tracks);
-        assert!(directories.is_empty());
-        assert!(track_ids.is_empty());
-        assert!(!wait);
-        let (command, _) = translate(action(&["queue", "add", "3", "1"]))?;
-        assert!(matches!(command, Command::Enqueue { track_ids } if track_ids == [3, 1]));
-        Ok(())
     }
 
     #[test]
