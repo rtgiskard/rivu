@@ -170,7 +170,7 @@ class ClassicalSummaryTests(unittest.TestCase):
 
 
 class TimingBoundaryTests(unittest.TestCase):
-    def run_tool(self, module, root):
+    def run_tool(self, module, root, repeats=1, source_hash="a"*64):
         clock = [0.0]
         audio = np.ones((8, 2), dtype="float32")
         def read_audio(*args, **kwargs):
@@ -188,7 +188,8 @@ class TimingBoundaryTests(unittest.TestCase):
             destination.mkdir()
             result = {"outputs":{"vocals":str(destination/"vocals.wav"),
                                  "accompaniment":str(destination/"accompaniment.wav")},
-                      "processing":{"core_seconds":24}, "metrics":{"real_time_factor":1.0}}
+                      "processing":{"core_seconds":24}, "metrics":{"real_time_factor":1.0},
+                      "source_sha256":source_hash}
             (destination/"result.json").write_text(json.dumps(result))
             clock[0] += 7
             event = {"version":module.EVENT_VERSION, "type":"complete", "task_id":request["task_id"]}
@@ -202,7 +203,7 @@ class TimingBoundaryTests(unittest.TestCase):
             report_path = root/"report.json"
             argv = ["benchmark.py", "--request", str(request_path), "--reference", "reference.wav",
                     "--corpus-manifest", str(manifest), "--upstream-reference", "upstream.wav",
-                    "--accompaniment-reference", "backing.wav", "--repeats", "1", "--report", str(report_path)]
+                    "--accompaniment-reference", "backing.wav", "--repeats", str(repeats), "--report", str(report_path)]
         else:
             (root/"track-00").mkdir()
             manifest.write_text(json.dumps({"schema":2,"records":[{"directory":"track-00", "source":"original.mp4",
@@ -220,7 +221,7 @@ class TimingBoundaryTests(unittest.TestCase):
         return json.loads(report_path.read_text())
 
     def test_both_tools_include_last_score_but_not_setup_in_evaluation(self):
-        for module, expected in ((benchmark, 41), (evaluate, 41)):
+        for module, expected in ((benchmark, 20), (evaluate, 41)):
             with self.subTest(module=module.__name__), tempfile.TemporaryDirectory() as temporary:
                 report = self.run_tool(module, Path(temporary))
                 run = report["runs"][0]
@@ -230,6 +231,70 @@ class TimingBoundaryTests(unittest.TestCase):
                     self.assertEqual(report["timing_summary"][field]["median"], run[field])
                 self.assertEqual(run["si_sdr_gain_db"], [0, None])
                 json.dumps(report, allow_nan=False)
+
+    def test_benchmark_repeats_exclude_fixed_work_and_reject_changed_input(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            report = self.run_tool(benchmark, Path(temporary), repeats=3)
+            self.assertEqual(len(report["runs"]), 3)
+            for run in report["runs"]:
+                self.assertEqual(run["worker_subprocess_wall_seconds"], 7)
+                self.assertEqual(run["evaluation_wall_seconds"], 20)
+                self.assertEqual(run["source_sha256"], report["input_sha256"])
+        for source_hash in ("b"*64, None):
+            with self.subTest(source_hash=source_hash), tempfile.TemporaryDirectory() as temporary:
+                with self.assertRaisesRegex(ValueError, "worker input does not match"):
+                    self.run_tool(benchmark, Path(temporary), source_hash=source_hash)
+
+
+class BenchmarkRepeatTests(unittest.TestCase):
+    def test_each_repeat_scores_its_own_output_against_fixed_inputs(self):
+        import soundfile as sf
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            rate = 8000
+            reference = np.sin(np.arange(512, dtype="float32")[:, None] * 0.125) * 0.25
+            noisy = reference * 0.5
+            reference_path, input_path = root/"reference.wav", root/"input.wav"
+            sf.write(reference_path, reference, rate, subtype="FLOAT")
+            sf.write(input_path, noisy, rate, subtype="FLOAT")
+            manifest = root/"manifest.json"
+            manifest.write_text("{}")
+            request = {"output_dir":str(root/"worker"), "input_path":str(input_path),
+                       "operation":"speech", "task_id":"repeat"}
+            request_path = root/"request.json"
+            request_path.write_text(json.dumps(request))
+            requests = []
+            outputs = [reference, reference*0.75, np.zeros_like(reference)]
+            def worker(command, **kwargs):
+                current = json.loads(Path(command[-1]).read_text())
+                destination = Path(current["output_dir"])
+                destination.mkdir()
+                output_path = destination/"speech.wav"
+                sf.write(output_path, outputs[len(requests)], rate, subtype="FLOAT")
+                requests.append(current)
+                result = {"outputs":{"speech":str(output_path)}, "processing":{"core_seconds":24},
+                          "source_sha256":benchmark.digest(input_path)}
+                (destination/"result.json").write_text(json.dumps(result))
+                event = {"version":benchmark.EVENT_VERSION, "type":"complete", "task_id":"repeat"}
+                return subprocess.CompletedProcess(command, 0, json.dumps(event)+"\n", "")
+            report_path = root/"report.json"
+            argv = ["benchmark.py", "--request", str(request_path), "--reference", str(reference_path),
+                    "--corpus-manifest", str(manifest), "--repeats", "3", "--report", str(report_path)]
+            with patch.object(sys, "argv", argv), patch.object(benchmark.subprocess, "run", side_effect=worker), \
+                    patch("builtins.print"):
+                benchmark.main()
+            report = json.loads(report_path.read_text())
+            self.assertEqual(report["input_quality"], benchmark.metrics(reference, noisy, rate))
+            self.assertEqual(len({current["output_dir"] for current in requests}), 3)
+            for current in requests:
+                self.assertEqual({key:value for key,value in current.items() if key != "output_dir"},
+                                 {key:value for key,value in request.items() if key != "output_dir"})
+            for run, output in zip(report["runs"], outputs):
+                self.assertEqual(run["reference_quality"], benchmark.metrics(reference, output, rate))
+            self.assertEqual(report["runs"][0]["reference_quality"]["rms_error"], 0)
+            self.assertGreater(report["runs"][1]["reference_quality"]["rms_error"], 0)
+            self.assertGreater(report["runs"][2]["reference_quality"]["rms_error"],
+                               report["runs"][1]["reference_quality"]["rms_error"])
 
 
 if __name__ == "__main__":

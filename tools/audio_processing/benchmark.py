@@ -22,7 +22,7 @@ else:
 
 TIMING_BOUNDARIES = {
     "worker_subprocess_wall_seconds": "Immediately before subprocess.run through its return; includes process startup, worker work and captured pipe collection only.",
-    "evaluation_wall_seconds": "Before per-sample reference/input reads and request creation through completed sample record construction, after all worker output/event reads, artifact writes, hashes and quality/intelligibility scoring. Excludes appending the completed record, progress printing, corpus summaries and final aggregate report serialization/write; excludes one-time CLI/model/corpus setup.",
+    "evaluation_wall_seconds": "Before each independent run's request creation through completed run record construction, including worker output/event reads, artifact writes, input identity validation and output quality scoring. Excludes one-time fixed reference/input reads, hashes and input quality scoring; excludes appending the completed record, progress printing, aggregate summaries and final report serialization/write.",
 }
 
 
@@ -105,14 +105,27 @@ def main():
     base = Path(request["output_dir"])
     report = {"command":sys.argv,"request":request,"corpus_manifest_sha256":digest(args.corpus_manifest),
               "corpus_provenance":read_json(args.corpus_manifest),"runs":[],"timing_boundaries":TIMING_BOUNDARIES}
+    report["input_sha256"] = digest(request["input_path"])
+    reference, rate = sf.read(args.reference, dtype="float32", always_2d=True)
+    noisy, source_rate = sf.read(request["input_path"], dtype="float32", always_2d=True)
+    if digest(request["input_path"]) != report["input_sha256"]:
+        raise ValueError("input changed while preparing benchmark")
+    if rate != source_rate:
+        raise ValueError("reference must be at source rate")
+    report["reference_sha256"] = digest(args.reference)
+    report["input_quality"] = metrics(reference, noisy, rate)
+    upstream = backing = None
+    if args.upstream_reference:
+        upstream, upstream_rate = sf.read(args.upstream_reference, dtype="float32", always_2d=True)
+        if upstream_rate != rate:
+            raise ValueError("upstream reference rate changed")
+        upstream_sha256 = digest(args.upstream_reference)
+    if request["operation"] == "separate" and args.accompaniment_reference:
+        backing, backing_rate = sf.read(args.accompaniment_reference, dtype="float32", always_2d=True)
+        if backing_rate != rate:
+            raise ValueError("accompaniment reference rate changed")
     for index in range(args.repeats):
         evaluation_start = time.perf_counter()
-        reference, rate = sf.read(args.reference, dtype="float32", always_2d=True)
-        noisy, source_rate = sf.read(request["input_path"], dtype="float32", always_2d=True)
-        if rate != source_rate:
-            raise ValueError("reference must be at source rate")
-        report["reference_sha256"] = digest(args.reference)
-        report["input_quality"] = metrics(reference, noisy, rate)
         run_request = {**request,"output_dir":str(base.with_name(base.name+"-run-"+str(index)))}
         request_path = base.parent / (base.name+"-request-"+str(index)+".json")
         with request_path.open("x") as stream:
@@ -126,6 +139,8 @@ def main():
             raise RuntimeError(json.dumps({"exit":completed.returncode,"events":events,"stderr":completed.stderr}))
         with (Path(run_request["output_dir"]) / "result.json").open() as stream:
             result = json.load(stream)
+        if result.get("source_sha256") != report["input_sha256"]:
+            raise ValueError("worker input does not match benchmark input")
         stem = "speech" if request["operation"] == "speech" else "vocals"
         output, output_rate = sf.read(result["outputs"][stem], dtype="float32", always_2d=True)
         if output_rate != rate:
@@ -133,19 +148,13 @@ def main():
         result["worker_subprocess_wall_seconds"] = worker_seconds
         result["reference_quality"] = metrics(reference, output, rate, result["processing"]["core_seconds"])
         result["si_sdr_gain_db"] = [score_difference(a,b) for a,b in zip(result["reference_quality"]["si_sdr_db"],report["input_quality"]["si_sdr_db"])]
-        if args.upstream_reference:
-            upstream, upstream_rate = sf.read(args.upstream_reference, dtype="float32", always_2d=True)
-            if upstream_rate != rate:
-                raise ValueError("upstream reference rate changed")
+        if upstream is not None:
             result["upstream_difference"] = metrics(upstream, output, rate, result["processing"]["core_seconds"])
-            result["upstream_reference_sha256"] = digest(args.upstream_reference)
+            result["upstream_reference_sha256"] = upstream_sha256
         if request["operation"] == "separate":
             accompaniment, _ = sf.read(result["outputs"]["accompaniment"], dtype="float32", always_2d=True)
             result["mixture_reconstruction_peak_residual"] = float(np.max(np.abs(noisy.astype("float64")-output-accompaniment)))
-            if args.accompaniment_reference:
-                backing, backing_rate = sf.read(args.accompaniment_reference, dtype="float32", always_2d=True)
-                if backing_rate != rate:
-                    raise ValueError("accompaniment reference rate changed")
+            if backing is not None:
                 result["accompaniment_quality"] = metrics(backing, accompaniment, rate, result["processing"]["core_seconds"])
         result["evaluation_wall_seconds"] = time.perf_counter()-evaluation_start
         report["runs"].append(result)
