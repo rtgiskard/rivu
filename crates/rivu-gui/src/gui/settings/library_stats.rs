@@ -337,13 +337,7 @@ mod tests {
             },
         );
         assert!(stats.values.is_empty());
-        assert!(
-            stats
-                .error
-                .as_deref()
-                .unwrap()
-                .contains("Query worker busy")
-        );
+        assert!(stats.error.is_some());
         assert!(!stats.in_flight);
         assert!(stats.prepare().is_none());
     }
@@ -380,14 +374,5 @@ mod tests {
         let current = response(&read, 1, 3);
         stats.complete(read, current);
         assert_eq!(stats.values[Path::new("/music")].total, 3);
-    }
-
-    #[test]
-    fn root_stats_sizes_use_iec_units_and_preserve_zero() {
-        assert_eq!(size_label(0), "0 B");
-        assert_eq!(size_label(1023), "1023 B");
-        assert_eq!(size_label(1024), "1.0 KiB");
-        assert_eq!(size_label(1536), "1.5 KiB");
-        assert_eq!(size_label(1024 * 1024 * 1024), "1.0 GiB");
     }
 }

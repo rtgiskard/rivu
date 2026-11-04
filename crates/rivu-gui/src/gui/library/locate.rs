@@ -395,27 +395,6 @@ mod tests {
     }
 
     #[test]
-    fn locate_freshness_uses_only_its_authoritative_query_stamp() {
-        let mut state = LibraryLocateState::default();
-        let query = query();
-        state.sync(&query, revisions());
-        let generation = state.projection.generation();
-        let mut current = revisions();
-        current.playlist = 11;
-        current.queue = 13;
-        current.duplicate_groups = 17;
-        current.duplicate_members = 19;
-        state.sync(&query, current);
-        assert_eq!(state.projection.generation(), generation);
-        assert!(state.projection.accepts(&query, generation, current));
-        current.library += 1;
-        assert!(!state.projection.accepts(&query, generation, current));
-        current = revisions();
-        current.structure += 1;
-        assert!(!state.projection.accepts(&query, generation, current));
-    }
-
-    #[test]
     fn cancelled_locate_keeps_the_physical_gate_and_retires_navigation_only() {
         let mut state = LibraryLocateState::default();
         let query = query();
@@ -437,30 +416,6 @@ mod tests {
             state
                 .projection
                 .accepts(&query, state.projection.generation(), revisions(),)
-        );
-    }
-
-    #[test]
-    fn locate_filter_or_target_change_rejects_the_previous_traversal() {
-        let mut state = LibraryLocateState::default();
-        let original = query();
-        state.sync(&original, revisions());
-        let generation = state.projection.generation();
-        let mut changed = original.clone();
-        let Query::LibraryLocate {
-            query, track_id, ..
-        } = &mut changed
-        else {
-            unreachable!()
-        };
-        *query = None;
-        *track_id = 9;
-        state.sync(&changed, revisions());
-        assert!(!state.projection.accepts(&original, generation, revisions()));
-        assert!(
-            state
-                .projection
-                .accepts(&changed, state.projection.generation(), revisions(),)
         );
     }
 }

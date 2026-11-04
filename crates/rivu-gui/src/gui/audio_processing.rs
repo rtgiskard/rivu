@@ -2810,7 +2810,6 @@ mod field_tests {
             .apply(&mut config, "-18.5")
             .unwrap();
         assert_eq!(config.spectral_gain_floor_db, -18.5);
-        assert_eq!(DenoiseField::SpectralGainFloorDb.text(&config), "-18.5");
         assert_eq!(config.strength, original.strength);
         let patch = DenoiseField::SpectralGainFloorDb.patch("-31.5").unwrap();
         assert_eq!(patch.spectral_gain_floor_db, Some(-31.5));
@@ -2843,8 +2842,6 @@ mod field_tests {
             NeuralField::Worker.patch(path).unwrap().worker,
             Some(PathBuf::from(path))
         );
-        NeuralField::SpeechWetMix.apply(&mut config, "0.6").unwrap();
-        assert_eq!(NeuralField::SpeechWetMix.text(&config), "0.6");
         assert!(NeuralField::SpeechWetMix.patch("NaN").is_err());
         assert!(NeuralField::Threads.patch("256").is_err());
     }

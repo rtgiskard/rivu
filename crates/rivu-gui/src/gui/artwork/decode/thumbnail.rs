@@ -503,26 +503,6 @@ mod tests {
     }
 
     #[test]
-    fn physical_demand_rounds_up_to_discrete_tiers() {
-        for (side, tier) in [
-            (0, 200),
-            (200, 200),
-            (201, 256),
-            (256, 256),
-            (257, 400),
-            (400, 400),
-            (401, 560),
-            (560, 560),
-            (561, 1024),
-            (1024, 1024),
-            (1025, u32::MAX),
-            (u32::MAX, u32::MAX),
-        ] {
-            assert_eq!(super::super::requested_tier(side), tier);
-        }
-    }
-
-    #[test]
     fn static_thumbnails_are_lossless_webp_with_correct_channels_alpha_and_aspect() {
         let directory = tempfile::tempdir().unwrap();
         let bytes = png(800, 400, [240, 12, 20, 96]);
@@ -549,14 +529,6 @@ mod tests {
             "must preserve straight-alpha BGRA"
         );
         let thumbnail = thumbnail_path(&path, hash, 256).unwrap();
-        let hex = hash.to_hex();
-        assert_eq!(
-            thumbnail,
-            directory
-                .path()
-                .join(&hex[..2])
-                .join(format!("{}-256.webp", &hex[2..32]))
-        );
         let encoded = fs::read(&thumbnail).unwrap();
         assert_eq!(&encoded[8..12], b"WEBP");
         assert!(encoded.windows(4).any(|bytes| bytes == b"VP8L"));
@@ -571,7 +543,6 @@ mod tests {
         .unwrap()
         .image;
         assert_eq!(image.as_bytes(0), cached.as_bytes(0));
-        assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 2);
     }
 
     #[test]

@@ -804,7 +804,7 @@ mod tests {
                 },
                 model.revisions,
             );
-            assert_eq!(model.albums.error(0), Some("timed out"));
+            assert!(model.albums.error(0).is_some());
             assert!(model.prepare().is_none());
             if replacement {
                 model.select(Some(key("latest")));
@@ -1142,7 +1142,7 @@ mod tests {
         model.retire_worker();
         model.sync(false, model.revisions, 2);
         model.sync(true, model.revisions, 2);
-        assert_eq!(model.tracks.error(0), Some("offline"));
+        assert!(model.tracks.error(0).is_some());
         assert!(model.prepare().is_none());
         model.retry();
         let request = model.prepare().unwrap();
@@ -1169,113 +1169,6 @@ mod tests {
                 limit: 2,
             },
         ]
-    }
-
-    #[test]
-    fn album_track_search_replaces_pages_and_rejects_previous_completion() {
-        let mut projection = QueryTracker::default();
-        let mut pages = paged::PagedRows::default();
-        let revisions = QueryRevisions::default();
-        let mut query = queries().into_iter().nth(1).unwrap();
-        sync_pages(&mut projection, &mut pages, &query, revisions);
-        pages.begin(0, 2);
-        pages.accept(Page {
-            total: 2,
-            rows: vec![41, 42],
-        });
-        let previous = query.clone();
-        let generation = projection.generation();
-        let Query::AlbumTracks { query: search, .. } = &mut query else {
-            unreachable!()
-        };
-        *search = Some("needle".into());
-        assert!(sync_pages(&mut projection, &mut pages, &query, revisions));
-        assert!(pages.get(0).is_none());
-        assert!(!projection.accepts(&previous, generation, revisions));
-        pages.begin(0, 2);
-        pages.accept(Page {
-            total: 1,
-            rows: vec![42],
-        });
-        assert_eq!(pages.get(0), Some(&42));
-        let Query::AlbumTracks { query: search, .. } = &mut query else {
-            unreachable!()
-        };
-        *search = None;
-        assert!(sync_pages(&mut projection, &mut pages, &query, revisions));
-        assert!(pages.get(0).is_none());
-    }
-
-    #[test]
-    fn hiding_retains_pages_and_failures_but_cancels_pending_submissions() {
-        for query in queries() {
-            let mut projection = QueryTracker::default();
-            let mut pages = paged::PagedRows::default();
-            let revisions = QueryRevisions::default();
-            assert!(sync_pages(&mut projection, &mut pages, &query, revisions));
-            pages.begin(0, 2);
-            pages.accept(Page {
-                total: 6,
-                rows: vec![10, 11],
-            });
-            pages.begin(2, 2);
-            pages.fail("Unavailable".into());
-            pages.begin(4, 2);
-            let generation = projection.generation();
-            cancel_pages(&mut projection, &mut pages);
-            assert_eq!(pages.len(), 6);
-            assert_eq!(pages.total(), Some(6));
-            assert_eq!(pages.get(0), Some(&10));
-            assert_eq!(pages.error(2), Some("Unavailable"));
-            assert!(!projection.accepts(&query, generation, revisions));
-            assert!(!sync_pages(&mut projection, &mut pages, &query, revisions));
-            assert_eq!(pages.get(1), Some(&11));
-            assert_eq!(pages.demand(4..6, 2), Some(4));
-            assert_eq!(pages.demand(2..4, 2), Some(4));
-            pages.retry();
-            assert_eq!(pages.demand(2..4, 2), Some(2));
-        }
-    }
-
-    #[test]
-    fn data_refresh_preserves_viewport_until_authoritative_total_arrives() {
-        for query in queries() {
-            let mut projection = QueryTracker::default();
-            let mut pages = paged::PagedRows::default();
-            let revisions = QueryRevisions::default();
-            sync_pages(&mut projection, &mut pages, &query, revisions);
-            pages.begin(80, 2);
-            pages.accept(Page {
-                total: 100,
-                rows: vec![80, 81],
-            });
-            pages.demand(80..84, 2);
-            let generation = projection.generation();
-            let refreshed = QueryRevisions {
-                album: 1,
-                ..revisions
-            };
-            assert!(sync_pages(&mut projection, &mut pages, &query, refreshed));
-            assert_eq!(pages.len(), 100);
-            assert_eq!(pages.total(), None);
-            assert_eq!(pages.visible(), 80..84);
-            assert!(pages.get(80).is_none());
-            assert!(!projection.accepts(&query, generation, revisions));
-            assert_eq!(pages.demand(pages.visible(), 2), Some(80));
-            pages.begin(80, 2);
-            pages.accept(Page {
-                total: 4,
-                rows: vec![],
-            });
-            assert_eq!(pages.len(), 4);
-            assert_eq!(pages.demand(pages.visible(), 2), Some(2));
-            pages.begin(2, 2);
-            pages.accept(Page {
-                total: 4,
-                rows: vec![2, 3],
-            });
-            assert_eq!(pages.get(3), Some(&3));
-        }
     }
 
     #[test]

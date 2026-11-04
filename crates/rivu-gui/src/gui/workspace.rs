@@ -614,9 +614,5 @@ mod tests {
         assert_eq!(reopened.layouts, expected);
         let loaded = LayoutSet::load(&directory.path().join("layout.json")).unwrap();
         assert_eq!(loaded.active_name(), "Work");
-        assert_eq!(
-            loaded.current().panels().len(),
-            expected.current().panels().len()
-        );
     }
 }

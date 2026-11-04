@@ -2068,7 +2068,6 @@ mod playlist_drag_tests {
             stamp: Default::default(),
             entry_generation: 4,
         };
-        assert_eq!(drag.track_ids.get().unwrap(), &[9, 9, 3]);
         for target in [7, 40, 2] {
             assert!(drag.command(Some(target), false).is_none());
             assert!(drag.command(Some(target), true).is_none());

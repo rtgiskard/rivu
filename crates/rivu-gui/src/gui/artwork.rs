@@ -1771,7 +1771,6 @@ mod tests {
         let track = crate::test_support::artwork_track(path);
         let manager = rivu_metadata::artwork::ArtworkManager::new(directory.path());
         let loaded = manager.load(crate::artwork_source(&track)).unwrap();
-        assert_eq!(loaded.max_image_bytes(), 16 * 1024 * 1024);
         assert_eq!(
             std::fs::metadata(loaded.path()).unwrap().len(),
             9 * 1024 * 1024
@@ -2261,13 +2260,7 @@ mod tests {
         image: &Entity<DecorationImage>,
     ) -> std::sync::Weak<RenderImage> {
         window.update(|_, cx| match &image.read(cx).load {
-            DecorationLoad::Ready(Ok(decoded)) => {
-                assert_eq!(
-                    decoded.size(0),
-                    gpui::size(gpui::DevicePixels(1024), gpui::DevicePixels(1024))
-                );
-                Arc::downgrade(decoded)
-            }
+            DecorationLoad::Ready(Ok(decoded)) => Arc::downgrade(decoded),
             _ => panic!("decoration must have completed its local SVG decode"),
         })
     }

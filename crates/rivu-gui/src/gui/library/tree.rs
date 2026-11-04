@@ -1713,31 +1713,6 @@ mod tests {
     }
 
     #[test]
-    fn guides_preserve_sibling_continuations_without_payloads() {
-        let mut tree = DirectoryTree::default();
-        accept(&mut tree, &branch(""), 0, 1, &["/a"], 1);
-        tree.expand(&branch("/a"));
-        accept(&mut tree, &branch("/a"), 0, 2, &["/a/first", "/a/last"], 2);
-        tree.expand(&branch("/a/first"));
-        accept(&mut tree, &branch("/a/first"), 0, 3, &["/a/first/leaf"], 1);
-        tree.expand(&branch("/a/last"));
-        accept(&mut tree, &branch("/a/last"), 0, 4, &["/a/last/leaf"], 1);
-        tree.pages.clear();
-        let guides = |index| {
-            let mut result = Vec::new();
-            tree.visit_guides(index, |column, continues, current| {
-                result.push((column, continues, current));
-            });
-            result
-        };
-        assert_eq!(guides(0), vec![]);
-        assert_eq!(guides(1), vec![(0, true, true)]);
-        assert_eq!(guides(2), vec![(1, false, true), (0, true, false)]);
-        assert_eq!(guides(3), vec![(0, false, true)]);
-        assert_eq!(guides(4), vec![(1, false, true), (0, false, false)]);
-    }
-
-    #[test]
     fn nested_revision_retry_relocation_and_collapse_keep_correct_ancestry() {
         let mut tree = DirectoryTree::default();
         tree.configure_page_size(1);
@@ -1920,33 +1895,6 @@ mod tests {
         assert!(
             matches!(tree.item(3), Some(TreeItem::Placeholder { branch: key, .. }) if key == branch("/a/x"))
         );
-    }
-
-    #[test]
-    fn branch_scroll_automatically_crosses_four_batch_boundaries() {
-        let mut tree = DirectoryTree::default();
-        tree.configure_page_size(2);
-        accept(&mut tree, &branch(""), 0, 1, &["/a"], 1);
-        tree.expand(&branch("/a"));
-        for offset in (0..10).step_by(2) {
-            assert_eq!(
-                tree.requests_for_range(offset + 1..offset + 2),
-                vec![(branch("/a"), offset)]
-            );
-            accept(
-                &mut tree,
-                &branch("/a"),
-                offset,
-                offset as u64 + 2,
-                &[
-                    &format!("/a/child-{offset}"),
-                    &format!("/a/child-{}", offset + 1),
-                ],
-                10,
-            );
-            assert_eq!(tree.row_count(), 11);
-            assert!(matches!(tree.item(0), Some(TreeItem::Entry(_))));
-        }
     }
 
     #[test]

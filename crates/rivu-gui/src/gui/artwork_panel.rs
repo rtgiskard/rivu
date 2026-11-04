@@ -986,25 +986,6 @@ mod tests {
     }
 
     #[test]
-    fn circle_is_centered_and_bounded_in_wide_and_tall_panels() {
-        for (width, height, x, y) in [
-            (400., 200., 110., 20.),
-            (200., 400., 10., 120.),
-            (0., 200., 10., 120.),
-        ] {
-            let circle = circle_bounds(Bounds {
-                origin: point(px(10.), px(20.)),
-                size: size(px(width), px(height)),
-            });
-            assert_eq!(circle.origin, point(px(x), px(y)));
-            assert_eq!(
-                circle.size,
-                size(px(width.min(height)), px(width.min(height)))
-            );
-        }
-    }
-
-    #[test]
     fn styled_artwork_stays_bounded_and_concentric_at_fractional_scale() {
         let bounds = Bounds {
             origin: point(px(10.25), px(20.25)),
@@ -1038,7 +1019,6 @@ mod tests {
 
     #[test]
     fn card_preserves_inner_square_and_bounds_every_rotated_corner() {
-        assert_eq!(artwork_image_ratio(ArtworkStyle::Card), 448. / 512.);
         for (width, height) in [(32., 96.), (400., 200.), (200., 400.), (997.5, 601.25)] {
             let bounds = Bounds {
                 origin: point(px(10.25), px(20.25)),

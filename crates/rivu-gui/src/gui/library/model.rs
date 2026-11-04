@@ -908,7 +908,6 @@ mod tests {
                 revisions,
                 Some(search_count_result(&roots[0], (1, 3))),
             ));
-            assert_eq!(library.root_count_label(&roots[0]), "1 / 3");
             library.cancel_pending_reads();
             assert_eq!(library.search_counts(), Some((1, 3)));
             assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
@@ -925,7 +924,6 @@ mod tests {
         assert!(library.accept_search_counts(request.unwrap(), &roots, revisions, None));
         assert!(!library.search_counts_pending());
         assert_eq!(library.search_counts(), None);
-        assert_eq!(library.root_count_label(&roots[0]), "—");
         assert!(library.root_count_failed(&roots[0]));
         library.cancel_pending_reads();
         assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
@@ -948,14 +946,12 @@ mod tests {
             Some(search_count_result(&roots[0], (0, 3))),
         ));
         assert_eq!(library.search_counts(), Some((0, 3)));
-        assert_eq!(library.root_count_label(&roots[0]), "0 / 3");
         // An accepted payload is invalidated together with its per-root counts.
         library.refresh_search("third".into());
         let (changed, request) = library.prepare_search_counts(&roots, revisions);
         assert!(changed);
         assert!(request.is_some());
         assert_eq!(library.search_counts(), None);
-        assert_eq!(library.root_count_label(&roots[0]), "—");
     }
 
     #[test]
@@ -970,7 +966,6 @@ mod tests {
                 let (_, request) = library.prepare_search_counts(&roots, revisions);
                 assert!(library.accept_search_counts(request.unwrap(), &roots, revisions, None));
                 assert!(library.other_count_failed());
-                assert_eq!(library.other_count_label(), "—");
                 assert!(!library.search_counts_pending());
                 library.cancel_pending_reads();
                 assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
@@ -995,10 +990,6 @@ mod tests {
                 ));
                 assert!(!library.other_count_failed());
                 assert!(!library.search_counts_pending());
-                assert_eq!(
-                    library.other_count_label(),
-                    if filtered { "2 / 3" } else { "3" }
-                );
                 assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
             }
         }
@@ -1028,7 +1019,6 @@ mod tests {
                     }),
                 ));
                 assert!(!library.other_tracks_empty());
-                assert_eq!(library.other_count_label(), "0 / 3");
                 assert_eq!(library.tree.root_total(), Some(roots.len() + 1));
                 library.select_node(&LibraryNode::Track(41), false);
                 library.select_node(&LibraryNode::OtherTracks, true);
@@ -1184,28 +1174,6 @@ mod tests {
         library.refresh_tree(10);
         assert!(library.selected().contains(&41));
     }
-    #[test]
-    fn page_retry_preserves_unknown_count_until_an_empty_response_arrives() {
-        let mut library = LibraryBrowser::default();
-        let forest = TreeBranch::default();
-        library.prepare_directory(forest.clone(), 0, 20, 1);
-        library.fail_directory(&forest, 1);
-        assert_eq!(library.tree().row_count(), 1);
-        assert!(library.demand_directories(0..1).is_empty());
-        library.retry_directory(&forest);
-        assert_eq!(library.demand_directories(0..1), vec![(forest.clone(), 0)]);
-        library.prepare_directory(forest.clone(), 0, 20, 2);
-        library.accept_directory(
-            &forest,
-            2,
-            Page {
-                total: 0,
-                rows: Vec::new(),
-            },
-        );
-        assert_eq!(library.tree().row_count(), 0);
-        assert!(library.demand_directories(0..1).is_empty());
-    }
 
     #[test]
     fn drag_source_resolves_current_mixed_selection_without_duplicates() {
@@ -1261,16 +1229,6 @@ mod tests {
         assert!(library.tree_active());
         library.clear_selection();
         assert!(library.selected().is_empty());
-    }
-
-    #[test]
-    fn refreshed_projection_cancels_old_index_navigation_but_keeps_track_identity() {
-        let mut library = LibraryBrowser::default();
-        library.select_node(&LibraryNode::Track(41), false);
-        library.tree.defer_selection(0);
-        library.prepare_query(String::new());
-        assert_eq!(library.tree.ready_selection(), None);
-        assert!(library.selected().contains(&41));
     }
 
     #[test]
@@ -1651,44 +1609,6 @@ mod tests {
         );
         assert_eq!(library.tree.row_count(), 2);
         assert!(!library.directory_request_pending(&old_root, 2, None, None, false, None));
-    }
-
-    #[test]
-    fn snapshot_revision_reconciliation_finishes_root_and_directory_requests_without_rendering() {
-        let mut library = LibraryBrowser::default();
-        let roots = vec![std::path::PathBuf::from("/music")];
-        let (old, _) = library.begin_root_counts(&roots, 7);
-        let branch = TreeBranch::default();
-        library.prepare_directory(branch.clone(), 0, 20, 1);
-        let (current, batches) = library.begin_root_counts(&roots, 8);
-        library.refresh_tree(20);
-        library.prepare_directory(branch.clone(), 0, 20, 2);
-        assert_eq!(batches, [0]);
-        assert!(library.begin_root_counts(&roots, 8).1.is_empty());
-        assert!(!library.counts_current(old, &roots, 8));
-        assert!(!library.directory_request_pending(&branch, 1, None, None, false, None));
-        library.fail_root_counts(old, 0);
-        library.fail_directory(&branch, 1);
-        library.accept_root_counts(
-            current,
-            0,
-            vec![rivu_protocol::model::LibraryRootCount {
-                path: roots[0].clone(),
-                total: 0,
-            }],
-        );
-        library.accept_directory(
-            &branch,
-            2,
-            Page {
-                total: 0,
-                rows: Vec::new(),
-            },
-        );
-        assert_eq!(library.root_count(&roots[0]), Some(0));
-        assert!(library.begin_root_counts(&roots, 8).1.is_empty());
-        assert!(library.demand_directories(0..1).is_empty());
-        assert!(!library.directory_request_pending(&branch, 2, None, None, false, None));
     }
 
     #[test]

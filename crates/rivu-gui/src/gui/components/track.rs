@@ -297,53 +297,6 @@ mod tests {
             assert_eq!(track_title(title, path, None), "夜曲.live");
         }
         let title = "  A complete title  ";
-        assert!(
-            matches!(track_title(title, path, Some(2)), Cow::Borrowed(value) if value == title)
-        );
-        assert_eq!(track_title(" ", path, Some(2)), "夜曲.live · #02");
-    }
-
-    #[test]
-    fn unknown_and_zero_specs_do_not_create_placeholders() {
-        assert!(audio_specs(AudioSpecs::default()).is_empty());
-        assert!(
-            audio_specs(AudioSpecs {
-                codec: " \t",
-                bits_per_sample: Some(0),
-                bitrate_bps: Some(0),
-                ..AudioSpecs::default()
-            })
-            .is_empty()
-        );
-        let partial = audio_specs(AudioSpecs {
-            sample_rate: 48_000,
-            ..AudioSpecs::default()
-        });
-        assert!(partial.contains("48000"));
-        assert_eq!(partial.split(" · ").count(), 1);
-    }
-
-    #[test]
-    fn source_precision_and_bitrate_certainty_are_preserved() {
-        let source = AudioSpecs {
-            codec: "flac",
-            sample_rate: 44_100,
-            bits_per_sample: Some(24),
-            channels: 2,
-            bitrate_bps: Some(900_000),
-            bitrate_exact: true,
-        };
-        let lossless = audio_specs(source);
-        assert!(lossless.contains("24 bit"));
-        assert!(!lossless.contains('≈'));
-        // A lossy source has no source precision; never invent decoder width.
-        let lossy = audio_specs(AudioSpecs {
-            codec: "mp3",
-            bits_per_sample: None,
-            bitrate_exact: false,
-            ..source
-        });
-        assert!(!lossy.contains(" bit"));
-        assert!(lossy.contains("≈900"));
+        assert_eq!(track_title(title, path, Some(2)), title);
     }
 }

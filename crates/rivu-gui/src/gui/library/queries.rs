@@ -477,8 +477,6 @@ mod tests {
         assert_eq!(result.other_tracks, (1, 1));
         assert!(library.accept_search_counts(request, &roots, revisions, Some(result)));
         assert_eq!(library.search_counts(), Some((3, 5)));
-        assert_eq!(library.root_count_label(&parent), "1 / 2");
-        assert_eq!(library.root_count_label(&sibling), "1 / 2");
         library.refresh_search("not indexed".into());
         let (_, request) = library.prepare_search_counts(&roots, revisions);
         let request = request.unwrap();

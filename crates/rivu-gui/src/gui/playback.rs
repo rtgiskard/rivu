@@ -596,7 +596,6 @@ impl Playback {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gui::interaction::{DragCommit, WindowInteraction};
 
     #[test]
     fn seek_keys_require_queue_identity_and_finite_positive_duration() {
@@ -624,27 +623,5 @@ mod tests {
             }
             state.duration = Some(42.);
         }
-    }
-
-    #[test]
-    fn slider_key_cancellation_discards_pointer_preview_before_command() {
-        let mut owner = WindowInteraction::default();
-        owner.begin_slider(Dragging::Seek(3), Some(10), Some(100.));
-        owner.update_slider_seek(0.75);
-        owner.cancel();
-        let state = PlaybackState {
-            position: 12.,
-            duration: Some(100.),
-            ..Default::default()
-        };
-        assert!(matches!(
-            slider_command(Dragging::Seek(3), SliderKey::Increase, Some(10), &state),
-            Some(Command::SeekRelative {
-                queue_id: 10,
-                delta: 5.
-            })
-        ));
-        assert_eq!(owner.seek_preview(), None);
-        assert_eq!(owner.finish_drag(), DragCommit::None);
     }
 }

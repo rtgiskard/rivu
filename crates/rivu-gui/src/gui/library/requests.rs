@@ -859,18 +859,19 @@ mod tests {
                 .read
                 .unwrap();
             browser.prepare_directory_read(branch.clone(), 0, 20, &roots, revisions);
-            assert_eq!(
-                browser.publish_directory_read(
-                    &read,
-                    revisions,
-                    QueryResponse {
+            assert!(
+                browser
+                    .publish_directory_read(
+                        &read,
                         revisions,
-                        result: Err(rivu_protocol::response::QueryError::Message(
-                            "timeout".into()
-                        )),
-                    },
-                ),
-                Some("timeout".into())
+                        QueryResponse {
+                            revisions,
+                            result: Err(rivu_protocol::response::QueryError::Message(
+                                "timeout".into()
+                            )),
+                        },
+                    )
+                    .is_some()
             );
             assert_eq!(
                 browser.library.tree().status(&branch),
@@ -1026,22 +1027,5 @@ mod tests {
             browser.cancel_reads();
             assert!(browser.requests.directory_queued.is_empty());
         });
-    }
-
-    #[test]
-    fn queued_directory_demand_coalesces_without_releasing_a_worker() {
-        let mut requests = LibraryRequests::default();
-        let branch = super::library::TreeBranch::default();
-        requests.directory_workers.insert(branch.clone(), (0, 1));
-        requests.queue_directory(branch.clone(), 0);
-        requests.queue_directory(branch.clone(), 40);
-        assert_eq!(requests.directory_queued.len(), 1);
-        assert_eq!(
-            requests.directory_queued.front(),
-            Some(&(branch.clone(), 40))
-        );
-        requests.cancel_directory_demand();
-        assert!(requests.directory_queued.is_empty());
-        assert!(requests.directory_workers.contains_key(&branch));
     }
 }

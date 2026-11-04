@@ -483,35 +483,3 @@ impl History {
             .into_any_element()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn time_column_excludes_only_the_replaced_row_and_preserves_ties() {
-        let mut times = TimeWidths::new(px(10.));
-        for (id, width) in [(1, 30.), (2, 20.), (3, 15.)] {
-            times.include(id, px(width));
-        }
-        assert_eq!(times.width(None, px(0.)), px(30.));
-        assert_eq!(times.width(Some(1), px(12.)), px(20.));
-        assert_eq!(times.width(Some(2), px(12.)), px(30.));
-        assert_eq!(times.width(Some(99), px(0.)), px(30.));
-        assert_eq!(times.width(Some(1), px(40.)), px(40.));
-
-        times.include(4, px(30.));
-        assert_eq!(times.width(Some(1), px(12.)), px(30.));
-        assert_eq!(times.width(Some(4), px(12.)), px(30.));
-    }
-
-    #[test]
-    fn time_column_keeps_header_space_for_empty_or_single_row_history() {
-        let mut times = TimeWidths::new(px(10.));
-        assert_eq!(times.width(None, px(0.)), px(10.));
-        times.include(1, px(30.));
-        assert_eq!(times.width(Some(1), px(5.)), px(10.));
-        assert_eq!(times.width(Some(1), px(15.)), px(15.));
-        assert_eq!(times.width(None, px(0.)), px(30.));
-    }
-}

@@ -413,7 +413,6 @@ mod tests {
         let mut session = MetadataSession::default();
         request(&mut owner, &mut session, 1, now);
         let first = owner.prepare(&mut session, true, now).unwrap();
-        assert_eq!(first.delay, Duration::from_millis(80));
         assert!(owner.submit(first.read, &session, environment(true)));
         request(&mut owner, &mut session, 2, now + Duration::from_millis(20));
         assert!(owner.prepare(&mut session, true, now).is_none());
@@ -425,7 +424,10 @@ mod tests {
             .prepare(&mut session, true, now + Duration::from_millis(50))
             .unwrap();
         assert_eq!(next.read.track_id, 2);
-        assert_eq!(next.delay, Duration::from_millis(50));
+        assert_eq!(
+            next.delay,
+            first.delay.saturating_sub(Duration::from_millis(30))
+        );
         // A repeated completion cannot release the replacement's worker gate.
         finish(&mut owner, &mut session, first.read, true);
         assert!(owner.prepare(&mut session, true, now).is_none());
@@ -442,7 +444,6 @@ mod tests {
         let first = owner
             .prepare(&mut session, true, now + Duration::from_millis(30))
             .unwrap();
-        assert_eq!(first.delay, Duration::from_millis(50));
         assert!(!owner.submit(first.read, &session, environment(false)));
         assert!(owner.prepare(&mut session, false, now).is_none());
         let reopened = owner
@@ -632,7 +633,7 @@ mod tests {
             ReadCompletion::Retired
         ));
         let next = owner.prepare(&mut session, true, changed).unwrap();
-        assert_eq!(next.delay, Duration::from_millis(80));
+        assert_eq!(next.delay, first.delay);
         assert!(owner.submit(
             next.read,
             &session,

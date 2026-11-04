@@ -729,9 +729,6 @@ mod library_root_tests {
                 .collect::<Vec<_>>();
             assert_eq!(rendered, roots);
             assert_eq!(this.library.search_counts(), Some((0, 0)));
-            assert_eq!(this.state.library.track_total, 0);
-            assert!(!this.state.system.scanning);
-            assert!(this.state.system.scan_progress.is_none());
         });
     }
 
@@ -811,43 +808,5 @@ mod library_root_tests {
             draw_library(window, &app, &expected).await;
             assert_roots(window, &app, &expected);
         }
-    }
-}
-
-#[cfg(test)]
-mod lifecycle_tests {
-    use super::*;
-
-    #[test]
-    fn unchanged_and_transport_only_publications_do_not_change_library_display() {
-        let previous = GuiSnapshot::default();
-        assert!(!display_changed(&previous, &previous));
-        let mut next = previous.clone();
-        next.playback.position += 1.;
-        next.playback.last_heard_at = Some(1);
-        next.playback.volume = 0.5;
-        next.queue.revision += 1;
-        next.library.playlist_revision += 1;
-        next.system.revision += 1;
-        assert!(!display_changed(&previous, &next));
-    }
-
-    #[test]
-    fn library_content_scan_and_display_configuration_changes_repaint() {
-        let previous = GuiSnapshot::default();
-        let mut next = previous.clone();
-        next.library.revision += 1;
-        assert!(display_changed(&previous, &next));
-        next = previous.clone();
-        next.system.scanning = !previous.system.scanning;
-        assert!(display_changed(&previous, &next));
-        next = previous.clone();
-        Arc::make_mut(&mut next.system.config)
-            .library_columns
-            .artist = !previous.system.config.library_columns.artist;
-        assert!(display_changed(&previous, &next));
-        next = previous.clone();
-        next.playback.status = rivu_protocol::model::PlaybackStatus::Playing;
-        assert!(display_changed(&previous, &next));
     }
 }

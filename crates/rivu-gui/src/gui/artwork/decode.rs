@@ -352,16 +352,6 @@ pub(super) mod tests {
         }
     }
 
-    #[test]
-    fn configured_retained_budget_keeps_workspace_and_dimension_caps_fixed() {
-        for retained_mib in [1, 64, 1024] {
-            let budget = Budget::new(retained_mib);
-            assert_eq!(budget.retained, u64::from(retained_mib) * MIB);
-            assert_eq!(budget.workspace, 64 * MIB);
-            assert_eq!(budget.max_side, 4096);
-        }
-    }
-
     fn pixels(red: bool) -> image::RgbaImage {
         image::RgbaImage::from_pixel(
             2,

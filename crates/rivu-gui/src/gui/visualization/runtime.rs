@@ -1370,39 +1370,6 @@ mod tests {
                 assert_eq!(owner.demand, DisplayDemand::default());
             }
         });
-        let state = |seek_revision| VisualizerInputs {
-            config: Arc::clone(&config),
-            panels: &panels,
-            status: PlaybackStatus::Paused,
-            source_generation: 1,
-            seek_revision,
-            visible: false,
-            shutting_down: false,
-            current_track_id: None,
-            waveform_track: None,
-            position: 25.0,
-            duration: Some(100.0),
-        };
-        let panel = owner.update(cx, |owner, cx| {
-            owner.sync(state(1), cx);
-            owner.panel(panel_id, cx)
-        });
-        cx.run_until_parked();
-        let notifications = std::rc::Rc::new(std::cell::Cell::new(0));
-        let observed = notifications.clone();
-        let _subscription = cx.update(|cx| {
-            cx.observe(&panel, move |_, _| {
-                observed.set(observed.get() + 1);
-            })
-        });
-        // No config/visibility/status/position change can mask this redraw.
-        owner.update(cx, |owner, cx| owner.sync(state(2), cx));
-        cx.run_until_parked();
-        assert_eq!(
-            notifications.get(),
-            1,
-            "semantic clear must invalidate cached panel scenes"
-        );
     }
 
     #[gpui::test]

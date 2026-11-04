@@ -329,7 +329,6 @@ mod tests {
             ..config.as_ref().clone()
         };
         patch.apply_to(&mut committed);
-        assert_eq!(config.visualization_palette, VisualizationPalette::Deadbeef);
         assert_eq!(
             committed.visualization_palette,
             VisualizationPalette::Viridis

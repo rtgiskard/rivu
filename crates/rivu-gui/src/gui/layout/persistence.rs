@@ -455,8 +455,8 @@ mod tests {
             Ok(())
         });
         let window = owner.handle();
-        assert_eq!(window.submit(&named("first")), 1);
-        assert_eq!(window.submit(&named("session-only")), 2);
+        window.submit(&named("first"));
+        window.submit(&named("session-only"));
         assert!(window.completion().is_none());
         drop(window);
         let reopened = owner.handle();

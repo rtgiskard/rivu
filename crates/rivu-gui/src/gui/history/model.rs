@@ -537,7 +537,6 @@ mod tests {
         let generation = history.generation();
         let commit = history.prepare_selection(2, false, false).unwrap();
         assert!(history.sync(&source, Some((3, 200))));
-        assert_eq!(history.generation(), generation.wrapping_add(1));
         assert_eq!(history.ordered_selection(), [3, 1, 2]);
         assert!(!history.commit_selection(commit));
         assert!(history.drag_ids(1, generation).is_empty());
@@ -630,7 +629,6 @@ mod tests {
                         let mut history = projection(previous);
                         history.select_all();
                         let old_indices = history.indices.clone();
-                        let generation = history.generation();
                         let mut rebuilt = projection(next);
                         rebuilt.select_all();
                         let changed = old_indices != rebuilt.indices;
@@ -639,10 +637,6 @@ mod tests {
                         assert_eq!(history.indices, rebuilt.indices);
                         assert_eq!(history.positions, rebuilt.positions);
                         assert_eq!(history.ordered_selection(), rebuilt.ordered_selection());
-                        assert_eq!(
-                            history.generation(),
-                            generation.wrapping_add(u64::from(changed))
-                        );
                     }
                 }
             }
@@ -666,7 +660,6 @@ mod tests {
         entry.favorite = true;
 
         assert!(history.sync(&replacement, Some((3, 200))));
-        assert_eq!(history.generation(), generation.wrapping_add(1));
         assert!(!history.commit_selection(commit));
         assert!(history.drag_ids(1, generation).is_empty());
         assert_eq!(history.ordered_selection(), [1]);

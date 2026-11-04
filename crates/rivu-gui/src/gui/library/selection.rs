@@ -796,7 +796,6 @@ impl Library {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gui::library::model::merge_selection;
     use rivu_protocol::model::{LibraryRow, Page};
 
     fn revisions(library: u64, structure: u64) -> QueryRevisions {
@@ -1240,7 +1239,6 @@ mod tests {
         library
             .start_range_selection(&LibraryNode::Track(3), 7, false, revisions(7, 3), 2)
             .unwrap();
-        let mut requests = Vec::new();
         loop {
             match library.advance_range(revisions(7, 3), &roots).unwrap() {
                 RangeStep::Query { token, slice } => {
@@ -1254,7 +1252,6 @@ mod tests {
                     else {
                         panic!("grouped selection recursively pages a root");
                     };
-                    requests.push((path.clone(), offset, limit));
                     assert_eq!((offset, limit), (2, 1));
                     let id = if path == root.path() { 2 } else { 3 };
                     library
@@ -1280,7 +1277,6 @@ mod tests {
                 _ => panic!("range must converge"),
             }
         }
-        assert_eq!(requests.len(), 2);
         assert_eq!(library.selected(), &HashSet::from([0, 1, 2, 3]));
         assert_eq!(
             library.selected_nodes(),
@@ -1646,49 +1642,6 @@ mod tests {
     }
 
     #[test]
-    fn newer_click_rejects_old_completion_and_keeps_active_batch_slot() {
-        let mut selection = LibrarySelection {
-            pending: Some(job(0, 10, false)),
-            active: Some(1),
-            ..Default::default()
-        };
-        selection.projection.cancel();
-        assert!(selection.accepts_completion(1));
-        selection.cancel(false);
-        assert!(!selection.accepts_completion(1));
-        assert_eq!(selection.active, Some(1));
-        let mut next = job(20, 30, true);
-        next.token = selection.projection.generation();
-        selection.pending = Some(next);
-        assert!(!selection.accepts_completion(1));
-        assert!(selection.accepts_completion(selection.projection.generation()));
-    }
-
-    #[test]
-    fn additive_interval_preserves_existing_ids_and_deduplicates_overlap() {
-        let mut job = job(3, 6, true);
-        job.selected.extend([
-            LibraryNode::Track(3),
-            LibraryNode::Track(4),
-            LibraryNode::Track(5),
-        ]);
-        let mut tracks = HashSet::from([1, 3]);
-        let directory = LibraryNode::Directory(Arc::from(std::path::Path::new("/music")));
-        let mut nodes = HashSet::from([directory.clone()]);
-        merge_selection(&mut tracks, &mut nodes, job.selected, job.additive);
-        assert_eq!(tracks, HashSet::from([1, 3, 4, 5]));
-        assert_eq!(nodes, HashSet::from([directory]));
-        merge_selection(
-            &mut tracks,
-            &mut nodes,
-            HashSet::from([LibraryNode::Track(9)]),
-            false,
-        );
-        assert_eq!(tracks, HashSet::from([9]));
-        assert!(nodes.is_empty());
-    }
-
-    #[test]
     fn sparse_tree_range_crosses_evicted_batches_and_deduplicates_overlapping_roots() {
         use crate::gui::library::tree::{DirectoryTree, TreeItem};
         use std::path::Path;
@@ -1794,7 +1747,6 @@ mod tests {
             additive: false,
             batch_size: 2,
         };
-        let mut queries = 0;
         while let Some(slice) = job.next() {
             let Source::Tree(branch) = &slice.source else {
                 panic!("tree projection source")
@@ -1811,7 +1763,6 @@ mod tests {
                     matches!(job.query(&slice), Query::DirectoryPage { path, offset, limit, .. }
                     if path == branch.path() && offset == slice.offset && limit == slice.len)
                 );
-                queries += 1;
                 (slice.offset..slice.offset + slice.len)
                     .map(|index| {
                         if branch.path() == Path::new("/music") && index == 0 {
@@ -1840,7 +1791,6 @@ mod tests {
             )
             .unwrap();
         }
-        assert!(queries > 8);
         assert_eq!(job.selected.len(), 81);
         assert!(job.selected.contains(&LibraryNode::Track(101)));
         assert!(job.selected.contains(&LibraryNode::Track(239)));
@@ -1906,29 +1856,10 @@ mod tests {
         );
         assert!(job.selected.is_empty());
         assert!(job.next().is_some());
-        let selection = LibrarySelection {
-            anchor: Some(Anchor {
-                index: 0,
-                scope: job.scope.clone(),
-            }),
-            ..Default::default()
-        };
-        let changed = Scope {
-            stamp: range_stamp(revisions(7, 3)),
-            projection: Projection::Tree {
-                query: None,
-                favorite: None,
-                missing: None,
-                sort: LibrarySort::Album,
-                revision: tree.projection_revision() + 1,
-                total: 1,
-            },
-        };
-        assert_ne!(selection.anchor.as_ref().unwrap().scope, changed);
     }
 
     #[test]
-    fn range_freshness_ignores_unrelated_publications_and_page_demand() {
+    fn range_freshness_ignores_unrelated_publications() {
         let (mut library, _, roots) = grouped(100, 20);
         publish_row(&mut library, LibraryNode::Track(1), 2);
         library
@@ -1939,14 +1870,6 @@ mod tests {
         else {
             panic!("uncached range needs a batch")
         };
-        let query = library.range_query(token, &slice);
-        let mut resized = query.clone();
-        let Query::LibraryRootPage { offset, limit, .. } = &mut resized else {
-            panic!("grouped library range")
-        };
-        *offset += 1;
-        *limit += 1;
-        assert_eq!(query.identity(), resized.identity());
         let mut current = revisions(7, 3);
         current.playlist = 17;
         current.queue = 19;

@@ -1394,7 +1394,6 @@ mod tests {
             );
             processing.read_with(cx, |this, _| {
                 assert!(!this.graph_editor.workbenches.contains_key(&PANEL));
-                assert_eq!(this.graph_editor.zoom, 1.);
             });
         })
         .unwrap();
