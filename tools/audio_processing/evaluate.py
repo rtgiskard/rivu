@@ -92,12 +92,12 @@ def main():
         report["metric_packages"]={"pystoi":importlib.metadata.version("pystoi")}
     for index,(name,source,reference,provenance,backing,diagnostic,source_identity) in enumerate(records):
         evaluation_start=time.perf_counter()
-        reference_pcm = load_identified(reference, dtype="float32")
-        input_pcm = reference_pcm if source.resolve() == reference.resolve() else load_identified(source, dtype="float32")
+        reference_pcm = load_identified(reference, dtype="float32", max_frames=None)
+        input_pcm = reference_pcm if source.resolve() == reference.resolve() else load_identified(source, dtype="float32", max_frames=None)
         require_alignment(reference_pcm, input_pcm, "paired source/reference")
         reference_audio, rate = reference_pcm.data, reference_pcm.rate
         input_audio = input_pcm.data
-        backing_pcm = load_identified(backing, dtype="float32") if backing else None
+        backing_pcm = load_identified(backing, dtype="float32", max_frames=None) if backing else None
         if backing_pcm is not None:
             require_alignment(reference_pcm, backing_pcm, "backing reference")
         request={"version":1,"task_id":name,"operation":operation,"input_path":str(source.resolve()),
@@ -118,7 +118,7 @@ def main():
             result=json.load(stream)
         if result.get("source_sha256") != input_pcm.identity["sha256"]:
             raise ValueError("worker input does not match evaluation input: " + name)
-        estimate_pcm = load_identified(result["outputs"]["vocals" if operation=="separate" else "speech"], dtype="float32")
+        estimate_pcm = load_identified(result["outputs"]["vocals" if operation=="separate" else "speech"], dtype="float32", max_frames=None)
         require_alignment(reference_pcm, estimate_pcm, "output")
         estimate = estimate_pcm.data
         core=result["processing"]["core_seconds"]
@@ -131,7 +131,7 @@ def main():
             record["corpus_source"]=source_identity
         record["si_sdr_gain_db"]=[score_difference(a,b) for a,b in zip(record["output_quality"]["si_sdr_db"],record["input_quality"]["si_sdr_db"])]
         if backing:
-            estimated_pcm = load_identified(result["outputs"]["accompaniment"], dtype="float32")
+            estimated_pcm = load_identified(result["outputs"]["accompaniment"], dtype="float32", max_frames=None)
             require_alignment(reference_pcm, estimated_pcm, "backing output")
             estimated_accompaniment = estimated_pcm.data
             record["accompaniment_reference_sha256"] = backing_pcm.identity["sha256"]

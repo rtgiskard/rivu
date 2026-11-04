@@ -33,9 +33,9 @@ def identity(path):
     return {"path": str(path), "sha256": digest.hexdigest(), "bytes": path.stat().st_size}
 
 
-def load(path, dtype="float64"):
+def load(path, dtype="float64", *, max_frames=MAX_FRAMES):
     info = sf.info(path)
-    if not 0 < info.frames <= MAX_FRAMES or not 0 < info.channels <= MAX_CHANNELS:
+    if info.frames <= 0 or (max_frames is not None and info.frames > max_frames) or not 0 < info.channels <= MAX_CHANNELS:
         raise ValueError(f"evaluation bound exceeded: {info.frames} frames/{info.channels} channels")
     data, rate = sf.read(path, dtype=dtype, always_2d=True)
     if data.shape != (info.frames, info.channels) or rate != info.samplerate:
@@ -51,9 +51,9 @@ class IdentifiedAudio:
     identity: dict
 
 
-def load_identified(path, dtype="float64"):
+def load_identified(path, dtype="float64", *, max_frames=MAX_FRAMES):
     before = identity(path)
-    data, rate = load(path, dtype=dtype)
+    data, rate = load(path, dtype=dtype, max_frames=max_frames)
     if identity(path) != before:
         raise ValueError(f"audio changed while loading: {path}")
     data.flags.writeable = False

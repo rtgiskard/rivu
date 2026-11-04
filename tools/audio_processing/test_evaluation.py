@@ -276,6 +276,20 @@ class EvaluationIdentityTests(unittest.TestCase):
 
 
 class PreparedQualityTests(unittest.TestCase):
+    def test_snapshot_frame_policy_preserves_pcm_and_identity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "input.wav"
+            audio = np.arange(32, dtype="float32")[:, None] / 64
+            sf.write(path, audio, 48000, subtype="FLOAT")
+            for limit in (None, len(audio)):
+                captured = quality.load_identified(path, dtype="float32", max_frames=limit)
+                np.testing.assert_array_equal(captured.data, audio)
+                self.assertEqual(captured.rate, 48000)
+                self.assertEqual(captured.identity, quality.identity(path))
+                self.assertFalse(captured.data.flags.writeable)
+            with self.assertRaisesRegex(ValueError, "evaluation bound exceeded"):
+                quality.load_identified(path, max_frames=len(audio) - 1)
+
     def test_case_snapshots_keep_identity_and_score_each_output_independently(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

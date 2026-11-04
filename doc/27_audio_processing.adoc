@@ -850,6 +850,9 @@ retain one reference per corpus and one noisy baseline per case across Stationar
 Profile and Adaptive. Each mode scores its final repeat independently; timing
 repeats and their reports retain the existing boundaries. Profile capture uses
 that same loaded noisy-clean pair.
+The processing benchmark and corpus evaluator retain the worker's input-duration
+contract; sharing identity capture does not impose the standalone quality tool's
+12,000,000-frame admission bound.
 
 Both tool families encode undefined scores/gains as JSON `null`. SNR requires
 nonzero reference energy; SI-SDR requires nonzero mean-centered reference energy.

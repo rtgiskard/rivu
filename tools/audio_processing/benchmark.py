@@ -106,8 +106,8 @@ def main():
     base = Path(request["output_dir"])
     report = {"command":sys.argv,"request":request,"corpus_manifest_sha256":digest(args.corpus_manifest),
               "corpus_provenance":read_json(args.corpus_manifest),"runs":[],"timing_boundaries":TIMING_BOUNDARIES}
-    reference_pcm = load_identified(args.reference, dtype="float32")
-    input_pcm = reference_pcm if args.reference.resolve() == Path(request["input_path"]).resolve() else load_identified(request["input_path"], dtype="float32")
+    reference_pcm = load_identified(args.reference, dtype="float32", max_frames=None)
+    input_pcm = reference_pcm if args.reference.resolve() == Path(request["input_path"]).resolve() else load_identified(request["input_path"], dtype="float32", max_frames=None)
     require_alignment(reference_pcm, input_pcm, "benchmark input")
     reference, rate = reference_pcm.data, reference_pcm.rate
     noisy = input_pcm.data
@@ -116,12 +116,12 @@ def main():
     report["input_quality"] = metrics(reference, noisy, rate)
     upstream = backing = None
     if args.upstream_reference:
-        upstream_pcm = load_identified(args.upstream_reference, dtype="float32")
+        upstream_pcm = load_identified(args.upstream_reference, dtype="float32", max_frames=None)
         require_alignment(reference_pcm, upstream_pcm, "upstream reference")
         upstream = upstream_pcm.data
         upstream_sha256 = upstream_pcm.identity["sha256"]
     if request["operation"] == "separate" and args.accompaniment_reference:
-        backing_pcm = load_identified(args.accompaniment_reference, dtype="float32")
+        backing_pcm = load_identified(args.accompaniment_reference, dtype="float32", max_frames=None)
         require_alignment(reference_pcm, backing_pcm, "accompaniment reference")
         backing = backing_pcm.data
         report["accompaniment_reference_sha256"] = backing_pcm.identity["sha256"]
@@ -143,7 +143,7 @@ def main():
         if result.get("source_sha256") != report["input_sha256"]:
             raise ValueError("worker input does not match benchmark input")
         stem = "speech" if request["operation"] == "speech" else "vocals"
-        output_pcm = load_identified(result["outputs"][stem], dtype="float32")
+        output_pcm = load_identified(result["outputs"][stem], dtype="float32", max_frames=None)
         require_alignment(reference_pcm, output_pcm, "output")
         output = output_pcm.data
         result["worker_subprocess_wall_seconds"] = worker_seconds
@@ -153,7 +153,7 @@ def main():
             result["upstream_difference"] = metrics(upstream, output, rate, result["processing"]["core_seconds"])
             result["upstream_reference_sha256"] = upstream_sha256
         if request["operation"] == "separate":
-            accompaniment_pcm = load_identified(result["outputs"]["accompaniment"], dtype="float32")
+            accompaniment_pcm = load_identified(result["outputs"]["accompaniment"], dtype="float32", max_frames=None)
             require_alignment(reference_pcm, accompaniment_pcm, "accompaniment output")
             accompaniment = accompaniment_pcm.data
             result["mixture_reconstruction_peak_residual"] = float(np.max(np.abs(noisy.astype("float64")-output-accompaniment)))
