@@ -528,6 +528,46 @@ impl AudioProcessing {
         field.into_div()
     }
 
+    pub(super) fn activate_graph_profile(
+        &mut self,
+        id: u64,
+        snapshot: &GuiSnapshot,
+        cx: &mut Context<Self>,
+    ) {
+        self.reconcile(self.context.snapshot(), cx);
+        let graph = &snapshot.system.config.processing_graph;
+        if self.graph_busy()
+            || self.graph_node_dirty_count(id, cx) > 0
+            || self.state.system.config.processing_graph.revision != graph.revision
+        {
+            return;
+        }
+        let Ok(GraphNode {
+            kind:
+                GraphNodeKind::Denoise {
+                    config,
+                    profile: None,
+                },
+            ..
+        }) = graph.node(id)
+        else {
+            return;
+        };
+        self.graph_edit(
+            GraphEdit::Replace {
+                id,
+                kind: GraphNodeKind::Denoise {
+                    config: config.clone(),
+                    profile: Some(rivu_format::config::processing_graph::NoiseSelection {
+                        start_seconds: 0.,
+                        end_seconds: 1.,
+                    }),
+                },
+            },
+            cx,
+        );
+    }
+
     pub(super) fn graph_inspector(
         &mut self,
         panel: u64,
@@ -644,12 +684,8 @@ impl AudioProcessing {
         } else {
             self.deactivate_equalizer_panel(panel, window, cx);
         }
-        if let GraphNodeKind::Denoise {
-            config,
-            profile: None,
-        } = &node.kind
-        {
-            let config = config.clone();
+        if let GraphNodeKind::Denoise { profile: None, .. } = &node.kind {
+            let snapshot = Rc::clone(&self.state);
             content = content.child(disabled_control(
                 theme,
                 button(
@@ -657,33 +693,14 @@ impl AudioProcessing {
                     self.tr("processing-graph-add-profile"),
                     cx,
                     move |this, _, cx| {
-                        this.graph_edit(
-                            GraphEdit::Replace {
-                                id,
-                                kind: GraphNodeKind::Denoise {
-                                    config: config.clone(),
-                                    profile: Some(
-                                        rivu_format::config::processing_graph::NoiseSelection {
-                                            start_seconds: 0.,
-                                            end_seconds: 1.,
-                                        },
-                                    ),
-                                },
-                            },
-                            cx,
-                        );
+                        this.activate_graph_profile(id, &snapshot, cx);
                     },
                 )
                 .self_start(),
                 busy || drafts > 0,
             ));
         }
-        if let GraphNodeKind::Mix {
-            gains_db,
-            muted,
-            solo,
-        } = &node.kind
-        {
+        if let GraphNodeKind::Mix { gains_db, .. } = &node.kind {
             content = content.child(
                 caption(theme, self.tr("processing-graph-input-gain"))
                     .id(("graph-mix-help", panel))
@@ -693,9 +710,7 @@ impl AudioProcessing {
             );
             let mut lanes = row().flex_wrap().gap_1();
             for add in [true, false] {
-                let mut gains_db = gains_db.clone();
-                let mut muted = muted.clone();
-                let mut solo = solo.clone();
+                let snapshot = Rc::clone(&self.state);
                 let disabled = busy
                     || drafts > 0
                     || if add {
@@ -703,20 +718,6 @@ impl AudioProcessing {
                     } else {
                         gains_db.len() <= 2
                     };
-                if add {
-                    gains_db.push(0.);
-                    muted.push(false);
-                    solo.push(false);
-                } else {
-                    gains_db.pop();
-                    muted.pop();
-                    solo.pop();
-                }
-                let kind = GraphNodeKind::Mix {
-                    gains_db,
-                    muted,
-                    solo,
-                };
                 lanes = lanes.child(disabled_control(
                     theme,
                     button(
@@ -728,13 +729,40 @@ impl AudioProcessing {
                         }),
                         cx,
                         move |this, _, cx| {
-                            this.graph_edit(
-                                GraphEdit::Replace {
-                                    id,
-                                    kind: kind.clone(),
-                                },
-                                cx,
-                            )
+                            if disabled {
+                                return;
+                            }
+                            this.reconcile(this.context.snapshot(), cx);
+                            let graph = &snapshot.system.config.processing_graph;
+                            if this.graph_busy()
+                                || this.graph_node_dirty_count(id, cx) > 0
+                                || this.state.system.config.processing_graph.revision
+                                    != graph.revision
+                            {
+                                return;
+                            }
+                            let Some(node) = graph.nodes.iter().find(|node| node.id == id) else {
+                                return;
+                            };
+                            let mut kind = node.kind.clone();
+                            let GraphNodeKind::Mix {
+                                gains_db,
+                                muted,
+                                solo,
+                            } = &mut kind
+                            else {
+                                return;
+                            };
+                            if add {
+                                gains_db.push(0.);
+                                muted.push(false);
+                                solo.push(false);
+                            } else {
+                                gains_db.pop();
+                                muted.pop();
+                                solo.pop();
+                            }
+                            this.graph_edit(GraphEdit::Replace { id, kind }, cx);
                         },
                     ),
                     disabled,

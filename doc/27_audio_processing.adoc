@@ -692,6 +692,9 @@ not a user edit. File-choice results, including cancellation and errors, must
 still belong to the original panel and draft. Graph choices additionally check
 node kind and revision. Completing an old request cannot clear a newer request's
 busy state or publish an error into its draft.
+Rendered graph actions reconcile current state before submission and preserve
+the revision that produced the intent. An old Add profile or Mix control cannot
+overwrite newer settings, drafts or an in-flight edit.
 
 Core state owns the selected audition and media-task identity; projections consume
 those facts rather than defining them. The processing service owns worker retirement,

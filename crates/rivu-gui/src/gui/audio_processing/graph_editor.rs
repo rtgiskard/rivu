@@ -106,6 +106,12 @@ impl Default for GraphEditorState {
 }
 
 impl GraphEditorState {
+    pub(super) fn equalizer_dependencies(&self) -> (bool, bool) {
+        // Stamps are retired with their dirty fields. Availability depends on
+        // draft presence, not every edit to an already-dirty field's text.
+        (self.pending.is_some(), !self.draft_stamps.is_empty())
+    }
+
     pub(super) fn retain_panels(&mut self, layout: &super::super::workspace::WorkspacePanels) {
         self.workbenches.retain(|id, _| layout.contains_panel(*id));
     }
@@ -166,9 +172,11 @@ impl AudioProcessing {
     pub(super) fn reconcile_graph(&mut self, cx: &mut Context<Self>) {
         let mut equalizer_completed = None;
         let mut equalizer_rebased = None;
+        let mut pending_completed = false;
         let graph = &self.state.system.config.processing_graph;
         let revision = graph.revision;
-        if self.graph_editor.revision != Some(revision) {
+        let revision_changed = self.graph_editor.revision != Some(revision);
+        if revision_changed {
             self.graph_editor.pointer = None;
             if self.graph_editor.pending.is_none() && self.graph_editor.revision.is_some() {
                 self.graph_editor.undo.clear();
@@ -180,6 +188,7 @@ impl AudioProcessing {
             && pending.accepted
             && revision > pending.before.revision
         {
+            pending_completed = true;
             let pending = self
                 .graph_editor
                 .pending
@@ -242,6 +251,12 @@ impl AudioProcessing {
                     }
                 }
             }
+        }
+        // ACK can arrive after the publication. Settle pending edits above even
+        // when the revision was already observed; graph membership scans need
+        // neither playback publications nor unchanged render passes.
+        if !revision_changed && !pending_completed {
+            return;
         }
         if self
             .graph_editor
@@ -313,6 +328,7 @@ impl AudioProcessing {
             pending.accepted = true;
         }
         self.reconcile_graph(cx);
+        self.reconcile_equalizers(cx);
     }
 
     pub(super) fn graph_edit(&mut self, edit: GraphEdit, cx: &mut Context<Self>) {
@@ -1347,6 +1363,163 @@ mod tests {
         })
         .unwrap();
         draw(cx, handle);
+    }
+
+    fn replace_backend_node(runtime: &CoreRuntime, kind: GraphNodeKind) {
+        let revision = runtime.handle.config_snapshot().processing_graph.revision;
+        let ack =
+            futures::executor::block_on(runtime.handle.request_ack(Command::ProcessingGraphEdit {
+                expected_revision: revision,
+                edit: Box::new(GraphEdit::Replace { id: 3, kind }),
+            }));
+        assert!(ack.is_success(), "{:?}", ack.error);
+    }
+
+    #[gpui::test]
+    async fn current_profile_action_adds_default_selection_without_changing_denoise_config(
+        cx: &mut TestAppContext,
+    ) {
+        let (_directory, runtime, processing, handle) = fixture(cx);
+        let config = rivu_dsp::denoise::DenoiseConfig {
+            spectral_gain_floor_db: -18.5,
+            ..Default::default()
+        };
+        replace_backend_node(
+            &runtime,
+            GraphNodeKind::Denoise {
+                config: config.clone(),
+                profile: None,
+            },
+        );
+        let revision = runtime.handle.config_snapshot().processing_graph.revision;
+        processing.update(cx, |this, cx| {
+            this.reconcile(this.context.snapshot(), cx);
+            let rendered = Rc::clone(&this.state);
+            this.activate_graph_profile(3, &rendered, cx);
+        });
+        wait_for_commands(cx, &processing, handle).await;
+        let committed = runtime.handle.config_snapshot();
+        assert_eq!(
+            committed.processing_graph.node(3).unwrap().kind,
+            GraphNodeKind::Denoise {
+                config,
+                profile: Some(rivu_format::config::processing_graph::NoiseSelection {
+                    start_seconds: 0.,
+                    end_seconds: 1.,
+                }),
+            },
+        );
+        assert_eq!(committed.processing_graph.revision, revision + 1);
+    }
+
+    #[gpui::test]
+    async fn stale_rendered_profile_action_cannot_revert_newer_denoise_config_or_profile(
+        cx: &mut TestAppContext,
+    ) {
+        let (_directory, runtime, processing, handle) = fixture(cx);
+        for profile in [
+            None,
+            Some(rivu_format::config::processing_graph::NoiseSelection {
+                start_seconds: 2.,
+                end_seconds: 4.,
+            }),
+        ] {
+            replace_backend_node(
+                &runtime,
+                GraphNodeKind::Denoise {
+                    config: Default::default(),
+                    profile: None,
+                },
+            );
+            let rendered = processing.update(cx, |this, cx| {
+                this.reconcile(this.context.snapshot(), cx);
+                Rc::clone(&this.state)
+            });
+            let config = rivu_dsp::denoise::DenoiseConfig {
+                spectral_gain_floor_db: -18.5,
+                ..Default::default()
+            };
+            let latest = GraphNodeKind::Denoise { config, profile };
+            replace_backend_node(&runtime, latest.clone());
+            let revision = runtime.handle.config_snapshot().processing_graph.revision;
+            processing.update(cx, |this, cx| {
+                // Snapshot delivery can advance state before an old frame's callback fires.
+                this.reconcile(this.context.snapshot(), cx);
+                this.activate_graph_profile(3, &rendered, cx);
+            });
+            wait_for_commands(cx, &processing, handle).await;
+            let committed = runtime.handle.config_snapshot();
+            assert_eq!(committed.processing_graph.node(3).unwrap().kind, latest);
+            assert_eq!(committed.processing_graph.revision, revision);
+        }
+    }
+
+    #[gpui::test]
+    fn profile_action_reconciles_newer_context_before_submitting(cx: &mut TestAppContext) {
+        let (_directory, runtime, processing, _handle) = fixture(cx);
+        replace_backend_node(
+            &runtime,
+            GraphNodeKind::Denoise {
+                config: Default::default(),
+                profile: None,
+            },
+        );
+        let rendered = processing.update(cx, |this, cx| {
+            this.reconcile(this.context.snapshot(), cx);
+            Rc::clone(&this.state)
+        });
+        replace_backend_node(
+            &runtime,
+            GraphNodeKind::Denoise {
+                config: Default::default(),
+                profile: Some(rivu_format::config::processing_graph::NoiseSelection {
+                    start_seconds: 3.,
+                    end_seconds: 5.,
+                }),
+            },
+        );
+        let revision = runtime.handle.config_snapshot().processing_graph.revision;
+        processing.update(cx, |this, cx| {
+            this.activate_graph_profile(3, &rendered, cx);
+            assert_eq!(this.state.system.config.processing_graph.revision, revision);
+            assert!(this.graph_editor.pending.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn profile_action_preserves_drafts_added_after_render(cx: &mut TestAppContext) {
+        let (_directory, runtime, processing, _handle) = fixture(cx);
+        replace_backend_node(
+            &runtime,
+            GraphNodeKind::Denoise {
+                config: Default::default(),
+                profile: None,
+            },
+        );
+        processing.update(cx, |this, cx| {
+            this.reconcile(this.context.snapshot(), cx);
+            this.graph_select(3, cx);
+            let rendered = Rc::clone(&this.state);
+            let key = *this
+                .fields
+                .keys()
+                .find(|key| {
+                    matches!(
+                        key,
+                        FieldKey::Graph(NodeField {
+                            node: 3,
+                            field: GraphField::Denoise(DenoiseField::Strength),
+                            ..
+                        })
+                    )
+                })
+                .unwrap();
+            this.stage_graph_text(key, "0.25".into(), cx);
+            this.activate_graph_profile(3, &rendered, cx);
+            assert!(this.graph_editor.pending.is_none());
+            assert!(this.fields[&key].dirty);
+            assert_eq!(this.fields[&key].input.read(cx).text(), "0.25");
+        });
     }
 
     #[gpui::test]

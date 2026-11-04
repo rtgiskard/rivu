@@ -179,54 +179,57 @@ impl DenoiseField {
         }
     }
     pub(super) fn apply(self, config: &mut DenoiseConfig, text: &str) -> Result<(), String> {
+        // Parsing is shared with standalone patches; graph validation remains
+        // the caller's responsibility after applying all selected fields.
+        let patch = self.patch(text)?;
         match self {
-            Self::Mode => {
-                config.mode = match text {
-                    "off" => DenoiseMode::Off,
-                    "stationary" => DenoiseMode::Stationary,
-                    "profile" => DenoiseMode::Profile,
-                    "adaptive" => DenoiseMode::Adaptive,
-                    _ => return Err("Invalid denoise mode".to_owned()),
-                }
-            }
-            Self::Strength => config.strength = parse_processing_number(text)?,
+            Self::Mode => config.mode = patch.mode.expect("parsed mode"),
+            Self::Strength => config.strength = patch.strength.expect("parsed strength"),
             Self::SpectralGainFloorDb => {
-                config.spectral_gain_floor_db = parse_processing_number(text)?
+                config.spectral_gain_floor_db =
+                    patch.spectral_gain_floor_db.expect("parsed gain floor");
             }
-            Self::AttackMs => config.attack_ms = parse_processing_number(text)?,
-            Self::ReleaseMs => config.release_ms = parse_processing_number(text)?,
+            Self::AttackMs => config.attack_ms = patch.attack_ms.expect("parsed attack"),
+            Self::ReleaseMs => config.release_ms = patch.release_ms.expect("parsed release"),
             Self::SmoothingBins => {
-                config.smoothing_bins = text.parse::<usize>().map_err(|error| error.to_string())?
+                config.smoothing_bins = patch.smoothing_bins.expect("parsed smoothing")
             }
             Self::TransientProtection => {
-                config.transient_protection = parse_processing_number(text)?
+                config.transient_protection = patch
+                    .transient_protection
+                    .expect("parsed transient protection");
             }
-            Self::Wet => config.wet = parse_processing_number(text)?,
-            Self::FftSize => {
-                config.fft_size = text.parse::<usize>().map_err(|error| error.to_string())?
-            }
+            Self::Wet => config.wet = patch.wet.expect("parsed wet mix"),
+            Self::FftSize => config.fft_size = patch.fft_size.expect("parsed FFT size"),
             Self::StationaryNoiseDbfs => {
-                config.stationary_noise_dbfs = parse_processing_number(text)?
+                config.stationary_noise_dbfs =
+                    patch.stationary_noise_dbfs.expect("parsed noise floor");
             }
-            Self::HumEnabled => {
-                config.hum.enabled = text.parse::<bool>().map_err(|error| error.to_string())?
+            Self::HumEnabled => config.hum.enabled = patch.hum_enabled.expect("parsed hum enabled"),
+            Self::HumFundamentalHz => {
+                config.hum.fundamental_hz = patch.hum_fundamental_hz.expect("parsed hum frequency");
             }
-            Self::HumFundamentalHz => config.hum.fundamental_hz = parse_processing_number(text)?,
             Self::HumHarmonics => {
-                config.hum.harmonics = text.parse::<usize>().map_err(|error| error.to_string())?
+                config.hum.harmonics = patch.hum_harmonics.expect("parsed harmonics")
             }
-            Self::HumQ => config.hum.q = parse_processing_number(text)?,
+            Self::HumQ => config.hum.q = patch.hum_q.expect("parsed hum Q"),
             Self::ImpulseEnabled => {
-                config.impulse.enabled = text.parse::<bool>().map_err(|error| error.to_string())?
+                config.impulse.enabled = patch.impulse_enabled.expect("parsed impulse enabled")
             }
             Self::ImpulseMaxWidth => {
-                config.impulse.max_width =
-                    text.parse::<usize>().map_err(|error| error.to_string())?
+                config.impulse.max_width = patch.impulse_max_width.expect("parsed impulse width")
             }
-            Self::ImpulseThreshold => config.impulse.threshold = parse_processing_number(text)?,
-            Self::ImpulseFloorDbfs => config.impulse.floor_dbfs = parse_processing_number(text)?,
+            Self::ImpulseThreshold => {
+                config.impulse.threshold =
+                    patch.impulse_threshold.expect("parsed impulse threshold")
+            }
+            Self::ImpulseFloorDbfs => {
+                config.impulse.floor_dbfs = patch.impulse_floor_dbfs.expect("parsed impulse floor")
+            }
             Self::ImpulseTransientProtection => {
-                config.impulse.transient_protection = parse_processing_number(text)?
+                config.impulse.transient_protection = patch
+                    .impulse_transient_protection
+                    .expect("parsed impulse transient protection");
             }
         }
         Ok(())
@@ -237,6 +240,7 @@ impl DenoiseField {
         Ok(patch)
     }
     fn patch_into(self, patch: &mut DenoisePatch, text: &str) -> Result<(), String> {
+        let text = text.trim();
         match self {
             Self::Mode => {
                 patch.mode = Some(match text {
@@ -413,35 +417,44 @@ impl NeuralField {
         }
     }
     pub(super) fn apply(self, config: &mut NeuralConfig, text: &str) -> Result<(), String> {
+        let patch = self.patch(text)?;
         match self {
-            Self::SpeechInterpreter => config.speech_interpreter = PathBuf::from(text),
-            Self::SeparationInterpreter => config.separation_interpreter = PathBuf::from(text),
-            Self::Worker => config.worker = PathBuf::from(text),
+            Self::SpeechInterpreter => {
+                config.speech_interpreter =
+                    patch.speech_interpreter.expect("parsed speech interpreter")
+            }
+            Self::SeparationInterpreter => {
+                config.separation_interpreter = patch
+                    .separation_interpreter
+                    .expect("parsed separation interpreter")
+            }
+            Self::Worker => config.worker = patch.worker.expect("parsed worker"),
             Self::SpeechManifest => {
-                config.speech_manifest = (!text.is_empty()).then(|| PathBuf::from(text))
+                config.speech_manifest = patch.speech_manifest.expect("parsed speech manifest")
             }
             Self::SeparationManifest => {
-                config.separation_manifest = (!text.is_empty()).then(|| PathBuf::from(text))
+                config.separation_manifest = patch
+                    .separation_manifest
+                    .expect("parsed separation manifest")
             }
-            Self::Device => {
-                config.device = match text {
-                    "cpu" => NeuralDevice::Cpu,
-                    "cuda" => NeuralDevice::Cuda,
-                    _ => return Err("Invalid neural device".to_owned()),
-                }
+            Self::Device => config.device = patch.device.expect("parsed device"),
+            Self::Threads => config.threads = patch.threads.expect("parsed threads"),
+            Self::SpeechWetMix => {
+                config.speech_wet_mix = patch.speech_wet_mix.expect("parsed speech wet mix")
             }
-            Self::Threads => {
-                config.threads = text.parse::<u8>().map_err(|error| error.to_string())?
-            }
-            Self::SpeechWetMix => config.speech_wet_mix = parse_processing_number(text)?,
             Self::SpeechAttenuationLimitDb => {
-                config.speech_attenuation_limit_db = parse_processing_number(text)?
+                config.speech_attenuation_limit_db = patch
+                    .speech_attenuation_limit_db
+                    .expect("parsed speech attenuation");
             }
             Self::SpeechPostFilter => {
                 config.speech_post_filter =
-                    text.parse::<bool>().map_err(|error| error.to_string())?
+                    patch.speech_post_filter.expect("parsed speech postfilter")
             }
-            Self::SeparationOverlap => config.separation_overlap = parse_processing_number(text)?,
+            Self::SeparationOverlap => {
+                config.separation_overlap =
+                    patch.separation_overlap.expect("parsed separation overlap")
+            }
         }
         Ok(())
     }
@@ -451,6 +464,11 @@ impl NeuralField {
         Ok(patch)
     }
     fn patch_into(self, patch: &mut NeuralPatch, text: &str) -> Result<(), String> {
+        let text = if self.input_kind() == FieldInputKind::Path {
+            text
+        } else {
+            text.trim()
+        };
         match self {
             Self::SpeechInterpreter => patch.speech_interpreter = Some(PathBuf::from(text)),
             Self::SeparationInterpreter => patch.separation_interpreter = Some(PathBuf::from(text)),
@@ -518,6 +536,15 @@ impl FieldKey {
         match self {
             Self::Graph(binding) => Some(binding.node),
             _ => None,
+        }
+    }
+
+    fn value_text(self, text: &str) -> &str {
+        match self {
+            Self::Neural(field) if field.input_kind() == FieldInputKind::Path => text,
+            Self::Graph(binding) if binding.field.path_placeholder().is_some() => text,
+            Self::GraphExport | Self::PresetPath => text,
+            _ => text.trim(),
         }
     }
 }
@@ -796,6 +823,11 @@ impl AudioProcessing {
     }
 
     pub(super) fn reconcile(&mut self, state: Rc<GuiSnapshot>, cx: &mut Context<Self>) {
+        let config_changed = !Arc::ptr_eq(&self.state.system.config, &state.system.config);
+        let denoise_changed =
+            config_changed && self.state.system.config.denoise != state.system.config.denoise;
+        let neural_changed =
+            config_changed && self.state.system.config.neural != state.system.config.neural;
         let format_changed = self
             .state
             .current_track()
@@ -803,8 +835,10 @@ impl AudioProcessing {
             != state
                 .current_track()
                 .map(|t| (t.id, t.sample_rate, t.channels));
+        let title_changed = self.state.current_track().map(|track| &track.title)
+            != state.current_track().map(|track| &track.title);
         let preset_names_changed = self.preset_popup.is_some()
-            && !Arc::ptr_eq(&self.state.system.config, &state.system.config)
+            && config_changed
             && !self
                 .state
                 .system
@@ -818,7 +852,7 @@ impl AudioProcessing {
                     .equalizer_presets
                     .iter()
                     .map(|preset| &preset.name));
-        let changed = !Arc::ptr_eq(&self.state.system.config, &state.system.config)
+        let changed = config_changed
             || match (&self.state.system.processing, &state.system.processing) {
                 (Some(previous), Some(current)) => !Arc::ptr_eq(previous, current),
                 (None, None) => false,
@@ -826,14 +860,16 @@ impl AudioProcessing {
             }
             || self.state.system.processing_audition != state.system.processing_audition
             || self.state.playback.status != state.playback.status
-            || format_changed;
+            || format_changed
+            || title_changed;
         if self.state.system.processing.as_ref().map(|task| task.id)
             != state.system.processing.as_ref().map(|task| task.id)
         {
             self.results.task_details = false;
         }
         self.state = state;
-        if let Some(popup) = &mut self.preset_popup
+        if config_changed
+            && let Some(popup) = &mut self.preset_popup
             && popup.confirmation.as_ref().is_some_and(|confirmation| {
                 !self
                     .state
@@ -850,7 +886,7 @@ impl AudioProcessing {
             popup.confirmation = None;
             self.notify_preset_panel(panel, cx);
         }
-        if !self.state.system.config.equalizer.enabled {
+        if self.preset_popup.is_some() && !self.state.system.config.equalizer.enabled {
             let _ = self.set_preset_popup(None, cx);
         }
         if preset_names_changed {
@@ -861,8 +897,13 @@ impl AudioProcessing {
         }
         self.reconcile_graph(cx);
         self.reconcile_equalizers(cx);
+        if denoise_changed {
+            self.sync_denoise_fields(cx);
+        }
+        if neural_changed {
+            self.sync_neural_fields(cx);
+        }
         if changed {
-            self.sync_fields(cx);
             cx.notify();
         }
     }
@@ -1042,14 +1083,14 @@ impl AudioProcessing {
 
     fn finish_parameter_fields(&mut self, submitted: SubmittedFields, cx: &mut Context<Self>) {
         for submitted in submitted.first.into_iter().chain(submitted.rest) {
-            if let Some(field) = self
+            if let Some((key, field)) = self
                 .fields
-                .values_mut()
-                .find(|field| field.input.entity_id() == submitted.input.entity_id())
+                .iter_mut()
+                .find(|(_, field)| field.input.entity_id() == submitted.input.entity_id())
                 && submitted_text_current(
                     field.generation,
                     submitted.generation,
-                    field.input.read(cx).text().trim(),
+                    key.value_text(field.input.read(cx).text()),
                     &submitted.text,
                 )
             {
@@ -1157,7 +1198,7 @@ impl AudioProcessing {
         })
     }
 
-    fn sync_fields(&mut self, cx: &mut Context<Self>) {
+    fn sync_denoise_fields(&mut self, cx: &mut Context<Self>) {
         for field in [
             DenoiseField::Strength,
             DenoiseField::SpectralGainFloorDb,
@@ -1183,6 +1224,9 @@ impl AudioProcessing {
             };
             self.field(FieldKey::Denoise(field), &label, value, cx);
         }
+    }
+
+    fn sync_neural_fields(&mut self, cx: &mut Context<Self>) {
         for field in [
             NeuralField::SpeechInterpreter,
             NeuralField::SeparationInterpreter,
@@ -1202,6 +1246,11 @@ impl AudioProcessing {
                 cx,
             );
         }
+    }
+
+    fn sync_fields(&mut self, cx: &mut Context<Self>) {
+        self.sync_denoise_fields(cx);
+        self.sync_neural_fields(cx);
         for (key, label, value) in [
             (FieldKey::PresetName, "processing-preset-name", ""),
             (FieldKey::PresetPath, "processing-preset-path", ""),
@@ -1223,7 +1272,7 @@ impl AudioProcessing {
     fn text(&self, key: FieldKey, cx: &App) -> String {
         self.fields
             .get(&key)
-            .map(|f| f.input.read(cx).text().trim().to_owned())
+            .map(|f| key.value_text(f.input.read(cx).text()).to_owned())
             .unwrap_or_default()
     }
 
@@ -2324,7 +2373,7 @@ impl AudioProcessing {
                     SubmittedParameter {
                         input: field.input.clone(),
                         generation: field.generation,
-                        text: field.input.read(cx).text().trim().to_owned(),
+                        text: key.value_text(field.input.read(cx).text()).to_owned(),
                     },
                 )
             })
@@ -2839,7 +2888,7 @@ mod field_tests {
         let clear = NeuralField::SpeechManifest.patch("").unwrap();
         assert_eq!(clear.speech_manifest, Some(None));
         assert_eq!(clear.separation_manifest, None);
-        let path = "runtime.with.dots/worker with spaces.py";
+        let path = " runtime.with.dots/worker with spaces.py ";
         NeuralField::Worker.apply(&mut config, path).unwrap();
         assert_eq!(NeuralField::Worker.text(&config), path);
         assert_eq!(
@@ -2848,6 +2897,43 @@ mod field_tests {
         );
         assert!(NeuralField::SpeechWetMix.patch("NaN").is_err());
         assert!(NeuralField::Threads.patch("256").is_err());
+    }
+
+    #[test]
+    fn page_commands_keep_literal_paths_clear_intent_and_numeric_normalization() {
+        let path = " /runtime/worker with spaces.py ";
+        let worker = FieldKey::Neural(NeuralField::Worker);
+        let manifest = FieldKey::Neural(NeuralField::SpeechManifest);
+        let threads = FieldKey::Neural(NeuralField::Threads);
+        let command = page_parameter_command(
+            Page::Speech,
+            [
+                (worker, worker.value_text(path)),
+                (manifest, manifest.value_text("")),
+                (threads, threads.value_text(" 4 ")),
+            ]
+            .into_iter(),
+        )
+        .unwrap()
+        .unwrap();
+        let Command::NeuralEdit { patch } = command else {
+            panic!("neural parameter command");
+        };
+        assert_eq!(patch.worker, Some(PathBuf::from(path)));
+        assert_eq!(patch.speech_manifest, Some(None));
+        assert_eq!(patch.separation_manifest, None);
+        assert_eq!(patch.threads, Some(4));
+        assert_eq!(patch.speech_wet_mix, None);
+        let mut config = NeuralConfig::default();
+        let previous = config.clone();
+        for invalid in ["NaN", "inf", "-inf", "1e", ""] {
+            assert!(
+                NeuralField::SpeechWetMix
+                    .apply(&mut config, invalid)
+                    .is_err()
+            );
+            assert_eq!(config, previous);
+        }
     }
 
     #[test]

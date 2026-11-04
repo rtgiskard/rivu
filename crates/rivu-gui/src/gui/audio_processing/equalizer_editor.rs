@@ -83,6 +83,40 @@ pub(super) struct EqualizerEditors {
     // Replacement intent follows serialized command start/ack, not refreshes.
     reset_band_focus: Option<EqTarget>,
     pending_node_focus_reset: Option<(u64, u64)>,
+    reconciled: Option<EqualizerReconcileInputs>,
+}
+
+// Publications also carry transport position. Retain only the last dependency
+// source plus local queue/draft fences, not a cache of editor projections.
+struct EqualizerReconcileInputs {
+    config: Arc<rivu_format::config::Config>,
+    format: EqFormat,
+    pending: usize,
+    command_active: bool,
+    graph_pending: bool,
+    graph_drafts: bool,
+    collecting: Option<(u64, u64)>,
+    geometry_epoch: u64,
+    reset_band_focus: Option<EqTarget>,
+}
+
+impl EqualizerReconcileInputs {
+    fn unchanged_from(&self, previous: &Self) -> bool {
+        self.format == previous.format
+            && self.pending == previous.pending
+            && self.command_active == previous.command_active
+            && self.graph_pending == previous.graph_pending
+            && self.graph_drafts == previous.graph_drafts
+            && self.collecting == previous.collecting
+            && self.geometry_epoch == previous.geometry_epoch
+            && self.reset_band_focus == previous.reset_band_focus
+            && (Arc::ptr_eq(&self.config, &previous.config)
+                || (self.config.equalizer == previous.config.equalizer
+                    && self.config.equalizer_ab == previous.config.equalizer_ab
+                    && self.config.processing_graph.revision
+                        == previous.config.processing_graph.revision
+                    && self.config.ui_scale == previous.config.ui_scale))
+    }
 }
 
 struct EqualizerField {
@@ -293,6 +327,11 @@ impl EqualizerEditor {
             || geometry_changed
             || self.blocked != blocked
             || self.collecting_revision != collecting_revision
+            || !Arc::ptr_eq(&self.state.system.config, &state.system.config)
+                && (self.state.system.config.ui_scale != state.system.config.ui_scale
+                    || self.target == EqTarget::Monitor
+                        && self.state.system.config.equalizer_ab
+                            != state.system.config.equalizer_ab)
             || self.pending != pending;
         self.state = state;
         self.format = format;
@@ -313,6 +352,9 @@ impl EqualizerEditor {
         self.collecting_revision = collecting_revision;
         self.pending = pending;
         self.geometry_epoch = geometry_epoch;
+        if !changed {
+            return;
+        }
         if changed {
             let enabled = !self.input_locked();
             for (key, field) in &self.fields {
@@ -2743,6 +2785,27 @@ impl AudioProcessing {
     }
 
     pub(super) fn reconcile_equalizers(&mut self, cx: &mut Context<Self>) {
+        let (graph_pending, graph_drafts) = self.graph_editor.equalizer_dependencies();
+        let inputs = EqualizerReconcileInputs {
+            config: Arc::clone(&self.state.system.config),
+            format: equalizer_format(&self.state),
+            pending: self.pending,
+            command_active: self.command_active,
+            graph_pending,
+            graph_drafts,
+            collecting: self.graph_collecting_equalizer_input(),
+            geometry_epoch: self.geometry_epoch,
+            reset_band_focus: self.equalizer_editors.reset_band_focus,
+        };
+        let unchanged = self
+            .equalizer_editors
+            .reconciled
+            .as_ref()
+            .is_some_and(|previous| inputs.unchanged_from(previous));
+        self.equalizer_editors.reconciled = Some(inputs);
+        if unchanged {
+            return;
+        }
         let state = Rc::clone(&self.state);
         let blocked = self.equalizer_blocked(EqTarget::Node(0));
         let collecting = self.collecting_equalizer_target();
@@ -4376,6 +4439,13 @@ mod tests {
         let success = publish_graph_front(cx, &runtime, &owner);
         assert!(success);
         for (fraction, expected) in [(0.4, "-4.8"), (0.6, "4.8")] {
+            // Transport-only publications must not retire the old collecting
+            // fence while Core's new graph revision is awaiting its ACK.
+            owner.update(cx, |owner, cx| {
+                let mut state = (*owner.state).clone();
+                state.playback.position += f64::from(fraction);
+                owner.reconcile(Rc::new(state), cx);
+            });
             draw(cx, handle);
             dispatch_pointer_event(
                 cx,
