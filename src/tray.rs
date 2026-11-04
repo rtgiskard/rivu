@@ -1,7 +1,7 @@
 use crate::{app::AppHandle, core::CoreHandle, projection::TraySnapshot};
 use futures::{FutureExt, StreamExt, channel::oneshot, future::Shared};
 use parking_lot::RwLock;
-use rivu_presentation::{DEFAULT_IMAGE, i18n::Localizer};
+use rivu_presentation::i18n::Localizer;
 use rivu_protocol::model::{Command, PlaybackStatus, RepeatMode};
 use serde::Serialize;
 use std::{
@@ -32,21 +32,6 @@ type Cancellation = Shared<oneshot::Receiver<()>>;
 
 fn sni_status() -> &'static str {
     "Active"
-}
-
-fn icon_pixmap() -> &'static Vec<IconPixmap> {
-    static ICON: std::sync::LazyLock<Vec<IconPixmap>> = std::sync::LazyLock::new(|| {
-        let image = image::load_from_memory(DEFAULT_IMAGE)
-            .expect("embedded Rivu tray icon")
-            .to_rgba8();
-        let (width, height) = image.dimensions();
-        let pixels = image
-            .pixels()
-            .flat_map(|pixel| [pixel[3], pixel[0], pixel[1], pixel[2]])
-            .collect();
-        vec![(width as i32, height as i32, pixels)]
-    });
-    &ICON
 }
 
 struct TrayData {
@@ -370,12 +355,12 @@ impl StatusNotifierItem {
 
     #[zbus(property(emits_changed_signal = "const"))]
     fn icon_name(&self) -> &'static str {
-        ""
+        "rivu"
     }
 
     #[zbus(property(emits_changed_signal = "const"))]
     fn icon_pixmap(&self) -> Vec<(i32, i32, Vec<u8>)> {
-        icon_pixmap().clone()
+        Vec::new()
     }
 
     #[zbus(property(emits_changed_signal = "const"))]

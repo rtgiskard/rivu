@@ -533,6 +533,10 @@ service, not just the GUI. The tray needs session D-Bus and a
 StatusNotifier-compatible desktop host. Failures are logged without preventing
 window use or playback; a watcher starting or restarting later is registered
 automatically.
+The host resolves the `rivu` icon name from its icon theme; Rivu does not send
+raw icon pixels over D-Bus. Install the theme icons using
+link:../readme.adoc#build-and-install[the installation instructions]. Running a
+build without installed theme icons may leave the tray item without an icon.
 Its menu offers Play/Pause, Previous, Next, Shuffle, Repeat, and Quit application.
 Repeat follows the cycle described under
 <<transport-and-timing,Transport and timing>>.
