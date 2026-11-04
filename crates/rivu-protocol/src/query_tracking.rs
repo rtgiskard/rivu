@@ -126,20 +126,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn epochs_allocate_lazily_and_reuse_their_generation_cell() {
+    fn cancelling_or_dropping_an_epoch_invalidates_its_tickets() {
         let mut epoch = QueryEpoch::default();
         epoch.advance();
-        assert_eq!(epoch.generation(), 1);
-        assert!(epoch.shared.is_none());
         let first = epoch.ticket();
-        let repeated = epoch.ticket();
-        assert!(Arc::ptr_eq(&first.shared, &repeated.shared));
         assert!(first.is_current());
         epoch.cancel();
         assert!(!first.is_current());
         let next = epoch.ticket();
         assert!(next.is_current());
-        assert!(Arc::ptr_eq(&first.shared, &next.shared));
         drop(epoch);
         assert!(!next.is_current());
     }

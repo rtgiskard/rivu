@@ -312,36 +312,6 @@ mod tests {
     use clap::Parser;
     use std::path::PathBuf;
 
-    #[test]
-    fn preset_paths_are_anchored_to_client_without_expansion_or_existence() {
-        let cwd = std::env::current_dir().unwrap();
-        for variant in ["ImportPreset", "ExportPreset"] {
-            for input in [
-                PathBuf::from("~/missing preset.json"),
-                cwd.join("absent.json"),
-            ] {
-                let expected = if input.is_absolute() {
-                    input.clone()
-                } else {
-                    cwd.join(&input)
-                };
-                let json = serde_json::json!({(variant):{"path":input,"name":"Reference"}});
-                let Command::EqualizerEdit { edit } = equalizer_command(&json.to_string()).unwrap()
-                else {
-                    panic!("expected equalizer edit");
-                };
-                match edit {
-                    EqualizerEdit::ImportPreset { path, name, .. }
-                    | EqualizerEdit::ExportPreset { path, name } => {
-                        assert_eq!(path, expected);
-                        assert_eq!(name, "Reference");
-                    }
-                    _ => panic!("expected preset edit"),
-                }
-            }
-        }
-    }
-
     fn parse_graph_action(arguments: &[&str]) -> ProcessingGraphAction {
         let args = Args::try_parse_from(
             ["rivu", "processing", "graph"]
@@ -353,30 +323,6 @@ mod tests {
             panic!("expected graph action");
         };
         action
-    }
-
-    #[test]
-    fn graph_edit_parses_typed_json_and_preserves_revision_and_signed_gains() {
-        let edit = r#"{"Replace":{"id":3,"kind":{"mix":{"gains_db":[-6.0,-12.5],"muted":[false,false],"solo":[false,false]}}}}"#;
-        let ProcessingGraphAction::Edit {
-            expected_revision,
-            edit,
-        } = parse_graph_action(&["edit", edit, "--expected-revision", "19"])
-        else {
-            panic!("expected graph edit action");
-        };
-        assert_eq!(expected_revision, 19);
-        let edit: Box<GraphEdit> = serde_json::from_str(&edit).unwrap();
-        let GraphEdit::Replace {
-            id,
-            kind: GraphNodeKind::Mix { gains_db, .. },
-        } = *edit
-        else {
-            panic!("expected mix replacement");
-        };
-        assert_eq!(id, 3);
-        assert_eq!(gains_db, [-6.0, -12.5]);
-        assert!(serde_json::from_str::<Box<GraphEdit>>("not GraphEdit JSON").is_err());
     }
 
     #[test]

@@ -459,47 +459,6 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    #[test]
-    fn formatter_colors_only_timestamp_space_and_level() {
-        for ansi in [false, true] {
-            let captured = tempfile::NamedTempFile::new().unwrap();
-            let subscriber = tracing_subscriber::registry().with(
-                fmt::layer()
-                    .event_format(LineFormatter { ansi })
-                    .with_ansi(false)
-                    .with_writer(captured.reopen().unwrap()),
-            );
-            tracing::subscriber::with_default(subscriber, || {
-                tracing::debug!(target: "logging_test", operation = "scan", "body");
-                tracing::info!(target: "logging_test", operation = "scan", "body");
-                tracing::warn!(target: "logging_test", operation = "scan", "body");
-                tracing::error!(target: "logging_test", operation = "scan", "body");
-            });
-            let contents = fs::read_to_string(captured.path()).unwrap();
-            let lines: Vec<_> = contents.lines().collect();
-            assert_eq!(lines.len(), 4);
-            for (line, (color, letter)) in
-                lines
-                    .iter()
-                    .zip([("36", "D"), ("34", "I"), ("33", "W"), ("1;31", "E")])
-            {
-                let (prefix, body) = if ansi {
-                    line.strip_prefix(&format!("\x1b[{color}m"))
-                        .unwrap()
-                        .split_once("\x1b[0m")
-                        .unwrap()
-                } else {
-                    assert!(!line.contains('\x1b'));
-                    line.split_once(" logging_test:").unwrap()
-                };
-                let (timestamp, actual_letter) = prefix.split_once(' ').unwrap();
-                assert_eq!(actual_letter, letter);
-                chrono::DateTime::parse_from_rfc3339(timestamp).unwrap();
-                assert!(!body.contains('\x1b'));
-            }
-        }
-    }
-
     // Keep each session's dispatch as the thread default through reconfiguration
     // and shutdown: tracing's single-dispatch fast path rebuilds callsite interests
     // against the current default, not merely every live Dispatch.

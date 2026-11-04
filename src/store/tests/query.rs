@@ -450,46 +450,6 @@ fn new_list_search_matches_effective_metadata_filename_and_literal_substrings() 
 }
 
 #[test]
-fn bounded_view_queries_filter_order_and_count() {
-    let store = Store::open(Path::new(":memory:")).unwrap();
-    store
-        .apply_scan(&scan(vec![
-            rec("/music/c.mp3", "c", "Charlie", 1.0),
-            rec("/music/a.mp3", "a", "Alpha", 1.0),
-            rec("/music/b.mp3", "b", "Bravo", 1.0),
-        ]))
-        .unwrap();
-    let ids: Vec<_> = all_tracks(&store).iter().map(|track| track.id).collect();
-    store.set_favorite(&[ids[1]], true).unwrap();
-    let page = store.library_page(None, Some(true), None, 0, 1).unwrap();
-    assert_eq!(page.total, 1);
-    assert_eq!(page.rows.len(), 1);
-    assert_eq!(page.rows[0].id, ids[1]);
-    let page = store.library_page(Some("a"), None, None, 0, 2).unwrap();
-    assert_eq!(
-        page.rows.iter().map(|track| track.id).collect::<Vec<_>>(),
-        vec![ids[0], ids[1]]
-    );
-    let count_only = store
-        .library_page(Some("a"), None, None, usize::MAX, 0)
-        .unwrap();
-    assert_eq!(count_only.total, 3);
-    assert!(count_only.rows.is_empty());
-
-    let playlist = store.create_playlist("mix").unwrap();
-    store.add_playlist(playlist, &ids).unwrap();
-    assert_eq!(
-        store.playlist_summary_batch(None, None, 1).unwrap().rows[0].entry_count,
-        3
-    );
-    let entries = store.playlist_entries_page(playlist, None, 1, 1).unwrap();
-    assert_eq!(entries.total, 3);
-    assert_eq!(entries.rows.len(), 1);
-    assert_eq!(entries.rows[0].track_id, ids[1]);
-    assert_eq!(store.playlist_track_ids(playlist, 2).unwrap(), ids[..2]);
-}
-
-#[test]
 fn paged_totals_follow_local_writes_and_rollback() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("counts.db");

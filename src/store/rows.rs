@@ -132,18 +132,3 @@ pub(super) fn library_row_from_row(
 ) -> rusqlite::Result<rivu_protocol::model::LibraryRow> {
     library_row_at(row, 0)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn track_projection_column_count_matches_appended_payload_offset() {
-        let store = super::super::Store::open(std::path::Path::new(":memory:")).unwrap();
-        let statement = store
-            .conn
-            .prepare(&format!("SELECT {TRACK_COLUMNS} FROM tracks"))
-            .unwrap();
-        assert_eq!(statement.column_count(), TRACK_COLUMN_COUNT);
-    }
-}

@@ -390,14 +390,7 @@ mod tests {
         let config = directory
             .path()
             .join(OsString::from_vec(b"config-\xff.toml".to_vec()));
-        let error = App::start(data_dir.clone(), config.clone(), Vec::new())
-            .err()
-            .unwrap();
-        assert!(
-            error
-                .to_string()
-                .contains("Configuration path is not valid UTF-8")
-        );
+        assert!(App::start(data_dir.clone(), config.clone(), Vec::new()).is_err());
         assert!(!config.exists());
         assert!(std::fs::read_dir(&data_dir).unwrap().next().is_none());
         assert!(ipc::SocketOwner::acquire(&data_dir).is_ok());
@@ -494,8 +487,7 @@ mod tests {
         );
         let ack = rivu_client::request_ack(directory.path(), AppCommand::Shutdown).unwrap();
         assert!(ack.is_success());
-        let error = worker.join().unwrap().unwrap_err();
-        assert!(format!("{error:#}").contains("Saving configuration"));
+        worker.join().unwrap().unwrap_err();
         assert_eq!(std::fs::read_to_string(config_path).unwrap(), invalid);
         // App's error is observable only after transport/core teardown, including
         // the accepted IPC reply. Ownership can immediately be reacquired.

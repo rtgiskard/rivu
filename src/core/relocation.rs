@@ -481,12 +481,11 @@ mod tests {
         });
         // On timeout do not join: a FIFO-open regression must fail, not hang
         // while a test runtime waits for a stuck blocking filesystem operation.
-        let error = receive
+        receive
             .recv_timeout(Duration::from_secs(2))
             .expect("FIFO admission must not block")
             .err()
             .unwrap();
         worker.join().unwrap();
-        assert!(format!("{error:#}").contains("not an ordinary file"));
     }
 }

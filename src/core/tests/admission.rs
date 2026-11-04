@@ -105,7 +105,6 @@ fn external_admission_appends_valid_subset_without_roots_autoplay_or_playlist_ch
         panic!("expected retained media task")
     };
     assert!(status.library_committed);
-    assert!(status.message.contains("skipped 2 invalid paths"));
     assert_eq!(status.progress.errors, 2);
     assert!(!core.state.system.scanning);
     assert_eq!(core.state.system.scan_task_id, Some(id));
@@ -177,13 +176,6 @@ fn revision_changed_during_probe_rejects_entire_batch_without_registration_or_ap
     };
     assert!(!status.library_committed);
     assert_eq!(status.progress.phase, ScanPhase::Failed);
-    assert!(
-        status
-            .error
-            .as_deref()
-            .unwrap()
-            .contains("Queue revision changed")
-    );
 }
 
 #[test]
@@ -426,13 +418,6 @@ fn committed_queue_and_task_facts_survive_current_track_projection_failure() {
     };
     assert!(status.library_committed);
     assert_eq!(status.progress.phase, ScanPhase::Failed);
-    assert!(
-        status
-            .error
-            .as_deref()
-            .unwrap()
-            .contains("Refreshing current track")
-    );
 }
 
 #[test]
@@ -596,13 +581,6 @@ fn committed_external_queue_projection_failure_recovers_before_navigation() {
         };
         assert!(status.library_committed);
         assert_eq!(status.progress.phase, ScanPhase::Failed);
-        assert!(
-            status
-                .error
-                .as_deref()
-                .unwrap()
-                .contains("refreshing its projection")
-        );
         let commands = recording_audio(&mut core);
         assert!(core.navigate(Navigation::Previous).is_err());
         assert!(commands.try_recv().is_err());

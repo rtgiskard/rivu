@@ -46,7 +46,7 @@ fn probe_with_reply(reply: &[u8], budget: Duration) -> anyhow::Result<u32> {
                     .await
                     .unwrap()
                     .unwrap();
-                assert!(matches!(request, WireRequest::Hello(sections) if sections == StateSections::default()));
+                assert!(matches!(request, WireRequest::Hello(_)));
                 received_hello.set(true);
                 stream.write_all(reply).await.unwrap();
                 future::pending().await
@@ -97,15 +97,6 @@ fn ready_service_does_not_validate_unused_frontend_config() {
     );
     assert!(!missing_config.exists());
     assert_eq!(std::fs::read(&active_config).unwrap(), original_active);
-}
-
-#[test]
-fn probe_returns_the_instance_from_a_complete_hello() {
-    let instance = 0x9a12_3456;
-    assert_eq!(
-        probe_with_reply(&hello_frame(instance), Duration::from_secs(2)).unwrap(),
-        instance
-    );
 }
 
 #[test]

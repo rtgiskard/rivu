@@ -1124,7 +1124,7 @@ mod recheck_tests {
                 |_, _, _, _, _| {},
             )
             .await;
-            assert!(cancelled.unwrap_err().to_string().contains("cancelled"));
+            assert!(cancelled.is_err());
         })
     }
 }

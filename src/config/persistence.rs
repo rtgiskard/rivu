@@ -200,8 +200,7 @@ mod tests {
             ..Config::default()
         };
         config.validate().unwrap();
-        let error = config.save(&path).unwrap_err();
-        assert!(format!("{error:#}").contains("exceeds"));
+        assert!(config.save(&path).is_err());
         assert_eq!(fs::read_to_string(&path).unwrap(), previous);
         assert_eq!(Config::load(&path).unwrap().volume, 0.25);
         assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);

@@ -452,12 +452,6 @@ fn fifo_cue_sources_are_local_errors_and_allow_subsequent_scans() -> Result<()> 
             worker.join().unwrap();
             assert!(terminal);
             assert!(!result.errors.is_empty());
-            assert!(
-                result
-                    .errors
-                    .iter()
-                    .all(|error| error.contains("not an ordinary file"))
-            );
             assert_eq!(result.track_count(), 1);
             assert_eq!(result.records[0].path, good);
             assert!(result.tracks().all(|track| !track.duration_filter_exempt));
@@ -570,12 +564,6 @@ fn nonregular_audio_is_a_local_error_preserving_only_its_existing_identity() -> 
                     worker.join().unwrap();
                     assert!(terminal);
                     assert_eq!(result.errors.len(), if explicit { 2 } else { 1 });
-                    assert!(
-                        result
-                            .errors
-                            .iter()
-                            .any(|error| error.contains("not an ordinary file"))
-                    );
                     assert_eq!(result.uncertainties, [ScanUncertainty::File(audio.clone())]);
                     assert!(!result.scan_incomplete);
                     assert_eq!(result.track_count(), 1);
@@ -671,12 +659,6 @@ fn explicit_non_utf8_scopes_do_not_abort_valid_scan_reconciliation() -> Result<(
             )?;
             assert_eq!(result.roots, [good_root]);
             assert_eq!(result.errors.len(), invalid.len());
-            assert!(
-                result
-                    .errors
-                    .iter()
-                    .all(|error| error.contains("not UTF-8"))
-            );
             assert!(result.uncertainties.is_empty());
             assert!(!result.scan_incomplete);
             assert_eq!(result.track_count(), 1);

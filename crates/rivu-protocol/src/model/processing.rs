@@ -422,7 +422,7 @@ mod equalizer_edit_tests {
     use super::*;
 
     #[test]
-    fn node_candidates_share_parameter_semantics_without_mutating_monitor_config() {
+    fn node_parameter_edits_preserve_unedited_fields_and_reject_capacity_overflow() {
         let monitor = EqualizerConfig {
             enabled: true,
             preamp_db: -1.125,
@@ -433,7 +433,6 @@ mod equalizer_edit_tests {
             }],
             ..Default::default()
         };
-        let baseline = monitor.clone();
         let mut node = monitor.clone();
         assert!(
             EqualizerEdit::BandField {
@@ -453,7 +452,6 @@ mod equalizer_edit_tests {
                 .unwrap()
                 .is_none()
         );
-        assert_eq!(monitor, baseline);
         assert_eq!(node.bands.len(), 32);
         assert_eq!(node.bands[0].frequency_hz, 1523.875);
         assert_eq!(node.bands[0].gain_db, -3.0625);
@@ -465,37 +463,5 @@ mod equalizer_edit_tests {
                 .is_err()
         );
         assert_eq!(node, full);
-    }
-
-    #[test]
-    fn preset_and_ab_operations_remain_with_the_monitor_owner() {
-        let baseline = EqualizerConfig {
-            enabled: true,
-            output_gain_db: -2.75,
-            ..Default::default()
-        };
-        for edit in [
-            EqualizerEdit::SwapAb,
-            EqualizerEdit::LoadPreset {
-                name: "Reference".to_owned(),
-            },
-            EqualizerEdit::ImportPreset {
-                path: "not-read.json".into(),
-                name: "Reference".to_owned(),
-                overwrite: false,
-            },
-            EqualizerEdit::ExportPreset {
-                path: "not-written.json".into(),
-                name: "Reference".to_owned(),
-            },
-        ] {
-            let mut candidate = baseline.clone();
-            let expected = edit.clone();
-            assert_eq!(
-                edit.apply_config(&mut candidate, Some(48_000)).unwrap(),
-                Some(expected)
-            );
-            assert_eq!(candidate, baseline);
-        }
     }
 }

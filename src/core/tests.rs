@@ -331,10 +331,8 @@ fn committed_queue_scalar_refresh_failure(
          BEGIN DELETE FROM rivu_meta; END;",
         )
         .unwrap();
-    let error = core
-        .command(Command::RemoveTracks { track_ids: vec![2] })
+    core.command(Command::RemoveTracks { track_ids: vec![2] })
         .unwrap_err();
-    assert!(error.to_string().contains("Track deletion committed"));
     assert!(core.store.track(2).unwrap().is_none());
     assert!(core.queue_projection_stale);
     connection

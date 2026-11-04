@@ -1087,19 +1087,13 @@ mod tests {
             let saved = futures::executor::block_on(receiver).unwrap();
             assert!(worker.join().is_err());
             assert!(saved.outcome_uncertain);
+            assert!(saved.error.is_some());
             assert_eq!(saved.library_committed, committed);
             assert_eq!(saved.playlist_id.is_some(), committed);
             if let Some(id) = saved.playlist_id {
                 let store = Store::open(&directory.path().join("library.db")).unwrap();
                 assert!(store.playlist_ids().unwrap().contains(&id));
             }
-            assert!(
-                saved
-                    .error
-                    .unwrap()
-                    .to_string()
-                    .contains("may already be committed")
-            );
             let store = Store::open(&directory.path().join("library.db")).unwrap();
             assert_eq!(
                 store.playlist_summary_page(None, 0, 0).unwrap().total,

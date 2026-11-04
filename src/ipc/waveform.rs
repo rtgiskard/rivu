@@ -23,8 +23,6 @@ use std::{
     time::Duration,
 };
 type Response = rivu_protocol::waveform::Response<WaveformFrame>;
-#[cfg(test)]
-use rivu_protocol::waveform::{decode, encode};
 
 // Version 2 adds the suspension state to progressive cache keys.
 const MAX_CLIENTS: usize = 8;
@@ -348,29 +346,13 @@ mod tests {
         drop(service);
     }
 
-    // Exercise service cache decisions and serialized suspension metadata without PCM.
-    fn refresh(
-        server: &WaveformFrame,
-        client: &mut WaveformFrame,
-        known: &mut Option<WaveKey>,
-    ) -> bool {
-        let request =
-            decode::<Request>(&encode(&Request::Progressive { known: *known }).unwrap()).unwrap();
-        let Request::Progressive { known: requested } = request else {
-            panic!("expected progressive request");
-        };
-        let response = progressive_response(7, server, requested);
-        let response = decode::<Response>(&encode(&response).unwrap()).unwrap();
-        let Response::Progressive { key, frame } = response else {
+    // Exercise service cache decisions without PCM.
+    fn refresh(server: &WaveformFrame, known: &mut Option<WaveKey>) -> bool {
+        let Response::Progressive { key, frame } = progressive_response(7, server, *known) else {
             panic!("expected progressive response");
         };
         *known = Some(key);
-        if let Some(frame) = frame {
-            *client = *frame;
-            true
-        } else {
-            false
-        }
+        frame.is_some()
     }
 
     #[test]
@@ -379,37 +361,36 @@ mod tests {
         // except for the actual visualization toggle API throughout this transition.
         let mut server = WaveformFrame::default();
         let control = rivu_audio::WaveformControl::default();
-        let mut client = WaveformFrame::default();
         let mut known = None;
-        assert!(refresh(&server, &mut client, &mut known));
-        assert!(!refresh(&server, &mut client, &mut known));
+        assert!(refresh(&server, &mut known));
+        assert!(!refresh(&server, &mut known));
 
         let old_scan = Arc::new(AtomicBool::new(false));
         control.cancel_scan_on_suspend(&server, &old_scan);
         assert!(!old_scan.load(Ordering::Relaxed));
 
         control.set_visualization_enabled(&mut server, false);
-        assert!(refresh(&server, &mut client, &mut known));
+        assert!(refresh(&server, &mut known));
         assert!(old_scan.load(Ordering::Relaxed));
         let disabled_scan = Arc::new(AtomicBool::new(false));
         control.cancel_scan_on_suspend(&server, &disabled_scan);
         assert!(disabled_scan.load(Ordering::Relaxed));
-        assert!(!refresh(&server, &mut client, &mut known));
+        assert!(!refresh(&server, &mut known));
 
         let revision = server.revision;
         let suspension = server.suspension_generation();
         control.set_visualization_enabled(&mut server, true);
         assert_eq!(server.revision, revision);
         assert_eq!(server.suspension_generation(), suspension);
-        assert!(refresh(&server, &mut client, &mut known));
+        assert!(refresh(&server, &mut known));
         let resumed_scan = Arc::new(AtomicBool::new(false));
         control.cancel_scan_on_suspend(&server, &resumed_scan);
         assert!(!resumed_scan.load(Ordering::Relaxed));
-        assert!(!refresh(&server, &mut client, &mut known));
+        assert!(!refresh(&server, &mut known));
 
         // The resumed guard remains live: the next disable still cancels it.
         control.set_visualization_enabled(&mut server, false);
-        assert!(refresh(&server, &mut client, &mut known));
+        assert!(refresh(&server, &mut known));
         assert!(resumed_scan.load(Ordering::Relaxed));
     }
 }

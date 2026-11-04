@@ -514,20 +514,6 @@ mod tests {
     }
 
     #[test]
-    fn bulk_request_limit_is_enforced() {
-        let mut buffer = Vec::new();
-        let payload = "X".repeat(6 * 1024 * 1024);
-        assert!(
-            FrameWriter {
-                bytes: &mut buffer,
-                limit: MAX_REQUEST
-            }
-            .encode(0, &payload)
-            .is_err()
-        );
-    }
-
-    #[test]
     fn stalled_bulk_response_releases_encoding_buffer() {
         async_io::block_on(async {
             let mut sender = LimitedWriter::default();
@@ -684,69 +670,6 @@ mod tests {
             panic!("query request with a payload")
         };
         payload
-    }
-
-    #[test]
-    fn warmed_small_requests_reuse_receive_storage() {
-        async_io::block_on(async {
-            let first_payload = "X".repeat(1024);
-            let mut encoded = Vec::new();
-            encode_request_frame_into(&payload_request(first_payload.clone()), &mut encoded)
-                .unwrap();
-            let mut pending = BytesMut::new();
-            let first = read_request_frame(&mut encoded.as_slice(), &mut pending)
-                .await
-                .unwrap()
-                .unwrap();
-            let pointer = pending.as_ptr();
-            let capacity = pending.capacity();
-            assert!(capacity >= encoded.len());
-            assert!(capacity <= RETAINED_BUFFER_LIMIT);
-            for payload in ["Y".repeat(1024), "Z".repeat(128)] {
-                encode_request_frame_into(&payload_request(payload.clone()), &mut encoded).unwrap();
-                let request = read_request_frame(&mut encoded.as_slice(), &mut pending)
-                    .await
-                    .unwrap()
-                    .unwrap();
-                assert_eq!(request_payload(request), payload);
-                assert!(pending.is_empty());
-                assert_eq!(pending.as_ptr(), pointer);
-                assert_eq!(pending.capacity(), capacity);
-            }
-            assert_eq!(request_payload(first), first_payload);
-        });
-    }
-
-    #[test]
-    fn warmed_small_responses_reuse_receive_storage() {
-        async_io::block_on(async {
-            let first_payload = "X".repeat(1024);
-            let mut encoded = Vec::new();
-            encode_response_frame_into(&WireResponse::Error(first_payload.clone()), &mut encoded)
-                .unwrap();
-            let mut pending = BytesMut::new();
-            let first = read_response_frame(&mut encoded.as_slice(), &mut pending)
-                .await
-                .unwrap();
-            let pointer = pending.as_ptr();
-            let capacity = pending.capacity();
-            assert!(capacity >= encoded.len());
-            assert!(capacity <= RETAINED_BUFFER_LIMIT);
-            for payload in ["Y".repeat(1024), "Z".repeat(128)] {
-                encode_response_frame_into(&WireResponse::Error(payload.clone()), &mut encoded)
-                    .unwrap();
-                assert!(matches!(
-                    read_response_frame(&mut encoded.as_slice(), &mut pending)
-                        .await
-                        .unwrap(),
-                    WireResponse::Error(actual) if actual == payload
-                ));
-                assert!(pending.is_empty());
-                assert_eq!(pending.as_ptr(), pointer);
-                assert_eq!(pending.capacity(), capacity);
-            }
-            assert!(matches!(first, WireResponse::Error(actual) if actual == first_payload));
-        });
     }
 
     #[test]

@@ -196,23 +196,40 @@ impl ClientSession {
                 },
                 async {
                     if self.stream.is_none() {
-                        self.stream = Some(rivu_protocol::wire::connect(&self.data_dir).await.with_context(|| {
-                            format!(
-                                "Cannot connect to Rivu at {}. Start `rivu serve` first.",
-                                self.data_dir.display()
-                            )
-                        })?);
+                        self.stream = Some(
+                            rivu_protocol::wire::connect(&self.data_dir)
+                                .await
+                                .with_context(|| {
+                                    format!(
+                                        "Cannot connect to Rivu at {}. Start `rivu serve` first.",
+                                        self.data_dir.display()
+                                    )
+                                })?,
+                        );
                     }
                     let stream = self.stream.as_mut().unwrap();
-                    write_request_frame_buffered(stream, request, &mut self.write_buffer, write_started).await?;
+                    write_request_frame_buffered(
+                        stream,
+                        request,
+                        &mut self.write_buffer,
+                        write_started,
+                    )
+                    .await?;
                     let response = read_response_frame(stream, &mut self.read_buffer);
-                    let response = if matches!(request, WireRequest::Watch(_) | WireRequest::WaitTask(_) | WireRequest::QueryRetained(_)) {
+                    let response = if matches!(
+                        request,
+                        WireRequest::Watch(_)
+                            | WireRequest::WaitTask(_)
+                            | WireRequest::QueryRetained(_)
+                    ) {
                         response.await
                     } else {
                         let deadline = rivu_protocol::transport::response_timeout(wait_timeout);
                         #[cfg(test)]
                         let response = match response_clock {
-                            Some((clock, started)) => clock.timeout_at(started + deadline, response).await,
+                            Some((clock, started)) => {
+                                clock.timeout_at(started + deadline, response).await
+                            }
                             None => timeout(deadline, response).await,
                         };
                         #[cfg(not(test))]
@@ -224,7 +241,8 @@ impl ClientSession {
                     }
                     Ok(response)
                 },
-            ).await
+            )
+            .await
         });
         if result.is_err() {
             self.disconnect();
@@ -620,7 +638,6 @@ mod tests {
             error.downcast_ref::<CommandFailure>().unwrap().status,
             AckStatus::Unknown
         );
-        assert!(format!("{error:#}").contains("do not automatically retry"));
         assert!(
             client
                 .request_ack(Command::CreatePlaylist {

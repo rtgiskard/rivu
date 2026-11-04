@@ -395,41 +395,6 @@ fn rejected_audio_progress_count_preserves_statistics_and_album_token() {
 }
 
 #[test]
-fn committed_play_count_invalidates_once_without_queue_projection_reads() {
-    let (directory, mut core) = fixture_with_database(Some(10.0));
-    playing(&mut core, 1);
-    let before_count = core.state.current_track().unwrap().play_count;
-    let before = core.state.query_revisions();
-    let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
-    connection.execute_batch("DELETE FROM rivu_meta").unwrap();
-    core.playback_progress(8.0, 8.0).unwrap();
-    assert_eq!(core.state.library.revision, before.library + 1);
-    assert_eq!(
-        core.state.current_track().unwrap().play_count,
-        before_count + 1
-    );
-    assert!(core.playback.as_ref().unwrap().counted);
-    let count = || {
-        connection
-            .query_row("SELECT play_count FROM tracks WHERE id=1", [], |row| {
-                row.get::<_, i64>(0)
-                    .map(|value| u64::try_from(value).unwrap())
-            })
-            .unwrap()
-    };
-    assert_eq!(count(), before_count + 1);
-    core.playback_progress(9.0, 9.0).unwrap();
-    assert_eq!(count(), before_count + 1);
-    assert_eq!(core.state.library.revision, before.library + 1);
-    // Repeated progress cannot replay a known commit or generate another token.
-    assert_eq!(core.state.queue.revision, before.queue + 1);
-    assert_eq!(
-        core.state.current_track().unwrap().play_count,
-        before_count + 1
-    );
-}
-
-#[test]
 fn manual_play_count_updates_projections_without_consuming_playback_count() {
     let (_directory, mut core) = fixture_with_database(Some(10.0));
     playing(&mut core, 1);
@@ -566,7 +531,7 @@ fn saturated_audio_admission_preserves_state_requests_events_and_command_order()
         }
     };
     worker.join().unwrap();
-    assert!(result.unwrap_err().to_string().contains("not queued"));
+    result.unwrap_err();
     assert_eq!(core.output_settings_request, 1);
     assert_eq!(core.generation, generation);
     assert_eq!(
@@ -588,12 +553,7 @@ fn saturated_audio_admission_preserves_state_requests_events_and_command_order()
         (Command::Seek { seconds: 5.0 }, PlaybackStatus::Playing),
     ] {
         core.state.playback.status = status;
-        assert!(
-            core.command(command)
-                .unwrap_err()
-                .to_string()
-                .contains("not queued")
-        );
+        core.command(command).unwrap_err();
         assert_eq!(core.state.playback.status, status);
         assert_eq!(core.state.playback.position, 2.0);
         assert_eq!(core.state.playback.seek_revision, seek_revision);

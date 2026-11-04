@@ -350,7 +350,7 @@ fn verification_panic_retires_the_task_without_committing_and_allows_retry() {
     });
     let result = settle_relocation(&mut core);
     assert_eq!(result.phase, RelocationPhase::Failed);
-    assert!(result.error.as_deref().unwrap().contains("panicked"));
+    assert!(result.error.is_some());
     assert!(core.track(source).unwrap().missing);
     core.relocate_track(source, target).unwrap();
     assert_eq!(

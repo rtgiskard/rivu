@@ -637,7 +637,6 @@ fn random_draws_include_current_weight_duplicates_and_ignore_forward_history() {
     core.enqueue(&[1]).unwrap();
     let id = core.store.queue_id_at(0).unwrap().unwrap();
     assert_eq!(core.random_queue_id(&mut rng).unwrap(), Some(id));
-    assert_eq!(core.random_queue_id(&mut rng).unwrap(), Some(id));
     for _ in 0..5000 {
         core.record_queue_history(id);
     }

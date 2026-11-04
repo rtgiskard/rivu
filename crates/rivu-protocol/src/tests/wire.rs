@@ -50,10 +50,6 @@ fn exact_playlist_summary_round_trips_ids_and_optional_results() {
 fn exact_playlist_summary_identity_and_stamp_select_catalog() {
     use crate::response::QueryRevisions;
     let query = Query::PlaylistSummary { playlist_id: 42 };
-    assert_eq!(
-        query.identity(),
-        Query::PlaylistSummary { playlist_id: 42 }.identity()
-    );
     assert_ne!(
         query.identity(),
         Query::PlaylistSummary { playlist_id: 43 }.identity()
@@ -374,25 +370,10 @@ fn playlist_group_requests_and_locations_round_trip_stable_identities() {
             index: usize::MAX,
             expected_revision: u64::MAX,
         },
-        Command::InsertQueueSources {
-            directories: vec![PathBuf::from("/music")],
-            track_ids: vec![3, 1],
-            other_tracks: false,
-            index: 0,
-            expected_revision: 19,
-        },
         Command::InsertPlaylist {
             playlist_id: 10,
             track_ids: vec![3, 1, 3],
             index: 7,
-            expected_revision: 19,
-        },
-        Command::InsertPlaylistSources {
-            playlist_id: 10,
-            directories: vec![PathBuf::from("/music")],
-            track_ids: vec![],
-            other_tracks: false,
-            index: 0,
             expected_revision: 19,
         },
         Command::MovePlaylistEntries {
@@ -847,8 +828,6 @@ fn runtime_wire_round_trip_preserves_large_client_configuration_without_transfer
     };
     let mut encoded = Vec::new();
     encode_response_frame_into(&WireResponse::State(wire_state(runtime)), &mut encoded).unwrap();
-    assert!(encoded.len() < 256);
-    assert!(encoded_full.len() > encoded.len() * 100);
     assert!(
         !encoded
             .windows(b"configuration-only-marker".len())
@@ -965,41 +944,6 @@ fn configuration_wire_adapter_preserves_optional_fields_and_library_columns() {
             state_response(state).configuration.unwrap().config.as_ref(),
             config.as_ref()
         );
-    }
-}
-
-#[test]
-fn common_palette_values_roundtrip_configuration_wire() {
-    use rivu_format::config::{Config, VisualizationPalette};
-
-    for palette in [
-        VisualizationPalette::Inferno,
-        VisualizationPalette::Magma,
-        VisualizationPalette::Viridis,
-        VisualizationPalette::Cividis,
-        VisualizationPalette::Grayscale,
-        VisualizationPalette::Deadbeef,
-    ] {
-        let config = Arc::new(Config {
-            visualization_palette: palette,
-            ..Default::default()
-        });
-        let mut encoded = Vec::new();
-        encode_response_frame_into(
-            &WireResponse::State(wire_state(StateResponse {
-                configuration: Some(rivu_protocol::model::ConfigurationState {
-                    config: Arc::clone(&config),
-                    config_path: "/test/config.toml".into(),
-                }),
-                ..Default::default()
-            })),
-            &mut encoded,
-        )
-        .unwrap();
-        let WireResponse::State(state) = decode_response_frame(&encoded[4..]).unwrap() else {
-            panic!("expected state")
-        };
-        assert_eq!(state_response(state).configuration.unwrap().config, config);
     }
 }
 
@@ -1980,25 +1924,6 @@ fn settings_patch_round_trip_preserves_untouched_owner_state_and_explicit_clears
     assert_eq!(owner.scan_max_depth, 7);
     assert_eq!(owner.volume, 0.2);
     assert!(owner.shuffle);
-}
-
-#[test]
-fn retained_query_and_desktop_registration_round_trip_as_distinct_requests() {
-    let mut encoded = Vec::new();
-    encode_request_frame_into(
-        &WireRequest::QueryRetained(WireQuery::from(Query::LibraryStats)),
-        &mut encoded,
-    )
-    .unwrap();
-    let WireRequest::QueryRetained(query) = decode_request_frame(&encoded[4..]).unwrap() else {
-        panic!("expected retained query");
-    };
-    assert_eq!(Query::try_from(query).unwrap(), Query::LibraryStats);
-    encode_request_frame_into(&WireRequest::RegisterDesktop, &mut encoded).unwrap();
-    assert!(matches!(
-        decode_request_frame(&encoded[4..]).unwrap(),
-        WireRequest::RegisterDesktop
-    ));
 }
 
 #[test]

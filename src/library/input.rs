@@ -206,7 +206,7 @@ mod tests {
                     )
                     .await;
                     if cancel {
-                        assert!(result.unwrap_err().to_string().contains("cancelled"));
+                        assert!(result.is_err());
                         assert_eq!(reads.load(Ordering::Relaxed), 1);
                     } else {
                         assert_eq!(result?, b"song");

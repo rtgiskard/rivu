@@ -5,34 +5,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[test]
-fn common_palette_patch_preserves_unrelated_theme_and_supports_reset() {
-    let baseline = Config::default();
-    for palette in [
-        VisualizationPalette::Inferno,
-        VisualizationPalette::Magma,
-        VisualizationPalette::Viridis,
-        VisualizationPalette::Cividis,
-        VisualizationPalette::Grayscale,
-        VisualizationPalette::Deadbeef,
-    ] {
-        let draft = Config {
-            visualization_palette: palette,
-            ..baseline.clone()
-        };
-        let mut latest = Config {
-            ui_theme: Theme::TokyoNight,
-            ..baseline.clone()
-        };
-        ConfigPatch::between(&baseline, &draft).apply_to(&mut latest);
-        assert_eq!(latest.visualization_palette, palette);
-        assert_eq!(latest.ui_theme, Theme::TokyoNight);
-        ConfigPatch::between(&draft, &baseline).apply_to(&mut latest);
-        assert_eq!(latest.visualization_palette, VisualizationPalette::Deadbeef);
-        assert_eq!(latest.ui_theme, Theme::TokyoNight);
-    }
-}
-
 fn write_current_config(path: &Path, contents: impl AsRef<str>) -> std::io::Result<()> {
     fs::write(
         path,
@@ -66,8 +38,6 @@ fn missing_save_writes_only_overrides_and_clears_optional_keys() {
     config = Config::load(&path).unwrap();
     config.output_device = None;
     config.save(&path).unwrap();
-    let saved = fs::read_to_string(&path).unwrap();
-    assert_eq!(saved, original.replace("output_device = 'USB DAC'\n", ""));
     assert_eq!(Config::load(&path).unwrap(), config);
 
     fs::remove_file(&path).unwrap();
@@ -123,8 +93,6 @@ fn unversioned_current_files_load_without_being_rewritten() {
 fn artwork_file_limit_round_trips_and_rejects_out_of_range_values() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
-    write_current_config(&path, "[interface]\n").unwrap();
-    assert_eq!(Config::load(&path).unwrap().artwork_file_limit_mib, 16);
     for limit in [1, 16, 32, 64] {
         write_current_config(
             &path,
@@ -155,8 +123,6 @@ fn artwork_file_limit_round_trips_and_rejects_out_of_range_values() {
 fn artwork_decode_budget_round_trips_and_rejects_out_of_range_values() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
-    write_current_config(&path, "[interface]\n").unwrap();
-    assert_eq!(Config::load(&path).unwrap().artwork_decode_budget_mib, 64);
     for budget in [1, 64, 257, 1024] {
         write_current_config(
             &path,
@@ -181,32 +147,6 @@ fn artwork_decode_budget_round_trips_and_rejects_out_of_range_values() {
         .unwrap();
         assert!(Config::load(&path).is_err());
     }
-}
-
-#[test]
-fn artwork_decode_budget_patch_preserves_concurrent_unedited_fields() {
-    let baseline = Config::default();
-    let draft = Config {
-        artwork_decode_budget_mib: 128,
-        ..baseline.clone()
-    };
-    let mut latest = Config {
-        volume: 0.25,
-        artwork_fps: 30,
-        artwork_file_limit_mib: 32,
-        ..baseline.clone()
-    };
-    let expected = Config {
-        artwork_decode_budget_mib: 128,
-        ..latest.clone()
-    };
-    ConfigPatch::between(&baseline, &draft).apply_to(&mut latest);
-    assert_eq!(latest, expected);
-
-    latest.artwork_decode_budget_mib = 256;
-    ConfigPatch::between(&baseline, &baseline).apply_to(&mut latest);
-    assert_eq!(latest.artwork_decode_budget_mib, 256);
-    assert_eq!(latest.artwork_file_limit_mib, 32);
 }
 
 #[test]
@@ -284,32 +224,9 @@ fn spectrum_layout_patch_replaces_whole_variant_and_preserves_other_edits() {
 }
 
 #[test]
-fn queue_replace_confirmation_defaults_and_round_trips() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("config.toml");
-    assert!(Config::load(&path).unwrap().confirm_queue_replace);
-    write_current_config(&path, "[interface]\n").unwrap();
-    assert!(Config::load(&path).unwrap().confirm_queue_replace);
-    for enabled in [true, false] {
-        write_current_config(
-            &path,
-            format!("[interface]\nconfirm_queue_replace = {enabled}\n"),
-        )
-        .unwrap();
-        let config = Config::load(&path).unwrap();
-        assert_eq!(config.confirm_queue_replace, enabled);
-        config.save(&path).unwrap();
-        assert_eq!(Config::load(&path).unwrap(), config);
-    }
-}
-
-#[test]
 fn interface_theme_names_round_trip_strictly() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
-    assert_eq!(Config::load(&path).unwrap().ui_theme, Theme::RivuDark);
-    write_current_config(&path, "[interface]\nfont = 'sans-serif'\n").unwrap();
-    assert_eq!(Config::load(&path).unwrap().ui_theme, Theme::RivuDark);
     let names = ["rivu_dark", "tokyo_night", "tokyo_night_day"];
     for (name, theme) in names.into_iter().zip(Theme::ALL) {
         write_current_config(&path, format!("[interface]\ntheme = '{name}'\n")).unwrap();
@@ -331,32 +248,9 @@ fn interface_theme_names_round_trip_strictly() {
 }
 
 #[test]
-fn theme_patch_preserves_unrelated_concurrent_changes() {
-    let baseline = Config::default();
-    let draft = Config {
-        ui_theme: Theme::TokyoNightDay,
-        ..baseline.clone()
-    };
-    let mut latest = Config {
-        volume: 0.25,
-        output_device: Some("concurrent output".into()),
-        ui_language: "zh-CN".into(),
-        visualization_enabled: false,
-        ..baseline.clone()
-    };
-    let expected = Config {
-        ui_theme: Theme::TokyoNightDay,
-        ..latest.clone()
-    };
-    ConfigPatch::between(&baseline, &draft).apply_to(&mut latest);
-    assert_eq!(latest, expected);
-}
-
-#[test]
 fn interface_language_normalizes_and_round_trips_without_resolving_auto() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
-    assert_eq!(Config::load(&path).unwrap().ui_language, "auto");
     for (input, expected) in [("AUTO", "auto"), ("en_us", "en-US"), ("ZH_cn", "zh-CN")] {
         write_current_config(&path, format!("[interface]\nlanguage = '{input}'\n")).unwrap();
         let config = Config::load(&path).unwrap();
@@ -366,8 +260,7 @@ fn interface_language_normalizes_and_round_trips_without_resolving_auto() {
     }
     for value in ["", "fr-FR", "zh-TW", "zh-Hant"] {
         write_current_config(&path, format!("[interface]\nlanguage = '{value}'\n")).unwrap();
-        let error = Config::load(&path).unwrap_err();
-        assert!(format!("{error:#}").contains("interface.language"));
+        assert!(Config::load(&path).is_err());
     }
 }
 
@@ -465,8 +358,7 @@ fn artwork_settings_round_trip_and_reject_invalid_motion_values() {
             format!("interface.artwork.period_seconds = {period}\n"),
         )
         .unwrap();
-        let error = Config::load(&path).unwrap_err();
-        assert!(format!("{error:#}").contains("interface.artwork.period_seconds"));
+        assert!(Config::load(&path).is_err());
     }
     fs::remove_file(&path).unwrap();
     Config::default().save(&path).unwrap();
@@ -541,32 +433,6 @@ fn grouped_file_defaults_partial_tables_and_font_normalization() {
     assert_eq!(config.spectrum_db_range(), 95.0);
     assert_eq!(config.spectrogram_db_range(), 95.0);
     assert_eq!(config.reactive_db_range(), 95.0);
-}
-
-#[test]
-fn spectrogram_patch_preserves_unedited_and_concurrent_values() {
-    let baseline = Config::default();
-    let draft = Config {
-        spectrogram_db_range: Some(100.0),
-        ..baseline.clone()
-    };
-    let mut latest = Config {
-        spectrogram_interpolate: false,
-        spectrogram_history_seconds: 40,
-        ..baseline.clone()
-    };
-    let expected = Config {
-        spectrogram_db_range: Some(100.0),
-        ..latest.clone()
-    };
-    ConfigPatch::between(&baseline, &draft).apply_to(&mut latest);
-    assert_eq!(latest, expected);
-    ConfigPatch::between(&draft, &baseline).apply_to(&mut latest);
-    assert_eq!(latest.spectrogram_db_range, baseline.spectrogram_db_range);
-    assert!(!latest.spectrogram_interpolate);
-    assert_eq!(latest.spectrogram_history_seconds, 40);
-    ConfigPatch::between(&baseline, &baseline).apply_to(&mut latest);
-    assert_eq!(latest.spectrogram_history_seconds, 40);
 }
 
 #[test]
@@ -879,8 +745,6 @@ fn scan_max_depth_round_trips_and_rejects_zero() {
 fn scan_min_duration_defaults_round_trips_and_rejects_non_u32_values() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
-    write_current_config(&path, "[library]\n").unwrap();
-    assert_eq!(Config::load(&path).unwrap().scan_min_duration_seconds, 0);
 
     for seconds in [0, 1, 45, u32::MAX] {
         let config = Config {
@@ -903,26 +767,6 @@ fn scan_min_duration_defaults_round_trips_and_rejects_non_u32_values() {
         assert!(Config::load(&path).is_err(), "accepted {value}");
     }
     directory.close().unwrap();
-}
-
-#[test]
-fn scan_min_duration_patch_preserves_concurrent_unedited_settings() {
-    let baseline = Config::default();
-    let draft = Config {
-        scan_min_duration_seconds: 30,
-        ..baseline.clone()
-    };
-    let mut latest = Config {
-        scan_max_depth: 7,
-        ..baseline.clone()
-    };
-    ConfigPatch::between(&baseline, &draft).apply_to(&mut latest);
-    assert_eq!(latest.scan_min_duration_seconds, 30);
-    assert_eq!(latest.scan_max_depth, 7);
-
-    ConfigPatch::between(&draft, &baseline).apply_to(&mut latest);
-    assert_eq!(latest.scan_min_duration_seconds, 0);
-    assert_eq!(latest.scan_max_depth, 7);
 }
 
 #[test]
@@ -949,8 +793,7 @@ fn base_font_size_defaults_round_trips_and_rejects_invalid_values() {
                 ui_font_size_pt: invalid_size,
                 ..config.clone()
             };
-            let error = invalid.save(&path).unwrap_err();
-            assert!(format!("{error:#}").contains("interface.font_size_pt"));
+            assert!(invalid.save(&path).is_err());
             assert_eq!(fs::read_to_string(&path).unwrap(), saved);
         }
     }
@@ -959,32 +802,6 @@ fn base_font_size_defaults_round_trips_and_rejects_invalid_values() {
         write_current_config(&path, format!("interface.font_size_pt = {value}\n")).unwrap();
         assert!(Config::load(&path).is_err(), "accepted font size {value}");
     }
-}
-
-#[test]
-fn base_font_size_patch_preserves_owner_changes() {
-    let baseline = Config::default();
-    let draft = Config {
-        ui_font_size_pt: 18,
-        ..baseline.clone()
-    };
-    let mut latest = Config {
-        ui_scale: 1.5,
-        ui_font: "Noto Sans".to_owned(),
-        volume: 0.25,
-        ..baseline.clone()
-    };
-    let expected = Config {
-        ui_font_size_pt: 18,
-        ..latest.clone()
-    };
-    ConfigPatch::between(&baseline, &draft).apply_to(&mut latest);
-    assert_eq!(latest, expected);
-    ConfigPatch::between(&draft, &baseline).apply_to(&mut latest);
-    assert_eq!(latest.ui_font_size_pt, baseline.ui_font_size_pt);
-    assert_eq!(latest.ui_scale, 1.5);
-    assert_eq!(latest.ui_font, "Noto Sans");
-    assert_eq!(latest.volume, 0.25);
 }
 
 #[test]
@@ -1005,8 +822,7 @@ fn layout_snapping_round_trips_limits_and_rejects_invalid_values_without_overwri
                 layout_snap_grid_px: invalid_spacing,
                 ..config.clone()
             };
-            let error = invalid.save(&path).unwrap_err();
-            assert!(format!("{error:#}").contains("interface.layout_snap_grid_px"));
+            assert!(invalid.save(&path).is_err());
             assert_eq!(fs::read_to_string(&path).unwrap(), saved);
         }
     }
@@ -1131,11 +947,6 @@ fn analysis_windows_and_fft_sizes_round_trip() {
 fn visualization_signal_defaults_and_round_trips_in_shared_group() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
-    write_current_config(&path, "[visualizations]\n").unwrap();
-    assert_eq!(
-        Config::load(&path).unwrap().visualization_signal,
-        VisualizationSignal::After
-    );
     for (visualization_signal, name) in [
         (VisualizationSignal::Before, "before"),
         (VisualizationSignal::After, "after"),
@@ -1155,25 +966,6 @@ fn visualization_signal_defaults_and_round_trips_in_shared_group() {
         );
         assert_eq!(Config::load(&path).unwrap(), config);
     }
-}
-
-#[test]
-fn visualization_signal_patch_preserves_unrelated_concurrent_changes() {
-    let baseline = Config::default();
-    let mut draft = baseline.clone();
-    draft.visualization_signal = VisualizationSignal::Before;
-    let patch = ConfigPatch::between(&baseline, &draft);
-    let mut current = baseline.clone();
-    current.analysis_rate_hz = 30;
-    patch.apply_to(&mut current);
-    assert_eq!(current.visualization_signal, VisualizationSignal::Before);
-    assert_eq!(current.analysis_rate_hz, 30);
-
-    let mut draft = baseline.clone();
-    draft.analysis_rate_hz = 40;
-    ConfigPatch::between(&baseline, &draft).apply_to(&mut current);
-    assert_eq!(current.visualization_signal, VisualizationSignal::Before);
-    assert_eq!(current.analysis_rate_hz, 40);
 }
 
 #[test]

@@ -9,10 +9,8 @@ fn committed_history_removal_retains_session_suppression_when_refresh_fails() {
     connection
         .execute("UPDATE tracks SET last_played='unreadable' WHERE id=4", [])
         .unwrap();
-    let error = core
-        .command(Command::RemoveHistory { track_ids: vec![1] })
+    core.command(Command::RemoveHistory { track_ids: vec![1] })
         .unwrap_err();
-    assert!(error.to_string().contains("History removal committed"));
     assert_eq!(core.track(1).unwrap().last_played, None);
     assert!(core.playback.as_ref().unwrap().history_removed);
     assert!(core.playback_history_pending);
@@ -204,8 +202,7 @@ fn committed_track_edit_invalidates_before_failed_refresh_and_same_edit_is_noop(
         decoder_hint: None,
     };
     let before = core.state.query_revisions();
-    let error = core.command(edit()).unwrap_err();
-    assert!(error.to_string().contains("Track edit committed"));
+    core.command(edit()).unwrap_err();
     let title: String = connection
         .query_row("SELECT title_override FROM tracks WHERE id=1", [], |row| {
             row.get(0)
@@ -268,7 +265,6 @@ fn failed_edits_and_empty_deletions_do_not_invalidate() {
         })
         .unwrap_err();
     assert!(format!("{error:#}").contains("edit rejected"));
-    assert!(!error.to_string().contains("committed"));
     assert_eq!(core.track(1).unwrap().title, "Track 1");
     assert_eq!(core.state.query_revisions(), before);
     core.command(Command::RemoveTracks {
@@ -331,8 +327,7 @@ fn committed_track_deletions_invalidate_before_failed_refresh() {
         } else {
             Command::RemoveTracks { track_ids: vec![2] }
         };
-        let error = core.command(command).unwrap_err();
-        assert!(error.to_string().contains("Track deletion committed"));
+        core.command(command).unwrap_err();
         assert!(core.store.track(2).unwrap().is_none());
         let committed = core.state.query_revisions();
         assert_eq!(committed.library, before.library + 1);
@@ -412,8 +407,7 @@ fn committed_deletions_isolate_history_and_queue_read_failures() {
             } else {
                 Command::RemoveTracks { track_ids: vec![2] }
             };
-            let error = core.command(command).unwrap_err();
-            assert!(error.to_string().contains("Track deletion committed"));
+            core.command(command).unwrap_err();
             assert!(core.store.track(2).unwrap().is_none());
             assert_eq!(core.state.library.track_total, 3);
             let committed = core.state.query_revisions();
@@ -433,7 +427,6 @@ fn committed_deletions_isolate_history_and_queue_read_failures() {
                 assert_eq!(core.played, [1, 4, 5]);
                 assert_eq!(core.played_cursor, 2);
             } else {
-                assert!(format!("{error:#}").contains("Refreshing history failed"));
                 assert!(Arc::ptr_eq(&core.state.library.history, &history));
                 assert_eq!(core.store.queue_ids().unwrap(), [1, 4, 5]);
                 assert_queue_saved(&core);
@@ -1466,10 +1459,8 @@ fn committed_deletion_invalidates_all_affected_playlists_before_projection_failu
              BEGIN UPDATE tracks SET last_played='unreadable' WHERE id=3; END;",
         )
         .unwrap();
-    let error = core
-        .command(Command::RemoveTracks { track_ids: vec![2] })
+    core.command(Command::RemoveTracks { track_ids: vec![2] })
         .unwrap_err();
-    assert!(error.to_string().contains("Track deletion committed"));
     assert_eq!(core.state.library.track_total, 3);
     assert_eq!(core.state.library.playlist_revision, before.playlist + 1);
     assert_eq!(

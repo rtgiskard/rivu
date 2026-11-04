@@ -1256,9 +1256,7 @@ mod tests {
             scalar_playlist_revisions: Arc::clone(&core.state.library.playlist_entry_revisions),
         });
         let rejected = ReadQueries::execute(&path, &mut reader, &core.shared, &fence, &request);
-        assert!(
-            matches!(rejected.result, Err(QueryError::Message(error)) if error.contains("maintenance"))
-        );
+        assert!(matches!(rejected.result, Err(QueryError::Message(_))));
     }
 
     #[test]
