@@ -91,6 +91,9 @@ logging (`debug`, `info`, `warning`, `error`).
 See link:doc/01_config.adoc#logging-and-diagnostics[logging and diagnostics].
 `--json` writes one result to stdout and runtime diagnostics as JSON to stderr;
 it is not available for GUI, serve, or TUI.
+Paginated JSON lists stream one array; if a command fails, stdout may contain an
+incomplete result. Check the exit status before consuming it; do not treat partial
+output as a complete collection.
 Use `rivu` or `rivu -h` for concise help, `rivu --help` for startup details, and a
 subcommand's `--help` for exact arguments.
 
