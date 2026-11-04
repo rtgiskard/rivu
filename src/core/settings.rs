@@ -79,9 +79,28 @@ impl Core {
         let roots = library::normalize_roots(&config.library_roots)?;
         Arc::make_mut(&mut config).library_roots = roots;
         let roots_changed = config.library_roots != self.state.configuration.config.library_roots;
+        let previous = &self.state.configuration.config;
+        let changed = [
+            config.visualization_enabled != previous.visualization_enabled,
+            config.media_read_buffer_mib != previous.media_read_buffer_mib,
+            config.volume != self.state.playback.volume,
+            config.visualization_signal != previous.visualization_signal,
+            config.equalizer != previous.equalizer,
+            config.ffmpeg_enabled != previous.ffmpeg_enabled,
+        ];
         // No other producer can consume these slots while Core persists.
         // Reject a busy batch before committing any desired settings.
-        self.engine.ensure_command_capacity(7)?;
+        // Explicit Apply always validates output, including an unchanged idle sink.
+        self.engine
+            .ensure_command_capacity(1 + changed.iter().filter(|&&changed| changed).count())?;
+        let [
+            visualization_changed,
+            buffer_changed,
+            volume_changed,
+            signal_changed,
+            equalizer_changed,
+            ffmpeg_changed,
+        ] = changed;
         let ffmpeg_status = if !config.ffmpeg_enabled {
             "disabled".to_owned()
         } else {
@@ -112,19 +131,31 @@ impl Core {
         let request = self.output_settings_request.wrapping_add(1);
         let config = &self.state.configuration.config;
         (|| -> Result<()> {
-            self.engine.send(AudioCommand::VisualizationEnabled(
-                config.visualization_enabled,
-            ))?;
-            self.engine
-                .send(AudioCommand::MediaReadBuffer(config.media_read_buffer_mib))?;
-            self.engine.send(AudioCommand::Volume(config.volume))?;
-            self.engine.send(AudioCommand::VisualizationSignal(
-                config.visualization_signal,
-            ))?;
-            self.engine
-                .send(AudioCommand::Equalizer(Arc::new(config.equalizer.clone())))?;
-            self.engine
-                .send(AudioCommand::FfmpegEnabled(config.ffmpeg_enabled))?;
+            if visualization_changed {
+                self.engine.send(AudioCommand::VisualizationEnabled(
+                    config.visualization_enabled,
+                ))?;
+            }
+            if buffer_changed {
+                self.engine
+                    .send(AudioCommand::MediaReadBuffer(config.media_read_buffer_mib))?;
+            }
+            if volume_changed {
+                self.engine.send(AudioCommand::Volume(config.volume))?;
+            }
+            if signal_changed {
+                self.engine.send(AudioCommand::VisualizationSignal(
+                    config.visualization_signal,
+                ))?;
+            }
+            if equalizer_changed {
+                self.engine
+                    .send(AudioCommand::Equalizer(Arc::new(config.equalizer.clone())))?;
+            }
+            if ffmpeg_changed {
+                self.engine
+                    .send(AudioCommand::FfmpegEnabled(config.ffmpeg_enabled))?;
+            }
             self.engine.send(AudioCommand::OutputSettings {
                 request,
                 device: config.output_device.clone(),

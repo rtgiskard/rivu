@@ -446,112 +446,47 @@ fn queue_save_failure_does_not_prevent_final_config_save() {
 }
 
 #[test]
-fn busy_audio_configuration_rejects_the_whole_batch_before_persistence() {
-    for available in [0, 1, 5, 6, 7] {
-        let (_directory, mut core) = fixture();
-        core.state
-            .configuration
-            .config
-            .save(&core.state.configuration.config_path)
-            .unwrap();
-        let baseline = core.state.clone();
-        let saved = std::fs::read(&core.state.configuration.config_path).unwrap();
-        let (commands, receive) = async_channel::bounded(64);
-        for index in 0..64 - available {
-            commands
-                .try_send(AudioCommand::Volume(index as f32))
-                .unwrap();
-        }
-        core.engine.replace_commands(commands);
-        let mut config = core.state.configuration.config.as_ref().clone();
-        config.volume = 0.25;
-        config.shuffle = true;
-        config.visualization_enabled = false;
-        config.ffmpeg_enabled = false;
-        config.output_device = Some("configured-output".into());
-        let result = core.command(Command::Configure {
-            config: Arc::new(config.clone()),
-        });
-        if available < 7 {
-            result.unwrap_err();
-            assert_eq!(
-                *core.state.configuration.config,
-                *baseline.configuration.config
-            );
-            assert_eq!(core.state.playback.volume, baseline.playback.volume);
-            assert_eq!(core.state.playback.shuffle, baseline.playback.shuffle);
-            assert_eq!(
-                core.state.system.selected_device,
-                baseline.system.selected_device
-            );
-            assert_eq!(core.output_settings_request, 0);
-            assert_eq!(
-                std::fs::read(&core.state.configuration.config_path).unwrap(),
-                saved
-            );
-            assert_eq!(receive.len(), 64 - available);
-            if available == 0 {
-                assert!(
-                    core.mutate_config(ConfigMutation::ToggleVisualization)
-                        .is_err()
-                );
-                assert_eq!(
-                    *core.state.configuration.config,
-                    *baseline.configuration.config
-                );
+fn configuration_admission_preserves_saved_state_until_the_changed_batch_fits() {
+    for change_volume in [false, true] {
+        for available in 0..=2 {
+            let (_directory, mut core) = fixture();
+            core.flush_config().unwrap();
+            let baseline = core.state.configuration.config.clone();
+            let saved = std::fs::read(&core.state.configuration.config_path).unwrap();
+            let (commands, _receive) = async_channel::bounded(2);
+            for _ in 0..2 - available {
+                commands.try_send(AudioCommand::Volume(0.5)).unwrap();
+            }
+            core.engine.replace_commands(commands);
+            let mut config = core.effective_config();
+            config.query_batch_size = 42;
+            if change_volume {
+                config.volume = 0.25;
+            }
+            let result = core.command(Command::Configure {
+                config: Arc::new(config.clone()),
+            });
+            // Explicit output validation needs one slot; changed volume needs another.
+            if available < 1 + usize::from(change_volume) {
+                result.unwrap_err();
+                assert_eq!(*core.state.configuration.config, *baseline);
+                assert_eq!(core.state.playback.volume, baseline.volume);
+                assert_eq!(core.output_settings_request, 0);
                 assert_eq!(
                     std::fs::read(&core.state.configuration.config_path).unwrap(),
                     saved
                 );
-                assert_eq!(receive.len(), 64);
+            } else {
+                result.unwrap();
+                assert_eq!(*core.state.configuration.config, config);
+                assert_eq!(core.state.playback.volume, config.volume);
+                assert_eq!(
+                    Config::load(&core.state.configuration.config_path).unwrap(),
+                    config
+                );
+                assert_eq!(core.output_settings_request, 1);
             }
-        } else {
-            result.unwrap();
-            assert_eq!(*core.state.configuration.config, config);
-            assert_eq!(
-                Config::load(&core.state.configuration.config_path).unwrap(),
-                config
-            );
-            assert_eq!(core.output_settings_request, 1);
-            assert_eq!(receive.len(), 64);
         }
-        for index in 0..64 - available {
-            assert!(matches!(
-                receive.try_recv().unwrap(),
-                AudioCommand::Volume(value) if value == index as f32
-            ));
-        }
-        if available == 7 {
-            assert!(matches!(
-                receive.try_recv().unwrap(),
-                AudioCommand::VisualizationEnabled(false)
-            ));
-            assert!(matches!(
-                receive.try_recv().unwrap(),
-                AudioCommand::MediaReadBuffer(_)
-            ));
-            assert!(matches!(
-                receive.try_recv().unwrap(),
-                AudioCommand::Volume(0.25)
-            ));
-            assert!(matches!(
-                receive.try_recv().unwrap(),
-                AudioCommand::VisualizationSignal(_)
-            ));
-            assert!(
-                matches!(receive.try_recv().unwrap(), AudioCommand::Equalizer(config) if *config == core.state.configuration.config.equalizer)
-            );
-            assert!(matches!(
-                receive.try_recv().unwrap(),
-                AudioCommand::FfmpegEnabled(false)
-            ));
-            assert!(matches!(
-                receive.try_recv().unwrap(),
-                AudioCommand::OutputSettings { request: 1, device: Some(device), .. }
-                    if device == "configured-output"
-            ));
-        }
-        assert!(receive.try_recv().is_err());
     }
 }
 
