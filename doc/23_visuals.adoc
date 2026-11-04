@@ -225,7 +225,7 @@ enabled. Playback, commands, and shutdown remain independent of presentation.
 A reliable Hidden notification cancels both clocks and disables analysis.
 Reveal waits for a current drawable replacement without replaying hidden audio;
 switching one panel never suspends unaffected visible panels. Final drawings,
-inactive-tab state and audio-worker pools have distinct lifetimes defined in
+inactive-tab state and GUI analysis-worker pools have distinct lifetimes defined in
 link:22_cache.adoc#resource-boundaries[Resource boundaries].
 Loss of focus alone never disables analysis. Without a reliable visibility
 notification, compositor throttling limits native animation callbacks but not
@@ -705,7 +705,7 @@ See that repository's README for focused checks and build prerequisites.
 Headless WGPU checks need an available adapter and do not establish native-window
 behavior. They are not substitutes for Rivu application behavior tests.
 
-From Rivu's repository root, run `cargo test --locked --test gpui_cached_dependencies`
+From Rivu's repository root, run `cargo test --locked -p rivu-gui --test gpui_cached_dependencies`
 for the application-side cached-view notification and replay regressions.
 
 For a native-window smoke check, use a Wayland desktop with a working WGPU

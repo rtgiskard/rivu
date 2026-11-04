@@ -37,23 +37,25 @@ an inactive one does not replace the tree.
 === Frontend crate boundary
 
 `rivu-gui` owns the GPUI event loop, display connection, session and window
-resources. The application host injects a narrow in-process interface for
-published state, commands, queries, display demand and shutdown. Core, storage,
-IPC, MPRIS and tray services retain their application lifetime; moving the GUI
-into a library does not create another process or another Core owner.
+resources in a desktop process separate from Core. Commands, queries and shared
+configuration use instance-bound IPC; state getters read locally published
+snapshots. Native PCM is observed through the shared-memory transport, with
+display analysis in the desktop worker. Core, storage, IPC, MPRIS and tray services
+retain their service lifetime independently of the desktop.
 
-The GUI releases display demand and window resources on close, retains the
-session's accepted layouts for reopening, and flushes the final layout outside
-GPUI's deadline-limited quit observer. Core acknowledgment and service joins
-remain outside the graphical event loop. User Quit passes through draft guards;
-forced application shutdown does not depend on an open window.
+Closing the last window releases display demand and window resources, flushes
+the final layout after the GPUI event loop returns, and exits the desktop process.
+Reopening starts a new desktop from the persisted layout and current Core state.
+Core acknowledgment and service joins remain outside the graphical event loop.
+User Quit passes through draft guards; forced application shutdown does not depend
+on an open window.
 
 `rivu-tui` owns terminal input, restoration and its IPC workers. Each frontend
 keeps its own projection and transient state. `rivu-presentation` shares only
 toolkit-neutral localization, shortcut policy, theme presets and application
 icons; `rivu-ui` remains the reusable GPUI controls package. Semantic RGB palette
-values belong to `rivu-format`; engine-independent display and query contracts
-belong to `rivu-protocol`.
+values belong to `rivu-format`; wire and query contracts belong to `rivu-protocol`,
+and display analysis contracts and execution belong to `rivu-analysis`.
 
 Shared icons and locale files live in `crates/rivu-presentation/data/` so the
 crate keeps its compile-time resources inside its package boundary. Root

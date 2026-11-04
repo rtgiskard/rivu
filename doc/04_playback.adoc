@@ -396,7 +396,7 @@ collection, regardless of filters. Selecting a row alone does not change playbac
 Outside search editing, help, and details, press `:` to open the command line on
 the bottom row. Enter executes; Escape cancels. Submitted search results remain
 browsable with command mode, without clearing the search. Commands are bounded
-to 256 UTF-8 bytes and support Backspace; they do not execute shell commands.
+to 256 UTF-8 bytes and support Backspace.
 
 [cols="1,3",options="header"]
 |===
@@ -481,7 +481,7 @@ metadata, favorite, playback-state, and missing-file indicators where space perm
 Truncation does not change stored metadata.
 
 The status row shows volume, shuffle, and repeat on the left and current-track
-codec, sample rate, and bit depth on the right, in the theme accent color.
+codec, sample rate, and bit depth on the right, in the theme's metadata color.
 Dynamic messages occupy a separate, fixed last row at every terminal height;
 without a message that row stays blank. Notices take precedence over scan status,
 core errors, and the startup help hint, in that order. Startup help lasts four
@@ -523,7 +523,8 @@ Core shutdown exits normally; a lost connection without shutdown state reports a
 Closing the window, including the application menu's Close window action, leaves
 the core and playback running. Activate the tray icon, use `rivu gui`, or invoke
 MPRIS `Raise` to reopen or focus the window. CLI and MPRIS reopening work with
-the tray disabled or unavailable; a headless core has no graphical host to raise.
+the tray disabled or unavailable, including when Core was started with `serve`.
+A Core built without GUI support cannot launch a desktop.
 Use Quit application in the application menu or tray, or `rivu quit`, to stop the
 core. Quitting also removes the tray item and releases desktop media controls;
 closing only the window does not.
@@ -602,8 +603,8 @@ accumulates against the current position and stays bound to its queue occurrence
 stale or stopped requests are ignored. Seeking strictly beyond a known end advances
 if another occurrence exists; the exact endpoint stays within the current one,
 and seeking beyond the queue tail does nothing. Out-of-range or stale `SetPosition`
-is ignored. `OpenUri` is rejected: import media first. `Raise` requires a graphical
-host; `Quit` also works headlessly.
+is ignored. `OpenUri` is rejected: import media first. `Raise` requires a Core built
+with GUI support; `Quit` also works without it.
 
 MPRIS Next/Previous preserve paused or stopped state; stopped navigation selects
 without opening a decoder. CLI, TUI, and GUI navigation instead starts playback

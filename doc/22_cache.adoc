@@ -374,11 +374,12 @@ Other analysis views can continue updating without accumulating hidden history.
 Restoration shows that frozen drawing until fresh analysis produces a replacement;
 it does not replay frames received while hidden.
 
+[[resource-boundaries]]
 === Resource boundaries
 
 Hiding releases GUI working state, Spectrogram history and stereo/generative
 simulation resources while retaining bounded final drawings as described below.
-Audio-worker analyzer capacity has a separate lifetime. Base waveform previews
+GUI-worker analyzer capacity has a separate lifetime. Base waveform previews
 retain their independent bounded lifetime; see <<waveform,Waveform caching>>.
 Waveform numerical payloads grow with effective display-column count and panel
 count, not panel pixel area: four f32 values (16 bytes) per column, at most 1024
