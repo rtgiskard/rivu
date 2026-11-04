@@ -99,6 +99,12 @@ pub struct ImpulseConfig {
     pub transient_protection: f32,
 }
 
+impl ImpulseConfig {
+    fn radius(&self) -> usize {
+        self.max_width + 2
+    }
+}
+
 impl Default for ImpulseConfig {
     fn default() -> Self {
         Self {
@@ -185,6 +191,25 @@ impl DenoiseConfig {
     pub fn is_bypassed(&self) -> bool {
         self.wet == 0.0
             || (self.mode == DenoiseMode::Off && !self.hum.enabled && !self.impulse.enabled)
+    }
+
+    /// Maximum withheld source frames for valid controls, without preparing DSP state.
+    pub fn lookahead_frames(&self) -> usize {
+        if self.is_bypassed() {
+            0
+        } else {
+            let spectral = if self.mode == DenoiseMode::Off {
+                0
+            } else {
+                self.fft_size
+            };
+            spectral
+                + if self.impulse.enabled {
+                    self.impulse.radius()
+                } else {
+                    0
+                }
+        }
     }
 
     /// Validate persisted controls before a source format is available.

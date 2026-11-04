@@ -112,20 +112,25 @@ impl FirEqualizer {
         Ok(equalizer)
     }
 
+    /// Causal latency and tail for validated controls, without preparing FFT state.
+    pub fn timing_frames(config: &EqualizerConfig, taps: usize) -> (usize, usize) {
+        Self::timing(!config.enabled, taps)
+    }
+
     pub fn latency_frames(&self) -> usize {
-        if self.bypass {
-            0
-        } else {
-            (self.taps - 1) / 2 + PARTITION
-        }
+        Self::timing(self.bypass, self.taps).0
     }
 
     /// Zeros required after the final input to exhaust the complete causal tail.
     pub fn tail_frames(&self) -> usize {
-        if self.bypass {
-            0
+        Self::timing(self.bypass, self.taps).1
+    }
+
+    fn timing(bypass: bool, taps: usize) -> (usize, usize) {
+        if bypass {
+            (0, 0)
         } else {
-            self.taps - 1 + PARTITION
+            ((taps - 1) / 2 + PARTITION, taps - 1 + PARTITION)
         }
     }
 

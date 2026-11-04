@@ -244,7 +244,7 @@ struct ImpulseRepair {
 
 impl ImpulseRepair {
     fn new(config: ImpulseConfig, channels: usize) -> Self {
-        let radius = config.max_width + 2;
+        let radius = config.radius();
         let floor = 10.0_f32.powf(config.floor_dbfs / 20.0);
         Self {
             config,
@@ -477,7 +477,7 @@ impl Denoiser {
             (0.0, 0.0, 0.0)
         };
         // Retain dry samples only when a partial blend actually has lookahead.
-        let delay = spectral_size + impulse.as_ref().map_or(0, |repair| repair.radius);
+        let delay = config.lookahead_frames();
         let dry_capacity = if !bypass && config.wet < 1.0 && delay > 0 {
             (delay + 1) * channels
         } else {
@@ -547,15 +547,7 @@ impl Denoiser {
     }
     /// Maximum withheld source frames before EOF (not a playback delay).
     pub fn lookahead_frames(&self) -> usize {
-        if self.bypass {
-            0
-        } else {
-            (if self.config.mode == DenoiseMode::Off {
-                0
-            } else {
-                self.size
-            }) + self.impulse.as_ref().map_or(0, |repair| repair.radius)
-        }
+        self.config.lookahead_frames()
     }
 
     fn check_cancel(&mut self, cancel: &mut impl FnMut() -> bool) -> Result<()> {

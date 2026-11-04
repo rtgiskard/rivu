@@ -126,6 +126,9 @@ struct SpectrumAnalyzer {
     density: Option<DensityField>,
     pcm_snapshots: Option<[Arc<Vec<[f32; 2]>>; PCM_SNAPSHOT_COUNT]>,
     spectrogram_snapshots: Option<[Arc<Vec<f32>>; SPECTRUM_SNAPSHOT_COUNT]>,
+    // Unnormalized conjugate-pair power, shared only with additional consumers.
+    // Spatial pan still needs the independently reconstructed channel powers.
+    bin_powers: Vec<f32>,
 }
 
 impl SpectrumAnalyzer {
@@ -195,6 +198,7 @@ impl SpectrumAnalyzer {
             density: None,
             pcm_snapshots: None,
             spectrogram_snapshots: None,
+            bin_powers: Vec::new(),
         }
     }
 
@@ -251,6 +255,11 @@ impl SpectrumAnalyzer {
         } else {
             self.visualizer.pcm = PcmSnapshot::default();
             self.pcm_snapshots = None;
+        }
+        if demand.band_energy || demand.spectrogram {
+            self.bin_powers.resize(self.rolling.len() / 2, 0.0);
+        } else {
+            self.bin_powers = Vec::new();
         }
         self.set_spectrogram_demand(demand.spectrogram);
         self.visualizer.demand = demand;
@@ -309,21 +318,6 @@ impl SpectrumAnalyzer {
         }
         self.fft
             .process_with_scratch(&mut self.frequency, &mut self.scratch);
-        if self.visualizer.demand.band_energy {
-            for (target, &(first, last)) in
-                self.visualizer.band_rms.iter_mut().zip(&self.drive_bins)
-            {
-                let mut power = 0.0;
-                for bin in first..last {
-                    let endpoint = if bin == n / 2 { 0.5 } else { 1.0 };
-                    power += (self.frequency[bin].norm_sqr()
-                        + self.frequency[(n - bin) % n].norm_sqr())
-                        * 0.5
-                        * endpoint;
-                }
-                *target = (power * self.power_normalization).sqrt();
-            }
-        }
         if density_demand {
             let [left, right, cross] = energies;
             let total = left + right;
@@ -363,28 +357,54 @@ impl SpectrumAnalyzer {
                 });
             }
         }
-        if self.visualizer.demand.spectrogram {
-            self.snapshot_spectrogram();
+        let cached_bins = if self.visualizer.demand.spectrogram && self.snapshot_spectrogram() {
+            1..n / 2 + 1
+        } else if self.visualizer.demand.band_energy {
+            // The three drive bands are contiguous. Do not scan unused bins
+            // when band energy is the only additional power consumer.
+            let bins = self.drive_bins[0].0..self.drive_bins[2].1;
+            for bin in bins.clone() {
+                self.bin_powers[bin - 1] =
+                    self.frequency[bin].norm_sqr() + self.frequency[n - bin].norm_sqr();
+            }
+            bins
+        } else {
+            0..0
+        };
+        if self.visualizer.demand.band_energy {
+            for (target, &(first, last)) in
+                self.visualizer.band_rms.iter_mut().zip(&self.drive_bins)
+            {
+                let mut power = 0.0;
+                for bin in first..last {
+                    let endpoint = if bin == n / 2 { 0.5 } else { 1.0 };
+                    power += self.bin_powers[bin - 1] * 0.5 * endpoint;
+                }
+                *target = (power * self.power_normalization).sqrt();
+            }
         }
         for (level, &(first, last)) in self.levels.iter_mut().zip(&self.bands) {
             let mut power = 0.0_f32;
             for bin in first..last {
-                let packed = self.frequency[bin];
-                let mirrored = self.frequency[(n - bin) % n];
+                let pair_power = if cached_bins.contains(&bin) {
+                    self.bin_powers[bin - 1]
+                } else {
+                    self.frequency[bin].norm_sqr() + self.frequency[n - bin].norm_sqr()
+                };
                 // Nyquist has no negative-frequency partner to double.
                 let endpoint_gain = if bin == n / 2 { 0.25 } else { 1.0 };
-                power = power.max((packed.norm_sqr() + mirrored.norm_sqr()) * 0.25 * endpoint_gain);
+                power = power.max(pair_power * 0.25 * endpoint_gain);
             }
             *level = (power.sqrt() * self.normalization).max(1e-7).log10() * 20.0;
         }
         [(rms[0] / n as f32).sqrt(), (rms[1] / n as f32).sqrt()]
     }
 
-    fn snapshot_spectrogram(&mut self) {
+    fn snapshot_spectrogram(&mut self) -> bool {
         // Only mutate a uniquely owned slot, after releasing our old handle.
         self.visualizer.spectrogram = SpectrumSnapshot::default();
         let Some(slots) = &mut self.spectrogram_snapshots else {
-            return;
+            return false;
         };
         for slot in slots {
             if let Some(levels) = Arc::get_mut(slot) {
@@ -394,17 +414,18 @@ impl SpectrumAnalyzer {
                     // power even for opposite-phase stereo. Match the base
                     // spectrum's coherent gain and single-sided Nyquist gain.
                     let endpoint_gain = if bin == n / 2 { 0.25 } else { 1.0 };
-                    let power = (self.frequency[bin].norm_sqr()
-                        + self.frequency[n - bin].norm_sqr())
-                        * 0.25
-                        * endpoint_gain;
+                    let pair_power =
+                        self.frequency[bin].norm_sqr() + self.frequency[n - bin].norm_sqr();
+                    self.bin_powers[bin - 1] = pair_power;
+                    let power = pair_power * 0.25 * endpoint_gain;
                     *level = (power.sqrt() * self.normalization).max(1e-7).log10() * 20.0;
                 }
                 self.visualizer.spectrogram = SpectrumSnapshot::from_shared(Arc::clone(slot));
-                return;
+                return true;
             }
         }
         // Slow consumers retain every slot: omit only the optional full FFT.
+        false
     }
 
     fn snapshot_pcm(&mut self) {
@@ -738,6 +759,90 @@ mod tests {
         let mut analyzer = SpectrumAnalyzer::new(visualizer_settings(), 5120);
         analyzer.set_visualizer_demand(demand);
         analyzer
+    }
+
+    #[test]
+    fn shared_power_preserves_sum_max_and_nyquist_across_demand_changes() {
+        let mut analyzer = SpectrumAnalyzer::new(
+            AnalysisSettings {
+                fft_size: 32768,
+                window: AnalysisWindow::None,
+                ..visualizer_settings()
+            },
+            32768,
+        );
+        let musical_band = analyzer
+            .bands
+            .iter()
+            .position(|&(first, last)| first <= 1000 && 1010 < last)
+            .unwrap();
+        let demands = [
+            ALL_DEMAND,
+            BAND_ENERGY_DEMAND,
+            VisualizerDemand::default(),
+            SPATIAL_DEMAND,
+            SPECTROGRAM_DEMAND,
+            ALL_DEMAND,
+        ];
+        let mut retained = Vec::new();
+        for (index, demand) in demands.into_iter().enumerate() {
+            analyzer.set_visualizer_demand(demand);
+            let gain = (index + 1) as f32 / 8.0;
+            for i in 0..32768 {
+                let phase = std::f32::consts::TAU * i as f32 / 32768.0;
+                let nyquist = if i % 2 == 0 { 0.125 } else { -0.125 };
+                let sample = gain
+                    * (0.125 * (1000.0 * phase).sin() + 0.25 * (1010.0 * phase).sin() + nyquist);
+                analyzer.push([sample, -sample]);
+            }
+            analyzer.transform();
+            let expected_peak_db = 20.0 * (gain * 0.25).log10();
+            assert!((analyzer.levels[musical_band] - expected_peak_db).abs() < 0.01);
+            let expected_nyquist_db = 20.0 * (gain * 0.125).log10();
+            assert!((analyzer.levels.last().unwrap() - expected_nyquist_db).abs() < 0.01);
+            if demand.band_energy {
+                let expected = gain * ((0.125_f32.powi(2) + 0.25_f32.powi(2)) * 0.5).sqrt();
+                assert!((analyzer.visualizer.band_rms[1] - expected).abs() < 0.0001);
+                assert!((analyzer.visualizer.band_rms[2] - gain * 0.125).abs() < 0.0001);
+            } else {
+                assert_eq!(analyzer.visualizer.band_rms, [0.0; 3]);
+            }
+            if demand.spectrogram {
+                assert!((analyzer.visualizer.spectrogram[1009] - expected_peak_db).abs() < 0.01);
+                assert!(
+                    (analyzer.visualizer.spectrogram[16383] - expected_nyquist_db).abs() < 0.01
+                );
+                retained.push((analyzer.visualizer.spectrogram.clone(), expected_peak_db));
+            } else {
+                assert!(analyzer.visualizer.spectrogram.is_empty());
+            }
+            if demand.spatial_spectrum {
+                let nyquist = analyzer.visualizer.spatial.last().unwrap();
+                assert!((nyquist.power - (gain * 0.125).powi(2)).abs() < 0.0001);
+                assert!(nyquist.pan.abs() < 0.0001);
+            }
+            for (snapshot, expected_db) in &retained {
+                assert!((snapshot[1009] - expected_db).abs() < 0.01);
+            }
+        }
+        // Retain the third slot, then change the window while no full-bin
+        // publication is available. Band energy must not reuse stale power.
+        analyzer.transform();
+        assert!(!analyzer.visualizer.spectrogram.is_empty());
+        retained.push((
+            analyzer.visualizer.spectrogram.clone(),
+            20.0 * (0.75_f32 * 0.25).log10(),
+        ));
+        for _ in 0..32768 {
+            analyzer.push([0.0; 2]);
+        }
+        analyzer.transform();
+        assert!(analyzer.visualizer.spectrogram.is_empty());
+        assert_eq!(analyzer.visualizer.band_rms, [0.0; 3]);
+        assert!(analyzer.levels.iter().all(|db| *db <= -139.0));
+        for (snapshot, expected_db) in &retained {
+            assert!((snapshot[1009] - expected_db).abs() < 0.01);
+        }
     }
 
     #[test]

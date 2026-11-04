@@ -30,7 +30,9 @@ pub(super) fn prepare(
         mode,
         GraphExecutionMode::Auto | GraphExecutionMode::Realtime
     ) {
-        match audio::GraphRunner::compile(graph, target, sample_rate, channels) {
+        match audio::GraphRunner::plan(graph, target, None, sample_rate, channels)
+            .and_then(audio::GraphPlan::prepare)
+        {
             Ok(runner) => {
                 check_cancel(cancel)?;
                 return Ok((GraphExecutionMode::Realtime, None, Some(runner)));
@@ -61,15 +63,14 @@ pub(super) fn prepare(
                 node: id,
                 port: port as u16,
             };
-            if let Ok(runner) = audio::GraphRunner::compile_from_boundary(
-                graph,
-                target,
-                boundary,
-                sample_rate,
-                channels,
-            ) {
+            if let Ok(plan) =
+                audio::GraphRunner::plan(graph, target, Some(boundary), sample_rate, channels)
+            {
                 check_cancel(cancel)?;
-                return Ok((GraphExecutionMode::Hybrid, Some(boundary), Some(runner)));
+                if let Ok(runner) = plan.prepare() {
+                    check_cancel(cancel)?;
+                    return Ok((GraphExecutionMode::Hybrid, Some(boundary), Some(runner)));
+                }
             }
         }
     }
@@ -274,11 +275,17 @@ impl Engine {
             .context("Graph latency overflow")?;
         frames = frames.checked_add(tail).context("Graph length overflow")?;
         let index = self.nodes.len();
+        let needs_sum = !matches!(processor, Processor::Source(_) | Processor::Decoder)
+            && !(inputs.len() == 1 && inputs[0].gain == 1.0 && inputs[0].delay.is_empty());
         self.nodes.push(Node {
             inputs,
             processor,
             output: vec![0.0; BLOCK * self.channels],
-            sum: vec![0.0; BLOCK * self.channels],
+            sum: if needs_sum {
+                vec![0.0; BLOCK * self.channels]
+            } else {
+                Vec::new()
+            },
             latency,
             frames,
             input_frames,
@@ -1768,5 +1775,190 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn work_budget_candidates_keep_the_first_exact_admissible_suffix() {
+        let graph = chain(vec![
+            GraphNodeKind::Equalizer {
+                config: rivu_dsp::equalizer::config::EqualizerConfig {
+                    enabled: true,
+                    ..Default::default()
+                },
+                implementation: EqImplementation::LinearPhase { taps: 8193 },
+            };
+            4
+        ]);
+        let target = GraphPort { node: 2, port: 0 };
+        let cancel = AtomicBool::new(false);
+        let error = prepare(
+            &graph,
+            target,
+            GraphExecutionMode::Realtime,
+            48000,
+            2,
+            &cancel,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("arithmetic work budget"));
+        for requested in [GraphExecutionMode::Auto, GraphExecutionMode::Hybrid] {
+            let (mode, boundary, runner) =
+                prepare(&graph, target, requested, 48000, 2, &cancel).unwrap();
+            assert_eq!(mode, GraphExecutionMode::Hybrid);
+            assert_eq!(boundary, Some(GraphPort { node: 3, port: 0 }));
+            let mut runner = runner.unwrap();
+            assert_eq!(runner.latency_frames(), 3 * (4096 + BLOCK));
+            let mut input = [0.25, -0.5];
+            runner.process_interleaved(&mut input).unwrap();
+            assert_eq!(input, [0.0; 2]);
+        }
+    }
+
+    #[test]
+    fn zero_wet_profile_still_requires_an_offline_prefix() {
+        let graph = chain(vec![
+            GraphNodeKind::Denoise {
+                config: rivu_dsp::denoise::DenoiseConfig {
+                    mode: DenoiseMode::Profile,
+                    wet: 0.0,
+                    ..Default::default()
+                },
+                profile: None,
+            },
+            GraphNodeKind::Equalizer {
+                config: Default::default(),
+                implementation: EqImplementation::Iir,
+            },
+        ]);
+        let target = GraphPort { node: 2, port: 0 };
+        let cancel = AtomicBool::new(false);
+        assert!(
+            prepare(
+                &graph,
+                target,
+                GraphExecutionMode::Realtime,
+                48000,
+                2,
+                &cancel
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("offline profile capture")
+        );
+        for requested in [GraphExecutionMode::Auto, GraphExecutionMode::Hybrid] {
+            let (mode, boundary, runner) =
+                prepare(&graph, target, requested, 48000, 2, &cancel).unwrap();
+            assert_eq!(mode, GraphExecutionMode::Hybrid);
+            assert_eq!(boundary, Some(GraphPort { node: 3, port: 0 }));
+            let mut runner = runner.unwrap();
+            let mut input = [0.25, -0.0];
+            let expected = input.map(f32::to_bits);
+            runner.process_interleaved(&mut input).unwrap();
+            assert_eq!(input.map(f32::to_bits), expected);
+        }
+    }
+
+    #[test]
+    fn hybrid_never_substitutes_one_separation_output_for_both() {
+        let mut graph = chain(vec![
+            GraphNodeKind::Separate {
+                config: Default::default(),
+            },
+            GraphNodeKind::Mix {
+                gains_db: vec![0.0; 2],
+                muted: vec![false; 2],
+                solo: vec![false; 2],
+            },
+            GraphNodeKind::Equalizer {
+                config: Default::default(),
+                implementation: EqImplementation::Iir,
+            },
+        ]);
+        graph.edges.push(GraphEdge {
+            from: GraphPort { node: 3, port: 1 },
+            to: GraphPort { node: 4, port: 1 },
+        });
+        for requested in [GraphExecutionMode::Auto, GraphExecutionMode::Hybrid] {
+            let (mode, boundary, runner) = prepare(
+                &graph,
+                GraphPort { node: 2, port: 0 },
+                requested,
+                48000,
+                2,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            assert_eq!(mode, GraphExecutionMode::Hybrid);
+            assert_eq!(boundary, Some(GraphPort { node: 4, port: 0 }));
+            let mut runner = runner.unwrap();
+            let mut input = [0.25, -0.5];
+            runner.process_interleaved(&mut input).unwrap();
+            assert_eq!(input, [0.25, -0.5]);
+        }
+    }
+
+    #[test]
+    fn offline_mix_keeps_wide_accumulation_and_rejects_finite_overflow() {
+        let budget = audio::PcmBudget::new(MEMORY_LIMIT);
+        let input = pcm(&[33_554_432.0], &budget);
+        let mut graph = mix_graph(vec![0.0; 3], vec![false; 3], vec![false; 3]);
+        graph.edges[1].from = GraphPort { node: 4, port: 0 };
+        for id in [4, 5] {
+            graph.nodes.push(GraphNode {
+                id,
+                kind: GraphNodeKind::Source,
+                position: [0.0; 2],
+            });
+        }
+        graph.next_id = 6;
+        graph.edges.push(GraphEdge {
+            from: GraphPort { node: 5, port: 0 },
+            to: GraphPort { node: 3, port: 2 },
+        });
+        let boundaries = BTreeMap::from([
+            (
+                GraphPort { node: 4, port: 0 },
+                GraphPcm {
+                    pcm: pcm(&[1.0], &budget),
+                    start_frame: 0,
+                },
+            ),
+            (
+                GraphPort { node: 5, port: 0 },
+                GraphPcm {
+                    pcm: pcm(&[-33_554_432.0], &budget),
+                    start_frame: 0,
+                },
+            ),
+        ]);
+        let cancel = AtomicBool::new(false);
+        let mut engine = Engine::new(&input);
+        let target = engine
+            .compile(
+                &graph,
+                GraphPort { node: 2, port: 0 },
+                &boundaries,
+                &BTreeMap::new(),
+                &cancel,
+            )
+            .unwrap();
+        let output = engine.render(target, Arc::clone(&budget), &cancel).unwrap();
+        assert_eq!(samples(&output.pcm), [1.0]);
+
+        let input = pcm(&[f32::MAX * 0.75], &budget);
+        let graph = mix_graph(vec![0.0; 2], vec![false; 2], vec![false; 2]);
+        let retained = budget.used_bytes();
+        let mut engine = Engine::new(&input);
+        let target = engine
+            .compile(
+                &graph,
+                GraphPort { node: 2, port: 0 },
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &cancel,
+            )
+            .unwrap();
+        assert!(engine.render(target, Arc::clone(&budget), &cancel).is_err());
+        assert_eq!(budget.used_bytes(), retained);
     }
 }

@@ -144,7 +144,7 @@ mod waveform;
 mod worker;
 
 pub use channels::Channel;
-pub use graph::GraphRunner;
+pub use graph::{GraphPlan, GraphRunner};
 pub use output::devices;
 pub use render::{RenderFormat, SourceRenderer};
 use rivu_protocol::waveform::{PlaybackRange, SourceIdentity, WaveformFrame};

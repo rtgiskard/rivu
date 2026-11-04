@@ -115,6 +115,103 @@ impl GraphSnapshot {
     }
 }
 
+struct PlannedNode {
+    port: GraphPort,
+    inputs: Vec<Input>,
+    source: bool,
+    bypassed: bool,
+    latency: usize,
+    input_latency: usize,
+    tail: usize,
+    input_tail: usize,
+}
+
+/// Lightweight admission result. No DSP instances, delay lines, or PCM blocks
+/// are allocated until the selected plan is prepared.
+pub struct GraphPlan<'a> {
+    graph: &'a ProcessingGraph,
+    target: GraphPort,
+    boundary: Option<GraphPort>,
+    sample_rate: u32,
+    channels: usize,
+    nodes: Vec<PlannedNode>,
+    state_bytes: usize,
+    work_per_frame: u64,
+}
+
+impl GraphPlan<'_> {
+    pub fn prepare(self) -> Result<GraphRunner> {
+        let graph = std::sync::Arc::new(self.graph.clone());
+        self.prepare_owned(graph)
+    }
+
+    fn prepare_owned(self, graph: std::sync::Arc<ProcessingGraph>) -> Result<GraphRunner> {
+        let mut nodes: Vec<Node> = Vec::with_capacity(self.nodes.len());
+        for mut planned in self.nodes {
+            let processor = if planned.source {
+                Processor::Source
+            } else if planned.bypassed {
+                Processor::Pass
+            } else {
+                match &graph.node(planned.port.node)?.kind {
+                    GraphNodeKind::Output | GraphNodeKind::Mix { .. } => Processor::Pass,
+                    GraphNodeKind::Equalizer {
+                        config,
+                        implementation,
+                    } => match implementation {
+                        EqImplementation::Iir => {
+                            Processor::Iir(Equalizer::new(config, self.sample_rate, self.channels)?)
+                        }
+                        EqImplementation::LinearPhase { taps } => Processor::Fir(
+                            FirEqualizer::new(config, self.sample_rate, self.channels, *taps)?,
+                        ),
+                    },
+                    GraphNodeKind::Denoise { config, .. } => {
+                        Processor::Denoise(Box::new(BlockDenoiser::new(
+                            Denoiser::new(self.sample_rate, self.channels, config.clone(), None)?,
+                            GRAPH_BLOCK_FRAMES,
+                        )?))
+                    }
+                    _ => unreachable!("admitted graph processor"),
+                }
+            };
+            for input in &mut planned.inputs {
+                input.delay = DelayLine::new(
+                    planned.input_latency - nodes[input.node].latency,
+                    self.channels,
+                );
+            }
+            nodes.push(Node {
+                id: planned.port.node,
+                inputs: planned.inputs,
+                processor,
+                output: vec![0.0; GRAPH_BLOCK_FRAMES * self.channels],
+                latency: planned.latency,
+                tail: planned.tail,
+                input_tail: planned.input_tail,
+                blocks: 0,
+            });
+        }
+        let output = nodes.last().context("empty realtime graph")?;
+        Ok(GraphRunner {
+            latency: output.latency,
+            tail: output.tail,
+            nodes,
+            channels: self.channels,
+            sample_rate: self.sample_rate,
+            estimated_state_bytes: self.state_bytes,
+            estimated_work_per_frame: self.work_per_frame,
+            processed_frames: 0,
+            source_frames: None,
+            source_start_frame: 0,
+            published_frames: None,
+            graph,
+            target: self.target,
+            boundary: self.boundary,
+        })
+    }
+}
+
 /// A prepared immutable graph snapshot, including a cached-prefix boundary when
 /// requested. `process_interleaved` has zero steady-state allocations. Input and
 /// output remain native-rate, native-layout, unclipped PCM. Calls are bounded to
@@ -157,13 +254,7 @@ impl GraphRunner {
         sample_rate: u32,
         channels: usize,
     ) -> Result<Self> {
-        Self::prepare(
-            std::sync::Arc::new(graph.clone()),
-            target,
-            None,
-            sample_rate,
-            channels,
-        )
+        Self::plan(graph, target, None, sample_rate, channels)?.prepare()
     }
 
     /// The supplied PCM is the source-aligned cached output of `boundary`.
@@ -177,13 +268,7 @@ impl GraphRunner {
         sample_rate: u32,
         channels: usize,
     ) -> Result<Self> {
-        Self::prepare(
-            std::sync::Arc::new(graph.clone()),
-            target,
-            Some(boundary),
-            sample_rate,
-            channels,
-        )
+        Self::plan(graph, target, Some(boundary), sample_rate, channels)?.prepare()
     }
 
     fn prepare(
@@ -193,6 +278,19 @@ impl GraphRunner {
         sample_rate: u32,
         channels: usize,
     ) -> Result<Self> {
+        Self::plan(&graph, target, boundary, sample_rate, channels)?
+            .prepare_owned(std::sync::Arc::clone(&graph))
+    }
+
+    /// Admit topology, capability, latency, and budgets without constructing DSP.
+    /// Numerical DSP preparation errors can still be returned by `GraphPlan::prepare`.
+    pub fn plan(
+        graph: &ProcessingGraph,
+        target: GraphPort,
+        boundary: Option<GraphPort>,
+        sample_rate: u32,
+        channels: usize,
+    ) -> Result<GraphPlan<'_>> {
         graph.validate()?;
         ensure!(
             sample_rate > 0 && channels > 0 && channels <= MAX_GRAPH_CHANNELS,
@@ -205,9 +303,9 @@ impl GraphRunner {
             );
         }
         let mut ordered = Vec::new();
-        visit(&graph, target, boundary, &mut BTreeSet::new(), &mut ordered)?;
+        visit(graph, target, boundary, &mut BTreeSet::new(), &mut ordered)?;
         let mut indices: BTreeMap<GraphPort, usize> = BTreeMap::new();
-        let mut nodes: Vec<Node> = Vec::with_capacity(ordered.len());
+        let mut nodes: Vec<PlannedNode> = Vec::with_capacity(ordered.len());
         let mut state_bytes = 0usize;
         let mut work_per_frame = 0u64;
         for port in ordered {
@@ -247,7 +345,6 @@ impl GraphRunner {
                         state_bytes <= MAX_STATE_BYTES,
                         "realtime graph exceeds 64 MiB state budget"
                     );
-                    input.delay = DelayLine::new(delay, channels);
                     upstream_tail = upstream_tail.max(nodes[input.node].tail + delay);
                     if let GraphNodeKind::Mix {
                         gains_db,
@@ -266,7 +363,7 @@ impl GraphRunner {
                 }
             }
             let bypassed = !is_source && is_bypassed(&graph_node.kind);
-            // Bound cumulative state and work before allocating each processor.
+            // Bound cumulative state and work before preparing any processor.
             let (extra_state, extra_work) = if is_source || bypassed {
                 (0, 0)
             } else {
@@ -284,14 +381,23 @@ impl GraphRunner {
                 work_per_frame.saturating_mul(u64::from(sample_rate)) <= MAX_WORK_PER_SECOND,
                 "realtime graph exceeds arithmetic work budget; use Hybrid or Offline execution"
             );
-            let (processor, latency, tail) = if is_source {
-                (Processor::Source, 0, 0)
-            } else if bypassed {
-                // Keep constructor validation without allocating an unused DSP
-                // instance or denoise staging buffers.
+            let (latency, tail) = if is_source {
+                (0, 0)
+            } else {
                 match &graph_node.kind {
-                    GraphNodeKind::Equalizer { config, .. } => {
+                    GraphNodeKind::Source => unreachable!(),
+                    GraphNodeKind::Output | GraphNodeKind::Mix { .. } => (0, 0),
+                    GraphNodeKind::Equalizer {
+                        config,
+                        implementation,
+                    } => {
                         config.validate_for_stream(sample_rate, channels)?;
+                        match implementation {
+                            EqImplementation::Iir => (0, 0),
+                            EqImplementation::LinearPhase { taps } => {
+                                FirEqualizer::timing_frames(config, *taps)
+                            }
+                        }
                     }
                     GraphNodeKind::Denoise { config, .. } => {
                         ensure!(
@@ -299,46 +405,8 @@ impl GraphRunner {
                             "profile denoise requires offline profile capture; use a cached prefix in Hybrid mode"
                         );
                         config.validate_for_format(sample_rate, channels)?;
-                    }
-                    _ => unreachable!(),
-                }
-                (Processor::Pass, 0, 0)
-            } else {
-                match &graph_node.kind {
-                    GraphNodeKind::Source => unreachable!(),
-                    GraphNodeKind::Output | GraphNodeKind::Mix { .. } => (Processor::Pass, 0, 0),
-                    GraphNodeKind::Equalizer {
-                        config,
-                        implementation: EqImplementation::Iir,
-                    } => (
-                        Processor::Iir(Equalizer::new(config, sample_rate, channels)?),
-                        0,
-                        0,
-                    ),
-                    GraphNodeKind::Equalizer {
-                        config,
-                        implementation: EqImplementation::LinearPhase { taps },
-                    } => {
-                        let fir = FirEqualizer::new(config, sample_rate, channels, *taps)?;
-                        let latency = fir.latency_frames();
-                        let tail = fir.tail_frames();
-                        (Processor::Fir(fir), latency, tail)
-                    }
-                    GraphNodeKind::Denoise { config, .. } => {
-                        ensure!(
-                            config.mode != DenoiseMode::Profile,
-                            "profile denoise requires offline profile capture; use a cached prefix in Hybrid mode"
-                        );
-                        let denoiser = Denoiser::new(sample_rate, channels, config.clone(), None)?;
-                        let latency = denoiser.lookahead_frames();
-                        (
-                            Processor::Denoise(Box::new(BlockDenoiser::new(
-                                denoiser,
-                                GRAPH_BLOCK_FRAMES,
-                            )?)),
-                            latency,
-                            latency,
-                        )
+                        let latency = config.lookahead_frames();
+                        (latency, latency)
                     }
                     GraphNodeKind::Speech { .. } | GraphNodeKind::Separate { .. } => bail!(
                         "node {} requires model inference and is unsupported realtime; select Hybrid or Offline execution",
@@ -352,33 +420,27 @@ impl GraphRunner {
                 "realtime graph latency exceeds two seconds; use Offline execution"
             );
             indices.insert(port, nodes.len());
-            nodes.push(Node {
-                id: port.node,
+            nodes.push(PlannedNode {
+                port,
                 inputs,
-                processor,
-                output: vec![0.0; GRAPH_BLOCK_FRAMES * channels],
+                source: is_source,
+                bypassed,
                 latency,
+                input_latency: upstream_latency,
                 tail: upstream_tail + tail,
                 input_tail: upstream_tail,
-                blocks: 0,
             });
         }
-        let output = nodes.last().context("empty realtime graph")?;
-        Ok(Self {
-            latency: output.latency,
-            tail: output.tail,
-            nodes,
-            channels,
-            sample_rate,
-            estimated_state_bytes: state_bytes,
-            estimated_work_per_frame: work_per_frame,
-            processed_frames: 0,
-            source_frames: None,
-            source_start_frame: 0,
-            published_frames: None,
+        ensure!(!nodes.is_empty(), "empty realtime graph");
+        Ok(GraphPlan {
             graph,
             target,
             boundary,
+            sample_rate,
+            channels,
+            nodes,
+            state_bytes,
+            work_per_frame,
         })
     }
 
