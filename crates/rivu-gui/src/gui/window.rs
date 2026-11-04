@@ -1024,7 +1024,10 @@ impl WindowView {
                 cx,
             );
         });
-        albums.clone().into_any_element()
+        albums
+            .clone()
+            .cached(gpui::StyleRefinement::default().size_full())
+            .into_any_element()
     }
 
     pub(super) fn sync_album_browser(&mut self, cx: &mut Context<Self>) {

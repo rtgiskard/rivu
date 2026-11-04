@@ -551,6 +551,7 @@ Color and Bloom republish material without advancing geometry; background only
 repaints. Sensitivity and display range affect future accepted audio, preserving
 paused geometry.
 
+[[artwork-composition-and-animation]]
 == Artwork composition and animation
 
 Artwork styles change composition, not acquisition or signal analysis. Card
@@ -576,6 +577,14 @@ not stop rotation; the artwork FPS cap and native frame delivery still limit it.
 Animated source images retain GPUI's focus-based playback policy; source animation
 alone does not keep the artwork owner ticking while the window is inactive.
 Resuming rotation does not replay suspended time. Visualization enablement does not affect artwork.
+
+Each artwork frame advances the shared runtime once, then invalidates only visible
+panel instances with running rotation or an active-window animated source.
+A static panel showing a still image does not redraw just because another panel
+rotates. Source-animation demand starts only after a successful decode with more
+than one frame; loading, failed, and single-frame images do not keep it ticking.
+Image completion notifications make newly decoded animations eligible. Source,
+style, and other shared presentation changes still notify the runtime's consumers.
 
 == Failure boundaries
 

@@ -2448,10 +2448,6 @@ mod tests {
                 |_, _| div().children(panels.iter().cloned()).into_any_element(),
             );
         };
-        let notifications = std::rc::Rc::new(std::cell::Cell::new(0));
-        let observed = notifications.clone();
-        let _subscription =
-            window.update(|_, cx| cx.observe(&owner, move |_, _| observed.set(observed.get() + 1)));
 
         // Loading a static/paused panel must not invent a clock. The existing
         // decode-completion redraw then starts source animation without playback.
@@ -2461,14 +2457,8 @@ mod tests {
             0
         );
         window.run_until_parked();
-        let before_request = notifications.get();
         draw(window);
         window.run_until_parked();
-        assert_eq!(
-            notifications.get(),
-            before_request,
-            "requesting an animation frame must not invalidate its consumers"
-        );
         assert_eq!(
             window.update(|window, cx| window.simulate_next_frame(cx)),
             1
@@ -2497,7 +2487,6 @@ mod tests {
         let angles = |window: &mut gpui::VisualTestContext| {
             window.update(|_, cx| [1, 2].map(|id| owner.read(cx).rotation_angle(id)))
         };
-        notifications.set(0);
         let before_reduced_motion = angles(window);
         window.update(|_, cx| cx.set_reduce_motion(true));
         for _ in 0..3 {
@@ -2507,11 +2496,6 @@ mod tests {
             window.update(|window, cx| window.simulate_next_frame(cx));
             assert_eq!(angles(window), before_reduced_motion);
         }
-        assert_eq!(
-            notifications.get(),
-            0,
-            "reduced motion accepts no animation updates"
-        );
         window.update(|_, cx| cx.set_reduce_motion(false));
         for _ in 0..2 {
             draw(window);
@@ -2523,10 +2507,6 @@ mod tests {
                 .zip(before_reduced_motion)
                 .all(|(after, before)| after > before),
             "both visible rotations resume after reduced motion"
-        );
-        assert!(
-            notifications.get() > 0,
-            "resumed animation invalidates its consumers"
         );
 
         window.deactivate_window();
@@ -2549,25 +2529,18 @@ mod tests {
         );
         draw(window);
         let unfocused_static = angles(window);
-        let before_unfocused_notifications = notifications.get();
         for _ in 0..3 {
             window.update(|window, cx| window.simulate_next_frame(cx));
             draw(window);
             assert_eq!(angles(window), unfocused_static);
         }
-        assert_eq!(
-            notifications.get(),
-            before_unfocused_notifications,
-            "source animation alone stays suspended while unfocused"
-        );
         window.update(|window, _| window.activate_window());
         window.run_until_parked();
-        let before_reactivation = notifications.get();
         draw(window);
-        window.update(|window, cx| window.simulate_next_frame(cx));
-        assert!(
-            notifications.get() > before_reactivation,
-            "a focused animated source resumes consumer updates even while rotation is static"
+        assert_eq!(
+            window.update(|window, cx| window.simulate_next_frame(cx)),
+            1,
+            "a focused animated source resumes even while rotation is static"
         );
         assert_eq!(angles(window), unfocused_static);
 

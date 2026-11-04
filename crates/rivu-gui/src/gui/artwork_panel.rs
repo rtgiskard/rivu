@@ -129,6 +129,7 @@ struct Instance {
     options: ArtworkOptions,
     rotation: Rotation,
     visible: bool,
+    panel: Option<gpui::WeakEntity<ArtworkPanel>>,
 }
 
 const DECORATIONS: [&[u8]; 6] = [
@@ -240,6 +241,7 @@ impl ArtworkRuntime {
                         options,
                         rotation: Rotation::new(),
                         visible: false,
+                        panel: None,
                     }
                 });
                 changed |= instance.options != options;
@@ -414,10 +416,16 @@ impl ArtworkRuntime {
             }
             return;
         }
+        let source_animated = window.is_window_active() && self.view.is_animated(cx);
         for instance in self.instances.values_mut() {
             instance.rotation.advance(now);
+            if instance.visible
+                && (instance.rotation.running || source_animated)
+                && let Some(panel) = &instance.panel
+            {
+                let _ = panel.update(cx, |_, cx| cx.notify());
+            }
         }
-        cx.notify();
         self.request_frame(window, cx);
     }
 
@@ -627,6 +635,14 @@ pub(super) struct ArtworkPanel {
 
 impl ArtworkPanel {
     pub(super) fn new(id: u64, owner: Entity<ArtworkRuntime>, cx: &mut Context<Self>) -> Self {
+        let panel = cx.weak_entity();
+        owner.update(cx, |owner, _| {
+            owner
+                .instances
+                .get_mut(&id)
+                .expect("artwork panel initialized before view")
+                .panel = Some(panel);
+        });
         let subscription = cx.observe(&owner, |_, _, cx| cx.notify());
         Self {
             id,

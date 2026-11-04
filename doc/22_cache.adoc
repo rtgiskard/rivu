@@ -641,6 +641,16 @@ and deleting, so a slow probe can delay it. Cache-only rendering/MPRIS reads do
 not wait on that gate. Maintenance never follows symlinks or touches audio sources
 and reports inspection/deletion failures.
 
+=== Cached panel drawing
+
+Album Browser and each large artwork panel use a GPUI cached view boundary.
+When another panel redraws, unchanged views reuse their retained drawing state
+instead of rebuilding their element trees. Input, model and image completions,
+and geometry changes still invalidate the affected views. This retains per-view
+drawing state, not another collection-sized row cache or decoded-image cache.
+Artwork frame delivery is described under
+link:23_visuals.adoc#artwork-composition-and-animation[Artwork composition and animation].
+
 === Window-owned real-cover decoding
 
 GUI previews keep decoded images separate from this session-wide lookup cache.

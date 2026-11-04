@@ -207,6 +207,7 @@ impl WindowView {
                         })
                     })
                     .clone()
+                    .cached(StyleRefinement::default().size_full())
                     .into_any_element();
             }
             PanelKind::AudioVisualizer => {

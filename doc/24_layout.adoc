@@ -512,6 +512,12 @@ only that panel's region registrations. Visualization scheduling and image
 retirement belong to a separate presentation owner; see
 link:23_visuals.adoc#analysis-boundary[Analysis boundary].
 
+Album grids and Artwork panels also retain cached view boundaries, so unrelated
+visualization frames do not rebuild their unchanged element trees. Artwork source
+and option changes invalidate their consumers; rotation frames invalidate only
+visible rotating instances. Animated source images still update every visible
+Artwork consumer, including instances whose rotation mode is static.
+
 
 === Reusable GPUI controls
 
