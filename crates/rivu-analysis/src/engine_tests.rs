@@ -1,0 +1,299 @@
+use super::*;
+use rivu_format::config::Config;
+
+fn setup() -> (AnalysisEngine, AnalysisFrame, PcmState, DisplayDemand) {
+    let settings = AnalysisSettings {
+        fft_size: 512,
+        fps: 60,
+        ..AnalysisSettings::from(&Config::default())
+    };
+    let state = PcmState {
+        active: true,
+        sample_rate: 48_000,
+        ..PcmState::default()
+    };
+    let demand = DisplayDemand {
+        enabled: true,
+        visualizer: VisualizerDemand {
+            stereo_density: true,
+            pcm: true,
+            spectrogram: true,
+            ..VisualizerDemand::default()
+        },
+    };
+    let mut engine = AnalysisEngine::new(settings);
+    let mut frame = AnalysisFrame::default();
+    engine.configure(settings, demand, state, 1, &mut frame);
+    (engine, frame, state, demand)
+}
+fn header(state: PcmState, sequence: u64, start_frame: u64) -> PcmHeader {
+    PcmHeader {
+        sequence,
+        start_frame,
+        output_frame: start_frame,
+        epoch: state.epoch,
+        intent: state.intent,
+        generation: state.generation,
+        capture: state.capture,
+        sample_rate: state.sample_rate,
+        gap: false,
+    }
+}
+
+#[test]
+fn rejected_pcm_never_prepares_or_advances_analysis() {
+    let (mut engine, mut frame, state, _) = setup();
+    for field in 0..6 {
+        let mut stale = header(state, 0, 0);
+        match field {
+            0 => stale.epoch += 2,
+            1 => stale.intent += 1,
+            2 => stale.generation += 1,
+            3 => stale.capture += 1,
+            4 => stale.sample_rate += 1,
+            _ => stale.epoch += 1,
+        }
+        assert!(!engine.ingest(stale, [[0.5; 2]; 512].into_iter(), &mut frame));
+        assert!(engine.analyzer.is_none());
+        assert_eq!(engine.sample_time, Duration::ZERO);
+    }
+    engine.request_frame();
+    assert!(!engine.publish(&mut frame, Instant::now()));
+    let pending = PcmState { intent: 1, ..state };
+    engine.configure(engine.settings, engine.demand, pending, 2, &mut frame);
+    assert!(!engine.ingest(
+        header(pending, 0, 0),
+        [[0.5; 2]; 512].into_iter(),
+        &mut frame
+    ));
+}
+
+#[test]
+fn permit_survives_partial_windows_and_fps_only_changes() {
+    let (mut engine, mut frame, state, demand) = setup();
+    engine.request_frame();
+    engine.ingest(
+        header(state, 0, 0),
+        [[0.5; 2]; 256].iter().copied(),
+        &mut frame,
+    );
+    assert_eq!(engine.publication_delay(Instant::now()), None);
+    let generation = frame.generation;
+    let settings = AnalysisSettings {
+        fps: 5,
+        ..engine.settings
+    };
+    engine.configure(settings, demand, state, 1, &mut frame);
+    engine.ingest(
+        header(state, 1, 256),
+        [[0.5; 2]; 256].iter().copied(),
+        &mut frame,
+    );
+    assert!(engine.publish(&mut frame, Instant::now()));
+    assert_eq!(frame.generation, generation);
+    assert_eq!(frame.rms_left, 0.5);
+    assert!(!engine.publish(&mut frame, Instant::now() + Duration::from_secs(1)));
+}
+
+#[test]
+fn publication_is_coalesced_capped_and_requires_fresh_input() {
+    let (mut engine, mut frame, state, _) = setup();
+    let now = Instant::now();
+    engine.ingest(
+        header(state, 0, 0),
+        [[0.5; 2]; 512].iter().copied(),
+        &mut frame,
+    );
+    assert!(!engine.publish(&mut frame, now));
+    engine.request_frame();
+    engine.request_frame();
+    assert!(engine.publish(&mut frame, now));
+    engine.request_frame();
+    assert_eq!(engine.publication_delay(now), None);
+    engine.ingest(
+        header(state, 1, 512),
+        [[0.5; 2]; 512].iter().copied(),
+        &mut frame,
+    );
+    assert!(!engine.publish(&mut frame, now));
+    assert!(engine.publication_delay(now).unwrap() > Duration::ZERO);
+    assert!(engine.publish(&mut frame, now + Duration::from_secs(1)));
+}
+
+#[test]
+fn capture_restart_clears_windows_but_pause_preserves_continuity() {
+    let (mut engine, mut frame, state, demand) = setup();
+    engine.ingest(
+        header(state, 0, 0),
+        [[0.5; 2]; 512].iter().copied(),
+        &mut frame,
+    );
+    engine.request_frame();
+    assert!(engine.publish(&mut frame, Instant::now()));
+    let retained = frame.visualizer.pcm.clone();
+    let generation = frame.generation;
+    let paused = PcmState {
+        epoch: 2,
+        capture: 1,
+        active: false,
+        ..state
+    };
+    engine.configure(engine.settings, demand, paused, 2, &mut frame);
+    assert_eq!(frame.generation, generation);
+    assert!(frame.settings.is_none());
+    let resumed = PcmState {
+        epoch: 4,
+        capture: 2,
+        ..state
+    };
+    engine.configure(engine.settings, demand, resumed, 3, &mut frame);
+    assert!(!engine.ingest(
+        header(state, 1, 512),
+        [[1.0; 2]; 512].into_iter(),
+        &mut frame
+    ));
+    engine.request_frame();
+    engine.ingest(
+        header(resumed, 2, 1024),
+        [[0.0; 2]; 256].iter().copied(),
+        &mut frame,
+    );
+    assert!(!engine.publish(&mut frame, Instant::now() + Duration::from_secs(1)));
+    engine.ingest(
+        header(resumed, 3, 1280),
+        [[0.0; 2]; 256].iter().copied(),
+        &mut frame,
+    );
+    assert!(engine.publish(&mut frame, Instant::now() + Duration::from_secs(1)));
+    assert_eq!(frame.generation, generation);
+    assert_eq!(frame.rms_left, 0.0);
+    assert!(retained.iter().all(|sample| *sample == [0.5; 2]));
+    let stopped = PcmState {
+        active: false,
+        generation: 1,
+        epoch: 6,
+        ..resumed
+    };
+    engine.configure(engine.settings, demand, stopped, 4, &mut frame);
+    assert_ne!(frame.generation, generation);
+}
+
+#[test]
+fn sequence_start_frame_and_explicit_gaps_require_complete_new_windows() {
+    for kind in 0..3 {
+        let (mut engine, mut frame, state, _) = setup();
+        engine.ingest(
+            header(state, 0, 0),
+            [[1.0; 2]; 512].iter().copied(),
+            &mut frame,
+        );
+        let generation = frame.generation;
+        let mut next = header(state, 1, 512);
+        match kind {
+            0 => next.sequence += 1,
+            1 => next.start_frame += 1,
+            _ => next.gap = true,
+        }
+        engine.request_frame();
+        engine.ingest(next, [[0.0; 2]; 256].iter().copied(), &mut frame);
+        assert_ne!(frame.generation, generation);
+        assert!(frame.settings.is_none());
+        assert!(!engine.publish(&mut frame, Instant::now()));
+        let next = header(state, next.sequence + 1, next.start_frame + 256);
+        engine.ingest(next, [[0.0; 2]; 256].iter().copied(), &mut frame);
+        assert!(engine.publish(&mut frame, Instant::now()));
+        assert_eq!(frame.rms_left, 0.0);
+    }
+}
+
+#[test]
+fn plot_only_changes_preserve_partial_fft_but_retire_old_publications() {
+    let (mut engine, mut frame, state, demand) = setup();
+    engine.ingest(
+        header(state, 0, 0),
+        [[0.5; 2]; 256].iter().copied(),
+        &mut frame,
+    );
+    let changed = DisplayDemand {
+        visualizer: VisualizerDemand::default(),
+        ..demand
+    };
+    engine.configure(engine.settings, changed, state, 2, &mut frame);
+    assert!(frame.settings.is_none());
+    engine.ingest(
+        header(state, 1, 256),
+        [[0.5; 2]; 256].iter().copied(),
+        &mut frame,
+    );
+    engine.request_frame();
+    assert!(engine.publish(&mut frame, Instant::now()));
+    assert_eq!(frame.rms_left, 0.5);
+    assert!(frame.visualizer.density.is_empty());
+}
+
+#[test]
+fn incompatible_configuration_discards_partial_samples() {
+    for kind in 0..3 {
+        let (mut engine, mut frame, state, demand) = setup();
+        engine.ingest(
+            header(state, 0, 0),
+            [[1.0; 2]; 256].iter().copied(),
+            &mut frame,
+        );
+        let mut settings = engine.settings;
+        match kind {
+            0 => settings.fft_size = 1024,
+            1 => settings.window = AnalysisWindow::None,
+            _ => settings.signal = rivu_format::config::VisualizationSignal::Before,
+        }
+        // Ensure each selected setting actually changes the default.
+        if settings.signal == engine.settings.signal && kind == 2 {
+            settings.signal = rivu_format::config::VisualizationSignal::After;
+        }
+        if settings.window == engine.settings.window && kind == 1 {
+            settings.window = AnalysisWindow::BlackmanHarris;
+        }
+        let generation = frame.generation;
+        engine.configure(settings, demand, state, 2, &mut frame);
+        assert_ne!(frame.generation, generation);
+        engine.request_frame();
+        engine.ingest(
+            header(state, 1, 256),
+            [[0.0; 2]; 256].iter().copied(),
+            &mut frame,
+        );
+        assert!(!engine.publish(&mut frame, Instant::now()));
+        engine.ingest(
+            header(state, 2, 512),
+            vec![[0.0; 2]; settings.fft_size as usize - 256]
+                .iter()
+                .copied(),
+            &mut frame,
+        );
+        assert!(engine.publish(&mut frame, Instant::now()));
+        assert_eq!(frame.rms_left, 0.0);
+    }
+}
+
+#[test]
+fn density_ingests_the_entire_stream_not_only_latest_fft_tail() {
+    let (mut engine, mut frame, state, _) = setup();
+    for block in 0..64 {
+        let sample = if block == 0 { [0.7, -0.7] } else { [0.0; 2] };
+        engine.ingest(
+            header(state, block, block * 512),
+            [sample; 512].iter().copied(),
+            &mut frame,
+        );
+    }
+    engine.request_frame();
+    assert!(engine.publish(&mut frame, Instant::now()));
+    assert_eq!(frame.rms_left, 0.0);
+    assert!(frame.visualizer.density.iter().any(|value| *value > 0.0));
+    assert!(
+        frame
+            .sample_time
+            .abs_diff(Duration::from_secs_f64(32768.0 / 48000.0))
+            < Duration::from_nanos(64)
+    );
+}

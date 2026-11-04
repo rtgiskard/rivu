@@ -1137,7 +1137,16 @@ mod tests {
         async_io::block_on(rivu_protocol::transport::timeout(
             Duration::from_secs(5),
             async {
-                while handle.display_state().system.mpris_status != expected {
+                while handle
+                    .state(rivu_protocol::response::StateSections {
+                        system: true,
+                        ..Default::default()
+                    })
+                    .system
+                    .unwrap()
+                    .mpris_status
+                    != expected
+                {
                     changes.recv().await.unwrap();
                 }
             },
@@ -1158,7 +1167,7 @@ mod tests {
         let (directory, mut runtime) = runtime_fixture();
         let manager = MprisController::start(
             runtime.handle.clone(),
-            AppHandle::new(&runtime, false),
+            AppHandle::new(&runtime, directory.path()),
             Arc::new(
                 ArtworkManager::new(directory.path())
                     .with_default_image(rivu_presentation::DEFAULT_IMAGE),
@@ -1296,8 +1305,12 @@ mod tests {
         assert!(
             runtime
                 .handle
-                .display_state()
+                .state(rivu_protocol::response::StateSections {
+                    system: true,
+                    ..Default::default()
+                })
                 .system
+                .unwrap()
                 .mpris_status
                 .is_empty()
         );
@@ -1331,7 +1344,17 @@ mod tests {
                 panic!("cancelled publication must not be polled");
             }
         )));
-        assert_eq!(handle.display_state().system.mpris_status, failure);
+        assert_eq!(
+            handle
+                .state(rivu_protocol::response::StateSections {
+                    system: true,
+                    ..Default::default()
+                })
+                .system
+                .unwrap()
+                .mpris_status,
+            failure
+        );
         runtime.control.request_shutdown().unwrap();
         runtime.join().unwrap();
     }
@@ -1389,7 +1412,7 @@ mod tests {
     fn retirement_deadline_closes_connection_even_with_live_interface_guard() {
         let bus = TestBus::start();
         let (_directory, mut runtime) = runtime_fixture();
-        let connection = bus.serve_root(AppHandle::new(&runtime, false));
+        let connection = bus.serve_root(AppHandle::new(&runtime, _directory.path()));
         let retained = connection.clone();
         let root = futures::executor::block_on(
             connection.object_server().interface::<_, Root>(OBJECT_PATH),
@@ -1423,7 +1446,7 @@ mod tests {
     fn publisher_panic_still_retires_connection_and_releases_bus_name() {
         let bus = TestBus::start();
         let (_directory, mut runtime) = runtime_fixture();
-        let connection = bus.serve_root(AppHandle::new(&runtime, false));
+        let connection = bus.serve_root(AppHandle::new(&runtime, _directory.path()));
         let retained = connection.clone();
         let (cancel, _cancelled) = oneshot::channel();
         let publisher = runtime.test_executor().spawn(async {
@@ -1458,7 +1481,7 @@ mod tests {
     fn accepted_quit_reply_survives_service_retirement() {
         let bus = TestBus::start();
         let (_directory, mut runtime) = runtime_fixture();
-        let connection = bus.serve_root(AppHandle::new(&runtime, false));
+        let connection = bus.serve_root(AppHandle::new(&runtime, _directory.path()));
         let changes = runtime.handle.subscribe_revisions();
         let client = bus.connect();
         let quit = runtime.test_executor().spawn(async move {
@@ -1596,7 +1619,7 @@ mod tests {
             ArtworkManager::new(directory.path())
                 .with_default_image(rivu_presentation::DEFAULT_IMAGE),
         );
-        let app = AppHandle::new(&runtime, false);
+        let app = AppHandle::new(&runtime, directory.path());
         let connection = bus.serve_root(app.clone());
         let client = bus.connect();
         async_io::block_on(async {

@@ -331,8 +331,8 @@ impl Render for WindowView {
                             cx,
                             |this, _, cx| {
                                 this.shell.dismiss(shell::Surface::AppMenu);
-                                if let Err(error) = this.handle.update_gui_config(
-                                    rivu_protocol::model::ConfigChange::ToggleVisualization,
+                                if let Err(error) = this.handle.update_config(
+                                    rivu_protocol::model::ConfigMutation::ToggleVisualization,
                                 ) {
                                     this.error = Some(format!("{error:#}"));
                                 }
@@ -519,14 +519,13 @@ impl Render for WindowView {
                             rivu_presentation::DEFAULT_IMAGE.to_vec(),
                         ))
                     });
-                    let built = chrono::DateTime::<chrono::Utc>::from_timestamp(
-                        self.handle.build_info().timestamp,
-                        0,
-                    )
-                    .expect("build script validates timestamp range")
-                    .with_timezone(&chrono::Local)
-                    .format("%Y-%m-%d %H:%M:%S %:z")
-                    .to_string();
+                    let build_info = *cx.global::<crate::BuildInfo>();
+                    let built =
+                        chrono::DateTime::<chrono::Utc>::from_timestamp(build_info.timestamp, 0)
+                            .expect("build script validates timestamp range")
+                            .with_timezone(&chrono::Local)
+                            .format("%Y-%m-%d %H:%M:%S %:z")
+                            .to_string();
                     app = app.child(
                         Dialog::backdrop("about-modal")
                             .map(|surface| self.dialog_surface(surface))
@@ -569,15 +568,13 @@ impl Render for WindowView {
                                                                         &[
                                                                             (
                                                                                 "version",
-                                                                                self.handle
-                                                                                    .build_info()
-                                                                                    .version
+                                                                                build_info
+                                                                                    .git_version
                                                                                     .into(),
                                                                             ),
                                                                             (
                                                                                 "features",
-                                                                                self.handle
-                                                                                    .build_info()
+                                                                                build_info
                                                                                     .features
                                                                                     .into(),
                                                                             ),

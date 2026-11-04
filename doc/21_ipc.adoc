@@ -33,7 +33,8 @@ or DSP execution in a combined build.
 
 The client drives I/O on its calling thread, so async callers must move it off
 their executor thread. Retained sessions reuse sockets and bounded framing storage.
-The GUI uses an injected in-process host port and owns only its view and audition state.
+The GUI drives retained IPC sessions on bounded background workers and reads
+published local snapshots on its event-loop thread.
 
 Protocol codec and transport contracts are tested in `rivu-protocol`; client
 session, cancellation, and task-wait contracts are tested in `rivu-client`.
@@ -43,46 +44,82 @@ integration tests rather than making the standalone crates depend on the host.
 
 === Consumer and application lifetimes
 
-`rivu-gui` owns the graphical event loop, windows, display reconnection, and layout
-persistence. Its `Host` port receives typed business and application operations
-from the root application's adapter; the GUI does not depend on the root crate,
-audio execution, or SQLite during normal builds. Tray and MPRIS remain root-owned
-consumers of `CoreHandle`. CLI and `rivu-tui` use the local IPC socket, whose
-dispatcher separates application requests from Core operations without changing
-the wire format.
+`rivu-gui` owns the graphical event loop, windows, layout persistence, remote
+client workers and display analysis. The application launches Core and desktop
+as separate processes of the same executable. The GUI has no normal dependency
+on the root crate, audio execution or SQLite. Tray and MPRIS remain service-owned
+consumers of `CoreHandle`; desktop activation does not require a GPUI event loop
+in the service.
 
-`rivu-protocol` owns neutral display state and analysis/waveform value contracts;
-each frontend owns its view projection. High-rate frames remain shared in-process
-buffers, not IPC state sections or per-frame boxed requests. Core retains analysis
-publication, waveform decoding, and scan cancellation; the GUI declares demand
-and consumes the resulting frames. `rivu-presentation` supplies localization,
-keyboard semantics, theme mapping, and shared application images without GPUI,
-audio execution, or database dependencies.
+Commands, queries, configuration mutations and Watch use instance-bound local
+IPC sessions. State getters read the GUI's published cache, never a socket.
+Configuration edits merge at Core against current owner state; the GUI does not
+write a stale whole-configuration snapshot. An uncertain mutation result is not
+automatically replayed, and an old desktop cannot silently attach to a replacement
+Core instance.
 
-The graphical host has three lifetime boundaries within one process:
+High-rate audio uses a separate bounded shared-memory PCM window. Core owns
+capture and audio identity; `rivu-analysis` runs display DSP in the GUI background
+worker. GUI analysis reads native channels directly and uses the observed output
+frame cursor to avoid consuming far-ahead samples. Overwrites discard old realtime
+data without blocking playback. Waveform envelopes and explicit complete scans
+remain Core-owned and use a separate instance-bound service; complete PCM
+streaming is not implemented.
+`rivu-presentation` supplies localization, keyboard semantics, theme mapping and
+shared images without GPUI, audio execution or database dependencies.
 
-* `App` owns `TaskRuntime`, the Core runtime, IPC listener and instance ownership,
-  shutdown signals, shared artwork, logging session, optional tray, MPRIS manager,
-  and open/focus/quit coordination. It supplies the adapter and retains `GuiHost`
-  through graphical teardown. The headless `serve` host uses the same application ownership.
-* Core owns accepted business operations and authoritative state. Closing a
-  window does not cancel playback, scans, saves, or accepted commands. Dismissing
-  a relocation review explicitly requests cancellation of its verification task,
-  without undoing a commit.
-* `GuiHost` owns GPUI initialization and the event loop; it remains available
-  without a window. Its `UiSession` owns window creation, focus, reload, and close;
-  `WindowView` owns view state, subscriptions, and render resources. Reopening
-  builds a new view from current Core state; repeated open requests focus the
-  existing window. Late background results use weak references and need not
-  reach a closed view.
+The lifetime boundaries are:
 
-Window-open requests coalesce at App until the graphical host is ready. Core
-completion notifies App independently of GUI registration, including on panic.
-Shutdown has a bounded lifecycle signal independent of the business queue;
-accepted IPC shutdown acknowledgements drain before transport retirement.
-Service joins run outside GPUI quit callbacks. Window/display resource release
-is described in link:22_cache.adoc#renderer-buffers-atlases-and-display-lifecycle[Resource lifecycles];
-closing a window is not framework teardown or a promise of headless-equivalent memory.
+* `App` owns `TaskRuntime`, Core, IPC listeners and instance ownership, shutdown
+  signals, artwork, logging, optional tray and MPRIS. Ownership is retained
+  through physical worker and transport retirement.
+* Core owns authoritative state and accepted business operations. Desktop exit
+  does not cancel playback, scans, saves or accepted commands. Dismissing a
+  relocation review explicitly requests cancellation without undoing a commit.
+* The desktop owns GPUI and its window-local state, subscriptions and render
+  resources. Closing the last window exits that process. Reopening starts a new
+  desktop from current Core state; repeated open requests focus an existing one.
+  Late results cannot restore a closed view or a superseded source.
+
+Startup readiness requires a successful Hello, not merely a bound socket or a
+live child. Open requests coalesce during desktop startup under the original child
+and startup deadline. A failed startup is reported rather than automatically
+replayed; a later explicit open can retry. Explicit application shutdown stops
+the service and connected consumers; closing or killing only the desktop leaves
+the service alive. Accepted shutdown acknowledgements drain before transport
+retirement. Window/display resource release is described in
+link:22_cache.adoc#renderer-buffers-atlases-and-display-lifecycle[Resource lifecycles].
+
+[[realtime-pcm-transport]]
+==== Realtime PCM transport
+
+The PCM v4 side channel binds to the command session's Core instance and verifies
+the local peer. Its control socket carries 16-byte requests and 72-byte status
+records, including the observed audible output-frame cursor, not a predicted
+presentation deadline. The handshake supplies a Core-owned sealed memfd path;
+clients map that same window read-only. Existing mappings survive Core retirement,
+but a new command session must attach to its own instance's window.
+
+The window holds 32 blocks of at most 1024 frames and 18 native float channels,
+including standard speaker indices. Sample storage is 2.25 MiB per Core window,
+plus metadata and alignment, independent of the number of clients (at most 16).
+There is no private capture queue, middleware PCM copy or per-client PCM queue.
+Analysis history and the processed Before FIFO are separate allocations.
+
+PCM publications, cursor progress and subscription changes wake enabled receivers.
+Stream identity, applied intent, capture identity and sequence watermarks reject
+obsolete blocks. Missing sequences or explicit gaps break analysis continuity.
+Readers never pin slots: a writer may replace samples during direct observation.
+Metadata snapshots are validated; payload observation remains best-effort, not a
+lossless snapshot. Slow consumers resume from retained data rather than extending
+the window or reconstructing overwritten history.
+
+Waveform envelopes use their own versioned socket protocol with at most eight
+clients, 1 MiB frames, a one-second Hello deadline and five-second control I/O
+deadlines. Progressive results retain at most 1024 bins. An explicit full scan
+still returns an envelope after Core-side scanning, not a complete PCM stream;
+disconnect requests cancellation but physical decoding must retire before its
+blocking-work lease is released.
 
 === Owner execution and retirement
 
@@ -258,6 +295,10 @@ Request types:
 * `Command` (`3`) — execute a state-changing command
 * `Watch` (`4`) — wait for a revision change
 * `WaitTask` (`5`) — wait for a specific scan, relocation, or processing task's terminal result
+* `QueryRetained` (`6`) — execute a query while preserving its physical worker
+  ownership through completion, even if the GUI's logical wait times out
+* `RegisterDesktop` (`7`) — register an instance-bound desktop activation session;
+  returns `Ack`
 
 Response types:
 
@@ -284,11 +325,22 @@ collection lengths and optional fields are encoded in the message body.
 Library information-column selection is encoded in WireConfig as five booleans
 in Artist, Album, Duration, Codec, and Bitrate order; all false means no columns.
 
+Configuration mutations use the positional `WireConfigMutation` adapter. Settings
+carry only edited fields; Core merges them into its current configuration and
+publishes the authoritative result. GUI commands do not bypass persistence or
+playback validation.
+
 Library, Queue, album-member, and playlist-entry rows carry source paths, CUE
 track numbers, and cached audio specifications, including bitrate certainty.
 These fields let frontends format complete hover information without a separate
 track lookup. Query revisions cover labels and other query-dependent metadata;
 bitrate-bearing payload queries also depend on the committed bitrate revision.
+
+Playback state includes the authoritative `source_generation` and optional
+`ProcessingAudition` run, output port and execution mode. These describe the
+accepted audio source, not the latest processing task or current editor draft.
+Desktop analysis and waveform requests use those facts to reject results from a
+retired source; path equality alone does not establish source identity.
 
 The codec and positional payload schema are not negotiated. Changes require
 coordinated client and server updates, preserving configuration semantics such
@@ -358,9 +410,10 @@ Client command failures before handshake or encoding completes are `NotAdmitted`
 Once a socket write is attempted, write, flush, response, and cancellation failures
 are conservatively `Unknown`, even without evidence that bytes reached the peer.
 The client's `CommandFailure` carries no invented Core revision or task ID.
-`Shutdown` is an App lifecycle request; interactive GUI/tray quit uses the separate
-user-shutdown path. Neither confirms unsubmitted inline Details text. Shutdown
-acknowledgement means accepted shutdown, not final persistence or worker
+`Shutdown` is an App lifecycle request. After its local pending-edit guards,
+the GUI's `Quit application` sends it through the instance-bound command worker;
+`Close window` only retires the desktop. Neither action confirms unsubmitted
+inline Details text. Shutdown acknowledgement means accepted shutdown, not final persistence or worker
 retirement. Blocking I/O and cooperative cancellation provide no hard exit deadline.
 The host attempts each final persistence domain even if another fails, retires
 its workers and services, then exits with failure if final persistence failed.

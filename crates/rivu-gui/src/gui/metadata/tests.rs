@@ -2,8 +2,8 @@ use super::*;
 use crate::test_support::ConfigFixture;
 use crate::test_support::CoreRuntime;
 use gpui::{EntityInputHandler, TestAppContext};
+use rivu_format::config::Config;
 use rivu_presentation::i18n::Localizer;
-use rivu_protocol::model::Config;
 use rivu_protocol::response::Ack;
 
 pub(super) fn track(id: i64, title: &str) -> Track {

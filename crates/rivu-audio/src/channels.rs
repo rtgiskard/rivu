@@ -110,26 +110,7 @@ pub(super) fn mapping(source: &[Channel], device: &[Channel]) -> Result<Vec<Opti
 // Visualization paths fold decoded channels into two logical sides. Real
 // output still uses the original permutation with independent speakers.
 pub(super) fn analysis_weights(layout: &[Channel]) -> Vec<[f32; 2]> {
-    use Channel::*;
-    let mut weights: Vec<_> = layout
-        .iter()
-        .map(|channel| match channel {
-            FrontLeft | RearLeft | SideLeft | FrontLeftCenter | TopFrontLeft | TopRearLeft => {
-                [1.0, 0.0]
-            }
-            FrontRight | RearRight | SideRight | FrontRightCenter | TopFrontRight
-            | TopRearRight => [0.0, 1.0],
-            _ => [1.0, 1.0],
-        })
-        .collect();
-    let total = weights.iter().fold([0.0_f32; 2], |sum, weight| {
-        [sum[0] + weight[0], sum[1] + weight[1]]
-    });
-    for weight in &mut weights {
-        weight[0] /= total[0].max(1.0);
-        weight[1] /= total[1].max(1.0);
-    }
-    weights
+    rivu_dsp::channels::analysis_weights(layout.iter().map(|channel| channel.standard_index()))
 }
 
 #[cfg(test)]

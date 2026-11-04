@@ -408,8 +408,8 @@ impl WindowView {
                         cx,
                         |this, _, cx| {
                             this.panel_menu = None;
-                            if let Err(error) = this.handle.update_gui_config(
-                                rivu_protocol::model::ConfigChange::ToggleWaveformSeek,
+                            if let Err(error) = this.handle.update_config(
+                                rivu_protocol::model::ConfigMutation::ToggleWaveformSeek,
                             ) {
                                 this.error = Some(format!("{error:#}"));
                             }
@@ -506,8 +506,8 @@ impl WindowView {
                         MenuIndicator::Check,
                         cx,
                         move |this, _, cx| {
-                            if let Err(error) = this.handle.update_gui_config(
-                                rivu_protocol::model::ConfigChange::ToggleLibraryColumn(column),
+                            if let Err(error) = this.handle.update_config(
+                                rivu_protocol::model::ConfigMutation::ToggleLibraryColumn(column),
                             ) {
                                 this.error = Some(format!("{error:#}"));
                             }

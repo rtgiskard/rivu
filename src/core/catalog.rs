@@ -945,7 +945,7 @@ impl Core {
     pub(in crate::core) fn retain_scan_outcome(
         &mut self,
         mut status: ScanTaskStatus,
-        owner: rivu_protocol::model::MediaTaskOwner,
+        owner: MediaTaskOwner,
     ) {
         self.state.scan_owner = Some(owner);
         if let Some(error) = &status.error {

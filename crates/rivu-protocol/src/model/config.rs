@@ -1,12 +1,16 @@
-//! Field-based configuration edits applied to current owner state.
 use rivu_format::config::*;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 macro_rules! config_patch {
     ($( $(#[$attr:meta])* pub $field:ident : $ty:ty, )*) => {
-        #[derive(Clone, Debug, Default, PartialEq)]
+        /// Only explicitly edited Settings fields; applied to owner-time state.
+        #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
         pub struct ConfigPatch {
-            $( $field: Option<$ty>, )*
+            $(
+                #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_field")]
+                pub(crate) $field: Option<$ty>,
+            )*
         }
 
         impl ConfigPatch {
@@ -27,12 +31,59 @@ macro_rules! config_patch {
 }
 rivu_format::config_fields!(config_patch);
 
-pub enum ConfigChange {
+fn deserialize_field<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ConfigMutation {
     ToggleVisualization,
     ToggleWaveformSeek,
-    ToggleLibraryColumn(LibraryColumn),
-    AddLibraryRoot(std::path::PathBuf),
-    RemoveLibraryRoot(std::path::PathBuf),
-    // Only the cold Settings request allocates; ordinary queue slots stay small.
+    ToggleLibraryColumn(#[serde(with = "library_column")] LibraryColumn),
+    AddLibraryRoot(PathBuf),
+    RemoveLibraryRoot(PathBuf),
     Settings(Box<ConfigPatch>),
+}
+
+mod library_column {
+    use super::*;
+
+    #[derive(Serialize, Deserialize)]
+    enum Column {
+        Artist,
+        Album,
+        Duration,
+        Codec,
+        Bitrate,
+    }
+
+    pub fn serialize<S: serde::Serializer>(
+        value: &LibraryColumn,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match value {
+            LibraryColumn::Artist => Column::Artist,
+            LibraryColumn::Album => Column::Album,
+            LibraryColumn::Duration => Column::Duration,
+            LibraryColumn::Codec => Column::Codec,
+            LibraryColumn::Bitrate => Column::Bitrate,
+        }
+        .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<LibraryColumn, D::Error> {
+        Ok(match Column::deserialize(deserializer)? {
+            Column::Artist => LibraryColumn::Artist,
+            Column::Album => LibraryColumn::Album,
+            Column::Duration => LibraryColumn::Duration,
+            Column::Codec => LibraryColumn::Codec,
+            Column::Bitrate => LibraryColumn::Bitrate,
+        })
+    }
 }

@@ -21,6 +21,12 @@ pub(crate) struct CoreState {
 }
 
 impl CoreState {
+    #[cfg(test)]
+    pub(crate) fn scan_visible(&self, owner: MediaTaskOwner) -> bool {
+        self.scan_owner == Some(owner)
+            && (self.system.scanning || self.system.scan_progress.is_some())
+    }
+
     pub(crate) fn current_track(&self) -> Option<&Track> {
         self.current_track.as_deref()
     }

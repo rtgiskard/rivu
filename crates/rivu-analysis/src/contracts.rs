@@ -14,47 +14,11 @@ pub struct VisualizerDemand {
     pub spectrogram: bool,
 }
 
-impl VisualizerDemand {
-    fn from_bits(bits: u64) -> Self {
-        Self {
-            stereo_density: bits & 1 != 0,
-            spatial_spectrum: bits & 2 != 0,
-            band_energy: bits & 4 != 0,
-            pcm: bits & 16 != 0,
-            spectrogram: bits & 32 != 0,
-        }
-    }
-
-    fn bits(self) -> u64 {
-        u64::from(self.stereo_density)
-            | (u64::from(self.spatial_spectrum) << 1)
-            | (u64::from(self.band_energy) << 2)
-            | (u64::from(self.pcm) << 4)
-            | (u64::from(self.spectrogram) << 5)
-    }
-}
-
 /// Complete coalesced demand from the display consumer, independent of playback.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DisplayDemand {
     pub enabled: bool,
     pub visualizer: VisualizerDemand,
-}
-
-impl DisplayDemand {
-    /// Decode packed display flags, ignoring any higher producer revision bits.
-    /// Revision and capture identity remain producer-owned.
-    pub fn from_bits(bits: u64) -> Self {
-        Self {
-            enabled: bits & 8 != 0,
-            visualizer: VisualizerDemand::from_bits(bits),
-        }
-    }
-
-    /// Pack display flags without any producer revision or capture identity.
-    pub fn bits(self) -> u64 {
-        self.visualizer.bits() | (u64::from(self.enabled) << 3)
-    }
 }
 
 pub const DENSITY_SIDE: usize = 256;

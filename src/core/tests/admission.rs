@@ -61,15 +61,9 @@ fn external_admission_appends_valid_subset_without_roots_autoplay_or_playlist_ch
     assert!(core.state.system.scanning);
     assert_eq!(core.state.system.scan_task_id, Some(id));
     core.publish();
-    let snapshot = crate::projection::display_state(&core.shared.read());
-    assert!(display_scan_visible(
-        &snapshot.system,
-        rivu_protocol::model::MediaTaskOwner::Queue
-    ));
-    assert!(!display_scan_visible(
-        &snapshot.system,
-        rivu_protocol::model::MediaTaskOwner::Library
-    ));
+    let snapshot = &core.shared.read().clone();
+    assert!(snapshot.scan_visible(MediaTaskOwner::Queue));
+    assert!(!snapshot.scan_visible(MediaTaskOwner::Library));
     assert_eq!(core.store.queue_ids().unwrap(), before_queue);
     let ViewResponse::ScanTask(status) = core.view(&Query::ScanTask { id }).unwrap() else {
         panic!("expected media task")
@@ -78,15 +72,9 @@ fn external_admission_appends_valid_subset_without_roots_autoplay_or_playlist_ch
     assert_eq!(status.progress.phase, ScanPhase::Discovering);
     finish_admission(&mut core);
     core.publish();
-    let snapshot = crate::projection::display_state(&core.shared.read());
-    assert!(display_scan_visible(
-        &snapshot.system,
-        rivu_protocol::model::MediaTaskOwner::Queue
-    ));
-    assert!(!display_scan_visible(
-        &snapshot.system,
-        rivu_protocol::model::MediaTaskOwner::Library
-    ));
+    let snapshot = &core.shared.read().clone();
+    assert!(snapshot.scan_visible(MediaTaskOwner::Queue));
+    assert!(!snapshot.scan_visible(MediaTaskOwner::Library));
     assert!(snapshot.system.last_error.is_some());
     let added = core
         .store
@@ -126,11 +114,8 @@ fn external_admission_appends_valid_subset_without_roots_autoplay_or_playlist_ch
     assert_eq!(core.state.revisions, revisions);
     core.command(Command::DismissScanResult).unwrap();
     core.publish();
-    let snapshot = crate::projection::display_state(&core.shared.read());
-    assert!(!display_scan_visible(
-        &snapshot.system,
-        rivu_protocol::model::MediaTaskOwner::Queue
-    ));
+    let snapshot = &core.shared.read().clone();
+    assert!(!snapshot.scan_visible(MediaTaskOwner::Queue));
     assert!(snapshot.system.scan_task_id.is_none());
 }
 

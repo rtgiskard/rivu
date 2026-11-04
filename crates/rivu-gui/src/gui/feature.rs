@@ -1,6 +1,6 @@
 //! Shared services, not shared business state, for window-local features.
 use super::scrolling::ScrollViews;
-use crate::host::HostHandle;
+use crate::frontend::FrontendHandle;
 use crate::projection::GuiSnapshot;
 use gpui::SharedString;
 use rivu_presentation::i18n::Localizer;
@@ -26,7 +26,7 @@ impl FeatureContext {
         self.snapshots.read()
     }
 
-    pub(super) fn handle(&self) -> &HostHandle {
+    pub(super) fn handle(&self) -> &FrontendHandle {
         self.snapshots.handle()
     }
 }
@@ -36,12 +36,12 @@ impl FeatureContext {
 /// Core remains authoritative. Reading after a query completion may refresh the
 /// cache, but never creates another Core subscription or a feature-state copy.
 pub(super) struct SnapshotSource {
-    handle: HostHandle,
+    handle: FrontendHandle,
     current: RefCell<Rc<GuiSnapshot>>,
 }
 
 impl SnapshotSource {
-    pub(super) fn new(handle: HostHandle) -> Self {
+    pub(super) fn new(handle: FrontendHandle) -> Self {
         let current = Rc::new(handle.gui_snapshot());
         Self {
             handle,
@@ -49,7 +49,7 @@ impl SnapshotSource {
         }
     }
 
-    pub(super) fn handle(&self) -> &HostHandle {
+    pub(super) fn handle(&self) -> &FrontendHandle {
         &self.handle
     }
 

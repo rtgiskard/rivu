@@ -5,15 +5,12 @@ pub(super) fn wait_handle(core: &Core) -> (CoreHandle, mpsc::Receiver<Request>) 
     let (sender, requests) = mpsc::bounded(MAX_TASK_WAITERS + 1);
     let handle = CoreHandle {
         state: Arc::clone(&core.shared),
-        analysis: Arc::clone(&core.engine.analysis),
-        analysis_control: Arc::clone(&core.engine.analysis_control),
+        pcm: Arc::clone(&core.engine.pcm),
         waveform: Arc::clone(&core.engine.waveform),
         waveform_control: Arc::clone(&core.engine.waveform_control),
         sender,
         revision_updates: Arc::clone(&core.revision_updates),
-        wakeup: Arc::clone(&core.wakeup),
         task_waiters: Arc::clone(&core.task_waiters),
-        query_timeout: None,
     };
     (handle, requests)
 }

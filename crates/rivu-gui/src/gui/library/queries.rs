@@ -6,7 +6,7 @@ use rivu_protocol::{model::Query, response::ViewResponse};
 use std::rc::Rc;
 
 async fn library_search_counts(
-    handle: &crate::host::HostHandle,
+    handle: &crate::frontend::FrontendHandle,
     request: &model::SearchCountRequest,
 ) -> Option<model::SearchCountResult> {
     let model::SearchCountRequest {
@@ -407,8 +407,8 @@ mod tests {
         use crate::gui::library::model::LibraryBrowser;
         use crate::test_support::CoreRuntime;
         use rivu::test_support::catalog::CatalogFixture;
-        use rivu_protocol::model::Config;
-        use rivu_protocol::model::Query;
+        use rivu_format::config::Config;
+        use rivu_protocol::model::{Command, ConfigMutation, Query};
 
         let directory = tempfile::tempdir().unwrap();
         let parent = directory.path().join("music");
@@ -492,12 +492,12 @@ mod tests {
         assert_eq!(library.tree().root_total(), Some(3));
         library.refresh_search("needle".into());
         for root in &roots {
-            runtime
-                .handle
-                .update_gui_config(rivu_protocol::model::ConfigChange::RemoveLibraryRoot(
-                    root.clone(),
-                ))
-                .unwrap();
+            // A query on an independent IPC worker is not a command FIFO fence.
+            let ack =
+                futures::executor::block_on(runtime.handle.request_ack(Command::MutateConfig {
+                    change: ConfigMutation::RemoveLibraryRoot(root.clone()),
+                }));
+            assert!(ack.is_success(), "{ack:?}");
         }
         let revisions = runtime.handle.query(Query::OtherTracksCount).revisions;
         let (_, request) = library.prepare_search_counts(&[], revisions);

@@ -1,10 +1,9 @@
-use rivu_protocol::model::Config;
-use rivu_protocol::{
-    display::{DisplayLibraryState, DisplayState, DisplaySystemState},
-    model::*,
+use rivu_format::config::Config;
+use rivu_protocol::model::{
+    ClientSnapshot, HistoryEntry, MediaTaskOwner, PlaybackState, ProcessingAudition, QueueState,
+    Track,
 };
 use std::{collections::BTreeMap, sync::Arc};
-
 #[derive(Clone, Debug, Default)]
 pub struct GuiSnapshot {
     pub library: GuiLibrarySnapshot,
@@ -41,7 +40,7 @@ pub struct GuiSystemSnapshot {
     pub scan_owner: Option<MediaTaskOwner>,
     pub last_error: Option<String>,
     pub devices: Arc<Vec<String>>,
-    /// Mirrors `SystemState::revision`: publication/wakeup sequence, not query freshness.
+    /// GUI publication/wakeup sequence, independent of query-domain freshness.
     pub revision: u64,
     pub config: Arc<Config>,
     pub mpris_status: String,
@@ -59,11 +58,53 @@ impl GuiSystemSnapshot {
 }
 
 impl GuiSnapshot {
+    pub(crate) fn from_client(
+        state: &ClientSnapshot,
+        revisions: rivu_protocol::response::StateRevisions,
+    ) -> Self {
+        Self {
+            revisions,
+            library: GuiLibrarySnapshot {
+                track_total: state.library.track_total,
+                playlist_total: state.library.playlist_total,
+                revision: state.library.revision,
+                structure_revision: state.library.structure_revision,
+                album_revision: state.library.album_revision,
+                playlist_revision: state.library.playlist_revision,
+                playlist_entry_revisions: Arc::clone(&state.library.playlist_entry_revisions),
+                metadata_revisions: Arc::clone(&state.library.metadata_revisions),
+                bitrate_revision: state.library.bitrate_revision,
+                duplicate_groups_revision: state.library.duplicate_groups_revision,
+                duplicate_members_revision: state.library.duplicate_members_revision,
+                history: Arc::clone(&state.library.history),
+            },
+            queue: state.queue.clone(),
+            current_track: state.current_track.clone(),
+            playback: state.playback.clone(),
+            source_generation: state.source_generation,
+            system: GuiSystemSnapshot {
+                scanning: state.system.scanning,
+                scan_message: state.system.scan_message.clone(),
+                scan_progress: state.system.scan_progress.clone(),
+                scan_task_id: state.system.scan_task_id,
+                scan_owner: state.system.scan_owner,
+                last_error: state.system.last_error.clone(),
+                devices: Arc::clone(&state.system.devices),
+                revision: state.system.revision,
+                config: Arc::clone(&state.configuration.config),
+                mpris_status: state.system.mpris_status.clone(),
+                ffmpeg_status: state.system.ffmpeg_status.clone(),
+                shutting_down: state.system.shutting_down,
+                relocation_task: state.system.relocation_task.clone(),
+                processing: state.system.processing.clone(),
+                processing_audition: state.processing_audition,
+            },
+        }
+    }
     pub fn current_track(&self) -> Option<&Track> {
         self.current_track.as_deref()
     }
 }
-
 impl GuiLibrarySnapshot {
     pub(crate) fn query_revisions(
         &self,
@@ -107,60 +148,5 @@ impl GuiSnapshot {
             &self.library.playlist_entry_revisions,
             &self.library.metadata_revisions,
         )
-    }
-}
-
-impl From<DisplayState> for GuiSnapshot {
-    fn from(state: DisplayState) -> Self {
-        Self {
-            library: GuiLibrarySnapshot::from(state.library),
-            queue: state.queue,
-            current_track: state.current_track,
-            playback: state.playback,
-            source_generation: state.source_generation,
-            system: GuiSystemSnapshot::from(state.system),
-            revisions: state.revisions,
-        }
-    }
-}
-
-impl From<DisplayLibraryState> for GuiLibrarySnapshot {
-    fn from(state: DisplayLibraryState) -> Self {
-        Self {
-            track_total: state.track_total,
-            playlist_total: state.playlist_total,
-            revision: state.revision,
-            structure_revision: state.structure_revision,
-            album_revision: state.album_revision,
-            playlist_revision: state.playlist_revision,
-            playlist_entry_revisions: state.playlist_entry_revisions,
-            metadata_revisions: state.metadata_revisions,
-            bitrate_revision: state.bitrate_revision,
-            duplicate_groups_revision: state.duplicate_groups_revision,
-            duplicate_members_revision: state.duplicate_members_revision,
-            history: state.history,
-        }
-    }
-}
-
-impl From<DisplaySystemState> for GuiSystemSnapshot {
-    fn from(state: DisplaySystemState) -> Self {
-        Self {
-            scanning: state.scanning,
-            scan_message: state.scan_message,
-            scan_progress: state.scan_progress,
-            scan_task_id: state.scan_task_id,
-            scan_owner: state.scan_owner,
-            last_error: state.last_error,
-            devices: state.devices,
-            revision: state.revision,
-            config: state.config,
-            mpris_status: state.mpris_status,
-            ffmpeg_status: state.ffmpeg_status,
-            shutting_down: state.shutting_down,
-            relocation_task: state.relocation_task,
-            processing: state.processing,
-            processing_audition: state.processing_audition,
-        }
     }
 }

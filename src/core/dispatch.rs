@@ -245,12 +245,12 @@ impl Core {
         let _ = self.engine.send(AudioCommand::Equalizer(Arc::new(
             self.state.configuration.config.equalizer.clone(),
         )));
-        let _ = self.engine.send(AudioCommand::AnalysisSettings(
-            self.state.configuration.config.as_ref().into(),
+        let _ = self.engine.send(AudioCommand::VisualizationSignal(
+            self.state.configuration.config.visualization_signal,
         ));
     }
 
-    fn dispatch_request(&mut self, request: Request) {
+    pub(super) fn dispatch_request(&mut self, request: Request) {
         match request.operation {
             Operation::Query { query, ticket } => {
                 if let Some(reads) = &self.read_queries
@@ -278,9 +278,12 @@ impl Core {
             } => {
                 self.register_task_wait(target, registration);
             }
-            #[cfg(any(test, feature = "gui", feature = "test-support"))]
-            Operation::WaveformSnapshot(reply) => {
-                let _ = self.engine.send(AudioCommand::WaveformSnapshot(reply));
+            Operation::WaveformSnapshot { source, reply } => {
+                if self.state.source_generation == source {
+                    let _ = self.engine.send(AudioCommand::WaveformSnapshot(reply));
+                } else {
+                    let _ = reply.send(Err("Full waveform source changed before capture".into()));
+                }
             }
             Operation::Command(command) => {
                 use command::CommandOutcome;
@@ -319,14 +322,12 @@ impl Core {
                     let _ = reply.send(CoreResponse::Ack(ack));
                 }
             }
-            operation => {
+            operation @ (Operation::Navigate(_) | Operation::MprisSeek { .. }) => {
                 let result = match operation {
                     Operation::MprisSeek { queue_id, offset } => self.mpris_seek(queue_id, offset),
                     _ if self.database_maintenance_active() => Err(anyhow::anyhow!(
                         "Database maintenance is in progress; this operation was not executed"
                     )),
-                    #[cfg(any(test, feature = "gui", feature = "test-support"))]
-                    Operation::GuiConfig(change) => self.update_gui_config(change),
                     Operation::Navigate(direction) => self.navigate(direction),
                     _ => unreachable!("operation matched above"),
                 };
@@ -465,7 +466,7 @@ impl Core {
                 shared.system = self.state.system.clone();
                 shared.scan_owner = self.state.scan_owner;
             } else {
-                // The in-process wakeup sequence advances even without a System change.
+                // Publication advances even without a System section change.
                 shared.system.revision = self.state.system.revision;
             }
             if changed.configuration {
@@ -481,12 +482,9 @@ impl Core {
                 !matches!(sender.try_send(()), Err(mpsc::TrySendError::Closed(_)))
             });
         }
-        #[cfg(any(test, feature = "gui", feature = "test-support"))]
-        {
-            let callback = self.wakeup.read().clone();
-            if let Some(callback) = callback {
-                callback();
-            }
+        #[cfg(test)]
+        if let Some(observer) = &self.publication_observer {
+            observer();
         }
     }
 

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/rivu-ui", "crates/rivu-format", "crates/rivu-utils", "crates/rivu-migrate", "crates/rivu-metadata", "crates/rivu-dsp", "crates/rivu-audio", "crates/rivu-protocol", "crates/rivu-client", "crates/rivu-visuals", "crates/rivu-presentation", "crates/rivu-tui", "crates/rivu-gui"]
+members = ["crates/rivu-ui", "crates/rivu-format", "crates/rivu-utils", "crates/rivu-migrate", "crates/rivu-metadata", "crates/rivu-dsp", "crates/rivu-audio", "crates/rivu-protocol", "crates/rivu-client", "crates/rivu-visuals", "crates/rivu-presentation", "crates/rivu-tui", "crates/rivu-gui", "crates/rivu-shm", "crates/rivu-analysis"]
 resolver = "3"
 
 [workspace.dependencies]
@@ -13,7 +13,7 @@ description = "A lightweight, local-first Linux music player"
 
 [features]
 default = ["gui", "tui", "ffmpeg", "onnx"]
-gui = ["dep:rivu-gui"]
+gui = ["dep:rivu-gui", "dep:async-process"]
 tui = ["dep:rivu-tui"]
 test-support = ["rivu-audio/test-support", "rivu-metadata/test-support", "rivu-protocol/test-support"]
 ffmpeg = ["rivu-audio/ffmpeg"]
@@ -31,6 +31,7 @@ rivu-metadata = { path = "crates/rivu-metadata", features = ["artwork"] }
 rivu-dsp = { path = "crates/rivu-dsp", default-features = false, features = ["execution"] }
 rivu-protocol = { path = "crates/rivu-protocol" }
 rivu-client = { path = "crates/rivu-client" }
+rivu-shm = { path = "crates/rivu-shm" }
 hound = "3.5"
 anyhow = "1"
 blake3 = "1"
@@ -40,6 +41,7 @@ bytes = "1"
 async-channel = "2"
 async-executor = "1"
 async-io = "2"
+async-process = { version = "2.5", optional = true }
 async-lock = "3"
 async-signal = "0.2"
 futures-lite = "2"

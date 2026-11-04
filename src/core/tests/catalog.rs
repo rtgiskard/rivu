@@ -1087,7 +1087,6 @@ fn rejected_library_scan_ack_preserves_unrelated_global_errors() {
 
 #[test]
 fn library_scan_failures_stay_in_their_result_while_import_errors_remain_global() {
-    use rivu_protocol::model::MediaTaskOwner;
     for import in [false, true] {
         let (_directory, mut core) = fixture();
         core.state.system.last_error = Some("Unrelated audio failure".into());
@@ -1110,19 +1109,10 @@ fn library_scan_failures_stay_in_their_result_while_import_errors_remain_global(
         assert_eq!(status.progress.phase, ScanPhase::Failed);
         assert_eq!(status.error.as_deref(), Some("Unreadable scan source"));
         core.publish();
-        let snapshot = crate::projection::display_state(&core.shared.read());
-        assert_eq!(
-            display_scan_visible(&snapshot.system, MediaTaskOwner::Library),
-            !import
-        );
-        assert_eq!(
-            display_scan_visible(&snapshot.system, MediaTaskOwner::Playlist),
-            import
-        );
-        assert!(!display_scan_visible(
-            &snapshot.system,
-            MediaTaskOwner::Queue
-        ));
+        let snapshot = &core.shared.read().clone();
+        assert_eq!(snapshot.scan_visible(MediaTaskOwner::Library), !import);
+        assert_eq!(snapshot.scan_visible(MediaTaskOwner::Playlist), import);
+        assert!(!snapshot.scan_visible(MediaTaskOwner::Queue));
         assert_eq!(
             snapshot.system.last_error.as_deref(),
             Some(if import {

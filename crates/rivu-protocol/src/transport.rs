@@ -91,6 +91,13 @@ pub fn decode_request_frame(bytes: &[u8]) -> Result<WireRequest> {
         RequestTag::WaitTask => {
             WireRequest::WaitTask(decode_body(body, "Decoding IPC task wait request")?)
         }
+        RequestTag::QueryRetained => {
+            WireRequest::QueryRetained(decode_body(body, "Decoding IPC retained query request")?)
+        }
+        RequestTag::RegisterDesktop => {
+            let () = decode_body(body, "Decoding IPC desktop registration")?;
+            WireRequest::RegisterDesktop
+        }
     };
     Ok(request)
 }
@@ -184,6 +191,8 @@ pub fn encode_request_frame_into(request: &WireRequest, bytes: &mut Vec<u8>) -> 
         WireRequest::Command(value) => writer.encode(RequestTag::Command as u8, value),
         WireRequest::Watch(value) => writer.encode(RequestTag::Watch as u8, value),
         WireRequest::WaitTask(value) => writer.encode(RequestTag::WaitTask as u8, value),
+        WireRequest::QueryRetained(value) => writer.encode(RequestTag::QueryRetained as u8, value),
+        WireRequest::RegisterDesktop => writer.encode(RequestTag::RegisterDesktop as u8, &()),
     }
 }
 

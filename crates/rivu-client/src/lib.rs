@@ -206,7 +206,7 @@ impl ClientSession {
                     let stream = self.stream.as_mut().unwrap();
                     write_request_frame_buffered(stream, request, &mut self.write_buffer, write_started).await?;
                     let response = read_response_frame(stream, &mut self.read_buffer);
-                    let response = if matches!(request, WireRequest::Watch(_) | WireRequest::WaitTask(_)) {
+                    let response = if matches!(request, WireRequest::Watch(_) | WireRequest::WaitTask(_) | WireRequest::QueryRetained(_)) {
                         response.await
                     } else {
                         let deadline = rivu_protocol::transport::response_timeout(wait_timeout);
@@ -271,6 +271,32 @@ impl ClientSession {
             _ => {
                 self.disconnect();
                 bail!("IPC response was not a query response")
+            }
+        }
+    }
+
+    /// Wait for physical query completion without a transport response deadline.
+    /// Logical UI timeouts must retain this call until reply or disconnect.
+    pub fn query_retained(&mut self, query: Query) -> Result<QueryResponse> {
+        self.ensure_handshake()?;
+        let request = WireRequest::QueryRetained(WireQuery::from(query));
+        match unpack_error(self.exchange(&request, query_wait_timeout())?)? {
+            WireResponse::Query(response) => Ok(response),
+            _ => {
+                self.disconnect();
+                bail!("IPC response was not a query response")
+            }
+        }
+    }
+
+    /// Register this session as a desktop host until its socket disconnects.
+    pub fn register_desktop(&mut self) -> Result<Ack> {
+        self.ensure_handshake()?;
+        match unpack_error(self.exchange(&WireRequest::RegisterDesktop, query_wait_timeout())?)? {
+            WireResponse::Ack(ack) => Ok(ack),
+            _ => {
+                self.disconnect();
+                bail!("IPC response was not a desktop registration acknowledgement")
             }
         }
     }

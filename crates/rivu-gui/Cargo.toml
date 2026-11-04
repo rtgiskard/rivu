@@ -12,6 +12,9 @@ rivu-dsp = { path = "../rivu-dsp", default-features = false }
 rivu-format = { path = "../rivu-format", default-features = false }
 rivu-utils = { path = "../rivu-utils", default-features = false }
 rivu-protocol = { path = "../rivu-protocol" }
+rivu-analysis = { path = "../rivu-analysis" }
+rivu-client = { path = "../rivu-client" }
+rivu-shm = { path = "../rivu-shm" }
 rivu-presentation = { path = "../rivu-presentation" }
 rivu-metadata = { path = "../rivu-metadata", features = ["artwork"] }
 rivu-ui = { path = "../rivu-ui" }
@@ -19,6 +22,11 @@ rivu-visuals = { path = "../rivu-visuals" }
 gpui.workspace = true
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "df48a139ce9c292738b523252c12f044697e673f", default-features = false, features = ["wayland"] }
 anyhow = "1"
+async-channel = "2"
+async-executor = "1"
+async-io = "2"
+async-signal = "0.2"
+futures-lite = "2"
 blake3 = "1"
 tempfile = "3.27"
 ashpd = { version = "0.13.13", default-features = false, features = ["async-io", "file_chooser"] }
@@ -39,4 +47,3 @@ rivu-metadata = { path = "../rivu-metadata", features = ["test-support"] }
 rivu-visuals = { path = "../rivu-visuals", features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
 libc = "0.2"
-ringbuf = "0.5"

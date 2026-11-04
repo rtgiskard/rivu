@@ -109,7 +109,7 @@ pub(super) fn fixture_with_database(duration: Option<f64>) -> (tempfile::TempDir
         revision_updates: Arc::new(RwLock::new(Vec::new())),
         shared: Arc::new(RwLock::new(state.clone())),
         state,
-        wakeup: Arc::new(RwLock::new(None)),
+        publication_observer: None,
         task_waiters: Arc::new(Mutex::new(TaskWaiters::default())),
         task_completions_pending: false,
         generation: 1,
@@ -237,24 +237,21 @@ fn navigation_runtime(
     let (sender, requests) = async_channel::bounded(64);
     let handle = CoreHandle {
         state: core.shared.clone(),
-        analysis: core.engine.analysis.clone(),
-        analysis_control: core.engine.analysis_control.clone(),
+        pcm: core.engine.pcm.clone(),
         waveform: core.engine.waveform.clone(),
-        waveform_control: core.engine.waveform_control.clone(),
+        waveform_control: Arc::clone(&core.engine.waveform_control),
         sender,
         revision_updates: core.revision_updates.clone(),
-        wakeup: core.wakeup.clone(),
         task_waiters: core.task_waiters.clone(),
-        query_timeout: None,
     };
     let publications = Arc::new(Mutex::new(Vec::new()));
     let observed = publications.clone();
     let state = core.shared.clone();
-    handle.set_wakeup(move || {
+    core.publication_observer = Some(Arc::new(move || {
         observed
             .lock()
             .push(MprisSnapshot::from_core(&state.read()));
-    });
+    }));
     let (control, shutdown) = CoreLifecycle::new();
     let worker_control = control.clone();
     let worker = thread::spawn(move || run_test_driver(core, requests, shutdown, &worker_control));
@@ -276,36 +273,25 @@ fn run_until_disconnected(core: Core, requests: mpsc::Receiver<Request>) -> Core
     run_test_driver(core, requests, shutdown, &control)
 }
 
-fn display_fixture() -> (
+fn pcm_fixture() -> (
     CoreHandle,
-    rivu_audio::analysis::AnalysisWorker,
+    Arc<audio::capture::PcmControl>,
     mpsc::Receiver<Request>,
 ) {
-    let analysis = Arc::new(RwLock::new(AnalysisFrame::default()));
-    let worker = rivu_audio::analysis::AnalysisWorker::new(analysis.clone()).unwrap();
-    worker.configure(rivu_protocol::analysis::AnalysisSettings {
-        fps: 60,
-        fft_size: 512,
-        window: crate::config::AnalysisWindow::None,
-        signal: crate::config::VisualizationSignal::After,
-    });
-    worker.set_playback_active(true);
+    let pcm = Arc::new(audio::capture::PcmControl::default());
     let (sender, receiver) = async_channel::bounded(1);
     let handle = CoreHandle {
         state: Arc::new(RwLock::new(CoreState::default())),
-        analysis,
-        analysis_control: worker.control.clone(),
+        pcm: Arc::clone(&pcm),
         waveform: Arc::new(RwLock::new(
             rivu_protocol::waveform::WaveformFrame::default(),
         )),
         waveform_control: Arc::new(audio::WaveformControl::default()),
         sender,
         revision_updates: Arc::new(RwLock::new(Vec::new())),
-        wakeup: Arc::new(RwLock::new(None)),
         task_waiters: Arc::new(Mutex::new(TaskWaiters::default())),
-        query_timeout: None,
     };
-    (handle, worker, receiver)
+    (handle, pcm, receiver)
 }
 
 fn write_pcm(path: &Path) {
@@ -534,11 +520,4 @@ fn assert_queue_saved(core: &Core) {
         core.state.queue.current_position
     );
     assert_eq!(projection.total, core.state.queue.total);
-}
-
-fn display_scan_visible(
-    system: &rivu_protocol::display::DisplaySystemState,
-    owner: MediaTaskOwner,
-) -> bool {
-    system.scan_owner == Some(owner) && (system.scanning || system.scan_progress.is_some())
 }

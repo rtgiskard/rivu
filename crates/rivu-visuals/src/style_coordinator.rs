@@ -5,8 +5,8 @@ use crate::{
     stereo_renderer::StereoRenderer,
 };
 use gpui::{AnyElement, div, prelude::*};
+use rivu_analysis::AnalysisFrame;
 use rivu_format::config::{AudioVisualizerOptions, AudioVisualizerStyle};
-use rivu_protocol::analysis::AnalysisFrame;
 use rivu_protocol::model::PlaybackStatus;
 use std::{
     cell::Cell,

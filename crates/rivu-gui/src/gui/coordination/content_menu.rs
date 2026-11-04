@@ -553,8 +553,8 @@ impl WindowView {
             }
             ContentAction::RemoveLibraryRoot => {
                 if let Some(root) = menu.root {
-                    if let Err(error) = self.handle.update_gui_config(
-                        rivu_protocol::model::ConfigChange::RemoveLibraryRoot(root),
+                    if let Err(error) = self.handle.update_config(
+                        rivu_protocol::model::ConfigMutation::RemoveLibraryRoot(root),
                     ) {
                         self.error = Some(format!("{error:#}"));
                     }

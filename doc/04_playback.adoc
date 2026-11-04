@@ -507,8 +507,8 @@ Use the application menu's Quit application action, tray Quit, or `rivu quit`
 to stop the core. Quitting also removes the tray item and releases desktop media
 controls; closing only the window does not.
 
-`interface.tray_enabled` controls tray startup and requires restarting the graphical
-host, not just reopening its window. The tray needs session D-Bus and a
+`interface.tray_enabled` controls tray startup and requires restarting the Core
+service, not just the GUI. The tray needs session D-Bus and a
 StatusNotifier-compatible desktop host. Failures are logged without preventing
 window use or playback; a watcher starting or restarting later is registered
 automatically.

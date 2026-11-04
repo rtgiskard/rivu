@@ -5,10 +5,8 @@ use gpui::{
     GpuValueMapping, Hsla, Pixels, Point, SharedString, TextAlign, Window, canvas, div, fill,
     point, prelude::*, px, rgb, size,
 };
+use rivu_analysis::{AnalysisFrame, AnalysisSettings, DENSITY_SIDE, DensitySnapshot, SpatialBin};
 use rivu_format::config::{AudioVisualizerOptions, AudioVisualizerStyle};
-use rivu_protocol::analysis::{
-    AnalysisFrame, AnalysisSettings, DENSITY_SIDE, DensitySnapshot, SpatialBin,
-};
 use std::{cell::RefCell, rc::Rc, sync::Arc, time::Duration};
 
 const SPATIAL_WIDTH: usize = 256;
@@ -878,8 +876,8 @@ impl StereoRenderer {
 mod tests {
     use super::*;
     use gpui::GpuFrame;
+    use rivu_analysis::{SpatialBin, VisualizerDemand, VisualizerFrame};
     use rivu_format::config::Config;
-    use rivu_protocol::analysis::{SpatialBin, VisualizerDemand, VisualizerFrame};
 
     fn frame(style: AudioVisualizerStyle) -> AnalysisFrame {
         AnalysisFrame {

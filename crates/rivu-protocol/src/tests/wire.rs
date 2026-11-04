@@ -1028,6 +1028,8 @@ fn request_round_trip_uses_explicit_message_types() {
             configuration: 5,
         }),
         WireRequest::WaitTask(rivu_protocol::model::TaskTarget::Scan { id: 42 }),
+        WireRequest::QueryRetained(WireQuery::Track { track_id: 42 }),
+        WireRequest::RegisterDesktop,
     ];
     for request in requests {
         let expected_type = match &request {
@@ -1037,6 +1039,8 @@ fn request_round_trip_uses_explicit_message_types() {
             WireRequest::Command(_) => RequestTag::Command,
             WireRequest::Watch(_) => RequestTag::Watch,
             WireRequest::WaitTask(_) => RequestTag::WaitTask,
+            WireRequest::QueryRetained(_) => RequestTag::QueryRetained,
+            WireRequest::RegisterDesktop => RequestTag::RegisterDesktop,
         };
         let mut encoded = Vec::new();
         encode_request_frame_into(&request, &mut encoded).unwrap();
@@ -1047,6 +1051,8 @@ fn request_round_trip_uses_explicit_message_types() {
                 assert_eq!((offset, limit), (7, 11))
             }
             WireRequest::State(_) | WireRequest::Hello(_) => {}
+            WireRequest::QueryRetained(WireQuery::Track { track_id }) => assert_eq!(track_id, 42),
+            WireRequest::RegisterDesktop => {}
             WireRequest::WaitTask(target) => {
                 assert_eq!(target, rivu_protocol::model::TaskTarget::Scan { id: 42 })
             }
@@ -1930,4 +1936,158 @@ fn graph_task_query_frame_retains_pcm_availability_and_context_without_paths() {
         panic!("expected retained graph task");
     };
     assert_eq!(*decoded, task);
+}
+
+#[test]
+fn settings_patch_round_trip_preserves_untouched_owner_state_and_explicit_clears() {
+    use crate::model::{ConfigMutation, ConfigPatch};
+    use rivu_format::config::{Config, SpectrumBarLayout};
+    let baseline = Config {
+        output_device: Some("draft-output".into()),
+        spectrum_db_range: Some(60.0),
+        ..Config::default()
+    };
+    let mut draft = baseline.clone();
+    draft.output_device = None;
+    draft.spectrum_db_range = None;
+    draft.spectrum_bar_layout = SpectrumBarLayout::Fixed { count: 48 };
+    draft.scan_max_depth = 7;
+    let patch = ConfigPatch::between(&baseline, &draft);
+    let mut encoded = Vec::new();
+    encode_request_frame_into(
+        &WireRequest::Command(WireCommand::from(Command::MutateConfig {
+            change: ConfigMutation::Settings(Box::new(patch)),
+        })),
+        &mut encoded,
+    )
+    .unwrap();
+    let WireRequest::Command(command) = decode_request_frame(&encoded[4..]).unwrap() else {
+        panic!("expected config mutation");
+    };
+    let Command::MutateConfig {
+        change: ConfigMutation::Settings(patch),
+    } = Command::try_from(command).unwrap()
+    else {
+        panic!("expected Settings patch");
+    };
+    let mut owner = baseline;
+    owner.volume = 0.2;
+    owner.shuffle = true;
+    patch.apply_to(&mut owner);
+    assert_eq!(owner.output_device, None);
+    assert_eq!(owner.spectrum_db_range, None);
+    assert_eq!(owner.spectrum_bar_layout, draft.spectrum_bar_layout);
+    assert_eq!(owner.scan_max_depth, 7);
+    assert_eq!(owner.volume, 0.2);
+    assert!(owner.shuffle);
+}
+
+#[test]
+fn retained_query_and_desktop_registration_round_trip_as_distinct_requests() {
+    let mut encoded = Vec::new();
+    encode_request_frame_into(
+        &WireRequest::QueryRetained(WireQuery::from(Query::LibraryStats)),
+        &mut encoded,
+    )
+    .unwrap();
+    let WireRequest::QueryRetained(query) = decode_request_frame(&encoded[4..]).unwrap() else {
+        panic!("expected retained query");
+    };
+    assert_eq!(Query::try_from(query).unwrap(), Query::LibraryStats);
+    encode_request_frame_into(&WireRequest::RegisterDesktop, &mut encoded).unwrap();
+    assert!(matches!(
+        decode_request_frame(&encoded[4..]).unwrap(),
+        WireRequest::RegisterDesktop
+    ));
+}
+
+#[test]
+fn public_playback_and_scan_ownership_round_trip_to_client_snapshot() {
+    use crate::model::{ClientSnapshot, MediaTaskOwner, ProcessingAudition};
+    let audition = ProcessingAudition {
+        id: 17,
+        output: None,
+        mode: None,
+    };
+    let response = StateResponse {
+        playback: Some(crate::response::PlaybackSnapshot {
+            playback: Default::default(),
+            current_track: None,
+            source_generation: 43,
+            processing_audition: Some(audition),
+        }),
+        system: Some(crate::model::SystemState {
+            scan_owner: Some(MediaTaskOwner::Playlist),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut encoded = Vec::new();
+    encode_response_frame_into(&WireResponse::State(wire_state(response)), &mut encoded).unwrap();
+    let WireResponse::State(response) = decode_response_frame(&encoded[4..]).unwrap() else {
+        panic!("expected state");
+    };
+    let mut snapshot = ClientSnapshot::default();
+    state_response(response).apply_to(&mut snapshot);
+    assert_eq!(snapshot.source_generation, 43);
+    assert_eq!(snapshot.processing_audition, Some(audition));
+    assert_eq!(snapshot.system.scan_owner, Some(MediaTaskOwner::Playlist));
+}
+
+#[test]
+fn quick_config_mutations_round_trip_without_full_config_payloads() {
+    use crate::model::ConfigMutation;
+    use rivu_format::config::LibraryColumn;
+    let mut changes = vec![
+        ConfigMutation::ToggleVisualization,
+        ConfigMutation::ToggleWaveformSeek,
+        ConfigMutation::AddLibraryRoot("/music/夜".into()),
+        ConfigMutation::RemoveLibraryRoot("/music/old".into()),
+    ];
+    for column in [
+        LibraryColumn::Artist,
+        LibraryColumn::Album,
+        LibraryColumn::Duration,
+        LibraryColumn::Codec,
+        LibraryColumn::Bitrate,
+    ] {
+        changes.push(ConfigMutation::ToggleLibraryColumn(column));
+    }
+    let mut encoded = Vec::new();
+    for change in changes {
+        let expected = serde_json::to_value(&change).unwrap();
+        encode_request_frame_into(
+            &WireRequest::Command(WireCommand::from(Command::MutateConfig { change })),
+            &mut encoded,
+        )
+        .unwrap();
+        let WireRequest::Command(command) = decode_request_frame(&encoded[4..]).unwrap() else {
+            panic!("expected config command");
+        };
+        let Command::MutateConfig { change } = Command::try_from(command).unwrap() else {
+            panic!("expected mutation");
+        };
+        assert_eq!(serde_json::to_value(change).unwrap(), expected);
+    }
+}
+
+#[test]
+fn public_settings_patch_json_distinguishes_clear_from_unchanged() {
+    use crate::model::ConfigPatch;
+    let patch: ConfigPatch =
+        serde_json::from_value(serde_json::json!({"output_device": null, "scan_max_depth": 7}))
+            .unwrap();
+    let mut owner = rivu_format::config::Config {
+        output_device: Some("owner".into()),
+        volume: 0.2,
+        ..Default::default()
+    };
+    assert_eq!(
+        serde_json::to_value(&patch).unwrap(),
+        serde_json::json!({"output_device": null, "scan_max_depth": 7})
+    );
+    patch.apply_to(&mut owner);
+    assert_eq!(owner.output_device, None);
+    assert_eq!(owner.scan_max_depth, 7);
+    assert_eq!(owner.volume, 0.2);
 }

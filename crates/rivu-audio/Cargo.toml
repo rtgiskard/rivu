@@ -2,12 +2,12 @@
 name = "rivu-audio"
 version = "0.2.0"
 edition = "2024"
-description = "Rivu audio decoding, playback, rendering, waveform and analysis engine"
+description = "Rivu audio decoding, playback, rendering, waveform and PCM capture engine"
 
 [features]
 default = ["ffmpeg"]
 ffmpeg = ["dep:bindgen", "dep:libloading"]
-# Existing application tests exercise analyzer demand and command admission.
+# Application fixtures exercise command admission and PCM ownership.
 test-support = ["rivu-protocol/test-support"]
 
 [dependencies]
@@ -16,6 +16,7 @@ rivu-format = { path = "../rivu-format", default-features = false }
 rivu-metadata = { path = "../rivu-metadata" }
 rivu-utils = { path = "../rivu-utils", default-features = false }
 rivu-protocol = { path = "../rivu-protocol" }
+rivu-shm = { path = "../rivu-shm" }
 anyhow = "1"
 async-channel = "2"
 async-io = "2"
@@ -27,7 +28,6 @@ libloading = { version = "0.9", optional = true }
 opus = "0.4"
 parking_lot = "0.12"
 ringbuf = "0.5"
-rustfft = "6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 symphonia = { version = "0.6.1", features = ["all"] }

@@ -1,9 +1,9 @@
 //! Concrete rendering parameters, captured by the host when configuration changes.
+use rivu_analysis::AnalysisSettings;
 use rivu_format::config::{
     AnalysisWindow, Config, RgbColor, SpectrumBarLayout, SpectrumStyle, VisualizationPalette,
     VisualizationSignal,
 };
-use rivu_protocol::analysis::AnalysisSettings;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VisualParameters {

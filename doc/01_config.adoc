@@ -162,9 +162,8 @@ unavailable languages, including Traditional Chinese, fall back to English.
 Explicit configuration values are `auto`, `en-US`, or `zh-CN` (case-insensitive;
 underscores are accepted and normalized to hyphens); other values are errors.
 Choose Language in Settings → Interface → Appearance & layout, then Apply to save.
-The change takes effect when the graphical host restarts. Closing and reopening
-a desktop window keeps the host's startup language; quit and restart Rivu to
-apply a saved language change.
+Restart the GUI to apply the saved language to its windows. The tray keeps the
+Core service's startup language and requires restarting that service.
 CLI output, TUI, command-line help, and localized diagnostics always use automatic
 selection from the process environment, independently of `interface.language`.
 They do not read configuration for localization. Starting a host or probing media
@@ -220,7 +219,7 @@ Output selection and application errors are described under
 <<output-and-applying-changes,Output and applying changes>> and in
 link:04_playback.adoc#output-devices-and-speaker-layouts[Playback output].
 `interface.tray_enabled` and `interface.mpris_enabled` both default to `true` and
-independently control desktop integration. Tray changes require a graphical-host
+independently control desktop integration. Tray changes require a Core service
 restart; MPRIS changes apply while running. Requirements and recovery are in
 link:04_playback.adoc#desktop-tray-and-window-lifecycle[Desktop tray and window lifecycle]
 and link:04_playback.adoc#mpris-and-artwork[MPRIS and artwork].

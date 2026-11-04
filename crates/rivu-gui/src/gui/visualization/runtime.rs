@@ -2,19 +2,19 @@
 //! Business state arrives through `sync`; the animation clock never reads or
 //! refreshes the application root. Panel entities are the only redraw targets.
 
+use crate::frontend::FrontendHandle;
 use crate::gui::{animation_frames::AnimationFrames, layout, visualization};
-use crate::host::HostHandle;
 #[cfg(test)]
 use crate::test_support::ConfigFixture;
 use gpui::{
     AnyElement, Context, Entity, Render, Subscription, Task, WeakEntity, Window, div, prelude::*,
     rgb,
 };
+use rivu_analysis::{AnalysisFrame, DisplayDemand, VisualizerDemand};
 use rivu_format::config::AudioVisualizerOptions;
 use rivu_format::config::AudioVisualizerStyle;
+use rivu_format::config::Config;
 use rivu_presentation::i18n::Localizer;
-use rivu_protocol::analysis::{AnalysisFrame, DisplayDemand, VisualizerDemand};
-use rivu_protocol::model::Config;
 use rivu_protocol::model::{PlaybackStatus, Track};
 use std::{
     collections::HashMap,
@@ -109,7 +109,7 @@ impl AnimationClock {
 }
 
 pub(in crate::gui) struct VisualizerRuntime {
-    handle: HostHandle,
+    handle: FrontendHandle,
     labels: Arc<visualization::VisualLabels>,
     parameters: visualization::VisualParameters,
     config: Arc<Config>,
@@ -144,7 +144,7 @@ pub(in crate::gui) struct VisualizerRuntime {
 
 impl VisualizerRuntime {
     pub(in crate::gui) fn new(
-        handle: HostHandle,
+        handle: FrontendHandle,
         i18n: Arc<Localizer>,
         waveform: Entity<visualization::Waveform>,
         frames: Entity<AnimationFrames>,
@@ -213,11 +213,8 @@ impl VisualizerRuntime {
         let visibility_changed = self.visible != visible || self.shutting_down != shutting_down;
         let status_changed = self.status != status;
         let position_changed = self.position != position || self.duration != duration;
-        let settings_changed =
-            !rivu_protocol::analysis::AnalysisSettings::from(self.config.as_ref())
-                .signal_compatible_with(rivu_protocol::analysis::AnalysisSettings::from(
-                    config.as_ref(),
-                ));
+        let settings_changed = !rivu_analysis::AnalysisSettings::from(self.config.as_ref())
+            .signal_compatible_with(rivu_analysis::AnalysisSettings::from(config.as_ref()));
         let signal_changed = self.source_generation != source_generation
             || self.seek_revision != seek_revision
             || settings_changed;
@@ -278,7 +275,7 @@ impl VisualizerRuntime {
 
         if invalidate {
             self.staging = AnalysisFrame::default();
-            self.sequence = self.handle.analysis().read().sequence;
+            self.sequence = self.handle.analysis.read().sequence;
             self.needs_refresh = false;
             self.animation_clock = AnimationClock::default();
             self.frequency_views.clear_presentation();
@@ -359,6 +356,13 @@ impl VisualizerRuntime {
             };
             retain_analysis_staging(&mut self.staging, demand);
             self.handle.set_display_demand(demand);
+            self.handle.set_waveform_demand(
+                enabled
+                    && self
+                        .panels
+                        .values()
+                        .any(|kind| matches!(kind, PanelKind::Waveform(_))),
+            );
             if self.demand.enabled != demand.enabled {
                 self.cancel_clock(cx);
             }
@@ -537,7 +541,7 @@ impl VisualizerRuntime {
         if self.status != PlaybackStatus::Playing {
             return;
         }
-        let frame = self.handle.analysis().read();
+        let frame = self.handle.analysis.read();
         // Capture restarts may discard an incomplete FFT without breaking the
         // signal. Only the producer's continuity fence can revoke this picture.
         if frame.settings.is_none()
@@ -676,6 +680,7 @@ impl VisualizerRuntime {
         self.cancel_clock(cx);
         self.demand = DisplayDemand::default();
         self.handle.set_display_demand(self.demand);
+        self.handle.set_waveform_demand(false);
         self.staging = AnalysisFrame::default();
         self.needs_refresh = false;
         self.awaiting_replacement = false;
@@ -695,6 +700,7 @@ impl VisualizerRuntime {
 impl Drop for VisualizerRuntime {
     fn drop(&mut self) {
         self.handle.set_display_demand(DisplayDemand::default());
+        self.handle.set_waveform_demand(false);
     }
 }
 
@@ -721,7 +727,7 @@ pub(in crate::gui) fn retain_analysis_staging(frame: &mut AnalysisFrame, demand:
     let visualizer = &mut frame.visualizer;
     if !demand.visualizer.stereo_density {
         visualizer.demand.stereo_density = false;
-        visualizer.density = rivu_protocol::analysis::DensitySnapshot::default();
+        visualizer.density = rivu_analysis::DensitySnapshot::default();
         visualizer.correlation = None;
         visualizer.balance = None;
         visualizer.side_ratio = None;
@@ -736,11 +742,11 @@ pub(in crate::gui) fn retain_analysis_staging(frame: &mut AnalysisFrame, demand:
     }
     if !demand.visualizer.pcm {
         visualizer.demand.pcm = false;
-        visualizer.pcm = rivu_protocol::analysis::PcmSnapshot::default();
+        visualizer.pcm = rivu_analysis::PcmSnapshot::default();
     }
     if !demand.visualizer.spectrogram {
         visualizer.demand.spectrogram = false;
-        visualizer.spectrogram = rivu_protocol::analysis::SpectrumSnapshot::default();
+        visualizer.spectrogram = rivu_analysis::SpectrumSnapshot::default();
     }
 }
 
@@ -952,7 +958,7 @@ mod tests {
         let runtime = CoreRuntime::start(directory.path(), &config_path).unwrap();
         let config = runtime.handle.config_snapshot();
         let waveform =
-            cx.new(|_| visualization::Waveform::new(Arc::clone(runtime.handle.waveform())));
+            cx.new(|_| visualization::Waveform::new(Arc::clone(&runtime.handle.waveform)));
         let owner = cx.new(|cx| {
             VisualizerRuntime::new(
                 runtime.handle.clone(),
@@ -1162,7 +1168,7 @@ mod tests {
         config.save_fixture(&config_path).unwrap();
         let runtime = CoreRuntime::start(directory.path(), &config_path).unwrap();
         let waveform =
-            cx.new(|_| visualization::Waveform::new(Arc::clone(runtime.handle.waveform())));
+            cx.new(|_| visualization::Waveform::new(Arc::clone(&runtime.handle.waveform)));
         let owner = cx.new(|cx| {
             VisualizerRuntime::new(
                 runtime.handle.clone(),
@@ -1263,7 +1269,7 @@ mod tests {
         layout.add("audio_visualizer", None);
         let panels = demand(&layout);
         let waveform =
-            cx.new(|_| visualization::Waveform::new(Arc::clone(runtime.handle.waveform())));
+            cx.new(|_| visualization::Waveform::new(Arc::clone(&runtime.handle.waveform)));
         let owner = cx.new(|cx| {
             VisualizerRuntime::new(
                 runtime.handle.clone(),
@@ -1392,7 +1398,7 @@ mod tests {
         );
         let panels = demand(&layout);
         let waveform =
-            cx.new(|_| visualization::Waveform::new(Arc::clone(runtime.handle.waveform())));
+            cx.new(|_| visualization::Waveform::new(Arc::clone(&runtime.handle.waveform)));
         let owner = cx.new(|cx| {
             VisualizerRuntime::new(
                 runtime.handle.clone(),
@@ -1490,7 +1496,7 @@ mod tests {
         let window = cx.add_empty_window();
         let owner = window.update(|_, cx| {
             let waveform =
-                cx.new(|_| visualization::Waveform::new(Arc::clone(runtime.handle.waveform())));
+                cx.new(|_| visualization::Waveform::new(Arc::clone(&runtime.handle.waveform)));
             cx.new(|cx| {
                 VisualizerRuntime::new(
                     runtime.handle.clone(),
@@ -1849,7 +1855,7 @@ mod tests {
         layout.add("audio_visualizer", None);
         let panels = demand(&layout);
         let waveform =
-            cx.new(|_| visualization::Waveform::new(Arc::clone(runtime.handle.waveform())));
+            cx.new(|_| visualization::Waveform::new(Arc::clone(&runtime.handle.waveform)));
         let owner = cx.new(|cx| {
             VisualizerRuntime::new(
                 runtime.handle.clone(),
@@ -1970,7 +1976,7 @@ mod tests {
         replacement.id += 1;
         for boundary in 0..7 {
             let waveform =
-                cx.new(|_| visualization::Waveform::new(Arc::clone(runtime.handle.waveform())));
+                cx.new(|_| visualization::Waveform::new(Arc::clone(&runtime.handle.waveform)));
             let owner = cx.new(|cx| {
                 VisualizerRuntime::new(
                     runtime.handle.clone(),
@@ -2133,7 +2139,7 @@ mod tests {
             ),
         ] {
             let waveform =
-                cx.new(|_| visualization::Waveform::new(Arc::clone(runtime.handle.waveform())));
+                cx.new(|_| visualization::Waveform::new(Arc::clone(&runtime.handle.waveform)));
             let owner = cx.new(|cx| {
                 VisualizerRuntime::new(
                     runtime.handle.clone(),

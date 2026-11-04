@@ -80,7 +80,7 @@ impl Core {
             let track_id = result.track.id;
             self.establish_graph_source_context(track_id)?;
             self.audition_pcm(id, Some(pcm))?;
-            self.state.processing_audition = Some(rivu_protocol::model::ProcessingAudition {
+            self.state.processing_audition = Some(ProcessingAudition {
                 id,
                 output: Some(node),
                 mode: Some(GraphExecutionMode::Offline),

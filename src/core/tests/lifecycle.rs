@@ -80,21 +80,29 @@ fn startup_device_enumeration_keeps_restored_queue_queries_available() {
         .is_success()
     );
     assert!(!retired.load(Ordering::Acquire));
-    assert!(handle.display_state().system.devices.is_empty());
+    assert!(handle.state_snapshot().system.devices.is_empty());
 
-    let state = handle.state.clone();
-    let (published, publication) = bounded(1);
-    handle.set_wakeup(move || {
-        let state = state.read();
-        if state.system.devices.as_slice() == ["discovered-output"] {
-            let _ = published.try_send(state.system.selected_device.clone());
-        }
-    });
+    let changes = handle.subscribe_revisions();
     release.send(()).unwrap();
-    assert_eq!(
-        publication.recv_timeout(Duration::from_secs(5)).unwrap(),
-        Some("new-selection".into())
-    );
+    futures::executor::block_on(async {
+        rivu_protocol::transport::timeout(Duration::from_secs(5), async {
+            loop {
+                {
+                    let state = handle.state.read();
+                    if state.system.devices.as_slice() == ["discovered-output"] {
+                        assert_eq!(
+                            state.system.selected_device.as_deref(),
+                            Some("new-selection")
+                        );
+                        break;
+                    }
+                }
+                changes.recv().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+    });
     assert!(retired.load(Ordering::Acquire));
     assert_eq!(handle.state.read().queue.current_id, Some(3));
     control.request_shutdown().unwrap();
@@ -313,7 +321,7 @@ fn shutdown_drains_scan_saving_and_preserves_committed_facts() {
 
 #[test]
 fn saturated_command_queue_reports_not_admitted_without_inserting_the_command() {
-    let (handle, _analysis, requests) = display_fixture();
+    let (handle, _analysis, requests) = pcm_fixture();
     handle
         .sender
         .send_blocking(Request {
@@ -335,7 +343,7 @@ fn saturated_command_queue_reports_not_admitted_without_inserting_the_command() 
 
 #[test]
 fn admitted_command_timeout_leaves_owner_request_intact_without_replaying() {
-    let (handle, _analysis, requests) = display_fixture();
+    let (handle, _analysis, requests) = pcm_fixture();
     let ack = futures::executor::block_on(handle.operation_ack_async(
         Operation::Command(Command::Volume { value: 0.4 }),
         Duration::ZERO,
@@ -364,7 +372,7 @@ fn admitted_command_timeout_leaves_owner_request_intact_without_replaying() {
 
 #[test]
 fn owner_disconnect_after_admission_reports_unknown_not_rejection() {
-    let (handle, _analysis, requests) = display_fixture();
+    let (handle, _analysis, requests) = pcm_fixture();
     let owner = thread::spawn(move || {
         drop(requests.recv_blocking().unwrap());
     });
@@ -591,7 +599,7 @@ fn async_replies_and_admission_do_not_need_a_blocking_pool_slot() {
                     .is_success()
             );
             assert!(matches!(
-                handle.query_for_gui(Query::Track { track_id: 1 }).await.result,
+                handle.query_retained(Query::Track { track_id: 1 }).await.result,
                 Ok(rivu_protocol::response::ViewResponse::Track(Some(track))) if track.id == 1
             ));
         }
@@ -613,7 +621,7 @@ fn async_replies_and_admission_do_not_need_a_blocking_pool_slot() {
     futures::executor::block_on(async {
         rivu_protocol::transport::timeout(Duration::from_secs(5), async {
             loop {
-                let response = handle.query_for_gui(Query::Track { track_id: 1 }).await;
+                let response = handle.query_retained(Query::Track { track_id: 1 }).await;
                 if matches!(&response.result, Err(QueryError::Message(error)) if error.contains("maintenance")) {
                     break;
                 }
@@ -709,7 +717,7 @@ fn owner_failure_retires_background_work_without_blocking_executor() {
         });
         let (entered, entering) = bounded(1);
         let (release, released) = bounded(1);
-        *core.wakeup.write() = Some(Arc::new(move || {
+        core.publication_observer = Some(Arc::new(move || {
             entered.send(()).unwrap();
             released.recv().unwrap();
             panic!("injected Core owner failure");

@@ -636,7 +636,7 @@ impl DbusMenu {
 impl DbusMenu {
     fn activate(&self, id: i32) {
         if id == 9 {
-            if let Err(error) = self.app.request_user_shutdown() {
+            if let Err(error) = self.app.request_shutdown() {
                 tracing::warn!(error = %error, "tray_quit_failed");
             }
             return;
@@ -757,8 +757,8 @@ mod tests {
         )
         .unwrap();
         let handle = runtime.handle.clone();
-        let app = AppHandle::new(&runtime, false);
-        assert!(!app.can_raise());
+        let app = AppHandle::new(&runtime, directory.path());
+        assert!(app.can_raise());
         let menu = DbusMenu {
             data: Arc::new(RwLock::new(TrayData {
                 i18n: Arc::new(Localizer::new(&handle.config_snapshot().ui_language)),

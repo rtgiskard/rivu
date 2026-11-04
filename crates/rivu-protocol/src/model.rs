@@ -1,32 +1,13 @@
-mod config;
-pub use config::{ConfigChange, ConfigPatch};
-pub use rivu_format::config::Config;
 mod processing;
 pub use processing::*;
-
-/// Selected audio source admitted by Core, independent of the latest task and editor.
-/// Transport status remains separate: a selected source can be paused.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ProcessingAudition {
-    pub id: u64,
-    pub output: Option<GraphPort>,
-    /// Cached graph output is Offline; a prepared live runner is Realtime or Hybrid.
-    /// Standalone denoise/separation audition has no graph mode.
-    pub mode: Option<GraphExecutionMode>,
-}
-
-/// Owner of the shared scan/import/admission task and its retained outcome.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MediaTaskOwner {
-    Library,
-    Playlist,
-    Queue,
-}
 mod duplicates;
 pub use duplicates::{DuplicateGroup, DuplicateMember};
 
 mod query;
 pub use query::{Query, QueryIdentity, QueryStamp};
+mod config;
+pub use config::{ConfigMutation, ConfigPatch};
+pub use rivu_format::config::Config;
 
 use rivu_format::decoder_hint::DecoderHint;
 use serde::{Deserialize, Serialize};
@@ -44,6 +25,8 @@ pub struct ClientSnapshot {
     pub queue: QueueState,
     pub current_track: Option<Arc<Track>>,
     pub playback: PlaybackState,
+    pub source_generation: u64,
+    pub processing_audition: Option<ProcessingAudition>,
     pub system: SystemState,
     pub configuration: ConfigurationState,
 }
@@ -52,6 +35,25 @@ impl ClientSnapshot {
     pub fn current_track(&self) -> Option<&Track> {
         self.current_track.as_deref()
     }
+}
+
+/// Selected audio source admitted by Core, independent of the latest task and editor.
+/// Transport status remains separate: a selected source can be paused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessingAudition {
+    pub id: u64,
+    pub output: Option<GraphPort>,
+    /// Cached graph output is Offline; a prepared live runner is Realtime or Hybrid.
+    /// Standalone denoise/separation audition has no graph mode.
+    pub mode: Option<GraphExecutionMode>,
+}
+
+/// Owner of the shared scan/import/admission task and its retained outcome.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MediaTaskOwner {
+    Library,
+    Playlist,
+    Queue,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -479,6 +481,7 @@ pub struct SystemState {
     pub scan_message: String,
     pub scan_progress: Option<ScanProgress>,
     pub scan_task_id: Option<u64>,
+    pub scan_owner: Option<MediaTaskOwner>,
     pub last_error: Option<String>,
     pub devices: Arc<Vec<String>>,
     pub selected_device: Option<String>,
@@ -498,6 +501,7 @@ impl Default for SystemState {
             scan_message: String::new(),
             scan_progress: None,
             scan_task_id: None,
+            scan_owner: None,
             last_error: None,
             devices: Arc::new(Vec::new()),
             selected_device: None,
@@ -654,6 +658,9 @@ pub enum CollectionDestination {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum Command {
+    MutateConfig {
+        change: ConfigMutation,
+    },
     TransferCollection {
         source: CollectionSource,
         destination: CollectionDestination,

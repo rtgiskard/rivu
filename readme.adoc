@@ -72,11 +72,12 @@ requests scanning when raising an existing window.
 One core runs per data directory. All clients must use the same `--data-dir` to
 reach the same instance. `--config` selects configuration when starting a core.
 
-Closing the GUI window leaves playback and the core running. Reopen it with
-`rivu gui`; stop the instance with `rivu quit`, `Quit Rivu`, or MPRIS `Quit` when
-enabled. A `serve` instance must be stopped before starting a graphical host in
-the same data directory.
-Ctrl-C and SIGTERM also request a clean shutdown.
+The GUI menu's `Close window` exits the desktop process and leaves playback and
+the core running. Reopen it with `rivu gui`, including when the core was started
+with `rivu serve`. `Quit application` stops the Core and connected GUI/TUI clients,
+as do `rivu quit`, the tray's `Quit Rivu`, and MPRIS `Quit` when enabled.
+Ctrl-C and SIGTERM request a clean shutdown of the process receiving them;
+terminating only the desktop does not stop the core.
 
 == CLI
 
@@ -262,11 +263,12 @@ report an explicit disabled-feature error instead of falling back to Python.
 
 === Frontend selection
 
-`gui` and `tui` select independent frontend libraries. The desktop and Core
-remain in one process; the TUI connects to an existing Core over IPC. Without
-`gui`, the application does not depend on GPUI, Wayland integration, or graphical
-controls. Selecting `tui` does not remove the application's Core/audio services;
-the standalone `rivu-tui` library itself has no engine or database dependency.
+`gui` and `tui` select independent frontend libraries. One `rivu` executable runs
+the Core service and graphical desktop in separate processes; both frontends
+connect to Core over IPC. Without `gui`, the application does not depend on GPUI,
+Wayland integration, or graphical controls. Selecting `tui` does not remove the
+application's Core/audio services; the standalone `rivu-tui` library itself has no
+engine or database dependency.
 
 [source,sh]
 ----
@@ -283,8 +285,8 @@ explicitly to these builds when needed. Select `-p rivu` for a frontend-pruned
 application build: `--workspace` also builds the independent frontend packages.
 
 The frontend crates are `rivu-gui` and `rivu-tui`; `rivu-presentation` holds their
-shared non-graphical presentation resources. Ownership and the in-process GUI
-host contract are described in link:doc/21_ipc.adoc#consumer-and-application-lifetimes[frontend lifetimes].
+shared non-graphical presentation resources. Process ownership and client
+lifetimes are described in link:doc/21_ipc.adoc#consumer-and-application-lifetimes[frontend lifetimes].
 
 With GNU tar and zstd installed, `make package` creates
 `.cache/dist/rivu-linux-<host-architecture>.tar.zst` and its SHA-256 checksum

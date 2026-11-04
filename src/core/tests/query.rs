@@ -2,7 +2,7 @@ use super::*;
 
 pub(crate) struct TestQueryPort {
     requests: mpsc::Receiver<Request>,
-    _analysis: rivu_audio::analysis::AnalysisWorker,
+    _analysis: Arc<rivu_audio::capture::PcmControl>,
 }
 
 pub(crate) struct TestQueryReply {
@@ -37,7 +37,7 @@ impl CoreHandle {
     // The production query port with a controlled consumer, sharing the existing
     // test executor and analysis fixture rather than introducing a mock transport.
     pub(crate) fn test_query_port() -> (Self, TestQueryPort) {
-        let (handle, analysis, requests) = display_fixture();
+        let (handle, analysis, requests) = pcm_fixture();
         (
             handle,
             TestQueryPort {
@@ -65,7 +65,9 @@ impl CoreHandle {
             state.revisions
         };
         if notify {
-            self.notify_revisions();
+            self.revision_updates.write().retain(|sender| {
+                !matches!(sender.try_send(()), Err(mpsc::TrySendError::Closed(_)))
+            });
         }
         revisions
     }
@@ -128,90 +130,22 @@ fn cancelled_queued_read_skips_store_and_does_not_cancel_another_owner() {
 }
 
 #[test]
-fn already_cancelled_read_never_enters_the_request_queue() {
-    let (handle, _analysis, requests) = display_fixture();
-    let mut epoch = QueryEpoch::default();
-    let ticket = epoch.ticket();
-    epoch.cancel();
-    assert!(matches!(
-        futures::executor::block_on(handle.query_if_current(Query::Track { track_id: 1 }, ticket))
-            .result,
-        Err(QueryError::Cancelled)
-    ));
-    assert!(requests.try_recv().is_err());
-}
-
-#[test]
-fn cancellation_after_dispatch_waits_for_the_physical_reply() {
-    use std::sync::atomic::AtomicBool;
-
-    let (_directory, mut core) = fixture();
-    let (handle, _analysis, mut requests) = display_fixture();
-    let mut epoch = QueryEpoch::default();
-    let ticket = epoch.ticket();
-    let gate = Arc::new(AtomicBool::new(true));
-    let worker_gate = Arc::clone(&gate);
-    let (finished, completion) = bounded(1);
-    let worker = thread::spawn(move || {
-        let response = futures::executor::block_on(
-            handle.query_if_current(Query::Track { track_id: 1 }, ticket),
-        );
-        worker_gate.store(false, Ordering::Release);
-        finished.send(response).unwrap();
-    });
-    let request = requests.recv_timeout(Duration::from_secs(2)).unwrap();
-    let Operation::Query { query, ticket } = request.operation else {
-        panic!("expected a read request");
-    };
-    // Execute the same dispatch boundary as Core::run, then deliberately
-    // hold physical completion delivery until after cancellation.
-    let response = core.query_response_if_current(&query, ticket.as_ref());
-    assert!(matches!(&response.result, Ok(ViewResponse::Track(Some(track))) if track.id == 1));
-    epoch.cancel();
-    assert!(gate.load(Ordering::Acquire));
-    assert!(completion.try_recv().is_err());
-    request
-        .reply
-        .unwrap()
-        .send(CoreResponse::Query(response))
-        .unwrap();
-    assert!(matches!(
-        completion.recv_timeout(Duration::from_secs(2)).unwrap().result,
-        Ok(ViewResponse::Track(Some(track))) if track.id == 1
-    ));
-    worker.join().unwrap();
-    assert!(!gate.load(Ordering::Acquire));
-}
-
-#[test]
-fn gui_timeout_notifies_without_retiring_and_discards_late_reply_or_disconnect() {
+fn retained_query_waits_for_physical_reply_or_disconnect() {
     for disconnect in [false, true] {
-        let (handle, _analysis, requests) = display_fixture();
-        let (notice, notices) = bounded(1);
-        let handle = handle.with_query_timeout(move |response| notice.send(response).unwrap());
-        let mut epoch = QueryEpoch::default();
-        let ticket = epoch.ticket();
+        let (handle, _analysis, requests) = pcm_fixture();
         let (finished, completion) = bounded(1);
         let worker = thread::spawn(move || {
             finished
-                .send(futures::executor::block_on(handle.query_with_ticket_async(
-                    Query::Track { track_id: 1 },
-                    Some(ticket),
-                    true,
-                    Duration::ZERO,
-                )))
+                .send(futures::executor::block_on(
+                    handle.query_retained(Query::Track { track_id: 1 }),
+                ))
                 .unwrap();
         });
         let request = requests.recv_blocking().unwrap();
-        let notification = notices.recv().unwrap();
-        assert!(matches!(notification.result, Err(QueryError::Message(_))));
-        // Logical replacement/cancellation cannot complete the submitted worker.
-        epoch.cancel();
-        let latest = epoch.ticket();
-        assert!(latest.is_current());
         assert!(completion.try_recv().is_err());
-        assert!(requests.try_recv().is_err());
-        if !disconnect {
+        if disconnect {
+            drop(request);
+        } else {
             request
                 .reply
                 .unwrap()
@@ -220,26 +154,23 @@ fn gui_timeout_notifies_without_retiring_and_discards_late_reply_or_disconnect()
                     result: Ok(ViewResponse::Track(None)),
                 }))
                 .unwrap();
-        } else {
-            drop(request);
         }
-        let result = completion.recv().unwrap();
-        assert!(matches!(result.result, Err(QueryError::Message(_))));
-        assert!(notices.try_recv().is_err());
+        let response = completion.recv_timeout(Duration::from_secs(2)).unwrap();
+        if disconnect {
+            assert!(matches!(response.result, Err(QueryError::Message(_))));
+        } else {
+            assert!(matches!(response.result, Ok(ViewResponse::Track(None))));
+        }
         worker.join().unwrap();
     }
 }
 
 #[test]
-fn non_gui_timeout_does_not_wait_for_physical_retirement_or_notify_gui() {
-    let (handle, _analysis, requests) = display_fixture();
-    let handle = handle.with_query_timeout(|_| panic!("non-GUI query notified GUI"));
-    let result = futures::executor::block_on(handle.query_with_ticket_async(
-        Query::Track { track_id: 1 },
-        None,
-        false,
-        Duration::ZERO,
-    ));
+fn query_timeout_does_not_wait_for_physical_retirement() {
+    let (handle, _analysis, requests) = pcm_fixture();
+    let result = futures::executor::block_on(
+        handle.query_with_timeout(Query::Track { track_id: 1 }, Duration::ZERO),
+    );
     assert!(matches!(result.result, Err(QueryError::Message(_))));
     let request = requests.recv_blocking().unwrap();
     assert!(

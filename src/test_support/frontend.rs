@@ -1,147 +1,62 @@
-//! Genuine Core and catalog fixtures exposed only by the test-support feature.
-use crate::{
-    app::AppHandle,
-    core::{CoreHandle, CoreRuntime},
-    execution::BlockingExecutor,
-};
+//! Genuine Core and IPC services for frontend integration tests.
+use crate::{app::AppHandle, core::CoreRuntime, ipc};
 use anyhow::Result;
-use futures::future::BoxFuture;
-use parking_lot::RwLock;
-use rivu_protocol::{
-    analysis::{AnalysisFrame, DisplayDemand},
-    display::DisplayState,
-    model::{Command, Config, ConfigChange, ConfigPatch, Query, Track},
-    query_tracking::QueryTicket,
-    response::{Ack, QueryResponse},
-    waveform::{WaveformFrame, WaveformScanParameters},
-};
-use std::{
-    path::Path,
-    sync::{Arc, atomic::AtomicBool},
-};
+use rivu_format::config::Config;
+use std::path::Path;
 
-type Wakeup = Arc<dyn Fn() + Send + Sync>;
-type QueryTimeout = Arc<dyn Fn(QueryResponse) + Send + Sync>;
-pub type WaveformScan = Box<dyn FnOnce(Track) -> BoxFuture<'static, Result<WaveformFrame>> + Send>;
-
+/// Runs the same command, PCM and waveform services as the application, without
+/// process-wide logging, signals, desktop launching or desktop-bus services.
 pub struct FrontendFixture {
-    pub endpoint: FrontendEndpoint,
-    _runtime: CoreRuntime,
+    server: Option<ipc::Server>,
+    waveform: Option<ipc::waveform::WaveServer>,
+    pcm: Option<ipc::pcm::PcmServer>,
+    // The runtime owns the executor that drains command and waveform sessions.
+    runtime: CoreRuntime,
+    // Storage authority outlives every service, including partial teardown.
+    _owner: ipc::SocketOwner,
 }
 
 impl FrontendFixture {
     pub fn start(data_dir: &Path, config: &Path) -> Result<Self> {
+        let owner = ipc::SocketOwner::acquire(data_dir)?;
         let runtime = CoreRuntime::start(data_dir, config)?;
-        let endpoint = FrontendEndpoint {
-            core: runtime.handle.clone(),
-            app: AppHandle::new(&runtime, true),
-            workers: Arc::clone(runtime.test_workers()),
-        };
+        let app = AppHandle::new(&runtime, data_dir);
+        let pcm =
+            ipc::pcm::PcmServer::start(data_dir, runtime.handle.clone(), owner.instance_id())?;
+        let waveform = ipc::waveform::WaveServer::start(
+            data_dir,
+            runtime.handle.clone(),
+            owner.instance_id(),
+            runtime.test_executor(),
+            runtime.test_workers(),
+        )?;
+        let server =
+            ipc::Server::start(&owner, runtime.handle.clone(), app, runtime.test_executor())?;
+        // Hello binds identity; a query also waits for Core's dispatch startup.
+        rivu_client::client_session(data_dir)?
+            .query(rivu_protocol::model::Query::ScanTask { id: 0 })?;
         Ok(Self {
-            endpoint,
-            _runtime: runtime,
+            server: Some(server),
+            waveform: Some(waveform),
+            pcm: Some(pcm),
+            runtime,
+            _owner: owner,
         })
+    }
+
+    pub fn executor(&self) -> &std::sync::Arc<async_executor::Executor<'static>> {
+        self.runtime.test_executor()
     }
 }
 
-#[derive(Clone)]
-pub struct FrontendEndpoint {
-    core: CoreHandle,
-    app: AppHandle,
-    workers: Arc<BlockingExecutor>,
-}
-impl FrontendEndpoint {
-    pub fn display_state(&self) -> DisplayState {
-        self.core.display_state()
-    }
-    pub fn display_state_if_changed(&self, revision: u64) -> Option<DisplayState> {
-        self.core.display_state_if_changed(revision)
-    }
-    pub fn config_snapshot(&self) -> Arc<Config> {
-        self.core.config_snapshot()
-    }
-    pub fn library_revision(&self) -> u64 {
-        self.core.library_revision()
-    }
-    pub fn send(&self, command: Command) -> Result<()> {
-        self.core.send(command)
-    }
-    pub fn request_ack(&self, command: Command) -> BoxFuture<'_, Ack> {
-        Box::pin(self.core.request_ack(command))
-    }
-    pub fn query(
-        &self,
-        query: Query,
-        ticket: Option<QueryTicket>,
-        timeout: Option<QueryTimeout>,
-    ) -> BoxFuture<'_, QueryResponse> {
-        let mut core = self.core.clone();
-        if let Some(timeout) = timeout {
-            core = core.with_query_timeout(move |response| timeout(response));
-        }
-        Box::pin(async move {
-            match ticket {
-                Some(ticket) => core.query_if_current(query, ticket).await,
-                None => core.query_for_gui(query).await,
-            }
-        })
-    }
-    pub fn update_gui_config(&self, change: ConfigChange) -> Result<()> {
-        self.core.update_gui_config(change)
-    }
-    pub fn apply_gui_settings(&self, patch: ConfigPatch) -> BoxFuture<'_, Ack> {
-        Box::pin(self.core.apply_gui_settings(patch))
-    }
-    pub fn analysis(&self) -> &Arc<RwLock<AnalysisFrame>> {
-        &self.core.analysis
-    }
-    pub fn waveform(&self) -> &Arc<RwLock<WaveformFrame>> {
-        &self.core.waveform
-    }
-    pub fn set_display_demand(&self, demand: DisplayDemand) {
-        self.core.set_display_demand(demand);
-    }
-    pub fn analysis_frame_is_current(&self, frame: &AnalysisFrame) -> bool {
-        self.core.analysis_frame_is_current(frame)
-    }
-    pub fn request_analysis_frame(&self) {
-        self.core.request_analysis_frame();
-    }
-    pub fn prepare_waveform_scan(
-        &self,
-        parameters: WaveformScanParameters,
-        selected: bool,
-        cancelled: Arc<AtomicBool>,
-    ) -> Result<WaveformScan> {
-        self.core
-            .prepare_waveform_scan(parameters, selected, cancelled, Arc::clone(&self.workers))
-    }
-    pub fn set_playback_wakeup(&self, callback: Wakeup) {
-        self.core.set_wakeup(move || callback());
-    }
-    pub fn clear_wakeup(&self) {
-        self.core.clear_wakeup();
-    }
-    pub fn request_shutdown(&self) -> Result<()> {
-        self.app.request_shutdown()
-    }
-    pub fn is_shutting_down(&self) -> bool {
-        self.app.is_shutting_down()
-    }
-    pub fn set_control_wakeup(&self, callback: Wakeup) {
-        self.app.set_wakeup(move || callback());
-    }
-    pub fn withdraw_gui(&self) {
-        self.app.withdraw_gui();
-    }
-    pub fn take_raise_request(&self) -> bool {
-        self.app.take_raise_request()
-    }
-    pub fn take_quit_request(&self) -> bool {
-        self.app.take_quit_request()
-    }
-    pub fn raise_pending(&self) -> bool {
-        self.app.state.lock().raise_pending
+impl Drop for FrontendFixture {
+    fn drop(&mut self) {
+        // Cancel transport-owned work while Core's executor is still running.
+        drop(self.waveform.take());
+        drop(self.pcm.take());
+        drop(self.server.take());
+        let _ = self.runtime.control.request_shutdown();
+        let _ = self.runtime.join();
     }
 }
 

@@ -35,16 +35,21 @@ link:22_cache.adoc#visualization-caching[Visualization caching].
 Visualization analysis is separate from audio output and observes samples before
 master volume gain. One global `visualizations.general.signal` setting selects `before`
 or `after` (default): before the active realtime processing chain, or after that
-chain including monitor EQ. The audio worker sends only the selected stereo
-signal to a bounded ring; analysis consumes it off the real-time thread. There
-is one FFT path, not parallel before/after analyzers. Worker-driven analysis need
-not be strictly synchronized to the output callback's audible clock. Spectrum
-combines channel energy rather than averaging signed channels, so opposite-phase
-stereo does not cancel. Optional spatial analysis retains the channels' relationship.
+chain including monitor EQ. The audio worker writes the selected native-channel
+signal once into a bounded shared-memory window. The GUI reads it directly and
+folds channels into logical stereo for `rivu-analysis`, outside both playback and
+paint callbacks. There is one FFT path, not parallel before/after analyzers.
+Each block carries its admitted output-frame position. GUI ingestion stops before
+a block starting more than 1024 frames ahead of the observed audible cursor and
+resumes on PCM or cursor notifications, without clock polling or deadline
+prediction. This limits gross prefetch lead; it is not strict A/V synchronization.
+Spectrum combines channel energy rather than averaging signed channels, so
+opposite-phase stereo does not cancel. Optional spatial analysis retains the
+channels' relationship.
 
 === PCM admission
 
-The tap holds at most 32,768 stereo frames and observes only PCM admitted to
+The shared tap holds at most 32,768 frames of up to 18 native channels and observes only PCM admitted to
 output. Each refill admits at most 16,384 frames before returning to control
 handling. DSP and monitor EQ process converted fragments once; later edits do
 not reprocess pending output. Rolling waveform capture remains decoder-driven.
@@ -68,12 +73,15 @@ execution failure stops playback rather than resuming uncertain decoder state.
 
 === Ingestion and publication
 
-Audio arrival wakes analysis to ingest a finite queued prefix independently of
-display requests. `analysis_rate_hz` limits FFT transforms and publications, not PCM
-ingestion. Requests coalesce into one permit, retained until a complete fresh
-window and its publication deadline are available. The worker publishes one
-latest shared frame, not a result backlog; hidden, paused and disabled gates
-revoke permits and timed wakeups.
+PCM arrival and output-cursor progress wake GUI analysis to ingest a finite retained
+prefix independently of display requests. Native samples are read directly from
+the shared window without an intermediate stereo PCM buffer. Readers do not pin
+slots; concurrent overwrites remain best-effort observation. Each drain is bounded
+to the window's 32 slots. `analysis_rate_hz` limits FFT transforms and publications,
+not PCM ingestion. Requests coalesce into one permit, retained until
+a complete fresh window and its publication deadline are available. The worker
+publishes one latest local shared frame, not a result backlog; hidden, paused and
+disabled gates revoke permits and timed wakeups.
 
 Analysis always observes the latest complete window. When that window is shorter
 than the analysis interval, a transient between observed windows can be absent
@@ -84,8 +92,8 @@ unobserved audio. Density instead accumulates samples during ingestion.
 Analysis preparation and retained analyzer capacity follow
 link:22_cache.adoc#resource-boundaries[Resource boundaries]. Pause or loss of demand
 clears capture input; disabling visualizations also breaks semantic continuity.
-Backpressure never blocks playback. A stalled worker drops stale queued input
-and marks a continuity break; fresh audio wakes recovery without polling. A
+Backpressure never blocks playback. A stalled worker skips overwritten input
+and marks a continuity break; PCM or cursor progress wakes recovery without polling. A
 ready replacement and its generation publish together. Until then, invalidation
 remains visible so consumers cannot smooth across unrelated audio.
 

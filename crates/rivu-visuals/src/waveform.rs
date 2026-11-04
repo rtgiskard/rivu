@@ -77,6 +77,7 @@ struct ManualRequest {
     source: Rc<Source>,
     suspension_generation: u64,
     cancelled: Arc<AtomicBool>,
+    remote_cancel: Option<futures::channel::oneshot::Sender<()>>,
     progressive_revision: u64,
     identity: Option<rivu_protocol::waveform::WaveformIdentity>,
 }
@@ -1065,29 +1066,24 @@ impl Waveform {
         false
     }
 
-    /// Capture display identity before the host starts an explicit full scan.
-    /// The host registers this cancellation flag with the audio producer.
+    /// Capture display identity for an authoritative remote full scan.
+    /// Replacing or releasing the request also closes its remote connection.
     pub fn prepare_full(
         &mut self,
         track: &Track,
         cx: &mut Context<Self>,
-    ) -> (u64, Arc<AtomicBool>) {
+    ) -> (u64, futures::channel::oneshot::Receiver<()>) {
         self.sync(Some(track), cx);
-        let request = self.start_full(track.decoder_hint);
-        cx.notify();
-        request
-    }
-
-    /// Accept the current saved hint without replacing the admitted scan or its cancellation flag.
-    pub fn set_full_hint(&mut self, generation: u64, decoder_hint: DecoderHint) -> bool {
-        if !self.enabled || generation != self.generation {
-            return false;
+        let (generation, suspended) = self.start_full(track.decoder_hint);
+        let (cancel, cancelled) = futures::channel::oneshot::channel();
+        if !suspended.load(Ordering::Relaxed) {
+            self.manual
+                .as_mut()
+                .expect("full request is present")
+                .remote_cancel = Some(cancel);
         }
-        let Some(request) = self.manual.as_mut() else {
-            return false;
-        };
-        Rc::make_mut(&mut request.source).decoder_hint = decoder_hint;
-        true
+        cx.notify();
+        (generation, cancelled)
     }
 
     pub fn complete_full(
@@ -1117,6 +1113,7 @@ impl Waveform {
             }),
             suspension_generation: shared.suspension_generation(),
             cancelled: Arc::clone(&cancelled),
+            remote_cancel: None,
             progressive_revision: shared.revision,
             identity: self
                 .source
@@ -3122,17 +3119,19 @@ mod tests {
     }
 
     #[test]
-    fn saved_hint_update_preserves_scan_identity_and_rejects_retired_requests() {
+    fn replacing_and_dropping_full_request_retires_remote_connection() {
         let mut waveform = preview(frame(vec![Some(0.25), None]));
-        let (generation, cancelled) = waveform.start_full(DecoderHint::Auto);
-        assert!(waveform.set_full_hint(generation, DecoderHint::Native));
-        let request = waveform.manual.as_ref().unwrap();
-        assert_eq!(request.source.decoder_hint, DecoderHint::Native);
-        assert!(Arc::ptr_eq(&cancelled, &request.cancelled));
-        assert!(!cancelled.load(Ordering::Relaxed));
+        waveform.start_full(DecoderHint::Auto);
+        let (cancel, mut cancelled) = futures::channel::oneshot::channel();
+        waveform.manual.as_mut().unwrap().remote_cancel = Some(cancel);
         waveform.cancel_pending();
-        assert!(!waveform.set_full_hint(generation, DecoderHint::Ffmpeg));
-        assert!(cancelled.load(Ordering::Relaxed));
+        assert!(cancelled.try_recv().is_err());
+
+        waveform.start_full(DecoderHint::Auto);
+        let (cancel, mut cancelled) = futures::channel::oneshot::channel();
+        waveform.manual.as_mut().unwrap().remote_cancel = Some(cancel);
+        drop(waveform);
+        assert!(cancelled.try_recv().is_err());
     }
 
     #[test]

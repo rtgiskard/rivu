@@ -84,9 +84,9 @@ dependencies = [
 
 [[package]]
 name = "addr2line"
-version = "0.25.1"
+version = "0.27.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b5d307320b3181d6d7954e663bd7c774a838b8220fe0593c86d9fb09f498b4b"
+checksum = "e567177890eb1617b1f774005b66b26b2377afd138a2ca37aae7d8f0c81429d4"
 dependencies = [
  "gimli",
 ]
@@ -544,14 +544,14 @@ dependencies = [
 
 [[package]]
 name = "backtrace"
-version = "0.3.76"
+version = "0.3.77"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb531853791a215d7c62a30daf0dde835f381ab5de4589cfe7c649d2cbe92bd6"
+checksum = "42f4220217f3288537b83684130f42fad43320b1c3b805f1910d683d52ded24f"
 dependencies = [
  "addr2line",
  "cfg-if",
  "libc",
- "miniz_oxide 0.8.9",
+ "miniz_oxide 0.9.1",
  "object",
  "rustc-demangle",
  "windows-link 0.2.1",
@@ -2164,9 +2164,9 @@ dependencies = [
 
 [[package]]
 name = "gimli"
-version = "0.32.3"
+version = "0.34.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e629b9b98ef3dd8afe6ca2bd0f89306cec16d43d907889945bc5d6687f2f13c7"
+checksum = "1033caf0b349c518623b5396bfb2cf0bddf44f0306d543a250e5743297aafd10"
 
 [[package]]
 name = "gl_generator"
@@ -4046,9 +4046,9 @@ dependencies = [
 
 [[package]]
 name = "object"
-version = "0.37.3"
+version = "0.40.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff76201f031d8863c38aa7f905eca4f53abbfa15f609db4277d44cd8938f33fe"
+checksum = "dd229a0361b9d0d4396176e02d65897f487eebeab7caa6d443855ee152ca0b9c"
 dependencies = [
  "memchr",
 ]
@@ -4145,9 +4145,9 @@ dependencies = [
 
 [[package]]
 name = "ordered-float"
-version = "5.5.0"
+version = "5.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8c7c9e0d9b23589f26070720bac724174bfec1083e82f7854cdd0267518343c0"
+checksum = "7f59006ce1e204c30956638535b74d317bca99477b9356dfaec54c37f6f600ab"
 dependencies = [
  "num-traits",
 ]
@@ -5139,6 +5139,7 @@ dependencies = [
  "async-executor",
  "async-io",
  "async-lock",
+ "async-process",
  "async-signal",
  "blake3",
  "blocking",
@@ -5166,6 +5167,7 @@ dependencies = [
  "rivu-metadata",
  "rivu-presentation",
  "rivu-protocol",
+ "rivu-shm",
  "rivu-tui",
  "rivu-utils",
  "rusqlite",
@@ -5177,6 +5179,15 @@ dependencies = [
  "tracing",
  "url",
  "zbus",
+]
+
+[[package]]
+name = "rivu-analysis"
+version = "0.2.8"
+dependencies = [
+ "rivu-format",
+ "rivu-protocol",
+ "rustfft",
 ]
 
 [[package]]
@@ -5201,8 +5212,8 @@ dependencies = [
  "rivu-format",
  "rivu-metadata",
  "rivu-protocol",
+ "rivu-shm",
  "rivu-utils",
- "rustfft",
  "serde",
  "serde_json",
  "symphonia",
@@ -5257,22 +5268,29 @@ version = "0.2.8"
 dependencies = [
  "anyhow",
  "ashpd",
+ "async-channel",
+ "async-executor",
+ "async-io",
+ "async-signal",
  "blake3",
  "chrono",
  "futures",
+ "futures-lite",
  "gpui",
  "gpui_platform",
  "image",
  "libc",
  "parking_lot",
- "ringbuf",
  "rivu",
+ "rivu-analysis",
  "rivu-audio",
+ "rivu-client",
  "rivu-dsp",
  "rivu-format",
  "rivu-metadata",
  "rivu-presentation",
  "rivu-protocol",
+ "rivu-shm",
  "rivu-ui",
  "rivu-utils",
  "rivu-visuals",
@@ -5335,6 +5353,7 @@ dependencies = [
  "async-io",
  "blake3",
  "bytes",
+ "futures",
  "futures-lite",
  "libc",
  "postcard",
@@ -5342,6 +5361,16 @@ dependencies = [
  "rivu-format",
  "serde",
  "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "rivu-shm"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "rivu-protocol",
  "tempfile",
 ]
 
@@ -5397,6 +5426,7 @@ dependencies = [
  "futures",
  "gpui",
  "parking_lot",
+ "rivu-analysis",
  "rivu-format",
  "rivu-protocol",
  "rivu-ui",
@@ -5485,9 +5515,9 @@ dependencies = [
 
 [[package]]
 name = "rustix"
-version = "1.1.5"
+version = "1.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d"
+checksum = "e5e76742e5294153d4dde1207dbec5bdd81eef6fabdc0d2118babadabfd858aa"
 dependencies = [
  "bitflags 2.13.2",
  "errno",
@@ -6836,9 +6866,9 @@ checksum = "b1d386ff53b415b7fe27b50bb44679e2cc4660272694b7b6f3326d8480823a94"
 
 [[package]]
 name = "unicode-width"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
+checksum = "ca718471876992059f251e33aafc334346ada08042b7661dd1fe313a9bced557"
 
 [[package]]
 name = "url"
@@ -6881,15 +6911,24 @@ dependencies = [
 
 [[package]]
 name = "utf8_iter"
-version = "1.0.4"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
+checksum = "af3bd9d3e571c26fcce9d033b87ea5ab061b8d2ffe9b7a5675d810d68f03edf0"
+dependencies = [
+ "utf_types",
+]
 
 [[package]]
 name = "utf8parse"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
+
+[[package]]
+name = "utf_types"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a3b425286980a367278453f3b6d28cdcb134b574e5a35824a6ff5eebad50bb6"
 
 [[package]]
 name = "uuid"
@@ -8022,9 +8061,9 @@ dependencies = [
 
 [[package]]
 name = "zcheapstr"
-version = "1.1.0"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d1afec51604565183aeb5c54c20aeab286120d4e4460f7f76e3e8bb8c0d99473"
+checksum = "939f186d9ecebe044315a5cb6d6f78568bbc21152adc954d5a0c2f58bdbc9920"
 dependencies = [
  "serde",
 ]

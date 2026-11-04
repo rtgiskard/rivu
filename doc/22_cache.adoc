@@ -24,10 +24,10 @@ of queue restoration and request handling. Core publishes the result without
 changing the selected output; the device list may initially be empty. Shutdown
 acknowledgement can precede discovery completion, but process exit waits for it.
 
-Saved layouts are read and parsed alongside application initialization. The
-persistence writer starts only when the GUI session accepts that data, before
-the first window is constructed. Reopening uses session memory, so no late disk
-load can replace an edited workspace.
+Saved layouts are read and parsed during desktop initialization. The persistence
+writer starts when the GUI session accepts that data, before the first window is
+constructed. Reopening starts a fresh desktop from the persisted layout; late
+loads within a session cannot replace an edited workspace.
 
 == Queue control and mutation working memory
 
@@ -89,13 +89,13 @@ link:21_ipc.adoc#transactional-inputs-and-bounded-storage-queries[IPC storage qu
 
 === Window-local query retention
 
-The window and feature owners share one GUI snapshot cache. Changed-state
-projection and revision comparison occur under the same Core read lock; unchanged
-reads reuse the snapshot. Each consumer retains its own last-processed revision,
-so another consumer's refresh cannot hide a change. Completion/timeout checks use
-current revisions, not a submission-time snapshot. A publication with unchanged
-state-section tokens does not invalidate the GUI root; audio frames still have
-their independent processing path.
+The window and feature owners share one GUI snapshot cache. Background IPC
+workers merge authoritative state and revisions into one local publication;
+unchanged reads reuse the snapshot. Each consumer retains its own last-processed
+revision, so another consumer's refresh cannot hide a change. Completion/timeout
+checks use current revisions, not a submission-time snapshot. A publication with
+unchanged state-section tokens does not invalidate the GUI root; audio frames
+still have their independent processing path.
 
 Workspace publishes panel membership and active-tab demand when layout structure
 or panel options change. Visualizer and artwork owners reconcile their retained
@@ -269,7 +269,7 @@ The ownership layers have different retirement boundaries:
 [cols="1,3",options="header"]
 |===
 |Owner |Retained data and boundary
-|Audio analysis worker
+|GUI analysis worker
 |Reusable FFT machinery and bounded optional snapshot pools. Suspending capture
 clears accepted input, not necessarily prepared allocation capacity; see
 <<resource-boundaries,Resource boundaries>>.
@@ -413,7 +413,15 @@ Source/seek identity and analysis settings govern semantic invalidation even whi
 hidden or paused. The continuity contract belongs to
 link:23_visuals.adoc[Visualization Rendering Design].
 
-The processed Before tap's source-aligned FIFO is separate from the analysis ring
+Core retains one fixed native-channel PCM window shared read-only with GUI clients:
+32 slots × 1024 frames × 18 float channels, or 2.25 MiB of sample storage plus
+metadata and alignment. Capture writes directly; neither IPC nor GUI transport
+retains another PCM queue. The GUI's logical stereo analysis history remains
+separate. Slots are never pinned by readers, so a stalled GUI cannot retain or
+extend Core storage. The transport contract belongs to
+link:21_ipc.adoc#realtime-pcm-transport[Realtime PCM transport].
+
+The processed Before tap's native-channel source-aligned FIFO is separate from the analysis ring
 and waveform retention. Capture-identity changes, inactive analysis or exhaustion
 of its output span release samples and allocation, including on refills admitting
 no new PCM. Its capacity and admission contract are defined in
@@ -842,29 +850,17 @@ focus and listeners, then restores the enclosing dispatch and context stacks.
 Atlas admission rejects invalid or over-device-limit dimensions before allocation.
 Failed first-tile reservation leaves no empty page or consumed page slot.
 
-After the window is destroyed, the application requests headless mode. A
-successful transition releases the display connection and its shared GPU
-context; a failed transition is logged, not treated as completed reclamation.
-Reopening reconnects to the original display before creating a new window;
-requests arriving during a connection switch are coalesced. A failed reconnect
-leaves the application running so another open request can retry.
+Closing the last window exits the desktop process. GPUI display connections,
+GPU contexts, font caches, worker buffers and allocator state retire with that
+process rather than remaining in a windowless service. Submitted GPU work still
+obeys backend retirement rules during teardown.
 
-After successful headless transition, GPUI reclaims idle derived storage once the
-current update's callbacks finish, unless a window reopened. Empty element/event
-arenas retain one 1 MiB chunk each; live allocations remain valid. Layout scratch,
-font metrics/glyph bounds, and idle text wrappers/runs are released, but registered
-font identities remain. Reopening rebuilds these caches on demand. This adds no
-timer and waits for neither GPU nor background work.
+Playback, IPC, tray, MPRIS and accepted business operations belong to the separate
+Core service and remain alive. Reopening starts a new desktop and rebuilds its
+derived caches from current service state. Process exit releases desktop-owned
+memory; this is not a promise about Core's retained business or audio caches.
 
-Playback, IPC, tray, MPRIS, and accepted business operations remain independent
-of this transition. The GPUI event loop, executors, registered font system, and
-business caches remain available; this is not full framework teardown. Allocator arenas,
-thread-local state, and backend display bookkeeping can outlive a window or
-display reconnect, so RSS is not a count of live rendering resources. No
-allocator trim is performed, and closing the window does not promise
-serve-level process memory.
-
-GUI and tray share one startup Localizer, including parsed resources and fixed
-messages, across window reopen. Language changes require restart; window strings
-and tray protocol payloads retain their separate owners.
+GUI and tray have separate process-local startup Localizers. A saved language
+change requires restarting the GUI for window strings and restarting the Core
+service for tray protocol payloads.
 

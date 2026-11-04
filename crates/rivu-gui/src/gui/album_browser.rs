@@ -10,7 +10,7 @@ use std::{
 
 use gpui::{prelude::*, *};
 
-use crate::host::HostHandle;
+use crate::frontend::FrontendHandle;
 use rivu_protocol::{
     model::{AlbumKey, AlbumSort, Command, PlaybackStatus, Track},
     response::QueryRevisions,
@@ -224,7 +224,7 @@ impl AlbumCovers {
 pub(super) struct AlbumBrowser {
     panel_id: u64,
     scroll_views: Rc<RefCell<ScrollViews>>,
-    handle: HostHandle,
+    handle: FrontendHandle,
     snapshots: Rc<super::feature::SnapshotSource>,
     i18n: Arc<rivu_presentation::i18n::Localizer>,
     localized_text: BTreeMap<&'static str, SharedString>,

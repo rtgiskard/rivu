@@ -1,6 +1,6 @@
 //! Delivers a logical waiting failure while the asynchronous read still owns its slot.
 
-use crate::host::HostHandle;
+use crate::frontend::FrontendHandle;
 use futures::{
     channel::oneshot,
     future::{Either, select},
@@ -10,9 +10,9 @@ use parking_lot::Mutex;
 use rivu_protocol::response::QueryResponse;
 
 pub(super) async fn run<T, F: Future<Output = T>>(
-    handle: HostHandle,
+    handle: FrontendHandle,
     cx: &mut AsyncApp,
-    operation: impl FnOnce(HostHandle) -> F,
+    operation: impl FnOnce(FrontendHandle) -> F,
     mut on_timeout: impl FnMut(QueryResponse, &mut AsyncApp),
 ) -> T {
     // A composed operation reports its first failure only. The original future

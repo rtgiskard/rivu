@@ -1163,8 +1163,8 @@ mod tests {
     use crate::test_support::ConfigFixture;
     use crate::test_support::CoreRuntime;
     use core::prelude::v1::test;
+    use rivu_format::config::Config;
     use rivu_presentation::i18n::Localizer;
-    use rivu_protocol::model::Config;
 
     const PANEL: u64 = 7;
 

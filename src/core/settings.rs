@@ -13,49 +13,43 @@ impl Core {
         config
     }
 
-    #[cfg(any(test, feature = "gui", feature = "test-support"))]
-    pub(in crate::core) fn update_gui_config(&mut self, change: ConfigChange) -> Result<()> {
-        if let ConfigChange::Settings(patch) = change {
+    pub(in crate::core) fn mutate_config(&mut self, change: ConfigMutation) -> Result<()> {
+        if let ConfigMutation::Settings(patch) = change {
             // Playback controls can be newer than the last persisted config.
             // Only explicit draft changes override the owner's execution-time state.
             let mut config = self.effective_config();
             patch.apply_to(&mut config);
-            return self
-                .command(Command::Configure {
-                    config: std::sync::Arc::new(config),
-                })
-                .map(|_| ())
-                .map_err(|error| error.error);
+            return self.configure(Arc::new(config));
         }
         let mut config = self.effective_config();
-        let visualization_changed = matches!(change, ConfigChange::ToggleVisualization);
+        let visualization_changed = matches!(change, ConfigMutation::ToggleVisualization);
         let roots_changed = matches!(
             change,
-            ConfigChange::AddLibraryRoot(_) | ConfigChange::RemoveLibraryRoot(_)
+            ConfigMutation::AddLibraryRoot(_) | ConfigMutation::RemoveLibraryRoot(_)
         );
         match change {
-            ConfigChange::ToggleVisualization => {
+            ConfigMutation::ToggleVisualization => {
                 config.visualization_enabled = !config.visualization_enabled
             }
-            ConfigChange::ToggleWaveformSeek => {
+            ConfigMutation::ToggleWaveformSeek => {
                 config.waveform_seek_enabled = !config.waveform_seek_enabled
             }
-            ConfigChange::ToggleLibraryColumn(column) => config.library_columns.toggle(column),
-            ConfigChange::AddLibraryRoot(path) => {
+            ConfigMutation::ToggleLibraryColumn(column) => config.library_columns.toggle(column),
+            ConfigMutation::AddLibraryRoot(path) => {
                 let path = library::logical_path(&path)?;
                 if config.library_roots.contains(&path) {
                     return Ok(());
                 }
                 config.library_roots.push(path);
             }
-            ConfigChange::RemoveLibraryRoot(path) => {
+            ConfigMutation::RemoveLibraryRoot(path) => {
                 let path = library::logical_path(&path)?;
                 if !config.library_roots.contains(&path) {
                     return Ok(());
                 }
                 config.library_roots.retain(|root| root != &path);
             }
-            ConfigChange::Settings(_) => unreachable!(),
+            ConfigMutation::Settings(_) => unreachable!(),
         }
         config.validate()?;
         if visualization_changed {
@@ -124,8 +118,9 @@ impl Core {
             self.engine
                 .send(AudioCommand::MediaReadBuffer(config.media_read_buffer_mib))?;
             self.engine.send(AudioCommand::Volume(config.volume))?;
-            self.engine
-                .send(AudioCommand::AnalysisSettings(config.as_ref().into()))?;
+            self.engine.send(AudioCommand::VisualizationSignal(
+                config.visualization_signal,
+            ))?;
             self.engine
                 .send(AudioCommand::Equalizer(Arc::new(config.equalizer.clone())))?;
             self.engine

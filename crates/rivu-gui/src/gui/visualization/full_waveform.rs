@@ -101,3 +101,30 @@ impl FullWaveformRequest {
                 .is_some_and(|target| track.is_some_and(|track| target.matches(track)))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replaced_request_waits_for_physical_worker_retirement() {
+        let track = crate::test_support::artwork_track("track.wav".into());
+        let mut request = FullWaveformRequest::default();
+        let first = request.begin(&track);
+        assert_eq!(request.reserve(), Some((first, track.id)));
+        let replacement = request.begin(&track);
+        assert!(!request.accepts(first, Some(&track)));
+        assert!(request.accepts(replacement, Some(&track)));
+        assert_eq!(request.reserve(), None);
+        request.retire(replacement);
+        assert_eq!(request.reserve(), None);
+        request.retire(first);
+        assert_eq!(request.reserve(), Some((replacement, track.id)));
+        request.retire(first);
+        assert_eq!(request.reserve(), None);
+        request.invalidate();
+        assert!(!request.accepts(replacement, Some(&track)));
+        request.retire(replacement);
+        assert_eq!(request.reserve(), None);
+    }
+}

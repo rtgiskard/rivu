@@ -7,7 +7,7 @@ use super::{
     source::{DECODE_WORK_BUDGET, DecodeStep, Source},
     waveform::{WaveformAccumulator, WaveformBuffer, WaveformControl, WaveformCoverage},
 };
-use crate::analysis::{AnalysisAudioIdentity, AnalysisProducer, AnalysisWorker};
+use crate::capture::{PcmAudioIdentity, PcmControl, PcmProducer};
 use anyhow::{Result, bail};
 use crossbeam_channel::Receiver;
 use parking_lot::RwLock;
@@ -88,14 +88,14 @@ struct VisualizationCapture {
     weights: Vec<[f32; 2]>,
     coverage: WaveformCoverage,
     visualization_enabled: bool,
-    producer: Option<AnalysisProducer>,
+    producer: Option<PcmProducer>,
     signal: VisualizationSignal,
-    tap_identity: Option<AnalysisAudioIdentity>,
+    tap_identity: Option<PcmAudioIdentity>,
     // Missing Before samples during capture warmup are not a source gap.
     before_started: bool,
     // Destructive DSP needs a separate Before signal, bounded by its output
     // latency plus one PCM fragment. Other taps borrow admitted PCM directly.
-    before: VecDeque<[f32; 2]>,
+    before: VecDeque<f32>,
     before_position: u64,
 }
 
@@ -150,11 +150,11 @@ impl VisualizationCapture {
         self.before_started = false;
     }
 
-    fn sync_tap(&mut self) -> Option<AnalysisAudioIdentity> {
+    fn sync_tap(&mut self) -> Option<PcmAudioIdentity> {
         let identity = if !self.visualization_enabled {
             None
         } else {
-            self.producer.as_ref().and_then(AnalysisProducer::identity)
+            self.producer.as_ref().and_then(PcmProducer::identity)
         };
         if identity != self.tap_identity || identity.is_none() {
             self.reset_tap();
@@ -173,24 +173,24 @@ impl VisualizationCapture {
         if self.sync_tap().is_none() || pcm.is_empty() {
             return Ok(());
         }
-        if self.before.len() + pcm.len() / channels > limit {
+        if self.before.len() / channels + pcm.len() / channels > limit {
             bail!("Before analysis staging exceeds graph latency plus packet bound");
         }
         if self.before.is_empty() {
             self.before_position = position;
         }
-        self.before.extend(pcm.chunks_exact(channels).map(|frame| {
-            let mut samples = [0.0; 2];
-            for (sample, weight) in frame.iter().zip(&self.weights) {
-                samples[0] += sample * weight[0];
-                samples[1] += sample * weight[1];
-            }
-            samples
-        }));
+        self.before.extend(pcm.iter().copied());
         Ok(())
     }
 
-    fn submit_tap(&mut self, tap: PendingTap, position: u64, pcm: &[f32], channels: usize) {
+    fn submit_tap(
+        &mut self,
+        tap: PendingTap,
+        position: u64,
+        output_frame: u64,
+        pcm: &[f32],
+        channels: usize,
+    ) {
         let Some(identity) = self.sync_tap() else {
             return;
         };
@@ -200,24 +200,28 @@ impl VisualizationCapture {
         let producer = self.producer.as_mut().expect("active tap producer");
         match tap {
             PendingTap::Direct(signal) if signal == self.signal => {
-                producer.push(pcm, &self.weights);
+                producer.push(output_frame, pcm);
             }
             PendingTap::Before if self.signal == VisualizationSignal::Before => {
                 let frames = pcm.len() / channels;
                 let skip = position
                     .saturating_sub(self.before_position)
-                    .min(self.before.len() as u64) as usize;
-                drop(self.before.drain(..skip));
+                    .min((self.before.len() / channels) as u64) as usize;
+                drop(self.before.drain(..skip * channels));
                 self.before_position += skip as u64;
                 let lead = self
                     .before_position
                     .saturating_sub(position)
                     .min(frames as u64) as usize;
-                let count = (frames - lead).min(self.before.len());
+                let count = (frames - lead).min(self.before.len() / channels);
                 if self.before_started && (lead != 0 || skip != 0) {
                     producer.discontinuity();
                 }
-                producer.push_samples_for(identity, self.before.drain(..count));
+                producer.push_samples_for(
+                    identity,
+                    output_frame + lead as u64,
+                    self.before.drain(..count * channels),
+                );
                 self.before_position += count as u64;
                 self.before_started |= count != 0;
                 if self.before_started && count + lead != frames {
@@ -245,7 +249,7 @@ impl Playback {
     pub(super) fn from_source(
         source: Source,
         options: PlaybackOptions,
-        analyzer: &AnalysisWorker,
+        analyzer: &Arc<PcmControl>,
         waveform: Arc<RwLock<WaveformFrame>>,
         waveform_control: Arc<WaveformControl>,
     ) -> Result<Self> {
@@ -288,6 +292,7 @@ impl Playback {
                 frames.saturating_sub((start * source.info().sample_rate as f64).round() as u64)
             })
         });
+        analyzer.set_generation(generation);
         let output = Output::new(
             source.info().sample_rate,
             source.layout(),
@@ -327,7 +332,7 @@ impl Playback {
             path,
             range,
             decoder_hint,
-            analyzer.settings().signal,
+            analyzer.signal(),
             scan_equalizer,
         );
         scan_source.expected_identity = Some(source.identity());
@@ -369,7 +374,7 @@ impl Playback {
                 coverage: waveform_coverage,
                 visualization_enabled,
                 producer: Some(analyzer.audio_producer()),
-                signal: analyzer.settings().signal,
+                signal: analyzer.signal(),
                 tap_identity: None,
                 before_started: false,
                 before: VecDeque::new(),
@@ -386,7 +391,7 @@ impl Playback {
         device: Option<&str>,
         volume: f32,
         auto_mix: bool,
-        analyzer: &AnalysisWorker,
+        analyzer: &Arc<PcmControl>,
     ) -> Result<()> {
         let metadata = Arc::clone(&self.metadata);
         self.restart_output_with(target, |source, paused| {
@@ -449,7 +454,7 @@ impl Playback {
         // Seeking the source is a real discontinuity, unlike restarting only
         // visualization capture after pause or display suspension.
         if let Some(producer) = &mut self.visualization.producer {
-            producer.discontinuity();
+            producer.restart_traversal();
         }
         self.offset_frames = 0;
         self.base_position = position;
@@ -715,6 +720,7 @@ impl Playback {
                         }
                         // Settled disabled EQ keeps the original borrowed fast path.
                         let prefix = frames.len().min(remaining_frames * channels);
+                        let output_frame = self.output.submitted();
                         let count = self.output.push(&frames[..prefix]);
                         self.pending_tap = PendingTap::Direct(self.visualization.signal);
                         self.pending_discontinuity = discontinuity;
@@ -729,6 +735,7 @@ impl Playback {
                         self.visualization.submit_tap(
                             self.pending_tap,
                             position,
+                            output_frame,
                             &frames[..count * channels],
                             channels,
                         );
@@ -803,6 +810,7 @@ impl Playback {
                 end = end.min(start + (gap - submitted) as usize);
             }
         }
+        let output_frame = self.output.submitted();
         let count = self
             .output
             .push(&self.pending[start * channels..end * channels]);
@@ -815,6 +823,7 @@ impl Playback {
         self.visualization.submit_tap(
             self.pending_tap,
             self.pending_position + start as u64,
+            output_frame,
             &self.pending[start * channels..(start + count) * channels],
             channels,
         );
@@ -900,16 +909,182 @@ pub(super) mod tests {
     use std::io::{Seek, SeekFrom, Write};
 
     #[test]
-    fn before_staging_rejects_old_identity_and_releases_on_pause_or_hidden_fill() {
-        use ringbuf::traits::Consumer;
+    fn late_capture_and_pause_resume_restart_capture_coordinates() {
+        use rivu_format::config::processing_graph::GraphPort;
+        for processing in 0..3 {
+            for signal in [VisualizationSignal::Before, VisualizationSignal::After] {
+                let file = pcm_samples(64_000);
+                let (mut playback, _) =
+                    test_playback_with_waveform(file.path(), None, Arc::default());
+                if processing == 2 {
+                    let mut graph = GraphRunner::compile(
+                        &unity_fir_graph(),
+                        GraphPort { node: 2, port: 0 },
+                        8_000,
+                        1,
+                    )
+                    .unwrap();
+                    graph.set_source_context(-32, 63_968).unwrap();
+                    playback.graph_skip_frames = graph.latency_frames();
+                    playback.before_skip_frames = graph.source_lead_frames();
+                    playback.graph_output_remaining = Some(63_968);
+                    playback.graph = Some(graph);
+                } else if processing == 1 {
+                    playback.equalizer = Equalizer::new(
+                        &EqualizerConfig {
+                            enabled: true,
+                            preamp_db: 6.0,
+                            ..Default::default()
+                        },
+                        8_000,
+                        1,
+                    )
+                    .unwrap();
+                }
+                let worker = Arc::new(PcmControl::default());
+                worker.set_playback_active(true);
+                let (producer, mut captured) =
+                    PcmProducer::capture_for_test(&worker, playback.source.layout());
+                playback.visualization.producer = Some(producer);
+                playback.set_signal(signal);
+                let (output, mut render) = crate::output::test_backend_with_capacity(
+                    8_000,
+                    false,
+                    playback.source.layout(),
+                    73,
+                );
+                playback.output = output;
+                playback.fill().unwrap();
+                assert_eq!(playback.output.submitted(), 73);
+                render(&mut [0.0; 73], 0);
+                assert!(captured.try_pop().is_none());
 
+                for boundary in 0..2 {
+                    worker.set_enabled(true);
+                    let mut observed = false;
+                    for step in 0..256 {
+                        let admitted_start = playback.output.submitted();
+                        playback.fill().unwrap();
+                        let admitted_end = playback.output.submitted();
+                        let frames: Vec<_> = captured.pop_iter().collect();
+                        if let Some(first) = frames.first() {
+                            assert_eq!(first.header.start_frame, 0);
+                            assert!(first.header.output_frame >= admitted_start);
+                            assert!(
+                                first.header.output_frame + frames.len() as u64 <= admitted_end
+                            );
+                            for (offset, frame) in frames.iter().enumerate() {
+                                assert_eq!(
+                                    frame.header.start_frame,
+                                    first.header.start_frame + offset as u64
+                                );
+                                assert_eq!(
+                                    frame.header.output_frame,
+                                    first.header.output_frame + offset as u64
+                                );
+                            }
+                            observed = true;
+                        }
+                        let mut audible = vec![0.0; (admitted_end - admitted_start) as usize];
+                        render(&mut audible, 1 + (boundary * 256 + step) as u64 * 10);
+                        if observed {
+                            break;
+                        }
+                    }
+                    assert!(observed, "processing={processing}, signal={signal:?}");
+                    worker.set_enabled(false);
+                    playback.pause(true);
+                    worker.set_playback_active(false);
+                    playback.pause(false);
+                    worker.set_playback_active(true);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn before_staging_keeps_native_frames_bounded_and_preserves_output_gaps() {
+        use crate::Channel::{FrontCenter, FrontLeft, FrontRight, Lfe, SideLeft, SideRight};
+        let file = pcm();
+        let (mut playback, _) = test_playback_with_waveform(file.path(), None, Arc::default());
+        let worker = Arc::new(PcmControl::default());
+        worker.set_playback_active(true);
+        worker.set_enabled(true);
+        let layout = [FrontLeft, FrontRight, FrontCenter, Lfe, SideLeft, SideRight];
+        let (producer, _) = PcmProducer::capture_for_test(&worker, &layout);
+        playback.visualization.producer = Some(producer);
+        playback.set_signal(VisualizationSignal::Before);
+        let samples: Vec<_> = (0..32 * layout.len())
+            .map(|index| index as f32 / 256.0)
+            .collect();
+        playback
+            .visualization
+            .stage_before(40, &samples, layout.len(), 32)
+            .unwrap();
+        assert!(
+            playback
+                .visualization
+                .stage_before(72, &samples[..6], layout.len(), 32)
+                .is_err()
+        );
+        playback.visualization.submit_tap(
+            PendingTap::Before,
+            32,
+            900,
+            &[0.0; 32 * 6],
+            layout.len(),
+        );
+        let window = worker.window();
+        let block = window.block(window.sequence()).unwrap();
+        assert_eq!(block.layout(), &[0, 1, 2, 3, 9, 10]);
+        assert_eq!(block.len(), 24);
+        assert_eq!(block.header().start_frame, 0);
+        assert_eq!(block.header().output_frame, 908);
+        assert!(!block.header().gap);
+        for frame in 0..24 {
+            for channel in 0..layout.len() {
+                assert_eq!(
+                    block.sample(frame, channel),
+                    samples[frame * layout.len() + channel]
+                );
+            }
+        }
+
+        playback.visualization.submit_tap(
+            PendingTap::Before,
+            80,
+            948,
+            &[0.0; 16 * 6],
+            layout.len(),
+        );
+        playback
+            .visualization
+            .stage_before(112, &samples[..18], layout.len(), 3)
+            .unwrap();
+        playback.visualization.submit_tap(
+            PendingTap::Before,
+            112,
+            1000,
+            &[0.0; 3 * 6],
+            layout.len(),
+        );
+        let block = window.block(window.sequence()).unwrap();
+        assert_eq!(block.len(), 3);
+        assert_eq!(block.header().start_frame, 24);
+        assert_eq!(block.header().output_frame, 1000);
+        assert!(block.header().gap);
+    }
+
+    #[test]
+    fn before_staging_rejects_old_identity_and_releases_on_pause_or_hidden_fill() {
         let file = pcm();
         for pause in [false, true] {
             let (mut playback, _) = test_playback_with_waveform(file.path(), None, Arc::default());
-            let worker = AnalysisWorker::new(Arc::default()).unwrap();
+            let worker = Arc::new(PcmControl::default());
             worker.set_playback_active(true);
-            worker.control.set_display_enabled(true);
-            let (producer, mut captured) = AnalysisProducer::capture_for_test(&worker, 64);
+            worker.set_enabled(true);
+            let (producer, mut captured) =
+                PcmProducer::capture_for_test(&worker, playback.source.layout());
             playback.visualization.producer = Some(producer);
             playback.set_signal(VisualizationSignal::Before);
             playback
@@ -923,12 +1098,12 @@ pub(super) mod tests {
                 playback.pause(false);
                 worker.set_playback_active(true);
             } else {
-                worker.control.set_display_enabled(false);
-                worker.control.set_display_enabled(true);
+                worker.set_enabled(false);
+                worker.set_enabled(true);
             }
             playback
                 .visualization
-                .submit_tap(PendingTap::Before, 0, &[0.0; 32], 1);
+                .submit_tap(PendingTap::Before, 0, 0, &[0.0; 32], 1);
             assert!(captured.try_pop().is_none());
             assert_eq!(playback.visualization.before.capacity(), 0);
 
@@ -938,8 +1113,10 @@ pub(super) mod tests {
                 .unwrap();
             playback
                 .visualization
-                .submit_tap(PendingTap::Before, 32, &[0.0; 32], 1);
+                .submit_tap(PendingTap::Before, 32, 32, &[0.0; 32], 1);
             let first = captured.try_pop().unwrap();
+            assert_eq!(first.header.start_frame, 0);
+            assert_eq!(first.header.output_frame, 32);
             assert_eq!(
                 first.samples,
                 playback.visualization.weights[0].map(|w| w * 0.25)
@@ -951,7 +1128,7 @@ pub(super) mod tests {
                 .visualization
                 .stage_before(64, &[0.5; 32], 1, 32)
                 .unwrap();
-            worker.control.set_display_enabled(false);
+            worker.set_enabled(false);
             playback.eof = true;
             playback.fill().unwrap();
             assert_eq!(playback.visualization.before.capacity(), 0);
@@ -959,36 +1136,24 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn before_staging_survives_optional_demand_changes_without_a_gap() {
-        use ringbuf::traits::Consumer;
-        use rivu_protocol::analysis::{DisplayDemand, VisualizerDemand};
-
+    fn before_staging_survives_redundant_enable_without_a_gap() {
         let file = pcm();
         let (mut playback, _) = test_playback_with_waveform(file.path(), None, Arc::default());
-        let worker = AnalysisWorker::new(Arc::default()).unwrap();
+        let worker = Arc::new(PcmControl::default());
         worker.set_playback_active(true);
-        worker.control.set_display_enabled(true);
-        let (producer, mut captured) = AnalysisProducer::capture_for_test(&worker, 64);
+        worker.set_enabled(true);
+        let (producer, mut captured) =
+            PcmProducer::capture_for_test(&worker, playback.source.layout());
         playback.visualization.producer = Some(producer);
         playback.set_signal(VisualizationSignal::Before);
         playback
             .visualization
             .stage_before(0, &[0.5; 32], 1, 32)
             .unwrap();
-        let identity = playback.visualization.tap_identity;
-        let capacity = playback.visualization.before.capacity();
-        worker.control.set_display_demand(DisplayDemand {
-            enabled: true,
-            visualizer: VisualizerDemand {
-                pcm: true,
-                ..VisualizerDemand::default()
-            },
-        });
+        worker.set_enabled(true);
         playback
             .visualization
-            .submit_tap(PendingTap::Before, 0, &[0.0; 32], 1);
-        assert!(playback.visualization.tap_identity == identity);
-        assert_eq!(playback.visualization.before.capacity(), capacity);
+            .submit_tap(PendingTap::Before, 0, 0, &[0.0; 32], 1);
         let frames: Vec<_> = captured.pop_iter().collect();
         assert_eq!(frames.len(), 32);
         assert!(frames.iter().all(|frame| !frame.gap));
@@ -1163,125 +1328,104 @@ pub(super) mod tests {
 
     #[test]
     fn large_decoder_packet_publishes_before_its_pending_audio_finishes() {
-        use rivu_format::config::AnalysisWindow;
-        use rivu_protocol::analysis::{AnalysisFrame, AnalysisSettings};
-        use std::time::{Duration, Instant};
-
         for rate in [48_000, 192_000] {
             let file = large_packet_flac(rate);
-            for fps in [5, 20] {
-                for signal in [VisualizationSignal::Before, VisualizationSignal::After] {
-                    for processed in [false, true] {
-                        let (mut playback, _) =
-                            test_playback_with_waveform(file.path(), None, Arc::default());
-                        let shared = Arc::new(RwLock::new(AnalysisFrame::default()));
-                        let worker = AnalysisWorker::new(shared.clone()).unwrap();
-                        worker.configure(AnalysisSettings {
-                            fps,
-                            fft_size: 512,
-                            window: AnalysisWindow::None,
-                            signal,
-                        });
-                        worker.reset(rate);
-                        worker.set_playback_active(true);
-                        worker.control.set_display_enabled(true);
-                        playback.visualization.producer = Some(worker.audio_producer());
-                        playback.set_signal(signal);
-                        if processed {
-                            playback.equalizer = Equalizer::new(
-                                &EqualizerConfig {
-                                    enabled: true,
-                                    preamp_db: 6.0,
-                                    ..Default::default()
-                                },
-                                rate,
-                                1,
-                            )
-                            .unwrap();
-                        }
-                        let capacity = rate as usize / 4;
-                        let admitted = capacity.min(MAX_REFILL_FRAMES);
-                        let (output, mut render) = crate::output::test_backend_with_capacity(
+            for signal in [VisualizationSignal::Before, VisualizationSignal::After] {
+                for processed in [false, true] {
+                    let (mut playback, _) =
+                        test_playback_with_waveform(file.path(), None, Arc::default());
+                    let worker = Arc::new(PcmControl::default());
+                    worker.reset(rate, playback.source.layout());
+                    worker.set_playback_active(true);
+                    worker.set_enabled(true);
+                    playback.visualization.producer = Some(worker.audio_producer());
+                    let mut captured = crate::capture::TestCapture::new(&worker);
+                    playback.set_signal(signal);
+                    if processed {
+                        playback.equalizer = Equalizer::new(
+                            &EqualizerConfig {
+                                enabled: true,
+                                preamp_db: 6.0,
+                                ..Default::default()
+                            },
                             rate,
-                            false,
-                            playback.source.layout(),
-                            capacity,
-                        );
-                        playback.output = output;
-                        let deadline = Instant::now() + Duration::from_secs(3);
-                        while shared.read().display_token != worker.control.display_token() {
-                            assert!(
-                                Instant::now() < deadline,
-                                "analysis demand did not activate"
-                            );
-                            std::thread::sleep(Duration::from_millis(1));
-                        }
-                        playback.fill().unwrap();
-                        assert_eq!(playback.output.vacant_frames(), capacity - admitted);
-                        assert!(!playback.eof);
-                        assert!(!playback.finished());
-                        // A legal large codec block may be converted in finite
-                        // fragments; admitted PCM already has a rolling envelope.
-                        assert!(
-                            playback
-                                .visualization
-                                .waveform
-                                .read()
-                                .rms_counts
-                                .iter()
-                                .sum::<u64>()
-                                >= admitted as u64
-                        );
-                        worker.control.request_frame();
-                        let deadline = Instant::now() + Duration::from_secs(3);
-                        while shared.read().settings.is_none() {
-                            assert!(
-                                Instant::now() < deadline,
-                                "large packet failed to publish during playback"
-                            );
-                            std::thread::sleep(Duration::from_millis(1));
-                        }
-                        let expected = if processed && signal == VisualizationSignal::After {
-                            0.25 * 10.0_f32.powf(6.0 / 20.0)
-                        } else {
-                            0.25
-                        };
-                        let weights = &playback.visualization.weights;
-                        {
-                            let frame = shared.read();
-                            assert!((frame.rms_left - expected * weights[0][0]).abs() < 1e-5);
-                            assert!((frame.rms_right - expected * weights[0][1]).abs() < 1e-5);
-                            assert!(
-                                (frame.sample_time.as_secs_f64() - admitted as f64 / rate as f64)
-                                    .abs()
-                                    < 1e-8
-                            );
-                        }
-                        let mut audible = vec![0.0; admitted];
-                        render(&mut audible, 0);
-                        assert!(
-                            audible
-                                .iter()
-                                .all(|sample| sample.is_finite() && *sample > 0.0)
-                        );
-                        let mut consumed = admitted;
-                        while consumed < 65_535 {
-                            playback.fill().unwrap();
-                            let count = admitted.min(65_535 - consumed);
-                            let mut tail = vec![0.0; count];
-                            render(&mut tail, (consumed as u64 * 1000) / u64::from(rate));
-                            assert!(
-                                tail.iter()
-                                    .all(|sample| *sample > 0.0 && sample.is_finite())
-                            );
-                            consumed += count;
-                        }
-                        playback.fill().unwrap();
-                        assert!(playback.eof);
-                        let waveform = playback.visualization.waveform.read();
-                        assert!(waveform.complete);
-                        assert_eq!(waveform.rms_counts.iter().sum::<u64>(), 65_535);
+                            1,
+                        )
+                        .unwrap();
                     }
+                    let capacity = rate as usize / 4;
+                    let admitted = capacity.min(MAX_REFILL_FRAMES);
+                    let (output, mut render) = crate::output::test_backend_with_capacity(
+                        rate,
+                        false,
+                        playback.source.layout(),
+                        capacity,
+                    );
+                    playback.output = output;
+                    playback.fill().unwrap();
+                    assert_eq!(playback.output.vacant_frames(), capacity - admitted);
+                    assert!(!playback.eof);
+                    assert!(!playback.finished());
+                    // A legal large codec block may be converted in finite
+                    // fragments; admitted PCM already has a rolling envelope.
+                    assert!(
+                        playback
+                            .visualization
+                            .waveform
+                            .read()
+                            .rms_counts
+                            .iter()
+                            .sum::<u64>()
+                            >= admitted as u64
+                    );
+                    let mut pcm = [[0.0; 2]; rivu_protocol::pcm::PCM_BLOCK_FRAMES];
+                    let mut captured_frames = 0;
+                    let mut power = [0.0_f64; 2];
+                    while let Some((header, count)) = captured.read(&mut pcm) {
+                        assert_eq!(header.start_frame, captured_frames);
+                        assert_eq!(header.output_frame, captured_frames);
+                        captured_frames += count as u64;
+                        for sample in &pcm[..count] {
+                            for channel in 0..2 {
+                                power[channel] += f64::from(sample[channel]).powi(2);
+                            }
+                        }
+                    }
+                    assert_eq!(captured_frames, admitted as u64);
+                    let expected = if processed && signal == VisualizationSignal::After {
+                        0.25 * 10.0_f32.powf(6.0 / 20.0)
+                    } else {
+                        0.25
+                    };
+                    let weights = &playback.visualization.weights;
+                    for channel in 0..2 {
+                        let rms = (power[channel] / captured_frames as f64).sqrt() as f32;
+                        assert!((rms - expected * weights[0][channel]).abs() < 1e-5);
+                    }
+                    let mut audible = vec![0.0; admitted];
+                    render(&mut audible, 0);
+                    assert!(
+                        audible
+                            .iter()
+                            .all(|sample| sample.is_finite() && *sample > 0.0)
+                    );
+                    let mut consumed = admitted;
+                    while consumed < 65_535 {
+                        playback.fill().unwrap();
+                        let count = admitted.min(65_535 - consumed);
+                        let mut tail = vec![0.0; count];
+                        render(&mut tail, (consumed as u64 * 1000) / u64::from(rate));
+                        assert!(
+                            tail.iter()
+                                .all(|sample| *sample > 0.0 && sample.is_finite())
+                        );
+                        consumed += count;
+                    }
+                    playback.fill().unwrap();
+                    assert!(playback.eof);
+                    let waveform = playback.visualization.waveform.read();
+                    assert!(waveform.complete);
+                    assert_eq!(waveform.rms_counts.iter().sum::<u64>(), 65_535);
                 }
             }
         }
@@ -1328,7 +1472,6 @@ pub(super) mod tests {
 
     #[test]
     fn processed_before_and_after_taps_follow_admitted_audio_through_graph_eof() {
-        use ringbuf::traits::Consumer;
         use rivu_format::config::processing_graph::GraphPort;
 
         let file = pcm_level(149, 8192);
@@ -1352,10 +1495,11 @@ pub(super) mod tests {
                 1,
             )
             .unwrap();
-            let worker = AnalysisWorker::new(Arc::default()).unwrap();
+            let worker = Arc::new(PcmControl::default());
             worker.set_playback_active(true);
-            worker.control.set_display_enabled(true);
-            let (producer, mut captured) = AnalysisProducer::capture_for_test(&worker, 32);
+            worker.set_enabled(true);
+            let (producer, mut captured) =
+                PcmProducer::capture_for_test(&worker, playback.source.layout());
             playback.visualization.producer = Some(producer);
             playback.set_signal(signal);
             let (output, mut render) = crate::output::test_backend_with_capacity(
@@ -1371,6 +1515,10 @@ pub(super) mod tests {
                 playback.fill().unwrap();
                 let mut taps = Vec::new();
                 while let Some(frame) = captured.try_pop() {
+                    assert_eq!(
+                        frame.header.start_frame,
+                        submitted as u64 + taps.len() as u64
+                    );
                     taps.push(frame.samples);
                 }
                 let count = 17.min(117 - submitted);
@@ -1414,7 +1562,6 @@ pub(super) mod tests {
 
     #[test]
     fn graph_output_limit_retires_staging_without_decoding_an_empty_span() {
-        use ringbuf::traits::Consumer;
         use rivu_format::config::processing_graph::GraphPort;
 
         let file = pcm_samples(24_000);
@@ -1428,10 +1575,11 @@ pub(super) mod tests {
             playback.before_skip_frames = graph.source_lead_frames();
             playback.graph_output_remaining = Some(published);
             playback.graph = Some(graph);
-            let worker = AnalysisWorker::new(Arc::default()).unwrap();
+            let worker = Arc::new(PcmControl::default());
             worker.set_playback_active(true);
-            worker.control.set_display_enabled(true);
-            let (producer, mut captured) = AnalysisProducer::capture_for_test(&worker, 256);
+            worker.set_enabled(true);
+            let (producer, mut captured) =
+                PcmProducer::capture_for_test(&worker, playback.source.layout());
             playback.visualization.producer = Some(producer);
             playback.set_signal(VisualizationSignal::Before);
             let mut packets = 0;
@@ -1461,7 +1609,6 @@ pub(super) mod tests {
 
     #[test]
     fn vorbis_timestamp_conventions_preserve_pcm_and_only_real_tap_gaps() {
-        use ringbuf::traits::Consumer;
         use rivu_format::config::processing_graph::GraphPort;
 
         // Synthetic fixture provenance: 48,000 mono f32 samples at 48 kHz,
@@ -1564,10 +1711,11 @@ pub(super) mod tests {
                         )
                         .unwrap();
                     }
-                    let worker = AnalysisWorker::new(Arc::default()).unwrap();
+                    let worker = Arc::new(PcmControl::default());
                     worker.set_playback_active(true);
-                    worker.control.set_display_enabled(true);
-                    let (producer, mut captured) = AnalysisProducer::capture_for_test(&worker, 73);
+                    worker.set_enabled(true);
+                    let (producer, mut captured) =
+                        PcmProducer::capture_for_test(&worker, playback.source.layout());
                     playback.visualization.producer = Some(producer);
                     playback.set_signal(signal);
                     let (output, mut render) = crate::output::test_backend_with_capacity(
@@ -1646,7 +1794,6 @@ pub(super) mod tests {
 
     #[test]
     fn real_container_gaps_follow_graph_delay_and_preguard_to_output_admission() {
-        use ringbuf::traits::Consumer;
         use rivu_format::config::processing_graph::GraphPort;
 
         fn element(id: &[u8], payload: &[u8]) -> Vec<u8> {
@@ -1751,10 +1898,11 @@ pub(super) mod tests {
                     )
                     .unwrap();
                 }
-                let worker = AnalysisWorker::new(Arc::default()).unwrap();
+                let worker = Arc::new(PcmControl::default());
                 worker.set_playback_active(true);
-                worker.control.set_display_enabled(true);
-                let (producer, mut captured) = AnalysisProducer::capture_for_test(&worker, 73);
+                worker.set_enabled(true);
+                let (producer, mut captured) =
+                    PcmProducer::capture_for_test(&worker, playback.source.layout());
                 playback.visualization.producer = Some(producer);
                 playback.set_signal(signal);
                 let (output, mut render) = crate::output::test_backend_with_capacity(
@@ -2343,14 +2491,14 @@ pub(super) mod tests {
 
     #[test]
     fn seek_marks_only_new_admitted_pcm_and_rejecting_seek_keeps_old_output() {
-        use ringbuf::traits::Consumer;
         for signal in [VisualizationSignal::Before, VisualizationSignal::After] {
             let file = pcm();
             let (mut playback, _) = test_playback_with_waveform(file.path(), None, Arc::default());
-            let worker = AnalysisWorker::new(Arc::default()).unwrap();
+            let worker = Arc::new(PcmControl::default());
             worker.set_playback_active(true);
-            worker.control.set_display_enabled(true);
-            let (producer, mut captured) = AnalysisProducer::capture_for_test(&worker, 256);
+            worker.set_enabled(true);
+            let (producer, mut captured) =
+                PcmProducer::capture_for_test(&worker, playback.source.layout());
             playback.visualization.producer = Some(producer);
             playback.set_signal(signal);
             let (output, mut old_render) = crate::output::test_backend_with_capacity(
@@ -2363,6 +2511,7 @@ pub(super) mod tests {
             playback.fill().unwrap();
             let first: Vec<_> = captured.pop_iter().collect();
             assert_eq!(first.len(), 73);
+            assert_eq!(first[0].header.start_frame, 0);
             assert!(first[0].gap);
             assert!(first[1..].iter().all(|frame| !frame.gap));
             for target in [f64::NAN, f64::INFINITY, -1.0, 1e300, i64::MAX as f64, 1e16] {
@@ -2379,6 +2528,7 @@ pub(super) mod tests {
             playback.fill().unwrap();
             let continued: Vec<_> = captured.pop_iter().collect();
             assert_eq!(continued.len(), 73);
+            assert_eq!(continued[0].header.start_frame, 73);
             assert!(continued.iter().all(|frame| !frame.gap));
             let (output, mut render) = crate::output::test_backend_with_capacity(
                 8_000,
@@ -2396,6 +2546,7 @@ pub(super) mod tests {
             playback.fill().unwrap();
             let after: Vec<_> = captured.pop_iter().collect();
             assert_eq!(after.len(), 73);
+            assert_eq!(after[0].header.start_frame, 0);
             assert!(after[0].gap);
             assert!(after[1..].iter().all(|frame| !frame.gap));
             let mut samples = [0.0; 73];
@@ -2536,26 +2687,15 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn before_analysis_stays_continuous_across_monitor_eq_bypass_roundtrip() {
-        use ringbuf::traits::{Consumer, Producer};
-        use rivu_format::config::AnalysisWindow;
-        use rivu_protocol::analysis::{AnalysisFrame, AnalysisSettings};
-        use std::time::{Duration, Instant};
-
+    fn before_pcm_stays_continuous_across_monitor_eq_bypass_roundtrip() {
         let file = pcm_samples(24_000);
         let (mut playback, _) = test_playback_with_waveform(file.path(), None, Arc::default());
-        let shared = Arc::new(RwLock::new(AnalysisFrame::default()));
-        let worker = AnalysisWorker::new(shared.clone()).unwrap();
-        worker.configure(AnalysisSettings {
-            fps: 60,
-            fft_size: 512,
-            window: AnalysisWindow::None,
-            signal: VisualizationSignal::Before,
-        });
-        worker.reset(8_000);
+        let worker = Arc::new(PcmControl::default());
+        worker.reset(8_000, playback.source.layout());
         worker.set_playback_active(true);
-        worker.control.set_display_enabled(true);
-        let (producer, mut captured) = AnalysisProducer::capture_for_test(&worker, 512);
+        worker.set_enabled(true);
+        let (producer, mut captured) =
+            PcmProducer::capture_for_test(&worker, playback.source.layout());
         playback.visualization.producer = Some(producer);
         playback.set_signal(VisualizationSignal::Before);
         let (output, mut render) =
@@ -2597,51 +2737,19 @@ pub(super) mod tests {
         assert!(audible[8192] > (8192.0 / 32768.0) * 1.9);
         assert_eq!(audible[20_000], 4000.0 / 32768.0);
 
-        // Public generations must preserve continuity, not just tap values.
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while shared.read().display_token != worker.control.display_token() {
-            assert!(
-                Instant::now() < deadline,
-                "analysis demand did not activate"
-            );
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        let mut analysis_input = worker.producer();
-        let mut generation = None;
-        let mut accepted = 0;
-        for chunk in taps.chunks(2048) {
-            assert_eq!(analysis_input.push_slice(chunk), chunk.len());
-            accepted += chunk.len();
-            let sequence = shared.read().sequence;
-            worker.control.request_frame();
-            let deadline = Instant::now() + Duration::from_secs(3);
-            loop {
-                let frame = shared.read();
-                if frame.sequence > sequence && frame.settings.is_some() {
-                    let expected_generation = *generation.get_or_insert(frame.generation);
-                    assert_eq!(frame.generation, expected_generation);
-                    let expected_rms = (taps[accepted - 512..accepted]
-                        .iter()
-                        .map(|tap| tap.samples[0] * tap.samples[0])
-                        .sum::<f32>()
-                        / 512.0)
-                        .sqrt();
-                    assert!((frame.rms_left - expected_rms).abs() < 1e-6);
-                    break;
-                }
-                drop(frame);
-                assert!(
-                    Instant::now() < deadline,
-                    "analysis did not publish captured Before audio"
-                );
-                std::thread::sleep(Duration::from_millis(1));
-            }
-        }
+        // Monitor EQ changes preserve Before capture continuity.
+        assert_eq!(taps.len(), 24_000);
+        assert!(taps[0].gap);
+        assert!(taps[1..].iter().all(|tap| !tap.gap));
+        let first = taps[0].header;
+        assert!(taps.iter().all(|tap| tap.header.epoch == first.epoch
+            && tap.header.intent == first.intent
+            && tap.header.capture == first.capture
+            && tap.header.generation == first.generation));
     }
 
     #[test]
     fn selected_worker_pcm_matches_nonflat_eq_before_master_volume() {
-        use ringbuf::traits::Consumer;
         let file = pcm_samples(320);
         let config = EqualizerConfig {
             enabled: true,
@@ -2666,10 +2774,11 @@ pub(super) mod tests {
             for volume in [0.0, 0.25, 1.0] {
                 let (mut playback, mut render) =
                     test_playback_with_waveform(file.path(), None, Arc::default());
-                let worker = AnalysisWorker::new(Arc::default()).unwrap();
+                let worker = Arc::new(PcmControl::default());
                 worker.set_playback_active(true);
-                worker.control.set_display_enabled(true);
-                let (producer, mut captured) = AnalysisProducer::capture_for_test(&worker, 1024);
+                worker.set_enabled(true);
+                let (producer, mut captured) =
+                    PcmProducer::capture_for_test(&worker, playback.source.layout());
                 playback.visualization.producer = Some(producer);
                 playback.set_signal(signal);
                 playback.set_equalizer(&config).unwrap();

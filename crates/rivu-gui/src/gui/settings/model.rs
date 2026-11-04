@@ -1,5 +1,6 @@
 use rivu_format::config::ArtworkOptions;
-use rivu_protocol::model::{Config, ConfigPatch};
+use rivu_format::config::Config;
+use rivu_protocol::model::ConfigPatch;
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

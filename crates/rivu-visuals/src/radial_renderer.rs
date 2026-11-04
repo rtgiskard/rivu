@@ -6,10 +6,10 @@ use gpui::{
     AnyElement, App, Bounds, PathBuilder, Rgba, TextAlign, Window, canvas, div, point, prelude::*,
     px, rgb,
 };
+use rivu_analysis::{AnalysisFrame, AnalysisSettings};
 use rivu_format::config::{
     AnalysisWindow, AudioVisualizerOptions, AudioVisualizerStyle, VisualizationSignal,
 };
-use rivu_protocol::analysis::{AnalysisFrame, AnalysisSettings};
 use rivu_protocol::model::PlaybackStatus;
 use std::{
     cell::RefCell,

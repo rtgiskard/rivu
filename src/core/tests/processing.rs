@@ -2182,7 +2182,7 @@ fn auto_graph_prepares_off_thread_and_opens_stopped_source_paused() {
     assert_eq!(core.state.current_track.as_ref().unwrap().id, 1);
     assert_eq!(
         core.state.processing_audition,
-        Some(rivu_protocol::model::ProcessingAudition {
+        Some(ProcessingAudition {
             id: 1,
             output: Some(graph_port(2, 0)),
             mode: Some(GraphExecutionMode::Realtime),
@@ -2281,19 +2281,14 @@ fn cached_audition_tracks_the_selected_port_without_following_new_results() {
     assert!(core.state.processing_audition.is_none());
     let _commands = recording_audio(&mut core);
     core.processing_graph_audition(1, graph_port(2, 0)).unwrap();
-    let admitted = rivu_protocol::model::ProcessingAudition {
+    let admitted = ProcessingAudition {
         id: 1,
         output: Some(graph_port(2, 0)),
         mode: Some(GraphExecutionMode::Offline),
     };
     assert_eq!(core.state.processing_audition, Some(admitted));
     core.publish();
-    assert_eq!(
-        crate::projection::display_state(&core.shared.read())
-            .system
-            .processing_audition,
-        Some(admitted)
-    );
+    assert_eq!(core.shared.read().processing_audition, Some(admitted));
     assert!(
         core.processing_graph_audition(1, graph_port(2, 99))
             .is_err()
@@ -2319,7 +2314,7 @@ fn cached_audition_tracks_the_selected_port_without_following_new_results() {
         core.processing_status(2).unwrap().settings.graph.unwrap(),
         frozen_graph
     );
-    let selected = rivu_protocol::model::ProcessingAudition {
+    let selected = ProcessingAudition {
         id: 2,
         output: Some(graph_port(1, 0)),
         mode: Some(GraphExecutionMode::Realtime),
@@ -2331,21 +2326,11 @@ fn cached_audition_tracks_the_selected_port_without_following_new_results() {
     assert_eq!(core.state.system.processing.as_ref().unwrap().id, 3);
     assert_eq!(core.state.processing_audition, Some(selected));
     core.publish();
-    assert_eq!(
-        crate::projection::display_state(&core.shared.read())
-            .system
-            .processing_audition,
-        Some(selected)
-    );
+    assert_eq!(core.shared.read().processing_audition, Some(selected));
     core.stop().unwrap();
     assert!(core.state.processing_audition.is_none());
     core.publish();
-    assert!(
-        crate::projection::display_state(&core.shared.read())
-            .system
-            .processing_audition
-            .is_none()
-    );
+    assert!(core.shared.read().processing_audition.is_none());
 }
 
 #[test]

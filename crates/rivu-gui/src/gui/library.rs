@@ -403,8 +403,8 @@ impl Library {
                 match crate::gui::chooser_result(result) {
                     Ok(Some(files)) => {
                         if let Some(path) = crate::gui::chooser_path(&files)
-                            && let Err(error) = this.context.handle().update_gui_config(
-                                rivu_protocol::model::ConfigChange::AddLibraryRoot(path),
+                            && let Err(error) = this.context.handle().update_config(
+                                rivu_protocol::model::ConfigMutation::AddLibraryRoot(path),
                             )
                         {
                             this.report_error(format!("{error:#}"), cx);
@@ -669,25 +669,22 @@ impl Library {
 #[cfg(test)]
 mod library_root_tests {
     use super::{FeatureContext, Library};
+    use crate::frontend::FrontendHandle;
     use crate::gui::library::tree::TreeItem;
-    use crate::host::HostHandle;
     use crate::test_support::ConfigFixture;
     use crate::test_support::CoreRuntime;
     use gpui::{Entity, IntoElement, VisualTestContext, point, px, size};
+    use rivu_format::config::Config;
     use rivu_presentation::i18n::Localizer;
-    use rivu_protocol::model::Config;
-    use rivu_protocol::model::ConfigChange;
-    use rivu_protocol::model::{DirectoryRow, Query};
+    use rivu_protocol::model::ConfigMutation;
+    use rivu_protocol::model::{Command, DirectoryRow};
     use std::{path::PathBuf, sync::Arc};
 
-    fn settle_config(handle: &HostHandle) {
-        // Core dispatch is FIFO: this response follows config publication.
-        assert!(
-            handle
-                .query(Query::LibraryRootCounts { roots: Vec::new() })
-                .result
-                .is_ok()
-        );
+    fn apply_config(handle: &FrontendHandle, change: ConfigMutation) {
+        // Command and query IPC workers are independent. The command reply,
+        // including its authoritative frontend refresh, is the completion fence.
+        let ack = futures::executor::block_on(handle.request_ack(Command::MutateConfig { change }));
+        assert!(ack.is_success(), "{ack:?}");
     }
 
     async fn draw_library(
@@ -766,7 +763,6 @@ mod library_root_tests {
         .unwrap();
         cx.executor().allow_parking();
         let runtime = CoreRuntime::start(directory.path(), &config_path).unwrap();
-        settle_config(&runtime.handle);
         let i18n = Arc::new(Localizer::new("en-US"));
         let labels = std::rc::Rc::new(
             i18n.fixed_texts()
@@ -782,7 +778,7 @@ mod library_root_tests {
             scroll: Default::default(),
         };
         let (app, window) = cx.add_window_view(|_, cx| Library::new(context, cx));
-        // Snapshot publication uses explicit FIFO barriers and refreshes;
+        // Config ACKs publish authoritative snapshots before explicit refresh;
         // native query completion is awaited through the GPUI condition.
         runtime.handle.set_wakeup(|| {});
         app.update(&mut window.cx, |this, cx| {
@@ -798,18 +794,20 @@ mod library_root_tests {
         std::fs::create_dir(&second).unwrap();
         for (change, expected) in [
             (
-                ConfigChange::AddLibraryRoot(first.clone()),
+                ConfigMutation::AddLibraryRoot(first.clone()),
                 vec![first.clone()],
             ),
             (
-                ConfigChange::AddLibraryRoot(second.clone()),
+                ConfigMutation::AddLibraryRoot(second.clone()),
                 vec![first.clone(), second.clone()],
             ),
-            (ConfigChange::RemoveLibraryRoot(first), vec![second.clone()]),
-            (ConfigChange::RemoveLibraryRoot(second), Vec::new()),
+            (
+                ConfigMutation::RemoveLibraryRoot(first),
+                vec![second.clone()],
+            ),
+            (ConfigMutation::RemoveLibraryRoot(second), Vec::new()),
         ] {
-            runtime.handle.update_gui_config(change).unwrap();
-            settle_config(&runtime.handle);
+            apply_config(&runtime.handle, change);
             draw_library(window, &app, &expected).await;
             assert_roots(window, &app, &expected);
         }

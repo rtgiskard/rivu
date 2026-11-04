@@ -35,10 +35,10 @@ fn parse_log_level(value: &str) -> Result<rivu_utils::logging::LogLevel, String>
 
 #[derive(Subcommand)]
 pub(super) enum Action {
-    /// Open the desktop UI and optionally import paths.
+    /// Open the independent desktop and optionally import paths into Core.
     #[cfg(feature = "gui")]
     Gui { paths: Vec<PathBuf> },
-    /// Run the shared core without a GUI (foreground).
+    /// Run the Core service in the foreground, independently of the desktop.
     Serve { paths: Vec<PathBuf> },
     /// Control the running instance in a minimal terminal UI.
     #[cfg(feature = "tui")]
@@ -63,7 +63,7 @@ pub(super) enum Action {
     /// Configure audio processing, run offline jobs, and audition retained results.
     #[command(subcommand)]
     Processing(ProcessingAction),
-    /// Shut down the running GUI/headless core.
+    /// Shut down the running Core service.
     Quit,
 }
 

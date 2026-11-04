@@ -66,7 +66,6 @@ fn execute(args: Args, i18n: Localizer) -> Result<()> {
             data_dir,
             config_path,
             paths.into_iter().map(client_path).collect::<Result<_>>()?,
-            false,
         )?
         .run(),
         #[cfg(feature = "tui")]

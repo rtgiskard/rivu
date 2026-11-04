@@ -125,7 +125,7 @@ mod ffmpeg {
         }
     }
 }
-pub mod analysis;
+pub mod capture;
 mod media;
 pub use media::MediaInfo;
 use rivu_format::decoder_hint::DecoderHint;
@@ -210,7 +210,7 @@ pub fn waveform(
     source::Source::waveform(snapshot, media_read_buffer_mib, ffmpeg_enabled, cancelled)
 }
 
-use crate::analysis::{AnalysisControl, AnalysisWorker};
+use crate::capture::PcmControl;
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender, bounded};
 use futures::{
@@ -219,7 +219,7 @@ use futures::{
     future::{BoxFuture, Either},
 };
 use parking_lot::{Mutex, RwLock};
-use rivu_protocol::analysis::{AnalysisFrame, AnalysisSettings};
+use rivu_format::config::VisualizationSignal;
 use std::{
     path::PathBuf,
     sync::Arc,
@@ -334,8 +334,8 @@ pub enum AudioCommand {
     VisualizationEnabled(bool),
     MediaReadBuffer(u32),
     FfmpegEnabled(bool),
-    /// Update analysis only; never reopen the decoder or output stream.
-    AnalysisSettings(AnalysisSettings),
+    /// Select the captured tap without reopening decoder or output.
+    VisualizationSignal(VisualizationSignal),
     /// Capture the actual active source/graph without blocking device callbacks.
     WaveformSnapshot(oneshot::Sender<std::result::Result<Option<WaveformScanSnapshot>, String>>),
     StopAndSnapshot(oneshot::Sender<AudioSnapshot>),
@@ -343,13 +343,19 @@ pub enum AudioCommand {
 }
 
 impl AudioCommand {
-    fn changes_analysis_source(&self) -> bool {
+    fn changes_pcm_source(&self) -> bool {
         matches!(
             self,
             Self::Load { .. }
                 | Self::Audition { .. }
                 | Self::GraphAudition { .. }
                 | Self::Seek { .. }
+                | Self::Pause(_)
+                | Self::Stop
+                | Self::StopAndSnapshot(_)
+                | Self::OutputSettings { .. }
+                | Self::VisualizationEnabled(_)
+                | Self::VisualizationSignal(_)
         )
     }
 }
@@ -399,8 +405,7 @@ pub struct AudioEngine {
     commands: async_channel::Sender<AudioCommand>,
     command_wake: Sender<()>,
     pub events: Option<async_channel::Receiver<AudioEvent>>,
-    pub analysis: Arc<RwLock<AnalysisFrame>>,
-    pub analysis_control: Arc<AnalysisControl>,
+    pub pcm: Arc<PcmControl>,
     pub waveform: Arc<RwLock<WaveformFrame>>,
     pub waveform_control: Arc<WaveformControl>,
     worker: Option<JoinHandle<()>>,
@@ -412,13 +417,12 @@ impl AudioEngine {
         let (command_wake, commands_ready) = bounded(1);
         let (send_events, events) = async_channel::bounded(128);
         let (shutdown, cancelled) = shutdown_channel();
-        let analysis = Arc::new(RwLock::new(AnalysisFrame::default()));
         let waveform = Arc::new(RwLock::new(WaveformFrame::default()));
         let worker_waveform = waveform.clone();
         let waveform_control = Arc::new(WaveformControl::default());
         let worker_waveform_control = Arc::clone(&waveform_control);
-        let analyzer = AnalysisWorker::new(analysis.clone())?;
-        let analysis_control = Arc::clone(&analyzer.control);
+        let pcm = Arc::new(PcmControl::default());
+        let analyzer = Arc::clone(&pcm);
         let media_read_buffer_len = usize::try_from(media_read_buffer_mib)
             .expect("media read buffer size does not fit usize")
             .saturating_mul(BYTES_PER_MEBIBYTE);
@@ -440,8 +444,7 @@ impl AudioEngine {
             commands,
             command_wake,
             events: Some(events),
-            analysis,
-            analysis_control,
+            pcm,
             waveform,
             waveform_control,
             worker: Some(worker),
@@ -455,20 +458,16 @@ impl AudioEngine {
             self.shutdown.lock().take();
             return Ok(());
         }
-        let changes_analysis = command.changes_analysis_source();
-        if changes_analysis {
+        let changes_pcm = command.changes_pcm_source();
+        if changes_pcm {
             self.ensure_command_capacity(1)?;
-            self.analysis_control
-                .desired_intent
-                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            self.pcm.admit_intent();
         }
         self.commands
             .try_send(command)
             .inspect_err(|_| {
-                if changes_analysis {
-                    self.analysis_control
-                        .desired_intent
-                        .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                if changes_pcm {
+                    self.pcm.cancel_intent();
                 }
             })
             .map_err(|error| match error {
@@ -505,6 +504,7 @@ impl AudioEngine {
             self.commands.clone(),
             self.command_wake.clone(),
             self.events.take().expect("audio events already borrowed"),
+            Arc::clone(&self.pcm),
         )
     }
 
@@ -538,21 +538,35 @@ pub struct AudioStop {
     deadline: Instant,
 }
 
+// A cancelled capacity wait must not leave an unowned desired intent behind.
+struct PendingPcmIntent(Option<Arc<PcmControl>>);
+impl Drop for PendingPcmIntent {
+    fn drop(&mut self) {
+        if let Some(control) = &self.0 {
+            control.cancel_intent();
+        }
+    }
+}
+
 impl AudioStop {
     fn new(
         commands: async_channel::Sender<AudioCommand>,
         command_wake: Sender<()>,
         events: async_channel::Receiver<AudioEvent>,
+        pcm: Arc<PcmControl>,
     ) -> Self {
         let (reply, stopped) = oneshot::channel();
         Self {
             events,
             admission: Some(
                 async move {
+                    pcm.admit_intent();
+                    let mut intent = PendingPcmIntent(Some(pcm));
                     commands
                         .send(AudioCommand::StopAndSnapshot(reply))
                         .await
                         .map_err(|_| anyhow::anyhow!("Audio worker stopped"))?;
+                    intent.0 = None;
                     let _ = command_wake.try_send(());
                     Ok(())
                 }

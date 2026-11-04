@@ -334,3 +334,75 @@ fn independent_cli_session_can_explicitly_reconnect_to_a_new_instance() {
     assert_eq!(session.instance_id(), Some(2));
     server.join().unwrap();
 }
+
+#[test]
+fn retained_query_uses_physical_request_and_returns_actual_reply() {
+    use std::os::unix::net::UnixListener;
+    let directory = socket_test_directory();
+    let listener =
+        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
+    let (admitted, waiting) = std::sync::mpsc::sync_channel(1);
+    let (release, continue_reply) = std::sync::mpsc::sync_channel(1);
+    let server = std::thread::spawn(move || {
+        let mut stream = listener.accept().unwrap().0;
+        complete_test_handshake(&mut stream);
+        let WireRequest::QueryRetained(query) = read_test_request(&mut stream) else {
+            panic!("expected physical retained query");
+        };
+        assert_eq!(Query::try_from(query).unwrap(), Query::LibraryStats);
+        admitted.send(()).unwrap();
+        continue_reply.recv().unwrap();
+        write_test_response(
+            &mut stream,
+            WireResponse::Query(QueryResponse {
+                revisions: Default::default(),
+                result: Err(rivu_protocol::response::QueryError::Message(
+                    "actual owner result".into(),
+                )),
+            }),
+        );
+    });
+    let mut session = client_session(directory.path()).unwrap();
+    let (complete, completed) = std::sync::mpsc::sync_channel(1);
+    let client = std::thread::spawn(move || {
+        complete
+            .send(session.query_retained(Query::LibraryStats))
+            .unwrap()
+    });
+    waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(matches!(
+        completed.recv_timeout(Duration::from_millis(20)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    ));
+    release.send(()).unwrap();
+    assert!(
+        matches!(completed.recv_timeout(Duration::from_secs(2)).unwrap().unwrap().result,
+        Err(rivu_protocol::response::QueryError::Message(message)) if message == "actual owner result")
+    );
+    client.join().unwrap();
+    server.join().unwrap();
+}
+
+#[test]
+fn cancelling_retained_query_disconnects_its_physical_session() {
+    use std::io::Read;
+    use std::os::unix::net::UnixListener;
+    let directory = socket_test_directory();
+    let listener =
+        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
+    let mut session = client_session(directory.path()).unwrap();
+    let stop = session.cancellation();
+    let client = std::thread::spawn(move || session.query_retained(Query::LibraryStats));
+    let mut stream = listener.accept().unwrap().0;
+    complete_test_handshake(&mut stream);
+    assert!(matches!(
+        read_test_request(&mut stream),
+        WireRequest::QueryRetained(_)
+    ));
+    stop.cancel();
+    assert!(client.join().unwrap().is_err());
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+}

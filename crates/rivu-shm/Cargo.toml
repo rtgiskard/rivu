@@ -1,0 +1,13 @@
+[package]
+name = "rivu-shm"
+version = "0.1.0"
+edition = "2024"
+description = "Bounded native-channel shared PCM window for independent Rivu frontends"
+
+[dependencies]
+anyhow = "1"
+libc = "0.2"
+rivu-protocol = { path = "../rivu-protocol" }
+
+[dev-dependencies]
+tempfile = "3.27"

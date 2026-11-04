@@ -1,9 +1,9 @@
 //! Window ownership and release of visual subscriptions and analysis demand.
 use rivu_metadata::artwork::ArtworkManager;
 
-pub use super::layout::persistence::LoadedLayouts;
+pub(crate) use super::layout::persistence::LoadedLayouts;
 use super::{WindowView, layout::persistence::LayoutPersistence};
-use crate::host::HostHandle;
+use crate::frontend::FrontendHandle;
 use anyhow::Result;
 use gpui::*;
 use rivu_presentation::i18n::Localizer;
@@ -14,7 +14,7 @@ use std::{
 };
 
 pub(crate) struct UiSession {
-    handle: HostHandle,
+    handle: FrontendHandle,
     layout_save: LayoutPersistence,
     artwork_manager: Arc<ArtworkManager>,
     i18n: Arc<Localizer>,
@@ -24,7 +24,7 @@ pub(crate) struct UiSession {
 
 impl UiSession {
     pub(crate) fn new(
-        handle: HostHandle,
+        handle: FrontendHandle,
         layouts: LoadedLayouts,
         artwork_manager: Arc<ArtworkManager>,
         i18n: Arc<Localizer>,
@@ -39,26 +39,6 @@ impl UiSession {
                 window: None,
             })
         })
-    }
-
-    pub(crate) fn request_shutdown(&self, cx: &mut App) {
-        if let Some(window) = self.window
-            && window
-                .update(cx, |view, window, cx| {
-                    window.activate_window();
-                    view.request_quit(cx);
-                })
-                .is_ok()
-        {
-            return;
-        }
-        if let Err(error) = self.handle.request_shutdown() {
-            tracing::warn!(%error, "gui_quit_failed");
-        }
-    }
-
-    pub(crate) fn has_window(&self) -> bool {
-        self.window.is_some()
     }
 
     pub(crate) fn show_window(&mut self, cx: &mut App) -> Result<()> {
@@ -113,23 +93,27 @@ impl UiSession {
         Ok(())
     }
 
-    pub(crate) fn window_closed(&mut self, id: WindowId) {
-        if self.window.is_some_and(|window| window.window_id() == id) {
-            self.release_window();
+    pub(crate) fn window_closed(&mut self, id: WindowId) -> bool {
+        if !self.window.is_some_and(|window| window.window_id() == id) {
+            return false;
         }
+        self.release_window();
+        true
     }
 
-    /// Called once after the GPUI event loop returns, not by close/reopen or
-    /// the deadline-limited quit observer. The final latest save must finish
+    /// Called once after the GPUI event loop returns, not by the close observer
+    /// or the deadline-limited quit observer. The final latest save must finish
     /// before normal process teardown, and its error must reach the caller.
     pub(crate) fn flush_layouts(&self) -> Result<()> {
         self.layout_save.flush().map_err(anyhow::Error::msg)
     }
 
     fn clear_window_state(&self) {
+        self.layout_save.handle().clear_wakeup();
         self.handle.clear_wakeup();
         self.handle
-            .set_display_demand(rivu_protocol::analysis::DisplayDemand::default());
+            .set_display_demand(rivu_analysis::DisplayDemand::default());
+        self.handle.set_waveform_demand(false);
     }
 
     pub(crate) fn release_window(&mut self) {
@@ -143,8 +127,8 @@ impl WindowView {
     fn install_close_guard(&self, window: &Window, cx: &Context<Self>) {
         let view = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
-            // Always finish through the deferred close action. The platform must
-            // not remove the window while its confirmation is still pending.
+            // Native and menu closes share the manual-action path and its
+            // deferred removal, rather than letting the platform remove directly.
             let _ = view.update(cx, |view, cx| view.request_close_window(window, cx));
             false
         });
@@ -182,5 +166,48 @@ impl WindowView {
 impl Drop for UiSession {
     fn drop(&mut self) {
         self.release_window();
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::{LoadedLayouts, UiSession};
+    use gpui::TestAppContext;
+    use rivu_metadata::artwork::ArtworkManager;
+    use rivu_presentation::i18n::Localizer;
+    use std::{sync::Arc, time::Duration};
+
+    #[gpui::test]
+    fn application_quit_shuts_down_core(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = crate::test_support::CoreRuntime::start(
+            directory.path(),
+            &directory.path().join("config.toml"),
+        )
+        .unwrap();
+        let (stopped, shutdown) = std::sync::mpsc::sync_channel(1);
+        runtime.handle.set_disconnect_callback(move || {
+            let _ = stopped.try_send(());
+        });
+        let session = UiSession::new(
+            runtime.handle.clone(),
+            LoadedLayouts::load(directory.path().join("layout.json")),
+            Arc::new(ArtworkManager::new(directory.path())),
+            Arc::new(Localizer::new("en-US")),
+        );
+        cx.update(|cx| {
+            rivu_ui::input::Input::init(cx);
+            session.borrow_mut().show_window(cx).unwrap();
+        });
+        let window = session.borrow().window.unwrap();
+        window
+            .update(cx, |view, _, cx| view.request_quit(cx))
+            .unwrap();
+        shutdown.recv_timeout(Duration::from_secs(5)).unwrap();
+        let state = rivu_client::get_state(
+            directory.path(),
+            rivu_protocol::response::StateSections::ALL,
+        )
+        .unwrap();
+        assert!(state.system.unwrap().shutting_down);
     }
 }

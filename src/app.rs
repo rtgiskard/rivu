@@ -1,13 +1,14 @@
-//! Application lifecycle and services shared by graphical and headless instances.
-//! CLI parsing and client-relative path translation remain at the binary boundary.
+//! Headless application service owner. Desktops are independent IPC clients.
 use rivu_metadata::artwork::ArtworkManager;
-
+#[cfg(feature = "gui")]
+mod desktop_host;
+#[cfg(feature = "gui")]
+mod desktop_launcher;
 mod startup;
-
 #[cfg(test)]
 use crate::config::ConfigPersistence;
 #[cfg(feature = "gui")]
-use crate::tray::TrayController;
+use crate::tray;
 use crate::{
     core::{CoreHandle, CoreLifecycle, CoreRuntime},
     execution::TaskRuntime,
@@ -17,194 +18,110 @@ use anyhow::{Context, Result, bail};
 use async_signal::{Signal, Signals};
 #[cfg(test)]
 use crossbeam_channel::bounded;
+#[cfg(feature = "gui")]
+use desktop_launcher::DesktopLauncher;
 use futures::{FutureExt, StreamExt};
-#[cfg(feature = "gui")]
-mod gui_adapter;
-#[cfg(feature = "gui")]
-use rivu_gui::GuiHost;
-use rivu_protocol::AppCommand;
-use rivu_protocol::{model::Command, response::Ack};
+use rivu_protocol::{AppCommand, model::Command, response::Ack};
+use std::{
+    panic::AssertUnwindSafe,
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 #[cfg(test)]
-use std::thread;
-#[cfg(test)]
-use std::time::Duration;
-use std::{panic::AssertUnwindSafe, path::PathBuf, sync::Arc};
-#[derive(Default)]
-pub(crate) struct ControlState {
-    #[cfg(any(test, feature = "gui", feature = "test-support"))]
-    graphical: bool,
-    #[cfg(any(test, feature = "gui", feature = "test-support"))]
-    pub(crate) raise_pending: bool,
-    #[cfg(any(test, feature = "gui", feature = "test-support"))]
-    quit_pending: bool,
-    shutting_down: bool,
-    #[cfg(any(test, feature = "gui", feature = "test-support"))]
-    wakeup: Option<Arc<dyn Fn() + Send + Sync>>,
-}
+use std::{thread, time::Duration};
 
-/// Cloneable application endpoint, owned by App across window lifetimes.
+#[derive(Default)]
+struct DesktopPresence {
+    subscribers: parking_lot::Mutex<Vec<async_channel::Sender<()>>>,
+}
+impl DesktopPresence {
+    fn notify(&self) {
+        self.subscribers.lock().retain(|sender| {
+            let _ = sender.try_send(());
+            !sender.is_closed()
+        });
+    }
+}
+pub(crate) struct DesktopRegistration(Arc<DesktopPresence>);
+impl Drop for DesktopRegistration {
+    fn drop(&mut self) {
+        self.0.notify();
+    }
+}
+/// Service shutdown and remote graphical activation. Never owns a GUI.
 #[derive(Clone)]
 pub(crate) struct AppHandle {
     core: CoreHandle,
     runtime: CoreLifecycle,
-    pub(crate) state: Arc<parking_lot::Mutex<ControlState>>,
+    #[cfg(feature = "gui")]
+    data_dir: Arc<PathBuf>,
+    shutting_down: Arc<AtomicBool>,
+    desktop: Arc<DesktopPresence>,
+    #[cfg(feature = "gui")]
+    activation: async_channel::Sender<()>,
+    #[cfg(feature = "gui")]
+    activation_requests: async_channel::Receiver<()>,
 }
-
 impl AppHandle {
-    pub(crate) fn new(runtime: &CoreRuntime, graphical: bool) -> Self {
-        #[cfg(not(any(test, feature = "gui", feature = "test-support")))]
-        debug_assert!(!graphical);
-        let state = Arc::new(parking_lot::Mutex::new(ControlState {
-            #[cfg(any(test, feature = "gui", feature = "test-support"))]
-            graphical,
-            ..ControlState::default()
-        }));
-        let completion_state = Arc::clone(&state);
+    pub(crate) fn new(runtime: &CoreRuntime, data_dir: &Path) -> Self {
+        #[cfg(feature = "gui")]
+        let (activation, activation_requests) = async_channel::bounded(1);
+        #[cfg(not(feature = "gui"))]
+        let _ = data_dir;
+        let shutting_down = Arc::new(AtomicBool::new(false));
+        let completed = Arc::clone(&shutting_down);
         runtime.control.set_completion_callback(move || {
-            let mut state = completion_state.lock();
-            state.shutting_down = true;
-            #[cfg(any(test, feature = "gui", feature = "test-support"))]
-            {
-                state.raise_pending = false;
-                state.quit_pending = false;
-                let wakeup = state.wakeup.clone();
-                drop(state);
-                if let Some(wakeup) = wakeup {
-                    wakeup();
-                }
-            }
+            completed.store(true, Ordering::Release);
         });
         Self {
             core: runtime.handle.clone(),
             runtime: runtime.control.clone(),
-            state,
+            #[cfg(feature = "gui")]
+            data_dir: Arc::new(data_dir.to_owned()),
+            shutting_down,
+            desktop: Arc::new(DesktopPresence::default()),
+            #[cfg(feature = "gui")]
+            activation,
+            #[cfg(feature = "gui")]
+            activation_requests,
         }
     }
-
-    #[cfg(any(test, feature = "gui", feature = "test-support"))]
+    pub(crate) fn register_desktop(&self) -> DesktopRegistration {
+        self.desktop.notify();
+        DesktopRegistration(Arc::clone(&self.desktop))
+    }
+    #[cfg(feature = "gui")]
+    pub(crate) fn subscribe_desktop(&self) -> async_channel::Receiver<()> {
+        let (sender, receiver) = async_channel::bounded(1);
+        let _ = sender.try_send(());
+        self.desktop.subscribers.lock().push(sender);
+        receiver
+    }
     pub(crate) fn can_raise(&self) -> bool {
-        let state = self.state.lock();
-        state.graphical && !state.shutting_down
+        cfg!(feature = "gui") && !self.is_shutting_down()
     }
-
-    #[cfg(not(any(test, feature = "gui", feature = "test-support")))]
-    pub(crate) fn can_raise(&self) -> bool {
-        false
-    }
-
-    #[cfg(not(any(test, feature = "gui", feature = "test-support")))]
     pub(crate) fn raise(&self) -> Result<()> {
-        bail!("Rivu has no graphical host")
-    }
-
-    #[cfg(any(test, feature = "gui", feature = "test-support"))]
-    pub(crate) fn raise(&self) -> Result<()> {
-        let mut state = self.state.lock();
-        if !state.graphical {
-            bail!("Rivu has no graphical host");
-        }
-        if state.shutting_down {
+        if self.is_shutting_down() {
             bail!("Rivu is shutting down");
         }
-        let wakeup = if state.raise_pending {
-            None
-        } else {
-            state.wakeup.clone()
-        };
-        state.raise_pending = true;
-        drop(state);
-        if let Some(wakeup) = wakeup {
-            wakeup();
+        #[cfg(not(feature = "gui"))]
+        bail!("Rivu was built without the graphical frontend");
+        #[cfg(feature = "gui")]
+        match self.activation.try_send(()) {
+            Ok(()) | Err(async_channel::TrySendError::Full(())) => Ok(()),
+            Err(async_channel::TrySendError::Closed(())) => bail!("Desktop launcher is stopped"),
         }
-        Ok(())
     }
-
-    #[cfg(any(test, feature = "gui"))]
-    /// User-driven Quit is offered to the GUI draft guard before core shutdown.
-    /// A single pending bit keeps tray callbacks bounded and nonblocking.
-    pub(crate) fn request_user_shutdown(&self) -> Result<()> {
-        let mut state = self.state.lock();
-        if state.shutting_down {
-            return Ok(());
-        }
-        if !state.graphical {
-            drop(state);
-            return self.request_shutdown();
-        }
-        let wakeup = if state.quit_pending {
-            None
-        } else {
-            state.wakeup.clone()
-        };
-        state.quit_pending = true;
-        drop(state);
-        if let Some(wakeup) = wakeup {
-            wakeup();
-        }
-        Ok(())
-    }
-
-    /// Forced IPC/signal shutdown bypasses UI confirmation and never blocks a GPUI callback.
     pub(crate) fn request_shutdown(&self) -> Result<()> {
-        let mut state = self.state.lock();
-        if state.shutting_down {
-            return Ok(());
-        }
-        state.shutting_down = true;
-        #[cfg(any(test, feature = "gui", feature = "test-support"))]
-        {
-            state.raise_pending = false;
-            state.quit_pending = false;
-        }
-        #[cfg(any(test, feature = "gui", feature = "test-support"))]
-        let wakeup = state.wakeup.clone();
-        drop(state);
-        let result = self.runtime.request_shutdown();
-        #[cfg(any(test, feature = "gui", feature = "test-support"))]
-        if let Some(wakeup) = wakeup {
-            wakeup();
-        }
-        result
+        self.shutting_down.store(true, Ordering::Release);
+        self.runtime.request_shutdown()
     }
-
-    #[cfg(any(test, feature = "gui", feature = "test-support"))]
     pub(crate) fn is_shutting_down(&self) -> bool {
-        self.state.lock().shutting_down
+        self.shutting_down.load(Ordering::Acquire)
     }
-
-    #[cfg(any(test, feature = "gui", feature = "test-support"))]
-    pub(crate) fn set_wakeup(&self, callback: impl Fn() + Send + Sync + 'static) {
-        let wakeup: Arc<dyn Fn() + Send + Sync> = Arc::new(callback);
-        let mut state = self.state.lock();
-        state.wakeup = Some(Arc::clone(&wakeup));
-        let pending = state.raise_pending || state.quit_pending || state.shutting_down;
-        drop(state);
-        if pending {
-            wakeup();
-        }
-    }
-
-    #[cfg(any(test, feature = "gui", feature = "test-support"))]
-    pub(crate) fn withdraw_gui(&self) {
-        let mut state = self.state.lock();
-        state.graphical = false;
-        state.raise_pending = false;
-        state.quit_pending = false;
-        state.wakeup = None;
-    }
-
-    #[cfg(any(test, feature = "gui", feature = "test-support"))]
-    pub(crate) fn take_raise_request(&self) -> bool {
-        let mut state = self.state.lock();
-        std::mem::take(&mut state.raise_pending) && !state.shutting_down
-    }
-
-    #[cfg(any(test, feature = "gui", feature = "test-support"))]
-    pub(crate) fn take_quit_request(&self) -> bool {
-        let mut state = self.state.lock();
-        std::mem::take(&mut state.quit_pending) && !state.shutting_down
-    }
-
     pub(crate) async fn request_ack_async(&self, command: AppCommand) -> Ack {
         match command {
             AppCommand::Core(command) => self.core.request_ack(command).await,
@@ -221,90 +138,54 @@ impl AppHandle {
     }
 }
 
-/// Owns one instance's core runtime, external services, and optional GUI session.
-/// Closing a window releases the session's view, never the application services.
-/// App retains socket acquisition until core, media, and transport have stopped.
+/// Owns services and storage authority until core persistence and IPC drain finish.
 pub struct App {
     handle: AppHandle,
     runtime: CoreRuntime,
     signals: Option<ShutdownSignals>,
     media: Option<mpris::MprisController>,
+    #[cfg(feature = "gui")]
+    tray: Option<tray::TrayController>,
+    #[cfg(feature = "gui")]
+    activation: Option<DesktopLauncher>,
     artwork: Arc<ArtworkManager>,
-    #[cfg(feature = "gui")]
-    tray: Option<TrayController>,
-    #[cfg(feature = "gui")]
-    gui: Option<GuiHost>,
     server: Option<ipc::Server>,
+    visual: Option<ipc::pcm::PcmServer>,
+    waveform: Option<ipc::waveform::WaveServer>,
     session: Option<rivu_utils::logging::Session>,
-    // Field order keeps execution alive through all owners, including GUI teardown.
     tasks: TaskRuntime,
-    // Retire the socket last, including after partial startup and core join.
     _socket_owner: ipc::SocketOwner,
+}
+#[cfg(feature = "gui")]
+pub(crate) fn build_info() -> rivu_gui::BuildInfo {
+    rivu_gui::BuildInfo {
+        timestamp: env!("RIVU_BUILD_TIMESTAMP")
+            .parse()
+            .expect("build timestamp is an integer"),
+        git_version: env!("RIVU_GIT_VERSION"),
+        features: env!("RIVU_BUILD_FEATURES"),
+    }
 }
 
 impl App {
-    /// Show an existing instance, or start a graphical application if none exists.
-    /// Import paths must already be resolved against the calling client's cwd.
+    /// Attach a standalone desktop, starting an independent service only if absent.
     #[cfg(feature = "gui")]
     pub fn open_gui(data_dir: PathBuf, config_path: PathBuf, paths: Vec<PathBuf>) -> Result<()> {
-        match rivu_client::request_ack(&data_dir, AppCommand::ShowWindow) {
-            Ok(ack) if ack.is_success() => {
-                if !paths.is_empty() {
-                    let ack = rivu_client::request_ack(
-                        &data_dir,
-                        Command::Scan {
-                            paths,
-                            force: false,
-                        },
-                    )?;
-                    if !ack.is_success() {
-                        bail!("{}", ack.error.as_deref().unwrap_or("Command failed"));
-                    }
-                }
-                Ok(())
-            }
-            Ok(ack) => bail!("{}", ack.error.as_deref().unwrap_or("Command failed")),
-            Err(error) if ipc::is_no_instance(&error) => {
-                Self::start(data_dir, config_path, paths, true)?.run()
-            }
-            Err(error) => Err(error),
-        }
+        desktop_host::open(data_dir, config_path, paths)
     }
-
-    /// Acquire the instance before touching core storage or configuration.
-    /// Import paths must already be resolved against the calling client's cwd.
-    pub fn start(
-        data_dir: PathBuf,
-        config_path: PathBuf,
-        paths: Vec<PathBuf>,
-        graphical: bool,
-    ) -> Result<Self> {
-        #[cfg(not(feature = "gui"))]
-        if graphical {
-            bail!("Rivu was built without the graphical frontend");
-        }
+    pub fn start(data_dir: PathBuf, config_path: PathBuf, paths: Vec<PathBuf>) -> Result<Self> {
         rivu_utils::logging::init(None)?;
         let socket_owner = startup::acquire_storage(&data_dir, &config_path)?;
         let signals =
             Signals::new([Signal::Int, Signal::Term]).context("Registering shutdown signals")?;
         let config = CoreRuntime::load_startup_config(&config_path)?;
         let artwork_limit_bytes = config.artwork_file_limit_mib as usize * 1024 * 1024;
-        let tasks = TaskRuntime::start()?;
         #[cfg(feature = "gui")]
-        let layouts = graphical.then(|| {
-            let path = data_dir.join("layout.json");
-            let workers = Arc::clone(&tasks.workers);
-            tasks.handle.spawn(async move {
-                workers
-                    .execute(move || rivu_gui::LoadedLayouts::load(path))
-                    .await
-            })
-        });
-        let i18n = Arc::new(if graphical {
-            rivu_presentation::i18n::Localizer::new(&config.ui_language)
-        } else {
-            rivu_presentation::i18n::Localizer::for_cli("auto")
-        });
+        let tray_enabled = config.tray_enabled;
+        #[cfg(feature = "gui")]
+        let tray_i18n = Arc::new(rivu_presentation::i18n::Localizer::new(&config.ui_language));
+        let tasks = TaskRuntime::start()?;
+        let i18n = rivu_presentation::i18n::Localizer::for_cli("auto");
         let session = rivu_utils::logging::Session::start(
             &data_dir,
             &crate::config::logging_options(&config),
@@ -317,8 +198,20 @@ impl App {
             Arc::clone(&tasks.handle),
             Arc::clone(&tasks.workers),
         )?;
-        let handle = AppHandle::new(&runtime, graphical);
+        let handle = AppHandle::new(&runtime, &data_dir);
         let signals = ShutdownSignals::start(signals, handle.clone(), &tasks.handle);
+        let visual = ipc::pcm::PcmServer::start(
+            &data_dir,
+            runtime.handle.clone(),
+            socket_owner.instance_id(),
+        )?;
+        let waveform = ipc::waveform::WaveServer::start(
+            &data_dir,
+            runtime.handle.clone(),
+            socket_owner.instance_id(),
+            &tasks.handle,
+            &tasks.workers,
+        )?;
         let server = ipc::Server::start(
             &socket_owner,
             runtime.handle.clone(),
@@ -335,15 +228,17 @@ impl App {
             runtime,
             signals: Some(signals),
             media: None,
-            artwork,
             #[cfg(feature = "gui")]
             tray: None,
             #[cfg(feature = "gui")]
-            gui: None,
+            activation: None,
+            artwork,
             server: Some(server),
             session: Some(session),
             tasks,
             _socket_owner: socket_owner,
+            visual: Some(visual),
+            waveform: Some(waveform),
         };
         app.media = Some(mpris::MprisController::start(
             app.runtime.handle.clone(),
@@ -352,87 +247,61 @@ impl App {
             &app.tasks.handle,
             Arc::clone(&app.tasks.workers),
         ));
+        #[cfg(feature = "gui")]
+        {
+            app.activation = Some(DesktopLauncher::start(
+                app.handle.clone(),
+                config_path,
+                app._socket_owner.instance_id(),
+                &app.tasks.handle,
+            ));
+            if tray_enabled {
+                app.tray = Some(tray::TrayController::start(
+                    app.runtime.handle.clone(),
+                    app.handle.clone(),
+                    tray_i18n,
+                    &app.tasks.handle,
+                ));
+            }
+        }
         if !paths.is_empty() {
             app.runtime.handle.send(Command::Scan {
                 paths,
                 force: false,
             })?;
         }
-        if graphical {
-            #[cfg(feature = "gui")]
-            {
-                let port = gui_adapter::GuiAdapter::new(
-                    app.runtime.handle.clone(),
-                    app.handle.clone(),
-                    Arc::clone(&app.tasks.workers),
-                );
-                app.gui = Some(GuiHost::new(
-                    rivu_gui::HostHandle::new(port),
-                    futures::executor::block_on(layouts.expect("graphical layout preparation"))?,
-                    Arc::clone(&app.artwork),
-                    Arc::clone(&i18n),
-                ));
-                if app.runtime.handle.config_snapshot().tray_enabled {
-                    app.tray = Some(TrayController::start(
-                        app.runtime.handle.clone(),
-                        app.handle.clone(),
-                        Arc::clone(&i18n),
-                        &app.tasks.handle,
-                    ));
-                }
-            }
-        } else {
-            println!(
-                "{}",
-                i18n.format(
-                    "core-ready",
-                    &[("path", data_dir.display().to_string().into())]
-                )
-            );
-        }
+        println!(
+            "{}",
+            i18n.format(
+                "core-ready",
+                &[("path", data_dir.display().to_string().into())]
+            )
+        );
         Ok(app)
     }
-
-    /// Run until application shutdown. Core and services retire outside GPUI.
     pub fn run(mut self) -> Result<()> {
-        #[cfg(feature = "gui")]
-        if let Some(gui) = self.gui.take() {
-            let result = gui.run();
-            drop(self.tray.take());
-            return self.finish(result);
-        }
-        self.finish(Ok(()))
-    }
-
-    fn finish(&mut self, interface_result: Result<()>) -> Result<()> {
-        if interface_result.is_err() {
-            let _ = self.handle.request_shutdown();
-        }
-        let join_result = self.runtime.join();
-        // Keep IPC/socket acquisition and logging alive through core and MPRIS stop.
+        let joined = self.runtime.join();
         self.stop_services();
-        interface_result?;
-        join_result
+        joined
     }
-
-    /// Drain producers before flushing, only after core join and outside GPUI.
     fn stop_services(&mut self) {
+        #[cfg(feature = "gui")]
+        {
+            drop(self.tray.take());
+            drop(self.activation.take());
+        }
         drop(self.media.take());
-        // Server::drop drains its owned sessions before the async executor stops.
         drop(self.server.take());
+        drop(self.waveform.take());
+        drop(self.visual.take());
         drop(self.signals.take());
         if let Some(mut session) = self.session.take() {
             session.shutdown();
         }
     }
 }
-
 impl Drop for App {
     fn drop(&mut self) {
-        #[cfg(feature = "gui")]
-        drop(self.gui.take());
-        #[cfg(feature = "gui")]
-        drop(self.tray.take());
         if !self.runtime.is_finished() {
             let _ = self.handle.request_shutdown();
         }
@@ -509,7 +378,7 @@ mod tests {
         let config = directory
             .path()
             .join(OsString::from_vec(b"config-\xff.toml".to_vec()));
-        let error = App::start(data_dir.clone(), config.clone(), Vec::new(), false)
+        let error = App::start(data_dir.clone(), config.clone(), Vec::new())
             .err()
             .unwrap();
         assert!(
@@ -522,145 +391,12 @@ mod tests {
         assert!(ipc::SocketOwner::acquire(&data_dir).is_ok());
     }
 
-    #[cfg(feature = "gui")]
     #[test]
-    fn opening_existing_gui_does_not_validate_unused_config_path() {
-        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
-
+    fn completed_service_rejects_activation() {
         let (directory, mut runtime) = runtime_fixture();
-        let owner = ipc::SocketOwner::acquire(directory.path()).unwrap();
-        let app = AppHandle::new(&runtime, true);
-        let server = ipc::Server::start(
-            &owner,
-            runtime.handle.clone(),
-            app.clone(),
-            runtime.test_executor(),
-        )
-        .unwrap();
-        let unused_config = directory
-            .path()
-            .join(OsString::from_vec(b"unused-\xff.toml".to_vec()));
-        let original = b"intentionally not valid TOML";
-        std::fs::write(&unused_config, original).unwrap();
-        App::open_gui(
-            directory.path().to_owned(),
-            unused_config.clone(),
-            Vec::new(),
-        )
-        .unwrap();
-        assert!(app.take_raise_request());
-        assert_eq!(std::fs::read(&unused_config).unwrap(), original);
-        app.request_shutdown().unwrap();
-        runtime.join().unwrap();
-        drop(server);
-        drop(owner);
-    }
-
-    #[cfg(not(feature = "gui"))]
-    #[test]
-    fn disabled_graphical_start_rejects_before_touching_storage() {
-        let directory = tempfile::tempdir().unwrap();
-        let data_dir = directory.path().join("data");
-        let config = directory.path().join("config.toml");
-        let error = App::start(data_dir.clone(), config.clone(), Vec::new(), true)
-            .err()
-            .unwrap();
-        assert!(error.to_string().contains("without the graphical frontend"));
-        assert!(!data_dir.exists());
-        assert!(!config.exists());
-    }
-
-    #[test]
-    fn user_quit_coalesces_without_starting_core_shutdown() {
-        let (_directory, mut runtime) = runtime_fixture();
-        let app = AppHandle::new(&runtime, true);
-        for _ in 0..1000 {
-            app.request_user_shutdown().unwrap();
-        }
-        let (wake, wakes) = bounded(1);
-        app.set_wakeup(move || {
-            let _ = wake.try_send(());
-        });
-        assert_eq!(wakes.try_recv(), Ok(()));
-        assert!(!app.is_shutting_down());
-        assert!(!runtime.is_finished());
-        assert!(app.take_quit_request());
-        assert!(!app.take_quit_request());
-        // Cancelling the GUI confirmation consumes only this intent; another
-        // tray Quit must be deliverable without an earlier shutdown leaking.
-        app.request_user_shutdown().unwrap();
-        assert_eq!(wakes.try_recv(), Ok(()));
-        assert!(app.take_quit_request());
-        assert!(!app.is_shutting_down());
-        app.request_user_shutdown().unwrap();
-        app.request_shutdown().unwrap();
-        assert!(!app.take_quit_request());
-        runtime.join().unwrap();
-    }
-
-    #[test]
-    fn headless_user_quit_shuts_down_without_a_gui_guard() {
-        let (_directory, mut runtime) = runtime_fixture();
-        let app = AppHandle::new(&runtime, false);
-        app.request_user_shutdown().unwrap();
-        assert!(app.is_shutting_down());
-        assert!(!app.take_quit_request());
-        runtime.join().unwrap();
-    }
-
-    #[test]
-    fn raises_coalesce_across_registration_and_shutdown_withdraws_host() {
-        let (_directory, mut runtime) = runtime_fixture();
-        let app = AppHandle::new(&runtime, true);
-        for _ in 0..1000 {
-            app.raise().unwrap();
-        }
-        let (wake, wakes) = bounded(1);
-        app.set_wakeup(move || {
-            let _ = wake.try_send(());
-        });
-        assert_eq!(wakes.try_recv(), Ok(()));
-        assert!(app.take_raise_request());
-        assert!(!app.take_raise_request());
-        app.raise().unwrap();
-        assert_eq!(wakes.try_recv(), Ok(()));
-        app.request_shutdown().unwrap();
-        assert!(!app.can_raise());
-        assert!(app.raise().is_err());
-        assert!(!app.take_raise_request());
-        runtime.join().unwrap();
-    }
-
-    #[test]
-    fn completion_reconciles_before_and_after_ui_registration() {
-        for register_first in [false, true] {
-            let (_directory, mut runtime) = runtime_fixture();
-            let app = AppHandle::new(&runtime, true);
-            let (wake, wakes) = bounded(1);
-            let callback = move || {
-                let _ = wake.try_send(());
-            };
-            if register_first {
-                app.set_wakeup(callback.clone());
-            }
-            // Core completion, not an App shutdown request, must wake its owner.
-            runtime.control.request_shutdown().unwrap();
-            runtime.join().unwrap();
-            if !register_first {
-                app.set_wakeup(callback);
-            }
-            assert_eq!(wakes.try_recv(), Ok(()));
-            assert!(app.is_shutting_down());
-            assert!(!app.can_raise());
-        }
-    }
-
-    #[test]
-    fn app_endpoint_created_after_core_completion_reconciles_shutdown() {
-        let (_directory, mut runtime) = runtime_fixture();
         runtime.control.request_shutdown().unwrap();
         runtime.join().unwrap();
-        let app = AppHandle::new(&runtime, true);
+        let app = AppHandle::new(&runtime, directory.path());
         assert!(app.is_shutting_down());
         assert!(!app.can_raise());
         assert!(app.raise().is_err());
@@ -683,7 +419,7 @@ mod tests {
         .unwrap();
         let (ready, started) = bounded(1);
         let worker = thread::spawn(move || {
-            let app = App::start(data_dir, config_path, Vec::new(), false);
+            let app = App::start(data_dir, config_path, Vec::new());
             ready
                 .send(
                     app.as_ref()
@@ -721,7 +457,7 @@ mod tests {
         let config = config_path.clone();
         let (ready, started) = bounded(1);
         let worker = thread::spawn(move || {
-            let app = App::start(data_dir, config, Vec::new(), false);
+            let app = App::start(data_dir, config, Vec::new());
             ready
                 .send(
                     app.as_ref()
@@ -764,15 +500,7 @@ mod tests {
         let owner = ipc::SocketOwner::acquire(directory.path()).unwrap();
         let config = directory.path().join("config.toml");
         std::fs::write(&config, b"invalid config intentionally").unwrap();
-        assert!(
-            App::start(
-                directory.path().to_owned(),
-                config.clone(),
-                Vec::new(),
-                false
-            )
-            .is_err()
-        );
+        assert!(App::start(directory.path().to_owned(), config.clone(), Vec::new()).is_err());
         assert!(!directory.path().join("library.db").exists());
         assert_eq!(
             std::fs::read(config).unwrap(),
@@ -792,7 +520,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let config = directory.path().join("config.toml");
         std::fs::write(&config, b"invalid config intentionally").unwrap();
-        assert!(App::start(directory.path().to_owned(), config, Vec::new(), false).is_err());
+        assert!(App::start(directory.path().to_owned(), config, Vec::new()).is_err());
         assert!(ipc::SocketOwner::acquire(directory.path()).is_ok());
     }
 
@@ -800,7 +528,7 @@ mod tests {
     fn ipc_commands_and_sql_queries_finish_with_the_entire_blocking_pool_occupied() {
         let (directory, mut runtime) = runtime_fixture();
         let owner = ipc::SocketOwner::acquire(directory.path()).unwrap();
-        let app = AppHandle::new(&runtime, false);
+        let app = AppHandle::new(&runtime, directory.path());
         let server = ipc::Server::start(
             &owner,
             runtime.handle.clone(),
@@ -868,5 +596,63 @@ mod tests {
         app.request_shutdown().unwrap();
         runtime.join().unwrap();
         drop(server);
+    }
+}
+
+#[cfg(test)]
+mod lifetime_tests {
+    use super::*;
+
+    #[test]
+    fn desktop_registration_does_not_own_service_lifetime() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut runtime =
+            CoreRuntime::start(directory.path(), &directory.path().join("config.toml")).unwrap();
+        let app = AppHandle::new(&runtime, directory.path());
+        let desktop = app.register_desktop();
+        drop(desktop);
+        assert!(!app.is_shutting_down());
+        assert!(!runtime.is_finished());
+        assert_eq!(app.can_raise(), cfg!(feature = "gui"));
+        app.request_shutdown().unwrap();
+        runtime.join().unwrap();
+    }
+
+    #[cfg(feature = "gui")]
+    #[test]
+    fn activation_intents_coalesce_and_remain_available_after_desktop_exit() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut runtime =
+            CoreRuntime::start(directory.path(), &directory.path().join("config.toml")).unwrap();
+        let app = AppHandle::new(&runtime, directory.path());
+        for _ in 0..1000 {
+            app.raise().unwrap();
+        }
+        assert!(app.activation_requests.try_recv().is_ok());
+        assert!(app.activation_requests.try_recv().is_err());
+        let changes = app.subscribe_desktop();
+        assert!(changes.try_recv().is_ok());
+        let desktop = app.register_desktop();
+        assert!(changes.try_recv().is_ok());
+        drop(desktop);
+        assert!(changes.try_recv().is_ok());
+        app.raise().unwrap();
+        assert!(app.activation_requests.try_recv().is_ok());
+        app.request_shutdown().unwrap();
+        assert!(app.raise().is_err());
+        runtime.join().unwrap();
+    }
+
+    #[cfg(not(feature = "gui"))]
+    #[test]
+    fn service_without_gui_support_rejects_graphical_activation() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut runtime =
+            CoreRuntime::start(directory.path(), &directory.path().join("config.toml")).unwrap();
+        let app = AppHandle::new(&runtime, directory.path());
+        assert!(!app.can_raise());
+        assert!(app.raise().is_err());
+        app.request_shutdown().unwrap();
+        runtime.join().unwrap();
     }
 }

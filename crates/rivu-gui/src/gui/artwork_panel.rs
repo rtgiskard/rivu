@@ -10,8 +10,8 @@ use rivu_format::config::ArtworkDirection;
 use rivu_format::config::ArtworkMode;
 use rivu_format::config::ArtworkOptions;
 use rivu_format::config::ArtworkStyle;
+use rivu_format::config::Config;
 use rivu_presentation::i18n::Localizer;
-use rivu_protocol::model::Config;
 use rivu_protocol::model::{PlaybackStatus, Track};
 
 use super::animation_frames::AnimationFrames;

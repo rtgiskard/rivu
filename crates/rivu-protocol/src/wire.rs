@@ -1,5 +1,7 @@
 mod endpoint;
 pub use endpoint::{address, connect, verify_peer};
+mod config_patch;
+pub use config_patch::WireConfigMutation;
 
 use crate::{
     AppCommand,
@@ -27,6 +29,8 @@ pub enum RequestTag {
     Command = 3,
     Watch = 4,
     WaitTask = 5,
+    QueryRetained = 6,
+    RegisterDesktop = 7,
 }
 
 impl TryFrom<u8> for RequestTag {
@@ -40,6 +44,8 @@ impl TryFrom<u8> for RequestTag {
             3 => Self::Command,
             4 => Self::Watch,
             5 => Self::WaitTask,
+            6 => Self::QueryRetained,
+            7 => Self::RegisterDesktop,
             _ => bail!("Unknown IPC request type {value}"),
         })
     }
@@ -91,6 +97,8 @@ pub enum WireRequest {
     Command(WireCommand),
     Watch(StateRevisions),
     WaitTask(crate::model::TaskTarget),
+    QueryRetained(WireQuery),
+    RegisterDesktop,
 }
 
 /// Binary query wire format. Variant order belongs to the versioned wire schema.
@@ -537,6 +545,9 @@ pub enum WireCommand {
     SetPlayCount {
         track_id: i64,
         play_count: u64,
+    },
+    MutateConfig {
+        change: WireConfigMutation,
     },
 }
 
@@ -1293,6 +1304,9 @@ impl From<Command> for WireCommand {
             Command::Configure { config } => Self::Configure {
                 config: Box::new(WireConfig::from(config.as_ref())),
             },
+            Command::MutateConfig { change } => Self::MutateConfig {
+                change: change.into(),
+            },
             Command::MprisStatus { status } => Self::MprisStatus { status },
             Command::CreatePlaylistFromQueue { name } => Self::CreatePlaylistFromQueue { name },
             Command::RelocateTrack {
@@ -1584,6 +1598,9 @@ impl TryFrom<WireCommand> for Command {
             WireCommand::CancelScan { id } => Self::CancelScan { id },
             WireCommand::Configure { config } => Self::Configure {
                 config: Arc::new((*config).into()),
+            },
+            WireCommand::MutateConfig { change } => Self::MutateConfig {
+                change: change.into(),
             },
             WireCommand::MprisStatus { status } => Self::MprisStatus { status },
             WireCommand::Shutdown => bail!("Shutdown is an application request"),

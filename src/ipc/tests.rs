@@ -1,7 +1,6 @@
 use super::*;
 use crate::app::AppHandle;
 use crate::config::ConfigPersistence;
-use crate::test_support::ipc::socket_test_directory;
 use rivu_client::client_session;
 use rivu_protocol::{AppCommand, transport::*, wire::*};
 use rivu_protocol::{
@@ -36,7 +35,7 @@ fn pending_query_preserves_pipelined_responses_and_disconnected_clients_release_
     let mut runtime = crate::core::CoreRuntime::start(directory.path(), &config_path).unwrap();
     let (handle, queries) = crate::core::CoreHandle::test_query_port();
     let owner = SocketOwner::acquire(directory.path()).unwrap();
-    let app = AppHandle::new(&runtime, false);
+    let app = AppHandle::new(&runtime, directory.path());
     let server = Server::start(&owner, handle.clone(), app, runtime.test_executor()).unwrap();
     let address = rivu_protocol::wire::address(directory.path()).unwrap();
     let connect = || {
@@ -125,7 +124,7 @@ fn configuration_change_wakes_ipc_watch_and_selective_read_omits_runtime() {
     .unwrap();
     let owner = SocketOwner::acquire(directory.path()).unwrap();
     let mut runtime = crate::core::CoreRuntime::start(directory.path(), &config_path).unwrap();
-    let app = AppHandle::new(&runtime, false);
+    let app = AppHandle::new(&runtime, directory.path());
     let server =
         Server::start(&owner, runtime.handle.clone(), app, runtime.test_executor()).unwrap();
     let mut control = client_session(directory.path()).unwrap();
@@ -164,7 +163,9 @@ fn configuration_change_wakes_ipc_watch_and_selective_read_omits_runtime() {
     });
     runtime
         .handle
-        .update_gui_config(rivu_protocol::model::ConfigChange::ToggleWaveformSeek)
+        .send(Command::MutateConfig {
+            change: rivu_protocol::model::ConfigMutation::ToggleWaveformSeek,
+        })
         .unwrap();
     // Bound the failure path without depending on scheduling a particular watch/read order.
     let response = completion.recv_timeout(std::time::Duration::from_secs(5));
@@ -200,7 +201,7 @@ fn app_commands_route_over_ipc_without_changing_business_state() {
     .unwrap();
     let owner = SocketOwner::acquire(directory.path()).unwrap();
     let mut runtime = crate::core::CoreRuntime::start(directory.path(), &config_path).unwrap();
-    let app = AppHandle::new(&runtime, false);
+    let app = AppHandle::new(&runtime, directory.path());
     let server =
         Server::start(&owner, runtime.handle.clone(), app, runtime.test_executor()).unwrap();
     let mut client = client_session(directory.path()).unwrap();
@@ -221,16 +222,12 @@ fn app_commands_route_over_ipc_without_changing_business_state() {
         assert_eq!(client.instance_id(), instance);
     }
     let before = client.get_state(StateSections::ALL).unwrap();
-    let rejected = client.request_ack(AppCommand::ShowWindow).unwrap();
-    assert!(!rejected.is_success());
-    assert!(
-        rejected
-            .error
-            .as_deref()
-            .unwrap()
-            .contains("graphical host")
-    );
-    assert_eq!(rejected.revision, before.system.as_ref().unwrap().revision);
+    let accepted = client.request_ack(AppCommand::ShowWindow).unwrap();
+    #[cfg(feature = "gui")]
+    assert!(accepted.is_success());
+    #[cfg(not(feature = "gui"))]
+    assert!(!accepted.is_success());
+    assert_eq!(accepted.revision, before.system.as_ref().unwrap().revision);
     let after = client.get_state(StateSections::ALL).unwrap();
     assert_eq!(
         serde_json::to_value(before).unwrap(),
@@ -272,7 +269,7 @@ fn malformed_request_during_watch_receives_invalid_request_response() {
     .unwrap();
     let owner = SocketOwner::acquire(directory.path()).unwrap();
     let mut runtime = crate::core::CoreRuntime::start(directory.path(), &config_path).unwrap();
-    let app = AppHandle::new(&runtime, false);
+    let app = AppHandle::new(&runtime, directory.path());
     let server =
         Server::start(&owner, runtime.handle.clone(), app, runtime.test_executor()).unwrap();
     let mut control = client_session(directory.path()).unwrap();
@@ -358,7 +355,7 @@ fn library_root_queries_run_through_real_owner_and_ipc_session() {
     .unwrap();
     let owner = SocketOwner::acquire(directory.path()).unwrap();
     let mut runtime = CoreRuntime::start(directory.path(), &config_path).unwrap();
-    let app = AppHandle::new(&runtime, false);
+    let app = AppHandle::new(&runtime, directory.path());
     let server = Server::start(
         &owner,
         runtime.handle.clone(),
@@ -464,7 +461,7 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
     .unwrap();
     let owner = SocketOwner::acquire(directory.path()).unwrap();
     let mut runtime = CoreRuntime::start(directory.path(), &config_path).unwrap();
-    let app = AppHandle::new(&runtime, false);
+    let app = AppHandle::new(&runtime, directory.path());
     let server = Server::start(
         &owner,
         runtime.handle.clone(),
@@ -957,6 +954,12 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
     drop(owner);
 }
 
+pub(crate) fn socket_test_directory() -> tempfile::TempDir {
+    let cache = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".cache");
+    std::fs::create_dir_all(&cache).unwrap();
+    tempfile::tempdir_in(cache).unwrap()
+}
+
 #[test]
 fn instance_acquisition_creates_directory_without_socket_or_lock_files() {
     let directory = socket_test_directory();
@@ -1067,7 +1070,7 @@ fn filtered_occurrence_continuations_round_trip_and_reject_stale_ipc_scopes() {
     .unwrap();
     let owner = SocketOwner::acquire(directory.path()).unwrap();
     let mut runtime = crate::core::CoreRuntime::start(directory.path(), &config_path).unwrap();
-    let app = AppHandle::new(&runtime, false);
+    let app = AppHandle::new(&runtime, directory.path());
     let server = Server::start(
         &owner,
         runtime.handle.clone(),
@@ -1202,6 +1205,130 @@ fn filtered_occurrence_continuations_round_trip_and_reject_stale_ipc_scopes() {
         (4, 0)
     );
     drop(session);
+    drop(server);
+    app.request_shutdown().unwrap();
+    runtime.join().unwrap();
+}
+
+#[test]
+fn remote_config_patch_merges_live_controls_and_keeps_quick_changes_unpersisted() {
+    use rivu_protocol::model::{ConfigMutation, ConfigPatch};
+    let directory = socket_test_directory();
+    let config_path = directory.path().join("config.toml");
+    let config = crate::config::Config {
+        media_read_buffer_mib: 1,
+        ffmpeg_enabled: false,
+        ..Default::default()
+    };
+    config.save(&config_path).unwrap();
+    let saved = std::fs::read(&config_path).unwrap();
+    let owner = SocketOwner::acquire(directory.path()).unwrap();
+    let mut runtime = crate::core::CoreRuntime::start(directory.path(), &config_path).unwrap();
+    let app = AppHandle::new(&runtime, directory.path());
+    let server = Server::start(
+        &owner,
+        runtime.handle.clone(),
+        app.clone(),
+        runtime.test_executor(),
+    )
+    .unwrap();
+    let mut session = client_session(directory.path()).unwrap();
+    let initial = session.get_state(StateSections::ALL).unwrap();
+    let baseline = initial.configuration.unwrap().config;
+    let mut draft = baseline.as_ref().clone();
+    draft.scan_max_depth = 7;
+    let patch = ConfigPatch::between(&baseline, &draft);
+    assert!(
+        session
+            .request_ack(Command::Volume { value: 0.2 })
+            .unwrap()
+            .is_success()
+    );
+    assert!(
+        session
+            .request_ack(Command::MutateConfig {
+                change: ConfigMutation::ToggleWaveformSeek
+            })
+            .unwrap()
+            .is_success()
+    );
+    assert_eq!(std::fs::read(&config_path).unwrap(), saved);
+    assert!(
+        session
+            .request_ack(Command::MutateConfig {
+                change: ConfigMutation::Settings(Box::new(patch))
+            })
+            .unwrap()
+            .is_success()
+    );
+    let state = session.get_state(StateSections::ALL).unwrap();
+    let config = state.configuration.unwrap().config;
+    assert_eq!(config.scan_max_depth, 7);
+    assert_eq!(config.volume, 0.2);
+    assert_eq!(
+        config.waveform_seek_enabled,
+        !baseline.waveform_seek_enabled
+    );
+    assert_eq!(crate::config::Config::load(&config_path).unwrap(), *config);
+    assert_eq!(state.playback.unwrap().playback.volume, 0.2);
+    assert!(session.register_desktop().unwrap().is_success());
+    assert!(!session.register_desktop().unwrap().is_success());
+    assert!(
+        session
+            .query_retained(Query::LibraryStats)
+            .unwrap()
+            .result
+            .is_ok()
+    );
+    drop(session);
+    drop(server);
+    app.request_shutdown().unwrap();
+    runtime.join().unwrap();
+}
+
+#[test]
+fn retained_remote_query_retires_after_logical_timeout_without_releasing_its_physical_slot() {
+    use std::time::Duration;
+    let directory = socket_test_directory();
+    let config_path = directory.path().join("config.toml");
+    crate::config::Config {
+        media_read_buffer_mib: 1,
+        ffmpeg_enabled: false,
+        ..Default::default()
+    }
+    .save(&config_path)
+    .unwrap();
+    let mut runtime = crate::core::CoreRuntime::start(directory.path(), &config_path).unwrap();
+    let (handle, queries) = crate::core::CoreHandle::test_query_port();
+    let owner = SocketOwner::acquire(directory.path()).unwrap();
+    let app = AppHandle::new(&runtime, directory.path());
+    let server = Server::start(&owner, handle, app.clone(), runtime.test_executor()).unwrap();
+    let mut session = client_session(directory.path()).unwrap();
+    let (completed, result) = std::sync::mpsc::sync_channel(1);
+    let worker = std::thread::spawn(move || {
+        completed
+            .send(session.query_retained(Query::Track { track_id: 42 }))
+            .unwrap()
+    });
+    let reply = async_io::block_on(timeout(Duration::from_secs(2), queries.receive())).unwrap();
+    assert!(matches!(
+        result.recv_timeout(Duration::from_millis(20)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    ));
+    assert!(!reply.is_cancelled());
+    reply.respond(QueryResponse {
+        revisions: Default::default(),
+        result: Ok(rivu_protocol::response::ViewResponse::Track(None)),
+    });
+    assert!(
+        result
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap()
+            .result
+            .is_ok()
+    );
+    worker.join().unwrap();
     drop(server);
     app.request_shutdown().unwrap();
     runtime.join().unwrap();

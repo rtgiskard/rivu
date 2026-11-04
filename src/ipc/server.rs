@@ -34,6 +34,7 @@ type UnixListener = Async<std::os::unix::net::UnixListener>;
 /// The kernel releases the address after the last listening descriptor closes.
 pub struct SocketOwner {
     data_dir: PathBuf,
+    instance_id: u32,
     listener: std::os::unix::net::UnixListener,
 }
 
@@ -44,10 +45,21 @@ impl SocketOwner {
         let listener = std::os::unix::net::UnixListener::bind_addr(&address)
             .context("Cannot acquire Rivu IPC address; another Rivu may own this data directory")?;
         listener.set_nonblocking(true)?;
+        let instance_id = loop {
+            let id = rand::rng().random();
+            if id != UNKNOWN_INSTANCE {
+                break id;
+            }
+        };
         Ok(Self {
             data_dir: data_dir.to_owned(),
+            instance_id,
             listener,
         })
+    }
+
+    pub fn instance_id(&self) -> u32 {
+        self.instance_id
     }
 }
 
@@ -55,6 +67,7 @@ impl SocketOwner {
 /// service and every connection retire, before SocketOwner releases authority.
 pub struct Server {
     data_dir: PathBuf,
+    instance_id: u32,
     shutdown: Sender<()>,
     worker: Option<async_executor::Task<()>>,
 }
@@ -69,19 +82,26 @@ impl Server {
         let data_dir = owner.data_dir.clone();
         let listener = Async::new(owner.listener.try_clone()?)?;
         let (shutdown, shutdown_rx) = async_channel::bounded(1);
+        let instance_id = owner.instance_id();
         let worker = executor.spawn(run_server(
             listener,
             handle,
             app,
             shutdown_rx,
             executor.clone(),
+            instance_id,
         ));
         tracing::info!(path = %data_dir.display(), "ipc_server_started");
         Ok(Self {
             data_dir,
+            instance_id,
             shutdown,
             worker: Some(worker),
         })
+    }
+
+    pub fn instance_id(&self) -> u32 {
+        self.instance_id
     }
 }
 
@@ -234,9 +254,17 @@ async fn wait_for_query(
     reader: &mut RequestReader,
     handle: &CoreHandle,
     query: Query,
+    retained: bool,
     shutdown: &Receiver<()>,
 ) -> Result<Option<Result<QueryResponse>>> {
-    let query = run_query(handle, query).fuse();
+    let query = async {
+        if retained {
+            Ok(handle.query_retained(query).await)
+        } else {
+            run_query(handle, query).await
+        }
+    }
+    .fuse();
     futures::pin_mut!(query);
     loop {
         futures::select! {
@@ -297,6 +325,7 @@ async fn serve_connection(
     let mut pending_request = None;
     let mut write_buffer = Vec::new();
     let mut session = SessionState::Unbound;
+    let mut desktop_registration = None;
     loop {
         // Socket readiness alone does not impose a cooperative execution budget.
         futures_lite::future::yield_now().await;
@@ -370,7 +399,12 @@ async fn serve_connection(
                 let response = WireResponse::State(wire_state(handle.state(sections)));
                 write_frame_buffered(&mut stream, &response, &mut write_buffer).await?;
             }
-            WireRequest::Query(query) => {
+            request @ (WireRequest::Query(_) | WireRequest::QueryRetained(_)) => {
+                let (query, retained) = match request {
+                    WireRequest::Query(query) => (query, false),
+                    WireRequest::QueryRetained(query) => (query, true),
+                    _ => unreachable!(),
+                };
                 let query = match Query::try_from(query) {
                     Ok(query) => query,
                     Err(error) => {
@@ -384,8 +418,15 @@ async fn serve_connection(
                         continue;
                     }
                 };
-                let Some(response) =
-                    wait_for_query(&mut stream, &mut reader, &handle, query, &shutdown).await?
+                let Some(response) = wait_for_query(
+                    &mut stream,
+                    &mut reader,
+                    &handle,
+                    query,
+                    retained,
+                    &shutdown,
+                )
+                .await?
                 else {
                     return Ok(());
                 };
@@ -403,6 +444,19 @@ async fn serve_connection(
                     }
                 };
                 write_frame_buffered(&mut stream, &response, &mut write_buffer).await?;
+            }
+            WireRequest::RegisterDesktop => {
+                let result = if desktop_registration.is_some() {
+                    Err(anyhow::anyhow!(
+                        "Desktop already registered on this session"
+                    ))
+                } else {
+                    desktop_registration = Some(app.register_desktop());
+                    Ok(())
+                };
+                let ack = Ack::from_result(result, handle.publication_revision());
+                write_frame_buffered(&mut stream, &WireResponse::Ack(ack), &mut write_buffer)
+                    .await?;
             }
             WireRequest::Command(command) => {
                 let command = match AppCommand::try_from(command) {
@@ -484,16 +538,8 @@ async fn run_server(
     app: AppHandle,
     shutdown: Receiver<()>,
     executor: std::sync::Arc<async_executor::Executor<'static>>,
+    instance_id: u32,
 ) {
-    let instance_id = {
-        let mut rng = rand::rng();
-        loop {
-            let id = rng.random();
-            if id != UNKNOWN_INSTANCE {
-                break id;
-            }
-        }
-    };
     let mut clients = FuturesUnordered::new();
     enum Event {
         Accepted(std::io::Result<(UnixStream, std::os::unix::net::SocketAddr)>),
@@ -708,6 +754,7 @@ mod tests {
                     &mut reader,
                     &handle,
                     Query::LibraryStats,
+                    false,
                     &shutdown,
                 ));
                 assert!(waiting.as_mut().now_or_never().is_none());
@@ -760,6 +807,7 @@ mod tests {
                 &mut reader,
                 &handle,
                 Query::LibraryStats,
+                false,
                 &shutdown,
             ));
             assert!(waiting.as_mut().now_or_never().is_none());
@@ -869,6 +917,7 @@ mod tests {
                     &mut reader,
                     &handle,
                     Query::LibraryStats,
+                    false,
                     &shutdown,
                 ));
                 assert!(waiting.as_mut().now_or_never().is_none());
@@ -937,6 +986,7 @@ mod tests {
                     &mut reader,
                     &handle,
                     Query::LibraryStats,
+                    false,
                     &shutdown,
                 ));
                 assert!(waiting.as_mut().now_or_never().is_none());

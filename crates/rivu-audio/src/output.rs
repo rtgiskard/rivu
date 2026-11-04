@@ -3,7 +3,7 @@
 //! The selected sink and its strict speaker routes are never silently replaced.
 
 use super::{Channel, PlaybackMetadata, channels};
-use crate::analysis::AnalysisWorker;
+use crate::capture::PcmControl;
 use ::pipewire::{self as pw, properties::properties, spa};
 use anyhow::{Context, Result, bail};
 use crossbeam_channel::{Receiver, bounded};
@@ -19,7 +19,7 @@ use std::{
     rc::Rc,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
     },
     thread::JoinHandle,
     time::{Duration, Instant},
@@ -127,14 +127,14 @@ struct OutputShared {
     wakeup: crossbeam_channel::Sender<()>,
     notifications: Receiver<()>,
     refill_armed: AtomicBool,
-    // Audible source frames also determine position and output drain completion.
-    heard: AtomicU64,
+    // The same audible cursor backs playback accounting and PCM observation.
+    pcm: Arc<PcmControl>,
     timing_error: AtomicU32,
     // Linear amplitude gain; conversion happens outside the realtime callback.
     volume: AtomicU32,
 }
 impl OutputShared {
-    fn new(volume: f32, paused: bool) -> Self {
+    fn new(volume: f32, paused: bool, pcm: &Arc<PcmControl>) -> Self {
         let (wakeup, notifications) = bounded(1);
         Self {
             paused: AtomicBool::new(paused),
@@ -142,7 +142,7 @@ impl OutputShared {
             wakeup,
             notifications,
             refill_armed: AtomicBool::new(false),
-            heard: AtomicU64::new(0),
+            pcm: Arc::clone(pcm),
             timing_error: AtomicU32::new(0),
             volume: AtomicU32::new(crate::volume::gain(volume).to_bits()),
         }
@@ -174,6 +174,7 @@ struct PlaybackClock {
     pending: VecDeque<ScheduledFrames>,
     last_callback: Option<StreamInstant>,
     heard: u64,
+    notified_heard: u64,
 }
 impl PlaybackClock {
     fn new() -> Self {
@@ -181,6 +182,7 @@ impl PlaybackClock {
             pending: VecDeque::with_capacity(1024),
             last_callback: None,
             heard: 0,
+            notified_heard: 0,
         }
     }
 
@@ -218,7 +220,16 @@ impl PlaybackClock {
             }
             self.pending.pop_front();
         }
-        shared.heard.store(self.heard, Ordering::Release);
+        shared.pcm.heard_frame.store(self.heard, Ordering::Release);
+        if self.heard != self.notified_heard
+            && (self.heard - self.notified_heard >= rivu_protocol::pcm::PCM_BLOCK_FRAMES as u64
+                || self.pending.is_empty())
+        {
+            self.notified_heard = self.heard;
+            if shared.pcm.state().active {
+                shared.pcm.notify();
+            }
+        }
     }
 }
 
@@ -246,11 +257,14 @@ impl Output {
         source_rate: u32,
         source_layout: &[Channel],
         options: OutputOptions<'_>,
-        analyzer: &AnalysisWorker,
+        analyzer: &Arc<PcmControl>,
     ) -> Result<Self> {
         let target = target_name(options.device)?;
         let rate = source_rate;
         let source_channels = source_layout.len();
+        if source_channels > rivu_shm::MAX_PCM_CHANNELS {
+            bail!("Decoded speaker layout exceeds native PCM channel limit");
+        }
         let capacity = output_capacity(rate, source_channels)?;
         let (producer, consumer) = HeapRb::try_new(capacity)
             .context("Cannot allocate audio output PCM buffer")?
@@ -263,9 +277,9 @@ impl Output {
             .try_reserve_exact(scratch_samples)
             .context("Cannot allocate audio output callback buffer")?;
         scratch.resize(scratch_samples, 0.0);
-        let shared = Arc::new(OutputShared::new(options.volume, options.paused));
+        let shared = Arc::new(OutputShared::new(options.volume, options.paused, analyzer));
         let (error_send, errors) = bounded(4);
-        analyzer.reset(rate);
+        analyzer.reset(rate, source_layout);
         let callback = OutputCallback {
             consumer,
             shared: shared.clone(),
@@ -321,7 +335,7 @@ impl Output {
     pub(super) fn refill_delay(&self, eof: bool) -> Duration {
         let frames = if eof {
             self.submitted
-                .saturating_sub(self.shared.heard.load(Ordering::Acquire))
+                .saturating_sub(self.shared.pcm.heard_frame.load(Ordering::Acquire))
         } else {
             (self.producer.occupied_len() / self.source_channels) as u64 / 2
         };
@@ -349,11 +363,11 @@ impl Output {
     }
 
     pub(super) fn drained(&self) -> bool {
-        self.shared.heard.load(Ordering::Acquire) == self.submitted
+        self.shared.pcm.heard_frame.load(Ordering::Acquire) == self.submitted
     }
 
     pub(super) fn heard(&self) -> f64 {
-        self.shared.heard.load(Ordering::Acquire) as f64 / self.rate as f64
+        self.shared.pcm.heard_frame.load(Ordering::Acquire) as f64 / self.rate as f64
     }
     pub(super) fn position(&self) -> f64 {
         // The source cursor advances only as scheduled PCM becomes audible.
@@ -395,6 +409,10 @@ impl Output {
             on_close();
         }
         self.heard()
+    }
+
+    pub(super) fn submitted(&self) -> u64 {
+        self.submitted
     }
 
     #[cfg(test)]
@@ -1410,8 +1428,6 @@ pub(super) fn test_backend_with_capacity(
 #[cfg(test)]
 mod pcm_tests {
     use super::*;
-    use parking_lot::RwLock;
-    use rivu_protocol::analysis::AnalysisFrame;
 
     #[test]
     fn pcm_capacity_preserves_normal_high_rate_and_multichannel_queues() {
@@ -1557,7 +1573,7 @@ mod pcm_tests {
         );
     }
 
-    fn test_output(rate: u32, paused: bool) -> (Output, OutputCallback, AnalysisWorker) {
+    fn test_output(rate: u32, paused: bool) -> (Output, OutputCallback, Arc<PcmControl>) {
         let stereo = [Channel::FrontLeft, Channel::FrontRight];
         test_output_layout(rate, paused, &stereo, &stereo, 128)
     }
@@ -1568,11 +1584,11 @@ mod pcm_tests {
         source: &[Channel],
         device: &[Channel],
         capacity: usize,
-    ) -> (Output, OutputCallback, AnalysisWorker) {
-        let analyzer =
-            AnalysisWorker::new(Arc::new(RwLock::new(AnalysisFrame::default()))).unwrap();
+    ) -> (Output, OutputCallback, Arc<PcmControl>) {
+        let analyzer = Arc::new(PcmControl::default());
         let (producer, consumer) = HeapRb::new(capacity).split();
-        let shared = Arc::new(OutputShared::new(1.0, paused));
+        analyzer.reset(rate, source);
+        let shared = Arc::new(OutputShared::new(1.0, paused, &analyzer));
         let (_, errors) = bounded(4);
         let output = Output {
             stream: None,
@@ -1627,6 +1643,61 @@ mod pcm_tests {
         callback.render(&mut data, timestamp(23, 48));
         assert!(output.drained());
         assert_eq!(output.heard(), 0.003);
+    }
+
+    #[test]
+    fn pcm_cursor_uses_audible_frames_and_notifies_by_block_or_tail() {
+        let stereo = [Channel::FrontLeft, Channel::FrontRight];
+        let block = rivu_protocol::pcm::PCM_BLOCK_FRAMES as u64;
+        let frames = block * 2 + 1;
+        let samples = vec![0.25; frames as usize * stereo.len()];
+        let (mut output, mut callback, pcm) =
+            test_output_layout(1000, false, &stereo, &stereo, samples.len());
+        pcm.set_playback_active(true);
+        pcm.set_enabled(true);
+        let updates = pcm.subscribe();
+        while updates.try_recv().is_ok() {}
+        assert_eq!(output.push(&samples), frames as usize);
+        callback.render(&mut vec![0.0; samples.len()], timestamp(0, 20));
+        assert_eq!(pcm.state().heard_frame, 0);
+        assert!(updates.try_recv().is_err());
+        callback.render(&mut [], timestamp(20 + block - 1, 40 + block - 1));
+        assert_eq!(pcm.state().heard_frame, block - 1);
+        assert!(updates.try_recv().is_err());
+        callback.render(&mut [], timestamp(20 + block, 40 + block));
+        assert_eq!(pcm.state().heard_frame, block);
+        updates.try_recv().unwrap();
+        callback.render(&mut [], timestamp(20 + block * 2, 40 + block * 2));
+        assert_eq!(pcm.state().heard_frame, block * 2);
+        updates.try_recv().unwrap();
+        callback.render(&mut [], timestamp(20 + frames, 40 + frames));
+        assert_eq!(pcm.state().heard_frame, frames);
+        assert!(output.drained());
+        updates.try_recv().unwrap();
+        callback.render(&mut [], timestamp(21 + frames, 41 + frames));
+        assert!(updates.try_recv().is_err());
+
+        output.pause(true);
+        pcm.set_playback_active(false);
+        pcm.set_enabled(false);
+        pcm.set_enabled(true);
+        pcm.set_playback_active(true);
+        assert_eq!(pcm.state().heard_frame, frames);
+        pcm.reset(1000, &stereo);
+        assert_eq!(pcm.state().heard_frame, 0);
+    }
+
+    #[test]
+    fn disabled_capture_keeps_audible_cursor_without_notifications() {
+        let (mut output, mut callback, pcm) = test_output(1000, false);
+        let updates = pcm.subscribe();
+        while updates.try_recv().is_ok() {}
+        output.push(&[0.25; 16]);
+        callback.render(&mut [0.0; 16], timestamp(0, 20));
+        callback.render(&mut [], timestamp(28, 48));
+        assert_eq!(pcm.state().heard_frame, 8);
+        assert!(output.drained());
+        assert!(updates.try_recv().is_err());
     }
 
     #[test]

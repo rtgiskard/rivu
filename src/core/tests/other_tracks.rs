@@ -21,7 +21,7 @@ fn page(core: &Core) -> Page<LibraryRow> {
 #[test]
 fn current_roots_change_other_projection_and_stamps_but_not_persistent_tracks() {
     let (directory, mut core) = fixture();
-    core.update_gui_config(ConfigChange::RemoveLibraryRoot(
+    core.mutate_config(ConfigMutation::RemoveLibraryRoot(
         directory.path().to_path_buf(),
     ))
     .unwrap();
@@ -33,8 +33,10 @@ fn current_roots_change_other_projection_and_stamps_but_not_persistent_tracks() 
     let roots = core.state.configuration.config.library_roots.clone();
     let initial = core.state.query_revisions_for(&page_query());
     let initial_stamp = page_query().stamp(initial);
-    core.update_gui_config(ConfigChange::AddLibraryRoot(directory.path().to_path_buf()))
-        .unwrap();
+    core.mutate_config(ConfigMutation::AddLibraryRoot(
+        directory.path().to_path_buf(),
+    ))
+    .unwrap();
     assert_eq!(page(&core).total, 0);
     let scoped = core.state.query_revisions_for(&page_query());
     assert_ne!(initial_stamp, page_query().stamp(scoped));
@@ -55,7 +57,7 @@ fn current_roots_change_other_projection_and_stamps_but_not_persistent_tracks() 
         .unwrap(),
         ViewResponse::LibraryLocate(LibraryLocateResult::OutsideRoot)
     ));
-    core.update_gui_config(ConfigChange::RemoveLibraryRoot(
+    core.mutate_config(ConfigMutation::RemoveLibraryRoot(
         directory.path().to_path_buf(),
     ))
     .unwrap();
@@ -76,8 +78,10 @@ fn current_roots_change_other_projection_and_stamps_but_not_persistent_tracks() 
 #[test]
 fn other_collection_source_commands_resolve_execution_time_roots() {
     let (directory, mut core) = fixture();
-    core.update_gui_config(ConfigChange::AddLibraryRoot(directory.path().to_path_buf()))
-        .unwrap();
+    core.mutate_config(ConfigMutation::AddLibraryRoot(
+        directory.path().to_path_buf(),
+    ))
+    .unwrap();
     let before = core.store.queue_ids().unwrap();
     core.command(Command::EnqueueSources {
         other_tracks: true,
@@ -86,7 +90,7 @@ fn other_collection_source_commands_resolve_execution_time_roots() {
     })
     .unwrap();
     assert_eq!(core.store.queue_ids().unwrap(), before);
-    core.update_gui_config(ConfigChange::RemoveLibraryRoot(
+    core.mutate_config(ConfigMutation::RemoveLibraryRoot(
         directory.path().to_path_buf(),
     ))
     .unwrap();

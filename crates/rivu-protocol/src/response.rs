@@ -260,6 +260,8 @@ pub struct QueryResponse {
 pub struct PlaybackSnapshot {
     pub playback: PlaybackState,
     pub current_track: Option<Arc<Track>>,
+    pub source_generation: u64,
+    pub processing_audition: Option<crate::model::ProcessingAudition>,
 }
 
 /// Only requested sections are present; omitted sections must be preserved by clients.
@@ -287,7 +289,11 @@ impl StateResponse {
     pub fn apply_to(self, state: &mut ClientSnapshot) {
         if let Some(section) = self.playback {
             state.playback = section.playback;
-            state.current_track = section.current_track;
+            if state.current_track != section.current_track {
+                state.current_track = section.current_track;
+            }
+            state.source_generation = section.source_generation;
+            state.processing_audition = section.processing_audition;
         }
         if let Some(section) = self.queue {
             state.queue = section;
@@ -385,6 +391,8 @@ mod tests {
                     ..PlaybackState::default()
                 },
                 current_track: None,
+                source_generation: 0,
+                processing_audition: None,
             }),
             ..StateResponse::default()
         };

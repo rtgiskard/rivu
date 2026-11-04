@@ -235,6 +235,10 @@ impl LayoutPersistenceHandle {
         self.0.state.lock().wakeup = Some(Arc::new(wakeup));
     }
 
+    pub fn clear_wakeup(&self) {
+        self.0.state.lock().wakeup = None;
+    }
+
     /// Only a newer save request, not a memory edit, supersedes visible feedback.
     pub fn completion(&self) -> Option<Completion> {
         let state = self.0.state.lock();

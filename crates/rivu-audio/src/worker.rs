@@ -8,7 +8,7 @@ use super::{
     playback::{Playback, PlaybackOptions},
     source::{Source, SourceSelection},
 };
-use crate::analysis::AnalysisWorker;
+use crate::capture::PcmControl;
 use anyhow::anyhow;
 use async_channel::TryRecvError;
 use crossbeam_channel::{Receiver, select};
@@ -145,7 +145,7 @@ pub(super) struct Worker {
     commands_ready: Receiver<()>,
     events: async_channel::Sender<AudioEvent>,
     shutdown: AudioShutdownReceiver,
-    analyzer: AnalysisWorker,
+    analyzer: Arc<PcmControl>,
     waveform: Arc<RwLock<WaveformFrame>>,
     waveform_control: Arc<super::WaveformControl>,
     playback: Option<Playback>,
@@ -167,7 +167,7 @@ impl Worker {
         commands_ready: Receiver<()>,
         events: async_channel::Sender<AudioEvent>,
         shutdown: AudioShutdownReceiver,
-        analyzer: AnalysisWorker,
+        analyzer: Arc<PcmControl>,
         (waveform, waveform_control): (Arc<RwLock<WaveformFrame>>, Arc<super::WaveformControl>),
         media_read_buffer_len: usize,
     ) -> Self {
@@ -214,7 +214,7 @@ impl Worker {
         }
         self.last_snapshot
     }
-    fn refresh_analysis(&self) {
+    fn refresh_pcm(&self) {
         self.analyzer.set_playback_active(
             self.playback
                 .as_ref()
@@ -222,8 +222,8 @@ impl Worker {
         );
     }
     fn command(&mut self, command: AudioCommand) -> bool {
-        if command.changes_analysis_source() {
-            self.analyzer.control.apply_audio_intents(1);
+        if command.changes_pcm_source() {
+            self.analyzer.apply_audio_intents(1);
         }
         match command {
             AudioCommand::Shutdown => {
@@ -246,12 +246,12 @@ impl Worker {
                     self.waveform_control
                         .set_visualization_enabled(&mut self.waveform.write(), enabled);
                 }
-                self.refresh_analysis();
+                self.refresh_pcm();
             }
-            AudioCommand::AnalysisSettings(settings) => {
-                self.analyzer.configure(settings);
+            AudioCommand::VisualizationSignal(signal) => {
+                self.analyzer.set_signal(signal);
                 if let Some(playback) = self.playback.as_mut() {
-                    playback.set_signal(self.analyzer.settings().signal);
+                    playback.set_signal(self.analyzer.signal());
                 }
             }
             AudioCommand::WaveformSnapshot(reply) => {
@@ -448,7 +448,7 @@ impl Worker {
                 if let Some(playback) = self.playback.as_mut() {
                     playback.pause(paused);
                 }
-                self.refresh_analysis();
+                self.refresh_pcm();
             }
             AudioCommand::Seek { seconds, revision } => {
                 let result = if let Some(opening) = self.opening.as_mut() {
@@ -527,7 +527,7 @@ impl Worker {
                 self.pipewire_auto_mix,
                 &self.analyzer,
             )?;
-            self.refresh_analysis();
+            self.refresh_pcm();
         }
         Ok(())
     }
@@ -619,7 +619,7 @@ impl Worker {
                             info: playback.info().clone(),
                         });
                         self.playback = Some(playback);
-                        self.refresh_analysis();
+                        self.refresh_pcm();
                     }
                     Err(error) => self.event(AudioEvent::Failed {
                         generation,
@@ -662,7 +662,6 @@ impl Worker {
                 return false;
             }
             self.analyzer
-                .control
                 .apply_audio_intents(std::mem::take(&mut self.commands.coalesced_intents) as u64);
             if !self.command(command) {
                 return false;
@@ -809,10 +808,10 @@ mod tests {
     use futures::channel::oneshot;
 
     #[test]
-    fn coalesced_seeks_settle_every_admitted_analysis_intent() {
+    fn coalesced_seeks_settle_every_admitted_pcm_intent() {
         use std::sync::atomic::Ordering;
         let (mut worker, commands, _events, _shutdown) = opening_worker();
-        let control = Arc::clone(&worker.analyzer.control);
+        let control = Arc::clone(&worker.analyzer);
         let count = MAX_COMMANDS_PER_ROUND as u64;
         let epoch = control.epoch.load(Ordering::Acquire);
         control.desired_intent.store(count, Ordering::Release);
@@ -824,15 +823,11 @@ mod tests {
                 })
                 .unwrap();
         }
-        assert!(!control.frame_is_current(&rivu_protocol::analysis::AnalysisFrame::default()));
+        assert_ne!(control.state().intent, control.state().applied_intent);
         assert!(worker.control_round());
         assert_eq!(control.epoch.load(Ordering::Acquire), epoch + 4);
-        let current = rivu_protocol::analysis::AnalysisFrame {
-            audio_epoch: control.epoch.load(Ordering::Acquire),
-            audio_intent: count,
-            ..rivu_protocol::analysis::AnalysisFrame::default()
-        };
-        assert!(control.frame_is_current(&current));
+        assert_eq!(control.state().intent, count);
+        assert_eq!(control.state().applied_intent, count);
     }
 
     fn opening_worker() -> (
@@ -845,10 +840,7 @@ mod tests {
         let (_wake, commands_ready) = bounded(1);
         let (events, receive) = async_channel::bounded(16);
         let (stop, shutdown) = shutdown_channel();
-        let analyzer = AnalysisWorker::new(Arc::new(RwLock::new(
-            rivu_protocol::analysis::AnalysisFrame::default(),
-        )))
-        .unwrap();
+        let analyzer = Arc::new(PcmControl::default());
         let worker = Worker::new(
             commands,
             commands_ready,
@@ -1559,10 +1551,7 @@ mod tests {
         let (_wake, commands_ready) = bounded(1);
         let (events, receive) = async_channel::bounded(2);
         let (_stop, shutdown) = shutdown_channel();
-        let analyzer = AnalysisWorker::new(Arc::new(RwLock::new(
-            rivu_protocol::analysis::AnalysisFrame::default(),
-        )))
-        .unwrap();
+        let analyzer = Arc::new(PcmControl::default());
         let mut worker = Worker::new(
             commands,
             commands_ready,
@@ -1613,16 +1602,13 @@ mod tests {
                 })
                 .unwrap();
             let (shutdown, cancelled) = shutdown_channel();
-            let analyzer = AnalysisWorker::new(Arc::new(RwLock::new(
-                rivu_protocol::analysis::AnalysisFrame::default(),
-            )))
-            .unwrap();
+            let analyzer = Arc::new(PcmControl::default());
             let worker = Worker::new(
                 receive,
                 commands_ready,
                 events,
                 cancelled,
-                analyzer,
+                Arc::clone(&analyzer),
                 (
                     Arc::new(RwLock::new(WaveformFrame::default())),
                     Arc::new(crate::WaveformControl::default()),
@@ -1637,7 +1623,7 @@ mod tests {
                 worker.run();
             });
             let mut retired = Vec::new();
-            let mut stop = AudioStop::new(commands, command_wake, event_receive);
+            let mut stop = AudioStop::new(commands, command_wake, event_receive, analyzer);
             let snapshot = stop
                 .wait(|event| {
                     if let AudioEvent::Ended { generation, .. } = event {
@@ -1662,7 +1648,12 @@ mod tests {
             events
                 .try_send(AudioEvent::DecoderStopped { generation: 7 })
                 .unwrap();
-            let mut stop = AudioStop::new(commands, command_wake, event_receive);
+            let mut stop = AudioStop::new(
+                commands,
+                command_wake,
+                event_receive,
+                Arc::new(PcmControl::default()),
+            );
             let mut retired = Vec::new();
             assert!(
                 stop.wait(|event| retired.push(event))
@@ -1739,7 +1730,12 @@ mod tests {
                 }
                 let (events, event_receive) = async_channel::bounded(1);
                 let created = Instant::now();
-                let mut stop = AudioStop::new(commands, command_wake, event_receive);
+                let mut stop = AudioStop::new(
+                    commands,
+                    command_wake,
+                    event_receive,
+                    Arc::new(PcmControl::default()),
+                );
                 assert!(stop.deadline >= created + Duration::from_secs(5));
                 assert!(stop.deadline <= Instant::now() + Duration::from_secs(5));
                 assert!(stop.wait(|_| {}).now_or_never().is_none());
@@ -1770,10 +1766,7 @@ mod tests {
         let (_wake, commands_ready) = bounded(1);
         let (events, _receive) = async_channel::bounded(1);
         let (_stop, shutdown) = shutdown_channel();
-        let analyzer = AnalysisWorker::new(Arc::new(RwLock::new(
-            rivu_protocol::analysis::AnalysisFrame::default(),
-        )))
-        .unwrap();
+        let analyzer = Arc::new(PcmControl::default());
         let mut frame = crate::waveform::WaveformBuffer::default();
         frame.select(
             std::path::Path::new("stopped.wav"),
@@ -1799,7 +1792,7 @@ mod tests {
             65536,
         );
         worker.command(AudioCommand::Volume(0.3));
-        worker.analyzer.control.set_display_enabled(true);
+        worker.analyzer.set_enabled(true);
         worker.command(AudioCommand::VisualizationEnabled(false));
         let revision = waveform.read().revision;
         assert!(revision > completed.revision);
@@ -1810,9 +1803,7 @@ mod tests {
                 revision: 0,
             },
             AudioCommand::Pause(true),
-            AudioCommand::AnalysisSettings(rivu_protocol::analysis::AnalysisSettings::from(
-                &rivu_format::config::Config::default(),
-            )),
+            AudioCommand::VisualizationSignal(rivu_format::config::VisualizationSignal::After),
         ] {
             worker.command(command);
             assert_eq!(waveform.read().revision, revision);
@@ -1820,7 +1811,7 @@ mod tests {
             assert_eq!(worker.volume, 0.3);
             assert!(worker.device.is_none());
             assert!(worker.playback.is_none());
-            assert!(!worker.analyzer.control.accepts_audio());
+            assert!(!worker.analyzer.state().active);
         }
         worker.command(AudioCommand::VisualizationEnabled(true));
         assert_eq!(waveform.read().retained_capacity_bytes(), 0);
@@ -1856,9 +1847,7 @@ mod tests {
             AudioCommand::VisualizationEnabled(false),
             AudioCommand::MediaReadBuffer(2),
             AudioCommand::FfmpegEnabled(false),
-            AudioCommand::AnalysisSettings(rivu_protocol::analysis::AnalysisSettings::from(
-                &rivu_format::config::Config::default(),
-            )),
+            AudioCommand::VisualizationSignal(rivu_format::config::VisualizationSignal::After),
             AudioCommand::StopAndSnapshot(reply),
             AudioCommand::Shutdown,
         ];
@@ -2056,7 +2045,6 @@ mod tests {
     fn engine_shutdown_and_drop_cancel_full_command_and_event_queues() {
         use crate::AudioEngine;
         use parking_lot::Mutex;
-        use rivu_protocol::analysis::AnalysisFrame;
 
         for explicit in [false, true] {
             for borrowed in [false, true] {
@@ -2071,10 +2059,9 @@ mod tests {
                     })
                     .unwrap();
                 let (shutdown, cancelled) = shutdown_channel();
-                let analysis = Arc::new(RwLock::new(AnalysisFrame::default()));
                 let waveform = Arc::new(RwLock::new(WaveformFrame::default()));
-                let analyzer = AnalysisWorker::new(analysis.clone()).unwrap();
-                let analysis_control = Arc::clone(&analyzer.control);
+                let pcm = Arc::new(PcmControl::default());
+                let analyzer = Arc::clone(&pcm);
                 let worker = Worker::new(
                     receive,
                     commands_ready,
@@ -2099,8 +2086,7 @@ mod tests {
                     commands,
                     command_wake,
                     events: Some(event_receive),
-                    analysis,
-                    analysis_control,
+                    pcm,
                     waveform,
                     waveform_control,
                     worker: Some(worker),

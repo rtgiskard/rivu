@@ -3,8 +3,8 @@ use crate::{VisualLabels, VisualParameters};
 use gpui::{
     AnyElement, PathBuilder, SharedString, TextAlign, canvas, div, point, prelude::*, px, rgb,
 };
+use rivu_analysis::{AnalysisFrame, AnalysisSettings};
 use rivu_format::config::AudioVisualizerOptions;
-use rivu_protocol::analysis::{AnalysisFrame, AnalysisSettings};
 use std::{cell::RefCell, ops::Range, rc::Rc, sync::Arc};
 
 // Retain normalized sweep geometry, never the worker's full PCM snapshot.
@@ -393,8 +393,8 @@ impl OscilloscopeRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rivu_analysis::PcmSnapshot;
     use rivu_format::config::Config;
-    use rivu_protocol::analysis::PcmSnapshot;
 
     #[test]
     fn scope_triggers_on_real_stereo_pcm_and_bounds_short_windows() {

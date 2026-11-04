@@ -5,10 +5,9 @@ use super::visualization::full_waveform::FullWaveformRequest;
 pub(super) use super::{
     album_browser, animation_frames, appearance, artwork, artwork_panel, audio_processing,
     coordination, duplicates, feature, history, interaction, layout, library, list_interaction,
-    metadata, playback, playlists, query, queue, settings, shell, visualization, workspace,
+    metadata, playback, playlists, queue, settings, shell, visualization, workspace,
 };
-pub(super) use crate::host::HostHandle;
-pub(super) use crate::projection::GuiSnapshot;
+pub(super) use crate::{frontend::FrontendHandle, projection::GuiSnapshot};
 pub(super) use futures::{StreamExt, channel::mpsc};
 pub(super) use gpui::{prelude::*, *};
 pub(super) use interaction::{
@@ -20,7 +19,7 @@ pub(super) use layout::persistence::LayoutPersistenceHandle;
 pub(super) use layout::{Axis, Edge, Node};
 pub(super) use rivu_format::config::AudioVisualizerOptions;
 pub(super) use rivu_presentation::i18n::Localizer;
-pub(super) use rivu_protocol::model::{Command, Query};
+pub(super) use rivu_protocol::model::Command;
 pub(super) use rivu_ui::drag_preview;
 pub(super) use rivu_ui::input::{Input, InputEvent};
 pub(super) use std::{
@@ -71,7 +70,7 @@ pub(super) fn panel_list_focus(kind: &str, preferred: Option<BrowserFocus>) -> O
 pub(crate) struct WindowView {
     pub(super) i18n: Arc<Localizer>,
     pub(super) localized_text: Rc<HashMap<String, SharedString>>,
-    pub(super) handle: HostHandle,
+    pub(super) handle: FrontendHandle,
     pub(super) snapshots: Rc<feature::SnapshotSource>,
     pub(super) state: Rc<GuiSnapshot>,
     pub(super) workspace: workspace::Workspace,
@@ -108,10 +107,18 @@ pub(crate) struct WindowView {
     pub(super) content_resolution: coordination::collection::CollectionResolution,
     pub(super) waveform: Entity<visualization::Waveform>,
     pub(super) full_waveform_request: FullWaveformRequest,
-    full_waveform_scan: Option<(u64, crate::host::WaveformScan)>,
+    pending_full_waveform: Option<PendingWaveformScan>,
     pub(super) window_visible: bool,
     pub(super) ui_font: Font,
     pub(super) _subscriptions: Vec<Subscription>,
+}
+
+struct PendingWaveformScan {
+    generation: u64,
+    display_generation: u64,
+    track: rivu_protocol::model::Track,
+    source: Option<u64>,
+    cancelled: futures::channel::oneshot::Receiver<()>,
 }
 
 impl WindowView {
@@ -427,7 +434,7 @@ impl WindowView {
         self.send(Command::RemoveQueueEntries { queue_ids }, cx);
     }
     pub(super) fn new(
-        handle: HostHandle,
+        handle: FrontendHandle,
         layout_save: LayoutPersistenceHandle,
         artwork_manager: Arc<rivu_metadata::artwork::ArtworkManager>,
         session: Weak<RefCell<UiSession>>,
@@ -524,7 +531,7 @@ impl WindowView {
                 }
             },
         ));
-        let waveform = cx.new(|_| visualization::Waveform::new(Arc::clone(handle.waveform())));
+        let waveform = cx.new(|_| visualization::Waveform::new(Arc::clone(&handle.waveform)));
         let animation_frames = cx.new(|_| animation_frames::AnimationFrames::default());
         let presentation = cx.new(|cx| {
             visualization::runtime::VisualizerRuntime::new(
@@ -733,7 +740,7 @@ impl WindowView {
             content_resolution: coordination::collection::CollectionResolution::default(),
             waveform,
             full_waveform_request: FullWaveformRequest::default(),
-            full_waveform_scan: None,
+            pending_full_waveform: None,
             window_visible: window.is_visible(),
             _subscriptions: subscriptions,
             ui_font,
@@ -870,6 +877,10 @@ impl WindowView {
     pub(super) fn refresh(&mut self, cx: &mut Context<Self>) {
         let state = self.snapshots.read();
         if state.system.revision == self.state.system.revision {
+            let metadata_track = self.metadata.read(cx).track_snapshot();
+            let track = self.state.current_track().or(metadata_track.as_deref());
+            self.waveform
+                .update(cx, |waveform, cx| waveform.sync(track, cx));
             return;
         }
         if state.system.shutting_down && !self.state.system.shutting_down {
@@ -1135,88 +1146,53 @@ impl WindowView {
         let Some(track) = self.full_waveform_target(cx).cloned() else {
             return;
         };
-        self.full_waveform_request.begin(&track);
-        let parameters =
-            visualization::WaveformScanParameters::from(self.state.system.config.as_ref());
-        let (generation, cancelled) = self
+        let generation = self.full_waveform_request.begin(&track);
+        let source = self
+            .state
+            .current_track()
+            .map(|_| self.state.source_generation);
+        let (display_generation, cancelled) = self
             .waveform
             .update(cx, |waveform, cx| waveform.prepare_full(&track, cx));
-        match self.handle.prepare_waveform_scan(
-            parameters,
-            self.state.current_track().is_some(),
+        self.pending_full_waveform = Some(PendingWaveformScan {
+            generation,
+            display_generation,
+            track,
+            source,
             cancelled,
-        ) {
-            Ok(scan) => self.full_waveform_scan = Some((generation, scan)),
-            Err(error) => {
-                self.waveform.update(cx, |waveform, cx| {
-                    waveform.complete_full(generation, Err(error), cx)
-                });
-                self.full_waveform_request.invalidate();
-                return;
-            }
-        }
-        self.dispatch_full_waveform_query(cx);
+        });
+        self.dispatch_full_waveform_scan(cx);
     }
 
-    fn fail_full_waveform(&mut self, error: String, cx: &mut Context<Self>) {
-        if let Some((generation, _scan)) = self.full_waveform_scan.take() {
-            self.waveform.update(cx, |waveform, cx| {
-                waveform.complete_full(generation, Err(anyhow::Error::msg(error)), cx)
-            });
-        }
-    }
-
-    pub(super) fn dispatch_full_waveform_query(&mut self, cx: &mut Context<Self>) {
-        let Some((generation, track_id)) = self.full_waveform_request.reserve() else {
+    fn dispatch_full_waveform_scan(&mut self, cx: &mut Context<Self>) {
+        let Some((generation, _)) = self.full_waveform_request.reserve() else {
             return;
         };
-        let handle = self.handle.clone();
-        let query = Query::Track { track_id };
-        let stamp = query.stamp(self.state.query_revisions_for(&query));
+        let Some(pending) = self.pending_full_waveform.take() else {
+            self.full_waveform_request.retire(generation);
+            return;
+        };
+        if pending.generation != generation {
+            self.full_waveform_request.retire(generation);
+            return;
+        }
+        let data_dir = self.handle.data_dir().to_path_buf();
+        let instance = self.handle.instance_id();
         cx.spawn(async move |this, cx| {
-            let response = query::run(
-                handle,
-                cx,
-                move |handle| async move { handle.query_for_gui(Query::Track { track_id }).await },
-                |response, cx| {
-                    let _ = this.update(cx, |this, cx| {
-                        this.refresh(cx);
-                        this.sync_full_waveform_request(cx);
-                        if query.stamp(this.state.query_revisions_for(&query)) == stamp
-                            && this.full_waveform_request.accepts(
-                                generation,
-                                this.state
-                                    .current_track()
-                                    .or(this.metadata.read(cx).track()),
-                            )
-                            && let Err(error) = response.result
-                        {
-                            this.error = Some(error.to_string());
-                            this.fail_full_waveform(error.to_string(), cx);
-                            this.full_waveform_request.invalidate();
-                            cx.notify();
-                        }
-                    });
-                },
+            let result = crate::transport::waveform::scan_full(
+                data_dir,
+                instance,
+                pending.track,
+                pending.source,
+                pending.cancelled,
             )
             .await;
             let _ = this.update(cx, |this, cx| {
-                // Core changes also arrive while hidden, without a rendered frame.
                 this.refresh(cx);
                 this.sync_full_waveform_request(cx);
                 this.full_waveform_request.retire(generation);
                 if this.full_waveform_request.generation() != generation {
-                    this.dispatch_full_waveform_query(cx);
-                    return;
-                }
-                if query.stamp(response.revisions) != stamp
-                    || query.stamp(this.state.query_revisions_for(&query)) != stamp
-                {
-                    this.fail_full_waveform(
-                        "Full waveform metadata changed before decoding".into(),
-                        cx,
-                    );
-                    this.full_waveform_request.invalidate();
+                    this.dispatch_full_waveform_scan(cx);
                     return;
                 }
                 if !this.full_waveform_request.accepts(
@@ -1227,40 +1203,14 @@ impl WindowView {
                 ) {
                     return;
                 }
-                match response.result {
-                    Ok(rivu_protocol::response::ViewResponse::Track(Some(track)))
-                        if this.full_waveform_request.accepts(generation, Some(&track)) =>
-                    {
-                        if let Some((visual_generation, scan)) = this.full_waveform_scan.take() {
-                            if !this.waveform.update(cx, |waveform, _| {
-                                waveform.set_full_hint(visual_generation, track.decoder_hint)
-                            }) {
-                                this.full_waveform_request.invalidate();
-                                return;
-                            }
-                            let scan = scan(track);
-                            cx.spawn(async move |this, cx| {
-                                let result = scan.await;
-                                let _ = this.update(cx, |this, cx| {
-                                    this.waveform.update(cx, |waveform, cx| {
-                                        waveform.complete_full(visual_generation, result, cx)
-                                    });
-                                });
-                            })
-                            .detach();
-                        }
-                    }
-                    Err(error) => {
-                        this.error = Some(error.to_string());
-                        this.fail_full_waveform(error.to_string(), cx);
-                        cx.notify();
-                    }
-                    _ => this.fail_full_waveform(
-                        "Full waveform source changed before decoding".into(),
-                        cx,
-                    ),
+                if let Err(error) = &result {
+                    this.error = Some(error.to_string());
                 }
+                this.waveform.update(cx, |waveform, cx| {
+                    waveform.complete_full(pending.display_generation, result, cx);
+                });
                 this.full_waveform_request.invalidate();
+                cx.notify();
             });
         })
         .detach();
@@ -1332,29 +1282,27 @@ impl WindowView {
 mod state_tests {
     use super::visualization::runtime::{retain_analysis_staging, stage_analysis_frame};
     use super::{BrowserFocus, ListFocus, panel_list_focus};
-    use parking_lot::RwLock;
-    use ringbuf::traits::Producer;
-    use rivu_audio::analysis::{AnalysisWorker, TapFrame};
-    use rivu_protocol::analysis::{
-        AnalysisFrame, AnalysisSettings, DisplayDemand, VisualizerDemand,
+    use rivu_analysis::{
+        AnalysisEngine, AnalysisFrame, AnalysisSettings, DisplayDemand, VisualizerDemand,
     };
-    use std::{
-        sync::Arc,
-        thread,
-        time::{Duration, Instant},
-    };
+    use rivu_protocol::pcm::{PcmHeader, PcmState};
+    use std::time::{Duration, Instant};
 
     #[test]
     fn analysis_staging_releases_hidden_styles_and_waits_for_restored_publication() {
-        let shared = Arc::new(RwLock::new(AnalysisFrame::default()));
-        let worker = AnalysisWorker::new(shared.clone()).unwrap();
-        worker.configure(AnalysisSettings {
+        let settings = AnalysisSettings {
             fps: 60,
             fft_size: 512,
             window: rivu_format::config::AnalysisWindow::None,
             signal: rivu_format::config::VisualizationSignal::After,
-        });
-        worker.set_playback_active(true);
+        };
+        let state = PcmState {
+            active: true,
+            sample_rate: 48_000,
+            ..PcmState::default()
+        };
+        let mut worker = AnalysisEngine::new(settings);
+        let mut frame = AnalysisFrame::default();
         let all = DisplayDemand {
             enabled: true,
             visualizer: VisualizerDemand {
@@ -1365,40 +1313,35 @@ mod state_tests {
                 spectrogram: true,
             },
         };
-        worker.control.set_display_demand(all);
-        let mut producer = worker.producer();
-        let mut publish = |amplitude: f32| {
-            let token = worker.control.display_token();
-            let sequence = shared.read().sequence;
-            for index in 0..512 {
-                let sample = amplitude * (std::f32::consts::TAU * index as f32 / 32.0).sin();
-                assert!(
-                    producer
-                        .try_push(TapFrame {
-                            samples: [sample, -sample * 0.5],
-                            epoch: worker.control.epoch(),
-                            demand_token: token,
-                            gap: false,
-                        })
-                        .is_ok()
-                );
-            }
-            worker.control.request_frame();
-            let deadline = Instant::now() + Duration::from_secs(3);
-            loop {
-                let frame = shared.read();
-                if frame.sequence > sequence
-                    && frame.display_token == token
-                    && frame.settings.is_some()
-                {
-                    break frame.clone();
-                }
-                drop(frame);
-                assert!(Instant::now() < deadline, "analysis publication timed out");
-                thread::yield_now();
-            }
-        };
-        let publication = publish(0.5);
+        worker.configure(settings, all, state, 1, &mut frame);
+        fn publish(
+            worker: &mut AnalysisEngine,
+            frame: &mut AnalysisFrame,
+            state: PcmState,
+            block: u64,
+            amplitude: f32,
+        ) -> AnalysisFrame {
+            let samples: Vec<_> = (0..512)
+                .map(|index| {
+                    let sample = amplitude * (std::f32::consts::TAU * index as f32 / 32.0).sin();
+                    [sample, -sample * 0.5]
+                })
+                .collect();
+            worker.ingest(
+                PcmHeader {
+                    sequence: block,
+                    start_frame: block * 512,
+                    sample_rate: state.sample_rate,
+                    ..PcmHeader::default()
+                },
+                samples.iter().copied(),
+                frame,
+            );
+            worker.request_frame();
+            assert!(worker.publish(frame, Instant::now() + Duration::from_secs(block)));
+            frame.clone()
+        }
+        let publication = publish(&mut worker, &mut frame, state, 0, 0.5);
         assert!(
             publication
                 .visualizer
@@ -1445,7 +1388,7 @@ mod state_tests {
                 &mut sequence,
                 false,
                 &publication,
-                publication.display_token == worker.control.display_token(),
+                publication.display_token == frame.display_token,
             ));
             assert_eq!(
                 staging.visualizer.density.as_ptr(),
@@ -1519,9 +1462,9 @@ mod state_tests {
             assert_eq!(staging.visualizer.spatial.capacity(), 0);
         }
 
-        worker.control.set_display_demand(DisplayDemand::default());
-        worker.control.set_display_demand(all);
-        assert_ne!(publication.display_token, worker.control.display_token());
+        worker.configure(settings, DisplayDemand::default(), state, 2, &mut frame);
+        worker.configure(settings, all, state, 3, &mut frame);
+        assert_ne!(publication.display_token, frame.display_token);
         let mut staging = AnalysisFrame::default();
         let mut sequence = publication.sequence;
         // Even an explicit refresh cannot restore a retained pre-hide snapshot.
@@ -1530,11 +1473,11 @@ mod state_tests {
             &mut sequence,
             true,
             &publication,
-            publication.display_token == worker.control.display_token(),
+            publication.display_token == frame.display_token,
         ));
         assert!(staging.visualizer.density.is_empty());
         assert!(staging.settings.is_none());
-        let restored = publish(0.0);
+        let restored = publish(&mut worker, &mut frame, state, 1, 0.0);
         assert_eq!(restored.visualizer.demand, all.visualizer);
         assert!(
             restored
@@ -1550,7 +1493,7 @@ mod state_tests {
             &mut sequence,
             false,
             &restored,
-            restored.display_token == worker.control.display_token(),
+            restored.display_token == frame.display_token,
         ));
         assert_eq!(
             staging.visualizer.density.as_ptr(),

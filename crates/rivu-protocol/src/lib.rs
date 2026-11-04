@@ -1,8 +1,7 @@
 //! Shared IPC contracts and transport, independent of the application owner.
 
-pub mod analysis;
-pub mod display;
 pub mod model;
+pub mod pcm;
 pub mod query_tracking;
 pub mod response;
 pub mod transport;

@@ -8,7 +8,7 @@ mod pages;
 use model::{Completion, PanelApply, SettingsModel, Submission, Target};
 
 use super::{artwork_panel::artwork_style_label, visualization::visualization_style_label};
-use crate::host::HostHandle;
+use crate::frontend::FrontendHandle;
 use anyhow::Result;
 use gpui::{prelude::*, *};
 use rivu_format::config::AnalysisWindow;
@@ -17,6 +17,7 @@ use rivu_format::config::ArtworkMode;
 use rivu_format::config::ArtworkOptions;
 use rivu_format::config::ArtworkStyle;
 use rivu_format::config::AudioVisualizerStyle;
+use rivu_format::config::Config;
 use rivu_format::config::LogLevel;
 use rivu_format::config::SpectrumBarLayout;
 use rivu_format::config::SpectrumStyle;
@@ -25,7 +26,6 @@ use rivu_format::config::VisualizationSignal;
 use rivu_format::palette::Palette;
 use rivu_presentation::i18n::Localizer;
 use rivu_presentation::theme::Theme;
-use rivu_protocol::model::Config;
 use rivu_protocol::model::ConfigPatch;
 use rivu_ui::{
     ButtonTooltip, ChoiceAction, ChoiceItem, ChoiceMode, ChoicePopup, ChoiceState, Dialog,
@@ -676,7 +676,7 @@ struct SettingsSubmission {
 pub(super) struct Settings {
     i18n: Arc<Localizer>,
     text: HashMap<String, SharedString>,
-    handle: HostHandle,
+    handle: FrontendHandle,
     artwork_manager: Arc<ArtworkManager>,
     root_stats: library_stats::RootStats,
     artwork_cache_age: Entity<Input>,
@@ -722,7 +722,7 @@ impl Settings {
 
     pub(super) fn new(
         i18n: Arc<Localizer>,
-        handle: HostHandle,
+        handle: FrontendHandle,
         artwork_manager: Arc<ArtworkManager>,
         devices: Arc<Vec<String>>,
         runtime_status: (String, String),
@@ -2124,7 +2124,7 @@ impl Settings {
         };
         let handle = self.handle.clone();
         cx.spawn(async move |this, cx| {
-            let response = handle.apply_gui_settings(patch).await;
+            let response = handle.apply_settings(patch).await;
             let committed = handle.config_snapshot();
             let _ = this.update(cx, |this, cx| {
                 let result = if response.is_success() {
@@ -2670,7 +2670,7 @@ mod tests {
         runtime: &CoreRuntime,
         patch: ConfigPatch,
     ) -> (Arc<Config>, std::result::Result<(), String>) {
-        let response = futures::executor::block_on(runtime.handle.apply_gui_settings(patch));
+        let response = futures::executor::block_on(runtime.handle.apply_settings(patch));
         let result = if response.is_success() {
             Ok(())
         } else {
@@ -3380,7 +3380,7 @@ mod tests {
         let (patch, submission) = submit(&settings, cx);
         runtime
             .handle
-            .update_gui_config(rivu_protocol::model::ConfigChange::AddLibraryRoot(
+            .update_config(rivu_protocol::model::ConfigMutation::AddLibraryRoot(
                 external.clone(),
             ))
             .unwrap();

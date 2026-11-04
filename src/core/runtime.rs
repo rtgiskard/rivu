@@ -55,7 +55,7 @@ struct Completion {
 struct CompletionState {
     ack: Option<Ack>,
     finished: bool,
-    callback: Option<Wakeup>,
+    callback: Option<Arc<dyn Fn() + Send + Sync>>,
     error: Option<anyhow::Error>,
 }
 
@@ -120,7 +120,7 @@ impl CoreLifecycle {
     }
 
     pub(crate) fn set_completion_callback(&self, callback: impl Fn() + Send + Sync + 'static) {
-        let callback: Wakeup = Arc::new(callback);
+        let callback: Arc<dyn Fn() + Send + Sync> = Arc::new(callback);
         let mut state = self.completion.state.lock();
         state.callback = Some(Arc::clone(&callback));
         let finished = state.finished;
@@ -172,7 +172,7 @@ pub struct CoreRuntime {
     _test_tasks: Option<TaskRuntime>,
 }
 impl CoreRuntime {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn test_executor(&self) -> &Arc<async_executor::Executor<'static>> {
         &self
             ._test_tasks
@@ -263,8 +263,6 @@ impl CoreRuntime {
         let (sender, receiver) = async_channel::bounded(64);
         let (control, shutdown_receiver) = CoreLifecycle::new();
         let shared = Arc::new(RwLock::new(CoreState::default()));
-        #[cfg(any(test, feature = "gui", feature = "test-support"))]
-        let wakeup = Arc::new(RwLock::new(None));
         let initial = {
             let mut state = CoreState::default();
             state.playback.volume = config.volume;
@@ -280,21 +278,12 @@ impl CoreRuntime {
         let task_waiters = Arc::new(Mutex::new(TaskWaiters::default()));
         let handle = CoreHandle {
             state: shared.clone(),
-            #[cfg(any(test, feature = "gui", feature = "test-support"))]
-            analysis: engine.analysis.clone(),
-            #[cfg(any(test, feature = "gui", feature = "test-support"))]
-            analysis_control: Arc::clone(&engine.analysis_control),
-            #[cfg(any(test, feature = "gui", feature = "test-support"))]
+            pcm: Arc::clone(&engine.pcm),
             waveform: Arc::clone(&engine.waveform),
-            #[cfg(any(test, feature = "gui", feature = "test-support"))]
             waveform_control: Arc::clone(&engine.waveform_control),
             sender,
             revision_updates: Arc::clone(&revision_updates),
-            #[cfg(any(test, feature = "gui", feature = "test-support"))]
-            wakeup: wakeup.clone(),
             task_waiters: Arc::clone(&task_waiters),
-            #[cfg(any(test, feature = "gui", feature = "test-support"))]
-            query_timeout: None,
         };
         let (scan_tx, scan_rx) = async_channel::bounded(3);
         let (relocation_tx, relocation_rx) = async_channel::bounded(1);
@@ -309,8 +298,8 @@ impl CoreRuntime {
             revision_updates,
             state: initial,
             shared,
-            #[cfg(any(test, feature = "gui", feature = "test-support"))]
-            wakeup,
+            #[cfg(test)]
+            publication_observer: None,
             task_waiters,
             task_completions_pending: false,
             generation: 0,

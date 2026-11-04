@@ -574,7 +574,7 @@ impl Core {
                 self.state.system.selected_device = name;
             }
             Command::Analysis { enabled } => {
-                self.engine.analysis_control.set_display_enabled(enabled);
+                self.engine.pcm.set_enabled(enabled);
                 return Ok(CommandOutcome::Immediate);
             }
             Command::DismissError => {
@@ -591,6 +591,7 @@ impl Core {
                 return Ok(CommandOutcome::Immediate);
             }
             Command::Configure { config } => self.configure(config)?,
+            Command::MutateConfig { change } => self.mutate_config(change)?,
             Command::MprisStatus { status } => {
                 self.state.system.mpris_status = status;
                 return Ok(CommandOutcome::Immediate);

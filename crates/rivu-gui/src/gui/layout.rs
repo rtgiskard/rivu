@@ -2894,7 +2894,7 @@ mod tests {
     fn artwork_options(style: rivu_format::config::ArtworkStyle) -> ArtworkOptions {
         ArtworkOptions {
             style,
-            ..ArtworkOptions::from(&rivu_protocol::model::Config::default())
+            ..ArtworkOptions::from(&rivu_format::config::Config::default())
         }
     }
 

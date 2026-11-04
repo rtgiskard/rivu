@@ -7,7 +7,6 @@ pub(super) use rivu_visuals::{
 
 use rivu_format::config::AudioVisualizerStyle;
 use rivu_presentation::i18n::Localizer;
-pub(super) use rivu_protocol::waveform::WaveformScanParameters;
 use std::sync::Arc;
 
 pub(super) const AUDIO_VISUALIZER_STYLES: [AudioVisualizerStyle; 11] = [

@@ -2210,7 +2210,7 @@ mod content_menu_keyboard_tests {
         cx.update(rivu_ui::input::Input::init);
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
-        rivu_protocol::model::Config {
+        rivu_format::config::Config {
             volume: 0.0,
             ffmpeg_enabled: false,
             mpris_enabled: false,

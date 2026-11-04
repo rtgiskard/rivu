@@ -286,7 +286,7 @@ mod tests {
     use gpui::{Bounds, point, px, size};
 
     fn defaults() -> (AudioVisualizerOptions, ArtworkOptions) {
-        let config = rivu_protocol::model::Config::default();
+        let config = rivu_format::config::Config::default();
         (
             AudioVisualizerOptions::from(&config),
             ArtworkOptions::from(&config),

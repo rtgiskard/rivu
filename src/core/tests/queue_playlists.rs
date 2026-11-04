@@ -1091,7 +1091,7 @@ fn playlist_reorders_preserve_catalog_and_other_playlist_queries() {
         panic!("expected first entry batch");
     };
     let continuation = entries.next;
-    let old_snapshot = crate::projection::display_state(&core.state);
+    let old_snapshot = &core.state.clone();
     core.command(Command::MovePlaylistEntry {
         entry_id: first_entry,
         index: 2,
