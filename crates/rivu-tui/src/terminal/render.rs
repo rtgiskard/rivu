@@ -591,9 +591,15 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, area: Rect, ui: &mut UiState, color
     let width = inner.width as usize;
     let mut bindings: Vec<_> = help_bindings(context).collect();
     bindings.sort_by_key(|binding| help_order(binding.action));
+    let commands = [
+        (":q / :quit", "terminal-command-close"),
+        (":qa / :qall", "terminal-command-shutdown"),
+        (":help", "terminal-command-help"),
+    ];
     let key_width = bindings
         .iter()
         .map(|binding| Span::raw(binding.label()).width())
+        .chain(commands.iter().map(|(key, _)| Span::raw(*key).width()))
         .max()
         .unwrap_or(0);
     let indent = 2.min(width.saturating_sub(1));
@@ -603,26 +609,53 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, area: Rect, ui: &mut UiState, color
     } else {
         (indent + 2).min(width.saturating_sub(1))
     };
+    let append_row = |lines: &mut Vec<Line<'static>>, key: &str, description: &str| {
+        let descriptions =
+            wrap_details(description, width.saturating_sub(description_indent).max(1));
+        if columns {
+            for (index, description) in descriptions.into_iter().enumerate() {
+                let prefix = if index == 0 {
+                    format!(
+                        "{}{}{}",
+                        " ".repeat(indent),
+                        key,
+                        " ".repeat(key_width.saturating_sub(Span::raw(key).width()) + 2)
+                    )
+                } else {
+                    " ".repeat(description_indent)
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(prefix, Style::default().fg(colors.text)),
+                    Span::styled(description, Style::default().fg(colors.secondary)),
+                ]));
+            }
+        } else {
+            for part in wrap_details(key, width.saturating_sub(indent).max(1)) {
+                lines.push(Line::from(Span::styled(
+                    format!("{}{part}", " ".repeat(indent)),
+                    Style::default().fg(colors.text),
+                )));
+            }
+            for description in descriptions {
+                lines.push(Line::from(Span::styled(
+                    format!("{}{description}", " ".repeat(description_indent)),
+                    Style::default().fg(colors.secondary),
+                )));
+            }
+        }
+    };
     let mut lines = Vec::new();
-    for line in wrap_details(ui.i18n.text("terminal-command-help"), width.max(1)) {
-        lines.push(Line::from(Span::styled(
-            line,
-            Style::default().fg(colors.secondary),
-        )));
-    }
-    lines.push(Line::default());
     for (group, label) in [
-        "terminal-help-navigation",
-        "playback-title",
-        "terminal-help-page",
-        "terminal-help-exit",
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        if !bindings
-            .iter()
-            .any(|binding| help_group(binding.action) == group)
+        (4, "terminal-help-commands"),
+        (0, "terminal-help-navigation"),
+        (1, "playback-title"),
+        (2, "terminal-help-page"),
+        (3, "terminal-help-exit"),
+    ] {
+        if group != 4
+            && !bindings
+                .iter()
+                .any(|binding| help_group(binding.action) == group)
         {
             continue;
         }
@@ -632,47 +665,20 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, area: Rect, ui: &mut UiState, color
                 .fg(colors.accent)
                 .add_modifier(Modifier::BOLD),
         )));
-        for binding in bindings
-            .iter()
-            .filter(|binding| help_group(binding.action) == group)
-        {
-            let key = binding.label();
-            let descriptions = wrap_details(
-                ui.i18n.text(binding.description),
-                width.saturating_sub(description_indent).max(1),
-            );
-            if columns {
-                for (index, description) in descriptions.into_iter().enumerate() {
-                    let prefix = if index == 0 {
-                        format!(
-                            "{}{}{}",
-                            " ".repeat(indent),
-                            key,
-                            " ".repeat(
-                                key_width.saturating_sub(Span::raw(key.as_str()).width()) + 2
-                            )
-                        )
-                    } else {
-                        " ".repeat(description_indent)
-                    };
-                    lines.push(Line::from(vec![
-                        Span::styled(prefix, Style::default().fg(colors.text)),
-                        Span::styled(description, Style::default().fg(colors.secondary)),
-                    ]));
-                }
-            } else {
-                for part in wrap_details(&key, width.saturating_sub(indent).max(1)) {
-                    lines.push(Line::from(Span::styled(
-                        format!("{}{part}", " ".repeat(indent)),
-                        Style::default().fg(colors.text),
-                    )));
-                }
-                for description in descriptions {
-                    lines.push(Line::from(Span::styled(
-                        format!("{}{description}", " ".repeat(description_indent)),
-                        Style::default().fg(colors.secondary),
-                    )));
-                }
+        if group == 4 {
+            for (key, description) in commands {
+                append_row(&mut lines, key, ui.i18n.text(description));
+            }
+        } else {
+            for binding in bindings
+                .iter()
+                .filter(|binding| help_group(binding.action) == group)
+            {
+                append_row(
+                    &mut lines,
+                    &binding.label(),
+                    ui.i18n.text(binding.description),
+                );
             }
         }
         lines.push(Line::default());
@@ -825,26 +831,12 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut
         ..outer[3]
     };
     if let Some(input) = &ui.command_input {
-        let hint = ui.i18n.text("terminal-command-hint");
-        let hint_width = Line::from(hint).width().min(messages.width as usize / 2);
-        let input_width = messages.width.saturating_sub(hint_width as u16 + 2);
+        let input_width = messages.width;
         let (tail, cursor) = query_tail(input, input_width.saturating_sub(2) as usize);
         frame.render_widget(
             Paragraph::new(format!(":{tail}"))
                 .style(Style::default().fg(colors.search).bg(colors.selected)),
-            Rect {
-                width: input_width,
-                ..messages
-            },
-        );
-        frame.render_widget(
-            Paragraph::new(cell_text(hint, hint_width, true))
-                .style(Style::default().fg(colors.secondary)),
-            Rect {
-                x: messages.x + input_width + 2.min(messages.width),
-                width: hint_width as u16,
-                ..messages
-            },
+            messages,
         );
         if input_width > 1 && messages.height > 0 {
             frame.set_cursor_position((messages.x + 1 + cursor as u16, messages.y));
