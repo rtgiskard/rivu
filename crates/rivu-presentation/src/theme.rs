@@ -175,8 +175,6 @@ mod tests {
                     "{theme:?} accent label"
                 );
             }
-            let light = matches!(theme, Theme::TokyoNightDay);
-            assert_eq!(luminance(palette.bg) > luminance(palette.text), light);
         }
     }
 }

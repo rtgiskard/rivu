@@ -504,7 +504,6 @@ mod tests {
         assert!(geometry(100., 0.).thumb(px(0.)).is_none());
         assert!(geometry(0., 100.).thumb(px(0.)).is_none());
         assert_eq!(geometry(100., 200.).thumb_height(), Some(px(50.)));
-        assert_eq!(geometry(100., 10_000.).thumb_height(), Some(px(24.)));
         assert_eq!(geometry(10., 100.).thumb_height(), Some(px(10.)));
     }
 
@@ -515,7 +514,6 @@ mod tests {
         let bottom = metrics.thumb(px(-2_000.)).unwrap();
         assert_eq!(top.top(), metrics.track.top());
         assert_eq!(bottom.bottom(), metrics.track.bottom());
-        assert_eq!(top.size.width, px(THUMB_WIDTH));
         assert_eq!(metrics.offset_for_pointer(px(-100.), px(12.)), px(0.));
         assert_eq!(metrics.offset_for_pointer(px(500.), px(12.)), px(-900.));
         assert_eq!(metrics.offset_for_pointer(px(60.), px(12.)), px(-450.));

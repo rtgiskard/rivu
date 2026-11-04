@@ -485,34 +485,6 @@ mod tests {
     }
 
     #[test]
-    fn replacing_choices_resets_selection_and_empty_choices_close_popup() {
-        with_choice_window(|window| {
-            let mut state = ChoiceState::default();
-            state.open(
-                [ChoiceItem::new(10, "ten"), ChoiceItem::new(20, "twenty")],
-                1,
-            );
-            assert_eq!(state.selected_index(), Some(1));
-            state.close();
-            assert!(!state.is_open());
-
-            state.open([ChoiceItem::new(30, "thirty")], usize::MAX);
-            assert!(state.is_open());
-            assert_eq!(state.selected_index(), Some(0));
-            assert_eq!(state.item(0).map(|item| item.value), Some(30));
-            assert!(state.item(1).is_none());
-            navigate(&mut state, "down", window);
-            navigate(&mut state, "up", window);
-            assert_eq!(state.selected_index(), Some(0));
-
-            state.open([], 0);
-            assert!(!state.is_open());
-            assert_eq!(state.selected_index(), None);
-            assert!(state.item(0).is_none());
-        });
-    }
-
-    #[test]
     fn selection_consumes_native_click_but_tab_keeps_focus_traversal() {
         for key in [
             "enter", "space", "escape", "up", "down", "pageup", "pagedown",

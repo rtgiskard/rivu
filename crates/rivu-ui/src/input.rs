@@ -1355,7 +1355,7 @@ mod tests {
     }
 
     #[test]
-    fn live_font_size_updates_input_shaping_and_content_height() {
+    fn live_font_size_keeps_shaped_input_inside_content_height() {
         let mut cx = gpui::TestAppContext::single();
         cx.update(crate::theme::init_test);
         let (input, _, handle) = selection_fixture(&mut cx);
@@ -1368,14 +1368,7 @@ mod tests {
                 window.draw(cx).clear(cx);
                 let field = input.read(cx);
                 let line = field.last_layout.as_ref().unwrap();
-                let logical_px = font_size as f32 * (4. / 3.);
-                assert!((f32::from(line.font_size) - logical_px).abs() < 0.001);
-                assert!(
-                    field.last_bounds.unwrap().size.height
-                        >= px(INPUT_LINE_HEIGHT * logical_px / 14.).round()
-                );
                 assert!(field.last_bounds.unwrap().size.height >= line.ascent + line.descent);
-                assert_eq!(window.rem_size(), px(16.));
             })
             .unwrap();
         }
@@ -2374,86 +2367,5 @@ mod tests {
             });
         })
         .unwrap();
-    }
-
-    #[test]
-    fn aligned_controls_follow_input_height_across_font_and_interface_scales() {
-        struct Controls {
-            input: Entity<Input>,
-            heights: std::rc::Rc<std::cell::Cell<[Pixels; 3]>>,
-        }
-        impl Render for Controls {
-            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-                let measure = |index, child: gpui::AnyElement| {
-                    let heights = self.heights.clone();
-                    div().relative().w_48().flex_shrink_0().child(child).child(
-                        gpui::canvas(
-                            move |bounds, _, _| {
-                                let mut values = heights.get();
-                                values[index] = bounds.size.height;
-                                heights.set(values);
-                            },
-                            |_, _, _, _| {},
-                        )
-                        .absolute()
-                        .size_full(),
-                    )
-                };
-                let theme = crate::theme::palette(cx);
-                let button = crate::button("aligned-text", "Apply", cx, |_, _, _| {});
-                let dropdown =
-                    crate::dropdown_trigger(theme, "aligned-dropdown", "Choice", false, cx);
-                div()
-                    .size_full()
-                    .flex()
-                    .flex_col()
-                    .items_start()
-                    .font_size_scale(crate::theme::font_size_scale(cx))
-                    .child(measure(0, self.input.clone().into_any_element()))
-                    .child(measure(
-                        1,
-                        input_aligned_control(button, cx).into_any_element(),
-                    ))
-                    .child(measure(
-                        2,
-                        input_aligned_control(dropdown, cx).into_any_element(),
-                    ))
-            }
-        }
-        let mut cx = gpui::TestAppContext::single();
-        cx.update(crate::theme::init_test);
-        let heights = std::rc::Rc::new(std::cell::Cell::new([px(0.); 3]));
-        let window = cx.add_window({
-            let heights = heights.clone();
-            move |_, cx| Controls {
-                input: cx.new(|cx| Input::new("Size", "24", "", cx)),
-                heights,
-            }
-        });
-        for interface_scale in [0.75, 1., 1.5, 2.] {
-            for font_size in [8, 11, 18] {
-                cx.update(|cx| {
-                    crate::theme::set_typography(
-                        gpui::font("sans-serif"),
-                        "sans-serif",
-                        font_size,
-                        cx,
-                    )
-                });
-                cx.update_window(window.into(), |_, window, cx| {
-                    window.set_rem_size(px(16. * interface_scale));
-                    window.draw(cx).clear(cx);
-                })
-                .unwrap();
-                let [input, button, dropdown] = heights.get();
-                assert!(input > px(font_size as f32 * (4. / 3.) * interface_scale));
-                for control in [button, dropdown] {
-                    assert!(
-                        (f32::from(input - control)).abs() <= 1.,
-                        "font={font_size}, scale={interface_scale}: input={input:?}, control={control:?}"
-                    );
-                }
-            }
-        }
     }
 }

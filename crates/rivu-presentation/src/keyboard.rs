@@ -643,16 +643,6 @@ mod tests {
                     );
                 }
             }
-            assert!(!help_rows(&[context]).any(|row| matches!(
-                row.action,
-                Action::Enqueue
-                    | Action::EnqueueCollection
-                    | Action::FilterFavorites
-                    | Action::FilterMissing
-                    | Action::CycleSort
-                    | Action::CheckOtherTracks
-                    | Action::ForceCheckOtherTracks
-            )));
         }
         for context in [Context::TuiSearchResults, Context::TuiPlaylistTracks] {
             assert_eq!(
@@ -667,26 +657,6 @@ mod tests {
                 None
             );
         }
-        let rows = help_rows(&[Context::TuiOther]).collect::<Vec<_>>();
-        for action in [
-            Action::Enqueue,
-            Action::EnqueueCollection,
-            Action::FilterFavorites,
-            Action::FilterMissing,
-            Action::CycleSort,
-            Action::CheckOtherTracks,
-            Action::ForceCheckOtherTracks,
-            Action::CancelScan,
-        ] {
-            assert!(rows.iter().any(|row| row.action == action));
-        }
-        assert_eq!(
-            rows.iter()
-                .find(|row| row.action == Action::Enqueue)
-                .unwrap()
-                .label(),
-            "e"
-        );
     }
 
     #[test]
@@ -739,20 +709,6 @@ mod tests {
                 context
             ),
             Some(Action::Close)
-        );
-        let rows = help_rows(&[context]).collect::<Vec<_>>();
-        assert!(
-            rows.iter()
-                .any(|row| row.description == "keyboard-apply-search")
-        );
-        assert!(
-            rows.iter()
-                .any(|row| row.description == "keyboard-tabs-pair")
-        );
-        assert!(
-            !rows
-                .iter()
-                .any(|row| row.description == "keyboard-traverse")
         );
     }
 

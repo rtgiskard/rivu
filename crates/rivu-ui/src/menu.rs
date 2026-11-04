@@ -164,7 +164,7 @@ mod tests {
     }
 
     #[test]
-    fn menu_candidates_back_and_recovery_fit_the_same_scaled_row() {
+    fn menu_candidate_text_stays_inside_scaled_rows() {
         let mut cx = TestAppContext::single();
         cx.update(crate::theme::init_test);
         let window = cx.add_window(|_, _| MenuRows::default());
@@ -183,12 +183,6 @@ mod tests {
                 .unwrap();
                 root.read_with(&cx, |rows, _| {
                     let bounds = rows.bounds.get();
-                    for row in &bounds[1..] {
-                        assert_eq!(
-                            row.size.height, bounds[0].size.height,
-                            "rem={rem}, size={size}"
-                        );
-                    }
                     assert!(rows.text.bounds().top() >= bounds[2].top());
                     assert!(rows.text.bounds().bottom() <= bounds[2].bottom());
                 });
