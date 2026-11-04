@@ -702,6 +702,9 @@ lookahead prefill, fixed-block output and one-time EOF flushing. Its staging is
 bounded by lookahead and the admitted block size, independent of source duration.
 Only the declared real input is processed; graph padding drains delay rather than
 extending the source. Reset clears both DSP history and adapter staging.
+Graph blocks initialize only regions not overwritten by source reads, copies or
+mixing. Short reads and ended branches remain zero-extended through the current
+block, including while downstream processors drain their tails.
 
 Non-finite input/intermediate PCM fails without publishing partial audio; finite
 over-range samples are not clipped or silenced. A failed DSP/profile operation

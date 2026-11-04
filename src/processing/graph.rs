@@ -312,15 +312,20 @@ impl Engine {
             let frames = end.map_or(count, |end| {
                 end.saturating_sub(position).min(count as u64) as usize
             });
-            node.output.fill(0.0);
+            // Downstream nodes may outlive this node, but only read this round's
+            // count. Every processor below writes its complete active prefix.
+            node.output[frames * self.channels..count * self.channels].fill(0.0);
             let output = &mut node.output[..frames * self.channels];
             match &node.processor {
                 Processor::Source(pcm) => {
-                    pcm.read_frames(position, output);
+                    let read = pcm.read_frames(position, output);
+                    output[read * self.channels..].fill(0.0);
                 }
                 Processor::Decoder => {
                     if let Some(input) = decoder {
                         output.copy_from_slice(&input[..output.len()]);
+                    } else {
+                        output.fill(0.0);
                     }
                 }
                 _ => {
@@ -1118,6 +1123,88 @@ mod tests {
             to: GraphPort { node: 3, port: 1 },
         });
         graph
+    }
+
+    #[test]
+    fn unequal_mix_branches_zero_extend_after_reusing_output_buffers() {
+        let budget = audio::PcmBudget::new(MEMORY_LIMIT);
+        let input = pcm(&vec![2.0; BLOCK + 3], &budget);
+        let longer = pcm(&vec![1.0; BLOCK * 2 + 7], &budget);
+        let mut graph = mix_graph(vec![0.0; 2], vec![false; 2], vec![false; 2]);
+        graph.nodes.push(GraphNode {
+            id: 4,
+            kind: GraphNodeKind::Source,
+            position: [0.0; 2],
+        });
+        graph.edges[0].from = GraphPort { node: 4, port: 0 };
+        graph.next_id = 5;
+        let boundaries = BTreeMap::from([(
+            GraphPort { node: 4, port: 0 },
+            GraphPcm {
+                pcm: longer,
+                start_frame: 0,
+            },
+        )]);
+        let mut engine = Engine::new(&input);
+        let target = engine
+            .compile(
+                &graph,
+                GraphPort { node: 2, port: 0 },
+                &boundaries,
+                &BTreeMap::new(),
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        for node in &mut engine.nodes {
+            node.output.fill(f32::NAN);
+            node.sum.fill(f64::NAN);
+        }
+        let output = engine
+            .render(target, budget, &AtomicBool::new(false))
+            .unwrap();
+        let output = samples(&output.pcm);
+        assert_eq!(output.len(), BLOCK * 2 + 7);
+        assert!(output[..BLOCK + 3].iter().all(|&sample| sample == 3.0));
+        assert!(output[BLOCK + 3..].iter().all(|&sample| sample == 1.0));
+    }
+
+    #[test]
+    fn source_short_reads_and_decoder_without_input_clear_active_prefix() {
+        let budget = audio::PcmBudget::new(MEMORY_LIMIT);
+        let input = pcm(&[1.0, 2.0], &budget);
+        let graph = chain(Vec::new());
+        for streaming in [false, true] {
+            let mut engine = if streaming {
+                Engine::for_decoder(48000, Arc::clone(input.layout()))
+            } else {
+                Engine::new(&input)
+            };
+            let target = engine
+                .compile(
+                    &graph,
+                    GraphPort { node: 2, port: 0 },
+                    &BTreeMap::new(),
+                    &BTreeMap::new(),
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+            for node in &mut engine.nodes {
+                // Exercise the reader's short-read contract independently of
+                // the compiled source length and poison previously used data.
+                node.frames = 4;
+                node.input_frames = 4;
+                node.output.fill(f32::NAN);
+            }
+            engine
+                .round(0, 4, None, None, &AtomicBool::new(false))
+                .unwrap();
+            let expected = if streaming {
+                [0.0; 4]
+            } else {
+                [1.0, 2.0, 0.0, 0.0]
+            };
+            assert_eq!(&engine.nodes[target].output[..4], &expected);
+        }
     }
 
     #[test]
