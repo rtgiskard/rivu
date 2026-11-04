@@ -363,10 +363,9 @@ mod tests {
             ));
 
             for suspended in [false, true] {
-                handle.waveform_control.set_visualization_enabled(
-                    &mut handle.waveform.write(),
-                    !suspended,
-                );
+                handle
+                    .waveform_control
+                    .set_visualization_enabled(&mut handle.waveform.write(), !suspended);
                 assert!(serving.as_mut().poll(&mut context).is_pending());
                 let Response::Progressive { key, frame } =
                     read_frame::<Response>(&mut peer, &mut bytes).await.unwrap()
