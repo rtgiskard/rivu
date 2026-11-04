@@ -59,7 +59,6 @@ impl Core {
             | Command::ToggleShuffle
             | Command::Repeat { .. }
             | Command::CycleRepeat
-            | Command::Analysis { .. }
             | Command::DismissError
             | Command::DismissScanResult
             | Command::CancelScan { .. }

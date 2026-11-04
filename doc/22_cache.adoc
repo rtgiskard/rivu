@@ -68,8 +68,10 @@ Core's interactive track-ID LRU holds at most twice `interface.query_batch_size`
 entries by default, at most 512. Hits refresh age, misses are not retained, and a
 smaller query batch trims immediately. Metadata changes invalidate affected entries;
 playback statistics and committed bitrate changes patch existing entries. Scans
-clear it only for display impacts. This bounds entries, not string bytes. The
-background query owner and export do not populate this LRU or assemble pages from it.
+and external-file admission invalidate only their reported data-domain impacts;
+uncertain admission falls back to full invalidation. This bounds entries, not string
+bytes. The background query owner and export do not populate this LRU or assemble
+pages from it.
 
 Count retention stores scalars, not rows: one duplicate-group total and a shared
 sixteen-entry LRU for filtered Library, Other, directories, albums, album members,

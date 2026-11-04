@@ -128,6 +128,10 @@ async fn run_server(
         Stop,
     }
     loop {
+        futures_lite::future::yield_now().await;
+        if shutdown.is_closed() {
+            return Ok(());
+        }
         let event = {
             let completed = async {
                 if clients.is_empty() {
@@ -211,6 +215,8 @@ async fn serve_client(
     let mut minimum_sequence = 0;
     let (mut reader, mut writer) = stream.split();
     loop {
+        // Ready control I/O must still return to the publisher and other sessions.
+        futures_lite::future::yield_now().await;
         let command = futures::select! {
             result = request_reader.read(&mut reader).fuse() => Some(result?),
             result = notifications.recv().fuse() => { result.context("PCM publisher stopped")?; None },
@@ -288,6 +294,56 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn pipelined_subscription_yields_before_disconnect_retires_capture() {
+        use std::{
+            future::Future,
+            task::{Context, Waker},
+        };
+
+        let (handle, _queries) = CoreHandle::test_query_port();
+        let initial = handle.pcm.state();
+        let state = std::rc::Rc::new(std::cell::RefCell::new(ServerState {
+            handle: handle.clone(),
+            clients: BTreeMap::new(),
+        }));
+        let (stream, mut peer) = UnixStream::pair().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let mut requests = Vec::from(request(0, 0, 7));
+        requests.extend_from_slice(&request(1, 1, 11));
+        requests.extend_from_slice(&request(1, 0, 12));
+        peer.write_all(&requests).unwrap();
+        peer.shutdown(std::net::Shutdown::Write).unwrap();
+        let stream = Async::new(stream).unwrap();
+        async_io::block_on(stream.readable()).unwrap();
+        async_io::block_on(stream.writable()).unwrap();
+        {
+            let mut serving = std::pin::pin!(serve_client(stream, state.clone(), 1, 7));
+            let mut context = Context::from_waker(Waker::noop());
+            assert!(serving.as_mut().poll(&mut context).is_pending());
+            let mut welcome = [0; 16];
+            peer.read_exact(&mut welcome).unwrap();
+            assert_eq!(&welcome[..8], MAGIC);
+            let length = u32::from_le_bytes(welcome[12..].try_into().unwrap()) as usize;
+            assert!(length <= 4096);
+            peer.read_exact(&mut vec![0; length]).unwrap();
+
+            // Even with the next request and EOF already readable, the first ACK
+            // returns control so the session can be retired before the next intent.
+            assert!(serving.as_mut().poll(&mut context).is_pending());
+            let mut bytes = [0; STATUS_SIZE];
+            peer.read_exact(&mut bytes).unwrap();
+            let (enabled, revision, frontier) = decode_status(&bytes).unwrap();
+            assert_eq!(revision, 11);
+            assert_eq!(frontier, 0);
+            assert_eq!(enabled.capture, initial.capture + 1);
+            assert_eq!(handle.pcm.state().capture, enabled.capture);
+        }
+        // Dropping a yielded session still removes its aggregate demand.
+        assert!(state.borrow().clients.is_empty());
+        assert_eq!(handle.pcm.state().capture, initial.capture + 2);
     }
 
     #[test]

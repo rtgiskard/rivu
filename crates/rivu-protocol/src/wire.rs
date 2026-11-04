@@ -13,7 +13,7 @@ use rivu_format::decoder_hint::DecoderHint;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub const PROTOCOL_VERSION: u8 = 14;
+pub const PROTOCOL_VERSION: u8 = 15;
 pub const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub const MAX_CLIENTS: usize = 16;
@@ -423,9 +423,6 @@ pub enum WireCommand {
     },
     Device {
         name: Option<String>,
-    },
-    Analysis {
-        enabled: bool,
     },
     DismissError,
     Configure {
@@ -1297,7 +1294,6 @@ impl From<Command> for WireCommand {
             Command::RemoveTracks { track_ids } => Self::RemoveTracks { track_ids },
             Command::RemoveHistory { track_ids } => Self::RemoveHistory { track_ids },
             Command::Device { name } => Self::Device { name },
-            Command::Analysis { enabled } => Self::Analysis { enabled },
             Command::DismissError => Self::DismissError,
             Command::DismissScanResult => Self::DismissScanResult,
             Command::CancelScan { id } => Self::CancelScan { id },
@@ -1592,7 +1588,6 @@ impl TryFrom<WireCommand> for Command {
             WireCommand::RemoveTracks { track_ids } => Self::RemoveTracks { track_ids },
             WireCommand::RemoveHistory { track_ids } => Self::RemoveHistory { track_ids },
             WireCommand::Device { name } => Self::Device { name },
-            WireCommand::Analysis { enabled } => Self::Analysis { enabled },
             WireCommand::DismissError => Self::DismissError,
             WireCommand::DismissScanResult => Self::DismissScanResult,
             WireCommand::CancelScan { id } => Self::CancelScan { id },

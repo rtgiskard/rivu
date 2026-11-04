@@ -118,7 +118,9 @@ Analysis history and the processed Before FIFO are separate allocations.
 
 PCM publications and cursor progress wake enabled receivers. Each subscription
 request acknowledges its own revision and current sequence frontier; unchanged
-aggregate capture state does not wake other clients. Shared control changes,
+aggregate capture state does not wake other clients. Capture demand is owned by
+the aggregate of live subscriptions, subject to visualization enablement; command
+clients cannot override it through a global analysis setter. Shared control changes,
 including first enablement and last-subscriber disconnect, notify disabled clients
 as well so they can retire obsolete capture identities.
 Stream identity, applied intent, capture identity and sequence watermarks reject
@@ -137,6 +139,10 @@ and checks that identity before scanning; clients do not submit display metadata
 A full scan returns an envelope, not a complete PCM stream. Disconnect requests
 cancellation but physical decoding must retire before its blocking-work lease
 is released.
+
+Both side-channel accept and session loops yield cooperatively between requests,
+including when buffered control input and output complete without waiting. Frame
+and client limits do not substitute for this scheduling boundary.
 
 === Owner execution and retirement
 
@@ -208,10 +214,12 @@ body
 The frame header is six bytes. `body_length` excludes the four-byte length field
 and includes the version, message type, and serialized body.
 
-Bodies use Postcard serialization without COBS framing. The protocol version is
-defined by `PROTOCOL_VERSION` in
+Bodies use Postcard serialization without COBS framing. The command protocol is
+version 15, defined by `PROTOCOL_VERSION` in
 link:../crates/rivu-protocol/src/wire.rs[the wire contract]. Both peers must use
-matching protocol versions and positional wire schemas. The four-byte frame
+matching protocol versions and positional wire schemas. Version 15 removes the
+global `Analysis` command; restart Core and use matching clients after upgrading.
+The four-byte frame
 length remains little-endian; body integers follow Postcard's encoding.
 Version mismatches are rejected before decoding the body. There is no schema
 negotiation. See <<wire-schemas,Wire schemas>> for positional fields and adapters.

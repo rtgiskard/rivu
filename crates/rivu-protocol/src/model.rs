@@ -868,9 +868,6 @@ pub enum Command {
     Device {
         name: Option<String>,
     },
-    Analysis {
-        enabled: bool,
-    },
     DismissError,
     Configure {
         config: Arc<rivu_format::config::Config>,

@@ -426,7 +426,13 @@ impl Core {
         }
         task.status.library_committed = saved.committed;
         if saved.committed {
-            self.store.invalidate_caches();
+            if !saved.uncertain
+                && let Some(impacts) = saved.impacts
+            {
+                self.store.invalidate_scan_caches(impacts, false);
+            } else {
+                self.store.invalidate_caches();
+            }
         }
         // Confirmed effects remain authoritative even when later retirement
         // fails. Publish their tokens before isolating an uncertain outcome,

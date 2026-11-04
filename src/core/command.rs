@@ -143,10 +143,7 @@ impl Core {
                 }
             }
             Command::PlayAlbum { key } => {
-                ensure!(
-                    self.store.album_tracks_page(&key, None, 0, 0)?.total > 0,
-                    "Album is empty"
-                );
+                ensure!(self.store.album_has_tracks(&key)?, "Album is empty");
                 self.stop()?;
                 self.store.queue_album(&key, true)?;
                 self.advance_queue_revision();
@@ -572,10 +569,6 @@ impl Core {
                 })?;
                 self.output_settings_request = request;
                 self.state.system.selected_device = name;
-            }
-            Command::Analysis { enabled } => {
-                self.engine.pcm.set_enabled(enabled);
-                return Ok(CommandOutcome::Immediate);
             }
             Command::DismissError => {
                 self.state.system.last_error = None;

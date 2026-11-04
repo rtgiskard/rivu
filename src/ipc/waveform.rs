@@ -67,6 +67,10 @@ impl WaveServer {
         let worker = executor.spawn(async move {
             let mut clients = FuturesUnordered::new();
             loop {
+                futures_lite::future::yield_now().await;
+                if stopped.is_closed() {
+                    break;
+                }
                 enum Event {
                     Stop,
                     Accepted(std::io::Result<(Async<UnixStream>, SocketAddr)>),
@@ -153,6 +157,11 @@ async fn session(
     )?;
     write_frame(&mut stream, &mut bytes).await?;
     loop {
+        // A pipelined client must not monopolize the shared service executor.
+        futures_lite::future::yield_now().await;
+        if stopped.is_closed() {
+            return Ok(());
+        }
         let request = futures::select! {
             _ = stopped.recv().fuse() => return Ok(()),
             request = read_frame::<Request>(&mut stream, &mut bytes).fuse() => request?,
@@ -307,6 +316,74 @@ mod tests {
     async fn send(stream: &mut Async<UnixStream>, request: &Request, bytes: &mut Vec<u8>) {
         encode_frame_into(request, bytes).unwrap();
         write_frame(stream, bytes).await.unwrap();
+    }
+
+    #[test]
+    fn pipelined_progressive_requests_yield_to_suspension_and_shutdown() {
+        use std::{
+            future::Future,
+            task::{Context, Waker},
+        };
+
+        let (handle, _queries) = CoreHandle::test_query_port();
+        let tasks = crate::execution::TaskRuntime::start().unwrap();
+        let (stream, peer) = UnixStream::pair().unwrap();
+        let stream = Async::new(stream).unwrap();
+        let mut peer = Async::new(peer).unwrap();
+        let (stop, stopped) = async_channel::bounded(1);
+        async_io::block_on(timeout(Duration::from_secs(5), async {
+            let mut bytes = Vec::new();
+            send(
+                &mut peer,
+                &Request::Hello {
+                    version: VERSION,
+                    instance: 7,
+                },
+                &mut bytes,
+            )
+            .await;
+            for _ in 0..3 {
+                send(&mut peer, &Request::Progressive { known: None }, &mut bytes).await;
+            }
+            peer.get_ref().shutdown(std::net::Shutdown::Write).unwrap();
+            stream.readable().await.unwrap();
+            stream.writable().await.unwrap();
+            let mut serving = std::pin::pin!(session(
+                stream,
+                handle.clone(),
+                7,
+                Arc::clone(&tasks.workers),
+                stopped,
+            ));
+            let mut context = Context::from_waker(Waker::noop());
+            assert!(serving.as_mut().poll(&mut context).is_pending());
+            assert!(matches!(
+                read_frame::<Response>(&mut peer, &mut bytes).await.unwrap(),
+                Response::Hello { instance: 7, .. }
+            ));
+
+            for suspended in [false, true] {
+                handle.waveform_control.set_visualization_enabled(
+                    &mut handle.waveform.write(),
+                    !suspended,
+                );
+                assert!(serving.as_mut().poll(&mut context).is_pending());
+                let Response::Progressive { key, frame } =
+                    read_frame::<Response>(&mut peer, &mut bytes).await.unwrap()
+                else {
+                    panic!("expected progressive response");
+                };
+                assert_eq!(key.suspended, suspended);
+                assert_eq!(frame.unwrap().is_suspended(), suspended);
+            }
+            // Shutdown wins before the third buffered request, not just after EOF.
+            stop.close();
+            assert!(matches!(
+                serving.as_mut().poll(&mut context),
+                std::task::Poll::Ready(Ok(()))
+            ));
+        }))
+        .unwrap();
     }
 
     #[test]

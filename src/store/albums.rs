@@ -126,6 +126,21 @@ impl Store {
         Ok(Page { total, rows })
     }
 
+    pub(crate) fn album_has_tracks(&self, key: &AlbumKey) -> Result<bool> {
+        let directory = key
+            .directory
+            .to_str()
+            .context("Album directory is not UTF-8")?;
+        Ok(self.conn.query_row(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM tracks INDEXED BY tracks_album_members WHERE {})",
+                album_filter()
+            ),
+            params![directory, key.title],
+            |row| row.get(0),
+        )?)
+    }
+
     pub(crate) fn queue_album(&self, key: &AlbumKey, replace: bool) -> Result<()> {
         let directory = key
             .directory
@@ -133,12 +148,7 @@ impl Store {
             .context("Album directory is not UTF-8")?;
         let tx = self.conn.unchecked_transaction()?;
         let filter = album_filter();
-        let count: i64 = tx.query_row(
-            &format!("SELECT COUNT(*) FROM tracks INDEXED BY tracks_album_members WHERE {filter}"),
-            params![directory, key.title],
-            |row| row.get(0),
-        )?;
-        ensure!(count > 0, "Album is empty");
+        ensure!(self.album_has_tracks(key)?, "Album is empty");
         if replace {
             tx.execute(
                 "UPDATE rivu_meta SET current_queue_entry_id=NULL WHERE singleton=1",
