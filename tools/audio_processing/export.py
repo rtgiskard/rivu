@@ -8,6 +8,8 @@ the worker's internal processing consumes/produces PCM and never writes artifact
 import argparse
 from contextlib import ExitStack
 import json
+import hashlib
+import os
 from pathlib import Path
 import shutil
 import sys
@@ -20,16 +22,51 @@ else:
 
 
 class FileInput:
-    def __init__(self, path, reader):
-        self.path, self.reader = path, reader
-        self.sha256 = worker.digest(path)
+    def __init__(self, path, stack):
+        import soundfile as sf
+        self.path = Path(path)
+        self.stream = stack.enter_context(self.path.open("rb", buffering=0))
+        self.identity = self._identity()
+        self.reader = stack.enter_context(sf.SoundFile(self.stream))
+
+    def admit(self):
+        self.sha256 = self._digest()
+        try:
+            stat = self.path.stat()
+            unchanged = ((stat.st_dev, stat.st_ino) == self.identity[:2]
+                         and self._identity() == self.identity)
+        except OSError:
+            unchanged = False
+        worker.require(unchanged, "source_changed", "source changed during admission")
+
+    def _identity(self):
+        stat = os.fstat(self.stream.fileno())
+        return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+    def _digest(self):
+        digest = hashlib.sha256()
+        offset = 0
+        while offset < self.identity[2]:
+            block = os.pread(self.stream.fileno(), min(1024*1024, self.identity[2]-offset), offset)
+            worker.require(block, "source_changed", "source truncated while hashing")
+            digest.update(block)
+            offset += len(block)
+        return digest.hexdigest()
 
     def window(self, left, right):
         self.reader.seek(left)
         return self.reader.read(right-left, dtype="float32", always_2d=True)
 
     def finish(self):
-        worker.require(worker.digest(self.path) == self.sha256, "source_changed", "source changed during processing")
+        try:
+            stat = self.path.stat()
+            unchanged = ((stat.st_dev, stat.st_ino) == self.identity[:2]
+                         and self._identity() == self.identity
+                         and self._digest() == self.sha256
+                         and self._identity() == self.identity)
+        except OSError:
+            unchanged = False
+        worker.require(unchanged, "source_changed", "source changed during processing")
         return self.sha256
 
 
@@ -42,8 +79,14 @@ def process_export(request, emit):
     worker.require(source.is_file(), "input_missing", "input file does not exist")
     worker.require(not destination.exists(), "output_exists", "output_dir must not already exist")
     worker.require(destination.parent.is_dir(), "output_parent", "output parent must already exist")
+    with ExitStack() as stack:
+        source_input = FileInput(source, stack)
+        return _export_admitted(request, emit, destination, source_input)
+
+
+def _export_admitted(request, emit, destination, source_input):
     import soundfile as sf
-    info = sf.info(source)
+    info = source_input.reader
     worker.require(info.format in ("WAV", "WAVEX", "RF64") and info.subtype == "FLOAT", "input_format", "input must be IEEE float32 WAV/WAVEX/RF64")
     control = {key:value for key, value in request.items() if key not in ("input_path", "output_dir")}
     control.update(version=worker.VERSION, sample_rate=info.samplerate, channels=info.channels, frames=info.frames)
@@ -61,13 +104,13 @@ def process_export(request, emit):
             completion = fields
         else:
             emit(kind, **fields)
+    source_input.admit()
     destination.mkdir(mode=0o700)
     try:
         with ExitStack() as stack:
-            reader = stack.enter_context(sf.SoundFile(source))
             writers = {stem:stack.enter_context(sf.SoundFile(path, mode="w", samplerate=info.samplerate,
                        channels=info.channels, format=output_format, subtype="FLOAT")) for stem, path in outputs.items()}
-            report = worker._process_validated(control, FileInput(source, reader), lambda stem, samples:writers[stem].write(samples), capture)
+            report = worker._process_validated(control, source_input, lambda stem, samples:writers[stem].write(samples), capture)
         for path in outputs.values():
             actual = sf.info(path)
             worker.require((actual.frames, actual.channels, actual.samplerate) == (info.frames, info.channels, info.samplerate),

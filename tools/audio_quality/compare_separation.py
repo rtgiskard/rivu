@@ -18,18 +18,20 @@ from pathlib import Path
 
 import numpy as np
 if __package__:
-    from .evaluate import channel_metrics, identity, load, stereo_metrics
+    from .evaluate import channel_metrics, identity, load_identified, stereo_metrics
 else:
-    from evaluate import channel_metrics, identity, load, stereo_metrics
+    from evaluate import channel_metrics, identity, load_identified, stereo_metrics
 
 
 def compare(args):
-    mixture, rate = load(args.mixture)
-    reference, reference_rate = load(args.reference)
+    mixture_pcm = load_identified(args.mixture)
+    reference_pcm = load_identified(args.reference)
+    mixture, rate = mixture_pcm.data, mixture_pcm.rate
+    reference, reference_rate = reference_pcm.data, reference_pcm.rate
     if mixture.shape != reference.shape or reference_rate != rate or mixture.shape[1] != 2:
         raise ValueError("aligned stereo mixture/vocal references required")
-    mixture_identity = identity(args.mixture)
-    report = {"schema":1,"mixture":mixture_identity,"reference":identity(args.reference),
+    mixture_identity = mixture_pcm.identity
+    report = {"schema":1,"mixture":mixture_identity,"reference":reference_pcm.identity,
               "sample_rate":rate,"frames":len(mixture),"channels":2,"provenance":args.provenance,
               "baseline_metrics_by_channel":[channel_metrics(a,b) for a,b in zip(reference.T,mixture.T)],
               "models":[],"limits":"Same excerpt only; no listening review or full-corpus/model ranking. SI-SDR is scale invariant; inspect ordinary SNR, gain, stereo and peaks too. Mixture-minus-vocals reconstruction does not establish separation quality."}
@@ -42,8 +44,10 @@ def compare(args):
             raise ValueError("worker input content differs from selected mixture: " + str(path))
         if (result["sample_rate"],result["frames"],result["channels"]) != (rate,len(mixture),2):
             raise ValueError("worker timeline differs from paired references: " + str(path))
-        vocals, vocal_rate = load(result["outputs"]["vocals"])
-        backing, backing_rate = load(result["outputs"]["accompaniment"])
+        vocal_pcm = load_identified(result["outputs"]["vocals"])
+        backing_pcm = load_identified(result["outputs"]["accompaniment"])
+        vocals, vocal_rate = vocal_pcm.data, vocal_pcm.rate
+        backing, backing_rate = backing_pcm.data, backing_pcm.rate
         if vocals.shape != mixture.shape or backing.shape != mixture.shape or vocal_rate != rate or backing_rate != rate:
             raise ValueError("worker outputs violate alignment contract: " + str(path))
         residual = vocals + backing - mixture
@@ -52,8 +56,8 @@ def compare(args):
             "request_sha256":result["request_sha256"],"worker_sha256":result["worker_sha256"],
             "packages":result["packages"],"device":result["device"],"threads":result["threads"],
             "processing":result["processing"],"performance":result["metrics"],
-            "vocals":identity(result["outputs"]["vocals"]),
-            "accompaniment":identity(result["outputs"]["accompaniment"]),
+            "vocals":vocal_pcm.identity,
+            "accompaniment":backing_pcm.identity,
             "vocal_metrics_by_channel":[channel_metrics(a,b) for a,b in zip(reference.T,vocals.T)],
             "vocal_stereo":stereo_metrics(vocals),
             "reconstruction":{"residual_rms":float(np.sqrt(np.mean(residual**2))),

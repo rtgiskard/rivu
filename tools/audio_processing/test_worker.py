@@ -39,6 +39,115 @@ def bundle_fixture(base, operation="speech", model="MossFormer2_SE_48K", provena
     (base / "manifest.json").write_text(json.dumps(manifest))
     return manifest
 
+class ProducerIdentityTests(unittest.TestCase):
+    def make_sources(self, root, rate=8000):
+        import numpy as np
+        import soundfile as sf
+        source, replacement = root / "source.wav", root / "replacement.wav"
+        original = np.array([[0.25], [-0.25]], dtype="float32")
+        sf.write(source, original, rate, subtype="FLOAT")
+        sf.write(replacement, original * 3, rate, subtype="FLOAT")
+        self.assertEqual(source.stat().st_size, replacement.stat().st_size)
+        return source, replacement, original
+
+    def test_export_rejects_replacement_and_in_place_changes(self):
+        import numpy as np
+        import soundfile as sf
+        for replace in (True, False):
+            with self.subTest(replace=replace), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source, replacement, original = self.make_sources(root)
+                output = root / "export"
+                request = {**export_request(), "input_path":str(source), "output_dir":str(output)}
+                def process(control, admitted, write, emit):
+                    if replace:
+                        replacement.replace(source)
+                        np.testing.assert_array_equal(admitted.window(0, 2), original)
+                    else:
+                        sf.write(source, original * 3, 8000, subtype="FLOAT")
+                    admitted.finish()
+                    self.fail("changed source was accepted")
+                with patch("export.worker._process_validated", side_effect=process):
+                    with self.assertRaises(WorkerError) as error:
+                        process_export(request, lambda *args, **kwargs: None)
+                self.assertEqual(error.exception.code, "source_changed")
+                self.assertFalse(output.exists())
+
+    def test_export_rejects_replacement_during_admission(self):
+        import soundfile as sf
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, replacement, _ = self.make_sources(root)
+            open_audio = sf.SoundFile
+            def replace_after_open(*args, **kwargs):
+                reader = open_audio(*args, **kwargs)
+                replacement.replace(source)
+                return reader
+            request = {**export_request(), "input_path":str(source), "output_dir":str(root / "export")}
+            with patch("soundfile.SoundFile", side_effect=replace_after_open):
+                with self.assertRaises(WorkerError) as error:
+                    process_export(request, lambda *args, **kwargs: None)
+            self.assertEqual(error.exception.code, "source_changed")
+
+    def test_reference_rejects_replacement_while_loading(self):
+        import reference
+        from export import FileInput
+        with tempfile.TemporaryDirectory() as directory:
+            source, replacement, _ = self.make_sources(Path(directory))
+            read = FileInput.window
+            def replace_after_read(admitted, left, right):
+                audio = read(admitted, left, right)
+                replacement.replace(source)
+                return audio
+            with patch.object(FileInput, "window", replace_after_read):
+                with self.assertRaises(WorkerError) as error:
+                    reference.load_source(source)
+            self.assertEqual(error.exception.code, "source_changed")
+
+    def test_reference_retains_captured_identity_after_loading(self):
+        import numpy as np
+        import reference
+        with tempfile.TemporaryDirectory() as directory:
+            source, replacement, original = self.make_sources(Path(directory))
+            expected_digest = digest(source)
+            audio, rate, captured_digest = reference.load_source(source)
+            replacement.replace(source)
+            np.testing.assert_array_equal(audio, original)
+            self.assertEqual(rate, 8000)
+            self.assertEqual(captured_digest, expected_digest)
+            self.assertNotEqual(captured_digest, digest(source))
+
+    def test_reference_completion_does_not_hash_replacement_after_inference(self):
+        import io
+        import sys
+        from contextlib import redirect_stdout
+        from types import SimpleNamespace
+        import reference
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, replacement, _ = self.make_sources(root, rate=48000)
+            expected_digest = digest(source)
+            manifest = root / "manifest.json"
+            manifest.write_text('{"operation":"speech"}')
+            fake_torch = SimpleNamespace(set_num_threads=lambda value: None,
+                set_num_interop_threads=lambda value: None, manual_seed=lambda value: None,
+                backends=SimpleNamespace(cuda=SimpleNamespace(matmul=SimpleNamespace()), cudnn=SimpleNamespace()))
+            def infer(base, audio, device):
+                replacement.replace(source)
+                return audio
+            stdout = io.StringIO()
+            argv = ["reference.py", "--model-manifest", str(manifest), "--input", str(source),
+                    "--output", str(root / "reference.wav")]
+            with patch.object(sys, "argv", argv), patch.dict(sys.modules, {"torch":fake_torch}), \
+                 patch.object(reference, "validate_manifest", return_value={"operation":"speech", "id":"MossFormer2_SE_48K"}), \
+                 patch.object(reference, "check_packages"), patch.object(reference, "deny_network"), \
+                 patch.object(reference, "upstream_moss", side_effect=infer), redirect_stdout(stdout):
+                reference.main()
+            report = json.loads(stdout.getvalue())
+            self.assertEqual(report["source_sha256"], expected_digest)
+            self.assertNotEqual(report["source_sha256"], digest(source))
+            self.assertEqual(report["frames"], 2)
+
 class ProvisionTests(unittest.TestCase):
     def test_initial_construction_then_reprovision_preserves_source(self):
         import io

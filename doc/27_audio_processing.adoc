@@ -404,8 +404,11 @@ and `output_dir`: input must be IEEE float32 WAV/WAVEX/RF64 and destination must
 be new with an existing parent. It writes stem WAVs and `result.json`, with an
 8 GiB total audio-output limit and 256 MiB additional free-space reserve.
 Both Python entrypoints validate inference controls before constructing stream
-input or creating export outputs. Model assets and PCM/output protocol checks
-remain separate.
+input or creating export outputs. File export opens one source descriptor for
+metadata, bounded hashing and PCM reads; replacement or in-place mutation rejects
+the result. The independent reference loader captures PCM and its hash together,
+so later pathname replacement cannot relabel the inference input. Model assets and
+PCM/output protocol checks remain separate.
 
 
 Use the same interpreter for MossFormer2 and Kim, with a runtime worker
@@ -831,13 +834,22 @@ The Python benchmark and corpus evaluator report two distinct wall times.
 `worker_subprocess_wall_seconds` covers only the worker subprocess call, including
 startup and captured pipes. `evaluation_wall_seconds` ends after output reads,
 artifact writes, scoring and record construction. In the repeated benchmark it
-starts before each run's request creation; fixed reference/input reads, hashes
-and input scoring happen once outside the runs. Each worker result must identify
-that same input. In the corpus evaluator it starts before each sample's
-reference/input reads and request creation, including those reads and hashes.
+starts before each run's request creation; fixed reference/input/backing reads,
+hashes and input scoring happen once outside the runs. Each worker result must
+identify that same input. In the corpus evaluator it starts before each sample's
+reference/input/backing reads and request creation, including those reads and hashes.
 Both exclude record append, progress printing, aggregate summaries and final report
 serialization or writing. `timing_summary` summarizes each field separately;
 compare only measurements with matching timing boundaries.
+
+Evaluation hashes bracket each loaded PCM snapshot; changed identities and worker
+input hashes that differ from the scored baseline fail the run rather than
+retrying or mixing evidence. Reports identify the loaded reference, input, backing
+and output snapshots, not later versions of those paths. Classical corpus runs
+retain one reference per corpus and one noisy baseline per case across Stationary,
+Profile and Adaptive. Each mode scores its final repeat independently; timing
+repeats and their reports retain the existing boundaries. Profile capture uses
+that same loaded noisy-clean pair.
 
 Both tool families encode undefined scores/gains as JSON `null`. SNR requires
 nonzero reference energy; SI-SDR requires nonzero mean-centered reference energy.

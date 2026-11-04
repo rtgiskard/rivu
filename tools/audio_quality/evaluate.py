@@ -6,6 +6,7 @@ No automatic alignment, level matching, resampling, clipping, or source permutat
 """
 import argparse
 import hashlib
+from dataclasses import dataclass
 import json
 from pathlib import Path
 import platform
@@ -32,16 +33,36 @@ def identity(path):
     return {"path": str(path), "sha256": digest.hexdigest(), "bytes": path.stat().st_size}
 
 
-def load(path):
+def load(path, dtype="float64"):
     info = sf.info(path)
     if not 0 < info.frames <= MAX_FRAMES or not 0 < info.channels <= MAX_CHANNELS:
         raise ValueError(f"evaluation bound exceeded: {info.frames} frames/{info.channels} channels")
-    data, rate = sf.read(path, dtype="float64", always_2d=True)
+    data, rate = sf.read(path, dtype=dtype, always_2d=True)
+    if data.shape != (info.frames, info.channels) or rate != info.samplerate:
+        raise ValueError(f"audio changed while loading: {path}")
     if not np.isfinite(data).all():
         raise ValueError(f"non-finite audio: {path}")
     return data, rate
 
+@dataclass(frozen=True)
+class IdentifiedAudio:
+    data: np.ndarray
+    rate: int
+    identity: dict
 
+
+def load_identified(path, dtype="float64"):
+    before = identity(path)
+    data, rate = load(path, dtype=dtype)
+    if identity(path) != before:
+        raise ValueError(f"audio changed while loading: {path}")
+    data.flags.writeable = False
+    return IdentifiedAudio(data, rate, before)
+
+
+def require_alignment(reference, other, label):
+    if reference.rate != other.rate or reference.data.shape != other.data.shape:
+        raise ValueError(f"{label} alignment contract violated: reference={reference.rate}/{reference.data.shape}, other={other.rate}/{other.data.shape}; not silently compensating")
 
 
 def channel_metrics(reference, estimate):
@@ -74,49 +95,72 @@ def stereo_metrics(data):
     }
 
 
-def evaluate(args):
-    reference, rate = load(args.reference)
-    estimate, estimate_rate = load(args.estimate)
-    if rate != estimate_rate or reference.shape != estimate.shape:
-        raise ValueError(f"alignment contract violated: reference={rate}/{reference.shape}, estimate={estimate_rate}/{estimate.shape}; not silently compensating")
-    report = {
-        "schema": 1,
-        "reference": identity(args.reference),
-        "estimate": identity(args.estimate),
-        "sample_rate": rate,
-        "frames": reference.shape[0],
-        "channels": reference.shape[1],
-        "metrics_by_channel": [channel_metrics(a, b) for a, b in zip(reference.T, estimate.T)],
-        "reference_stereo": stereo_metrics(reference),
-        "estimate_stereo": stereo_metrics(estimate),
-        "provenance": args.provenance,
-        "implementation_identity": args.implementation,
-        "environment": {"python": sys.version, "numpy": np.__version__, "soundfile": sf.__version__, "platform": platform.platform()},
-        "limits": {"alignment": "exact frame/rate/channel equality required, no automatic lag correction", "metrics": "SI-SDR is scale invariant; inspect gain and ordinary SNR too. Silent references give undefined scores. These metrics do not establish absence of perceptual artifacts.", "listening": "not performed by this program"},
-    }
-    if args.noisy:
-        noisy, noisy_rate = load(args.noisy)
-        if noisy_rate != rate or noisy.shape != reference.shape:
-            raise ValueError("noisy baseline alignment mismatch")
-        report["noisy_baseline"] = identity(args.noisy)
-        report["baseline_metrics_by_channel"] = [channel_metrics(a, b) for a, b in zip(reference.T, noisy.T)]
-    if args.complement:
-        complement, complement_rate = load(args.complement)
-        if complement_rate != rate or complement.shape != reference.shape:
-            raise ValueError("complement alignment mismatch")
-        if not args.mixture:
-            raise ValueError("--complement requires --mixture")
-        mixture, mixture_rate = load(args.mixture)
-        if mixture_rate != rate or mixture.shape != reference.shape:
-            raise ValueError("mixture alignment mismatch")
-        residual = estimate + complement - mixture
-        report["reconstruction"] = {
-            "mixture": identity(args.mixture), "complement": identity(args.complement),
-            "residual_rms": float(np.sqrt(np.mean(residual ** 2))),
-            "residual_peak": float(np.max(np.abs(residual))),
-            "warning": "A complement defined as mixture minus target guarantees reconstruction, not target quality.",
+@dataclass(frozen=True)
+class PreparedBaseline:
+    audio: IdentifiedAudio
+    metrics_by_channel: list
+    reference: IdentifiedAudio
+
+
+class ReferenceEvaluation:
+    """One caller-owned reference; baseline lifetime is one independent case."""
+
+    def __init__(self, path):
+        self.audio = load_identified(path)
+        self.stereo = stereo_metrics(self.audio.data)
+
+    def baseline(self, path):
+        audio = self.audio if Path(path).resolve(strict=True) == Path(self.audio.identity["path"]) else load_identified(path)
+        require_alignment(self.audio, audio, "noisy baseline")
+        return PreparedBaseline(audio, [channel_metrics(a, b) for a, b in zip(self.audio.data.T, audio.data.T)], self.audio)
+
+    def score(self, estimate_path, provenance, implementation, *, baseline=None, complement=None, mixture=None):
+        estimate = load_identified(estimate_path)
+        require_alignment(self.audio, estimate, "estimate")
+        reference = self.audio.data
+        report = {
+            "schema": 1,
+            "reference": self.audio.identity,
+            "estimate": estimate.identity,
+            "sample_rate": self.audio.rate,
+            "frames": reference.shape[0],
+            "channels": reference.shape[1],
+            "metrics_by_channel": [channel_metrics(a, b) for a, b in zip(reference.T, estimate.data.T)],
+            "reference_stereo": self.stereo,
+            "estimate_stereo": stereo_metrics(estimate.data),
+            "provenance": provenance,
+            "implementation_identity": implementation,
+            "environment": {"python": sys.version, "numpy": np.__version__, "soundfile": sf.__version__, "platform": platform.platform()},
+            "limits": {"alignment": "exact frame/rate/channel equality required, no automatic lag correction", "metrics": "SI-SDR is scale invariant; inspect gain and ordinary SNR too. Silent references give undefined scores. These metrics do not establish absence of perceptual artifacts.", "listening": "not performed by this program"},
         }
-    return report
+        if baseline is not None:
+            if baseline.reference is not self.audio:
+                raise ValueError("noisy baseline belongs to another reference")
+            require_alignment(self.audio, baseline.audio, "noisy baseline")
+            report["noisy_baseline"] = baseline.audio.identity
+            report["baseline_metrics_by_channel"] = baseline.metrics_by_channel
+        if complement:
+            if not mixture:
+                raise ValueError("--complement requires --mixture")
+            complement_audio = load_identified(complement)
+            mixture_audio = load_identified(mixture)
+            require_alignment(self.audio, complement_audio, "complement")
+            require_alignment(self.audio, mixture_audio, "mixture")
+            residual = estimate.data + complement_audio.data - mixture_audio.data
+            report["reconstruction"] = {
+                "mixture": mixture_audio.identity, "complement": complement_audio.identity,
+                "residual_rms": float(np.sqrt(np.mean(residual ** 2))),
+                "residual_peak": float(np.max(np.abs(residual))),
+                "warning": "A complement defined as mixture minus target guarantees reconstruction, not target quality.",
+            }
+        return report
+
+
+def evaluate(args):
+    reference = ReferenceEvaluation(args.reference)
+    baseline = reference.baseline(args.noisy) if args.noisy else None
+    return reference.score(args.estimate, args.provenance, args.implementation,
+                           baseline=baseline, complement=args.complement, mixture=args.mixture)
 
 
 def main():

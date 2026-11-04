@@ -10,14 +10,13 @@ import json
 import math
 from pathlib import Path
 import subprocess
-from types import SimpleNamespace
 
 import soundfile as sf
 if __package__:
-    from .evaluate import evaluate
+    from .evaluate import ReferenceEvaluation, identity
     from .metric_core import score_difference, score_summary
 else:
-    from evaluate import evaluate
+    from evaluate import ReferenceEvaluation, identity
     from metric_core import score_difference, score_summary
 
 
@@ -55,11 +54,12 @@ def main():
     for corpus_name in args.corpus:
         corpus = Path(corpus_name).resolve(strict=True)
         manifest = json.loads((corpus / "manifest.json").read_text())
-        reference = Path(manifest["reference"])
-        clean, rate = sf.read(reference, dtype="float64")
-        cases = [{"path": str(reference), "name": "clean", "snr_db": None}, *manifest["cases"]]
+        reference = ReferenceEvaluation(manifest["reference"])
+        clean, rate = reference.audio.data, reference.audio.rate
+        cases = [{"path": reference.audio.identity["path"], "name": "clean", "snr_db": None}, *manifest["cases"]]
         for case in cases:
             source = Path(case["path"])
+            baseline = reference.baseline(source)
             snr = case["snr_db"]
             for mode in ("stationary", "profile", "adaptive"):
                 stem = f"{corpus.name}-{source.stem}-{mode}"
@@ -70,9 +70,7 @@ def main():
                 config_path.write_text(json.dumps(config) + "\n")
                 profile_args = []
                 if mode == "profile":
-                    noisy, noisy_rate = sf.read(source, dtype="float64")
-                    if rate != noisy_rate or clean.shape != noisy.shape:
-                        raise ValueError("noise-profile reference alignment mismatch")
+                    noisy = baseline.audio.data
                     profile = output / f"{stem}-noise.wav"
                     sf.write(profile, noisy - clean, rate, subtype="FLOAT")
                     profile_args.append(str(profile))
@@ -81,9 +79,15 @@ def main():
                 for repeat in range(args.repeats):
                     estimate = output / f"{stem}-{repeat}.wav"
                     command = [str(binary), str(source), str(estimate), str(config_path), *profile_args]
+                    if identity(source) != baseline.audio.identity:
+                        raise ValueError("classical input changed before rendering: " + str(source))
                     result = subprocess.run(command, check=True, text=True, capture_output=True)
+                    if identity(source) != baseline.audio.identity:
+                        raise ValueError("classical input changed while rendering: " + str(source))
                     timings.append(json.loads(result.stdout))
-                metrics = evaluate(SimpleNamespace(reference=str(reference), estimate=str(estimate), noisy=str(source), complement=None, mixture=None, provenance=manifest["provenance"], implementation=f"rivu-dsp classical {mode}; config={config}; synthetic calibrated controls disclosed"))
+                metrics = reference.score(estimate, manifest["provenance"],
+                    f"rivu-dsp classical {mode}; config={config}; synthetic calibrated controls disclosed",
+                    baseline=baseline)
                 metrics.update({"speaker": corpus.name, "noise_kind": case["name"], "input_snr_db": snr, "mode": mode, "timings": timings})
                 reports.append(metrics)
     groups = summarize_reports(reports)

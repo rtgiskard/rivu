@@ -31,11 +31,13 @@ if __package__:
     from .runtime.worker import EVENT_VERSION, digest, read_json
     from ..audio_quality.metric_core import score_difference, score_summary
     from ..audio_quality.music_manifest import music_records
+    from ..audio_quality.evaluate import load_identified, require_alignment
 else:
     from benchmark import metrics, TIMING_BOUNDARIES, timing_summary
     from runtime.worker import EVENT_VERSION, digest, read_json
     from audio_quality.metric_core import score_difference, score_summary
     from audio_quality.music_manifest import music_records
+    from audio_quality.evaluate import load_identified, require_alignment
 
 
 def cases(kind, root, selected):
@@ -74,7 +76,6 @@ def main():
     if not records:
         parser.error("no matching paired corpus files")
     import numpy as np
-    import soundfile as sf
     model=args.model_manifest.resolve()
     operation="separate" if args.kind=="music" else "speech"
     if read_json(model)["operation"]!=operation:
@@ -82,7 +83,8 @@ def main():
     args.output_dir.mkdir(mode=0o700)
     output=args.output_dir.resolve()
     report={"command":sys.argv,"model_manifest_sha256":digest(model),"runs":[],
-            "timing_boundaries":TIMING_BOUNDARIES,
+            "timing_boundaries":{**TIMING_BOUNDARIES,
+                "evaluation_wall_seconds":"Before each case's source/reference/backing reads and identity checks through completed run scoring, including request creation, worker subprocess, artifact reads/writes and intelligibility metrics. Excludes corpus/model setup, appending the record, progress printing, aggregate summaries and final report serialization/write."},
             "human_listening":"not performed; objective results do not establish listening approval"}
     if operation=="speech":
         import importlib.metadata
@@ -90,10 +92,14 @@ def main():
         report["metric_packages"]={"pystoi":importlib.metadata.version("pystoi")}
     for index,(name,source,reference,provenance,backing,diagnostic,source_identity) in enumerate(records):
         evaluation_start=time.perf_counter()
-        reference_audio,rate=sf.read(reference,dtype="float32",always_2d=True)
-        input_audio,input_rate=sf.read(source,dtype="float32",always_2d=True)
-        if rate!=input_rate:
-            raise ValueError("paired source/reference rates differ: "+name)
+        reference_pcm = load_identified(reference, dtype="float32")
+        input_pcm = reference_pcm if source.resolve() == reference.resolve() else load_identified(source, dtype="float32")
+        require_alignment(reference_pcm, input_pcm, "paired source/reference")
+        reference_audio, rate = reference_pcm.data, reference_pcm.rate
+        input_audio = input_pcm.data
+        backing_pcm = load_identified(backing, dtype="float32") if backing else None
+        if backing_pcm is not None:
+            require_alignment(reference_pcm, backing_pcm, "backing reference")
         request={"version":1,"task_id":name,"operation":operation,"input_path":str(source.resolve()),
                  "output_dir":str(output/name),"model_manifest":str(model),"device":"cpu","threads":args.threads,
                  "parameters":{"overlap":0.75} if operation=="separate" else {"wet_mix":1.0,"attenuation_limit_db":80}}
@@ -110,24 +116,26 @@ def main():
             raise RuntimeError(json.dumps({"case":name,"exit":completed.returncode,"events":events,"stderr":completed.stderr}))
         with (Path(request["output_dir"])/"result.json").open() as stream:
             result=json.load(stream)
-        estimate,output_rate=sf.read(result["outputs"]["vocals" if operation=="separate" else "speech"],dtype="float32",always_2d=True)
-        if output_rate!=rate:
-            raise ValueError("output rate changed: "+name)
+        if result.get("source_sha256") != input_pcm.identity["sha256"]:
+            raise ValueError("worker input does not match evaluation input: " + name)
+        estimate_pcm = load_identified(result["outputs"]["vocals" if operation=="separate" else "speech"], dtype="float32")
+        require_alignment(reference_pcm, estimate_pcm, "output")
+        estimate = estimate_pcm.data
         core=result["processing"]["core_seconds"]
         record={"name":name,"diagnostic_only":diagnostic,"input_path":str(source),"reference_path":str(reference),
-                "reference_sha256":digest(reference),"corpus_manifest_sha256":digest(provenance),"worker":result,
+                "input_sha256":input_pcm.identity["sha256"],
+                "reference_sha256":reference_pcm.identity["sha256"],"corpus_manifest_sha256":digest(provenance),"worker":result,
                 "worker_subprocess_wall_seconds":worker_seconds,"input_quality":metrics(reference_audio,input_audio,rate,core),
                 "output_quality":metrics(reference_audio,estimate,rate,core)}
         if source_identity is not None:
             record["corpus_source"]=source_identity
         record["si_sdr_gain_db"]=[score_difference(a,b) for a,b in zip(record["output_quality"]["si_sdr_db"],record["input_quality"]["si_sdr_db"])]
         if backing:
-            accompaniment,accompaniment_rate=sf.read(backing,dtype="float32",always_2d=True)
-            estimated_accompaniment,estimated_rate=sf.read(result["outputs"]["accompaniment"],dtype="float32",always_2d=True)
-            if accompaniment_rate!=rate or estimated_rate!=rate:
-                raise ValueError("backing rates changed")
-            record["accompaniment_reference_sha256"]=digest(backing)
-            record["accompaniment_quality"]=metrics(accompaniment,estimated_accompaniment,rate,core)
+            estimated_pcm = load_identified(result["outputs"]["accompaniment"], dtype="float32")
+            require_alignment(reference_pcm, estimated_pcm, "backing output")
+            estimated_accompaniment = estimated_pcm.data
+            record["accompaniment_reference_sha256"] = backing_pcm.identity["sha256"]
+            record["accompaniment_quality"] = metrics(backing_pcm.data,estimated_accompaniment,rate,core)
             record["mixture_reconstruction_max_abs"]=float(np.max(np.abs(input_audio.astype("float64")-estimate-estimated_accompaniment)))
         if operation=="speech":
             record["intelligibility"]={}

@@ -14,10 +14,12 @@ import time
 if __package__:
     from .runtime.worker import EVENT_VERSION, digest, read_json
     from ..audio_quality.metric_core import db_ratio, projection_metrics, score_difference
+    from ..audio_quality.evaluate import load_identified, require_alignment
 else:
     from runtime.worker import EVENT_VERSION, digest, read_json
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from audio_quality.metric_core import db_ratio, projection_metrics, score_difference
+    from audio_quality.evaluate import load_identified, require_alignment
 
 
 TIMING_BOUNDARIES = {
@@ -100,30 +102,29 @@ def main():
     if not 1 <= args.repeats <= 10:
         parser.error("repeats must be 1..10")
     import numpy as np
-    import soundfile as sf
     request = read_json(args.request)
     base = Path(request["output_dir"])
     report = {"command":sys.argv,"request":request,"corpus_manifest_sha256":digest(args.corpus_manifest),
               "corpus_provenance":read_json(args.corpus_manifest),"runs":[],"timing_boundaries":TIMING_BOUNDARIES}
-    report["input_sha256"] = digest(request["input_path"])
-    reference, rate = sf.read(args.reference, dtype="float32", always_2d=True)
-    noisy, source_rate = sf.read(request["input_path"], dtype="float32", always_2d=True)
-    if digest(request["input_path"]) != report["input_sha256"]:
-        raise ValueError("input changed while preparing benchmark")
-    if rate != source_rate:
-        raise ValueError("reference must be at source rate")
-    report["reference_sha256"] = digest(args.reference)
+    reference_pcm = load_identified(args.reference, dtype="float32")
+    input_pcm = reference_pcm if args.reference.resolve() == Path(request["input_path"]).resolve() else load_identified(request["input_path"], dtype="float32")
+    require_alignment(reference_pcm, input_pcm, "benchmark input")
+    reference, rate = reference_pcm.data, reference_pcm.rate
+    noisy = input_pcm.data
+    report["input_sha256"] = input_pcm.identity["sha256"]
+    report["reference_sha256"] = reference_pcm.identity["sha256"]
     report["input_quality"] = metrics(reference, noisy, rate)
     upstream = backing = None
     if args.upstream_reference:
-        upstream, upstream_rate = sf.read(args.upstream_reference, dtype="float32", always_2d=True)
-        if upstream_rate != rate:
-            raise ValueError("upstream reference rate changed")
-        upstream_sha256 = digest(args.upstream_reference)
+        upstream_pcm = load_identified(args.upstream_reference, dtype="float32")
+        require_alignment(reference_pcm, upstream_pcm, "upstream reference")
+        upstream = upstream_pcm.data
+        upstream_sha256 = upstream_pcm.identity["sha256"]
     if request["operation"] == "separate" and args.accompaniment_reference:
-        backing, backing_rate = sf.read(args.accompaniment_reference, dtype="float32", always_2d=True)
-        if backing_rate != rate:
-            raise ValueError("accompaniment reference rate changed")
+        backing_pcm = load_identified(args.accompaniment_reference, dtype="float32")
+        require_alignment(reference_pcm, backing_pcm, "accompaniment reference")
+        backing = backing_pcm.data
+        report["accompaniment_reference_sha256"] = backing_pcm.identity["sha256"]
     for index in range(args.repeats):
         evaluation_start = time.perf_counter()
         run_request = {**request,"output_dir":str(base.with_name(base.name+"-run-"+str(index)))}
@@ -142,9 +143,9 @@ def main():
         if result.get("source_sha256") != report["input_sha256"]:
             raise ValueError("worker input does not match benchmark input")
         stem = "speech" if request["operation"] == "speech" else "vocals"
-        output, output_rate = sf.read(result["outputs"][stem], dtype="float32", always_2d=True)
-        if output_rate != rate:
-            raise ValueError("output rate changed")
+        output_pcm = load_identified(result["outputs"][stem], dtype="float32")
+        require_alignment(reference_pcm, output_pcm, "output")
+        output = output_pcm.data
         result["worker_subprocess_wall_seconds"] = worker_seconds
         result["reference_quality"] = metrics(reference, output, rate, result["processing"]["core_seconds"])
         result["si_sdr_gain_db"] = [score_difference(a,b) for a,b in zip(result["reference_quality"]["si_sdr_db"],report["input_quality"]["si_sdr_db"])]
@@ -152,7 +153,9 @@ def main():
             result["upstream_difference"] = metrics(upstream, output, rate, result["processing"]["core_seconds"])
             result["upstream_reference_sha256"] = upstream_sha256
         if request["operation"] == "separate":
-            accompaniment, _ = sf.read(result["outputs"]["accompaniment"], dtype="float32", always_2d=True)
+            accompaniment_pcm = load_identified(result["outputs"]["accompaniment"], dtype="float32")
+            require_alignment(reference_pcm, accompaniment_pcm, "accompaniment output")
+            accompaniment = accompaniment_pcm.data
             result["mixture_reconstruction_peak_residual"] = float(np.max(np.abs(noisy.astype("float64")-output-accompaniment)))
             if backing is not None:
                 result["accompaniment_quality"] = metrics(backing, accompaniment, rate, result["processing"]["core_seconds"])

@@ -12,7 +12,7 @@ to source rate/length. No peak normalization or output clipping is applied.
 """
 import argparse
 import ast
-from contextlib import redirect_stdout
+from contextlib import ExitStack, redirect_stdout
 import json
 import math
 import os
@@ -21,6 +21,25 @@ import sys
 from types import SimpleNamespace
 
 from runtime.worker import validate_manifest, check_packages, deny_network, digest
+if __package__:
+    from .export import FileInput
+else:
+    from export import FileInput
+
+
+def load_source(path):
+    with ExitStack() as stack:
+        source = FileInput(path, stack)
+        info = source.reader
+        if (info.format not in ("WAV", "WAVEX", "RF64") or info.subtype != "FLOAT"
+                or info.channels not in (1, 2) or not 0 < info.frames <= 40*info.samplerate):
+            raise ValueError("reference requires nonempty float32 mono/stereo WAV <=40seconds")
+        source.admit()
+        audio = source.window(0, info.frames)
+        source_sha256 = source.finish()
+        if audio.shape != (info.frames, info.channels):
+            raise ValueError("reference input changed shape while loading")
+        return audio, info.samplerate, source_sha256
 
 
 def upstream_moss(base, audio, device):
@@ -73,10 +92,7 @@ def main():
     import soundfile as sf
     import torch
     from scipy.signal import resample_poly
-    info=sf.info(args.input)
-    if info.subtype!="FLOAT" or info.channels not in (1,2) or not 0<info.frames<=40*info.samplerate:
-        parser.error("reference requires nonempty float32 mono/stereo WAV <=40seconds")
-    audio,rate=sf.read(args.input,dtype="float32",always_2d=True)
+    audio,rate,source_sha256=load_source(args.input)
     model_rate=44100 if manifest["operation"]=="separate" else 48000
     divisor=math.gcd(rate,model_rate)
     model_audio=resample_poly(audio,model_rate//divisor,rate//divisor,axis=0).astype("float32") if rate!=model_rate else audio
@@ -105,7 +121,7 @@ def main():
     if result.shape!=audio.shape or not np.isfinite(result).all():
         raise ValueError("reference changed shape or produced nonfinite audio")
     sf.write(args.output,result,rate,format="WAV",subtype="FLOAT")
-    print(json.dumps({"output":str(args.output.resolve()),"sha256":digest(args.output),"source_sha256":digest(args.input),
+    print(json.dumps({"output":str(args.output.resolve()),"sha256":digest(args.output),"source_sha256":source_sha256,
                       "manifest_sha256":digest(args.model_manifest),"command":sys.argv,"frames":len(result),"rate":rate}))
 
 if __name__=="__main__":
