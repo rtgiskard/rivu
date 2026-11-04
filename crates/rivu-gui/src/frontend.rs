@@ -661,9 +661,6 @@ impl FrontendHandle {
     pub(crate) fn set_waveform_demand(&self, enabled: bool) {
         self.shared.wave.set_enabled(enabled);
     }
-    pub(crate) fn request_analysis_frame(&self) {
-        self.shared.visual.request_analysis_frame();
-    }
     pub(crate) fn analysis_frame_is_current(&self, frame: &AnalysisFrame) -> bool {
         self.is_connected() && self.shared.visual.analysis_frame_is_current(frame)
     }

@@ -7,8 +7,7 @@ use crate::gui::{animation_frames::AnimationFrames, layout, visualization};
 #[cfg(test)]
 use crate::test_support::ConfigFixture;
 use gpui::{
-    AnyElement, Context, Entity, Render, Subscription, Task, WeakEntity, Window, div, prelude::*,
-    rgb,
+    AnyElement, Context, Entity, Render, Subscription, WeakEntity, Window, div, prelude::*, rgb,
 };
 use rivu_analysis::{AnalysisFrame, DisplayDemand, VisualizerDemand};
 use rivu_format::config::AudioVisualizerOptions;
@@ -137,7 +136,6 @@ pub(in crate::gui) struct VisualizerRuntime {
     frame_pending: bool,
     frame_generation: u64,
     frames: Entity<AnimationFrames>,
-    analysis_timer: Option<Task<()>>,
     animation_clock: AnimationClock,
     _waveform_subscription: Subscription,
 }
@@ -183,7 +181,6 @@ impl VisualizerRuntime {
             frame_pending: false,
             frame_generation: 0,
             frames,
-            analysis_timer: None,
             animation_clock: AnimationClock::default(),
             _waveform_subscription: subscription,
         }
@@ -258,7 +255,7 @@ impl VisualizerRuntime {
             self.panel_revision = panels.revision;
             self.views.retain(|id, _| self.panels.contains_key(id));
         }
-        let was_running = self.analysis_interval();
+        let was_running = self.animating();
         self.config = config;
         self.visible = visible;
         self.shutting_down = shutting_down;
@@ -384,17 +381,12 @@ impl VisualizerRuntime {
                 self.needs_refresh = false;
             }
         }
-        if was_running.is_some() != self.analysis_interval().is_some()
+        if was_running != self.animating()
             || visibility_changed
             || visualization_changed
             || fps_changed
         {
             self.cancel_clock(cx);
-        } else if was_running != self.analysis_interval() {
-            // Cadence changes replace only the analysis timer. A pending draw
-            // and the accepted display clock still describe the same signal.
-            self.analysis_timer.take();
-            self.start_analysis_clock(cx);
         }
         let waveform_enabled = self.config.visualization_enabled && !self.shutting_down;
         let waveform_visible = self.active();
@@ -425,9 +417,8 @@ impl VisualizerRuntime {
         self.visible && !self.shutting_down && self.config.visualization_enabled
     }
 
-    fn analysis_interval(&self) -> Option<Duration> {
-        (self.active() && self.demand.enabled && self.status == PlaybackStatus::Playing)
-            .then(|| Duration::from_secs_f64(1.0 / self.config.analysis_rate_hz as f64))
+    fn animating(&self) -> bool {
+        self.active() && self.demand.enabled && self.status == PlaybackStatus::Playing
     }
 
     fn cancel_clock(&mut self, cx: &mut gpui::App) {
@@ -435,62 +426,21 @@ impl VisualizerRuntime {
             frames.cancel_presentation(self.frame_generation)
         });
         self.frame_generation = self.frame_generation.wrapping_add(1);
-        self.analysis_timer.take();
         self.frame_pending = false;
         self.animation_clock.suspend();
         self.frame_requested = false;
-    }
-
-    fn start_analysis_clock(&mut self, cx: &mut Context<Self>) {
-        let Some(interval) = self.analysis_interval() else {
-            return;
-        };
-        if self.analysis_timer.is_some() {
-            return;
-        }
-        self.handle.request_analysis_frame();
-        let generation = self.frame_generation;
-        let executor = cx.background_executor().clone();
-        self.analysis_timer = Some(cx.spawn(async move |this, cx| {
-            let mut deadline = Instant::now() + interval;
-            loop {
-                executor
-                    .timer(deadline.saturating_duration_since(Instant::now()))
-                    .await;
-                let running = this
-                    .update(cx, |this, _| {
-                        if this.frame_generation != generation || this.analysis_interval().is_none()
-                        {
-                            return false;
-                        }
-                        this.handle.request_analysis_frame();
-                        true
-                    })
-                    .unwrap_or(false);
-                if !running {
-                    break;
-                }
-                deadline += interval;
-                let now = Instant::now();
-                if deadline <= now {
-                    // Coalesce missed requests instead of replaying a timer backlog.
-                    deadline = now + interval;
-                }
-            }
-        }));
     }
 
     pub(in crate::gui) fn request_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.active()
             || !self.demand.enabled
             || (!self.frame_requested
-                && self.analysis_interval().is_none()
+                && !self.animating()
                 && !self.style_coordinator.idle_fading(Instant::now()))
             || self.frame_pending
         {
             return;
         }
-        self.start_analysis_clock(cx);
         self.frame_pending = true;
         let owner = cx.weak_entity();
         self.frames.update(cx, |frames, cx| {
@@ -519,7 +469,7 @@ impl VisualizerRuntime {
             return;
         }
         self.frame_requested = false;
-        if self.analysis_interval().is_some() {
+        if self.animating() {
             self.consume_analysis(now, cx);
             if !self.awaiting_replacement {
                 let time = self.animation_clock.advance(now);
@@ -769,19 +719,7 @@ pub(in crate::gui) fn stage_analysis_frame(
     {
         return needs_refresh && staging.settings.is_some();
     }
-    staging.frequencies_hz.clone_from(&frame.frequencies_hz);
-    staging.spectrum_db.clone_from(&frame.spectrum_db);
-    staging.sequence = frame.sequence;
-    staging.display_token = frame.display_token;
-    staging.audio_epoch = frame.audio_epoch;
-    staging.audio_intent = frame.audio_intent;
-    staging.sample_rate = frame.sample_rate;
-    staging.sample_time = frame.sample_time;
-    staging.generation = frame.generation;
-    staging.settings = frame.settings;
-    staging.rms_left = frame.rms_left;
-    staging.rms_right = frame.rms_right;
-    staging.visualizer.clone_from(&frame.visualizer);
+    staging.clone_from(frame);
     *sequence = frame.sequence;
     true
 }
@@ -1347,15 +1285,6 @@ mod tests {
                                 .advance(now + Duration::from_millis(10)),
                             Duration::from_millis(1000 + elapsed)
                         );
-                        assert_eq!(
-                            owner.analysis_interval(),
-                            (status == PlaybackStatus::Playing)
-                                .then(|| Duration::from_secs_f64(1.0 / 60.0))
-                        );
-                        assert_eq!(
-                            owner.analysis_timer.is_some(),
-                            status == PlaybackStatus::Playing
-                        );
                     } else {
                         assert!(owner.staging.settings.is_none());
                         assert!(owner.staging.spectrum_db.is_empty());
@@ -1438,7 +1367,6 @@ mod tests {
                 );
                 assert!(owner.staging.settings.is_none());
                 assert!(owner.staging.spectrum_db.is_empty());
-                assert!(owner.analysis_timer.is_none());
                 assert_eq!(owner.demand, DisplayDemand::default());
             }
         });
@@ -1565,7 +1493,6 @@ mod tests {
                 let generation = owner.frame_generation;
                 owner.request_frame(window, cx);
                 assert_eq!(owner.frame_generation, generation);
-                assert!(owner.analysis_timer.is_none());
                 owner.sync(
                     VisualizerInputs {
                         config: Arc::clone(&config),
@@ -1583,7 +1510,6 @@ mod tests {
                     cx,
                 );
                 assert_eq!(owner.demand, DisplayDemand::default());
-                assert!(owner.analysis_timer.is_none());
                 assert!(
                     !owner.frame_pending,
                     "cancellation removes only this client's slot"
@@ -1640,7 +1566,6 @@ mod tests {
             });
             window.simulate_next_frame(cx);
             owner.update(cx, |owner, cx| {
-                assert!(owner.analysis_timer.is_some());
                 assert!(
                     owner.frame_pending,
                     "native animation continues while analysis waits"
@@ -1670,13 +1595,6 @@ mod tests {
             window.simulate_next_frame(cx);
             owner.update(cx, |owner, cx| {
                 assert!(owner.frame_pending);
-                assert!(owner.analysis_timer.is_some());
-                assert_eq!(
-                    owner.analysis_interval(),
-                    Some(Duration::from_secs_f64(
-                        1.0 / config.analysis_rate_hz as f64
-                    ))
-                );
                 // Repeated wakeups must coalesce behind the one delayed request.
                 owner.request_frame(window, cx);
                 assert!(owner.frame_pending);
@@ -1699,9 +1617,8 @@ mod tests {
                     cx,
                 );
                 assert_eq!(owner.demand, DisplayDemand::default());
-                assert!(owner.analysis_timer.is_none());
                 assert!(!owner.frame_pending);
-                assert!(owner.analysis_interval().is_none());
+                assert!(!owner.animating());
                 assert_eq!(owner.staging.settings, None);
                 owner.sync(
                     VisualizerInputs {
@@ -1737,7 +1654,6 @@ mod tests {
                     cx,
                 );
                 assert_eq!(owner.demand, DisplayDemand::default());
-                assert!(owner.analysis_timer.is_none());
                 panels.reconcile(&empty_layout);
                 owner.sync(
                     VisualizerInputs {
@@ -1927,7 +1843,7 @@ mod tests {
             assert!(owner.style_coordinator.idle_fading(Instant::now()));
             assert!(owner.staging.settings.is_none());
             assert!(owner.staging.spectrum_db.is_empty());
-            assert!(owner.analysis_interval().is_none());
+            assert!(!owner.animating());
             owner.consume_analysis(Instant::now(), cx);
             assert!(owner.style_coordinator.idle_fading(Instant::now()));
             assert!(owner.staging.settings.is_none());
@@ -1942,7 +1858,6 @@ mod tests {
             owner.update(cx, |owner, cx| {
                 owner.request_frame(window, cx);
                 assert!(!owner.frame_pending);
-                assert!(owner.analysis_timer.is_none());
             });
         });
     }

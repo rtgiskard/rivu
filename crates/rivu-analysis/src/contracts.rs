@@ -186,7 +186,7 @@ impl Clone for VisualizerFrame {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 pub struct AnalysisFrame {
     pub sequence: u64,
     pub display_token: u64,
@@ -205,6 +205,30 @@ pub struct AnalysisFrame {
     pub rms_left: f32,
     pub rms_right: f32,
     pub visualizer: VisualizerFrame,
+}
+
+impl Clone for AnalysisFrame {
+    fn clone(&self) -> Self {
+        let mut frame = Self::default();
+        frame.clone_from(self);
+        frame
+    }
+
+    fn clone_from(&mut self, source: &Self) {
+        self.sequence = source.sequence;
+        self.display_token = source.display_token;
+        self.audio_epoch = source.audio_epoch;
+        self.audio_intent = source.audio_intent;
+        self.generation = source.generation;
+        self.settings = source.settings;
+        self.sample_rate = source.sample_rate;
+        self.sample_time = source.sample_time;
+        self.frequencies_hz.clone_from(&source.frequencies_hz);
+        self.spectrum_db.clone_from(&source.spectrum_db);
+        self.rms_left = source.rms_left;
+        self.rms_right = source.rms_right;
+        self.visualizer.clone_from(&source.visualizer);
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -33,7 +33,6 @@ struct Desired {
     demand: DisplayDemand,
     revision: u64,
     display_token: u64,
-    requested: bool,
     settings: AnalysisSettings,
     visualization_enabled: bool,
 }
@@ -44,7 +43,6 @@ impl Default for Desired {
             demand: DisplayDemand::default(),
             revision: 0,
             display_token: 0,
-            requested: false,
             settings: AnalysisSettings::from(&config),
             visualization_enabled: config.visualization_enabled,
         }
@@ -189,7 +187,6 @@ impl VisualClient {
         }
         desired.demand = demand;
         desired.display_token = desired.display_token.wrapping_add(1).max(1);
-        desired.requested &= demand.enabled;
         drop(desired);
         *self.state.current.write() = None;
         let _ = self.notifications.try_send(());
@@ -200,15 +197,6 @@ impl VisualClient {
         desired.revision = desired.revision.wrapping_add(1).max(1);
         desired.display_token = desired.display_token.wrapping_add(1).max(1);
         *self.state.current.write() = None;
-        drop(desired);
-        let _ = self.notifications.try_send(());
-    }
-    pub(crate) fn request_analysis_frame(&self) {
-        let mut desired = self.state.desired.lock();
-        if !desired.demand.enabled || self.state.stopped.load(Ordering::Acquire) {
-            return;
-        }
-        desired.requested = true;
         drop(desired);
         let _ = self.notifications.try_send(());
     }
@@ -329,8 +317,8 @@ async fn run_client(
         if state.stopped.load(Ordering::Acquire) {
             return Ok(());
         }
-        let (demand, revision, display_token, settings, requested) = {
-            let mut desired = state.desired.lock();
+        let (demand, revision, display_token, settings) = {
+            let desired = state.desired.lock();
             let mut demand = desired.demand;
             demand.enabled &= desired.visualization_enabled;
             (
@@ -338,12 +326,11 @@ async fn run_client(
                 desired.revision,
                 desired.display_token,
                 desired.settings,
-                std::mem::take(&mut desired.requested),
             )
         };
         if revision != sent_revision {
             // Only consumer enablement crosses IPC. Panel bits, cadence and
-            // display permits stay local; revision fences subscription changes.
+            // display identity stay local; revision fences subscription changes.
             rivu_protocol::transport::timeout(
                 DEADLINE,
                 writer.write_all(&request(1, u8::from(demand.enabled), revision)),
@@ -368,9 +355,6 @@ async fn run_client(
             // even when another GUI keeps global capture enabled.
             last_sequence = window.sequence();
             capture_revision = revision;
-        }
-        if requested {
-            engine.request_frame();
         }
         drain_again = false;
         if admitted && demand.enabled && pcm_state.active {

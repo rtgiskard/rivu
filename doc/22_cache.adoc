@@ -404,6 +404,11 @@ release these publications. There is no general screenshot cache. Physical GPU
 retirement is defined in
 link:25_gpu_rendering.adoc#admission-and-retirement[GPU admission and retirement].
 
+Analysis publications reuse the destination frequency, spectrum and requested
+spatial buffers across same-sized updates, both in transport staging and window
+staging. Immutable density, PCM and spectrogram snapshots keep shared ownership
+of their bounded producer slots rather than copying their samples.
+
 The GUI staging frame releases optional Density, Spatial Spectrum, metrics, and
 band-energy payloads when their last display demand disappears; losing all
 analysis demand also discards the spectrum copy. Reuse requires the same

@@ -128,6 +128,66 @@ async fn subscribe(f: &mut Fixture) {
 }
 
 #[test]
+fn fresh_pcm_publishes_without_gui_permits_and_resumes_after_visibility_changes() {
+    async_io::block_on(async {
+        let mut f = fixture();
+        subscribe(&mut f).await;
+        let state = PcmState {
+            active: true,
+            sample_rate: 48_000,
+            heard_frame: u64::MAX,
+            ..PcmState::default()
+        };
+        let config = Config {
+            analysis_fft_size: 512,
+            ..Config::default()
+        };
+        f.client.configure(&config);
+        stereo(&f.window, header(state, 0), 0.25, 512);
+        write_status(&mut f.server, state, 1, 0).await.unwrap();
+        let first = current_after(&f, 0).await;
+        stereo(&f.window, header(state, 512), 0.5, 512);
+        write_status(&mut f.server, state, 1, 0).await.unwrap();
+        let second = current_after(&f, first.sequence).await;
+        assert_eq!(second.rms_left, 0.5);
+
+        let demand = f.client.state.desired.lock().demand;
+        f.client.set_display_demand(DisplayDemand::default());
+        ControlReader::<REQUEST_SIZE>::new()
+            .read(&mut f.server)
+            .await
+            .unwrap();
+        write_status(&mut f.server, state, 2, 0).await.unwrap();
+        assert!(!f.client.analysis_frame_is_current(&second));
+        stereo(&f.window, header(state, 1024), 0.875, 512);
+        f.client.set_display_demand(demand);
+        ControlReader::<REQUEST_SIZE>::new()
+            .read(&mut f.server)
+            .await
+            .unwrap();
+        let token = f.client.state.desired.lock().display_token;
+        rivu_protocol::transport::timeout(Duration::from_secs(5), async {
+            while f.client.analysis.read().display_token != token {
+                f.wakes.recv().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        let minimum = f.window.sequence();
+        write_status(&mut f.server, state, 3, minimum)
+            .await
+            .unwrap();
+        stereo(&f.window, header(state, 1536), 0.125, 512);
+        write_status(&mut f.server, state, 3, minimum)
+            .await
+            .unwrap();
+        let restored = current_after(&f, second.sequence).await;
+        assert_eq!(restored.rms_left, 0.125);
+        assert_eq!(restored.display_token, token);
+    });
+}
+
+#[test]
 fn shared_native_channels_follow_cursor_and_reject_retired_capture() {
     async_io::block_on(async {
         let mut f = fixture();

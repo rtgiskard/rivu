@@ -78,10 +78,10 @@ prefix independently of display requests. Native samples are read directly from
 the shared window without an intermediate stereo PCM buffer. Readers do not pin
 slots; concurrent overwrites remain best-effort observation. Each drain is bounded
 to the window's 32 slots. `analysis_rate_hz` limits FFT transforms and publications,
-not PCM ingestion. Requests coalesce into one permit, retained until
-a complete fresh window and its publication deadline are available. The worker
-publishes one latest local shared frame, not a result backlog; hidden, paused and
-disabled gates revoke permits and timed wakeups.
+not PCM ingestion. The worker coalesces fresh input until a complete window and
+its publication deadline are available, then publishes one latest local shared
+frame rather than a result backlog. No fresh input means no publication timer;
+hidden, paused and disabled gates revoke pending analysis and timed wakeups.
 
 Analysis always observes the latest complete window. When that window is shorter
 than the analysis interval, a transient between observed windows can be absent
@@ -149,8 +149,8 @@ snapshot with newer metrics.
 ==== Independent analysis and display clocks
 
 One window-local `VisualizerRuntime` shares visual models and staging across panels.
-Its analysis timer requests frames at `analysis_rate_hz`; native window callbacks
-consume the latest publication and advance animation independently.
+The background analysis worker owns the `analysis_rate_hz` deadline; native window
+callbacks consume its latest publication and advance animation independently.
 `visualizations.general.animation_fps` caps Spectrum, Spectrogram and Audio Visualizer animation:
 `0` follows window frames, and `1`–`240` limits requests per second. It does not
 throttle analysis, Waveform or artwork. Artwork and audio visualization share one
@@ -229,7 +229,7 @@ inactive-tab state and audio-worker pools have distinct lifetimes defined in
 link:22_cache.adoc#resource-boundaries[Resource boundaries].
 Loss of focus alone never disables analysis. Without a reliable visibility
 notification, compositor throttling limits native animation callbacks but not
-the independent analysis timer; analysis remains bounded by `analysis_rate_hz` and
+the worker's analysis deadline; analysis remains bounded by `analysis_rate_hz` and
 retains only the latest publication until visibility is revoked.
 
 == Visualization enablement
