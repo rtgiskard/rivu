@@ -382,13 +382,31 @@ already selected decoder and never loads FFmpeg or changes decoder selection.
 
 == Terminal client
 
-The TUI controls the running core. Leaving it does not stop playback. `Tab` cycles
+The TUI controls the running core. Closing only the client does not stop playback. `Tab` cycles
 Queue → Playlists → Library → Recent; `Shift+Tab` reverses direction.
 Without a search, each page retains its selection and scroll position.
 `Right` opens a playlist; Enter plays the selected playlist, track, or queue
 occurrence. In Library track lists and playlist details, `e` enqueues the selected
 track. `Alt+e` enqueues the selected Library directory or the complete Other
 collection, regardless of filters. Selecting a row alone does not change playback.
+
+Outside search editing, help, and details, press `:` to open the command line on
+the bottom row. Enter executes; Escape cancels. Submitted search results remain
+browsable with command mode, without clearing the search. Commands are bounded
+to 256 UTF-8 bytes and support Backspace; they do not execute shell commands.
+
+[cols="1,3",options="header"]
+|===
+|Command |Effect
+|`:q`, `:quit` |Close this TUI only; Core and playback continue
+|`:qa`, `:qall` |Stop playback and shut down Core and all connected GUI/TUI clients
+|`:help` |Open the scrollable help page, including command descriptions
+|===
+
+Bare `q` outside editors and `Ctrl+C` keep their client-only exit behavior.
+Unknown commands and rejected shutdown requests display errors without closing
+the TUI. An accepted shutdown request exits through the normal Core state/watch
+path; an uncertain result is not automatically retried.
 
 Recent is always available, including when empty. It shows the published
 history of up to 256 unique tracks in recent-play order, with titles, play counts,

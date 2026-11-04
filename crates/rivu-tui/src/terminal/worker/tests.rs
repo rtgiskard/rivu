@@ -4,6 +4,7 @@ use crate::terminal::{
     state::{UiState, View},
 };
 use rivu::test_support::ipc;
+use rivu_protocol::model::Command;
 use rivu_protocol::response::QueryRevisions;
 use std::time::Duration;
 
@@ -408,9 +409,12 @@ fn command_worker_reports_ambiguous_failure_without_replaying_the_mutation() {
         .sender
         .as_ref()
         .unwrap()
-        .send(Command::CreatePlaylist {
-            name: "first".into(),
-        })
+        .send(
+            Command::CreatePlaylist {
+                name: "first".into(),
+            }
+            .into(),
+        )
         .unwrap();
     let failure = worker
         .results
@@ -424,9 +428,12 @@ fn command_worker_reports_ambiguous_failure_without_replaying_the_mutation() {
         .sender
         .as_ref()
         .unwrap()
-        .send(Command::CreatePlaylist {
-            name: "second".into(),
-        })
+        .send(
+            Command::CreatePlaylist {
+                name: "second".into(),
+            }
+            .into(),
+        )
         .unwrap();
     let ack = worker
         .results
@@ -461,18 +468,24 @@ fn command_worker_shutdown_closes_pending_exchange_and_drops_queued_commands() {
         .sender
         .as_ref()
         .unwrap()
-        .send(Command::CreatePlaylist {
-            name: "first".into(),
-        })
+        .send(
+            Command::CreatePlaylist {
+                name: "first".into(),
+            }
+            .into(),
+        )
         .unwrap();
     let mut stream = active.recv_timeout(Duration::from_secs(5)).unwrap();
     worker
         .sender
         .as_ref()
         .unwrap()
-        .send(Command::CreatePlaylist {
-            name: "second".into(),
-        })
+        .send(
+            Command::CreatePlaylist {
+                name: "second".into(),
+            }
+            .into(),
+        )
         .unwrap();
     drop(worker);
     assert_eq!(stream.read(&mut [0]).unwrap(), 0);
@@ -510,9 +523,12 @@ fn watcher_identity_binds_delayed_command_and_query_workers() {
         .sender
         .as_ref()
         .unwrap()
-        .send(Command::CreatePlaylist {
-            name: "A-only".into(),
-        })
+        .send(
+            Command::CreatePlaylist {
+                name: "A-only".into(),
+            }
+            .into(),
+        )
         .unwrap();
     let failure = commands
         .results
@@ -574,7 +590,7 @@ fn command_worker_reconnection_rejects_replacement_instance() {
             .sender
             .as_ref()
             .unwrap()
-            .send(Command::CreatePlaylist { name: name.into() })
+            .send(Command::CreatePlaylist { name: name.into() }.into())
             .unwrap();
         let failure = worker
             .results
@@ -687,4 +703,133 @@ fn query_worker_reconnection_rejects_replacement_before_accepting_results() {
     assert!(failure.instance_changed);
     assert!(failure.into_message().is_err());
     server.join().unwrap();
+}
+
+#[test]
+fn command_shutdown_stops_real_core_and_publishes_terminal_watch_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = directory.path().join("config.toml");
+    let _core =
+        rivu::test_support::frontend::FrontendFixture::start(directory.path(), &config).unwrap();
+    let watcher = spawn_watcher(directory.path());
+    watcher
+        .receiver
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap();
+    let (instance, initial) = watcher.take_update().unwrap().unwrap();
+    assert!(!initial.system.shutting_down);
+    let worker = spawn_command_worker(directory.path(), instance);
+    worker
+        .sender
+        .as_ref()
+        .unwrap()
+        .send(AppCommand::Shutdown)
+        .unwrap();
+    assert!(
+        worker
+            .results
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap()
+            .is_success()
+    );
+    // Only the watch's real shutdown state authorizes the TUI to exit; no
+    // command-side revision refresh is required after the successful Ack.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = deadline
+            .checked_duration_since(std::time::Instant::now())
+            .expect("Core shutdown must reach the watcher");
+        let _ = watcher.receiver.recv_timeout(remaining);
+        if let Some((observed_instance, state)) = watcher.take_update().unwrap() {
+            assert_eq!(observed_instance, instance);
+            if state.system.shutting_down {
+                break;
+            }
+        }
+    }
+}
+
+#[test]
+fn rejected_shutdown_remains_usable_and_disconnected_shutdown_is_not_retried() {
+    use ipc::{complete_test_handshake, reply_test_ack};
+    use rivu_protocol::{
+        response::AckStatus,
+        transport::decode_request_frame,
+        wire::{WireCommand, WireRequest},
+    };
+    use std::{io::Read, os::unix::net::UnixListener};
+
+    let directory = tempfile::tempdir().unwrap();
+    let listener =
+        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
+    let server = std::thread::spawn(move || {
+        let mut stream = listener.accept().unwrap().0;
+        complete_test_handshake(&mut stream);
+        for rejected in [true, false] {
+            let mut prefix = [0; 4];
+            stream.read_exact(&mut prefix).unwrap();
+            let length = u32::from_le_bytes(prefix) as usize;
+            assert!(length <= rivu_protocol::wire::MAX_REQUEST);
+            let mut body = vec![0; length];
+            stream.read_exact(&mut body).unwrap();
+            assert!(matches!(
+                decode_request_frame(&body).unwrap(),
+                WireRequest::Command(WireCommand::Shutdown)
+            ));
+            if rejected {
+                reply_test_ack(
+                    &mut stream,
+                    Ack {
+                        status: AckStatus::NotAdmitted,
+                        error: Some("shutdown rejected".into()),
+                        revision: 0,
+                        scan_id: None,
+                        relocation_id: None,
+                        processing_id: None,
+                        database_optimization: None,
+                    },
+                );
+            }
+        }
+        drop(stream);
+        listener
+    });
+    let worker = spawn_command_worker(directory.path(), 1);
+    worker
+        .sender
+        .as_ref()
+        .unwrap()
+        .send(AppCommand::Shutdown)
+        .unwrap();
+    let ack = worker
+        .results
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
+    assert!(!ack.is_success());
+    assert_eq!(ack.error.as_deref(), Some("shutdown rejected"));
+    worker
+        .sender
+        .as_ref()
+        .unwrap()
+        .send(AppCommand::Shutdown)
+        .unwrap();
+    let error = worker
+        .results
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap()
+        .unwrap_err();
+    assert!(
+        error
+            .into_message()
+            .unwrap()
+            .contains("Command outcome unknown")
+    );
+    let listener = server.join().unwrap();
+    drop(worker);
+    listener.set_nonblocking(true).unwrap();
+    assert!(
+        matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+    );
 }

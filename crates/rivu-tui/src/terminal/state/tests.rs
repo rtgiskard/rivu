@@ -7,6 +7,108 @@ use rivu_protocol::{
 };
 use std::path::Path;
 
+fn type_command(ui: &mut UiState, state: &TuiSnapshot, command: &str) -> KeyAction {
+    ui.key_action(KeyEvent::from(KeyCode::Char(':')), state);
+    for character in command.chars() {
+        assert!(matches!(
+            ui.key_action(KeyEvent::from(KeyCode::Char(character)), state),
+            KeyAction::Ignored
+        ));
+    }
+    ui.key_action(KeyEvent::from(KeyCode::Enter), state)
+}
+
+#[test]
+fn colon_commands_distinguish_local_exit_shutdown_and_help() {
+    let state = TuiSnapshot::default();
+    for command in ["q", "quit", " q "] {
+        let mut ui = UiState::default();
+        assert!(matches!(
+            type_command(&mut ui, &state, command),
+            KeyAction::Quit
+        ));
+        assert!(ui.command_input.is_none());
+    }
+    for command in ["qa", "qall"] {
+        let mut ui = UiState::default();
+        assert!(matches!(
+            type_command(&mut ui, &state, command),
+            KeyAction::Shutdown
+        ));
+        assert!(ui.command_input.is_none());
+    }
+    let mut ui = UiState::default();
+    assert!(matches!(
+        type_command(&mut ui, &state, "help"),
+        KeyAction::Ignored
+    ));
+    assert!(ui.show_help);
+    assert_eq!(ui.help_scroll, 0);
+}
+
+#[test]
+fn command_editor_cancels_bounds_unicode_and_rejects_unknown_commands() {
+    let state = TuiSnapshot::default();
+    let mut ui = UiState::default();
+    for command in ["", "   ", "!quit", "qa extra", "unknown"] {
+        assert!(matches!(
+            type_command(&mut ui, &state, command),
+            KeyAction::Ignored
+        ));
+        assert!(ui.command_input.is_none());
+        if !command.trim().is_empty() {
+            let notice = ui.message.as_ref().unwrap();
+            assert!(notice.kind == NoticeKind::Error);
+            assert!(notice.text.contains(command));
+        }
+    }
+    ui.key_action(KeyEvent::from(KeyCode::Char(':')), &state);
+    for _ in 0..200 {
+        ui.key_action(KeyEvent::from(KeyCode::Char('界')), &state);
+    }
+    assert_eq!(ui.command_input.as_ref().unwrap().len(), 255);
+    ui.key_action(KeyEvent::from(KeyCode::Backspace), &state);
+    assert_eq!(ui.command_input.as_ref().unwrap().len(), 252);
+    ui.key_action(KeyEvent::from(KeyCode::Esc), &state);
+    assert!(ui.command_input.is_none());
+    assert!(matches!(
+        ui.key_action(KeyEvent::from(KeyCode::Char('q')), &state),
+        KeyAction::Quit
+    ));
+}
+
+#[test]
+fn colon_respects_search_and_modal_input_ownership() {
+    let state = TuiSnapshot::default();
+    let mut ui = UiState::default();
+    ui.open_search();
+    ui.key_action(KeyEvent::from(KeyCode::Char(':')), &state);
+    assert_eq!(ui.search.query, ":");
+    assert!(ui.command_input.is_none());
+    ui.search.editing = false;
+    ui.key_action(KeyEvent::from(KeyCode::Char(':')), &state);
+    assert!(ui.command_input.is_some());
+    assert_eq!(ui.search.query, ":");
+    ui.key_action(KeyEvent::from(KeyCode::Esc), &state);
+    ui.search = SearchState::default();
+    for details in [false, true] {
+        ui.show_help = !details;
+        ui.details_active = details;
+        ui.key_action(KeyEvent::from(KeyCode::Char(':')), &state);
+        assert!(ui.command_input.is_none());
+    }
+    ui.details_active = false;
+    ui.key_action(KeyEvent::from(KeyCode::Char(':')), &state);
+    assert!(ui.command_input.is_some());
+    assert!(matches!(
+        ui.key_action(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &state
+        ),
+        KeyAction::Quit
+    ));
+}
+
 fn shortcut_tree(rows: Vec<DirectoryRow>, other_tracks: bool) -> View {
     let mut tree = LibraryTree {
         directory: if other_tracks {

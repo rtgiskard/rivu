@@ -428,6 +428,7 @@ pub(super) struct UiState {
     pub(super) i18n: Arc<Localizer>,
     pub(super) view: View,
     pub(super) search: SearchState,
+    pub(super) command_input: Option<String>,
     refresh_anchor: Option<i64>,
     library_selected_id: Option<i64>,
     // Each slot owns only its tab's view; switching moves bounded page caches.
@@ -460,6 +461,7 @@ impl UiState {
             i18n,
             view: View::default(),
             search: SearchState::default(),
+            command_input: None,
             refresh_anchor: None,
             library_selected_id: None,
             cached_library: None,
@@ -1282,10 +1284,65 @@ impl UiState {
         }
     }
 
+    fn command_key(&mut self, key: KeyEvent) -> KeyAction {
+        const MAX_COMMAND_BYTES: usize = 256;
+        if key.modifiers.intersects(
+            KeyModifiers::CONTROL
+                | KeyModifiers::ALT
+                | KeyModifiers::SUPER
+                | KeyModifiers::HYPER
+                | KeyModifiers::META,
+        ) {
+            return KeyAction::Ignored;
+        }
+        match key.code {
+            KeyCode::Esc => self.command_input = None,
+            KeyCode::Enter => {
+                let input = self.command_input.take().unwrap_or_default();
+                self.mark_local_change();
+                return match input.trim() {
+                    "" => KeyAction::Ignored,
+                    "q" | "quit" => KeyAction::Quit,
+                    "qa" | "qall" => KeyAction::Shutdown,
+                    "help" => {
+                        self.show_help = true;
+                        self.help_scroll = 0;
+                        KeyAction::Ignored
+                    }
+                    command => {
+                        self.set_notice(
+                            format!("{}: {command}", self.i18n.text("terminal-command-unknown")),
+                            NoticeKind::Error,
+                        );
+                        KeyAction::Ignored
+                    }
+                };
+            }
+            KeyCode::Backspace => {
+                if let Some(input) = &mut self.command_input {
+                    input.pop();
+                }
+            }
+            KeyCode::Char(character) if !character.is_control() => {
+                if let Some(input) = &mut self.command_input
+                    && input.len() + character.len_utf8() <= MAX_COMMAND_BYTES
+                {
+                    input.push(character);
+                }
+            }
+            _ => return KeyAction::Ignored,
+        }
+        self.mark_local_change();
+        KeyAction::Ignored
+    }
+
     pub(super) fn key_action(&mut self, key: KeyEvent, state: &TuiSnapshot) -> KeyAction {
         // Global terminal exit wins over editors and modal input ownership.
         if resolve_key(key, KeyboardContext::TuiHelp) == Some(Action::Close) {
             return KeyAction::Quit;
+        }
+        if self.command_input.is_some() {
+            return self.command_key(key);
         }
         if self.details_active {
             let action = resolve_key(key, KeyboardContext::TuiHelp);
@@ -1390,6 +1447,19 @@ impl UiState {
                 }
                 _ => {}
             }
+            return KeyAction::Ignored;
+        }
+        if key.code == KeyCode::Char(':')
+            && !key.modifiers.intersects(
+                KeyModifiers::CONTROL
+                    | KeyModifiers::ALT
+                    | KeyModifiers::SUPER
+                    | KeyModifiers::HYPER
+                    | KeyModifiers::META,
+            )
+        {
+            self.command_input = Some(String::new());
+            self.mark_local_change();
             return KeyAction::Ignored;
         }
         let Some(action) = resolved else {
@@ -1960,6 +2030,7 @@ fn matches_directory_identity(row: &DirectoryRow, identity: &ContainerIdentity) 
 
 pub(super) enum KeyAction {
     Quit,
+    Shutdown,
     Search,
     Command(Command),
     Ignored,

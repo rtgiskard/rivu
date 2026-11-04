@@ -12,6 +12,52 @@ use rivu_protocol::{
 use std::sync::Arc;
 
 #[test]
+fn command_prompt_keeps_unicode_tail_cursor_and_global_impact_hint() {
+    for width in [1, 8, 40, 120] {
+        let mut ui = UiState::new(Arc::new(Localizer::for_terminal("en-US")));
+        ui.command_input = Some("界".repeat(80));
+        let mut terminal = Terminal::new(TestBackend::new(width, 18)).unwrap();
+        terminal
+            .draw(|frame| draw(frame, &TuiSnapshot::default(), &mut ui))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let bottom: String = (0..width).map(|x| buffer[(x, 17)].symbol()).collect();
+        if width >= 8 {
+            assert!(bottom.contains(':'));
+        }
+        if width == 120 {
+            assert!(bottom.contains(":qa"));
+        }
+        let cursor = terminal.get_cursor_position().unwrap();
+        assert!(cursor.x < width);
+        assert!(cursor.y < 18);
+    }
+}
+
+#[test]
+fn command_help_is_visible_in_scrollable_localized_help() {
+    for language in ["en-US", "zh-CN"] {
+        let mut ui = UiState::new(Arc::new(Localizer::for_terminal(language)));
+        ui.show_help = true;
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        terminal
+            .draw(|frame| draw(frame, &TuiSnapshot::default(), &mut ui))
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(text.contains(":q"));
+        assert!(text.contains(":qa"));
+        assert!(text.contains(":help"));
+        assert!(ui.help_max_scroll > 0);
+    }
+}
+
+#[test]
 fn recent_renders_source_indices_and_timestamps() {
     let i18n = Localizer::for_terminal("en-US");
     let colors = TerminalColors::new(rivu_presentation::theme::Theme::default());

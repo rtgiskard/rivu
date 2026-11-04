@@ -3,7 +3,8 @@ use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender, TryRecvError, bounded};
 use parking_lot::Mutex;
 use rivu_protocol::{
-    model::{ClientSnapshot, Command, LibrarySort, Query, QueryStamp},
+    AppCommand,
+    model::{ClientSnapshot, LibrarySort, Query, QueryStamp},
     response::{Ack, QueryError, StateSections, ViewResponse},
 };
 use std::{
@@ -186,7 +187,7 @@ impl WorkerFailure {
 }
 
 pub(super) struct CommandWorker {
-    pub(super) sender: Option<Sender<Command>>,
+    pub(super) sender: Option<Sender<AppCommand>>,
     stopping: Option<Sender<()>>,
     shutdown: rivu_client::SessionCancellation,
     pub(super) results: Receiver<Result<Ack, WorkerFailure>>,
@@ -208,7 +209,7 @@ impl Drop for CommandWorker {
 
 pub(super) fn spawn_command_worker(data_dir: &Path, instance_id: u32) -> CommandWorker {
     let data_dir = data_dir.to_owned();
-    let (sender, receiver) = bounded::<Command>(8);
+    let (sender, receiver) = bounded::<AppCommand>(8);
     let (stopping, stop_receiver) = bounded::<()>(1);
     let (result_sender, results) = bounded::<Result<Ack, WorkerFailure>>(8);
     let shutdown = rivu_client::SessionCancellation::default();

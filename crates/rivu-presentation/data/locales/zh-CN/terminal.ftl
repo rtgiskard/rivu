@@ -1,5 +1,8 @@
 terminal-command-rejected = 操作被拒绝
 terminal-command-busy = 操作队列繁忙
+terminal-command-hint = :qa 停止播放并关闭所有界面 · Enter 执行 · Esc 取消
+terminal-command-help = :q / :quit 仅退出当前 TUI；:qa / :qall 停止播放并关闭所有界面；:help 查看命令
+terminal-command-unknown = 未知命令
 terminal-unexpected-response = 响应内容异常
 terminal-queue-added = 已加入队列
 terminal-queue-removed = 已移出队列

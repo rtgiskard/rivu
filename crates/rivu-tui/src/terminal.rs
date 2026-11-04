@@ -271,7 +271,12 @@ where
                             tui.ui.open_search();
                             tui.snapshot.clone()
                         }
-                        KeyAction::Command(command) => {
+                        action @ (KeyAction::Command(_) | KeyAction::Shutdown) => {
+                            let command = match action {
+                                KeyAction::Command(command) => command.into(),
+                                KeyAction::Shutdown => rivu_protocol::AppCommand::Shutdown,
+                                _ => unreachable!(),
+                            };
                             let queued = commands
                                 .sender
                                 .as_ref()

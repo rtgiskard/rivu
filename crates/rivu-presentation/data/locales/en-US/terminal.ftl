@@ -1,5 +1,8 @@
 terminal-command-rejected = Command rejected
 terminal-command-busy = Command queue busy
+terminal-command-hint = :qa stops playback and closes all interfaces · Enter: execute · Esc: cancel
+terminal-command-help = :q / :quit closes only this TUI; :qa / :qall stops playback and closes all interfaces; :help shows commands
+terminal-command-unknown = Unknown command
 terminal-unexpected-response = Unexpected view response
 terminal-queue-added = Added to queue
 terminal-queue-removed = Removed from queue

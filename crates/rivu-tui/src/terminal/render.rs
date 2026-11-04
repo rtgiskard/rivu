@@ -604,6 +604,13 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, area: Rect, ui: &mut UiState, color
         (indent + 2).min(width.saturating_sub(1))
     };
     let mut lines = Vec::new();
+    for line in wrap_details(ui.i18n.text("terminal-command-help"), width.max(1)) {
+        lines.push(Line::from(Span::styled(
+            line,
+            Style::default().fg(colors.secondary),
+        )));
+    }
+    lines.push(Line::default());
     for (group, label) in [
         "terminal-help-navigation",
         "terminal-help-playback",
@@ -817,7 +824,32 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut
         height: 1.min(outer[3].height),
         ..outer[3]
     };
-    if ui.search.active {
+    if let Some(input) = &ui.command_input {
+        let hint = ui.i18n.text("terminal-command-hint");
+        let hint_width = Line::from(hint).width().min(messages.width as usize / 2);
+        let input_width = messages.width.saturating_sub(hint_width as u16 + 2);
+        let (tail, cursor) = query_tail(input, input_width.saturating_sub(2) as usize);
+        frame.render_widget(
+            Paragraph::new(format!(":{tail}"))
+                .style(Style::default().fg(colors.search).bg(colors.selected)),
+            Rect {
+                width: input_width,
+                ..messages
+            },
+        );
+        frame.render_widget(
+            Paragraph::new(cell_text(hint, hint_width, true))
+                .style(Style::default().fg(colors.secondary)),
+            Rect {
+                x: messages.x + input_width + 2.min(messages.width),
+                width: hint_width as u16,
+                ..messages
+            },
+        );
+        if input_width > 1 && messages.height > 0 {
+            frame.set_cursor_position((messages.x + 1 + cursor as u16, messages.y));
+        }
+    } else if ui.search.active {
         let search_width = if ui.search.editing {
             messages.width
         } else {
