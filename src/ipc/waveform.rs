@@ -6,12 +6,12 @@ use async_channel::{Receiver, Sender};
 use async_io::Async;
 use futures::{FutureExt, StreamExt, io::AsyncReadExt, stream::FuturesUnordered};
 use rivu_audio::WaveformScanSnapshot;
-use rivu_protocol::waveform::{PlaybackRange, WaveformFrame};
+use rivu_protocol::waveform::{ExpectedSource, PlaybackRange, WaveformFrame};
 use rivu_protocol::{
-    model::{Query, Track},
+    model::Query,
     response::ViewResponse,
     transport::timeout,
-    waveform::{Request, VERSION, WaveKey, address, read_frame, write_frame},
+    waveform::{Request, VERSION, WaveKey, address, encode_frame_into, read_frame, write_frame},
 };
 use std::{
     os::unix::net::{SocketAddr, UnixListener, UnixStream},
@@ -22,21 +22,26 @@ use std::{
     },
     time::Duration,
 };
-type Response = rivu_protocol::waveform::Response<WaveformFrame>;
+type Response = rivu_protocol::waveform::Response<Box<WaveformFrame>>;
 
-// Version 2 adds the suspension state to progressive cache keys.
 const MAX_CLIENTS: usize = 8;
+// 1024 bins need at most 101 encoded bytes each, plus path and scalar metadata.
+const PROGRESSIVE_SCRATCH_CAPACITY: usize = 128 * 1024;
 
-fn progressive_response(source: u64, frame: &WaveformFrame, known: Option<WaveKey>) -> Response {
+fn progressive_response(
+    source: u64,
+    frame: &WaveformFrame,
+    known: Option<WaveKey>,
+) -> rivu_protocol::waveform::Response<&WaveformFrame> {
     let key = WaveKey {
         source,
         revision: frame.revision,
         suspension: frame.suspension_generation(),
         suspended: frame.is_suspended(),
     };
-    Response::Progressive {
+    rivu_protocol::waveform::Response::Progressive {
         key,
-        frame: (known != Some(key)).then(|| Box::new(frame.clone())),
+        frame: (known != Some(key)).then_some(frame),
     }
 }
 
@@ -129,26 +134,36 @@ async fn session(
     workers: Arc<BlockingExecutor>,
     stopped: Receiver<()>,
 ) -> Result<()> {
-    let request = timeout(Duration::from_secs(1), read_frame::<Request>(&mut stream)).await??;
+    let mut bytes = Vec::new();
+    let request = timeout(
+        Duration::from_secs(1),
+        read_frame::<Request>(&mut stream, &mut bytes),
+    )
+    .await??;
     ensure!(
         matches!(request, Request::Hello { version: VERSION, instance: id } if id == instance),
         "Waveform Hello instance/version mismatch"
     );
-    write_frame(
-        &mut stream,
+    encode_frame_into(
         &Response::Hello {
             version: VERSION,
             instance,
         },
-    )
-    .await?;
+        &mut bytes,
+    )?;
+    write_frame(&mut stream, &mut bytes).await?;
     loop {
         let request = futures::select! {
             _ = stopped.recv().fuse() => return Ok(()),
-            request = read_frame::<Request>(&mut stream).fuse() => request?,
+            request = read_frame::<Request>(&mut stream, &mut bytes).fuse() => request?,
         };
-        let response = match request {
-            Request::Hello { .. } => Response::Error("Waveform session is already bound".into()),
+        match request {
+            Request::Hello { .. } => {
+                encode_frame_into(
+                    &Response::Error("Waveform session is already bound".into()),
+                    &mut bytes,
+                )?;
+            }
             Request::Progressive { known } => {
                 let source = handle
                     .state(rivu_protocol::response::StateSections {
@@ -158,13 +173,19 @@ async fn session(
                     .playback
                     .expect("playback section requested")
                     .source_generation;
+                // Reserve outside the audio lock. The producer publishes at most 1024
+                // bins; this reusable seat covers their worst-case encoded envelope.
+                // Arc/COW publication would instead copy all bins on the audio writer
+                // whenever a slow client retained a snapshot. Borrow only for this
+                // bounded serialization pass, never for the socket write below.
+                bytes.reserve_exact(PROGRESSIVE_SCRATCH_CAPACITY.saturating_sub(bytes.len()));
                 let frame = handle.waveform.read();
-                progressive_response(source, &frame, known)
+                encode_frame_into(&progressive_response(source, &frame, known), &mut bytes)?;
             }
-            Request::Full { track, source } => {
+            Request::Full { expected, source } => {
                 let cancelled = Arc::new(AtomicBool::new(false));
                 let cancellation = CancelOnDrop(Arc::clone(&cancelled));
-                let full = full_scan(&handle, &workers, &track, source, cancelled).fuse();
+                let full = full_scan(&handle, &workers, &expected, source, cancelled).fuse();
                 futures::pin_mut!(full);
                 let mut extra = [0; 1];
                 let result = futures::select! {
@@ -173,13 +194,14 @@ async fn session(
                     result = full => result,
                 };
                 drop(cancellation);
-                match result {
+                let response = match result {
                     Ok(frame) => Response::Full(Box::new(frame)),
                     Err(error) => Response::Error(format!("{error:#}")),
-                }
+                };
+                encode_frame_into(&response, &mut bytes)?;
             }
-        };
-        write_frame(&mut stream, &response).await?;
+        }
+        write_frame(&mut stream, &mut bytes).await?;
     }
 }
 struct CancelOnDrop(Arc<AtomicBool>);
@@ -192,7 +214,7 @@ impl Drop for CancelOnDrop {
 async fn full_scan(
     handle: &CoreHandle,
     workers: &BlockingExecutor,
-    requested: &Track,
+    requested: &ExpectedSource,
     source: Option<u64>,
     cancelled: Arc<AtomicBool>,
 ) -> Result<WaveformFrame> {
@@ -236,31 +258,29 @@ async fn full_scan(
         _ => bail!("Full waveform track no longer exists"),
     };
     ensure!(
-        track.path == requested.path
-            && track.cue == requested.cue
-            && track.fingerprint == requested.fingerprint
-            && track.decoder_hint == requested.decoder_hint,
+        requested.matches(&track),
         "Full waveform metadata changed before capture"
     );
     let range = track.cue.as_ref().map(|cue| PlaybackRange {
         start_seconds: cue.start_seconds(),
         end_seconds: cue.end_seconds(),
     });
-    let fallback = WaveformScanSnapshot::original(
-        track.path.clone(),
-        range,
-        track.decoder_hint,
-        config.visualization_signal,
-        Arc::new(config.equalizer.clone()),
-    );
-    let mut snapshot = match captured {
+    let captured = match captured {
         Some(reply) => reply
             .await
             .context("Capturing waveform source")?
-            .map_err(anyhow::Error::msg)?
-            .unwrap_or(fallback),
-        None => fallback,
+            .map_err(anyhow::Error::msg)?,
+        None => None,
     };
+    let mut snapshot = captured.unwrap_or_else(|| {
+        WaveformScanSnapshot::original(
+            track.path.clone(),
+            range,
+            track.decoder_hint,
+            config.visualization_signal,
+            Arc::new(config.equalizer.clone()),
+        )
+    });
     if snapshot.path == track.path && snapshot.range == range {
         snapshot.decoder_hint = track.decoder_hint;
     }
@@ -284,6 +304,103 @@ async fn full_scan(
 mod tests {
     use super::*;
 
+    async fn send(stream: &mut Async<UnixStream>, request: &Request, bytes: &mut Vec<u8>) {
+        encode_frame_into(request, bytes).unwrap();
+        write_frame(stream, bytes).await.unwrap();
+    }
+
+    #[test]
+    fn waveform_socket_rejects_an_unbound_instance_or_version() {
+        let directory = crate::ipc::tests::socket_test_directory();
+        let (handle, _queries) = CoreHandle::test_query_port();
+        let tasks = crate::execution::TaskRuntime::start().unwrap();
+        let service =
+            WaveServer::start(directory.path(), handle, 7, &tasks.handle, &tasks.workers).unwrap();
+        async_io::block_on(timeout(Duration::from_secs(5), async {
+            for (version, instance) in [(VERSION - 1, 7), (VERSION, 8)] {
+                let mut stream = rivu_protocol::waveform::connect(directory.path())
+                    .await
+                    .unwrap();
+                let mut bytes = Vec::new();
+                send(
+                    &mut stream,
+                    &Request::Hello { version, instance },
+                    &mut bytes,
+                )
+                .await;
+                assert!(
+                    read_frame::<Response>(&mut stream, &mut bytes)
+                        .await
+                        .is_err()
+                );
+            }
+        }))
+        .unwrap();
+        drop(service);
+    }
+
+    #[test]
+    fn full_socket_reloads_authority_before_accepting_a_source_expectation() {
+        let directory = crate::ipc::tests::socket_test_directory();
+        let (handle, queries) = CoreHandle::test_query_port();
+        let tasks = crate::execution::TaskRuntime::start().unwrap();
+        let service =
+            WaveServer::start(directory.path(), handle, 7, &tasks.handle, &tasks.workers).unwrap();
+        async_io::block_on(timeout(Duration::from_secs(5), async {
+            let mut stream = rivu_protocol::waveform::connect(directory.path())
+                .await
+                .unwrap();
+            let mut bytes = Vec::new();
+            send(
+                &mut stream,
+                &Request::Hello {
+                    version: VERSION,
+                    instance: 7,
+                },
+                &mut bytes,
+            )
+            .await;
+            assert!(matches!(
+                read_frame::<Response>(&mut stream, &mut bytes)
+                    .await
+                    .unwrap(),
+                Response::Hello { .. }
+            ));
+            send(
+                &mut stream,
+                &Request::Full {
+                    expected: ExpectedSource {
+                        id: 9,
+                        path: "not-authoritative.wav".into(),
+                        cue: None,
+                        fingerprint: None,
+                        decoder_hint: rivu_format::decoder_hint::DecoderHint::Auto,
+                    },
+                    source: None,
+                },
+                &mut bytes,
+            )
+            .await;
+            let reply = async {
+                queries
+                    .receive()
+                    .await
+                    .respond(rivu_protocol::response::QueryResponse {
+                        revisions: Default::default(),
+                        result: Ok(ViewResponse::Track(None)),
+                    });
+            };
+            let (response, ()) =
+                futures::join!(read_frame::<Response>(&mut stream, &mut bytes), reply);
+            let Response::Error(error) = response.unwrap() else {
+                panic!("a missing authoritative track must reject the scan");
+            };
+            assert!(error.contains("track no longer exists"));
+        }))
+        .unwrap();
+        drop(service);
+    }
+
     #[test]
     fn progressive_socket_refreshes_suspension_without_new_pcm() {
         let directory = crate::ipc::tests::socket_test_directory();
@@ -301,17 +418,20 @@ mod tests {
             let mut stream = rivu_protocol::waveform::connect(directory.path())
                 .await
                 .unwrap();
-            write_frame(
+            let mut bytes = Vec::new();
+            send(
                 &mut stream,
                 &Request::Hello {
                     version: VERSION,
                     instance: 7,
                 },
+                &mut bytes,
             )
-            .await
-            .unwrap();
+            .await;
             assert!(matches!(
-                read_frame::<Response>(&mut stream).await.unwrap(),
+                read_frame::<Response>(&mut stream, &mut bytes)
+                    .await
+                    .unwrap(),
                 Response::Hello {
                     version: VERSION,
                     instance: 7
@@ -322,22 +442,22 @@ mod tests {
                 handle
                     .waveform_control
                     .set_visualization_enabled(&mut handle.waveform.write(), enabled);
-                write_frame(&mut stream, &Request::Progressive { known })
-                    .await
-                    .unwrap();
+                send(&mut stream, &Request::Progressive { known }, &mut bytes).await;
                 let Response::Progressive { key, frame } =
-                    read_frame::<Response>(&mut stream).await.unwrap()
+                    read_frame::<Response>(&mut stream, &mut bytes)
+                        .await
+                        .unwrap()
                 else {
                     panic!("expected progressive response");
                 };
                 assert_eq!(key.suspended, !enabled);
                 assert_eq!(frame.unwrap().is_suspended(), !enabled);
                 known = Some(key);
-                write_frame(&mut stream, &Request::Progressive { known })
-                    .await
-                    .unwrap();
+                send(&mut stream, &Request::Progressive { known }, &mut bytes).await;
                 assert!(matches!(
-                    read_frame::<Response>(&mut stream).await.unwrap(),
+                    read_frame::<Response>(&mut stream, &mut bytes)
+                        .await
+                        .unwrap(),
                     Response::Progressive { frame: None, .. }
                 ));
             }
@@ -348,7 +468,9 @@ mod tests {
 
     // Exercise service cache decisions without PCM.
     fn refresh(server: &WaveformFrame, known: &mut Option<WaveKey>) -> bool {
-        let Response::Progressive { key, frame } = progressive_response(7, server, *known) else {
+        let rivu_protocol::waveform::Response::Progressive { key, frame } =
+            progressive_response(7, server, *known)
+        else {
             panic!("expected progressive response");
         };
         *known = Some(key);

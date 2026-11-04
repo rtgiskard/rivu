@@ -124,13 +124,14 @@ pub(super) struct Details {
     pub(super) max_scroll: usize,
     pub(super) error_scroll: usize,
     pub(super) error_max_scroll: usize,
+    pub(super) layout: Option<super::render::DetailsLayout>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) enum DetailState {
     #[default]
     Loading,
-    Ready(Box<rivu_protocol::model::Track>),
+    Ready(Arc<rivu_protocol::model::Track>),
     Removed,
     Error(String),
     Container(String),
@@ -439,6 +440,7 @@ pub(super) struct UiState {
     pub(super) show_help: bool,
     pub(super) help_max_scroll: usize,
     pub(super) help_scroll: usize,
+    pub(super) help_layout: Option<super::render::HelpLayout>,
     pub(super) message: Option<Notice>,
     // Started only after the initial IPC snapshot; None is permanently dismissed.
     pub(super) startup_hint_deadline: Option<Instant>,
@@ -470,6 +472,7 @@ impl UiState {
             show_help: false,
             help_max_scroll: 0,
             help_scroll: 0,
+            help_layout: None,
             message: None,
             startup_hint_deadline: Some(Instant::now() + Duration::from_secs(4)),
             details: Details::default(),
@@ -714,7 +717,7 @@ impl UiState {
             self.details.error_scroll = 0;
             self.details.state = match result.view {
                 ViewResponse::Track(Some(track)) if Some(track.id) == self.details.target => {
-                    DetailState::Ready(Box::new(track))
+                    DetailState::Ready(Arc::new(track))
                 }
                 ViewResponse::Track(None) => DetailState::Removed,
                 _ => return self.unexpected_query(request),

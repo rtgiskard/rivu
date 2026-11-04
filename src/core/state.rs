@@ -54,6 +54,13 @@ impl CoreState {
         };
         let system = &self.system;
         let old = &previous.system;
+        let processing_changed = match (&system.processing, &old.processing) {
+            (Some(current), Some(previous)) => {
+                !Arc::ptr_eq(current, previous) && current != previous
+            }
+            (None, None) => false,
+            _ => true,
+        };
         StateSections {
             playback: self.playback != previous.playback
                 || self.source_generation != previous.source_generation
@@ -82,7 +89,7 @@ impl CoreState {
                 || system.scan_task_id != old.scan_task_id
                 || self.scan_owner != previous.scan_owner
                 || system.relocation_task != old.relocation_task
-                || system.processing != old.processing
+                || processing_changed
                 || system.last_error != old.last_error
                 || !Arc::ptr_eq(&system.devices, &old.devices)
                 || system.selected_device != old.selected_device

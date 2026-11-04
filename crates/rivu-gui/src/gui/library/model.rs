@@ -5,7 +5,7 @@ use gpui::ScrollStrategy;
 use rivu_protocol::model::{DirectoryRow, LibrarySort, Page, Query};
 use rivu_protocol::query_tracking::QueryTracker;
 use rivu_protocol::response::QueryRevisions;
-use std::{collections::HashSet, ops::Range};
+use std::{collections::HashSet, ops::Range, sync::Arc};
 
 pub(in crate::gui) fn merge_selection(
     tracks: &mut HashSet<i64>,
@@ -32,7 +32,7 @@ pub(in crate::gui) fn merge_selection(
 struct RootCounts {
     owner: QueryTracker,
     roots: Vec<std::path::PathBuf>,
-    totals: std::collections::HashMap<std::path::PathBuf, usize>,
+    totals: Arc<std::collections::HashMap<std::path::PathBuf, usize>>,
     pending: HashSet<usize>,
     failed: HashSet<usize>,
     settled: bool,
@@ -41,7 +41,7 @@ struct RootCounts {
 impl RootCounts {
     fn invalidate(&mut self) {
         self.owner.cancel();
-        self.totals.clear();
+        self.totals = Arc::default();
         self.pending.clear();
         self.failed.clear();
         self.settled = false;
@@ -67,6 +67,8 @@ pub(super) struct SearchCountRequest {
     pub(super) query: Query,
     pub(super) roots: Vec<std::path::PathBuf>,
     pub(super) revisions: QueryRevisions,
+    pub(super) root_totals: Arc<std::collections::HashMap<std::path::PathBuf, usize>>,
+    pub(super) other_total: Option<usize>,
     pub(super) ticket: rivu_protocol::query_tracking::QueryTicket,
     generation: u64,
 }
@@ -134,12 +136,14 @@ impl LibraryBrowser {
         roots: &[std::path::PathBuf],
         revisions: QueryRevisions,
     ) -> (bool, Option<SearchCountRequest>) {
+        self.sync_root_counts(roots, revisions.structure);
         let query = Query::LibraryRootPage {
             path: Default::default(),
             query: self.buffer.query.clone(),
             favorite: self.buffer.favorite,
             missing: self.buffer.missing,
-            sort: self.buffer.sort,
+            // Counts depend on membership, never the presentation ordering.
+            sort: LibrarySort::Id,
             offset: 0,
             limit: 0,
         };
@@ -172,6 +176,8 @@ impl LibraryBrowser {
                 query,
                 roots: roots.to_vec(),
                 revisions,
+                root_totals: Arc::clone(&self.counts.totals),
+                other_total: counts.other_total,
                 ticket: counts.projection.ticket(),
                 generation,
             })
@@ -214,7 +220,6 @@ impl LibraryBrowser {
             query,
             favorite,
             missing,
-            sort,
             ..
         } = &request.query
         else {
@@ -223,7 +228,6 @@ impl LibraryBrowser {
         if query != &self.buffer.query
             || *favorite != self.buffer.favorite
             || *missing != self.buffer.missing
-            || *sort != self.buffer.sort
             || request.roots != roots
             || counts.roots != roots
             || !counts
@@ -234,6 +238,11 @@ impl LibraryBrowser {
         }
         counts.failed = result.is_none();
         if let Some(result) = result {
+            for (root, (_, total)) in &result.roots {
+                if self.counts.totals.get(root) != Some(total) {
+                    Arc::make_mut(&mut self.counts.totals).insert(root.clone(), *total);
+                }
+            }
             counts.totals = Some(result.totals);
             counts.root_counts = result.roots;
             counts.other_tracks = Some(result.other_tracks);
@@ -354,7 +363,7 @@ impl LibraryBrowser {
             roots: roots.to_vec(),
         };
         if self.counts.owner.sync(&query, revisions) {
-            self.counts.totals.clear();
+            self.counts.totals = Arc::default();
             self.counts.pending.clear();
             self.counts.failed.clear();
             self.counts.settled = false;
@@ -437,8 +446,7 @@ impl LibraryBrowser {
         counts: Vec<rivu_protocol::model::LibraryRootCount>,
     ) {
         if self.counts.owner.generation() == generation && self.counts.pending.remove(&offset) {
-            self.counts
-                .totals
+            Arc::make_mut(&mut self.counts.totals)
                 .extend(counts.into_iter().map(|count| (count.path, count.total)));
         }
     }
@@ -799,6 +807,52 @@ mod tests {
             roots: [(root.to_path_buf(), totals)].into_iter().collect(),
             other_tracks: (0, 0),
         }
+    }
+
+    #[test]
+    fn count_totals_follow_structure_while_sort_and_filter_reuse_membership() {
+        let mut library = LibraryBrowser::default();
+        let roots = vec![std::path::PathBuf::from("/music")];
+        let mut revisions = QueryRevisions::default();
+        let (generation, offsets) = library.begin_root_counts(&roots, revisions.structure);
+        library.accept_root_counts(
+            generation,
+            offsets[0],
+            vec![rivu_protocol::model::LibraryRootCount {
+                path: roots[0].clone(),
+                total: 4,
+            }],
+        );
+        let request = library.prepare_search_counts(&roots, revisions).1.unwrap();
+        assert_eq!(request.root_totals.get(&roots[0]), Some(&4));
+        library.buffer.sort = LibrarySort::MostPlayed;
+        assert!(!library.prepare_search_counts(&roots, revisions).0);
+        assert!(request.ticket.is_current());
+        assert!(library.accept_search_counts(
+            request,
+            &roots,
+            revisions,
+            Some(search_count_result(&roots[0], (4, 4)))
+        ));
+        library.refresh_search("needle".into());
+        revisions.library += 1;
+        let request = library.prepare_search_counts(&roots, revisions).1.unwrap();
+        assert_eq!(request.root_totals.get(&roots[0]), Some(&4));
+        assert_eq!(request.other_total, Some(0));
+        assert!(library.accept_search_counts(
+            request,
+            &roots,
+            revisions,
+            Some(search_count_result(&roots[0], (1, 4)))
+        ));
+        library.buffer.sort = LibrarySort::Album;
+        assert!(!library.prepare_search_counts(&roots, revisions).0);
+        assert_eq!(library.search_counts(), Some((1, 4)));
+        revisions.structure += 1;
+        let request = library.prepare_search_counts(&roots, revisions).1.unwrap();
+        assert!(request.root_totals.is_empty());
+        assert_eq!(request.other_total, None);
+        assert_eq!(library.search_counts(), None);
     }
 
     #[test]

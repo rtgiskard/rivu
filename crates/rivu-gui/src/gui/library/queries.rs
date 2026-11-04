@@ -14,6 +14,8 @@ async fn library_search_counts(
         roots,
         revisions,
         ticket,
+        root_totals,
+        other_total,
         ..
     } = request;
     let Query::LibraryRootPage {
@@ -26,6 +28,10 @@ async fn library_search_counts(
     else {
         unreachable!()
     };
+    let unfiltered = query.is_none() && favorite.is_none() && missing.is_none();
+    if !ticket.is_current() {
+        return None;
+    }
     let mut matched = 0;
     let mut total = 0;
     let mut root_counts = std::collections::HashMap::new();
@@ -38,29 +44,35 @@ async fn library_search_counts(
         }) {
             continue;
         }
-        let response = handle
-            .query_if_current(
-                Query::LibraryRootPage {
-                    path: root.clone(),
-                    query: query.clone(),
-                    favorite: *favorite,
-                    missing: *missing,
-                    sort: *sort,
-                    offset: 0,
-                    limit: 0,
-                },
-                ticket.clone(),
-            )
-            .await;
-        if worker_query.stamp(response.revisions) != worker_query.stamp(*revisions) {
-            return None;
-        }
-        let Ok(ViewResponse::LibraryPage(page)) = response.result else {
-            return None;
+        let root_matched = if unfiltered && let Some(total) = root_totals.get(root) {
+            *total
+        } else {
+            let response = handle
+                .query_if_current(
+                    Query::LibraryRootPage {
+                        path: root.clone(),
+                        query: query.clone(),
+                        favorite: *favorite,
+                        missing: *missing,
+                        sort: *sort,
+                        offset: 0,
+                        limit: 0,
+                    },
+                    ticket.clone(),
+                )
+                .await;
+            if worker_query.stamp(response.revisions) != worker_query.stamp(*revisions) {
+                return None;
+            }
+            let Ok(ViewResponse::LibraryPage(page)) = response.result else {
+                return None;
+            };
+            page.total
         };
-        let root_matched = page.total;
-        let root_total = if query.is_none() && favorite.is_none() && missing.is_none() {
+        let root_total = if unfiltered {
             root_matched
+        } else if let Some(total) = root_totals.get(root) {
+            *total
         } else {
             let response = handle
                 .query_if_current(
@@ -88,28 +100,34 @@ async fn library_search_counts(
         total += root_total;
         root_counts.insert(root.clone(), (root_matched, root_total));
     }
-    let response = handle
-        .query_if_current(
-            Query::OtherTracksPage {
-                query: query.clone(),
-                favorite: *favorite,
-                missing: *missing,
-                sort: *sort,
-                offset: 0,
-                limit: 0,
-            },
-            ticket.clone(),
-        )
-        .await;
-    if worker_query.stamp(response.revisions) != worker_query.stamp(*revisions) {
-        return None;
-    }
-    let Ok(ViewResponse::LibraryPage(page)) = response.result else {
-        return None;
+    let other_matched = if unfiltered && let Some(total) = other_total {
+        *total
+    } else {
+        let response = handle
+            .query_if_current(
+                Query::OtherTracksPage {
+                    query: query.clone(),
+                    favorite: *favorite,
+                    missing: *missing,
+                    sort: *sort,
+                    offset: 0,
+                    limit: 0,
+                },
+                ticket.clone(),
+            )
+            .await;
+        if worker_query.stamp(response.revisions) != worker_query.stamp(*revisions) {
+            return None;
+        }
+        let Ok(ViewResponse::LibraryPage(page)) = response.result else {
+            return None;
+        };
+        page.total
     };
-    let other_matched = page.total;
-    let other_total = if query.is_none() && favorite.is_none() && missing.is_none() {
+    let other_total = if unfiltered {
         other_matched
+    } else if let Some(total) = other_total {
+        *total
     } else {
         let response = handle
             .query_if_current(Query::OtherTracksCount, ticket.clone())
@@ -488,6 +506,30 @@ mod tests {
         assert!(library.accept_search_counts(request, &roots, revisions, Some(result)));
         assert!(!library.other_tracks_empty());
         assert_eq!(library.tree().root_total(), Some(3));
+        let overlapping = vec![
+            parent.clone(),
+            nested.clone(),
+            sibling.clone(),
+            parent.clone(),
+        ];
+        let mut nested_library = LibraryBrowser::default();
+        nested_library.refresh_search("needle".into());
+        let request = nested_library
+            .prepare_search_counts(&overlapping, revisions)
+            .1
+            .unwrap();
+        let result =
+            futures::executor::block_on(super::library_search_counts(&runtime.handle, &request))
+                .unwrap();
+        assert_eq!(result.totals, (3, 5));
+        assert_eq!(result.roots.len(), 2);
+        assert!(!result.roots.contains_key(&nested));
+        assert!(nested_library.accept_search_counts(
+            request,
+            &overlapping,
+            revisions,
+            Some(result)
+        ));
         library.refresh_search("needle".into());
         for root in &roots {
             // A query on an independent IPC worker is not a command FIFO fence.

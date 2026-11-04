@@ -82,6 +82,8 @@ pub(super) fn spawn_watcher(data_dir: &Path) -> Watcher {
                 let mut state = ClientSnapshot::default();
                 let revisions = response.revisions;
                 response.apply_to(&mut state);
+                // Processing is not part of the terminal projection or publication.
+                state.system.processing = None;
                 (state, revisions, instance_id)
             }
             Err(error) => {
@@ -106,6 +108,7 @@ pub(super) fn spawn_watcher(data_dir: &Path) -> Watcher {
                                     .1
                                     .apply_sections(response.revisions, response.sections());
                                 response.apply_to(&mut state.0);
+                                state.0.system.processing = None;
                                 let shutting_down = state.0.system.shutting_down;
                                 *latest_worker.lock() = Some(Ok((state.2, state.0.clone())));
                                 let disconnected = sender.try_send(()).is_err_and(|error| {

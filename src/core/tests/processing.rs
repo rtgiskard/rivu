@@ -100,7 +100,7 @@ fn begin_mix(core: &mut Core, id: u64) {
         .unwrap();
     status.phase = ProcessingPhase::Processing;
     status.error = None;
-    core.state.system.processing = Some(status);
+    core.state.system.processing = Some(Arc::new(status));
 }
 
 fn mix_completion(core: &mut Core) -> crate::processing::Event {

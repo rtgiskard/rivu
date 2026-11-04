@@ -1,11 +1,15 @@
 //! Waveform display snapshots and bounded control envelopes.
-use crate::{model::Track, transport::timeout};
+use crate::{
+    model::{CueSegment, Track},
+    transport::{release_large_buffer, timeout},
+};
 use anyhow::{Context, Result, ensure};
 use async_io::Async;
 use futures_lite::io::{AsyncReadExt, AsyncWriteExt};
 use rivu_format::decoder_hint::DecoderHint;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
+    io::{self, Write},
     os::{
         linux::net::SocketAddrExt,
         unix::{
@@ -182,7 +186,7 @@ impl WaveformFrame {
         self.suspension_generation = suspension_generation;
     }
 }
-pub const VERSION: u8 = 2;
+pub const VERSION: u8 = 3;
 pub const MAX_FRAME: usize = 1024 * 1024;
 pub const IO_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -193,6 +197,39 @@ pub struct WaveKey {
     pub suspension: u64,
     pub suspended: bool,
 }
+
+/// Client expectation only; Core still reloads and compares the authoritative track.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ExpectedSource {
+    pub id: i64,
+    pub path: PathBuf,
+    pub cue: Option<CueSegment>,
+    pub fingerprint: Option<String>,
+    pub decoder_hint: DecoderHint,
+}
+
+impl From<&Track> for ExpectedSource {
+    fn from(track: &Track) -> Self {
+        Self {
+            id: track.id,
+            path: track.path.clone(),
+            cue: track.cue.clone(),
+            fingerprint: track.fingerprint.clone(),
+            decoder_hint: track.decoder_hint,
+        }
+    }
+}
+
+impl ExpectedSource {
+    pub fn matches(&self, track: &Track) -> bool {
+        self.id == track.id
+            && self.path == track.path
+            && self.cue == track.cue
+            && self.fingerprint == track.fingerprint
+            && self.decoder_hint == track.decoder_hint
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub enum Request {
     Hello {
@@ -203,21 +240,15 @@ pub enum Request {
         known: Option<WaveKey>,
     },
     Full {
-        track: Box<Track>,
+        expected: ExpectedSource,
         source: Option<u64>,
     },
 }
 #[derive(Serialize, Deserialize)]
 pub enum Response<Frame> {
-    Hello {
-        version: u8,
-        instance: u32,
-    },
-    Progressive {
-        key: WaveKey,
-        frame: Option<Box<Frame>>,
-    },
-    Full(Box<Frame>),
+    Hello { version: u8, instance: u32 },
+    Progressive { key: WaveKey, frame: Option<Frame> },
+    Full(Frame),
     Error(String),
 }
 pub fn address(data_dir: &Path) -> Result<SocketAddr> {
@@ -242,45 +273,105 @@ pub async fn connect(data_dir: &Path) -> Result<Async<UnixStream>> {
     crate::wire::verify_peer(&stream)?;
     Ok(stream)
 }
-pub fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>> {
-    let bytes = postcard::to_stdvec(value)?;
+struct FrameWriter<'a>(&'a mut Vec<u8>);
+
+impl Write for FrameWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let required = self.0.len().saturating_add(bytes.len());
+        if required > 4 + MAX_FRAME {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Waveform frame exceeds its byte limit",
+            ));
+        }
+        if required > self.0.capacity() {
+            let target = required
+                .max(self.0.capacity().saturating_mul(2))
+                .min(4 + MAX_FRAME);
+            self.0.reserve_exact(target - self.0.len());
+        }
+        self.0.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Encode directly into session storage, checking the limit before each append.
+/// On failure no partial frame remains available to send.
+pub fn encode_frame_into<T: Serialize>(value: &T, bytes: &mut Vec<u8>) -> Result<()> {
+    bytes.clear();
+    bytes.resize(4, 0);
+    if let Err(error) = postcard::to_io(value, FrameWriter(bytes)) {
+        bytes.clear();
+        release_large_buffer(bytes);
+        return Err(error).context("Encoding waveform frame");
+    }
+    let length = (bytes.len() - 4) as u32;
+    bytes[..4].copy_from_slice(&length.to_le_bytes());
+    Ok(())
+}
+
+pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     ensure!(
         bytes.len() <= MAX_FRAME,
         "Waveform frame exceeds its byte limit"
     );
-    Ok(bytes)
-}
-pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     let (value, remaining) = postcard::take_from_bytes(bytes)?;
     ensure!(remaining.is_empty(), "Waveform frame has trailing data");
     Ok(value)
 }
-pub async fn read_frame<T: DeserializeOwned>(stream: &mut Async<UnixStream>) -> Result<T> {
+
+pub async fn read_frame<T: DeserializeOwned>(
+    stream: &mut Async<UnixStream>,
+    bytes: &mut Vec<u8>,
+) -> Result<T> {
+    bytes.clear();
+    release_large_buffer(bytes);
     let mut prefix = [0; 4];
     stream.read_exact(&mut prefix[..1]).await?;
-    timeout(IO_TIMEOUT, async {
+    let result = timeout(IO_TIMEOUT, async {
         stream.read_exact(&mut prefix[1..]).await?;
         let length = u32::from_le_bytes(prefix) as usize;
         ensure!(length <= MAX_FRAME, "Waveform frame exceeds its byte limit");
-        let mut bytes = vec![0; length];
-        stream.read_exact(&mut bytes).await?;
-        decode(&bytes)
+        bytes.clear();
+        if length > bytes.capacity() {
+            bytes.reserve_exact(length);
+        }
+        bytes.resize(length, 0);
+        stream.read_exact(bytes).await?;
+        decode(bytes)
     })
     .await
-    .context("Incomplete waveform frame timed out")?
+    .context("Incomplete waveform frame timed out");
+    bytes.clear();
+    release_large_buffer(bytes);
+    result?
 }
-pub async fn write_frame<T: Serialize>(stream: &mut Async<UnixStream>, value: &T) -> Result<()> {
-    let bytes = encode(value)?;
-    timeout(IO_TIMEOUT, async {
-        stream
-            .write_all(&(bytes.len() as u32).to_le_bytes())
-            .await?;
-        stream.write_all(&bytes).await?;
+
+/// Send a previously encoded frame; no producer lock is held during I/O.
+pub async fn write_frame(stream: &mut Async<UnixStream>, bytes: &mut Vec<u8>) -> Result<()> {
+    let result = timeout(IO_TIMEOUT, async {
+        ensure!(
+            bytes.len() >= 4 && bytes.len() <= 4 + MAX_FRAME,
+            "Invalid encoded waveform frame length"
+        );
+        ensure!(
+            u32::from_le_bytes(bytes[..4].try_into().expect("checked prefix")) as usize
+                == bytes.len() - 4,
+            "Invalid encoded waveform frame prefix"
+        );
+        stream.write_all(bytes).await?;
         stream.flush().await?;
         Ok(())
     })
     .await
-    .context("Waveform write timed out")?
+    .context("Waveform write timed out");
+    bytes.clear();
+    release_large_buffer(bytes);
+    result?
 }
 
 #[cfg(test)]
@@ -374,8 +465,9 @@ mod snapshot_tests {
             channels: 2,
         });
         frame.scan_source_identity = Some(content);
-        let bytes = encode(&frame).unwrap();
-        let legacy: LegacyWaveformFrame = decode(&bytes).unwrap();
+        let mut bytes = Vec::new();
+        encode_frame_into(&frame, &mut bytes).unwrap();
+        let legacy: LegacyWaveformFrame = decode(&bytes[4..]).unwrap();
         assert_eq!(legacy.revision, frame.revision);
         assert_eq!(legacy.path, frame.path);
         assert_eq!(legacy.range, frame.range);
@@ -391,10 +483,109 @@ mod snapshot_tests {
         assert_eq!(legacy.scan_source_identity, frame.scan_source_identity);
         assert!(legacy.channel_weights.is_empty());
         assert!(legacy.rms_prefixes.is_empty());
-        assert_eq!(encode(&legacy).unwrap(), bytes);
-        let roundtrip: WaveformFrame = decode(&encode(&legacy).unwrap()).unwrap();
+        let mut legacy_bytes = Vec::new();
+        encode_frame_into(&legacy, &mut legacy_bytes).unwrap();
+        assert_eq!(legacy_bytes, bytes);
+        let roundtrip: WaveformFrame = decode(&legacy_bytes[4..]).unwrap();
         assert_eq!(roundtrip.identity, frame.identity);
         assert_eq!(roundtrip.suspension_generation(), 10);
         assert!(roundtrip.is_suspended());
+    }
+}
+
+#[cfg(test)]
+mod framing_tests {
+    use super::*;
+    use crate::transport::RETAINED_BUFFER_LIMIT;
+
+    #[test]
+    fn encoder_bounds_each_append_and_recovers_after_oversized_values() {
+        let mut bytes = Vec::new();
+        // This sequence length has a three-byte varint prefix.
+        let exact = vec![0u8; MAX_FRAME - 3];
+        encode_frame_into(&exact, &mut bytes).unwrap();
+        assert_eq!(bytes.len(), 4 + MAX_FRAME);
+        assert_eq!(
+            u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize,
+            MAX_FRAME
+        );
+        assert_eq!(decode::<Vec<u8>>(&bytes[4..]).unwrap(), exact);
+
+        assert!(encode_frame_into(&vec![0u8; MAX_FRAME], &mut bytes).is_err());
+        assert!(bytes.is_empty());
+        assert!(bytes.capacity() <= RETAINED_BUFFER_LIMIT);
+        encode_frame_into(&Request::Progressive { known: None }, &mut bytes).unwrap();
+        assert!(matches!(
+            decode(&bytes[4..]).unwrap(),
+            Request::Progressive { known: None }
+        ));
+    }
+
+    #[test]
+    fn decoder_rejects_oversized_trailing_and_truncated_input() {
+        assert!(decode::<Request>(&vec![0; MAX_FRAME + 1]).is_err());
+        let mut bytes = Vec::new();
+        encode_frame_into(
+            &Request::Hello {
+                version: VERSION,
+                instance: 7,
+            },
+            &mut bytes,
+        )
+        .unwrap();
+        let body = bytes[4..].to_vec();
+        assert!(decode::<Request>(&body[..body.len() - 1]).is_err());
+        let mut trailing = body;
+        trailing.push(0);
+        assert!(decode::<Request>(&trailing).is_err());
+        assert!(decode::<Vec<u8>>(&[0xff; 10]).is_err());
+    }
+
+    #[test]
+    fn reader_rejects_untrusted_prefixes_without_retaining_bulk_storage() {
+        for (length, body) in [
+            (MAX_FRAME + 1, vec![]),
+            (0, vec![]),
+            (3, vec![0]),
+            (2, vec![255, 255]),
+        ] {
+            let (receiver, mut sender) = UnixStream::pair().unwrap();
+            sender.write_all(&(length as u32).to_le_bytes()).unwrap();
+            sender.write_all(&body).unwrap();
+            drop(sender);
+            let mut receiver = Async::new(receiver).unwrap();
+            let mut bytes = Vec::with_capacity(MAX_FRAME);
+            assert!(async_io::block_on(read_frame::<Request>(&mut receiver, &mut bytes)).is_err());
+            assert!(bytes.is_empty());
+            assert!(bytes.capacity() <= RETAINED_BUFFER_LIMIT);
+        }
+    }
+
+    #[test]
+    fn socket_frames_reuse_small_storage_and_retire_bulk_transfers() {
+        async_io::block_on(async {
+            let (sender, receiver) = UnixStream::pair().unwrap();
+            let mut sender = Async::new(sender).unwrap();
+            let mut receiver = Async::new(receiver).unwrap();
+            let send = async {
+                let mut bytes = Vec::new();
+                for length in [8, 8, RETAINED_BUFFER_LIMIT + 1, 8] {
+                    encode_frame_into(&vec![42u8; length], &mut bytes).unwrap();
+                    write_frame(&mut sender, &mut bytes).await.unwrap();
+                    assert!(bytes.is_empty());
+                    assert!(bytes.capacity() <= RETAINED_BUFFER_LIMIT);
+                }
+            };
+            let receive = async {
+                let mut bytes = Vec::new();
+                for length in [8, 8, RETAINED_BUFFER_LIMIT + 1, 8] {
+                    let frame: Vec<u8> = read_frame(&mut receiver, &mut bytes).await.unwrap();
+                    assert_eq!(frame, vec![42u8; length]);
+                    assert!(bytes.is_empty());
+                    assert!(bytes.capacity() <= RETAINED_BUFFER_LIMIT);
+                }
+            };
+            futures::join!(send, receive);
+        });
     }
 }

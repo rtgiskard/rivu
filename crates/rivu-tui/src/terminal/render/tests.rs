@@ -73,7 +73,7 @@ fn long_detail_errors_scroll_independently_and_loading_preserves_ready_position(
         ui.details = Details {
             target: Some(2),
             source_label: "shell-panel-queue",
-            state: DetailState::Ready(Box::new(full_track(2))),
+            state: DetailState::Ready(Arc::new(full_track(2))),
             scroll: 4,
             ..Details::default()
         };
@@ -116,7 +116,7 @@ fn long_detail_errors_scroll_independently_and_loading_preserves_ready_position(
             ui.key_action(KeyEvent::from(key), &state);
             assert_eq!((ui.details.scroll, ui.details.max_scroll), position);
         }
-        ui.details.state = DetailState::Ready(Box::new(full_track(2)));
+        ui.details.state = DetailState::Ready(Arc::new(full_track(2)));
         terminal.draw(|frame| draw(frame, &state, &mut ui)).unwrap();
         assert_eq!((ui.details.scroll, ui.details.max_scroll), position);
         assert_eq!(terminal_text(&terminal), ready_text);
@@ -154,6 +154,62 @@ fn help_hierarchy_wraps_and_scrolls_read_only_in_current_context() {
         ui.key_action(KeyEvent::from(KeyCode::Esc), &state);
         assert!(!ui.show_help && !ui.details_active);
     }
+}
+
+#[test]
+fn cached_text_preserves_nonwrapping_unicode_clipping_and_style() {
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("界", Style::default().fg(ratatui::style::Color::Red)),
+            Span::raw("a"),
+        ]),
+        Line::from("加载中…"),
+        Line::from("e\u{301}👩‍🚀z"),
+    ];
+    for width in [1, 2, 3, 7] {
+        for scroll in 0..lines.len() {
+            let mut cached = Terminal::new(TestBackend::new(width, 3)).unwrap();
+            cached
+                .draw(|frame| draw_cached_lines(frame, frame.area(), &lines, scroll))
+                .unwrap();
+            let mut expected = Terminal::new(TestBackend::new(width, 3)).unwrap();
+            expected
+                .draw(|frame| {
+                    frame.render_widget(
+                        Paragraph::new(lines.clone()).scroll((scroll as u16, 0)),
+                        frame.area(),
+                    );
+                })
+                .unwrap();
+            assert_eq!(cached.backend().buffer(), expected.backend().buffer());
+        }
+    }
+}
+
+#[test]
+fn details_refresh_after_metadata_changes_without_reopening() {
+    let state = TuiSnapshot::default();
+    let mut track = full_track(2);
+    track.title = "Original title".into();
+    let mut ui = UiState::new(Arc::new(Localizer::for_terminal("en-US")));
+    ui.details_active = true;
+    ui.details = Details {
+        target: Some(2),
+        source_label: "shell-panel-queue",
+        state: DetailState::Ready(Arc::new(track)),
+        ..Details::default()
+    };
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal.draw(|frame| draw(frame, &state, &mut ui)).unwrap();
+    assert!(terminal_text(&terminal).contains("Original title"));
+    let DetailState::Ready(track) = &mut ui.details.state else {
+        unreachable!()
+    };
+    Arc::make_mut(track).title = "Updated title".into();
+    terminal.draw(|frame| draw(frame, &state, &mut ui)).unwrap();
+    let text = terminal_text(&terminal);
+    assert!(text.contains("Updated title"));
+    assert!(!text.contains("Original title"));
 }
 
 #[test]

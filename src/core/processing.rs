@@ -49,7 +49,7 @@ impl Core {
         self.sync_processing_audio_availability();
         let status = status?;
         let id = status.id;
-        self.state.system.processing = Some(status);
+        self.state.system.processing = Some(Arc::new(status));
         if mode != GraphExecutionMode::Offline {
             self.pending_processing_audition = Some((id, self.generation));
         }
@@ -103,7 +103,7 @@ impl Core {
         let status = status?;
         let task_id = status.id;
         self.pending_processing_audition = Some((status.id, self.generation));
-        self.state.system.processing = Some(status);
+        self.state.system.processing = Some(Arc::new(status));
         Ok(Some(task_id))
     }
 
@@ -213,7 +213,7 @@ impl Core {
             .processing
             .start_graph(track, Arc::new(config), request)?;
         let task_id = status.id;
-        self.state.system.processing = Some(status);
+        self.state.system.processing = Some(Arc::new(status));
         Ok(task_id)
     }
 
@@ -244,6 +244,8 @@ impl Core {
                     .system
                     .processing
                     .iter_mut()
+                    .filter(|status| status.id == id)
+                    .map(Arc::make_mut)
                     .chain(self.processing_results.iter_mut())
                     .filter(|status| status.id == id)
                 {
@@ -463,7 +465,7 @@ impl Core {
         self.sync_processing_audio_availability();
         let status = status?;
         let id = status.id;
-        self.state.system.processing = Some(status);
+        self.state.system.processing = Some(Arc::new(status));
         Ok(id)
     }
     fn sync_processing_audio_availability(&mut self) {
@@ -473,6 +475,8 @@ impl Core {
                 .system
                 .processing
                 .iter_mut()
+                .filter(|status| status.id == result.status.id)
+                .map(Arc::make_mut)
                 .chain(self.processing_results.iter_mut())
                 .filter(|status| status.id == result.status.id)
             {
@@ -492,7 +496,7 @@ impl Core {
         self.state
             .system
             .processing
-            .as_ref()
+            .as_deref()
             .filter(|status| status.id == id)
             .or_else(|| {
                 self.processing_results
@@ -517,7 +521,7 @@ impl Core {
         if let Some(retained) = self.processing_results.iter_mut().find(|s| s.id == id) {
             retained.clone_from(status);
         } else {
-            self.processing_results.push_back(status.clone());
+            self.processing_results.push_back(status.as_ref().clone());
             while self.processing_results.len() > MAX_RETAINED_SCAN_RESULTS {
                 self.processing_results.pop_front();
             }
@@ -530,6 +534,7 @@ impl Core {
         if let Some(id) = active {
             let retains_audio = self.processing.results().iter().any(|r| r.status.id == id);
             if let Some(status) = self.state.system.processing.as_mut().filter(|s| s.id == id) {
+                let status = Arc::make_mut(status);
                 status.phase = ProcessingPhase::Cancelled;
                 status.error = Some("Processing cancelled during shutdown".into());
                 if !retains_audio {
@@ -587,6 +592,7 @@ impl Core {
                     && let Some(status) =
                         self.state.system.processing.as_mut().filter(|s| s.id == id)
                 {
+                    let status = Arc::make_mut(status);
                     if let Some(existing) = status
                         .graph_nodes
                         .iter_mut()
@@ -608,6 +614,7 @@ impl Core {
                     && let Some(status) =
                         self.state.system.processing.as_mut().filter(|s| s.id == id)
                 {
+                    let status = Arc::make_mut(status);
                     status.completed = completed;
                     status.total = total;
                     status.phase = phase;
@@ -659,10 +666,10 @@ impl Core {
                             // Export receipts do not advertise retired PCM.
                             result.status.outputs = None;
                             result.status.graph_outputs.clear();
-                            self.state.system.processing = Some(result.status.clone());
+                            self.state.system.processing = Some(Arc::new(result.status.clone()));
                             self.processing.retire(result);
                         } else {
-                            self.state.system.processing = Some(result.status.clone());
+                            self.state.system.processing = Some(Arc::new(result.status.clone()));
                             if let Some(evicted) = self.processing.retain_result(result) {
                                 self.processing_cache_evicted(evicted);
                             }
@@ -692,6 +699,7 @@ impl Core {
                                 if let Some(status) =
                                     self.state.system.processing.as_mut().filter(|s| s.id == id)
                                 {
+                                    let status = Arc::make_mut(status);
                                     status.phase = ProcessingPhase::Failed;
                                     status.error = Some(error.clone());
                                 }
@@ -708,6 +716,7 @@ impl Core {
                         if let Some(status) =
                             self.state.system.processing.as_mut().filter(|s| s.id == id)
                         {
+                            let status = Arc::make_mut(status);
                             status.phase = if cancelled {
                                 ProcessingPhase::Cancelled
                             } else {
@@ -772,6 +781,7 @@ impl Core {
                     Err(error) => Err(error),
                 };
                 if let Some(status) = self.state.system.processing.as_mut().filter(|s| s.id == id) {
+                    let status = Arc::make_mut(status);
                     status.phase = if outcome.is_ok() {
                         ProcessingPhase::Complete
                     } else if cancelled {
@@ -861,7 +871,7 @@ impl Core {
             self.pending_processing_audition = Some((id, self.generation));
             status.phase = ProcessingPhase::Processing;
             status.error = None;
-            self.state.system.processing = Some(status);
+            self.state.system.processing = Some(Arc::new(status));
             return Ok(Some(id));
         }
         let result = self

@@ -1880,6 +1880,39 @@ fn graph_task_query_frame_retains_pcm_availability_and_context_without_paths() {
         panic!("expected retained graph task");
     };
     assert_eq!(*decoded, task);
+
+    let mut snapshot = crate::model::ClientSnapshot::default();
+    snapshot.system.processing = Some(Arc::new(task.clone()));
+    let previous = snapshot.clone();
+    Arc::make_mut(snapshot.system.processing.as_mut().unwrap()).phase = ProcessingPhase::Cancelled;
+    assert_eq!(
+        previous.system.processing.as_ref().unwrap().phase,
+        ProcessingPhase::Complete
+    );
+    assert_eq!(
+        serde_json::to_value(&previous.system).unwrap()["processing"],
+        json
+    );
+    encode_response_frame_into(
+        &WireResponse::State(wire_state(StateResponse {
+            system: Some(snapshot.system),
+            ..StateResponse::default()
+        })),
+        &mut encoded,
+    )
+    .unwrap();
+    let WireResponse::State(decoded) = decode_response_frame(&encoded[4..]).unwrap() else {
+        panic!("expected shared processing system response");
+    };
+    assert_eq!(
+        state_response(decoded)
+            .system
+            .unwrap()
+            .processing
+            .unwrap()
+            .phase,
+        ProcessingPhase::Cancelled
+    );
 }
 
 #[test]

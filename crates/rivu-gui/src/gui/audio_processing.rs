@@ -819,7 +819,11 @@ impl AudioProcessing {
                     .iter()
                     .map(|preset| &preset.name));
         let changed = !Arc::ptr_eq(&self.state.system.config, &state.system.config)
-            || self.state.system.processing != state.system.processing
+            || match (&self.state.system.processing, &state.system.processing) {
+                (Some(previous), Some(current)) => !Arc::ptr_eq(previous, current),
+                (None, None) => false,
+                _ => true,
+            }
             || self.state.system.processing_audition != state.system.processing_audition
             || self.state.playback.status != state.playback.status
             || format_changed;

@@ -20,7 +20,7 @@ use rivu_protocol::model::{
     DirectoryRow, LibraryRow, PlaybackStatus, PlaylistEntryRow, PlaylistSummary, QueueRow,
     RepeatMode,
 };
-use std::borrow::Cow;
+use std::{borrow::Cow, sync::Arc};
 use unicode_segmentation::UnicodeSegmentation;
 
 pub(super) fn help_bindings(context: KeyboardContext) -> impl Iterator<Item = keyboard::HelpRow> {
@@ -37,7 +37,7 @@ pub(super) fn track_label<'a>(title: &'a str, artist: &'a str) -> Cow<'a, str> {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct TerminalColors {
     bg: ratatui::style::Color,
     text: ratatui::style::Color,
@@ -208,7 +208,7 @@ fn page_body(
     ])
     .split(area);
     frame.render_widget(
-        Paragraph::new(title.to_owned()).style(
+        Paragraph::new(title).style(
             Style::default()
                 .fg(colors.accent)
                 .add_modifier(Modifier::BOLD),
@@ -224,15 +224,46 @@ fn page_body(
     rows[2]
 }
 
-fn draw_details(
-    frame: &mut ratatui::Frame<'_>,
-    area: Rect,
-    details: &mut Details,
-    i18n: &Localizer,
+pub(super) struct DetailsLayout {
+    target: Option<i64>,
+    source_label: &'static str,
+    state: DetailState,
+    i18n: Arc<Localizer>,
+    width: usize,
     colors: TerminalColors,
-) {
-    let area = page_body(frame, area, i18n.text("terminal-details"), colors);
-    let width = area.width as usize;
+    lines: Vec<Line<'static>>,
+}
+
+impl DetailsLayout {
+    fn matches(
+        &self,
+        details: &Details,
+        i18n: &Arc<Localizer>,
+        width: usize,
+        colors: TerminalColors,
+    ) -> bool {
+        self.target == details.target
+            && self.source_label == details.source_label
+            && Arc::ptr_eq(&self.i18n, i18n)
+            && self.width == width
+            && self.colors == colors
+            && match (&self.state, &details.state) {
+                (DetailState::Ready(a), DetailState::Ready(b)) => Arc::ptr_eq(a, b),
+                (DetailState::Loading, DetailState::Loading)
+                | (DetailState::Removed, DetailState::Removed) => true,
+                (DetailState::Error(a), DetailState::Error(b))
+                | (DetailState::Container(a), DetailState::Container(b)) => a == b,
+                _ => false,
+            }
+    }
+}
+
+fn details_lines(
+    details: &Details,
+    i18n: &Localizer,
+    width: usize,
+    colors: TerminalColors,
+) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     if let Some(id) = details.target {
         if let DetailState::Ready(track) = &details.state {
@@ -486,6 +517,65 @@ fn draw_details(
             );
         }
     }
+    lines
+}
+
+fn draw_cached_lines(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    lines: &[Line<'_>],
+    scroll: usize,
+) {
+    for (row, line) in lines
+        .iter()
+        .skip(scroll)
+        .take(area.height as usize)
+        .enumerate()
+    {
+        let mut x = 0;
+        // These cached bodies are left-aligned. Match Paragraph's truncation:
+        // skip a grapheme wider than the entire line, not the remaining width.
+        for grapheme in line.styled_graphemes(Style::default()) {
+            let width = Span::raw(grapheme.symbol).width() as u16;
+            if width == 0 || width > area.width {
+                continue;
+            }
+            if width > area.width - x {
+                break;
+            }
+            frame.buffer_mut()[(area.x + x, area.y + row as u16)]
+                .set_symbol(grapheme.symbol)
+                .set_style(grapheme.style);
+            x += width;
+        }
+    }
+}
+
+fn draw_details(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    details: &mut Details,
+    i18n: &Arc<Localizer>,
+    colors: TerminalColors,
+) {
+    let area = page_body(frame, area, i18n.text("terminal-details"), colors);
+    let width = area.width as usize;
+    if details
+        .layout
+        .as_ref()
+        .is_none_or(|layout| !layout.matches(details, i18n, width, colors))
+    {
+        details.layout = Some(DetailsLayout {
+            target: details.target,
+            source_label: details.source_label,
+            state: details.state.clone(),
+            i18n: Arc::clone(i18n),
+            width,
+            colors,
+            lines: details_lines(details, i18n, width, colors),
+        });
+    }
+    let lines = &details.layout.as_ref().expect("details layout").lines;
     // Error navigation is independent of the retained track reading position.
     let scroll = match details.state {
         DetailState::Loading => 0,
@@ -500,16 +590,7 @@ fn draw_details(
             details.scroll
         }
     };
-    frame.render_widget(
-        Paragraph::new(
-            lines
-                .into_iter()
-                .skip(scroll)
-                .take(area.height as usize)
-                .collect::<Vec<_>>(),
-        ),
-        area,
-    );
+    draw_cached_lines(frame, area, lines, scroll);
 }
 
 fn help_group(action: Action) -> usize {
@@ -562,6 +643,15 @@ fn help_order(action: Action) -> u8 {
     }
 }
 
+pub(super) struct HelpLayout {
+    context: KeyboardContext,
+    title: String,
+    i18n: Arc<Localizer>,
+    width: usize,
+    colors: TerminalColors,
+    lines: Vec<Line<'static>>,
+}
+
 fn draw_help(frame: &mut ratatui::Frame<'_>, area: Rect, ui: &mut UiState, colors: TerminalColors) {
     let context = ui.keyboard_context();
     let context_label = match context {
@@ -574,11 +664,18 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, area: Rect, ui: &mut UiState, color
         KeyboardContext::TuiOther | KeyboardContext::TuiOtherTarget => "library-other",
         _ => "shell-panel-library",
     };
-    let title = format!(
-        "{} — {}",
-        ui.i18n.text("terminal-keys"),
-        ui.i18n.text(context_label)
-    );
+    let title = ui
+        .help_layout
+        .as_ref()
+        .filter(|layout| layout.context == context && Arc::ptr_eq(&layout.i18n, &ui.i18n))
+        .map(|layout| Cow::Borrowed(layout.title.as_str()))
+        .unwrap_or_else(|| {
+            Cow::Owned(format!(
+                "{} — {}",
+                ui.i18n.text("terminal-keys"),
+                ui.i18n.text(context_label)
+            ))
+        });
     let body = page_body(frame, area, &title, colors);
     let rows = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(body);
     let inner = rows[0];
@@ -589,113 +686,120 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, area: Rect, ui: &mut UiState, color
     );
     ui.page_size = inner.height.max(1) as usize;
     let width = inner.width as usize;
-    let mut bindings: Vec<_> = help_bindings(context)
-        .map(|binding| {
-            let label = binding.label();
-            (binding, label)
-        })
-        .collect();
-    bindings.sort_by_key(|(binding, _)| help_order(binding.action));
-    let commands = [
-        (":q / :quit", "terminal-command-close"),
-        (":qa / :qall", "terminal-command-shutdown"),
-        (":help", "terminal-command-help"),
-    ];
-    let key_width = bindings
-        .iter()
-        .map(|(_, label)| Span::raw(label.as_str()).width())
-        .chain(commands.iter().map(|(key, _)| Span::raw(*key).width()))
-        .max()
-        .unwrap_or(0);
-    let indent = 2.min(width.saturating_sub(1));
-    let columns = width >= indent + key_width + 10;
-    let description_indent = if columns {
-        indent + key_width + 2
-    } else {
-        (indent + 2).min(width.saturating_sub(1))
-    };
-    let append_row = |lines: &mut Vec<Line<'static>>, key: &str, description: &str| {
-        let descriptions =
-            wrap_details(description, width.saturating_sub(description_indent).max(1));
-        if columns {
-            for (index, description) in descriptions.into_iter().enumerate() {
-                let prefix = if index == 0 {
-                    format!(
-                        "{}{}{}",
-                        " ".repeat(indent),
-                        key,
-                        " ".repeat(key_width.saturating_sub(Span::raw(key).width()) + 2)
-                    )
-                } else {
-                    " ".repeat(description_indent)
-                };
-                lines.push(Line::from(vec![
-                    Span::styled(prefix, Style::default().fg(colors.text)),
-                    Span::styled(description, Style::default().fg(colors.secondary)),
-                ]));
-            }
+    if ui.help_layout.as_ref().is_none_or(|layout| {
+        layout.context != context
+            || !Arc::ptr_eq(&layout.i18n, &ui.i18n)
+            || layout.width != width
+            || layout.colors != colors
+    }) {
+        let mut bindings: Vec<_> = help_bindings(context)
+            .map(|binding| {
+                let label = binding.label();
+                (binding, label)
+            })
+            .collect();
+        bindings.sort_by_key(|(binding, _)| help_order(binding.action));
+        let commands = [
+            (":q / :quit", "terminal-command-close"),
+            (":qa / :qall", "terminal-command-shutdown"),
+            (":help", "terminal-command-help"),
+        ];
+        let key_width = bindings
+            .iter()
+            .map(|(_, label)| Span::raw(label.as_str()).width())
+            .chain(commands.iter().map(|(key, _)| Span::raw(*key).width()))
+            .max()
+            .unwrap_or(0);
+        let indent = 2.min(width.saturating_sub(1));
+        let columns = width >= indent + key_width + 10;
+        let description_indent = if columns {
+            indent + key_width + 2
         } else {
-            for part in wrap_details(key, width.saturating_sub(indent).max(1)) {
-                lines.push(Line::from(Span::styled(
-                    format!("{}{part}", " ".repeat(indent)),
-                    Style::default().fg(colors.text),
-                )));
+            (indent + 2).min(width.saturating_sub(1))
+        };
+        let append_row = |lines: &mut Vec<Line<'static>>, key: &str, description: &str| {
+            let descriptions =
+                wrap_details(description, width.saturating_sub(description_indent).max(1));
+            if columns {
+                for (index, description) in descriptions.into_iter().enumerate() {
+                    let prefix = if index == 0 {
+                        format!(
+                            "{}{}{}",
+                            " ".repeat(indent),
+                            key,
+                            " ".repeat(key_width.saturating_sub(Span::raw(key).width()) + 2)
+                        )
+                    } else {
+                        " ".repeat(description_indent)
+                    };
+                    lines.push(Line::from(vec![
+                        Span::styled(prefix, Style::default().fg(colors.text)),
+                        Span::styled(description, Style::default().fg(colors.secondary)),
+                    ]));
+                }
+            } else {
+                for part in wrap_details(key, width.saturating_sub(indent).max(1)) {
+                    lines.push(Line::from(Span::styled(
+                        format!("{}{part}", " ".repeat(indent)),
+                        Style::default().fg(colors.text),
+                    )));
+                }
+                for description in descriptions {
+                    lines.push(Line::from(Span::styled(
+                        format!("{}{description}", " ".repeat(description_indent)),
+                        Style::default().fg(colors.secondary),
+                    )));
+                }
             }
-            for description in descriptions {
-                lines.push(Line::from(Span::styled(
-                    format!("{}{description}", " ".repeat(description_indent)),
-                    Style::default().fg(colors.secondary),
-                )));
-            }
-        }
-    };
-    let mut lines = Vec::new();
-    for (group, label) in [
-        (4, "terminal-help-commands"),
-        (0, "terminal-help-navigation"),
-        (1, "playback-title"),
-        (2, "terminal-help-page"),
-        (3, "terminal-help-exit"),
-    ] {
-        if group != 4
-            && !bindings
-                .iter()
-                .any(|(binding, _)| help_group(binding.action) == group)
-        {
-            continue;
-        }
-        lines.push(Line::from(Span::styled(
-            ui.i18n.text(label).to_owned(),
-            Style::default()
-                .fg(colors.accent)
-                .add_modifier(Modifier::BOLD),
-        )));
-        if group == 4 {
-            for (key, description) in commands {
-                append_row(&mut lines, key, ui.i18n.text(description));
-            }
-        } else {
-            for (binding, label) in bindings
-                .iter()
-                .filter(|(binding, _)| help_group(binding.action) == group)
+        };
+        let mut lines = Vec::new();
+        for (group, label) in [
+            (4, "terminal-help-commands"),
+            (0, "terminal-help-navigation"),
+            (1, "playback-title"),
+            (2, "terminal-help-page"),
+            (3, "terminal-help-exit"),
+        ] {
+            if group != 4
+                && !bindings
+                    .iter()
+                    .any(|(binding, _)| help_group(binding.action) == group)
             {
-                append_row(&mut lines, label, ui.i18n.text(binding.description));
+                continue;
             }
+            lines.push(Line::from(Span::styled(
+                ui.i18n.text(label).to_owned(),
+                Style::default()
+                    .fg(colors.accent)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            if group == 4 {
+                for (key, description) in commands {
+                    append_row(&mut lines, key, ui.i18n.text(description));
+                }
+            } else {
+                for (binding, label) in bindings
+                    .iter()
+                    .filter(|(binding, _)| help_group(binding.action) == group)
+                {
+                    append_row(&mut lines, label, ui.i18n.text(binding.description));
+                }
+            }
+            lines.push(Line::default());
         }
-        lines.push(Line::default());
+        ui.help_layout = Some(HelpLayout {
+            context,
+            title: title.into_owned(),
+            i18n: Arc::clone(&ui.i18n),
+            width,
+            colors,
+            lines,
+        });
     }
+    let lines = &ui.help_layout.as_ref().expect("help layout").lines;
     ui.help_max_scroll = lines.len().saturating_sub(inner.height as usize);
     ui.help_scroll = ui.help_scroll.min(ui.help_max_scroll);
-    frame.render_widget(
-        Paragraph::new(
-            lines
-                .into_iter()
-                .skip(ui.help_scroll)
-                .take(inner.height as usize)
-                .collect::<Vec<_>>(),
-        ),
-        inner,
-    );
+    draw_cached_lines(frame, inner, lines, ui.help_scroll);
 }
 
 pub(super) fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {

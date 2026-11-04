@@ -492,7 +492,7 @@ pub struct SystemState {
     pub database_optimization: Option<DatabaseOptimization>,
     pub shutting_down: bool,
     pub relocation_task: Option<RelocationTaskStatus>,
-    pub processing: Option<ProcessingTaskStatus>,
+    pub processing: Option<Arc<ProcessingTaskStatus>>,
 }
 impl Default for SystemState {
     fn default() -> Self {

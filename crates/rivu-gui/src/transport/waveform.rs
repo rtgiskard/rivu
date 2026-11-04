@@ -5,11 +5,10 @@ use futures::{FutureExt, channel::oneshot};
 use parking_lot::{Mutex, RwLock};
 use rivu_protocol::waveform::WaveformFrame;
 use rivu_protocol::{
-    model::Track,
-    transport::timeout,
+    transport::{release_large_buffer, timeout},
     waveform::{
-        IO_TIMEOUT, MAX_FRAME, Request, VERSION, address, connect, decode, encode, read_frame,
-        write_frame,
+        ExpectedSource, IO_TIMEOUT, MAX_FRAME, Request, VERSION, address, connect, decode,
+        encode_frame_into, read_frame, write_frame,
     },
 };
 use std::{
@@ -23,13 +22,14 @@ use std::{
     },
     thread::{self, JoinHandle},
 };
-type Response = rivu_protocol::waveform::Response<WaveformFrame>;
+type Response = rivu_protocol::waveform::Response<Box<WaveformFrame>>;
 type Wakeup = Arc<dyn Fn() + Send + Sync>;
 type ErrorCallback = Arc<dyn Fn(String) + Send + Sync>;
-fn exchange(stream: &mut UnixStream, request: &Request) -> Result<Response> {
-    let bytes = encode(request)?;
-    stream.write_all(&(bytes.len() as u32).to_le_bytes())?;
-    stream.write_all(&bytes)?;
+fn exchange(stream: &mut UnixStream, request: &Request, bytes: &mut Vec<u8>) -> Result<Response> {
+    encode_frame_into(request, bytes)?;
+    stream.write_all(bytes)?;
+    bytes.clear();
+    release_large_buffer(bytes);
     let mut prefix = [0; 4];
     stream.read_exact(&mut prefix)?;
     let length = u32::from_le_bytes(prefix) as usize;
@@ -37,9 +37,15 @@ fn exchange(stream: &mut UnixStream, request: &Request) -> Result<Response> {
         length <= MAX_FRAME,
         "Waveform response exceeds its byte limit"
     );
-    let mut response = vec![0; length];
-    stream.read_exact(&mut response)?;
-    let response = decode(&response)?;
+    if length > bytes.capacity() {
+        bytes.reserve_exact(length);
+    }
+    bytes.resize(length, 0);
+    stream.read_exact(bytes)?;
+    let response = decode(bytes);
+    bytes.clear();
+    release_large_buffer(bytes);
+    let response = response?;
     if let Response::Error(error) = response {
         bail!(error);
     }
@@ -71,6 +77,7 @@ impl WaveClient {
         rivu_protocol::wire::verify_peer(&stream)?;
         stream.set_read_timeout(Some(IO_TIMEOUT))?;
         stream.set_write_timeout(Some(IO_TIMEOUT))?;
+        let mut bytes = Vec::new();
         validate_hello(
             exchange(
                 &mut stream,
@@ -78,6 +85,7 @@ impl WaveClient {
                     version: VERSION,
                     instance,
                 },
+                &mut bytes,
             )?,
             instance,
         )?;
@@ -96,12 +104,13 @@ impl WaveClient {
             .spawn(move || {
                 let mut known = None;
                 while requests.recv_blocking().is_ok() {
-                    let result = exchange(&mut stream, &Request::Progressive { known });
+                    let result = exchange(&mut stream, &Request::Progressive { known }, &mut bytes);
                     match result {
                         Ok(Response::Progressive { key, frame }) => {
                             known = Some(key);
                             if let Some(frame) = frame {
-                                *output.write() = *frame;
+                                let retired = std::mem::replace(&mut *output.write(), *frame);
+                                drop(retired);
                                 let notify = notify.read().clone();
                                 if let Some(notify) = notify {
                                     notify();
@@ -177,33 +186,28 @@ impl Drop for WaveClient {
 pub(crate) async fn scan_full(
     data_dir: PathBuf,
     instance: u32,
-    track: Track,
+    expected: ExpectedSource,
     source: Option<u64>,
     cancelled: oneshot::Receiver<()>,
 ) -> Result<WaveformFrame> {
     let operation = async {
         let mut stream = timeout(IO_TIMEOUT, connect(&data_dir)).await??;
-        write_frame(
-            &mut stream,
+        let mut bytes = Vec::new();
+        encode_frame_into(
             &Request::Hello {
                 version: VERSION,
                 instance,
             },
-        )
-        .await?;
+            &mut bytes,
+        )?;
+        write_frame(&mut stream, &mut bytes).await?;
         validate_hello(
-            timeout(IO_TIMEOUT, read_frame(&mut stream)).await??,
+            timeout(IO_TIMEOUT, read_frame(&mut stream, &mut bytes)).await??,
             instance,
         )?;
-        write_frame(
-            &mut stream,
-            &Request::Full {
-                track: Box::new(track),
-                source,
-            },
-        )
-        .await?;
-        match read_frame(&mut stream).await? {
+        encode_frame_into(&Request::Full { expected, source }, &mut bytes)?;
+        write_frame(&mut stream, &mut bytes).await?;
+        match read_frame(&mut stream, &mut bytes).await? {
             Response::Full(frame) => Ok(*frame),
             Response::Error(error) => bail!(error),
             _ => bail!("Unexpected full waveform response"),
@@ -233,11 +237,165 @@ mod tests {
     }
 
     fn respond(stream: &mut UnixStream, response: Response) {
-        let bytes = encode(&response).unwrap();
-        stream
-            .write_all(&(bytes.len() as u32).to_le_bytes())
-            .unwrap();
+        let mut bytes = Vec::new();
+        encode_frame_into(&response, &mut bytes).unwrap();
         stream.write_all(&bytes).unwrap();
+    }
+
+    #[test]
+    fn cancelling_a_full_scan_closes_its_dedicated_connection() {
+        let directory = tempfile::tempdir().unwrap();
+        let listener = UnixListener::bind_addr(&address(directory.path()).unwrap()).unwrap();
+        let expected =
+            ExpectedSource::from(&crate::test_support::artwork_track("source.wav".into()));
+        let (started, captured) = async_channel::bounded(1);
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(IO_TIMEOUT)).unwrap();
+            assert!(matches!(receive(&mut stream), Request::Hello { .. }));
+            respond(
+                &mut stream,
+                Response::Hello {
+                    version: VERSION,
+                    instance: 7,
+                },
+            );
+            assert!(matches!(receive(&mut stream), Request::Full { .. }));
+            started.send_blocking(()).unwrap();
+            assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+        });
+        let (cancel, cancelled) = oneshot::channel();
+        let result = async_io::block_on(async {
+            let cancel = async {
+                captured.recv().await.unwrap();
+                cancel.send(()).unwrap();
+            };
+            let (result, ()) = futures::join!(
+                scan_full(directory.path().to_owned(), 7, expected, None, cancelled),
+                cancel,
+            );
+            result
+        });
+        assert!(result.unwrap_err().to_string().contains("cancelled"));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn full_scan_sends_only_source_expectations_and_receives_the_bound_frame() {
+        let directory = tempfile::tempdir().unwrap();
+        let listener = UnixListener::bind_addr(&address(directory.path()).unwrap()).unwrap();
+        let mut track = crate::test_support::artwork_track("source.wav".into());
+        track.title = "metadata is not scan input".repeat(MAX_FRAME / 16);
+        let expected = ExpectedSource::from(&track);
+        let requested = expected.clone();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(IO_TIMEOUT)).unwrap();
+            assert!(matches!(
+                receive(&mut stream),
+                Request::Hello {
+                    version: VERSION,
+                    instance: 7
+                }
+            ));
+            respond(
+                &mut stream,
+                Response::Hello {
+                    version: VERSION,
+                    instance: 7,
+                },
+            );
+            let Request::Full { expected, source } = receive(&mut stream) else {
+                panic!("expected full scan request");
+            };
+            assert_eq!(expected, requested);
+            assert_eq!(source, Some(17));
+            let mut frame = WaveformFrame::default();
+            frame.revision = 29;
+            frame.complete = true;
+            frame.path = Some(expected.path);
+            respond(&mut stream, Response::Full(Box::new(frame)));
+        });
+        let (_cancel, cancelled) = oneshot::channel();
+        let frame = async_io::block_on(scan_full(
+            directory.path().to_owned(),
+            7,
+            expected,
+            Some(17),
+            cancelled,
+        ))
+        .unwrap();
+        assert_eq!(frame.revision, 29);
+        assert!(frame.complete);
+        assert_eq!(frame.path, Some(track.path));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn source_expectations_ignore_display_edits_but_reject_source_changes() {
+        let original = crate::test_support::artwork_track("source.wav".into());
+        let expected = ExpectedSource::from(&original);
+        let mut changed = original.clone();
+        changed.title = "renamed".into();
+        changed.duration = Some(37.0);
+        assert!(expected.matches(&changed));
+        changed.id += 1;
+        assert!(!expected.matches(&changed));
+        changed = original.clone();
+        changed.path = "replacement.wav".into();
+        assert!(!expected.matches(&changed));
+        changed = original.clone();
+        changed.fingerprint = None;
+        assert!(!expected.matches(&changed));
+        changed = original.clone();
+        changed.decoder_hint = rivu_format::decoder_hint::DecoderHint::Ffmpeg;
+        assert!(!expected.matches(&changed));
+        changed = original;
+        changed.cue = Some(rivu_protocol::model::CueSegment {
+            sheet: "source.cue".into(),
+            number: 1,
+            start_frame: 75,
+            end_frame: Some(150),
+        });
+        assert!(!expected.matches(&changed));
+    }
+
+    #[test]
+    fn blocking_exchange_rejects_oversized_and_trailing_responses() {
+        for oversized in [true, false] {
+            let (mut stream, mut peer) = UnixStream::pair().unwrap();
+            stream.set_read_timeout(Some(IO_TIMEOUT)).unwrap();
+            let server = thread::spawn(move || {
+                assert!(matches!(receive(&mut peer), Request::Progressive { .. }));
+                if oversized {
+                    peer.write_all(&((MAX_FRAME + 1) as u32).to_le_bytes())
+                        .unwrap();
+                } else {
+                    let mut bytes = Vec::new();
+                    encode_frame_into(
+                        &Response::Hello {
+                            version: VERSION,
+                            instance: 7,
+                        },
+                        &mut bytes,
+                    )
+                    .unwrap();
+                    bytes.push(0);
+                    let length = (bytes.len() - 4) as u32;
+                    bytes[..4].copy_from_slice(&length.to_le_bytes());
+                    peer.write_all(&bytes).unwrap();
+                }
+            });
+            assert!(
+                exchange(
+                    &mut stream,
+                    &Request::Progressive { known: None },
+                    &mut Vec::new()
+                )
+                .is_err()
+            );
+            server.join().unwrap();
+        }
     }
 
     #[test]

@@ -2663,7 +2663,7 @@ fn bitrate_tui() -> TuiState {
     );
     tui.ui.details = Details {
         target: Some(7),
-        state: DetailState::Ready(Box::new(full_track(7))),
+        state: DetailState::Ready(Arc::new(full_track(7))),
         stamp: Some(query.stamp(revisions)),
         scroll: 4,
         max_scroll: 12,
@@ -2871,7 +2871,7 @@ fn bitrate_details_reject_late_reads_and_preserve_scroll_during_retry() {
         view: ViewResponse::Track(Some(full_track(7))),
     };
     tui.ui.details.stamp = old_stamp;
-    tui.ui.details.state = DetailState::Ready(Box::new(full_track(7)));
+    tui.ui.details.state = DetailState::Ready(Arc::new(full_track(7)));
     let mut next = tui.snapshot.clone();
     next.library.bitrate_revision += 1;
     tui.apply_snapshot(next.clone());

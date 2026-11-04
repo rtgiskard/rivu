@@ -1767,7 +1767,7 @@ mod tests {
                 graph_nodes: Vec::new(),
                 graph_plan: None,
             };
-            Rc::make_mut(&mut this.state).system.processing = Some(task);
+            Rc::make_mut(&mut this.state).system.processing = Some(Arc::new(task));
             this.page = Page::Results;
         });
         let window = cx.open_window(size(px(1200.), px(900.)), {
@@ -1804,12 +1804,14 @@ mod tests {
         });
         // The same retained input is no longer a focus owner when its result disappears.
         processing.update(cx, |this, _| {
-            Rc::make_mut(&mut this.state)
-                .system
-                .processing
-                .as_mut()
-                .unwrap()
-                .phase = ProcessingPhase::Failed;
+            Arc::make_mut(
+                Rc::make_mut(&mut this.state)
+                    .system
+                    .processing
+                    .as_mut()
+                    .unwrap(),
+            )
+            .phase = ProcessingPhase::Failed;
         });
         cx.update_window(handle, |_, window, cx| {
             window.refresh();

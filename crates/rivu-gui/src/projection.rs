@@ -47,7 +47,7 @@ pub struct GuiSystemSnapshot {
     pub ffmpeg_status: String,
     pub shutting_down: bool,
     pub relocation_task: Option<rivu_protocol::model::RelocationTaskStatus>,
-    pub processing: Option<rivu_protocol::model::ProcessingTaskStatus>,
+    pub processing: Option<Arc<rivu_protocol::model::ProcessingTaskStatus>>,
     pub processing_audition: Option<ProcessingAudition>,
 }
 

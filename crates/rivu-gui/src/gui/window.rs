@@ -116,7 +116,7 @@ pub(crate) struct WindowView {
 struct PendingWaveformScan {
     generation: u64,
     display_generation: u64,
-    track: rivu_protocol::model::Track,
+    expected: rivu_protocol::waveform::ExpectedSource,
     source: Option<u64>,
     cancelled: futures::channel::oneshot::Receiver<()>,
 }
@@ -1160,7 +1160,7 @@ impl WindowView {
         self.pending_full_waveform = Some(PendingWaveformScan {
             generation,
             display_generation,
-            track,
+            expected: rivu_protocol::waveform::ExpectedSource::from(&track),
             source,
             cancelled,
         });
@@ -1185,7 +1185,7 @@ impl WindowView {
             let result = crate::transport::waveform::scan_full(
                 data_dir,
                 instance,
-                pending.track,
+                pending.expected,
                 pending.source,
                 pending.cancelled,
             )
