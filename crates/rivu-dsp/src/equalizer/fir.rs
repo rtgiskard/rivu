@@ -176,14 +176,13 @@ impl FirEqualizer {
 
     fn convolve_partition(&mut self) -> Result<()> {
         for channel in 0..self.channels {
-            self.work.fill(Complex::default());
-            for (bin, &sample) in self
-                .work
+            for (bin, &sample) in self.work[..PARTITION]
                 .iter_mut()
                 .zip(&self.input[channel * PARTITION..(channel + 1) * PARTITION])
             {
-                bin.re = sample;
+                *bin = Complex::new(sample, 0.0);
             }
+            self.work[PARTITION..].fill(Complex::default());
             self.forward
                 .as_ref()
                 .expect("active FIR has FFT plans")

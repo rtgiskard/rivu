@@ -506,6 +506,9 @@ impl Playback {
     }
 
     pub(super) fn set_equalizer(&mut self, config: &EqualizerConfig) -> Result<()> {
+        if self.equalizer.config() == config {
+            return Ok(());
+        }
         self.equalizer.reconfigure(config)?;
         self.scan_source.equalizer = Arc::new(config.clone());
         self.visualization.begin_traversal();
@@ -2876,6 +2879,42 @@ pub(super) mod tests {
         let replacement = pcm_level(149, 16384);
         snapshot.path = replacement.path().to_owned();
         assert!(crate::waveform(&snapshot, 2, false, &cancelled).is_err());
+    }
+
+    #[test]
+    fn unchanged_equalizer_preserves_waveform_accumulation() {
+        let file = pcm();
+        let (mut playback, _) = test_playback_with_waveform(file.path(), None, Arc::default());
+        playback
+            .visualization
+            .push(0.0, &[0.25; 4], 8_000, 1, false);
+        playback.visualization.flush();
+        playback.set_equalizer(&EqualizerConfig::default()).unwrap();
+        playback
+            .visualization
+            .push(4.0 / 8_000.0, &[0.5; 4], 8_000, 1, false);
+        playback.visualization.flush();
+        {
+            let waveform = playback.visualization.waveform.read();
+            assert_eq!(waveform.rms_counts[0], 8);
+            assert_eq!(waveform.peaks[0], Some(0.5));
+            assert!((waveform.rms[0].unwrap() - (0.15625_f32).sqrt()).abs() < 1e-6);
+        }
+        playback
+            .set_equalizer(&EqualizerConfig {
+                enabled: true,
+                preamp_db: 6.0,
+                ..Default::default()
+            })
+            .unwrap();
+        playback
+            .visualization
+            .push(0.0, &[0.75; 4], 8_000, 1, false);
+        playback.visualization.flush();
+        let waveform = playback.visualization.waveform.read();
+        assert_eq!(waveform.rms_counts[0], 4);
+        assert_eq!(waveform.peaks[0], Some(0.75));
+        assert_eq!(waveform.rms[0], Some(0.75));
     }
 
     #[test]
