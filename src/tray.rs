@@ -643,35 +643,54 @@ impl DbusMenu {
 }
 
 fn menu_items(snapshot: &TraySnapshot, i18n: &Localizer) -> Vec<MenuLayout> {
-    let play_label = if snapshot.status == PlaybackStatus::Playing {
-        i18n.text("core-pause")
-    } else {
-        i18n.text("playback-play")
-    };
-    vec![
-        MenuLayout::item(2, play_label),
-        MenuLayout::item(3, i18n.text("core-previous")),
-        MenuLayout::item(4, i18n.text("core-next")),
-        MenuLayout::separator(5),
-        MenuLayout::item(
-            6,
-            if snapshot.shuffle {
-                i18n.text("core-shuffle-on")
+    (2..=9)
+        .map(|id| {
+            let (label, item_type) = menu_entry(snapshot, id, i18n).expect("known menu item");
+            if item_type == "separator" {
+                MenuLayout::separator(id)
             } else {
-                i18n.text("core-shuffle")
-            },
-        ),
-        MenuLayout::item(
-            7,
-            if snapshot.repeat == RepeatMode::Off {
-                i18n.text("core-repeat")
+                MenuLayout::item(id, label)
+            }
+        })
+        .collect()
+}
+
+fn menu_entry<'a>(
+    snapshot: &TraySnapshot,
+    id: i32,
+    i18n: &'a Localizer,
+) -> Option<(&'a str, &'static str)> {
+    Some(match id {
+        2 => (
+            i18n.text(if snapshot.status == PlaybackStatus::Playing {
+                "core-pause"
             } else {
-                i18n.text("core-repeat-on")
-            },
+                "playback-play"
+            }),
+            "standard",
         ),
-        MenuLayout::separator(8),
-        MenuLayout::item(9, i18n.text("app-quit")),
-    ]
+        3 => (i18n.text("core-previous"), "standard"),
+        4 => (i18n.text("core-next"), "standard"),
+        5 | 8 => ("", "separator"),
+        6 => (
+            i18n.text(if snapshot.shuffle {
+                "core-shuffle-on"
+            } else {
+                "core-shuffle"
+            }),
+            "standard",
+        ),
+        7 => (
+            i18n.text(if snapshot.repeat == RepeatMode::Off {
+                "core-repeat"
+            } else {
+                "core-repeat-on"
+            }),
+            "standard",
+        ),
+        9 => (i18n.text("app-quit"), "standard"),
+        _ => return None,
+    })
 }
 
 fn menu_properties(
@@ -680,38 +699,7 @@ fn menu_properties(
     requested: &[String],
     i18n: &Localizer,
 ) -> Option<HashMap<String, OwnedValue>> {
-    if !(2..=9).contains(&id) {
-        return None;
-    }
-    let play_label = if snapshot.status == PlaybackStatus::Playing {
-        i18n.text("core-pause")
-    } else {
-        i18n.text("playback-play")
-    };
-    let (label, item_type) = match id {
-        2 => (play_label, "standard"),
-        3 => (i18n.text("core-previous"), "standard"),
-        4 => (i18n.text("core-next"), "standard"),
-        5 | 8 => ("", "separator"),
-        6 => (
-            if snapshot.shuffle {
-                i18n.text("core-shuffle-on")
-            } else {
-                i18n.text("core-shuffle")
-            },
-            "standard",
-        ),
-        7 => (
-            if snapshot.repeat == RepeatMode::Off {
-                i18n.text("core-repeat")
-            } else {
-                i18n.text("core-repeat-on")
-            },
-            "standard",
-        ),
-        9 => (i18n.text("app-quit"), "standard"),
-        _ => unreachable!(),
-    };
+    let (label, item_type) = menu_entry(snapshot, id, i18n)?;
     let all = requested.is_empty();
     let mut properties = HashMap::new();
     if all || requested.iter().any(|name| name == "label") {

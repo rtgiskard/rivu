@@ -1,8 +1,8 @@
 use anyhow::{Context, Result, bail};
 use rivu_presentation::i18n::Localizer;
 use rivu_protocol::{
-    model::{MAX_QUERY_ROWS, PlaybackStatus, Query},
-    response::{QueryError, StateResponse, StateSections, ViewResponse},
+    model::{Batch, MAX_QUERY_ROWS, PlaybackStatus, Query},
+    response::{QueryError, QueryRevisions, StateResponse, StateSections, ViewResponse},
 };
 use rivu_utils::terminal::{TerminalEscaped, terminal_text};
 use std::{
@@ -20,57 +20,33 @@ pub(super) fn list_queue(i18n: &Localizer, data_dir: &Path, json: bool) -> Resul
         .queue
         .context("State omitted queue section")?
         .current_id;
-    let mut after = None;
-    let mut expected = None;
-    let stdout = io::stdout();
-    let mut output = stdout.lock();
-    let mut first = true;
-    if json {
-        write!(output, "[")?;
-    }
-    loop {
-        let response = session.query(Query::QueueBatch {
+    write_listing(
+        i18n,
+        &mut session,
+        json,
+        |after, expected| Query::QueueBatch {
             query: None,
             after,
             limit: MAX_QUERY_ROWS,
             expected,
-        })?;
-        expected.get_or_insert(response.revisions);
-        let view = listing_result(i18n, response.result)?;
-        let ViewResponse::QueueBatch(batch) = view else {
-            bail!("Queue query returned an unexpected response");
-        };
-        for row in &batch.rows {
-            if json {
-                if !first {
-                    write!(output, ",")?;
-                }
-                serde_json::to_writer(&mut output, row)?;
-                first = false;
-            } else {
-                writeln!(
-                    output,
-                    "{}\t{}\t{}\t{}{}",
-                    row.position,
-                    row.id,
-                    row.track_id,
-                    TerminalEscaped(&row.track.title),
-                    if current == Some(row.id) { " *" } else { "" }
-                )?;
-            }
-        }
-        let Some(next) = batch.next else {
-            break;
-        };
-        if batch.rows.is_empty() || after == Some(next) {
-            bail!("Queue query returned a non-progressing cursor");
-        }
-        after = Some(next);
-    }
-    if json {
-        writeln!(output, "]")?;
-    }
-    Ok(())
+        },
+        |view| match view {
+            ViewResponse::QueueBatch(batch) => Some(batch),
+            _ => None,
+        },
+        |output, row, _| {
+            writeln!(
+                output,
+                "{}\t{}\t{}\t{}{}",
+                row.position,
+                row.id,
+                row.track_id,
+                TerminalEscaped(&row.track.title),
+                if current == Some(row.id) { " *" } else { "" }
+            )?;
+            Ok(())
+        },
+    )
 }
 
 pub(super) fn list_library(
@@ -83,81 +59,54 @@ pub(super) fn list_library(
 ) -> Result<()> {
     let mut session = rivu_client::client_session(data_dir)?;
     let _ = session.get_state(StateSections::default())?;
-    let mut after = None;
-    let mut expected = None;
-    let stdout = io::stdout();
-    let mut output = stdout.lock();
-    if json {
-        write!(output, "[")?;
-    }
-    let mut first = true;
-    loop {
-        let response = session.query(Query::TrackBatch {
+    write_listing(
+        i18n,
+        &mut session,
+        json,
+        |after, expected| Query::TrackBatch {
             query: query.clone(),
             favorite,
             missing,
             after,
             limit: MAX_QUERY_ROWS,
             expected,
-        })?;
-        expected.get_or_insert(response.revisions);
-        let view = listing_result(i18n, response.result)?;
-        let ViewResponse::TrackBatch(batch) = view else {
-            bail!("Library query returned an unexpected response");
-        };
-        for track in &batch.rows {
-            if json {
-                if !first {
-                    write!(output, ",")?;
+        },
+        |view| match view {
+            ViewResponse::TrackBatch(batch) => Some(batch),
+            _ => None,
+        },
+        |output, track, _| {
+            write!(
+                output,
+                "{}\t{}\t{}\t{}\t{}{}{}\t",
+                track.id,
+                TerminalEscaped(&track.title),
+                TerminalEscaped(&track.artist),
+                TerminalEscaped(&track.album),
+                TerminalEscaped(track.path.display()),
+                if track.missing {
+                    i18n.text("core-missing-marker")
+                } else {
+                    ""
+                },
+                if track.favorite {
+                    i18n.text("core-favorite-marker")
+                } else {
+                    ""
                 }
-                serde_json::to_writer(&mut output, track)?;
-                first = false;
-            } else {
-                write!(
+            )?;
+            match track.bitrate_bps {
+                Some(value) => writeln!(
                     output,
-                    "{}\t{}\t{}\t{}\t{}{}{}\t",
-                    track.id,
-                    TerminalEscaped(&track.title),
-                    TerminalEscaped(&track.artist),
-                    TerminalEscaped(&track.album),
-                    TerminalEscaped(track.path.display()),
-                    if track.missing {
-                        i18n.text("core-missing-marker")
-                    } else {
-                        ""
-                    },
-                    if track.favorite {
-                        i18n.text("core-favorite-marker")
-                    } else {
-                        ""
-                    }
-                )?;
-                match track.bitrate_bps {
-                    Some(value) => writeln!(
-                        output,
-                        "{}{:.1} kbps",
-                        if track.bitrate_exact { "" } else { "≈" },
-                        value as f64 / 1000.0
-                    )?,
-                    None => writeln!(output, "—")?,
-                }
+                    "{}{:.1} kbps",
+                    if track.bitrate_exact { "" } else { "≈" },
+                    value as f64 / 1000.0
+                )?,
+                None => writeln!(output, "—")?,
             }
-        }
-        if batch.rows.is_empty() && batch.next.is_some() {
-            bail!("Library query returned an empty batch with a continuation cursor");
-        }
-        let Some(next) = batch.next else {
-            break;
-        };
-        if after == Some(next) {
-            bail!("Library query returned a non-progressing cursor");
-        }
-        after = Some(next);
-    }
-    if json {
-        writeln!(output, "]")?;
-    }
-    Ok(())
+            Ok(())
+        },
+    )
 }
 
 pub(super) fn show_other_tracks(i18n: &Localizer, view: ViewResponse, json: bool) -> Result<()> {
@@ -213,63 +162,36 @@ pub(super) fn show_other_tracks(i18n: &Localizer, view: ViewResponse, json: bool
 pub(super) fn list_playlists(i18n: &Localizer, data_dir: &Path, json: bool) -> Result<()> {
     let mut session = rivu_client::client_session(data_dir)?;
     let _ = session.get_state(StateSections::default())?;
-    let mut expected = None;
-    let mut after = None;
-    let stdout = io::stdout();
-    let mut output = stdout.lock();
-    if json {
-        write!(output, "[")?;
-    }
-    let mut first = true;
-    loop {
-        let response = session.query(Query::PlaylistSummaryBatch {
+    write_listing(
+        i18n,
+        &mut session,
+        json,
+        |after, expected| Query::PlaylistSummaryBatch {
             query: None,
             after,
             limit: MAX_QUERY_ROWS,
             expected,
-        })?;
-        expected.get_or_insert(response.revisions);
-        let view = listing_result(i18n, response.result)?;
-        let ViewResponse::PlaylistSummaryBatch(batch) = view else {
-            bail!("Playlist query returned an unexpected response");
-        };
-        for playlist in &batch.rows {
-            if json {
-                if !first {
-                    write!(output, ",")?;
-                }
-                serde_json::to_writer(&mut output, playlist)?;
-                first = false;
-            } else {
-                writeln!(
-                    output,
-                    "{}",
-                    i18n.format(
-                        "core-playlist-summary",
-                        &[
-                            ("id", playlist.id.to_string().into()),
-                            ("name", terminal_text(&playlist.name).into()),
-                            ("count", playlist.entry_count.to_string().into()),
-                        ]
-                    )
-                )?;
-            }
-        }
-        if batch.rows.is_empty() && batch.next.is_some() {
-            bail!("Playlist query returned an empty batch with a continuation cursor");
-        }
-        let Some(next) = batch.next else {
-            break;
-        };
-        if after == Some(next) {
-            bail!("Playlist query returned a non-progressing cursor");
-        }
-        after = Some(next);
-    }
-    if json {
-        writeln!(output, "]")?;
-    }
-    Ok(())
+        },
+        |view| match view {
+            ViewResponse::PlaylistSummaryBatch(batch) => Some(batch),
+            _ => None,
+        },
+        |output, playlist, _| {
+            writeln!(
+                output,
+                "{}",
+                i18n.format(
+                    "core-playlist-summary",
+                    &[
+                        ("id", playlist.id.to_string().into()),
+                        ("name", terminal_text(&playlist.name).into()),
+                        ("count", playlist.entry_count.to_string().into()),
+                    ]
+                )
+            )?;
+            Ok(())
+        },
+    )
 }
 
 pub(super) fn show_playlist(
@@ -280,59 +202,75 @@ pub(super) fn show_playlist(
 ) -> Result<()> {
     let mut session = rivu_client::client_session(data_dir)?;
     let _ = session.get_state(StateSections::default())?;
-    let mut expected = None;
-    let mut after = None;
-    let stdout = io::stdout();
-    let mut output = stdout.lock();
-    if json {
-        write!(output, "[")?;
-    }
-    let mut index = 0usize;
-    let mut first = true;
-    loop {
-        let response = session.query(Query::PlaylistEntryBatch {
+    write_listing(
+        i18n,
+        &mut session,
+        json,
+        |after, expected| Query::PlaylistEntryBatch {
             query: None,
             playlist_id,
             after,
             limit: MAX_QUERY_ROWS,
             expected,
-        })?;
+        },
+        |view| match view {
+            ViewResponse::PlaylistEntryBatch(batch) => Some(batch),
+            _ => None,
+        },
+        |output, entry, index| {
+            writeln!(
+                output,
+                "{}",
+                i18n.format(
+                    "core-playlist-entry",
+                    &[
+                        ("index", index.to_string().into()),
+                        ("entry", entry.id.to_string().into()),
+                        ("track", entry.track_id.to_string().into()),
+                    ]
+                )
+            )?;
+            Ok(())
+        },
+    )
+}
+
+/// Stream one revision-pinned traversal without retaining previously printed rows.
+fn write_listing<T: serde::Serialize, C: Copy + PartialEq>(
+    i18n: &Localizer,
+    session: &mut rivu_client::ClientSession,
+    json: bool,
+    mut query: impl FnMut(Option<C>, Option<QueryRevisions>) -> Query,
+    unpack: impl Fn(ViewResponse) -> Option<Batch<T, C>>,
+    mut text: impl FnMut(&mut dyn Write, &T, usize) -> Result<()>,
+) -> Result<()> {
+    let stdout = io::stdout();
+    let mut output = stdout.lock();
+    let mut after = None;
+    let mut expected = None;
+    let mut index = 0;
+    if json {
+        write!(output, "[")?;
+    }
+    loop {
+        let response = session.query(query(after, expected))?;
         expected.get_or_insert(response.revisions);
-        let view = listing_result(i18n, response.result)?;
-        let ViewResponse::PlaylistEntryBatch(batch) = view else {
-            bail!("Playlist entries query returned an unexpected response");
-        };
-        for entry in &batch.rows {
+        let batch = unpack(listing_result(i18n, response.result)?)
+            .context("Listing query returned an unexpected response")?;
+        for row in &batch.rows {
             if json {
-                if !first {
+                if index != 0 {
                     write!(output, ",")?;
                 }
-                serde_json::to_writer(&mut output, entry)?;
-                first = false;
+                serde_json::to_writer(&mut output, row)?;
             } else {
-                writeln!(
-                    output,
-                    "{}",
-                    i18n.format(
-                        "core-playlist-entry",
-                        &[
-                            ("index", index.to_string().into()),
-                            ("entry", entry.id.to_string().into()),
-                            ("track", entry.track_id.to_string().into()),
-                        ]
-                    )
-                )?;
+                text(&mut output, row, index)?;
             }
             index += 1;
         }
-        if batch.rows.is_empty() && batch.next.is_some() {
-            bail!("Playlist entries query returned an empty batch with a continuation cursor");
-        }
-        let Some(next) = batch.next else {
-            break;
-        };
-        if after == Some(next) {
-            bail!("Playlist entries query returned a non-progressing cursor");
+        let Some(next) = batch.next else { break };
+        if batch.rows.is_empty() || after == Some(next) {
+            bail!("Listing query returned a non-progressing cursor");
         }
         after = Some(next);
     }

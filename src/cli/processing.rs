@@ -170,7 +170,7 @@ fn show_processing(
         show_settings(
             i18n,
             &config,
-            state.processing.as_ref(),
+            state.processing.as_deref(),
             instance_id,
             graph_only,
         )?;

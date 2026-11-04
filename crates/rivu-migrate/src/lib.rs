@@ -231,13 +231,9 @@ pub fn run(options: &Options, mode: Mode, report: &mut Report) -> Result<()> {
     Ok(())
 }
 
-/// Execute a supplied database migration under offline ownership after validating
-/// configuration and the current database structure. Publish a durable SQLite
-/// backup before invoking `change` in a FULL-synchronous transaction. The operation
-/// must include its own postcondition validation; any error rolls it back. Reports
-/// retain backup artifacts and attempted/committed status even on failure.
-/// Registered migrations use the same backup and transaction implementation.
-pub fn apply_database_change(
+/// Inject a migration failure while exercising production backup and transaction handling.
+#[cfg(test)]
+fn apply_database_change(
     options: &Options,
     report: &mut Report,
     change: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<()>,
