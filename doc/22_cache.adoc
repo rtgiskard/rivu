@@ -124,8 +124,14 @@ independent demand; cover acquisition has separate owners.
 
 GUI and TUI consumers use `QueryTracker` for query identity, freshness stamps, and
 owner-scoped cancellation generations. It owns neither result rows nor worker
-slots. `QueryTicket` carries submission validity into Core; cancelling a tracker
-invalidates its tickets without invalidating an otherwise current cached payload.
+slots. TUI requests carry a value `QuerySubmission`; the tracker synchronizes the
+demand when issuing it and validates the response version when accepting it.
+The receipt is local to its issuing tracker, not a wire field or a page reservation.
+Failure suppression still follows demand and freshness rather than submission
+identity, so suppressed reads cannot invalidate another pending demand.
+`QueryTicket` separately carries cancellation validity into Core for in-process
+reads. Cancelling a tracker retires its submissions and tickets without
+invalidating an otherwise current cached payload.
 
 Every submitted read holds its physical slot until the actual reply or channel
 disconnection. Replacement, hiding, cancellation, and logical timeout cannot free

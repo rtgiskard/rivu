@@ -23,7 +23,7 @@ fn submit(ui: &mut UiState, state: &TuiSnapshot, query: &str) {
 
 fn result(request: &QueryRequest, view: ViewResponse) -> QueryResult {
     QueryResult {
-        revisions: request.stamp.revisions(),
+        revisions: request.demand.stamp.revisions(),
         view,
     }
 }
@@ -61,7 +61,7 @@ fn draft_never_submits_and_enter_only_applies_without_playing() {
     ));
     let fresh = ui.query_request(&state).unwrap();
     assert!(
-        matches!(fresh.query(), Query::LibraryLocate { track_id: 0, query: Some(query), .. } if query == "next")
+        matches!(fresh.demand.query(), Query::LibraryLocate { track_id: 0, query: Some(query), .. } if query == "next")
     );
     let View::LibraryResults(rows) = &ui.view else {
         panic!("library results");
@@ -126,8 +126,7 @@ fn applying_or_clearing_rejects_old_responses_even_when_query_text_returns() {
     let page = ui.query_request(&state).unwrap();
     assert!(ui.apply_query(&state, &page, Ok(response(&page, 12))));
     let fresh = ui.query_request(&state).unwrap();
-    assert_eq!(fresh.query(), old.query());
-    assert_ne!(fresh.generation, old.generation);
+    assert_eq!(fresh.demand.query(), old.demand.query());
     assert!(!ui.apply_query(&state, &old, Ok(response(&old, 12))));
     key(&mut ui, &state, KeyCode::Esc);
     assert!(!ui.search.active);
@@ -141,7 +140,7 @@ fn empty_draft_waits_for_enter_and_global_track_cannot_select_a_tree_container()
     ui.open_search();
     ui.search.query = "  ".into();
     assert!(
-        matches!(ui.query_request(&state).unwrap().query(), Query::LibraryPage { query: Some(query), .. } if query == "active")
+        matches!(ui.query_request(&state).unwrap().demand.query(), Query::LibraryPage { query: Some(query), .. } if query == "active")
     );
     key(&mut ui, &state, KeyCode::Enter);
     assert!(!ui.search.active);
@@ -159,7 +158,7 @@ fn filtered_queue_actions_use_occurrences_and_refresh_uses_filtered_offsets() {
     submit(&mut tui.ui, &state, "duplicate");
     let first = tui.ui.query_request(&state).unwrap();
     assert!(
-        matches!(first.query(), Query::QueuePage { query: Some(query), offset: 0, .. } if query == "duplicate")
+        matches!(first.demand.query(), Query::QueuePage { query: Some(query), offset: 0, .. } if query == "duplicate")
     );
     let mut row = queue_row(8, 101);
     row.offset = 0;
@@ -204,7 +203,7 @@ fn filtered_queue_actions_use_occurrences_and_refresh_uses_filtered_offsets() {
     assert_eq!(tui.ui.queue.total, 2);
     let lookup = tui.ui.query_request(&next).unwrap();
     assert!(
-        matches!(lookup.query(), Query::QueueEntries { query: Some(query), queue_ids } if query == "duplicate" && queue_ids == vec![202])
+        matches!(lookup.demand.query(), Query::QueueEntries { query: Some(query), queue_ids } if query == "duplicate" && queue_ids == vec![202])
     );
     duplicate.position = 16;
     duplicate.offset = 0;
@@ -215,7 +214,7 @@ fn filtered_queue_actions_use_occurrences_and_refresh_uses_filtered_offsets() {
     ));
     assert_eq!(tui.ui.queue.selection.selected(), Some(0));
     let page = tui.ui.query_request(&next).unwrap();
-    assert_eq!(page.offset, 0);
+    assert_eq!(page.demand.offset, 0);
     assert!(tui.ui.apply_query(
         &next,
         &page,
@@ -235,7 +234,7 @@ fn filtered_queue_actions_use_occurrences_and_refresh_uses_filtered_offsets() {
     key(&mut tui.ui, &next, KeyCode::Esc);
     let clear = tui.ui.query_request(&next).unwrap();
     assert!(matches!(
-        clear.query(),
+        clear.demand.query(),
         Query::QueueEntries { query: None, queue_ids } if queue_ids == vec![202]
     ));
 }
@@ -248,7 +247,7 @@ fn playlist_query_and_occurrence_lookup_keep_playlist_scope_and_filtered_offset(
     submit(&mut tui.ui, &state, "song");
     let first = tui.ui.query_request(&state).unwrap();
     assert!(
-        matches!(first.query(), Query::PlaylistEntries { playlist_id: 1, query: Some(query), .. } if query == "song")
+        matches!(first.demand.query(), Query::PlaylistEntries { playlist_id: 1, query: Some(query), .. } if query == "song")
     );
     assert!(tui.ui.apply_query(&state, &first, Ok(response(&first, 2))));
     key(&mut tui.ui, &state, KeyCode::Down);
@@ -263,7 +262,7 @@ fn playlist_query_and_occurrence_lookup_keep_playlist_scope_and_filtered_offset(
     tui.apply_snapshot(next.clone());
     let lookup = tui.ui.query_request(&next).unwrap();
     assert!(
-        matches!(lookup.query(), Query::PlaylistEntryLocations { playlist_id: 1, query: Some(query), entry_ids } if query == "song" && entry_ids == vec![1])
+        matches!(lookup.demand.query(), Query::PlaylistEntryLocations { playlist_id: 1, query: Some(query), entry_ids } if query == "song" && entry_ids == vec![1])
     );
     assert!(tui.ui.apply_query(
         &next,
@@ -289,7 +288,7 @@ fn playlist_query_and_occurrence_lookup_keep_playlist_scope_and_filtered_offset(
     assert!(!tui.ui.search.active);
     assert!(matches!(tui.ui.view, View::Playlists(_)));
     assert!(matches!(
-        tui.ui.query_request(&next).unwrap().query(),
+        tui.ui.query_request(&next).unwrap().demand.query(),
         Query::PlaylistSummaries { query: None, .. }
     ));
 }
@@ -307,7 +306,7 @@ fn directory_search_keeps_directory_semantics_and_clears_on_opening_target() {
     submit(&mut ui, &state, "child");
     let request = ui.query_request(&state).unwrap();
     assert!(
-        matches!(request.query(), Query::DirectoryPage { path, query: Some(query), .. } if path == Path::new("/music") && query == "child")
+        matches!(request.demand.query(), Query::DirectoryPage { path, query: Some(query), .. } if path == Path::new("/music") && query == "child")
     );
     assert!(ui.apply_query(
         &state,
@@ -325,7 +324,7 @@ fn directory_search_keeps_directory_semantics_and_clears_on_opening_target() {
     key(&mut ui, &state, KeyCode::Right);
     assert!(!ui.search.active);
     assert!(
-        matches!(ui.query_request(&state).unwrap().query(), Query::DirectoryPage { path, query: None, offset: 0, .. } if path == Path::new("/music/child"))
+        matches!(ui.query_request(&state).unwrap().demand.query(), Query::DirectoryPage { path, query: None, offset: 0, .. } if path == Path::new("/music/child"))
     );
 }
 
@@ -358,7 +357,7 @@ fn directory_refresh_locates_selected_track_with_same_query() {
     tui.apply_snapshot(next.clone());
     let locate = tui.ui.query_request(&next).unwrap();
     assert!(
-        matches!(locate.query(), Query::LibraryLocate { track_id: 42, path, tree: true, query: Some(query), .. } if path == Path::new("/music") && query == "song")
+        matches!(locate.demand.query(), Query::LibraryLocate { track_id: 42, path, tree: true, query: Some(query), .. } if path == Path::new("/music") && query == "song")
     );
 }
 
@@ -378,12 +377,12 @@ fn other_uses_global_editor_and_retains_collection_filters_and_sort() {
     submit(&mut ui, &state, "outside");
     let request = ui.query_request(&state).unwrap();
     assert!(
-        matches!(request.query(), Query::OtherTracksPage { query: Some(query), favorite: Some(true), missing: Some(false), sort: LibrarySort::Album, .. } if query == "outside")
+        matches!(request.demand.query(), Query::OtherTracksPage { query: Some(query), favorite: Some(true), missing: Some(false), sort: LibrarySort::Album, .. } if query == "outside")
     );
     key(&mut ui, &state, KeyCode::Esc);
     let cleared = ui.query_request(&state).unwrap();
     assert!(
-        matches!(cleared.query(), Query::OtherTracksPage { query: Some(query), favorite: Some(true), missing: Some(false), sort: LibrarySort::Album, .. } if query.is_empty())
+        matches!(cleared.demand.query(), Query::OtherTracksPage { query: Some(query), favorite: Some(true), missing: Some(false), sort: LibrarySort::Album, .. } if query.is_empty())
     );
 }
 
@@ -514,7 +513,7 @@ fn library_same_query_refresh_keeps_identity_and_rejects_old_revision() {
     assert!(!tui.ui.apply_query(&next, &old, Ok(response(&old, 12))));
     let locate = tui.ui.query_request(&next).unwrap();
     assert!(
-        matches!(locate.query(), Query::LibraryLocate { track_id: 1, query: Some(query), tree: false, .. } if query == "active")
+        matches!(locate.demand.query(), Query::LibraryLocate { track_id: 1, query: Some(query), tree: false, .. } if query == "active")
     );
     let located = result(
         &locate,
@@ -529,13 +528,13 @@ fn library_same_query_refresh_keeps_identity_and_rejects_old_revision() {
         panic!("library results");
     };
     assert_eq!(rows.selection.selected(), Some(7));
-    assert_eq!(tui.ui.query_request(&next).unwrap().offset, 6);
+    assert_eq!(tui.ui.query_request(&next).unwrap().demand.offset, 6);
     // Another revision before the relocated page arrives must retain the ID,
     // rather than treating its new offset as an identity.
     next.library.revision += 1;
     tui.apply_snapshot(next.clone());
     assert!(matches!(
-        tui.ui.query_request(&next).unwrap().query(),
+        tui.ui.query_request(&next).unwrap().demand.query(),
         Query::LibraryLocate { track_id: 1, .. }
     ));
 }
@@ -550,7 +549,7 @@ fn playlist_summary_search_keeps_enter_action_and_clears_on_expansion() {
     submit(&mut ui, &state, "collection");
     let request = ui.query_request(&state).unwrap();
     assert!(
-        matches!(request.query(), Query::PlaylistSummaries { query: Some(query), offset: 0, .. } if query == "collection")
+        matches!(request.demand.query(), Query::PlaylistSummaries { query: Some(query), offset: 0, .. } if query == "collection")
     );
     assert!(ui.apply_query(&state, &request, Ok(response(&request, 2))));
     assert!(matches!(
@@ -600,7 +599,7 @@ fn playlist_metadata_filter_changes_relocate_the_selected_occurrence_before_refi
         tui.apply_snapshot(next.clone());
         let stale = tui.ui.query_request(&next).unwrap();
         assert_eq!(
-            stale.query(),
+            stale.demand.query(),
             Query::PlaylistEntryLocations {
                 playlist_id: 1,
                 query: Some("song".into()),
@@ -617,7 +616,7 @@ fn playlist_metadata_filter_changes_relocate_the_selected_occurrence_before_refi
         );
         assert!(!tui.ui.apply_query(&next, &stale, Ok(response(&stale, 2))));
         let lookup = tui.ui.query_request(&next).unwrap();
-        assert_eq!(lookup.kind, stale.kind);
+        assert_eq!(lookup.demand.kind, stale.demand.kind);
         let located = result(
             &lookup,
             ViewResponse::PlaylistEntryLocations(vec![PlaylistEntryLocation {
@@ -636,8 +635,8 @@ fn playlist_metadata_filter_changes_relocate_the_selected_occurrence_before_refi
             assert!(!tui.ui.apply_query(&next, &lookup, Ok(response(&lookup, 2))));
         }
         let request = tui.ui.query_request(&next).unwrap();
-        assert_eq!(request.kind, QueryKind::Playlist(1));
-        assert_eq!(request.offset, 0);
+        assert_eq!(request.demand.kind, QueryKind::Playlist(1));
+        assert_eq!(request.demand.offset, 0);
         let mut refreshed = response(&request, 2);
         let ViewResponse::PlaylistEntries(page) = &mut refreshed.view else {
             panic!("playlist entries");
@@ -694,7 +693,7 @@ fn track_search_changes_locate_unloaded_identity_and_same_query_keeps_pages() {
         replace_query(&mut ui, &state, "second");
         let lookup = ui.query_request(&state).unwrap();
         assert!(matches!(
-            lookup.query(),
+            lookup.demand.query(),
             Query::LibraryLocate { track_id: 1, .. } | Query::OtherTracksLocate { track_id: 1, .. }
         ));
         let located = result(
@@ -707,7 +706,7 @@ fn track_search_changes_locate_unloaded_identity_and_same_query_keeps_pages() {
         );
         assert!(ui.apply_query(&state, &lookup, Ok(located)));
         let page = ui.query_request(&state).unwrap();
-        assert_eq!(page.offset, 6);
+        assert_eq!(page.demand.offset, 6);
         let mut loaded = response(&page, 12);
         match &mut loaded.view {
             ViewResponse::LibraryPage(page) => page.rows[1].id = 1,
@@ -716,7 +715,6 @@ fn track_search_changes_locate_unloaded_identity_and_same_query_keeps_pages() {
         }
         assert!(ui.apply_query(&state, &page, Ok(loaded)));
         let demand = ui.query_request(&state);
-        let generation = ui.projection.generation();
         let (selection, scroll, allocation) = match &ui.view {
             View::LibraryResults(rows) => (
                 rows.selection.selected(),
@@ -732,7 +730,6 @@ fn track_search_changes_locate_unloaded_identity_and_same_query_keeps_pages() {
         };
         replace_query(&mut ui, &state, " second ");
         assert_eq!(ui.query_request(&state), demand);
-        assert_eq!(ui.projection.generation(), generation);
         match &ui.view {
             View::LibraryResults(rows) => {
                 assert_eq!(rows.selection.selected(), selection);
@@ -750,7 +747,7 @@ fn track_search_changes_locate_unloaded_identity_and_same_query_keeps_pages() {
             key(&mut ui, &state, KeyCode::Esc);
             let clear = ui.query_request(&state).unwrap();
             assert!(matches!(
-                clear.query(),
+                clear.demand.query(),
                 Query::LibraryLocate {
                     track_id: 1,
                     query: None,
@@ -784,7 +781,7 @@ fn queue_search_changes_and_tab_clear_preserve_duplicate_occurrence() {
     replace_query(&mut ui, &state, "second");
     let lookup = ui.query_request(&state).unwrap();
     assert!(
-        matches!(lookup.query(), Query::QueueEntries { queue_ids, query: Some(query) } if queue_ids == vec![1001] && query == "second")
+        matches!(lookup.demand.query(), Query::QueueEntries { queue_ids, query: Some(query) } if queue_ids == vec![1001] && query == "second")
     );
     let mut selected = queue_row(17, 1001);
     selected.offset = 5;
@@ -794,7 +791,7 @@ fn queue_search_changes_and_tab_clear_preserve_duplicate_occurrence() {
         Ok(result(&lookup, ViewResponse::QueueEntries(vec![selected])))
     ));
     let page = ui.query_request(&state).unwrap();
-    assert_eq!(page.offset, 4);
+    assert_eq!(page.demand.offset, 4);
     let mut loaded = response(&page, 6);
     let ViewResponse::QueuePage(rows) = &mut loaded.view else {
         unreachable!()
@@ -814,7 +811,7 @@ fn queue_search_changes_and_tab_clear_preserve_duplicate_occurrence() {
     key(&mut ui, &state, KeyCode::BackTab);
     let clear = ui.query_request(&state).unwrap();
     assert!(
-        matches!(clear.query(), Query::QueueEntries { queue_ids, query: None } if queue_ids == vec![1001])
+        matches!(clear.demand.query(), Query::QueueEntries { queue_ids, query: None } if queue_ids == vec![1001])
     );
     assert!(!ui.apply_query(
         &state,
@@ -845,7 +842,7 @@ fn playlist_search_changes_and_tab_clear_preserve_duplicate_entry() {
     replace_query(&mut ui, &state, "second");
     let lookup = ui.query_request(&state).unwrap();
     assert!(
-        matches!(lookup.query(), Query::PlaylistEntryLocations { entry_ids, .. } if entry_ids == vec![1])
+        matches!(lookup.demand.query(), Query::PlaylistEntryLocations { entry_ids, .. } if entry_ids == vec![1])
     );
     let location = PlaylistEntryLocation {
         id: 1,
@@ -864,7 +861,7 @@ fn playlist_search_changes_and_tab_clear_preserve_duplicate_entry() {
         ))
     ));
     let page = ui.query_request(&state).unwrap();
-    assert_eq!(page.offset, 6);
+    assert_eq!(page.demand.offset, 6);
     let mut loaded = response(&page, 8);
     let ViewResponse::PlaylistEntries(rows) = &mut loaded.view else {
         unreachable!()
@@ -883,7 +880,7 @@ fn playlist_search_changes_and_tab_clear_preserve_duplicate_entry() {
     key(&mut ui, &state, KeyCode::BackTab);
     let clear = ui.query_request(&state).unwrap();
     assert!(
-        matches!(clear.query(), Query::PlaylistEntryLocations { entry_ids, query: None, .. } if entry_ids == vec![1])
+        matches!(clear.demand.query(), Query::PlaylistEntryLocations { entry_ids, query: None, .. } if entry_ids == vec![1])
     );
 }
 
@@ -933,7 +930,7 @@ fn missing_search_identity_falls_back_once_without_ghost_targets() {
                     .apply_query(&state, &lookup, Ok(result(&lookup, missing)))
             );
             let fallback = tui.ui.query_request(&state).unwrap();
-            assert_eq!(fallback.offset, 0);
+            assert_eq!(fallback.demand.offset, 0);
             // Publish again before the fallback page: the disappeared target
             // must not be resurrected from remembered identity fields.
             state.queue.revision += 1;
@@ -944,14 +941,14 @@ fn missing_search_identity_falls_back_once_without_ghost_targets() {
             tui.apply_snapshot(state.clone());
             let fresh = tui.ui.query_request(&state).unwrap();
             assert!(matches!(
-                fresh.query(),
+                fresh.demand.query(),
                 Query::QueuePage { .. }
                     | Query::LibraryPage { .. }
                     | Query::DirectoryPage { .. }
                     | Query::OtherTracksPage { .. }
                     | Query::PlaylistEntries { .. }
             ));
-            assert_eq!(fresh.offset, 0);
+            assert_eq!(fresh.demand.offset, 0);
             assert!(
                 tui.ui
                     .apply_query(&state, &fresh, Ok(response(&fresh, total)))
@@ -1023,7 +1020,7 @@ fn container_fixture(catalog: bool) -> (UiState, TuiSnapshot) {
 }
 
 fn container_page(request: &QueryRequest, catalog: bool, found: bool, total: usize) -> QueryResult {
-    let indices = request.offset..(request.offset + request.limit).min(total);
+    let indices = request.demand.offset..(request.demand.offset + request.demand.limit).min(total);
     let view = if catalog {
         ViewResponse::PlaylistSummaries(Page {
             total,
@@ -1063,7 +1060,7 @@ fn container_search_scans_bounded_pages_and_finishes_found_missing_or_empty() {
             let (mut ui, state) = container_fixture(catalog);
             replace_query(&mut ui, &state, "filter");
             let first = ui.query_request(&state).unwrap();
-            assert_eq!(first.offset, 0);
+            assert_eq!(first.demand.offset, 0);
             assert!(ui.apply_query(
                 &state,
                 &first,
@@ -1082,7 +1079,7 @@ fn container_search_scans_bounded_pages_and_finishes_found_missing_or_empty() {
                     _ => unreachable!(),
                 }
                 let second = ui.query_request(&state).unwrap();
-                assert_eq!(second.offset, 2);
+                assert_eq!(second.demand.offset, 2);
                 assert!(!ui.apply_query(
                     &state,
                     &first,
@@ -1160,13 +1157,13 @@ fn container_scan_clear_survives_tab_cache_and_navigation_rejects_late_pages() {
         let first = ui.query_request(&state).unwrap();
         assert!(ui.apply_query(&state, &first, Ok(container_page(&first, catalog, true, 4))));
         let old = ui.query_request(&state).unwrap();
-        assert_eq!(old.offset, 2);
+        assert_eq!(old.demand.offset, 2);
         key(&mut ui, &state, KeyCode::Tab);
         assert!(!ui.apply_query(&state, &old, Ok(container_page(&old, catalog, true, 4))));
         key(&mut ui, &state, KeyCode::BackTab);
         let clear = ui.query_request(&state).unwrap();
-        assert_eq!(clear.filter, None);
-        assert_eq!(clear.offset, 0);
+        assert_eq!(clear.demand.filter, None);
+        assert_eq!(clear.demand.offset, 0);
         assert!(ui.apply_query(&state, &clear, Ok(container_page(&clear, catalog, true, 4))));
         let second = ui.query_request(&state).unwrap();
         assert!(ui.apply_query(
@@ -1189,7 +1186,6 @@ fn container_scan_clear_survives_tab_cache_and_navigation_rejects_late_pages() {
         let obsolete = ui.query_request(&state).unwrap();
         key(&mut ui, &state, KeyCode::Down);
         let fresh = ui.query_request(&state).unwrap();
-        assert_ne!(fresh.generation, obsolete.generation);
         assert!(!ui.apply_query(
             &state,
             &obsolete,
@@ -1225,7 +1221,7 @@ fn root_global_search_and_clear_never_restore_an_unreachable_container() {
     replace_query(&mut ui, &state, "song");
     let first = ui.query_request(&state).unwrap();
     assert!(matches!(
-        first.query(),
+        first.demand.query(),
         Query::LibraryPage { offset: 0, .. }
     ));
     assert!(ui.apply_query(&state, &first, Ok(response(&first, 4))));
@@ -1296,7 +1292,7 @@ fn navigation_cancels_pending_track_and_occurrence_search_locates() {
             })),
         };
         assert!(!ui.apply_query(&state, &obsolete, Ok(result(&obsolete, late))));
-        assert_eq!(fresh.offset, 0);
+        assert_eq!(fresh.demand.offset, 0);
         assert!(ui.apply_query(&state, &fresh, Ok(response(&fresh, 4))));
         let selection = match &ui.view {
             View::Queue => ui.queue.selection.selected(),
@@ -1395,7 +1391,7 @@ fn container_scan_restores_scroll_and_discards_nonvisible_scan_batches() {
     replace_query(&mut ui, &state, "filter");
     for expected in (0..=8).step_by(2) {
         let request = ui.query_request(&state).unwrap();
-        assert_eq!(request.offset, expected);
+        assert_eq!(request.demand.offset, expected);
         let page = ViewResponse::DirectoryPage(Page {
             total: 20,
             rows: (expected..expected + 2)

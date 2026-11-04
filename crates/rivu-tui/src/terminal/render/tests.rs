@@ -375,9 +375,9 @@ fn queue_mutations_relocate_selected_occurrence_and_clamp_deleted_selection() {
     tui.apply_snapshot(state.clone());
     assert!(tui.ui.queue.pages.is_empty());
     let request = tui.ui.query_request(&state).unwrap();
-    assert_eq!(request.kind, QueryKind::QueueSelection(1008));
+    assert_eq!(request.demand.kind, QueryKind::QueueSelection(1008));
     assert!(
-        matches!(request.query(), Query::QueueEntries { queue_ids, query: None } if queue_ids == vec![1008])
+        matches!(request.demand.query(), Query::QueueEntries { queue_ids, query: None } if queue_ids == vec![1008])
     );
     let relocated = QueryResult {
         revisions: QueryRevisions {
@@ -389,7 +389,7 @@ fn queue_mutations_relocate_selected_occurrence_and_clamp_deleted_selection() {
     assert!(tui.ui.apply_query(&state, &request, Ok(relocated)));
     assert_eq!(tui.ui.queue.selection.selected(), Some(2));
     let request = tui.ui.query_request(&state).unwrap();
-    assert_eq!(request.offset, 0);
+    assert_eq!(request.demand.offset, 0);
     let mut page = response(&request, state.queue.total);
     let ViewResponse::QueuePage(rows) = &mut page.view else {
         unreachable!()
@@ -400,7 +400,7 @@ fn queue_mutations_relocate_selected_occurrence_and_clamp_deleted_selection() {
     state.queue.revision = 2;
     tui.apply_snapshot(state.clone());
     let request = tui.ui.query_request(&state).unwrap();
-    assert_eq!(request.kind, QueryKind::QueueSelection(1008));
+    assert_eq!(request.demand.kind, QueryKind::QueueSelection(1008));
     tui.ui.apply_query(
         &state,
         &request,

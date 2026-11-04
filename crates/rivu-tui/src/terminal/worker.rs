@@ -5,6 +5,7 @@ use parking_lot::Mutex;
 use rivu_protocol::{
     AppCommand,
     model::{ClientSnapshot, LibrarySort, Query, QueryStamp},
+    query_tracking::QuerySubmission,
     response::{Ack, QueryError, StateSections, ViewResponse},
 };
 use std::{
@@ -278,21 +279,22 @@ pub(super) enum QueryKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct QueryRequest {
+pub(super) struct QueryDemand {
     pub(super) kind: QueryKind,
     pub(super) filter: Option<String>,
     pub(super) offset: usize,
     pub(super) limit: usize,
-    pub(super) generation: u64,
     pub(super) stamp: QueryStamp,
 }
 
-impl QueryKind {
-    pub(super) fn query(&self, offset: usize, limit: usize) -> Query {
-        self.clone().into_query(offset, limit)
-    }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct QueryRequest {
+    pub(super) demand: QueryDemand,
+    pub(super) submission: QuerySubmission,
+}
 
-    fn filtered_query(self, offset: usize, limit: usize, filter: &str) -> Query {
+impl QueryKind {
+    pub(super) fn filtered_query(self, offset: usize, limit: usize, filter: &str) -> Query {
         let mut query = self.into_query(offset, limit);
         match &mut query {
             Query::QueuePage { query, .. }
@@ -440,16 +442,7 @@ impl QueryKind {
     }
 }
 
-impl QueryRequest {
-    // Failure suppression follows demand and freshness, not a submission generation.
-    pub(super) fn same_demand(&self, other: &Self) -> bool {
-        self.kind == other.kind
-            && self.filter == other.filter
-            && self.offset == other.offset
-            && self.limit == other.limit
-            && self.stamp == other.stamp
-    }
-
+impl QueryDemand {
     pub(super) fn accepts_view(&self, view: &ViewResponse) -> bool {
         match (&self.kind, view) {
             (QueryKind::Queue, ViewResponse::QueuePage(_))
@@ -571,7 +564,7 @@ pub(super) fn spawn_query_worker(data_dir: &Path, instance_id: u32) -> QueryWork
             };
             let result = match &mut session {
                 Ok(session) => session
-                    .query(job.request.query())
+                    .query(job.request.demand.query())
                     .map_err(WorkerFailure::from)
                     .and_then(|response| {
                         let view = response.result.map_err(WorkerFailure::from)?;

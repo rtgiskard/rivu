@@ -5,8 +5,27 @@ use crate::terminal::{
 };
 use rivu::test_support::ipc;
 use rivu_protocol::model::Command;
+use rivu_protocol::query_tracking::QueryTracker;
 use rivu_protocol::response::QueryRevisions;
 use std::time::Duration;
+
+fn queue_request(
+    tracker: &mut QueryTracker,
+    offset: usize,
+    revisions: QueryRevisions,
+) -> QueryRequest {
+    let query = QueryKind::Queue.into_query(offset, 20);
+    QueryRequest {
+        demand: QueryDemand {
+            kind: QueryKind::Queue,
+            filter: None,
+            offset,
+            limit: 20,
+            stamp: query.stamp(revisions),
+        },
+        submission: tracker.submit(&query, revisions),
+    }
+}
 
 fn injected_watcher(update: Option<WatchedSnapshot>) -> (Watcher, Sender<()>) {
     let (sender, receiver) = bounded(1);
@@ -207,8 +226,11 @@ fn replacing_queries_keeps_one_stalled_socket_until_worker_shutdown() {
         .unwrap();
     for offset in 1..100 {
         worker.request(QueryRequest {
-            offset,
-            ..request.clone()
+            demand: QueryDemand {
+                offset,
+                ..request.demand.clone()
+            },
+            submission: request.submission,
         });
     }
     // The peer deliberately stalls Hello. Replacements must not abandon
@@ -278,30 +300,16 @@ fn replaced_bitrate_queries_drain_then_send_only_latest_on_the_same_session() {
         }
     });
     let mut worker = spawn_query_worker(directory.path(), 1);
-    let request = QueryRequest {
-        kind: QueryKind::Queue,
-        filter: None,
-        offset: 0,
-        limit: 20,
-        generation: 0,
-        stamp: Query::QueuePage {
-            query: None,
-            offset: 0,
-            limit: 20,
-        }
-        .stamp(QueryRevisions::default()),
-    };
+    let mut tracker = QueryTracker::default();
+    let request = queue_request(&mut tracker, 0, QueryRevisions::default());
     worker.request(request.clone());
     active.recv_timeout(Duration::from_secs(5)).unwrap();
     for offset in 1..100 {
-        worker.request(QueryRequest {
+        worker.request(queue_request(
+            &mut tracker,
             offset,
-            generation: offset as u64,
-            stamp: request
-                .query()
-                .stamp(QueryRevisions::default().with_bitrate_revision(offset as u64)),
-            ..request.clone()
-        });
+            QueryRevisions::default().with_bitrate_revision(offset as u64),
+        ));
     }
     assert!(worker.latest.lock().is_none());
     release.send(()).unwrap();
@@ -310,8 +318,8 @@ fn replaced_bitrate_queries_drain_then_send_only_latest_on_the_same_session() {
     worker.sender.take();
     worker.worker.take().unwrap().join().unwrap();
     let (request, result) = worker.latest.lock().take().unwrap();
-    assert_eq!(request.offset, 99);
-    assert_eq!(request.stamp.revisions().bitrate, 99);
+    assert_eq!(request.demand.offset, 99);
+    assert_eq!(request.demand.stamp.revisions().bitrate, 99);
     assert_eq!(result.as_ref().unwrap().revisions.bitrate, 99);
     assert!(matches!(result.unwrap().view, ViewResponse::QueuePage(page) if page.total == 100));
     server.join().unwrap();
@@ -336,24 +344,16 @@ fn query_worker_shutdown_cancels_active_exchange_and_discards_pending_job() {
         started.send(stream).unwrap();
     });
     let mut worker = spawn_query_worker(directory.path(), 1);
-    let request = QueryRequest {
-        kind: QueryKind::Queue,
-        filter: None,
-        offset: 0,
-        limit: 20,
-        generation: 0,
-        stamp: Query::QueuePage {
-            query: None,
-            offset: 0,
-            limit: 20,
-        }
-        .stamp(QueryRevisions::default()),
-    };
+    let mut tracker = QueryTracker::default();
+    let request = queue_request(&mut tracker, 0, QueryRevisions::default());
     worker.request(request.clone());
     let mut stream = active.recv_timeout(Duration::from_secs(5)).unwrap();
     worker.request(QueryRequest {
-        offset: 99,
-        ..request
+        demand: QueryDemand {
+            offset: 99,
+            ..request.demand
+        },
+        submission: request.submission,
     });
     let pending = Arc::clone(&worker.pending);
     let results = Arc::clone(&worker.latest);
@@ -532,19 +532,8 @@ fn watcher_identity_binds_delayed_command_and_query_workers() {
         "instance failure must leave the TUI loop"
     );
     let mut queries = spawn_query_worker(directory.path(), instance_id);
-    let request = QueryRequest {
-        kind: QueryKind::Queue,
-        filter: None,
-        offset: 0,
-        limit: 20,
-        generation: 0,
-        stamp: Query::QueuePage {
-            query: None,
-            offset: 0,
-            limit: 20,
-        }
-        .stamp(QueryRevisions::default()),
-    };
+    let mut tracker = QueryTracker::default();
+    let request = queue_request(&mut tracker, 0, QueryRevisions::default());
     queries.request(request);
     queries.sender.take();
     queries.worker.take().unwrap().join().unwrap();
@@ -612,19 +601,8 @@ fn superseded_query_still_reports_replacement_instance_as_fatal() {
         assert_eq!(stream.read(&mut [0]).unwrap(), 0);
     });
     let mut worker = spawn_query_worker(directory.path(), 1);
-    worker.request(QueryRequest {
-        kind: QueryKind::Queue,
-        filter: None,
-        offset: 0,
-        limit: 20,
-        generation: 0,
-        stamp: Query::QueuePage {
-            query: None,
-            offset: 0,
-            limit: 20,
-        }
-        .stamp(QueryRevisions::default()),
-    });
+    let mut tracker = QueryTracker::default();
+    worker.request(queue_request(&mut tracker, 0, QueryRevisions::default()));
     connected.recv_timeout(Duration::from_secs(5)).unwrap();
     worker.cancel();
     release.send(()).unwrap();
@@ -666,30 +644,22 @@ fn query_worker_reconnection_rejects_replacement_before_accepting_results() {
         );
     });
     let mut worker = spawn_query_worker(directory.path(), 1);
-    let request = QueryRequest {
-        kind: QueryKind::Queue,
-        filter: None,
-        offset: 0,
-        limit: 20,
-        generation: 0,
-        stamp: Query::QueuePage {
-            query: None,
-            offset: 0,
-            limit: 20,
-        }
-        .stamp(QueryRevisions::default()),
-    };
+    let mut tracker = QueryTracker::default();
+    let request = queue_request(&mut tracker, 0, QueryRevisions::default());
     worker.request(request.clone());
     active.recv_timeout(Duration::from_secs(5)).unwrap();
     worker.request(QueryRequest {
-        offset: 20,
-        ..request
+        demand: QueryDemand {
+            offset: 20,
+            ..request.demand
+        },
+        submission: request.submission,
     });
     release.send(()).unwrap();
     worker.sender.take();
     worker.worker.take().unwrap().join().unwrap();
     let (request, result) = worker.latest.lock().take().unwrap();
-    assert_eq!(request.offset, 20);
+    assert_eq!(request.demand.offset, 20);
     let failure = result.err().unwrap();
     assert!(failure.instance_changed);
     assert!(failure.into_message().is_err());
