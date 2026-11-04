@@ -521,7 +521,7 @@ impl WindowView {
                         settings.update(cx, |settings, cx| {
                             settings.complete_panel_apply(
                                 *session,
-                                Err(this.i18n.text("shell-artwork-gone").to_owned()),
+                                Err(this.i18n.text("settings-panel-unavailable").to_owned()),
                                 cx,
                             )
                         });

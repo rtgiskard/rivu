@@ -102,7 +102,6 @@ gl-force-on = Force rescans: on
 
 gl-force-off = Force rescans: off
 
-gl-enqueue-selected = Append to queue
 
 gl-remove-library-selected = Remove from library
 
@@ -133,7 +132,7 @@ gl-delete-playlist-note = Only the playlist is deleted. Music files are not touc
 
 gl-delete-playlist = Delete playlist
 
-gl-replace-playlist = Replace queue and play
+gl-replace-queue-and-play = Replace queue and play
 
 
 gl-playlist-empty = This playlist is empty
@@ -161,9 +160,9 @@ gl-remove-playlist = Remove from playlist
 gl-remove-history = Remove from recent tracks
 
 
-gl-new-playlist = New playlist…
+playlist-create = New playlist…
 
-gl-import-m3u = Import M3U
+gl-import-playlist = Import playlist…
 
 gl-export-playlist = Export playlist
 
@@ -239,7 +238,7 @@ gl-native = Native
 gl-decoder-note = Applies on the next track or full-waveform load.
     Enable FFmpeg in Settings. Native DTS-WAV decoding may produce noise.
 
-gl-tags = Tags
+track-tags = Tags
 
 gl-title = Title
 
@@ -254,7 +253,6 @@ gl-album-missing = Album unavailable
 
 gl-untitled = Untitled
 
-gl-search-albums = Search albums or artists
 
 gl-album-response = Unexpected album query response
 
@@ -301,7 +299,6 @@ gl-played-at = { $time }{ $paused ->
        *[other] { "" }
     }
 
-gl-volume = Volume ([ / ])
 gl-seek-position = Playback position
 gl-volume-level = Volume
 
@@ -351,7 +348,6 @@ gl-queue-count = { $total } queued · { $selected } selected
 gl-queue-drag-hint = Drag an entry onto its new position
 
 gl-confirm-delete-playlist = Delete “{ $name }”?
-gl-confirm-remove-library = Remove the selected { $count } tracks from the library? Audio files are not deleted.
 
 gl-confirm-play-playlist = Play “{ $name }”?
 gl-confirm-play-album = Play album “{ $name }”?
@@ -406,7 +402,6 @@ gl-absent-now = file absent now
 
 gl-existence-unknown = existence unknown (path check failed / not a regular file)
 
-gl-never = Never
 
 gl-scan-missing = missing
 
@@ -568,7 +563,6 @@ gl-playlist-changed-select = Playlist changed while selecting; select the track 
 
 gl-metadata-wrong-track = Received details for a different track
 
-li-play = Play
 li-queue = Append to queue
 li-playlist = Add to playlist…
 li-favorite = Favorite

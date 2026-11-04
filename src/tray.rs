@@ -661,7 +661,7 @@ fn menu_items(snapshot: &TraySnapshot, i18n: &Localizer) -> Vec<MenuLayout> {
     let play_label = if snapshot.status == PlaybackStatus::Playing {
         i18n.text("core-pause")
     } else {
-        i18n.text("core-play")
+        i18n.text("playback-play")
     };
     vec![
         MenuLayout::item(2, play_label),
@@ -685,7 +685,7 @@ fn menu_items(snapshot: &TraySnapshot, i18n: &Localizer) -> Vec<MenuLayout> {
             },
         ),
         MenuLayout::separator(8),
-        MenuLayout::item(9, i18n.text("core-quit")),
+        MenuLayout::item(9, i18n.text("app-quit")),
     ]
 }
 
@@ -701,7 +701,7 @@ fn menu_properties(
     let play_label = if snapshot.status == PlaybackStatus::Playing {
         i18n.text("core-pause")
     } else {
-        i18n.text("core-play")
+        i18n.text("playback-play")
     };
     let (label, item_type) = match id {
         2 => (play_label, "standard"),
@@ -724,7 +724,7 @@ fn menu_properties(
             },
             "standard",
         ),
-        9 => (i18n.text("core-quit"), "standard"),
+        9 => (i18n.text("app-quit"), "standard"),
         _ => unreachable!(),
     };
     let all = requested.is_empty();

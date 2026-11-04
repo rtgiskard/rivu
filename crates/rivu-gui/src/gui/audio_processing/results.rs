@@ -375,7 +375,7 @@ impl AudioProcessing {
         if self.page != Page::Results {
             actions = actions.child(button(
                 ("graph-show-results", panel),
-                self.tr("processing-result-open"),
+                self.tr("processing-tab-results"),
                 cx,
                 move |this, _, cx| this.show_graph_results(panel, cx),
             ));

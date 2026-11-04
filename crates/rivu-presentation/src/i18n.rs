@@ -320,8 +320,8 @@ mod tests {
         assert_eq!(gui.language(), "zh-CN");
         assert_eq!(cli.language(), "en-US");
         assert_eq!(terminal.language(), "en-US");
-        assert_ne!(gui.text("core-play"), cli.text("core-play"));
-        assert_eq!(cli.text("core-play"), terminal.text("core-play"));
+        assert_ne!(gui.text("playback-play"), cli.text("playback-play"));
+        assert_eq!(cli.text("playback-play"), terminal.text("playback-play"));
     }
 
     #[test]

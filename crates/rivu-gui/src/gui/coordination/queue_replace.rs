@@ -78,7 +78,7 @@ impl WindowView {
                                 IconButton::new(
                                     "queue-replace-cancel",
                                     "",
-                                    self.tr("shell-cancel"),
+                                    self.tr("action-cancel"),
                                 )
                                 .build(
                                     IconButtonStyle::Surface,
@@ -92,7 +92,7 @@ impl WindowView {
                                 IconButton::new(
                                     "queue-replace-confirm",
                                     "",
-                                    self.tr("gl-replace-playlist"),
+                                    self.tr("gl-replace-queue-and-play"),
                                 )
                                 .build(
                                     IconButtonStyle::Surface,

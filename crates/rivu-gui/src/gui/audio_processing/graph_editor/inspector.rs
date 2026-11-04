@@ -466,7 +466,7 @@ impl AudioProcessing {
         } else if descriptor.is_boolean() {
             checkbox(
                 SharedString::from(format!("graph-bool-{panel}-{key:?}")),
-                SharedString::from(self.tr("processing-fields-enabled").to_string()),
+                SharedString::from(self.tr("processing-enabled").to_string()),
                 text == "true",
                 true,
                 cx,

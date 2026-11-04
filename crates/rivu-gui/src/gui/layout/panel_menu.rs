@@ -646,7 +646,7 @@ impl WindowView {
                         column()
                             .child(menu_item(
                                 "cancel-clear-queue",
-                                self.tr("shell-cancel"),
+                                self.tr("action-cancel"),
                                 cx,
                                 |this, _, cx| {
                                     this.panel_menu = None;

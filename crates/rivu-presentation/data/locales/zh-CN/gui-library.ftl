@@ -102,7 +102,6 @@ gl-force-on = 强制扫描：开
 
 gl-force-off = 强制扫描：关
 
-gl-enqueue-selected = 加入队列
 
 gl-remove-library-selected = 从音乐库移除
 
@@ -133,7 +132,7 @@ gl-delete-playlist-note = 仅删除播放列表，不会改动音乐文件
 
 gl-delete-playlist = 删除播放列表
 
-gl-replace-playlist = 替换队列并播放
+gl-replace-queue-and-play = 替换队列并播放
 
 
 gl-playlist-empty = 此播放列表为空
@@ -161,9 +160,9 @@ gl-remove-playlist = 从播放列表移除
 gl-remove-history = 从最近播放中移除
 
 
-gl-new-playlist = 新建播放列表…
+playlist-create = 新建播放列表…
 
-gl-import-m3u = 导入 M3U
+gl-import-playlist = 导入播放列表…
 
 gl-export-playlist = 导出播放列表
 
@@ -239,7 +238,7 @@ gl-native = 原生
 gl-decoder-note = 下次加载曲目或完整波形时生效。
     FFmpeg 需在设置中启用；DTS-WAV 原生解码可能产生噪声。
 
-gl-tags = 标签
+track-tags = 标签
 
 gl-title = 标题
 
@@ -254,7 +253,6 @@ gl-album-missing = 专辑信息缺失
 
 gl-untitled = 无标题
 
-gl-search-albums = 搜索专辑或艺人
 
 gl-album-response = 专辑查询返回了意外结果
 
@@ -292,7 +290,6 @@ gl-played-at = { $time }{ $paused ->
        *[other] { "" }
     }
 
-gl-volume = 音量（[ / ]）
 gl-seek-position = 播放进度
 gl-volume-level = 音量
 
@@ -315,7 +312,6 @@ gl-queue-count = 队列 { $total } 项 · 已选 { $selected } 项
 gl-queue-drag-hint = 拖动队列项以调整顺序
 
 gl-confirm-delete-playlist = 删除“{ $name }”？
-gl-confirm-remove-library = 确认从音乐库移除选中的 { $count } 首曲目？不会删除音频文件。
 
 gl-confirm-play-playlist = 播放“{ $name }”？
 gl-confirm-play-album = 播放专辑“{ $name }”？
@@ -364,7 +360,6 @@ gl-absent-now = 文件现已缺失
 
 gl-existence-unknown = 状态未知（路径检查失败或并非普通文件）
 
-gl-never = 从未
 
 gl-scan-missing = 缺失
 
@@ -520,7 +515,6 @@ gl-playlist-changed-select = 选择期间播放列表已改变，请重新选择
 
 gl-metadata-wrong-track = 收到的详情属于另一首曲目
 
-li-play = 播放
 li-queue = 追加到队列
 li-playlist = 添加到列表…
 li-favorite = 收藏

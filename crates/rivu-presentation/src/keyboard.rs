@@ -150,7 +150,7 @@ static BINDINGS: &[Binding] = &[
         Help,
         "keyboard-help"
     ),
-    binding!("i", "i", 0, TUI & !QUERY, Details, "keyboard-details"),
+    binding!("i", "i", 0, TUI & !QUERY, Details, "track-details"),
     binding!(
         "escape",
         "Escape",

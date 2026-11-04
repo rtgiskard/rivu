@@ -979,7 +979,7 @@ impl Metadata {
                 .into(),
         };
         let heading = self.metadata.selected().or(id).map_or_else(
-            || self.context.i18n.text("shell-panel-metadata").to_owned(),
+            || self.context.i18n.text("track-details").to_owned(),
             |id| {
                 self.context
                     .i18n
@@ -1362,7 +1362,7 @@ impl Metadata {
                         theme,
                         row()
                             .gap_2()
-                            .child(caption(theme, self.tr("gl-tags")))
+                            .child(caption(theme, self.tr("track-tags")))
                             .child(
                                 div()
                                     .id(("metadata-tags-help", panel_id))

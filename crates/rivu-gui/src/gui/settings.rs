@@ -2597,9 +2597,11 @@ impl Render for Settings {
                         .gap_0()
                         .overflow_hidden()
                         .child(
-                            row().h_10().flex_shrink_0().px_2().child(
-                                div().flex_1().text_lg().child(self.tr("settings-settings")),
-                            ),
+                            row()
+                                .h_10()
+                                .flex_shrink_0()
+                                .px_2()
+                                .child(div().flex_1().text_lg().child(self.tr("settings-title"))),
                         )
                         .child(panel),
                 ),

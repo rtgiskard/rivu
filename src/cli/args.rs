@@ -6,7 +6,7 @@ use std::path::PathBuf;
 #[command(
     name = "rivu",
     version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("RIVU_GIT_VERSION"), ")"),
-    about = "A quiet, local-first music player",
+    about = "A lightweight, local-first music player",
 )]
 pub(super) struct Args {
     #[arg(long, global = true, value_name = "DIRECTORY")]

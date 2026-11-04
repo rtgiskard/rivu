@@ -326,7 +326,7 @@ fn draw_details(
                     Style::default().fg(colors.accent),
                 )));
             };
-            group(&mut lines, "terminal-details-tags");
+            group(&mut lines, "track-tags");
             for (label, value) in [("gl-artist", &track.artist), ("gl-album", &track.album)] {
                 lines.extend(detail_field(i18n.text(label), value, width, colors));
                 lines.push(Line::default());
@@ -613,7 +613,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, area: Rect, ui: &mut UiState, color
     lines.push(Line::default());
     for (group, label) in [
         "terminal-help-navigation",
-        "terminal-help-playback",
+        "playback-title",
         "terminal-help-page",
         "terminal-help-exit",
     ]

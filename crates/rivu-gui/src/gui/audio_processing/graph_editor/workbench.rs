@@ -458,7 +458,7 @@ impl AudioProcessing {
                     ))
                     .child(button(
                         ("workbench-cancel-connect", panel),
-                        self.tr("processing-cancel"),
+                        self.tr("action-cancel"),
                         cx,
                         |this, _, cx| {
                             this.graph_editor.connecting = None;

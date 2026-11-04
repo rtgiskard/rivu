@@ -75,7 +75,7 @@ reach the same instance. `--config` selects configuration when starting a core.
 The GUI menu's `Close window` exits the desktop process and leaves playback and
 the core running. Reopen it with `rivu gui`, including when the core was started
 with `rivu serve`. `Quit application` stops the Core and connected GUI/TUI clients,
-as do `rivu quit`, the tray's `Quit Rivu`, and MPRIS `Quit` when enabled.
+as do `rivu quit`, the tray's `Quit application`, and MPRIS `Quit` when enabled.
 Ctrl-C and SIGTERM request a clean shutdown of the process receiving them;
 terminating only the desktop does not stop the core.
 

@@ -301,7 +301,7 @@ impl Render for WindowView {
                     }))
                     .child(menu_item(
                         "app-settings",
-                        self.tr("shell-settings"),
+                        self.tr("settings-title"),
                         cx,
                         |this, window, cx| {
                             this.settings
@@ -377,8 +377,8 @@ impl Render for WindowView {
                     .child(about)
                     .child(rivu_ui::menu_separator(theme))
                     .child(menu_item(
-                        "app-close-window",
-                        self.tr("shell-close-window"),
+                        "window-close",
+                        self.tr("window-close"),
                         cx,
                         |this, window, cx| {
                             this.shell.dismiss(shell::Surface::AppMenu);
@@ -387,7 +387,7 @@ impl Render for WindowView {
                     ))
                     .child(menu_item(
                         "app-quit",
-                        self.tr("shell-quit"),
+                        self.tr("app-quit"),
                         cx,
                         |this, _, cx| {
                             this.shell.dismiss(shell::Surface::AppMenu);

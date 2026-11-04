@@ -1296,7 +1296,7 @@ impl Duplicates {
                         .format("%Y-%m-%d %H:%M:%S")
                         .to_string()
                 })
-                .unwrap_or_else(|| self.context.i18n.text("gl-never").into());
+                .unwrap_or_else(|| self.context.i18n.text("gl-played-none").into());
             let mut card = column()
                 .flex_shrink_0()
                 .min_w_0()

@@ -699,7 +699,7 @@ impl WindowView {
                 .child(caption(theme, self.tr(description)))
                 .child(menu_item(
                     "content-cancel-remove",
-                    self.tr("shell-cancel"),
+                    self.tr("action-cancel"),
                     cx,
                     |this, _, cx| {
                         this.replace_content_menu(None, cx);
@@ -720,7 +720,7 @@ impl WindowView {
             if state.tracks_only {
                 menu = menu.child(menu_item(
                     "content-new-playlist",
-                    self.tr("shell-new-playlist"),
+                    self.tr("playlist-create"),
                     cx,
                     |this, window, cx| {
                         this.refresh(cx);
@@ -868,7 +868,7 @@ impl WindowView {
             if state.play.is_some() {
                 menu = menu.child(menu_item(
                     "content-play",
-                    self.tr("li-play"),
+                    self.tr("playback-play"),
                     cx,
                     |this, _, cx| this.content_action(ContentAction::Play, cx),
                 ));

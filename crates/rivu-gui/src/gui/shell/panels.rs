@@ -41,13 +41,13 @@ macro_rules! panel_kinds {
 }
 
 panel_kinds! {
-    Transport => ("transport", "shell-panel-playback"),
+    Transport => ("transport", "playback-title"),
     Library => ("library", "shell-panel-library"),
     Albums => ("albums", "shell-panel-albums"),
     Queue => ("queue", "shell-panel-queue"),
     Playlists => ("playlists", "shell-panel-playlists"),
     History => ("history", "shell-panel-history"),
-    Metadata => ("metadata", "shell-panel-metadata"),
+    Metadata => ("metadata", "track-details"),
     Artwork => ("artwork", "shell-panel-artwork"),
     AudioProcessing => ("audio_processing", "shell-panel-audio-processing"),
     AudioVisualizer => ("audio_visualizer", "shell-panel-audio-visualizer"),

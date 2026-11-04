@@ -3,13 +3,11 @@ core-command-accepted = 命令已接受，修订号 { $revision }
 core-stats = 曲目：{ $tracks }
     播放次数：{ $plays }
 core-listing-changed = 列表未完成：读取期间数据已更改，请重试命令。
-core-missing = [缺失]
-core-favorite = [收藏]
 core-unknown = 未知
 core-playing = 播放中
 core-paused = 已暂停
 core-stopped = 已停止
-core-play = 播放
+playback-play = 播放
 core-pause = 暂停
 core-previous = 上一首
 core-next = 下一首
@@ -17,15 +15,13 @@ core-shuffle = 随机播放
 core-shuffle-on = 随机播放 ✓
 core-repeat = 循环播放
 core-repeat-on = 循环播放 ✓
-core-quit = 退出
+app-quit = 退出应用
 core-playlist-summary = { $id }	{ $name }	{ $count } 首
 core-playlist-entry = { $index }	条目 { $entry }	曲目 { $track }
-core-relocation-accepted = 已接受迁移验证，任务 { $id }
 core-duplicate-groups = 历史同内容分组：{ $count }（使用缓存哈希，未经重新验证）
 core-duplicate-members = 历史同内容成员：{ $count }
 core-duplicate-group = { $fingerprint }	{ $total } 个成员	{ $missing } 个缺失	{ $present } 个可用
 core-duplicate-member = { $id }	{ $path }	{ $status }	收藏={ $favorite } 修改={ $overrides } 播放={ $plays } 播放列表引用={ $playlists } 队列引用={ $queue } 独立={ $independent }
-core-present = 可用
 core-optimization = 数据库优化完成
     数据库：{ $before } -> { $after } 字节
     WAL：{ $wal-before } -> { $wal-after } 字节
@@ -61,7 +57,7 @@ core-tags-written = 已更新源文件标签：{ $path }
     原文件备份：{ $backup }
     未更改音乐库数据库中的覆盖值。
 core-tags-unchanged = 源文件标签未变：{ $path }（未创建备份）
-core-help-about = 安静、以本地为先的音乐播放器
+core-help-about = 轻量、本地优先的音乐播放器
 core-help-long = 不带命令打开桌面界面，连接已有核心；若不存在则自动启动独立核心服务。每个数据目录共享一个核心，控制命令连接该实例。关闭窗口不会停止核心。列出输出设备、探测文件和读写源文件标签均可离线运行，无需实例。
 core-help-long-tui = 不带命令打开终端界面，连接已有核心；若不存在则自动启动独立核心服务。q 或 :q 仅退出当前 TUI；:qa 退出应用并停止核心。列出输出设备、探测文件和读写源文件标签均可离线运行，无需实例。
 core-help-long-serve = 不带命令启动无界面核心。serve 为每个数据目录运行一个核心；控制命令连接该实例。列出输出设备、探测文件和读写源文件标签均可离线运行，无需实例。
@@ -72,7 +68,6 @@ core-help-arguments = 参数
 core-help-global-options = 全局选项
 core-help-help = 显示帮助
 core-help-version = 显示版本
-core-help-help-subcommand = 要查看帮助的命令
 core-help-data-dir = 要启动或控制的实例及其数据目录
 core-help-config = 启动或文件探测使用的配置文件
 core-help-log-level = 临时覆盖本进程的标准错误和已启用的文件日志等级：debug、info、warning、error

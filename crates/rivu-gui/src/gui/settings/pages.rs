@@ -409,7 +409,7 @@ impl Settings {
         let remix = self.model.draft.pipewire_auto_mix;
         let playback = settings_card(
             palette(cx),
-            self.tr("shell-panel-playback"),
+            self.tr("playback-title"),
             column()
                 .gap_2()
                 .child(self.pair(Field::Volume, Field::PlayCountThreshold, cx))

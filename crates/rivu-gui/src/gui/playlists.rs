@@ -924,7 +924,7 @@ impl Playlists {
                                 IconButton::new(
                                     "playlist-action-cancel",
                                     "",
-                                    self.tr("shell-cancel"),
+                                    self.tr("action-cancel"),
                                 )
                                 .build(
                                     IconButtonStyle::Surface,
@@ -1982,7 +1982,7 @@ impl Playlists {
                         IconButton::new(
                             ("playlist-create", panel_id),
                             "",
-                            self.tr("gl-new-playlist"),
+                            self.tr("playlist-create"),
                         )
                         .build(
                             IconButtonStyle::Surface,
@@ -2004,7 +2004,7 @@ impl Playlists {
                         IconButton::new(
                             ("playlist-import", panel_id),
                             "",
-                            self.tr("gl-import-m3u"),
+                            self.tr("gl-import-playlist"),
                         )
                         .build(
                             IconButtonStyle::Surface,

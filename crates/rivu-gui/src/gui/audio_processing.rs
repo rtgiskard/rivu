@@ -1626,7 +1626,7 @@ impl AudioProcessing {
             ))
             .child(menu_item(
                 ("cancel-preset", panel),
-                self.tr("shell-cancel"),
+                self.tr("action-cancel"),
                 cx,
                 move |this, _, cx| {
                     if let Some(popup) = this
@@ -2596,9 +2596,9 @@ impl AudioProcessing {
         .flex_shrink_0()
         .whitespace_nowrap();
         let transport = self.tr(match self.state.playback.status {
-            rivu_protocol::model::PlaybackStatus::Playing => "processing-workspace-playing",
-            rivu_protocol::model::PlaybackStatus::Paused => "processing-workspace-paused",
-            rivu_protocol::model::PlaybackStatus::Stopped => "processing-workspace-stopped",
+            rivu_protocol::model::PlaybackStatus::Playing => "gl-playing",
+            rivu_protocol::model::PlaybackStatus::Paused => "gl-paused",
+            rivu_protocol::model::PlaybackStatus::Stopped => "gl-stopped",
         });
         let selected_audio = match self.state.system.processing_audition {
             Some(audition) => {

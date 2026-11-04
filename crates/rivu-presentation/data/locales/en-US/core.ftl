@@ -3,13 +3,11 @@ core-command-accepted = Command accepted at revision { $revision }
 core-stats = Tracks: { $tracks }
     Plays: { $plays }
 core-listing-changed = Listing incomplete: data changed while reading; retry the command.
-core-missing = [missing]
-core-favorite = [favorite]
 core-unknown = unknown
 core-playing = playing
 core-paused = paused
 core-stopped = stopped
-core-play = Play
+playback-play = Play
 core-pause = Pause
 core-previous = Previous
 core-next = Next
@@ -17,15 +15,13 @@ core-shuffle = Shuffle
 core-shuffle-on = Shuffle ✓
 core-repeat = Repeat
 core-repeat-on = Repeat ✓
-core-quit = Quit
+app-quit = Quit application
 core-playlist-summary = { $id }	{ $name }	{ $count } entries
 core-playlist-entry = { $index }	entry { $entry }	track { $track }
-core-relocation-accepted = Relocation verification accepted: task { $id }
 core-duplicate-groups = Historical same-content groups: { $count } (cached hashes, not fresh verification)
 core-duplicate-members = Historical same-content members: { $count }
 core-duplicate-group = { $fingerprint }	{ $total } members	{ $missing } missing	{ $present } present
 core-duplicate-member = { $id }	{ $path }	{ $status }	favorite={ $favorite } overrides={ $overrides } plays={ $plays } playlist_refs={ $playlists } queue_refs={ $queue } independent={ $independent }
-core-present = present
 core-optimization = Database optimization completed
     Database: { $before } -> { $after } bytes
     WAL: { $wal-before } -> { $wal-after } bytes
@@ -61,7 +57,7 @@ core-tags-written = Source-file tags updated: { $path }
     Original file backup: { $backup }
     Library database overrides were not changed.
 core-tags-unchanged = Source-file tags unchanged: { $path } (no backup created)
-core-help-about = A quiet, local-first music player
+core-help-about = A lightweight, local-first music player
 core-help-long = Run without a command to open the desktop UI, connecting to the existing core or starting an independent core service if absent. Each data directory shares one core; control commands connect to it. Closing the window keeps the core running. Output devices, file probing, and source-file tags work offline without an instance.
 core-help-long-tui = Run without a command to open the terminal UI, connecting to the existing core or starting an independent core service if absent. q or :q closes only this TUI; :qa quits the application and stops the core. Output devices, file probing, and source-file tags work offline without an instance.
 core-help-long-serve = Run without a command to start a headless core. serve owns one core per data directory; control commands connect to that instance. Output devices, file probing, and source-file tags work offline without an instance.
@@ -72,7 +68,6 @@ core-help-arguments = Arguments
 core-help-global-options = Global options
 core-help-help = Print help
 core-help-version = Print version
-core-help-help-subcommand = Command to show help for
 core-help-data-dir = Data directory and instance to start or control
 core-help-config = Startup/probe configuration file
 core-help-log-level = Override this process's stderr and enabled file logging: debug, info, warning, error
