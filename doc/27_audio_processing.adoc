@@ -610,6 +610,11 @@ arithmetic-work budget. These are planning limits, not measured device-deadline
 guarantees. An EQ configuration supported by the DSP crate alone can therefore
 still be rejected by the realtime graph planner.
 
+Admission uses a lightweight plan before preparing DSP, delay lines or PCM blocks.
+Auto/Hybrid candidates rejected for capability or budget therefore allocate no DSP
+state. A selected plan can still fail numerical construction, in which case
+automatic selection continues with the next candidate.
+
 Admission counts effective DSP work: disabled/solo-excluded IIR bands and identity
 peak/shelf sections do not consume stage estimates. Disabled EQ and fully bypassed
 restoration have no DSP latency/state, but edges and node buffers still count.
@@ -705,6 +710,10 @@ extending the source. Reset clears both DSP history and adapter staging.
 Graph blocks initialize only regions not overwritten by source reads, copies or
 mixing. Short reads and ended branches remain zero-extended through the current
 block, including while downstream processors drain their tails.
+
+Offline nodes allocate wide accumulation scratch only for weighted, delayed or
+multi-input mixing. Direct copies retain no such buffer; mixing still accumulates
+in `f64` and rejects non-finite output rather than clipping or normalizing it.
 
 Non-finite input/intermediate PCM fails without publishing partial audio; finite
 over-range samples are not clipped or silenced. A failed DSP/profile operation
@@ -820,12 +829,15 @@ GUI controls require actual application smoke proof.
 
 The Python benchmark and corpus evaluator report two distinct wall times.
 `worker_subprocess_wall_seconds` covers only the worker subprocess call, including
-startup and captured pipes. `evaluation_wall_seconds` starts before per-sample
-reference/input reads and request creation and ends after output reads, artifact
-writes, hashes, scoring and sample-record construction. It excludes record append,
-progress printing, cross-sample summaries and final aggregate report serialization
-or writing. `timing_summary` summarizes each field separately; compare only
-measurements with matching timing boundaries.
+startup and captured pipes. `evaluation_wall_seconds` ends after output reads,
+artifact writes, scoring and record construction. In the repeated benchmark it
+starts before each run's request creation; fixed reference/input reads, hashes
+and input scoring happen once outside the runs. Each worker result must identify
+that same input. In the corpus evaluator it starts before each sample's
+reference/input reads and request creation, including those reads and hashes.
+Both exclude record append, progress printing, aggregate summaries and final report
+serialization or writing. `timing_summary` summarizes each field separately;
+compare only measurements with matching timing boundaries.
 
 Both tool families encode undefined scores/gains as JSON `null`. SNR requires
 nonzero reference energy; SI-SDR requires nonzero mean-centered reference energy.

@@ -128,12 +128,15 @@ Metadata snapshots are validated; payload observation remains best-effort, not a
 lossless snapshot. Slow consumers resume from retained data rather than extending
 the window or reconstructing overwritten history.
 
-Waveform envelopes use their own versioned socket protocol with at most eight
-clients, 1 MiB frames, a one-second Hello deadline and five-second control I/O
-deadlines. Progressive results retain at most 1024 bins. An explicit full scan
-still returns an envelope after Core-side scanning, not a complete PCM stream;
-disconnect requests cancellation but physical decoding must retire before its
-blocking-work lease is released.
+Waveform envelopes use their own v3 socket protocol with at most eight clients,
+1 MiB frames, a one-second Hello deadline and five-second control I/O deadlines.
+Progressive results retain at most 1024 bins. Full requests carry only expected
+source identity (track ID, path, CUE segment, fingerprint and decoder hint) plus
+the optional playback source generation. Core resolves the authoritative Track
+and checks that identity before scanning; clients do not submit display metadata.
+A full scan returns an envelope, not a complete PCM stream. Disconnect requests
+cancellation but physical decoding must retire before its blocking-work lease
+is released.
 
 === Owner execution and retirement
 
@@ -179,6 +182,10 @@ occurrence selection and scroll position. GUI page, selection-index, and worker
 retention are described in link:22_cache.adoc#window-local-query-retention[Resource lifecycles].
 This avoids both a second control implementation and a universal whole-library
 snapshot on every playback update.
+
+Processing task metadata is shared immutably across local snapshots; updates use
+copy-on-write, keeping older publications stable. Socket representation remains a
+task value. The TUI drops this unconsumed payload when merging state.
 
 Startup and single-instance operation are documented in
 link:../readme.adoc[README]. Socket clients and Core must use compatible builds.

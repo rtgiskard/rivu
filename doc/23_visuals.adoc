@@ -138,6 +138,12 @@ demand changes preserve the sampling window, continuity generation, and survivin
 consumers' display clocks. Only losing all demand fences capture, including a quick
 hide/show that the worker did not observe as a steady state.
 
+Musical peaks, integrated band energy and Spectrogram reuse unnormalized bin power
+when their demands overlap. Each retains its own reduction and calibration:
+musical bands take maxima, energy bands sum power, and Spectrogram publishes dB
+bins. Spatial analysis still reconstructs separate channel power for pan. Pool
+exhaustion does not prevent current-window band-energy computation.
+
 Demand is not payload readiness. Exhausting a bounded Density, PCM, or Spectrogram
 snapshot pool omits that payload from the next frame, without blocking Spectrum,
 RMS, band power, or other available payloads. The affected renderer keeps its last drawing and

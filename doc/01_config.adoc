@@ -80,6 +80,12 @@ opens the affected page, and Reset field text restores only that field's accepte
 value. Other edits remain intact. Edits made during Apply await the next Apply;
 editing after success clears its notice.
 
+Apply reserves capacity for changed audio parameters before saving, then delivers
+those changes without resending unchanged EQ, visualization, buffer or decoder
+settings. Every explicit Apply still submits output settings: an idle output
+selection receives fresh device validation even when its value is unchanged.
+Playback controls already accepted in memory are included in the saved candidate.
+
 Save failures appear in logs, `rivu status` and the desktop notice. Correct the
 cause and retry; exit makes one final attempt. Atomic replacement prevents partial
 writes, not power loss. An audio-application failure after a successful save does

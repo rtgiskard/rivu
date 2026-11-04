@@ -225,6 +225,12 @@ Queue reconciliation failures retain occurrences but leave positions unavailable
 Selected-playlist summary failures remain scoped to selection/catalog freshness;
 catalog invalidation forgets counts until a current result restores them.
 
+Library matching counts depend on filters and data revisions, not row sort order.
+Unfiltered root and Other totals follow roots/structure freshness independently;
+warm totals are reused across filter changes. Overlapping configured roots count
+each track once. Sorting neither cancels a valid in-flight count nor refetches
+unchanged totals.
+
 Loading text waits 150 ms while placeholders retain geometry; errors and retries
 are immediate. A cancellable per-view wake follows current requests and retires on
 completion, hiding, or cancellation. Presentation delays never authorize stale data.
@@ -237,6 +243,11 @@ static measurements; only the replacement time label is remeasured. Source or
 typography changes rebuild them, and source replacement releases obsolete
 measurements even while hidden. Tree pages similarly retain selection indexes
 rather than rescanning all expansions on viewport demand.
+
+The TUI retains one current help layout and one current details layout. Scrolling
+and playback updates reuse their styled lines; width, language, key context,
+theme or details source/content changes invalidate the affected layout. Rendering
+borrows visible lines without rebuilding or copying the cached strings.
 
 == Processing output retention
 
@@ -323,6 +334,12 @@ do not pin preview snapshots. All-unknown data produces no publication, while
 known silence remains drawable. The renderer owns upload reuse and
 completion-aware retirement. Signal semantics are in
 link:23_visuals.adoc#waveform[Waveform].
+
+Each waveform socket session reuses one encoding/decoding scratch buffer; buffers
+above 256 KiB retire after I/O. Progressive service encoding reserves 128 KiB before
+briefly borrowing the bounded audio frame, then releases the read lock before any
+socket wait. It serializes the borrowed frame once rather than cloning its arrays
+or imposing copy-on-write snapshots on the audio producer.
 
 ==== Spectrum
 
@@ -463,6 +480,12 @@ Spectrogram demand releases the analyzer pool and staging handle even while
 paused. Existing external snapshots remain valid until their owners release them.
 This storage is separate from bounded logarithmic CPU history and GPU tiles;
 the figures are payload capacities, not total process-memory limits.
+
+Band-energy or Spectrogram demand also retains one reusable raw-power buffer:
+`4 * analysis_fft_size / 2` bytes, at most 64 KiB. Losing both demands releases it
+without resetting surviving analysis; base Spectrum, Density, PCM and Spatial-only
+demand do not allocate it. Its values belong to the current FFT window, never a
+retained Spectrogram publication.
 
 Density and Spatial Spectrum retain revocable numerical GPU publications of
 256 KiB and 128 KiB respectively, plus a shared 4 KiB palette per style.
