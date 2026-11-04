@@ -621,6 +621,15 @@ impl Store {
             .iter()
             .map(|path| directory_prefix(path))
             .collect::<Result<Vec<_>>>()?;
+        let mut unique = Vec::with_capacity(prefixes.len());
+        let mut indices = HashMap::with_capacity(prefixes.len());
+        for prefix in &prefixes {
+            if let std::collections::hash_map::Entry::Vacant(entry) = indices.entry(prefix.as_str())
+            {
+                entry.insert(unique.len());
+                unique.push(prefix.as_str());
+            }
+        }
         let mut statement = self.conn.prepare(
             "WITH roots AS (SELECT key,value FROM json_each(?1)),
              source_totals AS (
@@ -638,15 +647,23 @@ impl Store {
              FROM roots LEFT JOIN source_totals ON source_totals.root_key=roots.key
              GROUP BY roots.key ORDER BY roots.key",
         )?;
-        Ok(statement
-            .query_map([serde_json::to_string(&prefixes)?], |row| {
-                Ok(rivu_protocol::model::LibraryRootStats {
-                    path: roots[row.get::<_, i64>(0)? as usize].clone(),
-                    total: row.get::<_, i64>(1)? as usize,
-                    file_size: row.get::<_, i64>(2)? as u64,
-                })
+        let totals = statement
+            .query_map([serde_json::to_string(&unique)?], |row| {
+                Ok((row.get::<_, i64>(1)? as usize, row.get::<_, i64>(2)? as u64))
             })?
-            .collect::<rusqlite::Result<Vec<_>>>()?)
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(roots
+            .iter()
+            .zip(prefixes.iter())
+            .map(|(path, prefix)| {
+                let (total, file_size) = totals[indices[prefix.as_str()]];
+                rivu_protocol::model::LibraryRootStats {
+                    path: path.clone(),
+                    total,
+                    file_size,
+                }
+            })
+            .collect())
     }
 
     pub(crate) fn track_count(&self) -> Result<usize> {
@@ -664,10 +681,10 @@ impl Store {
         missing: Option<bool>,
         prefix: Option<&str>,
     ) -> Result<usize> {
-        if query.is_none() && favorite.is_none() && missing.is_none() && prefix.is_none() {
-            return self.track_count();
-        }
         self.cached_filtered_library_count(query, favorite, missing, prefix, || {
+            if query.is_none() && favorite.is_none() && missing.is_none() && prefix.is_none() {
+                return self.track_count();
+            }
             Ok(match prefix {
                 Some(prefix) if query.is_none() && favorite.is_none() && missing.is_none() => {
                     // Omitting nullable predicates keeps this count on the covering path index.

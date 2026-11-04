@@ -73,18 +73,21 @@ background query owner and export do not populate this LRU or assemble pages fro
 
 Count retention stores scalars, not rows: one duplicate-group total and a shared
 sixteen-entry LRU for filtered Library, Other, directories, albums, album members,
-Queue, and playlist entries. Filtered Library retains only its latest scope within
-that shared limit. Keys preserve optional filters and collection identity, never
-page boundaries. The read owner reuses counts across snapshots while their
-data-domain revisions remain valid, advancing cache ownership only after snapshot
+Queue, and playlist entries. Filtered Library retains only its latest scope,
+including the unfiltered full-library total, within that shared limit. Keys preserve
+optional filters and collection identity, never page boundaries. The read owner
+reuses counts across snapshots while their data-domain revisions remain valid,
+advancing cache ownership only after snapshot
 publication validation. Unrelated collection changes, no-change scans, and
 bitrate-only changes preserve library totals.
 
 Writable count caches check local SQLite changes and on-demand `PRAGMA data_version`
 for independent commits; writer transactions bypass them to avoid rollback leakage.
 There is no polling timer or collection-sized row cache. Root aggregation and
-directory relations are request-local; persistent album summaries are transactional
-database projections, not evictable pages. See
+directory relations are request-local; identical normalized roots share one
+aggregation while results retain each original input path and its order.
+Persistent album summaries are transactional database projections, not evictable
+pages. See
 link:21_ipc.adoc#transactional-inputs-and-bounded-storage-queries[IPC storage queries].
 
 === Window-local query retention
