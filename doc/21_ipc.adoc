@@ -81,13 +81,23 @@ The lifetime boundaries are:
   desktop from current Core state; repeated open requests focus an existing one.
   Late results cannot restore a closed view or a superseded source.
 
-Startup readiness requires a successful Hello, not merely a bound socket or a
-live child. Open requests coalesce during desktop startup under the original child
-and startup deadline. A failed startup is reported rather than automatically
-replayed; a later explicit open can retry. Explicit application shutdown stops
-the service and connected consumers; closing or killing only the desktop leaves
-the service alive. Accepted shutdown acknowledgements drain before transport
-retirement. Window/display resource release is described in
+The executable shares one Core bootstrap path between GUI and TUI. It first
+attempts a Hello; only an absent listener permits starting an independent `serve`
+process. An existing owner keeps its configuration even when a new frontend
+supplies another config path. Readiness requires a successful Hello, not merely
+a bound socket or a live child. The complete connection and Hello exchange share
+one 30-second startup deadline. A bound listener receives one waiting Hello;
+only absent-listener retries back off, from 10 ms to at most 500 ms.
+
+Automatically started Core processes detach from the terminal session and use
+at most 64 KiB of anonymous startup diagnostic storage. Successful initialization
+disconnects that sink; failures return the retained diagnostic to the launcher.
+Manual `serve` retains its normal stderr. GUI open requests coalesce during
+desktop startup under the original child and startup deadline. A failed startup
+is reported rather than automatically replayed; a later explicit open can retry.
+Explicit application shutdown stops the service and connected consumers; closing
+or killing only a frontend leaves the service alive. Accepted shutdown
+acknowledgements drain before transport retirement. Window/display resource release is described in
 link:22_cache.adoc#renderer-buffers-atlases-and-display-lifecycle[Resource lifecycles].
 
 [[realtime-pcm-transport]]

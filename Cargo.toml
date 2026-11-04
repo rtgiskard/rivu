@@ -14,7 +14,7 @@ description = "A lightweight, local-first Linux music player"
 [features]
 default = ["gui", "tui", "ffmpeg", "onnx"]
 gui = ["dep:rivu-gui", "dep:async-process"]
-tui = ["dep:rivu-tui"]
+tui = ["dep:rivu-tui", "dep:async-process"]
 test-support = ["rivu-audio/test-support", "rivu-metadata/test-support", "rivu-protocol/test-support"]
 ffmpeg = ["rivu-audio/ffmpeg"]
 onnx = ["dep:ort", "dep:realfft", "dep:sha2"]

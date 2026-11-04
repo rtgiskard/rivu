@@ -464,7 +464,7 @@ fn visual_switch(
 ) -> Stateful<Div> {
     let label = label.into();
     let hint = match id {
-        "settings-tray" => i18n.text("settings-restart-hint"),
+        "settings-tray" => i18n.text("settings-tray-restart-hint"),
         "settings-visualization-disabled" => i18n.text("settings-visualization-disabled-hint"),
         "audio-visualizer-fade-idle" => i18n.text("settings-visualizer-fade-hint"),
         "default-visualizer-reference-lines" => i18n.text("settings-visualizer-guides-hint"),

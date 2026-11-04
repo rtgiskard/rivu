@@ -59,7 +59,7 @@ for scanning and path rules.
 # Run a foreground core without a desktop window
 rivu serve
 
-# Open the TUI for an existing core
+# Open the TUI, starting a background core if needed
 rivu tui
 
 # Stop the running instance, including its GUI and desktop integrations
@@ -81,8 +81,10 @@ terminating only the desktop does not stop the core.
 
 == CLI
 
-CLI and TUI controls require a running core; `library probe`, `library tags`, and
-`playback devices` can run independently. `--data-dir DIRECTORY` selects the
+GUI and TUI entrypoints connect to the existing core or start an independent
+background core when absent. CLI control commands require a running core;
+`library probe`, `library tags`, and `playback devices` can run independently.
+`--data-dir DIRECTORY` selects the
 instance. `--config FILE` selects startup/probe configuration.
 `--log-level LEVEL` temporarily overrides this process's stderr and enabled file
 logging (`debug`, `info`, `warning`, `error`).

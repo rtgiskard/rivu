@@ -40,7 +40,7 @@ pub(super) enum Action {
     Gui { paths: Vec<PathBuf> },
     /// Run the Core service in the foreground, independently of the desktop.
     Serve { paths: Vec<PathBuf> },
-    /// Control the running instance in a minimal terminal UI.
+    /// Open the terminal UI, starting an independent Core service if absent.
     #[cfg(feature = "tui")]
     Tui,
     /// Show playback and library state from the running instance.

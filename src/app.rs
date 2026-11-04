@@ -4,6 +4,8 @@ use rivu_metadata::artwork::ArtworkManager;
 mod desktop_host;
 #[cfg(feature = "gui")]
 mod desktop_launcher;
+#[cfg(any(feature = "gui", feature = "tui"))]
+mod frontend_host;
 mod startup;
 #[cfg(test)]
 use crate::config::ConfigPersistence;
@@ -173,6 +175,14 @@ impl App {
     pub fn open_gui(data_dir: PathBuf, config_path: PathBuf, paths: Vec<PathBuf>) -> Result<()> {
         desktop_host::open(data_dir, config_path, paths)
     }
+    /// Attach a terminal client, starting an independent service only if absent.
+    #[cfg(feature = "tui")]
+    pub fn open_tui(data_dir: PathBuf, config_path: PathBuf) -> Result<()> {
+        let data_dir = frontend_host::absolute(data_dir)?;
+        let config_path = frontend_host::absolute(config_path)?;
+        frontend_host::ensure_service(&data_dir, &config_path)?;
+        rivu_tui::run(&data_dir, "auto")
+    }
     pub fn start(data_dir: PathBuf, config_path: PathBuf, paths: Vec<PathBuf>) -> Result<Self> {
         rivu_utils::logging::init(None)?;
         let socket_owner = startup::acquire_storage(&data_dir, &config_path)?;
@@ -270,6 +280,8 @@ impl App {
                 force: false,
             })?;
         }
+        #[cfg(any(feature = "gui", feature = "tui"))]
+        frontend_host::detach_startup_diagnostics()?;
         println!(
             "{}",
             i18n.format(

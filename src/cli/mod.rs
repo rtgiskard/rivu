@@ -69,7 +69,7 @@ fn execute(args: Args, i18n: Localizer) -> Result<()> {
         )?
         .run(),
         #[cfg(feature = "tui")]
-        Action::Tui => rivu_tui::run(&data_dir, "auto"),
+        Action::Tui => App::open_tui(data_dir, config_path),
         Action::Library(action) => library::run(&i18n, &data_dir, &config_path, action, args.json),
         Action::Playback(PlaybackAction::Devices) => {
             let devices = audio::devices()?;

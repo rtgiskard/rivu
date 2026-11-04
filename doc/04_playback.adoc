@@ -382,7 +382,10 @@ already selected decoder and never loads FFmpeg or changes decoder selection.
 
 == Terminal client
 
-The TUI controls the running core. Closing only the client does not stop playback. `Tab` cycles
+`rivu tui` connects to the Core for its data directory, starting an independent
+background `rivu serve` when absent. The service survives TUI and terminal closure;
+use `:qa` / `:qall` or `rivu quit` to stop it. Closing only the client does not stop
+playback. `Tab` cycles
 Queue → Playlists → Library → Recent; `Shift+Tab` reverses direction.
 Without a search, each page retains its selection and scroll position.
 `Right` opens a playlist; Enter plays the selected playlist, track, or queue
