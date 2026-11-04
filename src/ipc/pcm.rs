@@ -109,7 +109,6 @@ impl Drop for ClientSubscription {
         let mut state = self.state.borrow_mut();
         state.clients.remove(&self.id);
         state.aggregate();
-        state.notify(true);
     }
 }
 async fn run_server(
@@ -226,9 +225,150 @@ async fn serve_client(
             state.clients.get_mut(&id).unwrap().0 = command[1] != 0;
             state.aggregate();
             minimum_sequence = state.handle.pcm.sequence();
-            state.notify(true);
         }
         let snapshot = state.borrow().handle.pcm.state();
         write_status(&mut writer, snapshot, revision, minimum_sequence).await?;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rivu_protocol::pcm::{PcmHeader, PcmState, STATUS_SIZE, decode_status, request};
+    use std::io::{Read, Write};
+    use std::time::Duration;
+
+    type Status = (PcmState, u64, u64);
+
+    struct Client(UnixStream);
+
+    impl Client {
+        fn connect(directory: &Path) -> Self {
+            let mut stream = UnixStream::connect_addr(&address(directory).unwrap()).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            stream.write_all(&request(0, 0, 7)).unwrap();
+            let mut welcome = [0; 16];
+            stream.read_exact(&mut welcome).unwrap();
+            assert_eq!(&welcome[..8], MAGIC);
+            assert_eq!(u32::from_le_bytes(welcome[8..12].try_into().unwrap()), 7);
+            let length = u32::from_le_bytes(welcome[12..].try_into().unwrap()) as usize;
+            assert!(length <= 4096);
+            stream.read_exact(&mut vec![0; length]).unwrap();
+            Self(stream)
+        }
+
+        fn status(&mut self) -> Status {
+            let mut bytes = [0; STATUS_SIZE];
+            self.0.read_exact(&mut bytes).unwrap();
+            decode_status(&bytes).unwrap()
+        }
+
+        fn subscribe(&mut self, enabled: bool, revision: u64) -> Status {
+            self.0
+                .write_all(&request(1, u8::from(enabled), revision))
+                .unwrap();
+            loop {
+                let status = self.status();
+                if status.1 == revision {
+                    return status;
+                }
+            }
+        }
+
+        fn capture(&mut self, capture: u64) -> Status {
+            loop {
+                let status = self.status();
+                if status.0.capture == capture {
+                    return status;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn subscription_acknowledges_revision_and_frontier_while_another_client_keeps_capture() {
+        let directory = crate::ipc::tests::socket_test_directory();
+        let (handle, _queries) = CoreHandle::test_query_port();
+        let server = PcmServer::start(directory.path(), handle.clone(), 7).unwrap();
+        let mut local = Client::connect(directory.path());
+        let initial = local.subscribe(false, 1);
+        assert_eq!(initial, (handle.pcm.state(), 1, 0));
+        assert_eq!(local.subscribe(false, 2), (initial.0, 2, 0));
+
+        let mut keeper = Client::connect(directory.path());
+        let shared = keeper.subscribe(true, 1).0;
+        assert_eq!(shared.capture, initial.0.capture + 1);
+        assert_eq!(local.capture(shared.capture), (shared, 2, 0));
+        let window = handle.pcm.window();
+        let publish = || {
+            assert!(window.publish(
+                PcmHeader {
+                    epoch: shared.epoch,
+                    intent: shared.intent,
+                    generation: shared.generation,
+                    capture: shared.capture,
+                    sample_rate: shared.sample_rate,
+                    ..Default::default()
+                },
+                &[0, 1],
+                [0.25, -0.25].into_iter(),
+            ));
+            window.sequence()
+        };
+        let first = publish();
+        assert_eq!(local.subscribe(false, 3), (shared, 3, first));
+        assert_eq!(local.subscribe(false, 4), (shared, 4, first));
+        let second = publish();
+        assert!(second > first);
+        assert_eq!(local.subscribe(true, 5), (shared, 5, second));
+        let third = publish();
+        assert!(third > second);
+        assert_eq!(local.subscribe(false, 6), (shared, 6, third));
+        assert_eq!(local.subscribe(true, 7), (shared, 7, third));
+        drop(local);
+        drop(keeper);
+        drop(server);
+    }
+
+    #[test]
+    fn aggregate_capture_boundaries_reach_disabled_clients_on_updates_and_disconnect() {
+        let directory = crate::ipc::tests::socket_test_directory();
+        let (handle, _queries) = CoreHandle::test_query_port();
+        let server = PcmServer::start(directory.path(), handle, 7).unwrap();
+        let mut observer = Client::connect(directory.path());
+        let initial = observer.subscribe(false, 11).0;
+        let mut first = Client::connect(directory.path());
+        let enabled = first.subscribe(true, 1).0;
+        assert_eq!(enabled.capture, initial.capture + 1);
+        assert_eq!(observer.capture(enabled.capture), (enabled, 11, 0));
+
+        let mut second = Client::connect(directory.path());
+        assert_eq!(second.subscribe(true, 1).0, enabled);
+        assert_eq!(first.subscribe(false, 2).0, enabled);
+        drop(second);
+        let disabled = observer.capture(enabled.capture + 1).0;
+        assert!(!disabled.active);
+        assert_eq!(observer.subscribe(false, 12), (disabled, 12, 0));
+
+        // Coalescing may skip intermediate broadcasts, but fast off/on still
+        // revokes the previous capture identity even without any audio frames.
+        let mut requests = Vec::new();
+        for (enabled, revision) in [(true, 3), (false, 4), (true, 5)] {
+            requests.extend_from_slice(&request(1, u8::from(enabled), revision));
+        }
+        first.0.write_all(&requests).unwrap();
+        let resumed = first.capture(disabled.capture + 3).0;
+        assert_eq!(observer.capture(resumed.capture), (resumed, 12, 0));
+        drop(first);
+        let stopped = observer.capture(resumed.capture + 1).0;
+        assert!(!stopped.active);
+        assert_eq!(observer.subscribe(false, 13), (stopped, 13, 0));
+        drop(observer);
+        drop(server);
     }
 }

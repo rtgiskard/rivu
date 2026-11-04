@@ -116,7 +116,11 @@ plus metadata and alignment, independent of the number of clients (at most 16).
 There is no private capture queue, middleware PCM copy or per-client PCM queue.
 Analysis history and the processed Before FIFO are separate allocations.
 
-PCM publications, cursor progress and subscription changes wake enabled receivers.
+PCM publications and cursor progress wake enabled receivers. Each subscription
+request acknowledges its own revision and current sequence frontier; unchanged
+aggregate capture state does not wake other clients. Shared control changes,
+including first enablement and last-subscriber disconnect, notify disabled clients
+as well so they can retire obsolete capture identities.
 Stream identity, applied intent, capture identity and sequence watermarks reject
 obsolete blocks. Missing sequences or explicit gaps break analysis continuity.
 Readers never pin slots: a writer may replace samples during direct observation.
