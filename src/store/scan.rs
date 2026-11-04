@@ -165,7 +165,19 @@ fn scan_scope<'a>(
             );
         }
         let path = path.to_str().context("Scan scope path is not UTF-8")?;
-        if exact.insert(path) && descendants {
+        exact.insert(path);
+    }
+    if descendants {
+        for &path in &exact {
+            // Only seek descendants of outermost roots. Ancestor hash lookups
+            // avoid comparing root pairs.
+            if path != "/"
+                && path
+                    .match_indices('/')
+                    .any(|(index, _)| exact.contains(if index == 0 { "/" } else { &path[..index] }))
+            {
+                continue;
+            }
             let path = path.trim_end_matches('/');
             let bytes = path
                 .len()
@@ -179,8 +191,19 @@ fn scan_scope<'a>(
             prefix.push('/');
             prefixes.insert(prefix);
         }
+        exact.retain(|path| !covered_by_scope_prefix(path, &prefixes));
     }
     Ok((exact, prefixes))
+}
+
+fn covered_by_scope_prefix(path: &str, prefixes: &HashSet<String>) -> bool {
+    if prefixes.is_empty() {
+        return false;
+    }
+    // Slash-terminated lookups preserve component boundaries without allocating
+    // an owner path or searching every requested root for every record.
+    path.match_indices('/')
+        .any(|(index, _)| prefixes.contains(&path[..=index]))
 }
 
 /// JSON buffers own their reservation until SQLite has finished reading them.
@@ -462,17 +485,22 @@ impl Store {
         let mut scope_workspace = result.retained_budget.as_ref().map(ImportBudget::scoped);
         let (mut exact, prefixes) =
             scan_scope(&result.roots, !exact_sources, scope_workspace.as_mut())?;
-        exact.extend(records.iter().map(|record| {
-            let owner = if exact_sources {
-                record.source.path.as_path()
-            } else {
-                record
-                    .cue
-                    .as_ref()
-                    .map_or(record.source.path.as_path(), |cue| cue.sheet.as_path())
-            };
-            owner.to_str().expect("scan record paths validated above")
-        }));
+        exact.extend(
+            records
+                .iter()
+                .map(|record| {
+                    let owner = if exact_sources {
+                        record.source.path.as_path()
+                    } else {
+                        record
+                            .cue
+                            .as_ref()
+                            .map_or(record.source.path.as_path(), |cue| cue.sheet.as_path())
+                    };
+                    owner.to_str().expect("scan record paths validated above")
+                })
+                .filter(|owner| !covered_by_scope_prefix(owner, &prefixes)),
+        );
         let exact_json = ScopeJson::serialize(&exact, result.retained_budget.as_ref())?;
         let prefixes_json = ScopeJson::serialize(&prefixes, result.retained_budget.as_ref())?;
         let mut selected = HashMap::new();

@@ -930,6 +930,10 @@ Relocation matching uses fingerprint and CUE segment identity. Exact identity wi
 multiple compatible candidates remain ambiguous, and only a confirmed missing
 source permits relocation. Incomplete scans disable relocation and missing
 detection. Fingerprints are validated before commit.
+Scan selection keeps only outermost descendant ranges and exact owners not
+already covered by those ranges. Coverage respects path-component boundaries;
+explicit files and CUE owners outside the ranges remain exact selections.
+This reduces query inputs without changing missing or uncertainty protection.
 
 `CheckOtherTracks {force}` checks only registered sources outside current roots,
 or all registered sources with no roots. It does not discover, relocate, or delete

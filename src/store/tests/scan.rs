@@ -1682,6 +1682,109 @@ fn other_check_preserves_registered_cue_identity_and_user_state_across_absence()
 }
 
 #[test]
+fn overlapping_scan_scope_preserves_owner_boundaries_and_missing_protections() {
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    let records: Vec<_> = [
+        "/music",
+        "/music/nested/inside.wav",
+        "/loose.wav",
+        "/musicology/untouched.wav",
+        "/outside/extra.wav",
+        "/music/nested/deleted.wav",
+        "/music/nested/uncertain.wav",
+    ]
+    .into_iter()
+    .map(|path| {
+        let mut source = record();
+        source.path = path.into();
+        source.fingerprint = None;
+        std::sync::Arc::new(source)
+    })
+    .collect();
+    let sheets = ["/music/nested/album.cue", "/sheets/external.cue"];
+    let segment = |sheet: &str, source| {
+        CueRecord::registered(
+            source,
+            CueSegment {
+                sheet: sheet.into(),
+                number: 1,
+                start_frame: 0,
+                end_frame: Some(4500),
+            },
+            cue_metadata(),
+            Some(60.0),
+        )
+    };
+    store
+        .apply_scan(&ScanResult {
+            records: records.clone(),
+            segments: vec![
+                segment(sheets[0], records[4].clone()),
+                segment(sheets[1], records[1].clone()),
+            ],
+            ..Default::default()
+        })
+        .unwrap();
+    let ids: Vec<_> = records
+        .iter()
+        .map(|record| {
+            store
+                .track_id_for_identity(crate::store::TrackIdentity::File(&record.path))
+                .unwrap()
+                .unwrap()
+        })
+        .collect();
+    let cue_ids: Vec<_> = sheets
+        .iter()
+        .map(|sheet| {
+            store
+                .track_id_for_identity(crate::store::TrackIdentity::Cue(Path::new(sheet), 1))
+                .unwrap()
+                .unwrap()
+        })
+        .collect();
+    store.set_favorite(&cue_ids, true).unwrap();
+    let refreshed = |index: usize| {
+        let mut source = records[index].as_ref().clone();
+        source.media.title = "Refreshed".into();
+        source.size += 1;
+        std::sync::Arc::new(source)
+    };
+    let inside = refreshed(1);
+    let outside = refreshed(4);
+    let roots = vec!["/music/nested".into(), "/music".into(), "/loose.wav".into()];
+    store
+        .apply_scan(&ScanResult {
+            roots: roots.clone(),
+            records: vec![inside.clone(), outside.clone()],
+            segments: vec![segment(sheets[0], outside), segment(sheets[1], inside)],
+            uncertainties: vec![crate::library::ScanUncertainty::File(
+                records[6].path.clone(),
+            )],
+            ..Default::default()
+        })
+        .unwrap();
+    for index in [0, 2, 5] {
+        assert!(store.track(ids[index]).unwrap().unwrap().missing);
+    }
+    for index in [1, 3, 4, 6] {
+        assert!(!store.track(ids[index]).unwrap().unwrap().missing);
+    }
+    for index in [1, 4] {
+        assert_eq!(store.track(ids[index]).unwrap().unwrap().title, "Refreshed");
+    }
+    for id in cue_ids {
+        let cue = store.track(id).unwrap().unwrap();
+        assert!(!cue.missing);
+        assert!(cue.favorite);
+    }
+    assert_eq!(store.track_count().unwrap(), 9);
+    // The path and CUE indexes both still select covered rows, root equality,
+    // and the explicit file, but not a lexical sibling or the outside ordinary.
+    assert_eq!(store.stored_scan_files(&roots).unwrap().len(), 7);
+}
+
+#[test]
 fn import_staging_budget_failure_commits_no_tracks() {
     let store = Store::open(Path::new(":memory:")).unwrap();
     let scan = ScanResult {
