@@ -2,7 +2,7 @@ use super::Store;
 use super::positions::insert_staged_tracks;
 use super::scan::{PROBE_VERSION, ScanImpacts};
 use crate::library::ExternalAdmission;
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
 use rusqlite::{OptionalExtension, params};
 
 impl Store {
@@ -15,14 +15,6 @@ impl Store {
         current_id: Option<u64>,
     ) -> Result<(usize, ScanImpacts, usize)> {
         let tx = self.conn.unchecked_transaction()?;
-        let total = usize::try_from(tx.query_row(
-            "SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=0",
-            [],
-            |row| row.get::<_, i64>(0),
-        )?)
-        .context("Invalid queue position")?;
-        let insertion = index.unwrap_or(total);
-        ensure!(insertion <= total, "Queue insertion index out of range");
         tx.execute_batch("CREATE TEMP TABLE external_sources(
             ordinal INTEGER PRIMARY KEY,resolved_id INTEGER,path TEXT NOT NULL,fingerprint BLOB,
             file_size INTEGER NOT NULL,modified_ns INTEGER NOT NULL,raw_title TEXT NOT NULL,
@@ -140,7 +132,7 @@ impl Store {
                 ])?;
             }
         }
-        let count = insert_staged_tracks(&tx, 0, insertion)?;
+        let count = insert_staged_tracks(&tx, 0, index)?;
         let current_id = current_id
             .map(i64::try_from)
             .transpose()

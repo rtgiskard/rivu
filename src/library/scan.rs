@@ -557,9 +557,17 @@ where
         }
     }
     for chunk in files.chunks(SOURCE_BATCH_SIZE) {
-        let pending = chunk
-            .iter()
-            .filter(|path| is_audio_path(path) && !sources.contains_key(*path))
+        cancellation.check()?;
+        let audio: [bool; SOURCE_BATCH_SIZE] =
+            std::array::from_fn(|index| chunk.get(index).is_some_and(|path| is_audio_path(path)));
+        let audio_paths = || {
+            chunk
+                .iter()
+                .zip(&audio)
+                .filter_map(|(path, &audio)| audio.then_some(path))
+        };
+        let pending = audio_paths()
+            .filter(|path| !sources.contains_key(*path))
             .cloned()
             .collect();
         prepare_sources(
@@ -572,7 +580,7 @@ where
             &mut scratch,
         )
         .await?;
-        for path in chunk.iter().filter(|path| is_audio_path(path)) {
+        for path in audio_paths() {
             cancellation.check()?;
             let record = sources
                 .remove(path)

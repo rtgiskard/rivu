@@ -189,3 +189,224 @@ fn collection_transfer_failures_preserve_queue_and_playlist_positions() {
     );
     assert_eq!(store.playlist_track_ids(playlist, 20).unwrap(), [1, 2, 3]);
 }
+
+#[test]
+fn empty_album_transfers_fail_without_changing_destinations() {
+    use rivu_protocol::model::{AlbumKey, CollectionDestination, CollectionSource};
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    store
+        .conn
+        .execute("INSERT INTO tracks(id,path) VALUES(1,'/other/one.wav')", [])
+        .unwrap();
+    store.enqueue_tracks(&[1]).unwrap();
+    let playlist = store.create_playlist_with_tracks("target", &[1]).unwrap();
+    let source = CollectionSource::Album {
+        key: AlbumKey {
+            directory: "/absent".into(),
+            title: "Absent".into(),
+        },
+        revision: 0,
+    };
+    let queue = store.queue_page(None, 0, 10).unwrap();
+    let entries = store.playlist_entries_page(playlist, None, 0, 10).unwrap();
+    for destination in [
+        CollectionDestination::Queue { insertion: None },
+        CollectionDestination::Playlist {
+            playlist_id: playlist,
+            revision: 0,
+            index: Some(0),
+        },
+    ] {
+        let error = store.transfer_collection(&source, destination).unwrap_err();
+        assert!(error.to_string().contains("Album is empty"));
+        assert_eq!(store.queue_page(None, 0, 10).unwrap(), queue);
+        assert_eq!(
+            store.playlist_entries_page(playlist, None, 0, 10).unwrap(),
+            entries
+        );
+    }
+}
+
+#[test]
+fn empty_playlist_transfers_still_validate_destination_and_index() {
+    use rivu_protocol::model::{CollectionDestination, CollectionInsertion, CollectionSource};
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    let source_id = store.create_playlist("empty").unwrap();
+    let target = store.create_playlist("target").unwrap();
+    let source = CollectionSource::Playlist {
+        playlist_id: source_id,
+        revision: 0,
+    };
+    for destination in [
+        CollectionDestination::Queue { insertion: None },
+        CollectionDestination::Queue {
+            insertion: Some(CollectionInsertion {
+                index: 0,
+                revision: 0,
+            }),
+        },
+        CollectionDestination::Playlist {
+            playlist_id: target,
+            revision: 0,
+            index: None,
+        },
+        CollectionDestination::Playlist {
+            playlist_id: target,
+            revision: 0,
+            index: Some(0),
+        },
+    ] {
+        assert_eq!(store.transfer_collection(&source, destination).unwrap(), 0);
+    }
+    for destination in [
+        CollectionDestination::Queue {
+            insertion: Some(CollectionInsertion {
+                index: 1,
+                revision: 0,
+            }),
+        },
+        CollectionDestination::Playlist {
+            playlist_id: target,
+            revision: 0,
+            index: Some(1),
+        },
+        CollectionDestination::Playlist {
+            playlist_id: target + 1,
+            revision: 0,
+            index: None,
+        },
+        CollectionDestination::Playlist {
+            playlist_id: target + 1,
+            revision: 0,
+            index: Some(0),
+        },
+        CollectionDestination::Playlist {
+            playlist_id: 0,
+            revision: 0,
+            index: None,
+        },
+    ] {
+        assert!(store.transfer_collection(&source, destination).is_err());
+    }
+    assert_eq!(store.queue_state().unwrap().total, 0);
+    assert!(store.playlist_track_ids(target, 10).unwrap().is_empty());
+    assert_eq!(
+        store
+            .transfer_collection(&source, CollectionDestination::Queue { insertion: None })
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn self_collection_transfers_preserve_staged_order_and_duplicate_occurrences() {
+    use rivu_protocol::model::{CollectionDestination, CollectionSource};
+    for (index, expected) in [
+        (None, vec![2, 1, 2, 2, 1, 2]),
+        (Some(1), vec![2, 2, 1, 2, 1, 2]),
+    ] {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        store
+            .conn
+            .execute_batch("INSERT INTO tracks(id,path) VALUES(1,'/one.wav'),(2,'/two.wav');")
+            .unwrap();
+        let playlist = store
+            .create_playlist_with_tracks("self", &[2, 1, 2])
+            .unwrap();
+        let source = CollectionSource::Playlist {
+            playlist_id: playlist,
+            revision: 0,
+        };
+        let destination = CollectionDestination::Playlist {
+            playlist_id: playlist,
+            revision: 0,
+            index,
+        };
+        assert_eq!(store.transfer_collection(&source, destination).unwrap(), 3);
+        assert_eq!(store.playlist_track_ids(playlist, 10).unwrap(), expected);
+        let entries = store
+            .playlist_entries_page(playlist, None, 0, 10)
+            .unwrap()
+            .rows;
+        assert!(
+            entries
+                .iter()
+                .enumerate()
+                .all(|(index, entry)| entry.position == index)
+        );
+    }
+}
+
+#[test]
+fn collection_transfers_reject_position_overflow_and_can_retry_after_rollback() {
+    use rivu_protocol::model::{CollectionDestination, CollectionInsertion, CollectionSource};
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    store
+        .conn
+        .execute_batch("INSERT INTO tracks(id,path) VALUES(1,'/one.wav');")
+        .unwrap();
+    let source_id = store.create_playlist_with_tracks("source", &[1]).unwrap();
+    let target = store.create_playlist_with_tracks("target", &[1]).unwrap();
+    store.enqueue_tracks(&[1]).unwrap();
+    let source = CollectionSource::Playlist {
+        playlist_id: source_id,
+        revision: 0,
+    };
+    for scope in [0, target] {
+        store
+            .conn
+            .execute(
+                "UPDATE playlist_entries SET position=?1 WHERE playlist_id=?2",
+                params![i64::MAX - 1, scope],
+            )
+            .unwrap();
+        for explicit in [false, true] {
+            let destination = if scope == 0 {
+                CollectionDestination::Queue {
+                    insertion: explicit.then_some(CollectionInsertion {
+                        index: 0,
+                        revision: 0,
+                    }),
+                }
+            } else {
+                CollectionDestination::Playlist {
+                    playlist_id: scope,
+                    revision: 0,
+                    index: explicit.then_some(0),
+                }
+            };
+            let error = store.transfer_collection(&source, destination).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("Insertion exceeds database positions")
+            );
+            let positions = store
+                .conn
+                .prepare("SELECT position FROM playlist_entries WHERE playlist_id=?1 ORDER BY position,id")
+                .unwrap()
+                .query_map([scope], |row| row.get::<_, i64>(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            assert_eq!(positions, [i64::MAX - 1]);
+        }
+        store
+            .conn
+            .execute(
+                "UPDATE playlist_entries SET position=0 WHERE playlist_id=?1",
+                [scope],
+            )
+            .unwrap();
+        let destination = if scope == 0 {
+            CollectionDestination::Queue { insertion: None }
+        } else {
+            CollectionDestination::Playlist {
+                playlist_id: scope,
+                revision: 0,
+                index: None,
+            }
+        };
+        assert_eq!(store.transfer_collection(&source, destination).unwrap(), 1);
+    }
+}

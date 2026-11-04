@@ -1,5 +1,5 @@
-use anyhow::Result;
-use rusqlite::{Transaction, params};
+use anyhow::{Context, Result, ensure};
+use rusqlite::{OptionalExtension, Transaction, params};
 
 /// Stage incoming occurrences; directory unions alone are set selections.
 pub(super) fn insert_tracks(
@@ -21,25 +21,29 @@ pub(super) fn insert_tracks(
             [ids],
         )?;
     }
-    insert_staged_tracks(tx, collection_id, index)
+    insert_staged_tracks(tx, collection_id, Some(index))
 }
 
 /// Consume SQL-staged occurrences without changing their order or multiplicity.
+/// Resolve append positions and validate the staged count in this transaction;
+/// callers provide neither a trusted count nor a previously read target length.
 pub(super) fn insert_staged_tracks(
     tx: &Transaction<'_>,
     collection_id: i64,
-    index: usize,
+    index: Option<usize>,
 ) -> Result<usize> {
-    let index = i64::try_from(index)?;
-    let total: i64 = tx.query_row(
-        "SELECT (SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=?1) FROM playlists WHERE id=?1",
-        [collection_id], |row| row.get(0),
-    )?;
-    anyhow::ensure!(index <= total, "Insertion index out of range");
-    let count: i64 = tx.query_row("SELECT COUNT(*) FROM insertion_tracks", [], |row| {
-        row.get(0)
-    })?;
-    anyhow::ensure!(
+    let (total, count): (i64, i64) = tx
+        .query_row(
+            "SELECT (SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=?1),(SELECT COUNT(*) FROM insertion_tracks) FROM playlists WHERE id=?1",
+            [collection_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?
+        .context("Playlist not found")?;
+    ensure!(total >= 0, "Invalid collection position");
+    let index = index.map(i64::try_from).transpose()?.unwrap_or(total);
+    ensure!(index <= total, "Insertion index out of range");
+    ensure!(
         total.checked_add(count).is_some(),
         "Insertion exceeds database positions"
     );

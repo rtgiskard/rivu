@@ -584,7 +584,7 @@ impl Store {
         index: usize,
     ) -> Result<bool> {
         let tx = self.conn.unchecked_transaction()?;
-        exists_playlist(&tx, playlist_id)?;
+        anyhow::ensure!(playlist_id > 0, "Playlist not found");
         let count = super::positions::insert_tracks(&tx, playlist_id, index, ids, directories)?;
         tx.commit()?;
         Ok(count != 0)

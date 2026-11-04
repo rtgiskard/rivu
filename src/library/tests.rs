@@ -175,6 +175,43 @@ fn cue_lookup_batches_share_sources_across_sheet_batches() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn mixed_case_audio_and_cue_share_one_source_and_report_all_discovered_files() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().to_path_buf();
+    let audio = root.join("audio.WaV");
+    wav(&audio, 75)?;
+    fs::write(
+        root.join("sheet.CuE"),
+        "FILE \"audio.WaV\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\n",
+    )?;
+    fs::write(root.join("ignored.wav.txt"), "not audio")?;
+    let mut looked_up = Vec::new();
+    let mut final_progress = None;
+    let result = super::scan_paths(
+        std::slice::from_ref(&root),
+        |paths| {
+            looked_up.extend_from_slice(paths);
+            Ok(vec![None; paths.len()])
+        },
+        false,
+        std::slice::from_ref(&root),
+        1,
+        &ScanCancellation::default(),
+        |phase, processed, total, errors, path| {
+            if phase == ScanPhase::ReadingMetadata && path.is_none() {
+                final_progress = Some((processed, total, errors));
+            }
+        },
+    )?;
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    assert_eq!(looked_up, [audio]);
+    assert_eq!(result.records.len(), 1);
+    assert_eq!(result.segments.len(), 1);
+    assert_eq!(final_progress, Some((2, Some(2), 0)));
+    Ok(())
+}
+
 fn scan_paths_at_depth(
     paths: &[PathBuf],
     known: &[(PathBuf, KnownFile)],

@@ -530,7 +530,10 @@ mod tests {
         store.enqueue_tracks(&[2])?;
         let tx = store.conn.unchecked_transaction()?;
         tx.execute_batch("CREATE TEMP TABLE insertion_tracks(ordinal INTEGER PRIMARY KEY,track_id INTEGER NOT NULL); INSERT INTO insertion_tracks VALUES(4,1),(99,1),(1000,3);")?;
-        assert_eq!(super::super::positions::insert_staged_tracks(&tx, 0, 0)?, 3);
+        assert_eq!(
+            super::super::positions::insert_staged_tracks(&tx, 0, Some(0))?,
+            3
+        );
         tx.commit()?;
         assert_eq!(
             store
