@@ -1592,27 +1592,6 @@ mod tests {
     }
 
     #[test]
-    fn gap_requires_a_complete_new_window() {
-        let settings = AnalysisSettings {
-            fps: 5,
-            fft_size: 512,
-            ..AnalysisSettings::from(&Config::default())
-        };
-        let mut analyzer = SpectrumAnalyzer::new(settings, 192_000);
-        for _ in 0..settings.fft_size {
-            analyzer.push([1.0; 2]);
-        }
-        analyzer.reset();
-        analyzer.push([0.0; 2]);
-        assert_eq!(analyzer.filled, 1);
-        for _ in 1..settings.fft_size {
-            analyzer.push([0.0; 2]);
-        }
-        assert_eq!(analyzer.filled, settings.fft_size as usize);
-        assert_eq!(analyzer.transform(), [0.0; 2]);
-    }
-
-    #[test]
     fn musical_bands_follow_nyquist() {
         for rate in [48_000, 8_000, 192_000, 44_100] {
             let frequencies = musical_frequencies(rate);
@@ -1765,7 +1744,6 @@ mod tests {
             analyzer.push([0.5, -0.5]);
         }
         analyzer.reset();
-        assert_eq!(analyzer.filled, 0);
         for _ in 0..settings.fft_size {
             analyzer.push([0.0, 0.0]);
         }

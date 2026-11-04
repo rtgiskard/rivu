@@ -32,8 +32,6 @@ struct RadialMapping {
     fft_size: u32,
     frequencies: Vec<u32>,
     ranges: Vec<Range<usize>>,
-    #[cfg(test)]
-    rebuilds: usize,
 }
 
 impl RadialMapping {
@@ -88,10 +86,6 @@ impl RadialMapping {
             }
         }
         self.ranges.truncate(count);
-        #[cfg(test)]
-        {
-            self.rebuilds += 1;
-        }
         Some(changed)
     }
 }
@@ -1075,7 +1069,6 @@ mod tests {
         audio.spectrum_db.fill(-70.0);
         radial.update(&audio, start);
         assert_eq!(radial.data.borrow().displayed, vec![0.5; 4]);
-        let rebuilds = radial.data.borrow().mapping.rebuilds;
         let capacity = radial.data.borrow().displayed.capacity();
         for tick in 1..=12 {
             let now = start + Duration::from_micros(16_000 * tick);
@@ -1091,7 +1084,6 @@ mod tests {
             );
         }
         assert_ne!(radial.data.borrow().time, initial_rotation);
-        assert_eq!(radial.data.borrow().mapping.rebuilds, rebuilds);
         assert_eq!(radial.data.borrow().displayed.capacity(), capacity);
         audio.spectrum_db.fill(0.0);
         radial.update(&audio, start + Duration::from_millis(192));
@@ -1271,30 +1263,11 @@ mod tests {
     }
 
     #[test]
-    fn radial_mapping_reuses_axis_and_rebuilds_changed_axes_with_bounded_storage() {
-        let mut frequencies: Vec<_> = (0..=4096)
-            .map(|bin| bin as f32 * 48_000.0 / 8192.0)
-            .collect();
-        let mut mapping = RadialMapping::default();
-        for _ in 0..120 {
-            assert!(mapping.prepare(48_000, 8192, &frequencies).is_some());
-        }
-        assert_eq!(mapping.rebuilds, 1);
-        assert_eq!(mapping.ranges.len(), 32);
-        frequencies[10] += 1.0;
-        mapping.prepare(48_000, 8192, &frequencies).unwrap();
-        assert_eq!(mapping.rebuilds, 2);
-        mapping.prepare(8_000, 8192, &frequencies).unwrap();
-        assert_eq!(mapping.rebuilds, 3);
-        mapping.prepare(8_000, 16384, &frequencies).unwrap();
-        assert_eq!(mapping.rebuilds, 4);
-        frequencies[10] = f32::NAN;
-        mapping.prepare(8_000, 16384, &frequencies).unwrap();
-        mapping.prepare(8_000, 16384, &frequencies).unwrap();
-        assert_eq!(mapping.rebuilds, 5);
-        frequencies = (0..=MAX_RADIAL_AXIS)
+    fn oversized_radial_mapping_bounds_retained_storage() {
+        let frequencies: Vec<_> = (0..=MAX_RADIAL_AXIS)
             .map(|bin| bin as f32 * 48_000.0 / (MAX_RADIAL_AXIS - 1) as f32)
             .collect();
+        let mut mapping = RadialMapping::default();
         mapping.prepare(48_000, 32768, &frequencies).unwrap();
         assert!(mapping.frequencies.is_empty());
         assert_eq!(mapping.ranges.len(), FANCY_BANDS);

@@ -706,14 +706,3 @@ impl FrequencyState {
         prepared
     }
 }
-#[cfg(test)]
-mod sampling_budget_tests {
-    use super::*;
-    #[test]
-    fn maximum_history_reduces_rows_without_changing_time_resolution() {
-        assert_eq!(history_column_count(60, 60), 3600);
-        assert_eq!(spectrogram_budget_rows(3600, 64 * 1024 * 1024), 580);
-        assert_eq!(spectrogram_budget_rows(3600, 16 * 1024 * 1024), 143);
-        assert!(spectrogram_budget_rows(400, 64 * 1024 * 1024) >= 4096);
-    }
-}

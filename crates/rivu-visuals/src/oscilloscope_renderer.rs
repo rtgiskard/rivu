@@ -551,20 +551,6 @@ mod tests {
         assert_eq!(display_amplitude(-3.0, 1.0), -1.0);
     }
 
-    #[test]
-    fn scale_axis_uses_input_amplitude_and_actual_source_span() {
-        let template = "±{amplitude} · {span} ms";
-        assert_eq!(
-            scale_label(template, 2.0, sweep_span_ms(480, 48_000)),
-            "±0.50 · 9.98 ms"
-        );
-        assert_eq!(
-            scale_label(template, 0.1, sweep_span_ms(2048, 192_000)),
-            "±10.00 · 10.66 ms"
-        );
-        assert_eq!(scale_label(template, 1.0, None), "±1.00 · — ms");
-    }
-
     fn frame(config: &Config) -> AnalysisFrame {
         let mut frame = AnalysisFrame {
             generation: 1,

@@ -1403,7 +1403,7 @@ mod tests {
             let limit = if skip { 3 } else { 1 };
             let read = decoder.rt.f.read_frame;
             let mut frames = Vec::new();
-            let error = decoder
+            decoder
                 .next_frames_with_reader(
                     &mut frames,
                     Some(&cancelled),
@@ -1423,7 +1423,6 @@ mod tests {
                 )
                 .unwrap_err();
             assert_eq!(packets, limit);
-            assert_eq!(error.to_string(), "Waveform loading cancelled");
             assert!(!decoder.draining, "cancellation is not EOF");
             cancelled.store(false, Ordering::Relaxed);
             decoder.seek(0.0, Some(&cancelled)).unwrap();

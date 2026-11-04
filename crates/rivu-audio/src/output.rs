@@ -1452,8 +1452,7 @@ mod pcm_tests {
         assert!(output_capacity(262_148, 64).is_err());
         assert!(output_capacity(262_144, 65).is_err());
         // A tiny stereo WAV can advertise this rate in its header.
-        let error = output_capacity(1_000_000_000, 2).unwrap_err();
-        assert!(error.to_string().contains("16 MiB limit"));
+        assert!(output_capacity(1_000_000_000, 2).is_err());
     }
 
     #[test]

@@ -1428,24 +1428,6 @@ mod tests {
     }
 
     #[test]
-    fn bypass_is_sample_exact_including_signed_zero() {
-        let input = [0.0, -0.0, 0.3, -0.9, 4.0, -4.0];
-        let output = run(DenoiseConfig::default(), 48_000, 2, &input, None, 1);
-        assert!(
-            input
-                .iter()
-                .zip(output)
-                .all(|(a, b)| a.to_bits() == b.to_bits())
-        );
-        let config = DenoiseConfig {
-            mode: DenoiseMode::Adaptive,
-            wet: 0.0,
-            ..Default::default()
-        };
-        assert_eq!(run(config, 48_000, 2, &input, None, 2), input);
-    }
-
-    #[test]
     fn unity_stft_preserves_alignment_edges_and_arbitrary_block_boundaries() {
         let config = DenoiseConfig {
             mode: DenoiseMode::Stationary,

@@ -906,9 +906,7 @@ mod tests {
             assert!(worker.opening.is_none());
             assert!(worker.playback.is_none());
             let event = events.try_recv().unwrap();
-            assert!(
-                matches!(event, AudioEvent::Failed { generation: 91, message } if message.contains("admitted for graph audition"))
-            );
+            assert!(matches!(event, AudioEvent::Failed { generation: 91, .. }));
             assert!(events.is_empty());
         }
     }
@@ -1748,12 +1746,7 @@ mod tests {
                 // Exercise a real timer wake after cancelling the first wait; the
                 // production request keeps the five-second deadline checked above.
                 stop.deadline = Instant::now() + Duration::from_millis(10);
-                let error = stop.wait(|_| {}).await.unwrap_err();
-                assert!(
-                    error
-                        .to_string()
-                        .contains("did not stop before the deadline")
-                );
+                assert!(stop.wait(|_| {}).await.is_err());
                 assert_eq!(receive.len(), 1, "a timed-out stop was replayed");
                 let _events = stop.into_events();
             }

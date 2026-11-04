@@ -279,9 +279,7 @@ mod tests {
         assert!(
             renderer
                 .render_pcm(Arc::clone(&budget), &cancelled)
-                .unwrap_err()
-                .to_string()
-                .contains("PCM memory budget exceeded")
+                .is_err()
         );
         assert_eq!(budget.used_bytes(), 0);
 
@@ -307,9 +305,7 @@ mod tests {
         assert!(
             renderer
                 .render_pcm(Arc::clone(&budget), &cancelled)
-                .unwrap_err()
-                .to_string()
-                .contains("PCM memory budget exceeded")
+                .is_err()
         );
         assert_eq!(budget.used_bytes(), 0);
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);

@@ -1220,7 +1220,6 @@ mod tests {
         // Empty buffer.
         assert!(read_lang_code(&mut BufReader::new(&[])).is_err());
         // Too few characters in buffer.
-        assert!(read_lang_code(&mut BufReader::new(b"")).is_err());
         assert!(read_lang_code(&mut BufReader::new(b"e")).is_err());
         assert!(read_lang_code(&mut BufReader::new(b"en")).is_err());
         // Non-alphabetic.

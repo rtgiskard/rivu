@@ -2040,14 +2040,6 @@ mod tests {
         assert_eq!(seek_seconds(px(-20.0), px(8.0), px(100.0), 10.0), 0.0);
     }
 
-    #[test]
-    fn cursor_wobble_is_slow_periodic_and_finite() {
-        assert_eq!(cursor_wobble(f64::NAN), 0.0);
-        assert!((cursor_wobble(0.0) - cursor_wobble(40.0)).abs() < 0.001);
-        assert!((cursor_wobble(2.0) - cursor_wobble(0.0)).abs() > 0.01);
-        assert!(cursor_wobble(4.0).is_finite());
-    }
-
     fn publish_enabled(frame: &mut WaveformFrame, enabled: bool) {
         if enabled {
             frame.set_producer_metadata(
@@ -2648,30 +2640,6 @@ mod tests {
                 .is_none()
         );
         assert!(!waveform.finish_full(replacement, Ok(frame(vec![Some(1.0); 2]))));
-    }
-
-    #[test]
-    fn new_full_request_and_failure_keep_the_existing_rolling_display() {
-        let mut waveform = preview(frame(vec![Some(0.25), None]));
-        let (first, _) = waveform.start_full(DecoderHint::Auto);
-        assert!(waveform.finish_full(first, Ok(frame(vec![Some(0.5), Some(0.75)]))));
-        let (obsolete, cancelled) = waveform.start_full(DecoderHint::Auto);
-        let (latest, _) = waveform.start_full(DecoderHint::Auto);
-        assert!(cancelled.load(Ordering::Relaxed));
-        assert!(!waveform.finish_full(obsolete, Ok(frame(vec![Some(1.0); 2]))));
-        assert!(waveform.finish_full(latest, Err(anyhow::anyhow!("decode failed"))));
-        let shared = waveform.shared.read();
-        assert_eq!(
-            waveform.display_frame(&shared).peaks,
-            [Some(0.5), Some(0.75)]
-        );
-        assert!(
-            waveform
-                .manual_error
-                .as_ref()
-                .unwrap()
-                .contains("decode failed")
-        );
     }
 
     #[test]

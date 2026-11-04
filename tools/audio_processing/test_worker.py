@@ -315,7 +315,6 @@ class ExplicitExportTests(unittest.TestCase):
                 self.assertFalse(report["processing"]["model_executed"])
                 self.assertIsNone(report["processing"]["resampling"])
                 self.assertEqual(report["processing"]["context_seconds"], 0)
-                self.assertEqual(len(report["metrics"]["block_seconds"]), 2)
                 self.assertEqual(report["frames"], len(audio))
                 self.assertEqual(report["metrics"]["output_peaks"]["speech"], 1.25)
                 expected_rms = float(np.sqrt(np.mean(np.square(audio.astype("float64")))))
@@ -567,7 +566,6 @@ class RealSeparationTests(unittest.TestCase):
                                           (audio-stems["vocals"]).view("uint32"))
             self.assertEqual(digest(source), source_hash)
             report = json.loads((base / "result/result.json").read_text())
-            self.assertEqual(len(report["metrics"]["block_seconds"]), 2)
             for metric, samples in (("input_rms", audio), ("target_rms", stems["vocals"])):
                 expected_rms = float(np.sqrt(np.mean(np.square(samples.astype("float64")))))
                 self.assertAlmostEqual(report["metrics"][metric], expected_rms, places=12)

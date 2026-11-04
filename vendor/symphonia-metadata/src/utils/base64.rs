@@ -115,13 +115,10 @@ mod tests {
         assert_eq!(Some(b"fooba".as_slice()), decode("Zm9vYmE=").as_deref());
         assert_eq!(Some(b"foobar".as_slice()), decode("Zm9vYmFy").as_deref());
         // Valid, without padding.
-        assert_eq!(Some(b"".as_slice()), decode("").as_deref());
         assert_eq!(Some(b"f".as_slice()), decode("Zg").as_deref());
         assert_eq!(Some(b"fo".as_slice()), decode("Zm8").as_deref());
-        assert_eq!(Some(b"foo".as_slice()), decode("Zm9v").as_deref());
         assert_eq!(Some(b"foob".as_slice()), decode("Zm9vYg").as_deref());
         assert_eq!(Some(b"fooba".as_slice()), decode("Zm9vYmE").as_deref());
-        assert_eq!(Some(b"foobar".as_slice()), decode("Zm9vYmFy").as_deref());
         // Invalid.
         assert_eq!(None, decode("a").as_deref());
         assert_eq!(None, decode("ab!c").as_deref());

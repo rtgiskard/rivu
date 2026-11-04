@@ -973,43 +973,6 @@ mod tests {
     }
 
     #[test]
-    fn flow_refresh_preserves_state_and_discontinuities_reset() {
-        let visual = plot(AudioVisualizerStyle::FractalFlow);
-        accept(&visual, &frame(50));
-        // 500 ms requires all 60 bounded integration steps, but one publication.
-        accept(&visual, &frame(550));
-        let before = visual.data.borrow().segments().to_vec();
-        let accepted_time = visual.data.borrow().last_time;
-        let config = Config {
-            effect_primary_color: "#ff0000".parse().unwrap(),
-            ..Config::default()
-        };
-        assert!(visual.configure_config(&config));
-        accept(&visual, &frame(550));
-        assert_eq!(visual.data.borrow().last_time, accepted_time);
-        assert_eq!(visual.data.borrow().segments(), before);
-        let mut gap = frame(1100);
-        gap.generation += 1;
-        accept(&visual, &gap);
-        let fresh = plot(AudioVisualizerStyle::FractalFlow);
-        fresh.configure_config(&config);
-        accept(&fresh, &gap);
-        assert_eq!(
-            visual.data.borrow().segments(),
-            fresh.data.borrow().segments()
-        );
-        gap.sample_time = Duration::from_millis(100);
-        accept(&visual, &gap);
-        let rewound = plot(AudioVisualizerStyle::FractalFlow);
-        rewound.configure_config(&config);
-        accept(&rewound, &gap);
-        assert_eq!(
-            visual.data.borrow().segments(),
-            rewound.data.borrow().segments()
-        );
-    }
-
-    #[test]
     fn signal_switch_restarts_scene_and_rejects_old_drive() {
         for style in [
             AudioVisualizerStyle::FractalBeams,

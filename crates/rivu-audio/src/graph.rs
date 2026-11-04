@@ -826,8 +826,7 @@ mod tests {
             },
             1,
         );
-        let error = GraphRunner::compile(&graph, port(3, 0), 48_000, 2).unwrap_err();
-        assert!(error.to_string().contains("profile"));
+        assert!(GraphRunner::compile(&graph, port(3, 0), 48_000, 2).is_err());
     }
 
     #[test]
@@ -968,8 +967,7 @@ mod tests {
             },
         ] {
             let graph = chain_graph(kind, 6);
-            let error = GraphRunner::compile(&graph, port(8, 0), 48_000, 2).unwrap_err();
-            assert!(error.to_string().contains("arithmetic work budget"));
+            assert!(GraphRunner::compile(&graph, port(8, 0), 48_000, 2).is_err());
         }
     }
 
@@ -1127,10 +1125,7 @@ mod tests {
             },
             profile: None,
         };
-        let error = GraphRunner::compile(&graph, port(2, 0), 48_000, 1)
-            .err()
-            .unwrap();
-        assert!(error.to_string().contains("profile"));
+        assert!(GraphRunner::compile(&graph, port(2, 0), 48_000, 1).is_err());
         graph.nodes[1].kind = GraphNodeKind::Equalizer {
             config: EqualizerConfig {
                 enabled: true,

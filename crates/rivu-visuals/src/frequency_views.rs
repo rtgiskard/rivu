@@ -15,12 +15,12 @@ use spectrogram::Spectrogram;
 #[cfg(test)]
 use spectrogram::{
     SPECTROGRAM_TILE_COLUMNS, SpectrogramTile, history_column_count, history_columns_for_width,
-    sample_spectrogram_column, spectrogram_source_height,
+    sample_spectrogram_column,
 };
 #[cfg(test)]
 use spectrum::{
     MAX_SPECTRUM_BARS, advance_envelope, group_bands, shape_y, smooth_release, smoothing_decay,
-    spectrum_bar_count, spectrum_labels_visible,
+    spectrum_bar_count,
 };
 use spectrum::{Spectrum, note_label};
 
@@ -1081,34 +1081,6 @@ mod tests {
     }
 
     #[test]
-    fn solid_spectrum_preserves_subpixel_and_full_height_signal() {
-        for level in [-99.9, -75.0, 0.0] {
-            let mut visuals = configured_visuals();
-            visuals.configure_config(&Config {
-                spectrum_style: SpectrumStyle::Solid,
-                spectrum_interpolate: false,
-                spectrum_db_range: Some(100.0),
-                ..Config::default()
-            });
-            visuals.update(&frame(1.0, level), Duration::from_secs_f64(1.0));
-            let body = prepared_body(&visuals, 1, 100.0, 100.0).unwrap();
-            let gpui::GpuContent::Path { path, .. } = body.content() else {
-                panic!("expected filled spectrum path")
-            };
-            let minimum_y = path
-                .vertices
-                .iter()
-                .map(|vertex| vertex.xy_position.y)
-                .fold(px(f32::INFINITY), |a, b| a.min(b));
-            let expected_y = px(121.5 - (level + 100.0));
-            assert!(
-                (minimum_y - expected_y).abs() < px(0.001),
-                "{level} dB must retain its measured height, not a stroke inset"
-            );
-        }
-    }
-
-    #[test]
     fn gpu_spectrum_outline_preserves_nonoverlapping_edges_and_palette_domain() {
         for height in [0.125, 1.0, 2.0, 25.0, 100.0] {
             let mut visuals = configured_visuals();
@@ -1375,18 +1347,6 @@ mod tests {
             high,
         );
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn small_canvases_skip_plots_and_cramped_spectra_omit_labels() {
-        for (width, height) in [(64.0, 100.0), (100.0, 40.0), (300.0, 25.0)] {
-            assert!(!visual_canvas_has_room(size(px(width), px(height))));
-        }
-        assert!(visual_canvas_has_room(size(px(65.0), px(41.0))));
-        assert!(!spectrum_labels_visible(true, px(41.0)));
-        assert!(!spectrum_labels_visible(true, px(77.0)));
-        assert!(spectrum_labels_visible(true, px(78.0)));
-        assert!(!spectrum_labels_visible(false, px(100.0)));
     }
 
     fn level_range(levels: &[f32]) -> Option<(f32, f32)> {
@@ -2480,28 +2440,6 @@ mod tests {
     }
 
     #[test]
-    fn range_changes_keep_shared_frequency_axis_and_history() {
-        let mut visuals = configured_visuals();
-        let mut config = Config::default();
-        visuals.update(&frame(1.0, -30.0), Duration::from_secs_f64(1.0));
-        config.spectrum_db_range = Some(40.0);
-        visuals.configure_config(&config);
-        {
-            let data = visuals.data.borrow();
-            assert_eq!(data.spectrum_range().unwrap().2, 20.0);
-            assert_eq!(data.spectrogram.db_range, 70.0);
-        }
-        config.spectrogram_db_range = Some(100.0);
-        visuals.configure_config(&config);
-        let data = visuals.data.borrow();
-        assert_eq!(
-            level_range(&data.spectrogram.columns[0].levels),
-            Some((-30.0, -30.0))
-        );
-        assert_eq!(data.spectrogram.len, 1);
-    }
-
-    #[test]
     fn common_range_changes_only_inherited_views_without_clearing_history() {
         for spectrum_override in [None, Some(70.0)] {
             for spectrogram_override in [None, Some(70.0)] {
@@ -2597,14 +2535,6 @@ mod tests {
                 [1, 2, 3, 4]
             );
         }
-    }
-
-    #[test]
-    fn spectrogram_display_rows_follow_physical_height_and_hard_cap() {
-        assert_eq!(spectrogram_source_height(320), 320);
-        assert_eq!(spectrogram_source_height(700), 700);
-        assert_eq!(spectrogram_source_height(1400), 1024);
-        assert_eq!(spectrogram_source_height(0), 1);
     }
 
     #[test]

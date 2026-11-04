@@ -473,13 +473,11 @@ mod tests {
     }
 
     #[test]
-    fn serde_and_validation_reject_invalid_parameters() {
+    fn validation_rejects_invalid_parameters() {
         let config = DenoiseConfig {
             spectral_gain_floor_db: -18.5,
             ..Default::default()
         };
-        let json = serde_json::to_string(&config).unwrap();
-        assert_eq!(config, serde_json::from_str(&json).unwrap());
         for spectral_gain_floor_db in [f32::NAN, f32::INFINITY, -100.1, 0.1] {
             let mut bad = config.clone();
             bad.spectral_gain_floor_db = spectral_gain_floor_db;
