@@ -589,8 +589,13 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, area: Rect, ui: &mut UiState, color
     );
     ui.page_size = inner.height.max(1) as usize;
     let width = inner.width as usize;
-    let mut bindings: Vec<_> = help_bindings(context).collect();
-    bindings.sort_by_key(|binding| help_order(binding.action));
+    let mut bindings: Vec<_> = help_bindings(context)
+        .map(|binding| {
+            let label = binding.label();
+            (binding, label)
+        })
+        .collect();
+    bindings.sort_by_key(|(binding, _)| help_order(binding.action));
     let commands = [
         (":q / :quit", "terminal-command-close"),
         (":qa / :qall", "terminal-command-shutdown"),
@@ -598,7 +603,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, area: Rect, ui: &mut UiState, color
     ];
     let key_width = bindings
         .iter()
-        .map(|binding| Span::raw(binding.label()).width())
+        .map(|(_, label)| Span::raw(label.as_str()).width())
         .chain(commands.iter().map(|(key, _)| Span::raw(*key).width()))
         .max()
         .unwrap_or(0);
@@ -655,7 +660,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, area: Rect, ui: &mut UiState, color
         if group != 4
             && !bindings
                 .iter()
-                .any(|binding| help_group(binding.action) == group)
+                .any(|(binding, _)| help_group(binding.action) == group)
         {
             continue;
         }
@@ -670,15 +675,11 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, area: Rect, ui: &mut UiState, color
                 append_row(&mut lines, key, ui.i18n.text(description));
             }
         } else {
-            for binding in bindings
+            for (binding, label) in bindings
                 .iter()
-                .filter(|binding| help_group(binding.action) == group)
+                .filter(|(binding, _)| help_group(binding.action) == group)
             {
-                append_row(
-                    &mut lines,
-                    &binding.label(),
-                    ui.i18n.text(binding.description),
-                );
+                append_row(&mut lines, label, ui.i18n.text(binding.description));
             }
         }
         lines.push(Line::default());

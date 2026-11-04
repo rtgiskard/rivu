@@ -46,14 +46,11 @@ impl TuiState {
             .ui
             .view
             .query_kind(false)
-            .filter(|kind| {
-                kind.clone().changed_without_bitrate(
-                    &self.snapshot,
-                    &next,
-                    &self.ui.search.applied_query,
-                )
+            .is_some_and(|kind| {
+                kind.changed_without_bitrate(&self.snapshot, &next, &self.ui.search.applied_query)
             })
-            .and_then(|_| self.ui.selected_identity());
+            .then(|| self.ui.selected_identity())
+            .flatten();
         self.ui.sync_queue(&self.snapshot, &next);
         if page_size_changed {
             self.ui.queue.pages.clear();
@@ -586,10 +583,8 @@ impl UiState {
                 if let Some(track_id) = self.refresh_anchor {
                     (QueryKind::LibrarySelection(track_id), 0)
                 } else {
-                    (
-                        QueryKind::Search(self.search.applied_query.clone()),
-                        results.next_offset(limit)?,
-                    )
+                    let offset = results.next_offset(limit)?;
+                    (QueryKind::Search(self.search.applied_query.clone()), offset)
                 }
             }
             View::Tree(tree) if tree.other_tracks => (
@@ -608,10 +603,10 @@ impl UiState {
                     },
                     0,
                 ),
-                None => (
-                    QueryKind::Directory(tree.directory.clone()),
-                    tree.entries.next_offset(limit)?,
-                ),
+                None => {
+                    let offset = tree.entries.next_offset(limit)?;
+                    (QueryKind::Directory(tree.directory.clone()), offset)
+                }
             },
             View::Tree(tree) if tree.other_present.is_none() => (QueryKind::OtherTracksCount, 0),
             View::Playlists(playlists) => (QueryKind::Playlists, playlists.next_offset(limit)?),

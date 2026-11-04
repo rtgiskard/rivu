@@ -318,9 +318,11 @@ are errors. Runtime IDs and edit locking are omitted.
 === Session snapshots and explicit sync
 
 The desktop-session owner retains immutable snapshots of layout edits; named
-layouts share trees until an edit copies the affected tree. Validation, encoding
-and file I/O stay off the GUI. Manual sync cancels previews and captures committed
-state; panel-settings Apply publishes only to session memory.
+layouts share trees until an edit copies the affected tree. Rendering borrows
+the active tree from a shared collection snapshot rather than copying the tree
+per frame. Validation, encoding and file I/O stay off the GUI. Manual sync cancels
+previews and captures committed state; panel-settings Apply publishes only to
+session memory.
 
 The writer serializes one in-flight and one replaceable pending sync snapshot.
 Later edits do not alter a captured request or suppress its feedback. A newer
