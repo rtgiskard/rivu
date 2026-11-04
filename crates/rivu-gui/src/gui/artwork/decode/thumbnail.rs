@@ -3,12 +3,12 @@ use std::{
     fs::{self, File},
     io::{Read, Write},
     path::Path,
-    sync::{Arc, LazyLock, Weak},
+    sync::{Arc, Weak},
 };
 
+use futures::lock::{Mutex, OwnedMutexGuard};
 use gpui::{ImageCacheError, RenderImage};
 use image::{ImageDecoder, ImageFormat, ImageReader, codecs::webp::WebPDecoder};
-use parking_lot::Mutex;
 
 use rivu_metadata::artwork::cache_paths::thumbnail_path;
 
@@ -18,14 +18,97 @@ use super::{Budget, decode, limit_error, preflight_webp, to_bgra};
 // configurable encoded admission limit.
 const MAX_THUMBNAIL_BYTES: usize = 8 * 1024 * 1024;
 
+const RETAINED_ENCODED_BYTES: usize = 2 * 1024 * 1024;
+const RETAINED_RESIZE_SIDE: usize = 4096;
+
 type SourceKey = (blake3::Hash, usize, Budget);
-type Sources = HashMap<SourceKey, Weak<Mutex<Source>>>;
 
 #[derive(Default)]
 struct Source {
     info: Option<SourceInfo>,
-    original: Option<Arc<RenderImage>>,
     rendered: HashMap<u32, Weak<RenderImage>>,
+}
+
+#[derive(Default)]
+struct ResizeWorkspace {
+    taps: Vec<f32>,
+    spans: Vec<(usize, usize, usize)>,
+    weights: Vec<f32>,
+    row: Vec<[f32; 4]>,
+}
+
+#[derive(Default)]
+struct Workspace {
+    input: Vec<u8>,
+    thumbnail: Vec<u8>,
+    encoded: Vec<u8>,
+    resize: ResizeWorkspace,
+    sources: HashMap<SourceKey, Source>,
+}
+
+fn recycle<T>(buffer: &mut Vec<T>, max_capacity: usize) {
+    if buffer.capacity() > max_capacity {
+        *buffer = Vec::new();
+    } else {
+        buffer.clear();
+    }
+}
+
+impl Workspace {
+    fn recycle(&mut self) {
+        recycle(&mut self.input, RETAINED_ENCODED_BYTES);
+        recycle(&mut self.thumbnail, RETAINED_ENCODED_BYTES);
+        recycle(&mut self.encoded, RETAINED_ENCODED_BYTES);
+        recycle(&mut self.resize.taps, RETAINED_RESIZE_SIDE);
+        recycle(&mut self.resize.spans, RETAINED_RESIZE_SIDE);
+        // For downsampling, all horizontal supports together cover at most
+        // 2 * source_width + 2 * target_width weights.
+        recycle(&mut self.resize.weights, 4 * RETAINED_RESIZE_SIDE);
+        recycle(&mut self.resize.row, RETAINED_RESIZE_SIDE);
+    }
+}
+
+/// One reusable decode seat, shared by every window of its owning application.
+/// Explicit ownership also keeps independent virtual test executors isolated.
+#[derive(Clone, Default)]
+pub(in crate::gui::artwork) struct DecodeWorkspace(Arc<Mutex<Workspace>>);
+
+impl DecodeWorkspace {
+    /// Acquire before any source or thumbnail I/O. Waiting only registers a
+    /// waker; dropping the wait removes it without starting synchronous work.
+    pub(in crate::gui::artwork) async fn acquire(&self) -> WorkspaceGuard {
+        WorkspaceGuard {
+            workspace: Arc::clone(&self.0).lock_owned().await,
+        }
+    }
+}
+
+/// Move this guard with synchronous work; cancellation must not release its
+/// buffers or seat while that work is still running. Display pixels never live
+/// in the reusable buffers.
+pub(in crate::gui::artwork) struct WorkspaceGuard {
+    workspace: OwnedMutexGuard<Workspace>,
+}
+
+impl WorkspaceGuard {
+    pub(in crate::gui::artwork) fn load(
+        &mut self,
+        path: &Path,
+        max_encoded_bytes: usize,
+        budget: Budget,
+        tier: u32,
+    ) -> Result<super::DecodedArtwork, ImageCacheError> {
+        let result = load_in_workspace(&mut self.workspace, path, max_encoded_bytes, budget, tier);
+        self.workspace.recycle();
+        result
+    }
+}
+
+impl Drop for WorkspaceGuard {
+    fn drop(&mut self) {
+        // Also recover scratch capacity if a codec or caller unwinds.
+        self.workspace.recycle();
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -34,33 +117,16 @@ struct SourceInfo {
     animated: bool,
 }
 
-fn read_bounded(path: &Path, max_bytes: usize) -> Result<Vec<u8>, ImageCacheError> {
+fn read_bounded(path: &Path, max_bytes: usize, bytes: &mut Vec<u8>) -> Result<(), ImageCacheError> {
     // Bound the read even if a file was changed outside the artwork manager.
-    let mut bytes = Vec::new();
+    bytes.clear();
     File::open(path)?
-        .take(max_bytes as u64 + 1)
-        .read_to_end(&mut bytes)?;
+        .take((max_bytes as u64).saturating_add(1))
+        .read_to_end(bytes)?;
     if bytes.len() > max_bytes {
         return Err(limit_error().into());
     }
-    Ok(bytes)
-}
-
-fn source(hash: blake3::Hash, max_encoded_bytes: usize, budget: Budget) -> Arc<Mutex<Source>> {
-    static SOURCES: LazyLock<Mutex<Sources>> = LazyLock::new(Mutex::default);
-    let mut sources = SOURCES.lock();
-    // Only active background loads own these entries: neither original pixels
-    // nor locks accumulate after the last waiter leaves.
-    sources.retain(|_, source| source.strong_count() != 0);
-    if let Some(source) = sources
-        .get(&(hash, max_encoded_bytes, budget))
-        .and_then(Weak::upgrade)
-    {
-        return source;
-    }
-    let source = Arc::new(Mutex::new(Source::default()));
-    sources.insert((hash, max_encoded_bytes, budget), Arc::downgrade(&source));
-    source
+    Ok(())
 }
 
 fn inspect(bytes: &[u8], budget: Budget) -> image::ImageResult<SourceInfo> {
@@ -88,15 +154,15 @@ fn inspect(bytes: &[u8], budget: Budget) -> image::ImageResult<SourceInfo> {
     })
 }
 
-fn cached(path: &Path, budget: Budget, tier: u32) -> Option<Arc<RenderImage>> {
+fn cached(path: &Path, budget: Budget, tier: u32, bytes: &mut Vec<u8>) -> Option<Arc<RenderImage>> {
     // NotFound also covers manual cleanup between path construction and open.
     // Corrupt disposable thumbnails are regenerated from the admitted source.
-    let bytes = read_bounded(path, MAX_THUMBNAIL_BYTES).ok()?;
-    let info = inspect(&bytes, budget).ok()?;
+    read_bounded(path, MAX_THUMBNAIL_BYTES, bytes).ok()?;
+    let info = inspect(bytes, budget).ok()?;
     if info.animated || info.longest != tier {
         return None;
     }
-    let frames = decode(&bytes, budget).ok()?;
+    let frames = decode(bytes, budget).ok()?;
     (frames.len() == 1).then(|| Arc::new(RenderImage::new(frames)))
 }
 
@@ -169,35 +235,46 @@ fn resize_bgra(
     view: image::ImageBuffer<image::Rgba<u8>, &[u8]>,
     width: u32,
     height: u32,
+    scratch: &mut ResizeWorkspace,
 ) -> image::RgbaImage {
     let horizontal = TriangleAxis::new(view.width(), width);
     let vertical = TriangleAxis::new(view.height(), height);
     let source_width = view.width() as usize;
     let source = view.as_raw().as_chunks::<4>().0;
     let alpha = source.iter().any(|pixel| pixel[3] != 255);
-    let mut taps = Vec::with_capacity(horizontal.max_taps().max(vertical.max_taps()));
-    let mut spans = Vec::with_capacity(width as usize);
-    let mut weights = Vec::with_capacity(width as usize * horizontal.max_taps());
+    let ResizeWorkspace {
+        taps,
+        spans,
+        weights,
+        row,
+    } = scratch;
+    taps.clear();
+    spans.clear();
+    weights.clear();
+    taps.reserve_exact(horizontal.max_taps().max(vertical.max_taps()));
+    spans.reserve_exact(width as usize);
+    weights.reserve_exact(width as usize * horizontal.max_taps());
     for x in 0..width as usize {
-        let start = horizontal.weights(x, &mut taps);
+        let start = horizontal.weights(x, taps);
         spans.push((start, weights.len(), taps.len()));
-        weights.extend_from_slice(&taps);
+        weights.extend_from_slice(taps);
     }
 
     // Retain only one source-width f32 row, not source_width * target_height.
     // Each pixel keeps the existing vertical-then-horizontal accumulation order.
-    let mut row = vec![[0.0_f32; 4]; source_width];
+    row.reserve_exact(source_width.saturating_sub(row.len()));
+    row.resize(source_width, [0.0; 4]);
     let mut output = image::RgbaImage::new(width, height);
     for (y, destination) in output
         .as_mut()
         .chunks_exact_mut(width as usize * 4)
         .enumerate()
     {
-        let start = vertical.weights(y, &mut taps);
+        let start = vertical.weights(y, taps);
         row.fill([0.0; 4]);
         for (source_row, &weight) in source[start * source_width..]
             .chunks_exact(source_width)
-            .zip(&taps)
+            .zip(taps.iter())
         {
             if alpha {
                 // Premultiply on read at 16-bit precision, without a source copy.
@@ -217,8 +294,11 @@ fn resize_bgra(
                 }
             }
         }
-        for (destination, &(start, offset, length)) in
-            destination.as_chunks_mut::<4>().0.iter_mut().zip(&spans)
+        for (destination, &(start, offset, length)) in destination
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(spans.iter())
         {
             let mut pixel = [0.0_f32; 4];
             for (source, &weight) in row[start..start + length]
@@ -253,22 +333,51 @@ fn resize_bgra(
     output
 }
 
+#[cfg(test)]
 pub(super) fn load(
     path: &Path,
     max_encoded_bytes: usize,
     budget: Budget,
     tier: u32,
 ) -> Result<super::DecodedArtwork, ImageCacheError> {
-    let bytes = read_bounded(path, max_encoded_bytes)?;
-    let hash = blake3::hash(&bytes);
-    let source = source(hash, max_encoded_bytes, budget);
-    // This mutex is taken only by existing background decode jobs. Same-source
-    // requests share one original decode and one result per requested tier.
-    let mut source = source.lock();
+    thread_local! {
+        static WORKSPACE: DecodeWorkspace = DecodeWorkspace::default();
+    }
+    WORKSPACE.with(|workspace| {
+        let mut workspace = futures_lite::future::block_on(workspace.acquire());
+        workspace.load(path, max_encoded_bytes, budget, tier)
+    })
+}
+
+fn load_in_workspace(
+    workspace: &mut Workspace,
+    path: &Path,
+    max_encoded_bytes: usize,
+    budget: Budget,
+    tier: u32,
+) -> Result<super::DecodedArtwork, ImageCacheError> {
+    let Workspace {
+        input,
+        thumbnail,
+        encoded,
+        resize,
+        sources,
+    } = workspace;
+    read_bounded(path, max_encoded_bytes, input)?;
+    let hash = blake3::hash(input);
+    // Preserve sharing for live display images, but never keep full-size source
+    // pixels alive solely for thumbnails. Idle workspaces retain scratch only.
+    sources.retain(|_, source| {
+        source.rendered.retain(|_, image| image.strong_count() != 0);
+        !source.rendered.is_empty()
+    });
+    let source = sources
+        .entry((hash, max_encoded_bytes, budget))
+        .or_default();
     let info = match source.info {
         Some(info) => info,
         None => {
-            let info = inspect(&bytes, budget)?;
+            let info = inspect(input, budget)?;
             source.info = Some(info);
             info
         }
@@ -290,17 +399,16 @@ pub(super) fn load(
     let path = (tier != u32::MAX)
         .then(|| thumbnail_path(path, hash, tier))
         .flatten();
-    if let Some(image) = path.as_deref().and_then(|path| cached(path, budget, tier)) {
+    if let Some(image) = path
+        .as_deref()
+        .and_then(|path| cached(path, budget, tier, thumbnail))
+    {
         source.rendered.insert(tier, Arc::downgrade(&image));
         return Ok(decoded(image));
     }
-    let original = match &source.original {
-        Some(image) => Arc::clone(image),
-        None => {
-            let image = Arc::new(RenderImage::new(decode(&bytes, budget)?));
-            source.original = Some(Arc::clone(&image));
-            image
-        }
+    let original = match source.rendered.get(&u32::MAX).and_then(Weak::upgrade) {
+        Some(image) => image,
+        None => Arc::new(RenderImage::new(decode(input, budget)?)),
     };
     if tier == u32::MAX {
         source.rendered.insert(tier, Arc::downgrade(&original));
@@ -316,10 +424,10 @@ pub(super) fn load(
         original.as_bytes(0).expect("admitted cover has a frame"),
     )
     .expect("admitted cover has complete pixels");
-    let mut frame = image::Frame::new(resize_bgra(view, width, height));
+    let mut frame = image::Frame::new(resize_bgra(view, width, height, resize));
     to_bgra(&mut frame); // BGRA -> RGBA for the encoder, preserving alpha.
-    let mut encoded = Vec::new();
-    image::codecs::webp::WebPEncoder::new_lossless(&mut encoded).encode(
+    encoded.clear();
+    image::codecs::webp::WebPEncoder::new_lossless(&mut *encoded).encode(
         frame.buffer().as_raw(),
         width,
         height,
@@ -331,7 +439,7 @@ pub(super) fn load(
     let image = Arc::new(RenderImage::new(vec![frame]));
     if let Some(path) = path {
         // Disk caching is best effort; a read-only/full cache must not hide art.
-        if let Err(error) = publish(&path, &encoded) {
+        if let Err(error) = publish(&path, encoded) {
             tracing::warn!(?error, "artwork_thumbnail_cache_write_failed");
         }
     }
@@ -357,10 +465,6 @@ mod tests {
         let admitted = rivu_metadata::artwork::DEFAULT_MAX_IMAGE_BYTES;
         let lower = 8 * 1024 * 1024;
         let budget = Budget::new(2);
-        // Keep the shared source alive so later requests exercise resident reuse.
-        let source = source(hash, admitted, budget);
-        let lower_source = super::source(hash, lower, budget);
-        assert!(!Arc::ptr_eq(&source, &lower_source));
         assert!(load(&path, lower, budget, 256).is_err());
         let first = load(&path, admitted, budget, 256).unwrap().image;
         assert_eq!(size(&first), (256, 128));
@@ -370,11 +474,9 @@ mod tests {
         assert!(load(&path, lower, budget, 256).is_err());
         let shared = load(&path, admitted, budget, 256).unwrap().image;
         assert!(Arc::ptr_eq(&first, &shared));
-        drop(source);
-        drop(lower_source);
         drop(first);
         drop(shared);
-        // A new source lease now uses the disk tier, still after source admission.
+        // With no live display result, the next load uses the admitted disk tier.
         let cached = load(&path, admitted, budget, 256).unwrap().image;
         assert_eq!(size(&cached), (256, 128));
         assert_eq!(&cached.as_bytes(0).unwrap()[..4], &[40, 30, 210, 255]);
@@ -403,12 +505,15 @@ mod tests {
     #[test]
     fn physical_demand_rounds_up_to_discrete_tiers() {
         for (side, tier) in [
-            (0, 256),
-            (255, 256),
+            (0, 200),
+            (200, 200),
+            (201, 256),
             (256, 256),
-            (257, 512),
-            (512, 512),
-            (513, 1024),
+            (257, 400),
+            (400, 400),
+            (401, 560),
+            (560, 560),
+            (561, 1024),
             (1024, 1024),
             (1025, u32::MAX),
             (u32::MAX, u32::MAX),
@@ -480,7 +585,7 @@ mod tests {
             let view =
                 image::ImageBuffer::from_raw(width, height, pixels.as_raw().as_slice()).unwrap();
             let (width, height) = if vertical { (1, 243) } else { (243, 1) };
-            let resized = resize_bgra(view, width, height);
+            let resized = resize_bgra(view, width, height, &mut ResizeWorkspace::default());
             let (x, y) = if vertical { (0, 8) } else { (8, 0) };
             // Pixel 9 contributes ~49% of the normalized Triangle support.
             // Rounding the support down to two taps would discard it entirely.
@@ -492,14 +597,14 @@ mod tests {
     fn transparent_hidden_blue_never_tints_visible_red_during_filtering() {
         let pixels = [0, 0, 255, 255, 255, 0, 0, 0]; // BGRA red / invisible blue.
         let view = image::ImageBuffer::from_raw(2, 1, pixels.as_slice()).unwrap();
-        let resized = resize_bgra(view, 1, 1);
+        let resized = resize_bgra(view, 1, 1, &mut ResizeWorkspace::default());
         assert_eq!(resized.get_pixel(0, 0).0, [0, 0, 255, 128]);
 
         // Low-alpha colors keep precision rather than rounding premultiplied
         // channels to zero before the filter has integrated them.
         let pixels = [0, 0, 128, 1, 255, 0, 0, 0];
         let view = image::ImageBuffer::from_raw(2, 1, pixels.as_slice()).unwrap();
-        let resized = resize_bgra(view, 1, 1);
+        let resized = resize_bgra(view, 1, 1, &mut ResizeWorkspace::default());
         assert_eq!(resized.get_pixel(0, 0).0[0], 0);
         assert!(resized.get_pixel(0, 0).0[2].abs_diff(128) <= 1);
     }
@@ -733,54 +838,141 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_source_leases_share_pixels_and_release_after_last_waiter() {
+    fn same_content_shares_live_images_without_retaining_original_pixels() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("source.png");
+        let other_path = directory.path().join("same-content.png");
         let bytes = png(800, 400, [210, 30, 40, 255]);
         fs::write(&path, &bytes).unwrap();
-        let first = source(
-            blake3::hash(&bytes),
-            rivu_metadata::artwork::DEFAULT_MAX_IMAGE_BYTES,
-            Budget::default(),
-        );
-        let second = source(
-            blake3::hash(&bytes),
-            rivu_metadata::artwork::DEFAULT_MAX_IMAGE_BYTES,
-            Budget::default(),
-        );
-        assert!(Arc::ptr_eq(&first, &second));
-        let image = load(
-            &path,
-            rivu_metadata::artwork::DEFAULT_MAX_IMAGE_BYTES,
-            Budget::default(),
-            256,
-        )
-        .unwrap()
-        .image;
-        let repeated = load(
-            &path,
-            rivu_metadata::artwork::DEFAULT_MAX_IMAGE_BYTES,
-            Budget::default(),
-            256,
-        )
-        .unwrap()
-        .image;
+        fs::write(&other_path, &bytes).unwrap();
+        let max_bytes = rivu_metadata::artwork::DEFAULT_MAX_IMAGE_BYTES;
+        let original = load(&path, max_bytes, Budget::default(), u32::MAX)
+            .unwrap()
+            .image;
+        let image = load(&path, max_bytes, Budget::default(), 256)
+            .unwrap()
+            .image;
+        let repeated = load(&other_path, max_bytes, Budget::default(), 256)
+            .unwrap()
+            .image;
         assert!(Arc::ptr_eq(&image, &repeated));
-        let original = Arc::clone(first.lock().original.as_ref().unwrap());
-        load(
-            &path,
-            rivu_metadata::artwork::DEFAULT_MAX_IMAGE_BYTES,
-            Budget::default(),
-            512,
-        )
-        .unwrap();
-        assert!(Arc::ptr_eq(
-            first.lock().original.as_ref().unwrap(),
-            &original
-        ));
-        let weak = Arc::downgrade(&first);
-        drop(first);
-        drop(second);
+        let larger = load(&other_path, max_bytes, Budget::default(), 512)
+            .unwrap()
+            .image;
+        assert_eq!(size(&larger), (512, 256));
+        assert_eq!(&larger.as_bytes(0).unwrap()[..4], &[40, 30, 210, 255]);
+        let shared_original = load(&other_path, max_bytes, Budget::default(), u32::MAX)
+            .unwrap()
+            .image;
+        assert!(Arc::ptr_eq(&original, &shared_original));
+        let weak_original = Arc::downgrade(&original);
+        drop(original);
+        drop(shared_original);
+        assert!(weak_original.upgrade().is_none());
+        assert_eq!(&image.as_bytes(0).unwrap()[..4], &[40, 30, 210, 255]);
+        let weak = Arc::downgrade(&image);
+        drop(image);
+        drop(repeated);
         assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn different_sources_wait_before_reading_and_keep_independent_display_pixels() {
+        use std::{future::Future, task::Context};
+
+        let directory = tempfile::tempdir().unwrap();
+        let first_path = directory.path().join("first.png");
+        let second_path = directory.path().join("second.png");
+        fs::write(&first_path, png(800, 400, [211, 31, 41, 255])).unwrap();
+        let max_bytes = rivu_metadata::artwork::DEFAULT_MAX_IMAGE_BYTES;
+        let workspace = DecodeWorkspace::default();
+        let mut first_guard = futures_lite::future::block_on(workspace.acquire());
+        let (loaded, image) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let first = first_guard
+                .load(&first_path, max_bytes, Budget::default(), 256)
+                .unwrap()
+                .image;
+            loaded.send(first).unwrap();
+            released.recv().unwrap();
+            drop(first_guard);
+        });
+        let mut next = Box::pin(async {
+            let mut workspace = workspace.acquire().await;
+            workspace.load(&second_path, max_bytes, Budget::default(), 256)
+        });
+        let mut context = Context::from_waker(futures::task::noop_waker_ref());
+        assert!(next.as_mut().poll(&mut context).is_pending());
+        let first = image.recv().unwrap();
+        assert!(next.as_mut().poll(&mut context).is_pending());
+        // This file did not exist when the wait began: pre-reading would fail.
+        fs::write(&second_path, png(400, 800, [12, 34, 220, 96])).unwrap();
+        release.send(()).unwrap();
+        let second = futures_lite::future::block_on(next).unwrap().image;
+        worker.join().unwrap();
+        assert_eq!(size(&first), (256, 128));
+        assert_eq!(size(&second), (128, 256));
+        assert_eq!(&first.as_bytes(0).unwrap()[..4], &[41, 31, 211, 255]);
+        assert_eq!(&second.as_bytes(0).unwrap()[..4], &[220, 34, 12, 96]);
+    }
+
+    #[test]
+    fn cancelling_an_awakened_waiter_never_starts_it_or_blocks_the_next_source() {
+        use std::{
+            future::Future,
+            sync::atomic::{AtomicBool, Ordering},
+            task::Context,
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("next.png");
+        fs::write(&path, png(400, 800, [11, 22, 33, 255])).unwrap();
+        let max_bytes = rivu_metadata::artwork::DEFAULT_MAX_IMAGE_BYTES;
+        let workspace = DecodeWorkspace::default();
+        let held = futures_lite::future::block_on(workspace.acquire());
+        let started = AtomicBool::new(false);
+        let mut cancelled = Box::pin(async {
+            let mut workspace = workspace.acquire().await;
+            started.store(true, Ordering::SeqCst);
+            workspace.load(&path, max_bytes, Budget::default(), 256)
+        });
+        let mut next = Box::pin(async {
+            let mut workspace = workspace.acquire().await;
+            workspace.load(&path, max_bytes, Budget::default(), 256)
+        });
+        let mut context = Context::from_waker(futures::task::noop_waker_ref());
+        assert!(cancelled.as_mut().poll(&mut context).is_pending());
+        assert!(next.as_mut().poll(&mut context).is_pending());
+        // Drop after a wake but before another poll, the delicate handoff case.
+        drop(held);
+        drop(cancelled);
+        let image = futures_lite::future::block_on(next).unwrap().image;
+        assert!(!started.load(Ordering::SeqCst));
+        assert_eq!(size(&image), (128, 256));
+        assert_eq!(&image.as_bytes(0).unwrap()[..4], &[33, 22, 11, 255]);
+    }
+
+    #[test]
+    fn source_read_and_decode_errors_leave_the_workspace_usable_without_stale_pixels() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("source.png");
+        let broken = directory.path().join("broken.png");
+        fs::write(&path, png(800, 400, [230, 10, 20, 128])).unwrap();
+        fs::write(&broken, b"not an image").unwrap();
+        let max_bytes = rivu_metadata::artwork::DEFAULT_MAX_IMAGE_BYTES;
+        let first = load(&path, max_bytes, Budget::default(), 256)
+            .unwrap()
+            .image;
+        assert!(load(&path, 1, Budget::default(), 256).is_err());
+        assert!(load(&broken, max_bytes, Budget::default(), 256).is_err());
+        fs::write(&path, png(300, 900, [12, 34, 210, 64])).unwrap();
+        let second = load(&path, max_bytes, Budget::default(), 256)
+            .unwrap()
+            .image;
+        assert_eq!(size(&second), (85, 256));
+        assert_eq!(&second.as_bytes(0).unwrap()[..4], &[210, 34, 12, 64]);
+        assert_eq!(size(&first), (256, 128));
+        assert_eq!(&first.as_bytes(0).unwrap()[..4], &[20, 10, 230, 128]);
     }
 }

@@ -575,7 +575,7 @@ fn managed_filename(name: &std::ffi::OsStr) -> bool {
         return false;
     };
     let hash = if let Some((hash, tier)) = stem.split_once('-') {
-        if extension != "webp" || !matches!(tier, "256" | "512" | "1024") {
+        if extension != "webp" || !matches!(tier, "200" | "256" | "400" | "560" | "512" | "1024") {
             return false;
         }
         hash

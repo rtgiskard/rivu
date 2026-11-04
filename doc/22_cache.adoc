@@ -587,7 +587,7 @@ Encoded images use immutable content-derived paths under `artwork/cache`.
 Disk names use the first 128 bits of BLAKE3 as 32 lowercase hexadecimal characters:
 the first two form a bucket directory and the remaining 30 form the filename.
 For example, originals use `ab/<30-hex>.png` and thumbnails use
-`ab/<30-hex>-256.webp`, `-512.webp`, or `-1024.webp`. Runtime content identity
+`ab/<30-hex>-200.webp`, `-256.webp`, `-400.webp`, `-560.webp`, or `-1024.webp`. Runtime content identity
 retains the full hash. Existing originals are compared with the incoming bytes
 before reuse; mismatches fail without overwriting the existing file.
 Identical bytes reuse an existing file, independent of track identity; files
@@ -606,17 +606,19 @@ There is no automatic file-count or total-byte budget, startup directory invento
 or automatic cleanup. No persistent track-to-image index is restored after restart:
 the first source probe discovers the image hash, then reuses its file if present.
 
-Static GUI covers generate lossless WebP tiers at 256, 512, or 1024 physical pixels
-on demand, without enlarging small originals. Animated GIF/WebP keep original
-frames. Same-source work coalesces and publishes complete files atomically; missing
-or damaged thumbnails regenerate, and write failure does not prevent display.
-Reuse neither rewrites files nor refreshes age.
+Static GUI covers generate lossless WebP tiers at 200, 256, 400, or 560 physical
+pixels on demand; larger previews can also request 1024. Small originals are
+never enlarged during generation. Animated GIF/WebP keep original frames.
+Live same-content results share pixels, and complete files publish atomically;
+missing or damaged thumbnails regenerate, and write failure does not prevent
+display. Reuse neither rewrites files nor refreshes age. Maintenance also
+recognizes previously generated 512-pixel files, but new loads do not generate them.
 
 Tier filenames have no processing-version suffix, so future processing changes
 need explicit invalidation. Thumbnail reads have an independent 8 MiB cap and
 still require original-source admission under the current encoded policy. These
 files are disposable even with a resident source lookup: displayed pixels do not
-depend on them. Three tiers per source are not a global disk-capacity limit.
+depend on them. Per-source tiers are not a global disk-capacity limit.
 
 The MPRIS default export uses the same content-hash directory and is protected
 once exported; later sessions can clean it when it is no longer resident.
@@ -663,15 +665,32 @@ consumer retains its own lookup identity and source-file protection. Loading
 starts only when a preview requests the image and runs the artwork-specific
 bounded decoder on GPUI's background executor, not render-time file I/O.
 
-Static previews select the smallest sufficient tier from actual display size,
-scale, and cropping aspect ratio; demand above 1024 uses the original. Visible
-consumers share their largest required tier. Upgrades retain the old image until
-ready; smaller demand is debounced 300 ms. Old textures retire only after consumers
-acknowledge scene replacement. Within-tier resizing does not decode again.
+Static previews select the smallest sufficient tier from actual physical display
+size. Album-card demand is capped at 560 pixels, accepting display upscaling above
+that size; independent large previews retain their 1024/original-image path.
+Visible consumers of the same source share their largest required tier, so a
+large preview can raise the shared image above the album-card cap. Upgrades retain
+the old image until ready; smaller demand is debounced 300 ms. Old textures retire
+only after consumers acknowledge scene replacement. Within-tier resizing does
+not decode again.
 
-Thumbnail filtering uses row-sized workspace rather than a full intermediate
-image, with premultiplied-alpha filtering to avoid fringes. Complete source/output
-pixels, codecs, and encoded bytes still contribute independently to memory use.
+One application-owned decode seat, shared by every window, serializes real-cover
+reads, pixel decoding, thumbnail filtering, encoding, and publication on GPUI's
+background executor. Its reusable workspace is released with the application.
+Waiting consumers retain only request state, not encoded input or worker scratch;
+retiring their load cancels the wait. Already-running synchronous work owns the
+seat until it actually returns, even after its consumer stops waiting.
+
+The seat reuses source-input, thumbnail-input, and encoded-output buffers, each
+retaining at most 2 MiB of capacity. Reusable filter weights and a source-width
+floating-point row retain at most 240 KiB on x86-64; no full intermediate image
+is retained. Oversized capacities are discarded on completion, failure, or
+unwind, rather than pinning a large-image high-water mark. Filtering preserves
+premultiplied-alpha behavior. Display pixels have independent ownership and are
+never overwritten by the next request. Original pixels used only for thumbnail
+generation are released after that work; source sharing retains weak display
+references, not an idle original-image cache. These retained-capacity bounds do
+not cap active source/output pixels, codecs, GPU uploads, or process RSS.
 
 Replaced or hidden consumers retire through a window-owned queue after scene
 replacement; removed panels need not paint again. Releasing one consumer cannot
@@ -682,7 +701,7 @@ demand; a late shared lookup may warm the session cache but cannot restore a
 hidden owner or start another hidden acquisition. Unsubmitted Details input cancels
 on blur, independently of accepted writes. Window hide, close, or reload releases
 current and retired display owners without waiting for another frame. Another
-window owns an independent decode.
+window retains its own consumer lifetime without keeping another window's images alive.
 
 Revisiting an image after its last consumer retires decodes it again; there is
 no idle decoded-image cache across selections or windows. A still-live consumer

@@ -19,6 +19,8 @@ use gpui::{
 
 mod decode;
 
+impl gpui::Global for decode::DecodeWorkspace {}
+
 #[derive(Default)]
 struct ArtworkImageRegistryState {
     budget: decode::Budget,
@@ -415,6 +417,7 @@ struct ArtworkViewState {
 pub(super) struct ArtworkImageSizing {
     image: Entity<ArtworkImage>,
     token: u64,
+    max_side: Option<u32>,
 }
 
 impl ArtworkImageSizing {
@@ -423,7 +426,7 @@ impl ArtworkImageSizing {
         self.image.update(cx, |image, cx| {
             image.views.insert(self.token, (view, image.generation));
             image.flush_replaced();
-            image.request(self.token, side, window, cx);
+            image.request(self.token, side, self.max_side, window, cx);
         });
     }
 }
@@ -486,13 +489,28 @@ impl ArtworkView {
         Some(ArtworkImageSizing {
             image: image.owner.image.clone(),
             token,
+            max_side: None,
         })
     }
 
     /// Measure the actual laid-out image surface, not an estimated panel width.
     pub(super) fn measured_image(&self, consumer: u64, cx: &App) -> Option<gpui::AnyElement> {
+        self.measured_image_with_limit(consumer, None, cx)
+    }
+
+    pub(super) fn measured_thumbnail(&self, consumer: u64, cx: &App) -> Option<gpui::AnyElement> {
+        self.measured_image_with_limit(consumer, Some(560), cx)
+    }
+
+    fn measured_image_with_limit(
+        &self,
+        consumer: u64,
+        max_side: Option<u32>,
+        cx: &App,
+    ) -> Option<gpui::AnyElement> {
         let image = self.image(cx)?;
-        let sizing = self.sizing(consumer)?;
+        let mut sizing = self.sizing(consumer)?;
+        sizing.max_side = max_side;
         Some(
             canvas(
                 move |bounds, window, cx| {
@@ -662,6 +680,7 @@ impl ArtworkImage {
         &mut self,
         consumer: u64,
         side: Pixels,
+        max_side: Option<u32>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -669,6 +688,7 @@ impl ArtworkImage {
             return;
         }
         let physical = (f32::from(side).max(0.) * window.scale_factor()).ceil() as u32;
+        let physical = physical.min(max_side.unwrap_or(u32::MAX));
         let tier = decode::requested_tier(physical);
         if self.demands.insert(consumer, tier) != Some(tier) {
             self.reconcile_demand(window, cx);
@@ -716,10 +736,16 @@ impl ArtworkImage {
         let artwork = self.artwork.clone();
         let budget = self.budget;
         let source = Arc::clone(&self.source);
+        if !cx.has_global::<decode::DecodeWorkspace>() {
+            cx.set_global(decode::DecodeWorkspace::default());
+        }
+        let decoder = cx.global::<decode::DecodeWorkspace>().clone();
         ImageCacheItem::from_future(
             async move {
                 // Hold the source lease throughout background I/O/decode.
-                let result = decode::load(&artwork.path(), artwork.max_image_bytes(), budget, tier);
+                let mut workspace = decoder.acquire().await;
+                let result =
+                    workspace.load(&artwork.path(), artwork.max_image_bytes(), budget, tier);
                 if let Err(error) = &result {
                     tracing::error!(?error, "artwork_decode_failed");
                 }
@@ -1169,6 +1195,46 @@ mod tests {
         bytes.into_inner()
     }
 
+    #[gpui::test]
+    fn album_thumbnail_limit_preserves_independent_large_image_demand(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (_directory, loaded) = loaded_cover(&static_cover(2048, 74));
+        let images = ArtworkImageRegistry::default();
+        let cover = ArtworkView::new(images.clone());
+        let window = cx.add_empty_window();
+        window.update(|window, cx| {
+            cover.replace(Some(loaded), cx);
+            let sizing = cover.sizing(1).unwrap();
+            sizing.image.update(cx, |image, cx| {
+                image.request(sizing.token, gpui::px(2000.), Some(560), window, cx);
+            });
+        });
+        draw_cover(window, &cover);
+        window.run_until_parked();
+        window.update(|_, cx| {
+            let state = cover.state.borrow();
+            let image = state.current.as_ref().unwrap().owner.image.read(cx);
+            let pixels = image.item.as_ref().unwrap().get().unwrap().unwrap();
+            assert_eq!(pixels.size(0).width.0, 560);
+            assert_eq!(pixels.size(0).height.0, 280);
+        });
+        request_cover_size(window, &cover, 2, 800.);
+        draw_cover(window, &cover);
+        window.run_until_parked();
+        draw_cover(window, &cover);
+        window.update(|window, cx| {
+            {
+                let state = cover.state.borrow();
+                let image = state.current.as_ref().unwrap().owner.image.read(cx);
+                let pixels = image.item.as_ref().unwrap().get().unwrap().unwrap();
+                assert_eq!(pixels.size(0).width.0, 1024);
+            }
+            cover.release_all_images(window, cx);
+            images.release_all_retired(window, cx);
+        });
+    }
+
     fn request_cover_size(
         window: &mut gpui::VisualTestContext,
         cover: &ArtworkView,
@@ -1181,6 +1247,7 @@ mod tests {
                 image.request(
                     sizing.token,
                     gpui::px(physical_side / window.scale_factor()),
+                    None,
                     window,
                     cx,
                 );
@@ -1304,7 +1371,7 @@ mod tests {
         };
         settle_notified_frames(cx);
         let (old_pixels, first_before, second_before) = cx.update(|cx| {
-            assert_eq!(cache.read(cx).tier, 256);
+            assert_eq!(cache.read(cx).tier, 200);
             assert_eq!(cache.read(cx).views.len(), 2);
             (
                 Arc::downgrade(
@@ -1334,7 +1401,7 @@ mod tests {
         settle_notified_frames(cx);
         cx.update(|cx| {
             let image = cache.read(cx);
-            assert_eq!(image.tier, 512);
+            assert_eq!(image.tier, 400);
             assert!(image.replaced.is_empty());
             assert!(
                 image
@@ -1444,11 +1511,11 @@ mod tests {
                 .unwrap()
                 .unwrap()
         });
-        // A 256 downgrade finishes after the user grows back to 512. The
+        // A 256 downgrade finishes after the user grows back to 560. The
         // current 1024 is still suitable; publishing 256 would visibly regress.
         window.update(|_, cx| {
             cache.update(cx, |image, cx| {
-                image.target = 512;
+                image.target = 560;
                 image.pending = Some((
                     256,
                     ImageCacheItem::from_future(
@@ -1467,7 +1534,7 @@ mod tests {
         window.update(|_, cx| {
             let image = cache.read(cx);
             assert_eq!(image.tier, 1024);
-            assert_eq!(image.pending.as_ref().unwrap().0, 512);
+            assert_eq!(image.pending.as_ref().unwrap().0, 560);
             assert!(Arc::ptr_eq(
                 &original,
                 &image.item.as_ref().unwrap().get().unwrap().unwrap()
@@ -1478,7 +1545,7 @@ mod tests {
         window.update(|_, cx| {
             cache.update(cx, |image, cx| {
                 image.pending = Some((
-                    512,
+                    560,
                     ImageCacheItem::from_future(
                         async { Err(ImageCacheError::Asset("controlled decode failure".into())) },
                         cx,
@@ -1492,7 +1559,7 @@ mod tests {
             window.update(|_, cx| {
                 let image = cache.read(cx);
                 assert!(image.pending.is_none());
-                assert_eq!(image.failed_tier, Some(512));
+                assert_eq!(image.failed_tier, Some(560));
                 assert!(Arc::ptr_eq(
                     &original,
                     &image.item.as_ref().unwrap().get().unwrap().unwrap()
@@ -1529,7 +1596,7 @@ mod tests {
                 .clone()
         });
         request_cover_size(window, &first, 1, 256.);
-        request_cover_size(window, &second, 2, 200.);
+        request_cover_size(window, &second, 2, 201.);
         draw_cover(window, &first);
         window.run_until_parked();
         let original = window.update(|_, cx| {
@@ -1548,8 +1615,8 @@ mod tests {
         draw_cover(window, &first);
         window.update(|_, cx| {
             let image = cache.read(cx);
-            assert_eq!(image.target, 512);
-            assert_eq!(image.pending.as_ref().unwrap().0, 512);
+            assert_eq!(image.target, 400);
+            assert_eq!(image.pending.as_ref().unwrap().0, 400);
             assert!(Arc::ptr_eq(
                 &original,
                 &image.item.as_ref().unwrap().get().unwrap().unwrap()
@@ -1561,7 +1628,7 @@ mod tests {
             assert_eq!(image.target, 1024);
             assert_eq!(
                 image.pending.as_ref().unwrap().0,
-                512,
+                400,
                 "one in-flight decode"
             );
         });
@@ -1738,8 +1805,8 @@ mod tests {
                 .get()
                 .unwrap()
                 .unwrap();
-            assert_eq!(u32::from(pixels.size(0).width), 256);
-            assert_eq!(u32::from(pixels.size(0).height), 128);
+            assert_eq!(u32::from(pixels.size(0).width), 200);
+            assert_eq!(u32::from(pixels.size(0).height), 100);
             assert_eq!(&pixels.as_bytes(0).unwrap()[..4], &[40, 30, 210, 255]);
             view.release_all_images(window, cx);
             images.release_all_retired(window, cx);

@@ -818,7 +818,7 @@ impl AlbumBrowser {
             .covers
             .views
             .get(&index)
-            .and_then(|cover| cover.view.measured_image(0, cx));
+            .and_then(|cover| cover.view.measured_thumbnail(0, cx));
         let directory = key.directory.to_string_lossy().into_owned();
         let title = key.title.clone();
         let drag_label: SharedString = title.clone().into();

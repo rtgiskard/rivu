@@ -995,15 +995,15 @@ fn thumbnail_cleanup_does_not_pin_to_resident_originals() {
     let original = manager.export_default().unwrap();
     let source = original.path();
     let hash = blake3::hash(DEFAULT_IMAGE);
-    let thumbnails =
-        [256, 512, 1024].map(|tier| cache_paths::thumbnail_path(&source, hash, tier).unwrap());
+    let thumbnails = [200, 256, 400, 560, 512, 1024]
+        .map(|tier| cache_paths::thumbnail_path(&source, hash, tier).unwrap());
     for thumbnail in &thumbnails {
         fs::write(thumbnail, b"thumbnail").unwrap();
     }
     let report = manager.maintain(Duration::ZERO, true).unwrap();
-    assert_eq!(report.files, 4);
+    assert_eq!(report.files, 7);
     assert_eq!(report.protected_files, 1);
-    assert_eq!(report.removed_files, 3);
+    assert_eq!(report.removed_files, 6);
     assert!(source.is_file());
     assert!(thumbnails.iter().all(|path| !path.exists()));
 }

@@ -5,9 +5,16 @@
 //! codecs, encoded input, temporary conversions and GPU textures have other costs.
 mod thumbnail;
 
-use std::{io::Cursor, path::Path, sync::Arc};
+pub(super) use thumbnail::DecodeWorkspace;
 
-use gpui::{ImageCacheError, RenderImage};
+use std::{io::Cursor, sync::Arc};
+
+#[cfg(test)]
+use std::path::Path;
+
+#[cfg(test)]
+use gpui::ImageCacheError;
+use gpui::RenderImage;
 use image::{
     AnimationDecoder, DynamicImage, Frame, ImageDecoder, ImageFormat, ImageReader, Limits,
     codecs::{gif::GifDecoder, webp::WebPDecoder},
@@ -99,9 +106,11 @@ impl Budget {
 /// Resolve a physical-pixel demand to a shared discrete decode tier.
 pub(super) fn requested_tier(side: u32) -> u32 {
     match side {
-        0..=256 => 256,
-        257..=512 => 512,
-        513..=1024 => 1024,
+        0..=200 => 200,
+        201..=256 => 256,
+        257..=400 => 400,
+        401..=560 => 560,
+        561..=1024 => 1024,
         _ => u32::MAX,
     }
 }
@@ -113,6 +122,7 @@ pub(super) struct DecodedArtwork {
     pub(super) source_side: u32,
 }
 
+#[cfg(test)]
 /// Blocking background work; never call this from the UI thread.
 pub(super) fn load(
     path: &Path,
