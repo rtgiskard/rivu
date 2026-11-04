@@ -12,7 +12,7 @@ use std::{f64::consts::PI, sync::Arc};
 
 use rustfft::{Fft, FftPlanner, num_complex::Complex};
 
-use super::config::{EqualizerConfig, MAX_CHANNELS, validate_taps};
+use super::config::{ChannelTarget, EqualizerConfig, FilterKind, MAX_CHANNELS, validate_taps};
 use anyhow::{Result, ensure};
 
 /// Causal block buffering included in FIR latency and tail lengths.
@@ -28,6 +28,7 @@ pub struct FirEqualizer {
     position: usize,
     history_position: usize,
     kernels: Vec<Complex<f32>>,
+    channel_kernels: Vec<usize>,
     histories: Vec<Complex<f32>>,
     input: Vec<f32>,
     output: Vec<f32>,
@@ -66,6 +67,24 @@ impl FirEqualizer {
         };
         let partitions = if bypass { 0 } else { taps.div_ceil(PARTITION) };
         let spectra_len = channels * partitions * FFT_SIZE;
+        // Share immutable spectra only for identical ordered effective filters.
+        // Histories, input, overlap, and output remain channel-local.
+        let mut representatives = [0; MAX_CHANNELS];
+        let mut banks = 0;
+        let mut channel_kernels = Vec::with_capacity(if bypass { 0 } else { channels });
+        if !bypass {
+            for channel in 0..channels {
+                let bank = representatives[..banks]
+                    .iter()
+                    .position(|&other| same_selection(config, channel, other))
+                    .unwrap_or_else(|| {
+                        representatives[banks] = channel;
+                        banks += 1;
+                        banks - 1
+                    });
+                channel_kernels.push(bank);
+            }
+        }
         let mut equalizer = Self {
             channels,
             taps,
@@ -74,7 +93,8 @@ impl FirEqualizer {
             partitions,
             position: 0,
             history_position: 0,
-            kernels: vec![Complex::default(); spectra_len],
+            kernels: vec![Complex::default(); banks * partitions * FFT_SIZE],
+            channel_kernels,
             histories: vec![Complex::default(); spectra_len],
             input: vec![0.0; if bypass { 0 } else { channels * PARTITION }],
             output: vec![0.0; if bypass { 0 } else { channels * PARTITION }],
@@ -87,7 +107,7 @@ impl FirEqualizer {
         };
         if !bypass {
             let mut designer = KernelDesigner::new(sample_rate, taps);
-            for channel in 0..channels {
+            for (bank, &channel) in representatives[..banks].iter().enumerate() {
                 let impulse = designer.design(config, sample_rate, channels, channel)?;
                 for partition in 0..partitions {
                     equalizer.work.fill(Complex::default());
@@ -104,7 +124,7 @@ impl FirEqualizer {
                         .expect("active FIR has FFT plans")
                         .process_with_scratch(&mut equalizer.work, &mut equalizer.scratch);
                     ensure!(finite_complex(&equalizer.work), "FIR kernel FFT overflow");
-                    let start = (channel * partitions + partition) * FFT_SIZE;
+                    let start = (bank * partitions + partition) * FFT_SIZE;
                     equalizer.kernels[start..start + FFT_SIZE].copy_from_slice(&equalizer.work);
                 }
             }
@@ -200,7 +220,8 @@ impl FirEqualizer {
                 let history =
                     (self.history_position + self.partitions - partition) % self.partitions;
                 let input = (channel * self.partitions + history) * FFT_SIZE;
-                let kernel = (channel * self.partitions + partition) * FFT_SIZE;
+                let kernel =
+                    (self.channel_kernels[channel] * self.partitions + partition) * FFT_SIZE;
                 for ((sum, signal), filter) in self
                     .sum
                     .iter_mut()
@@ -238,6 +259,39 @@ fn finite_complex(values: &[Complex<f32>]) -> bool {
     values
         .iter()
         .all(|value| value.re.is_finite() && value.im.is_finite())
+}
+
+fn same_selection(config: &EqualizerConfig, left: usize, right: usize) -> bool {
+    let solo = config.bands.iter().any(|band| band.enabled && band.solo);
+    let selected = |channel| {
+        config
+            .bands
+            .iter()
+            .filter(move |band| {
+                band.enabled
+                    && (!solo || band.solo)
+                    && !(band.gain_db == 0.0
+                        && matches!(
+                            band.kind,
+                            FilterKind::Peak | FilterKind::LowShelf | FilterKind::HighShelf
+                        ))
+                    && match &band.channels {
+                        ChannelTarget::All => true,
+                        ChannelTarget::Selected(channels) => channels.contains(&channel),
+                    }
+            })
+            .map(|band| {
+                (
+                    band.kind,
+                    band.frequency_hz.to_bits(),
+                    band.gain_db.to_bits(),
+                    band.q.to_bits(),
+                    band.shelf_slope.to_bits(),
+                    band.stages,
+                )
+            })
+    };
+    selected(left).eq(selected(right))
 }
 
 /// Shared only by the channels of one construction, then released before use.
@@ -423,7 +477,10 @@ mod tests {
                 }
             })
             .collect();
-        let mut actual: Vec<_> = input.iter().flat_map(|&x| [x; 3]).collect();
+        let mut actual: Vec<_> = input
+            .iter()
+            .flat_map(|&x| [x, -x * 0.5, x * 0.25])
+            .collect();
         multi.process_interleaved(&mut actual).unwrap();
         for channel in 0..3 {
             let mut independent = config.clone();
@@ -436,12 +493,83 @@ mod tests {
                 }]
             };
             let mut mono = FirEqualizer::new(&independent, 48_000, 1, 513).unwrap();
-            let mut expected = input.clone();
+            let scale = [1.0, -0.5, 0.25][channel];
+            let mut expected: Vec<_> = input.iter().map(|&x| x * scale).collect();
             mono.process_interleaved(&mut expected).unwrap();
             for (frame, expected) in actual.as_chunks::<3>().0.iter().zip(expected) {
                 assert_eq!(frame[channel], expected);
             }
         }
+    }
+
+    #[test]
+    fn matching_channel_filters_preserve_independent_signals_and_reset() {
+        let config = EqualizerConfig {
+            enabled: true,
+            bands: vec![
+                EqBand {
+                    gain_db: 6.0,
+                    channels: ChannelTarget::Selected(vec![0, 1]),
+                    ..Default::default()
+                },
+                EqBand {
+                    gain_db: 6.0,
+                    channels: ChannelTarget::Selected(vec![2]),
+                    ..Default::default()
+                },
+                EqBand {
+                    gain_db: 6.0 + 1e-12,
+                    channels: ChannelTarget::Selected(vec![3]),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let mut multi = FirEqualizer::new(&config, 48_000, 4, 513).unwrap();
+        let frames = multi.tail_frames() + 1024;
+        let original: Vec<_> = (0..frames)
+            .flat_map(|frame| {
+                std::array::from_fn::<_, 4, _>(|channel| {
+                    if frame < 1024 {
+                        (frame as f32 * (0.03 + channel as f32 * 0.017)).sin()
+                    } else {
+                        0.0
+                    }
+                })
+            })
+            .collect();
+        let mut actual = original.clone();
+        multi.process_interleaved(&mut actual).unwrap();
+        for channel in 0..4 {
+            let band = config.bands[if channel < 2 { 0 } else { channel - 1 }].clone();
+            let mono_config = EqualizerConfig {
+                bands: vec![EqBand {
+                    channels: ChannelTarget::All,
+                    ..band
+                }],
+                ..config.clone()
+            };
+            let mut mono = FirEqualizer::new(&mono_config, 48_000, 1, 513).unwrap();
+            let mut expected: Vec<_> = original
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|frame| frame[channel])
+                .collect();
+            mono.process_interleaved(&mut expected).unwrap();
+            assert!(
+                actual
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .zip(expected)
+                    .all(|(frame, expected)| frame[channel] == expected)
+            );
+        }
+        multi.reset();
+        let mut silence = vec![0.0; frames * 4];
+        multi.process_interleaved(&mut silence).unwrap();
+        assert!(silence.iter().all(|sample| *sample == 0.0));
     }
 
     #[test]

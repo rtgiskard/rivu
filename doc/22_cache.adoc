@@ -259,6 +259,12 @@ allocation budget. Clones and slices share their backing reservation; the final
 owner releases the charge. This does not cap decoder/DSP state, model weights,
 Python inference workspace or total process RSS.
 
+Native graphs share upstream PCM through transparent unity-gain, zero-delay nodes
+while preserving logical node identity and timing. FIR channels with identical
+effective filters share immutable kernels, not convolution history. Restoration
+allocates adaptive estimation history only in Adaptive mode; other spectral modes
+retain only the history their algorithms consume.
+
 Successful admission of a non-export run retires unselected PCM and prepared
 runners before the worker allocates. The selected audition stays pinned; capacity
 exhaustion fails rather than evicting it or spilling to disk. At most four frozen

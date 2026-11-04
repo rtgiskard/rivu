@@ -75,6 +75,8 @@ struct Node {
     inputs: Vec<Input>,
     processor: Processor,
     output: Vec<f32>,
+    // Logical nodes retain identity/timing/counts; only physical owners store PCM.
+    output_node: usize,
     latency: usize,
     tail: usize,
     input_tail: usize,
@@ -181,11 +183,25 @@ impl GraphPlan<'_> {
                     self.channels,
                 );
             }
+            let single_unity = planned.inputs.len() == 1
+                && planned.inputs[0].gain == 1.0
+                && planned.inputs[0].delay.samples.is_empty();
+            let output_node = if matches!(processor, Processor::Pass) && single_unity {
+                nodes[planned.inputs[0].node].output_node
+            } else {
+                nodes.len()
+            };
+            let owns_output = output_node == nodes.len();
             nodes.push(Node {
                 id: planned.port.node,
                 inputs: planned.inputs,
                 processor,
-                output: vec![0.0; GRAPH_BLOCK_FRAMES * self.channels],
+                output: if owns_output {
+                    vec![0.0; GRAPH_BLOCK_FRAMES * self.channels]
+                } else {
+                    Vec::new()
+                },
+                output_node,
                 latency: planned.latency,
                 tail: planned.tail,
                 input_tail: planned.input_tail,
@@ -371,6 +387,7 @@ impl GraphRunner {
             };
             state_bytes =
                 state_bytes.saturating_add(extra_state + GRAPH_BLOCK_FRAMES * channels * 4);
+            // Keep output admission conservative even for aliased logical nodes.
             work_per_frame =
                 work_per_frame.saturating_add(extra_work + inputs.len() as u64 * channels as u64);
             ensure!(
@@ -568,6 +585,10 @@ impl GraphRunner {
         for index in 0..self.nodes.len() {
             let (previous, remaining) = self.nodes.split_at_mut(index);
             let node = &mut remaining[0];
+            if node.output_node != index {
+                node.blocks = node.blocks.saturating_add(1);
+                continue;
+            }
             let output_frames = self.source_frames.map_or(frames, |source| {
                 (source + node.tail as u64)
                     .saturating_sub(self.processed_frames)
@@ -584,18 +605,17 @@ impl GraphRunner {
                     && node.inputs[0].gain == 1.0
                     && node.inputs[0].delay.samples.is_empty()
                 {
-                    output.copy_from_slice(&previous[node.inputs[0].node].output[..output.len()]);
+                    let input = &previous[previous[node.inputs[0].node].output_node].output;
+                    output.copy_from_slice(&input[..output.len()]);
                 } else {
                     output.fill(0.0);
                     for input in &mut node.inputs {
                         input.delay.add(
-                            &previous[input.node].output[..output.len()],
+                            &previous[previous[input.node].output_node].output[..output.len()],
                             output,
                             input.gain,
                         );
                     }
-                    // Copies and DSP outputs are already finite; edge gain/sum
-                    // arithmetic can still overflow, including delayed tails.
                     ensure!(
                         output.iter().all(|value| value.is_finite()),
                         "graph node {} produced non-finite PCM",
@@ -622,7 +642,8 @@ impl GraphRunner {
             }
             node.blocks = node.blocks.saturating_add(1);
         }
-        chunk.copy_from_slice(&self.nodes.last().expect("compiled target").output[..chunk.len()]);
+        let target = self.nodes.last().expect("compiled target").output_node;
+        chunk.copy_from_slice(&self.nodes[target].output[..chunk.len()]);
         self.processed_frames += frames as u64;
         Ok(())
     }
@@ -1109,6 +1130,54 @@ mod tests {
         }
         assert!(runner.node_process_counts().all(|(_, count)| count == 8));
     }
+
+    #[test]
+    fn transparent_suffix_preserves_fir_eof_tail_and_reset() {
+        let mut graph = chain_graph(
+            GraphNodeKind::Equalizer {
+                config: EqualizerConfig {
+                    enabled: true,
+                    ..Default::default()
+                },
+                implementation: EqImplementation::LinearPhase { taps: 513 },
+            },
+            3,
+        );
+        graph.nodes[2].kind = GraphNodeKind::Equalizer {
+            config: EqualizerConfig::default(),
+            implementation: EqImplementation::LinearPhase { taps: 513 },
+        };
+        graph.nodes[3].kind = GraphNodeKind::Denoise {
+            config: DenoiseConfig::default(),
+            profile: None,
+        };
+        let mut direct = GraphRunner::compile(&graph, port(2, 0), 48_000, 1).unwrap();
+        let mut suffix = GraphRunner::compile(&graph, port(5, 0), 48_000, 1).unwrap();
+        assert_eq!(suffix.latency_frames(), direct.latency_frames());
+        assert_eq!(suffix.tail_frames(), direct.tail_frames());
+        for _ in 0..2 {
+            let mut expected: Vec<_> = (0..37).map(|i| (i as f32 * 0.1).sin()).collect();
+            let mut actual = expected.clone();
+            direct.process_interleaved(&mut expected).unwrap();
+            suffix.process_interleaved(&mut actual).unwrap();
+            loop {
+                let mut left = [0.0; 43];
+                let mut right = [0.0; 43];
+                let count = direct.finish_interleaved(&mut left).unwrap();
+                assert_eq!(suffix.finish_interleaved(&mut right).unwrap(), count);
+                if count == 0 {
+                    break;
+                }
+                expected.extend_from_slice(&left[..count]);
+                actual.extend_from_slice(&right[..count]);
+            }
+            assert_eq!(actual, expected);
+            assert_eq!(actual.len(), 37 + suffix.tail_frames());
+            direct.reset();
+            suffix.reset();
+        }
+    }
+
     #[test]
     fn finite_mix_overflow_is_rejected_before_pcm_is_published() {
         let mut graph = branch_graph();

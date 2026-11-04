@@ -421,6 +421,11 @@ impl Denoiser {
         let spectral = !bypass && config.mode != DenoiseMode::Off;
         let spectral_size = if spectral { size } else { 0 };
         let bins = if spectral { size / 2 + 1 } else { 0 };
+        let adaptive_bins = if spectral && config.mode == DenoiseMode::Adaptive {
+            bins
+        } else {
+            0
+        };
         let (forward, inverse, scratch_len) = if spectral {
             let mut planner = FftPlanner::new();
             let forward = planner.plan_fft_forward(size);
@@ -512,12 +517,12 @@ impl Denoiser {
             smoothed_power: vec![0.0; bins],
             noise: initial_noise.clone(),
             initial_noise,
-            local_energy: vec![0.0; bins],
-            minimum: vec![0.0; bins],
-            temporary_minimum: vec![0.0; bins],
-            presence: vec![0.0; bins],
+            local_energy: vec![0.0; adaptive_bins],
+            minimum: vec![0.0; adaptive_bins],
+            temporary_minimum: vec![0.0; adaptive_bins],
+            presence: vec![0.0; adaptive_bins],
             previous_power: vec![0.0; bins],
-            previous_clean: vec![0.0; bins],
+            previous_clean: vec![0.0; adaptive_bins],
             gain: vec![1.0; bins],
             target_gain: vec![1.0; bins],
             analyzed: 0,
@@ -901,11 +906,14 @@ impl Denoiser {
                 self.release
             };
             self.gain[k] = alpha * self.gain[k] + (1.0 - alpha) * target;
-            self.previous_clean[k] = self.gain[k] * self.gain[k] * self.power[k];
-            ensure!(
-                self.gain[k].is_finite() && self.previous_clean[k].is_finite(),
-                "denoise gain history overflow"
-            );
+            ensure!(self.gain[k].is_finite(), "denoise gain history overflow");
+            if self.config.mode == DenoiseMode::Adaptive {
+                self.previous_clean[k] = self.gain[k] * self.gain[k] * self.power[k];
+                ensure!(
+                    self.previous_clean[k].is_finite(),
+                    "denoise gain history overflow"
+                );
+            }
         }
         Ok(())
     }
@@ -1101,6 +1109,38 @@ mod tests {
         assert!(processor.dry.is_empty());
         assert_eq!(processor.dry.capacity(), capacity);
         assert_eq!(processor.analyzed, 0);
+    }
+
+    #[test]
+    fn spectral_modes_preserve_chunk_independent_output_and_reset() {
+        let input = noise(4002, 135, 0.1);
+        for mode in [
+            DenoiseMode::Stationary,
+            DenoiseMode::Profile,
+            DenoiseMode::Adaptive,
+        ] {
+            let config = DenoiseConfig {
+                mode,
+                fft_size: 256,
+                ..Default::default()
+            };
+            let captured = (mode == DenoiseMode::Profile)
+                .then(|| profile(&noise(1024, 271, 0.03), 48_000, 2, 256));
+            let expected = run(config.clone(), 48_000, 2, &input, captured.clone(), 211);
+            let mut processor = Denoiser::new(48_000, 2, config, captured).unwrap();
+            for _ in 0..2 {
+                let mut output = Vec::new();
+                for block in input.chunks(74) {
+                    processor
+                        .process_block(block, &mut output, &mut || false)
+                        .unwrap();
+                }
+                processor.finish(&mut output, &mut || false).unwrap();
+                assert_eq!(output, expected);
+                assert!(output.iter().all(|sample| sample.is_finite()));
+                processor.reset();
+            }
+        }
     }
 
     #[test]

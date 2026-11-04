@@ -106,14 +106,16 @@ struct Node {
     inputs: Vec<Edge>,
     processor: Processor,
     output: Vec<f32>,
+    output_node: usize,
     sum: Vec<f64>,
     latency: u64,
     frames: u64,
     input_frames: u64,
 }
 
-/// One block per reachable native node, plus bounded causal delay queues. Model
-/// outputs act as immutable sources, never as a second implicit file protocol.
+/// One block per physical native output, plus bounded causal delay queues.
+/// Logical pass nodes retain timeline/identity while sharing upstream blocks.
+/// Model outputs act as immutable sources, never a second implicit file protocol.
 struct Engine {
     nodes: Vec<Node>,
     indices: BTreeMap<GraphPort, usize>,
@@ -277,10 +279,20 @@ impl Engine {
         let index = self.nodes.len();
         let needs_sum = !matches!(processor, Processor::Source(_) | Processor::Decoder)
             && !(inputs.len() == 1 && inputs[0].gain == 1.0 && inputs[0].delay.is_empty());
+        let output_node = if matches!(processor, Processor::Pass) && !needs_sum {
+            self.nodes[inputs[0].node].output_node
+        } else {
+            index
+        };
         self.nodes.push(Node {
             inputs,
             processor,
-            output: vec![0.0; BLOCK * self.channels],
+            output: if output_node == index {
+                vec![0.0; BLOCK * self.channels]
+            } else {
+                Vec::new()
+            },
+            output_node,
             sum: if needs_sum {
                 vec![0.0; BLOCK * self.channels]
             } else {
@@ -306,6 +318,9 @@ impl Engine {
         for index in 0..self.nodes.len() {
             let (previous, rest) = self.nodes.split_at_mut(index);
             let node = &mut rest[0];
+            if node.output_node != index {
+                continue;
+            }
             let end = if streaming {
                 source_eof.and_then(|source| source.checked_add(node.frames))
             } else {
@@ -340,13 +355,14 @@ impl Engine {
                         && node.inputs[0].gain == 1.0
                         && node.inputs[0].delay.is_empty()
                     {
-                        output
-                            .copy_from_slice(&previous[node.inputs[0].node].output[..output.len()]);
+                        let input = &previous[previous[node.inputs[0].node].output_node].output;
+                        output.copy_from_slice(&input[..output.len()]);
                     } else {
                         let sum = &mut node.sum[..output.len()];
                         sum.fill(0.0);
                         for edge in &mut node.inputs {
-                            let input = &previous[edge.node].output[..output.len()];
+                            let input =
+                                &previous[previous[edge.node].output_node].output[..output.len()];
                             for (sum, &sample) in sum.iter_mut().zip(input) {
                                 let sample = if edge.delay.is_empty() {
                                     sample
@@ -403,7 +419,7 @@ impl Engine {
             self.round(position, count, None, None, cancel)?;
             consume(
                 position,
-                &self.nodes[target].output[..count * self.channels],
+                &self.nodes[self.nodes[target].output_node].output[..count * self.channels],
             )?;
             position += count as u64;
         }
@@ -450,7 +466,7 @@ impl Engine {
                 self.round(position, count, Some(block), None, cancel)?;
                 consume(
                     position,
-                    &self.nodes[target].output[..count * self.channels],
+                    &self.nodes[self.nodes[target].output_node].output[..count * self.channels],
                 )?;
                 position = position
                     .checked_add(count as u64)
@@ -468,7 +484,7 @@ impl Engine {
             self.round(position, count, None, Some(frames), cancel)?;
             consume(
                 position,
-                &self.nodes[target].output[..count * self.channels],
+                &self.nodes[self.nodes[target].output_node].output[..count * self.channels],
             )?;
             position += count as u64;
         }
@@ -476,16 +492,8 @@ impl Engine {
         Ok(frames)
     }
     fn alias(&self, target: usize) -> Option<audio::PcmAudio> {
-        let node = &self.nodes[target];
-        match &node.processor {
+        match &self.nodes[self.nodes[target].output_node].processor {
             Processor::Source(pcm) => Some(pcm.clone()),
-            Processor::Pass
-                if node.inputs.len() == 1
-                    && node.inputs[0].gain == 1.0
-                    && node.inputs[0].delay.is_empty() =>
-            {
-                self.alias(node.inputs[0].node)
-            }
             _ => None,
         }
     }
@@ -1097,6 +1105,24 @@ mod tests {
                 profile: None,
             },
         ]);
+        let mut engine = Engine::new(&input);
+        let target = engine
+            .compile(
+                &bypass,
+                GraphPort { node: 2, port: 0 },
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        let mut streamed = Vec::new();
+        engine
+            .stream(target, None, &AtomicBool::new(false), |_, block| {
+                streamed.extend_from_slice(block);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(streamed, samples(&input));
         let output = render(&bypass, &input, &budget);
         assert_eq!(budget.used_bytes(), source_bytes);
         assert_eq!(samples(&output.pcm), samples(&input));
@@ -1210,7 +1236,8 @@ mod tests {
             } else {
                 [1.0, 2.0, 0.0, 0.0]
             };
-            assert_eq!(&engine.nodes[target].output[..4], &expected);
+            let physical = engine.nodes[target].output_node;
+            assert_eq!(&engine.nodes[physical].output[..4], &expected);
         }
     }
 
