@@ -19,6 +19,7 @@ pub(super) struct PagedList<T> {
     pub(super) viewport_rows: usize,
     // Target identity, next scan offset, and the viewport to restore on success.
     pub(super) identity_lookup: Option<(ContainerIdentity, usize, usize)>,
+    pub(super) columns: Option<super::render::IntrinsicColumns>,
 }
 
 impl<T> Default for PagedList<T> {
@@ -31,18 +32,32 @@ impl<T> Default for PagedList<T> {
             selection: ListState::default(),
             viewport_rows: 1,
             identity_lookup: None,
+            columns: None,
         }
     }
 }
 
 impl<T> PagedList<T> {
     pub(super) fn clear(&mut self) {
-        self.pages.clear();
+        self.clear_pages();
         self.total = 0;
         self.loaded = false;
         self.fetch_size = 0;
         if let Some((_, offset, _)) = &mut self.identity_lookup {
             *offset = 0;
+        }
+    }
+
+    pub(super) fn clear_pages(&mut self) {
+        self.pages.clear();
+        self.columns = None;
+    }
+
+    pub(super) fn retain_pages(&mut self, mut keep: impl FnMut(usize, &[T]) -> bool) {
+        let previous_len = self.pages.len();
+        self.pages.retain(|&offset, rows| keep(offset, rows));
+        if self.pages.len() != previous_len {
+            self.columns = None;
         }
     }
 
@@ -108,8 +123,7 @@ impl<T> PagedList<T> {
         let last = self.visible_end().saturating_sub(1) / fetch_size * fetch_size;
         let last = last.saturating_add(fetch_size);
         // At most ceil(viewport_rows / fetch_size) + 3 batches, independent of list length.
-        self.pages
-            .retain(|offset, _| (first..=last).contains(offset));
+        self.retain_pages(|offset, _| (first..=last).contains(&offset));
     }
 
     pub(super) fn navigate_action(&mut self, action: Action, page_size: usize) -> bool {
@@ -144,10 +158,11 @@ impl<T> PagedList<T> {
 
     pub(super) fn insert(&mut self, offset: usize, fetch_size: usize, total: usize, items: Vec<T>) {
         if self.fetch_size != fetch_size {
-            self.pages.clear();
+            self.clear_pages();
         }
         self.fetch_size = fetch_size;
         self.pages.insert(offset, items);
+        self.columns = None;
         self.total = total;
         self.loaded = true;
         let selected = self.selection.selected().unwrap_or(0);

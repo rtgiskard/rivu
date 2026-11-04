@@ -65,6 +65,69 @@ fn recent_renders_filtered_source_indices() {
 }
 
 #[test]
+fn iteration_recent_keeps_exact_alignment_and_live_count_and_time() {
+    let i18n = Localizer::for_terminal("en-US");
+    let colors = TerminalColors::new(rivu_presentation::theme::Theme::default());
+    let mut recent = RecentTracks {
+        source: Arc::new(vec![rivu_protocol::model::HistoryEntry {
+            track_id: 2,
+            title: "夜航e\u{301}👩‍🚀".repeat(20),
+            play_count: 12345,
+            played_at: 1_700_000_000,
+            favorite: false,
+        }]),
+        ..RecentTracks::default()
+    };
+    recent.entries.insert(0, 256, 1, vec![0]);
+    for width in [1_u16, 2, 3, 8, 24, 52, 80] {
+        let content_width = width.saturating_sub(2) as usize;
+        for (count, timestamp) in [(12345, 1_700_000_100), (987, 1_700_000_200)] {
+            Arc::make_mut(&mut recent.source)[0].play_count = count;
+            recent.playback = Some((2, timestamp));
+            let mut terminal = Terminal::new(TestBackend::new(width, 3)).unwrap();
+            terminal
+                .draw(|frame| draw_recent(frame, frame.area(), &mut recent, &i18n, colors))
+                .unwrap();
+            let count = count.to_string();
+            let count_width = count.len().min(content_width.saturating_sub(1));
+            let time = (content_width >= count_width + 35).then(|| {
+                chrono::DateTime::from_timestamp(timestamp, 0)
+                    .unwrap()
+                    .with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d %H:%M:%S")
+                    .to_string()
+            });
+            let gap = usize::from(content_width > count_width);
+            let title_width = content_width
+                .saturating_sub(count_width + gap + if time.is_some() { 21 } else { 0 });
+            let expected = format!(
+                "{}{}{}{}",
+                cell_text(&recent.source[0].title, title_width, false),
+                " ".repeat(gap),
+                cell_text(&count, count_width, true),
+                time.map_or_else(String::new, |time| format!("  {time}")),
+            );
+            let mut expected_terminal = Terminal::new(TestBackend::new(width, 3)).unwrap();
+            expected_terminal
+                .draw(|frame| {
+                    frame.render_widget(
+                        Paragraph::new(expected),
+                        Rect::new(width.min(1), 1, content_width as u16, 1),
+                    );
+                })
+                .unwrap();
+            for x in 0..width {
+                assert_eq!(
+                    terminal.backend().buffer()[(x, 1)].symbol(),
+                    expected_terminal.backend().buffer()[(x, 1)].symbol(),
+                    "recent row mismatch at width {width}, column {x}",
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn long_detail_errors_scroll_independently_and_loading_preserves_ready_position() {
     let state = TuiSnapshot::default();
     for width in [2, 7, 40, 80] {
@@ -83,7 +146,8 @@ fn long_detail_errors_scroll_independently_and_loading_preserves_ready_position(
         let position = (ui.details.scroll, ui.details.max_scroll);
         assert_eq!(position.0, 4);
 
-        ui.details.state = DetailState::Error(format!("{}\n终", "夜航e\u{301}👩‍🚀/\n".repeat(20)));
+        ui.details.state =
+            DetailState::Error(format!("{}\n终", "夜航e\u{301}👩‍🚀/\n".repeat(20)).into());
         terminal.draw(|frame| draw(frame, &state, &mut ui)).unwrap();
         assert!(ui.details.error_max_scroll > ui.page_size);
         assert!(!terminal_text(&terminal).contains('终'));
@@ -120,6 +184,58 @@ fn long_detail_errors_scroll_independently_and_loading_preserves_ready_position(
         terminal.draw(|frame| draw(frame, &state, &mut ui)).unwrap();
         assert_eq!((ui.details.scroll, ui.details.max_scroll), position);
         assert_eq!(terminal_text(&terminal), ready_text);
+    }
+}
+
+#[test]
+fn iteration_detail_fields_keep_label_and_value_visible_at_widths_one_through_four() {
+    let colors = TerminalColors::new(rivu_presentation::theme::Theme::default());
+    for width in 1..=4 {
+        let lines = detail_field("Artist", "Visible", width, colors);
+        let mut terminal = Terminal::new(TestBackend::new(width as u16, 32)).unwrap();
+        terminal
+            .draw(|frame| draw_cached_lines(frame, frame.area(), &lines, 0))
+            .unwrap();
+        let rendered = terminal_text(&terminal)
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect::<String>();
+        assert_eq!(
+            rendered, "ArtistVisible",
+            "field text lost at width {width}"
+        );
+        assert!(lines.iter().all(|line| line.width() <= width));
+    }
+}
+
+#[test]
+fn iteration_details_refresh_replaced_error_and_container_text() {
+    for container in [false, true] {
+        let mut ui = UiState::new(Arc::new(Localizer::for_terminal("en-US")));
+        ui.details_active = true;
+        ui.details.target = (!container).then_some(7);
+        ui.details.source_label = "shell-panel-queue";
+        ui.details.state = if container {
+            DetailState::Container("Original message".into())
+        } else {
+            DetailState::Error("Original message".into())
+        };
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        terminal
+            .draw(|frame| draw(frame, &TuiSnapshot::default(), &mut ui))
+            .unwrap();
+        assert!(terminal_text(&terminal).contains("Original message"));
+        ui.details.state = if container {
+            DetailState::Container("Updated message".into())
+        } else {
+            DetailState::Error("Updated message".into())
+        };
+        terminal
+            .draw(|frame| draw(frame, &TuiSnapshot::default(), &mut ui))
+            .unwrap();
+        let text = terminal_text(&terminal);
+        assert!(text.contains("Updated message"));
+        assert!(!text.contains("Original message"));
     }
 }
 
@@ -293,12 +409,15 @@ fn metadata_columns_clip_whole_graphemes_without_horizontal_overflow() {
     track.duration = Some(243.0);
     track.favorite = true;
     track.missing = true;
+    let intrinsic = IntrinsicColumns::measure(
+        BrowserMode::Tracks,
+        std::iter::once(RowContent::track(&track)),
+    );
     for width in [30, 60, 80, 110, 140] {
-        let line = BrowserColumns::new(width, true, std::iter::once(RowContent::track(&track)))
-            .line(
-                RowContent::track(&track),
-                TerminalColors::new(rivu_presentation::theme::Theme::default()),
-            );
+        let line = BrowserColumns::fit(width, intrinsic).line(
+            RowContent::track(&track),
+            TerminalColors::new(rivu_presentation::theme::Theme::default()),
+        );
         assert_eq!(line.width(), width as usize);
         let text = line
             .spans
@@ -319,12 +438,15 @@ fn tiny_browser_rows_preserve_title_without_horizontal_overflow() {
     track.album = "album ".repeat(20);
     track.codec = "PCM_S16LE".into();
     track.duration = Some(6003.0);
+    let intrinsic = IntrinsicColumns::measure(
+        BrowserMode::Tracks,
+        std::iter::once(RowContent::track(&track)),
+    );
     for width in 0..=100 {
-        let line = BrowserColumns::new(width, true, std::iter::once(RowContent::track(&track)))
-            .line(
-                RowContent::track(&track),
-                TerminalColors::new(rivu_presentation::theme::Theme::default()),
-            );
+        let line = BrowserColumns::fit(width, intrinsic).line(
+            RowContent::track(&track),
+            TerminalColors::new(rivu_presentation::theme::Theme::default()),
+        );
         assert_eq!(line.width(), width as usize);
         let text = line
             .spans
@@ -349,7 +471,10 @@ fn other_path_titles_expand_only_when_rendered_and_preserve_grapheme_clipping() 
         measured.title_path = Some(path);
         measured.file_icon = true;
         assert!(matches!(measured.title, Cow::Borrowed(_)));
-        let columns = BrowserColumns::new(width, true, std::iter::once(measured));
+        let columns = BrowserColumns::fit(
+            width,
+            IntrinsicColumns::measure(BrowserMode::Tracks, std::iter::once(measured)),
+        );
         let mut visible = RowContent::track(&track);
         visible.title_path = Some(path);
         visible.file_icon = true;
@@ -431,7 +556,7 @@ fn queue_mutations_relocate_selected_occurrence_and_clamp_deleted_selection() {
     tui.apply_snapshot(state.clone());
     assert!(tui.ui.queue.pages.is_empty());
     let request = tui.ui.query_request(&state).unwrap();
-    assert_eq!(request.demand.kind, QueryKind::QueueSelection(1008));
+    assert_eq!(request.demand.kind(), QueryKind::QueueSelection(1008));
     assert!(
         matches!(request.demand.query(), Query::QueueEntries { queue_ids, query: None } if queue_ids == vec![1008])
     );
@@ -456,7 +581,7 @@ fn queue_mutations_relocate_selected_occurrence_and_clamp_deleted_selection() {
     state.queue.revision = 2;
     tui.apply_snapshot(state.clone());
     let request = tui.ui.query_request(&state).unwrap();
-    assert_eq!(request.demand.kind, QueryKind::QueueSelection(1008));
+    assert_eq!(request.demand.kind(), QueryKind::QueueSelection(1008));
     tui.ui.apply_query(
         &state,
         &request,
@@ -514,4 +639,90 @@ pub(in crate::terminal) fn render_view(ui: &mut UiState) -> String {
         .iter()
         .map(|cell| cell.symbol())
         .collect()
+}
+
+#[test]
+fn retained_rows_size_columns_until_replaced_trimmed_or_cleared_and_resize_refits_them() {
+    let i18n = Localizer::for_terminal("en-US");
+    let colors = TerminalColors::new(rivu_presentation::theme::Theme::default());
+    let render = |page: &mut PagedList<LibraryRow>, width, mode| {
+        let mut terminal = Terminal::new(TestBackend::new(width, 3)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_paged_list(
+                    frame,
+                    frame.area(),
+                    "Rows".into(),
+                    page,
+                    |track| RowContent::track(track),
+                    &i18n,
+                    BrowserStyle { mode, colors },
+                );
+            })
+            .unwrap();
+        terminal.backend().buffer().clone()
+    };
+    let mut short = track(0);
+    short.title = "Title".into();
+    short.artist = "a".into();
+    short.album.clear();
+    let mut wide = short.clone();
+    wide.artist = "艺".repeat(8);
+    let mut page = PagedList::default();
+    page.set_viewport(2);
+    page.insert(0, 2, 10, vec![short.clone(), short.clone()]);
+    // Neighboring retained rows, not only visible rows, set intrinsic widths.
+    page.insert(2, 2, 10, vec![wide.clone()]);
+    assert_eq!(
+        render(&mut page, 100, BrowserMode::Tracks)[(64, 1)].symbol(),
+        "a"
+    );
+    assert_eq!(
+        render(&mut page, 100, BrowserMode::Tracks)[(64, 1)].symbol(),
+        "a"
+    );
+    assert_eq!(
+        render(&mut page, 110, BrowserMode::Tracks)[(74, 1)].symbol(),
+        "a"
+    );
+
+    page.insert(2, 2, 10, vec![short.clone()]);
+    assert_eq!(
+        render(&mut page, 100, BrowserMode::Tracks)[(79, 1)].symbol(),
+        "a"
+    );
+    page.insert(2, 2, 10, vec![wide.clone()]);
+    assert_eq!(
+        render(&mut page, 100, BrowserMode::Tracks)[(64, 1)].symbol(),
+        "a"
+    );
+    page.selection.select(Some(8));
+    *page.selection.offset_mut() = 8;
+    page.set_viewport(2);
+    page.insert(8, 2, 10, vec![short.clone(), short.clone()]);
+    assert_eq!(
+        render(&mut page, 100, BrowserMode::Tracks)[(79, 1)].symbol(),
+        "a"
+    );
+    assert!(!page.pages.contains_key(&2));
+
+    // Payload-only metadata/bitrate refreshes clear pages without changing the
+    // saved navigation coordinates; their replacement must resize columns too.
+    page.clear_pages();
+    page.insert(8, 2, 10, vec![short.clone(), wide]);
+    assert_eq!(
+        render(&mut page, 100, BrowserMode::Tracks)[(64, 1)].symbol(),
+        "a"
+    );
+    page.selection.select(Some(0));
+    page.insert(0, 3, 3, vec![short.clone(), short.clone(), short]);
+    assert_eq!(
+        render(&mut page, 100, BrowserMode::Tracks)[(79, 1)].symbol(),
+        "a"
+    );
+    let labels = render(&mut page, 100, BrowserMode::Labels);
+    assert!(!labels.content.iter().any(|cell| cell.symbol() == "f"));
+    let tracks = render(&mut page, 100, BrowserMode::Tracks);
+    assert!(tracks.content.iter().any(|cell| cell.symbol() == "f"));
+    assert_eq!(tracks[(79, 1)].symbol(), "a");
 }

@@ -1,6 +1,6 @@
 use super::{
     paged::{ContainerIdentity, PagedList},
-    worker::{QueryDemand, QueryKind, QueryRequest, QueryResult},
+    worker::{QueryDemand, QueryDemandRef, QueryKind, QueryRequest, QueryResult},
 };
 use crate::projection::TuiSnapshot;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -53,7 +53,7 @@ impl TuiState {
             .flatten();
         self.ui.sync_queue(&self.snapshot, &next);
         if page_size_changed {
-            self.ui.queue.pages.clear();
+            self.ui.queue.clear_pages();
             self.ui.queue.fetch_size = 0;
         }
         let was_playlist_detail = matches!(self.ui.view, View::PlaylistDetail { .. });
@@ -80,7 +80,9 @@ impl TuiState {
             if self.ui.refresh_anchor.is_none() {
                 self.ui.refresh_anchor = selected;
             }
-            self.ui.cancel_query();
+            if !self.ui.details_active {
+                self.ui.retire_query();
+            }
         }
         if let Some(message) = snapshot_message(&self.snapshot, &next, &self.ui.i18n) {
             self.ui.set_notice(message, NoticeKind::Information);
@@ -133,8 +135,8 @@ pub(super) enum DetailState {
     Loading,
     Ready(Arc<rivu_protocol::model::Track>),
     Removed,
-    Error(String),
-    Container(String),
+    Error(Arc<str>),
+    Container(Arc<str>),
 }
 
 #[derive(Default)]
@@ -235,6 +237,7 @@ impl RecentTracks {
                 indices.insert(position, index);
             }
         }
+        self.entries.columns = None;
         let indices = &self.entries.pages[&0];
         let selected = selected_id
             .and_then(|id| {
@@ -282,14 +285,14 @@ impl View {
         }
     }
 
-    fn query_kind(&self, selection: bool) -> Option<QueryKind> {
+    fn query_kind(&self, selection: bool) -> Option<QueryKind<'_>> {
         match self {
             Self::Recent(_) => None,
             Self::Queue => Some(QueryKind::Queue),
-            Self::LibraryResults(_) => Some(QueryKind::Search(String::new())),
+            Self::LibraryResults(_) => Some(QueryKind::Search("")),
             Self::Tree(tree) if tree.other_tracks => Some(tree.other_query()),
             Self::Tree(tree) if !tree.directory.as_os_str().is_empty() => {
-                Some(QueryKind::Directory(tree.directory.clone()))
+                Some(QueryKind::Directory(&tree.directory))
             }
             Self::Tree(_) => Some(QueryKind::OtherTracksCount),
             Self::Playlists(_) => Some(QueryKind::Playlists),
@@ -334,7 +337,7 @@ impl View {
                 detail.summary_dirty = true;
             }
             let compact = Query::PlaylistEntryLocations {
-                query: (!query.is_empty()).then(|| query.to_owned()),
+                query: (!query.is_empty()).then(String::new),
                 playlist_id: detail.playlist_id,
                 entry_ids: Vec::new(),
             };
@@ -409,13 +412,13 @@ impl View {
     // Payload-only changes keep membership, counts and navigation coordinates.
     fn invalidate_payload(&mut self) {
         match self {
-            Self::LibraryResults(results) => results.pages.clear(),
+            Self::LibraryResults(results) => results.clear_pages(),
             Self::Tree(tree) => {
-                tree.entries.pages.retain(|_, rows| {
+                tree.entries.retain_pages(|_, rows| {
                     !rows.iter().any(|row| matches!(row, DirectoryRow::Track(_)))
                 });
             }
-            Self::PlaylistDetail { detail, .. } => detail.entries.pages.clear(),
+            Self::PlaylistDetail { detail, .. } => detail.entries.clear_pages(),
             Self::Queue | Self::Recent(_) => {}
             Self::Playlists(_) => {}
         }
@@ -447,7 +450,7 @@ pub(super) struct UiState {
     pub(super) details: Details,
     pub(super) details_active: bool,
     pub(super) requested: Option<QueryRequest>,
-    pub(super) projection: QueryTracker,
+    projection: QueryTracker,
     pub(super) failed_request: Option<QueryDemand>,
     failed_summary_request: Option<QueryDemand>,
     pub(super) local_revision: u64,
@@ -521,18 +524,68 @@ impl UiState {
         changed
     }
 
-    pub(super) fn query_request(&mut self, state: &TuiSnapshot) -> Option<QueryRequest> {
+    // A pending demand is borrowed on every input-loop tick. Own its query only
+    // when it actually replaces the worker's submission.
+    pub(super) fn prepare_query_request(&mut self, state: &TuiSnapshot) -> bool {
+        let Some(demand) = self.next_demand(state) else {
+            self.requested = None;
+            return false;
+        };
+        if self
+            .requested
+            .as_ref()
+            .is_some_and(|request| demand.matches(&request.demand, state))
+        {
+            return false;
+        }
+        let query = demand.kind.filtered_query(
+            demand.offset,
+            demand.limit,
+            demand.filter.map(str::to_owned),
+        );
+        let mut demand = QueryDemand {
+            query,
+            offset: demand.offset,
+            limit: demand.limit,
+            stamp: Default::default(),
+        };
+        let revisions = demand.revisions(state);
+        demand.stamp = demand.query.stamp(revisions);
+        let submission = self.projection.submit(&demand.query, revisions);
+        self.requested = Some(QueryRequest { demand, submission });
         if self.details_active {
-            let request =
-                self.prepare_query(state, QueryKind::Track(self.details.target?), 0, 1)?;
             self.details.state = DetailState::Loading;
-            return Some(request);
+        }
+        true
+    }
+
+    #[cfg(test)]
+    pub(super) fn query_request(&mut self, state: &TuiSnapshot) -> Option<QueryRequest> {
+        self.prepare_query_request(state);
+        self.requested.clone()
+    }
+
+    fn next_demand(&self, state: &TuiSnapshot) -> Option<QueryDemandRef<'_>> {
+        if self.details_active {
+            let track_id = self.details.target?;
+            if let Some(stamp) = self.details.stamp {
+                let query = Query::Track { track_id };
+                let revisions = state.query_revisions(None).for_query(
+                    &query,
+                    &state.library.playlist_entry_revisions,
+                    &state.library.metadata_revisions,
+                );
+                if stamp == query.stamp(revisions) {
+                    return None;
+                }
+            }
+            return self.unsuppressed(self.demand_ref(QueryKind::Track(track_id), 0, 1), state);
         }
         let limit = state.system.query_batch_size as usize;
         if let Some((kind, offset)) = self.view_query(state, limit)
-            && let Some(request) = self.prepare_query(state, kind, offset, limit)
+            && let Some(demand) = self.unsuppressed(self.demand_ref(kind, offset, limit), state)
         {
-            return Some(request);
+            return Some(demand);
         }
         let View::PlaylistDetail { detail, .. } = &self.view else {
             return None;
@@ -540,15 +593,51 @@ impl UiState {
         if !detail.summary_dirty {
             return None;
         }
-        self.prepare_query(
+        self.unsuppressed(
+            self.demand_ref(QueryKind::PlaylistSummary(detail.playlist_id), 0, limit),
             state,
-            QueryKind::PlaylistSummary(detail.playlist_id),
-            0,
-            limit,
         )
     }
 
-    fn view_query(&self, state: &TuiSnapshot, limit: usize) -> Option<(QueryKind, usize)> {
+    fn demand_ref<'a>(
+        &'a self,
+        kind: QueryKind<'a>,
+        offset: usize,
+        limit: usize,
+    ) -> QueryDemandRef<'a> {
+        let filter = (!matches!(
+            kind,
+            QueryKind::Search(_)
+                | QueryKind::OtherTracksCount
+                | QueryKind::PlaylistSummary(_)
+                | QueryKind::Track(_)
+        ) && !self.search.applied_query.is_empty())
+        .then_some(self.search.applied_query.as_str());
+        QueryDemandRef {
+            kind,
+            filter,
+            offset,
+            limit,
+        }
+    }
+
+    fn unsuppressed<'a>(
+        &self,
+        demand: QueryDemandRef<'a>,
+        state: &TuiSnapshot,
+    ) -> Option<QueryDemandRef<'a>> {
+        let failed = match demand.kind {
+            QueryKind::PlaylistSummary(_) => &self.failed_summary_request,
+            _ => &self.failed_request,
+        };
+        // Suppression must not retire a separate active page/title submission.
+        (!failed
+            .as_ref()
+            .is_some_and(|failed| demand.matches(failed, state)))
+        .then_some(demand)
+    }
+
+    fn view_query(&self, state: &TuiSnapshot, limit: usize) -> Option<(QueryKind<'_>, usize)> {
         Some(match &self.view {
             View::Queue if state.queue.total != 0 => match self.queue_anchor {
                 Some(queue_id) => (QueryKind::QueueSelection(queue_id), 0),
@@ -559,7 +648,7 @@ impl UiState {
                     (QueryKind::LibrarySelection(track_id), 0)
                 } else {
                     let offset = results.next_offset(limit)?;
-                    (QueryKind::Search(self.search.applied_query.clone()), offset)
+                    (QueryKind::Search(&self.search.applied_query), offset)
                 }
             }
             View::Tree(tree) if tree.other_tracks => (
@@ -574,13 +663,13 @@ impl UiState {
                 Some(track_id) => (
                     QueryKind::DirectorySelection {
                         track_id,
-                        path: tree.directory.clone(),
+                        path: &tree.directory,
                     },
                     0,
                 ),
                 None => {
                     let offset = tree.entries.next_offset(limit)?;
-                    (QueryKind::Directory(tree.directory.clone()), offset)
+                    (QueryKind::Directory(&tree.directory), offset)
                 }
             },
             View::Tree(tree) if tree.other_present.is_none() => (QueryKind::OtherTracksCount, 0),
@@ -609,52 +698,7 @@ impl UiState {
         })
     }
 
-    fn prepare_query(
-        &mut self,
-        state: &TuiSnapshot,
-        kind: QueryKind,
-        offset: usize,
-        limit: usize,
-    ) -> Option<QueryRequest> {
-        let filter = (!matches!(
-            kind,
-            QueryKind::Search(_) | QueryKind::PlaylistSummary(_) | QueryKind::Track(_)
-        ) && !self.search.applied_query.is_empty())
-        .then(|| self.search.applied_query.clone());
-        let query =
-            kind.clone()
-                .filtered_query(offset, limit, filter.as_deref().unwrap_or_default());
-        let revisions = state.query_revisions(kind.playlist_id());
-        let revisions = if matches!(kind, QueryKind::Track(_)) {
-            revisions.for_query(
-                &query,
-                &state.library.playlist_entry_revisions,
-                &state.library.metadata_revisions,
-            )
-        } else {
-            revisions
-        };
-        let demand = QueryDemand {
-            kind,
-            filter,
-            offset,
-            limit,
-            stamp: query.stamp(revisions),
-        };
-        if matches!(demand.kind, QueryKind::Track(_)) && self.details.stamp == Some(demand.stamp) {
-            return None;
-        }
-        // Suppressed demand must not retire an independently active submission.
-        if self.failure_slot(&demand.kind).as_ref() == Some(&demand) {
-            return None;
-        }
-        Some(QueryRequest {
-            submission: self.projection.submit(&query, revisions),
-            demand,
-        })
-    }
-
-    fn failure_slot(&mut self, kind: &QueryKind) -> &mut Option<QueryDemand> {
+    fn failure_slot(&mut self, kind: QueryKind<'_>) -> &mut Option<QueryDemand> {
         match kind {
             QueryKind::PlaylistSummary(_) => &mut self.failed_summary_request,
             _ => &mut self.failed_request,
@@ -663,7 +707,7 @@ impl UiState {
 
     fn fail_query(&mut self, request: &QueryRequest, error: QueryError) -> bool {
         self.requested = None;
-        *self.failure_slot(&request.demand.kind) = Some(request.demand.clone());
+        *self.failure_slot(request.demand.kind()) = Some(request.demand.clone());
         // An obsolete demand is parked quietly until its identity or freshness changes.
         if matches!(error, QueryError::RevisionChanged | QueryError::Cancelled) {
             return false;
@@ -672,7 +716,7 @@ impl UiState {
         if self.details_active {
             self.details.stamp = Some(request.demand.stamp);
             self.details.error_scroll = 0;
-            self.details.state = DetailState::Error(message);
+            self.details.state = DetailState::Error(message.into());
             self.mark_local_change();
         } else {
             self.set_notice(message, NoticeKind::Error);
@@ -693,7 +737,13 @@ impl UiState {
         request: &QueryRequest,
         result: Result<QueryResult, QueryError>,
     ) -> bool {
-        if self.query_request(state).as_ref() != Some(request) {
+        if !self
+            .next_demand(state)
+            .is_some_and(|demand| demand.matches(&request.demand, state))
+            || !self
+                .projection
+                .accepts_submission(request.submission, request.demand.revisions(state))
+        {
             if self.requested.as_ref() == Some(request) {
                 self.requested = None;
             }
@@ -728,7 +778,7 @@ impl UiState {
             return true;
         }
         match (&mut self.view, result.view) {
-            (View::Queue, ViewResponse::QueuePage(page)) if request.demand.kind == QueryKind::Queue => {
+            (View::Queue, ViewResponse::QueuePage(page)) if request.demand.kind() == QueryKind::Queue => {
                 self.queue
                     .insert(request.demand.offset, request.demand.limit, page.total, page.rows);
                 if self.queue.total == 0 {
@@ -738,7 +788,7 @@ impl UiState {
                 }
             }
             (View::Queue, ViewResponse::QueueEntries(rows)) => {
-                if let QueryKind::QueueSelection(queue_id) = request.demand.kind {
+                if let QueryKind::QueueSelection(queue_id) = request.demand.kind() {
                     if let Some(row) = rows.iter().find(|row| row.id == queue_id) {
                         self.queue.selection.select(Some(row.offset));
                         self.queue.set_viewport(self.queue.viewport_rows);
@@ -819,7 +869,7 @@ impl UiState {
                 }
             }
             (View::PlaylistDetail { detail, .. }, ViewResponse::PlaylistSummary(summary))
-                if request.demand.kind == QueryKind::PlaylistSummary(detail.playlist_id) =>
+                if request.demand.kind() == QueryKind::PlaylistSummary(detail.playlist_id) =>
             {
                 if let Some(summary) = summary
                     && summary.id == detail.playlist_id
@@ -845,7 +895,7 @@ impl UiState {
                 if let QueryKind::PlaylistSelection {
                     playlist_id,
                     entry_id,
-                } = request.demand.kind
+                } = request.demand.kind()
                 {
                     let entry = entries
                         .into_iter()
@@ -920,7 +970,9 @@ impl UiState {
         self.details = Details {
             target,
             source_label,
-            state: container.map_or(DetailState::Loading, DetailState::Container),
+            state: container.map_or(DetailState::Loading, |text| {
+                DetailState::Container(text.into())
+            }),
             ..Details::default()
         };
         self.details_active = true;
@@ -988,7 +1040,7 @@ impl UiState {
             self.details.state = DetailState::Loading;
             self.details.stamp = None;
             if self.details_active {
-                self.cancel_query();
+                self.retire_query();
             }
             self.mark_local_change();
         }
@@ -1004,9 +1056,9 @@ impl UiState {
             return;
         }
         if !QueryKind::Queue.changed_without_bitrate(previous, next, filter) {
-            self.queue.pages.clear();
-            if matches!(self.view, View::Queue) {
-                self.cancel_query();
+            self.queue.clear_pages();
+            if matches!(self.view, View::Queue) && !self.details_active {
+                self.retire_query();
             }
             return;
         }
@@ -1036,16 +1088,23 @@ impl UiState {
             self.queue_selected_id = None;
         }
         self.queue.set_viewport(self.queue.viewport_rows);
-        if matches!(self.view, View::Queue) {
-            self.cancel_query();
+        if matches!(self.view, View::Queue) && !self.details_active {
+            self.retire_query();
         }
     }
 
-    fn cancel_query(&mut self) {
+    // Snapshot invalidation retires a submission, not failures of independent demands.
+    // Their identity and selected freshness decide when they become eligible again.
+    fn retire_query(&mut self) {
         self.requested = None;
+        self.projection.cancel();
+    }
+
+    // Explicit user/view transitions also permit previously failed demands to retry.
+    fn cancel_query(&mut self) {
+        self.retire_query();
         self.failed_request = None;
         self.failed_summary_request = None;
-        self.projection.cancel();
     }
 
     pub(super) fn open_search(&mut self) {
@@ -1140,7 +1199,10 @@ impl UiState {
                 }
             }
         }
-        self.cancel_query();
+        // A snapshot can remove the source playlist while its details owns the screen.
+        if !self.details_active {
+            self.cancel_query();
+        }
     }
 
     fn clear_search(&mut self, state: &TuiSnapshot) {
@@ -1849,9 +1911,8 @@ pub(super) struct LibraryTree {
 }
 
 impl LibraryTree {
-    fn other_query(&self) -> QueryKind {
+    fn other_query(&self) -> QueryKind<'_> {
         QueryKind::OtherTracks {
-            query: String::new(),
             favorite: self.favorite,
             missing: self.missing,
             sort: self.sort,

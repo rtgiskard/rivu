@@ -539,7 +539,7 @@ fn details_pin_search_target_reject_late_reads_and_restore_source() {
     ui.key_action(KeyEvent::from(KeyCode::Char('i')), &state);
     assert!(ui.details_active);
     let old = ui.query_request(&state).unwrap();
-    assert_eq!(old.demand.kind, QueryKind::Track(2));
+    assert_eq!(old.demand.kind(), QueryKind::Track(2));
     for key in [
         KeyCode::Delete,
         KeyCode::Enter,
@@ -583,7 +583,7 @@ fn details_pin_search_target_reject_late_reads_and_restore_source() {
     ui.key_action(KeyEvent::from(KeyCode::Up), &state);
     ui.key_action(KeyEvent::from(KeyCode::Char('i')), &state);
     let current = ui.query_request(&state).unwrap();
-    assert_eq!(current.demand.kind, QueryKind::Track(1));
+    assert_eq!(current.demand.kind(), QueryKind::Track(1));
     assert!(!ui.apply_query(
         &state,
         &old,
@@ -859,7 +859,7 @@ pub(in crate::terminal) fn track(index: usize) -> LibraryRow {
 
 pub(in crate::terminal) fn response(request: &QueryRequest, total: usize) -> QueryResult {
     let indices = request.demand.offset..(request.demand.offset + request.demand.limit).min(total);
-    let view = match &request.demand.kind {
+    let view = match &request.demand.kind() {
         QueryKind::OtherTracksCount => ViewResponse::OtherTracksCount(total),
         QueryKind::LibrarySelection(track_id) | QueryKind::DirectorySelection { track_id, .. } => {
             ViewResponse::LibraryLocate(rivu_protocol::model::LibraryLocateResult::Located(
@@ -1274,7 +1274,7 @@ fn recent_refresh_preserves_selected_track_across_reorder_and_hidden_updates() {
     tui.ui
         .key_action(KeyEvent::from(KeyCode::Char('i')), &state);
     assert_eq!(
-        tui.ui.query_request(&state).unwrap().demand.kind,
+        tui.ui.query_request(&state).unwrap().demand.kind(),
         QueryKind::Track(2)
     );
     tui.ui.key_action(KeyEvent::from(KeyCode::Esc), &state);
@@ -1465,7 +1465,7 @@ fn switching_tabs_rejects_old_completion_even_after_returning_to_same_page() {
     assert!(!tui.ui.apply_query(&state, &old, Ok(response(&old, 12))));
     tui.ui.key_action(KeyEvent::from(KeyCode::BackTab), &state);
     let current = tui.ui.query_request(&state).unwrap();
-    assert_eq!(current.demand.kind, old.demand.kind);
+    assert_eq!(current.demand.kind(), old.demand.kind());
     assert_eq!(current.demand.stamp, old.demand.stamp);
     assert!(!tui.ui.apply_query(&state, &old, Ok(response(&old, 12))));
     assert!(
@@ -1510,7 +1510,7 @@ fn hidden_pages_invalidate_without_cancelling_visible_queue_and_handle_deletion(
     tui.apply_snapshot(next.clone());
     tui.ui.key_action(KeyEvent::from(KeyCode::Tab), &next);
     assert_eq!(
-        tui.ui.query_request(&next).unwrap().demand.kind,
+        tui.ui.query_request(&next).unwrap().demand.kind(),
         QueryKind::PlaylistSelection {
             playlist_id: 1,
             entry_id: 0
@@ -1523,7 +1523,7 @@ fn hidden_pages_invalidate_without_cancelling_visible_queue_and_handle_deletion(
     tui.ui.key_action(KeyEvent::from(KeyCode::Tab), &next);
     assert!(matches!(tui.ui.view, View::Playlists(_)));
     assert_eq!(
-        tui.ui.query_request(&next).unwrap().demand.kind,
+        tui.ui.query_request(&next).unwrap().demand.kind(),
         QueryKind::Playlists
     );
 }
@@ -1564,7 +1564,7 @@ fn hidden_pages_follow_page_size_and_library_root_changes() {
     assert_eq!(tree.entries.selected(), Some(&DirectoryRow::OtherTracks));
     tui.ui.key_action(KeyEvent::from(KeyCode::Enter), &next);
     assert!(matches!(
-        tui.ui.query_request(&next).unwrap().demand.kind,
+        tui.ui.query_request(&next).unwrap().demand.kind(),
         QueryKind::OtherTracks { .. }
     ));
     tui.ui.key_action(KeyEvent::from(KeyCode::Left), &next);
@@ -1579,8 +1579,8 @@ fn hidden_pages_follow_page_size_and_library_root_changes() {
     );
     tui.ui.key_action(KeyEvent::from(KeyCode::Enter), &next);
     assert_eq!(
-        tui.ui.query_request(&next).unwrap().demand.kind,
-        QueryKind::Directory("/two".into())
+        tui.ui.query_request(&next).unwrap().demand.kind(),
+        QueryKind::Directory(std::path::Path::new("/two"))
     );
 }
 
@@ -1626,7 +1626,7 @@ fn unrelated_updates_preserve_pending_and_loaded_terminal_pages() {
         next.queue.revision += 1;
         Arc::make_mut(&mut next.library.playlist_entry_revisions).insert(1, 10);
         Arc::make_mut(&mut next.library.playlist_entry_revisions).insert(2, 11);
-        match request.demand.kind {
+        match request.demand.kind() {
             QueryKind::Queue => next.queue.revision = state.queue.revision,
             QueryKind::Search(_) => next.library.revision = state.library.revision,
             QueryKind::Directory(_) => {
@@ -1647,7 +1647,7 @@ fn unrelated_updates_preserve_pending_and_loaded_terminal_pages() {
         assert_eq!(tui.ui.requested.as_ref(), Some(&request));
         assert_eq!(tui.ui.query_request(&next), Some(request.clone()));
         let mut result = response(&request, 12);
-        result.revisions = next.query_revisions(request.demand.kind.playlist_id());
+        result.revisions = next.query_revisions(request.demand.kind().playlist_id());
         assert!(tui.ui.apply_query(&next, &request, Ok(result)));
         load_visible(&mut tui.ui, &next);
         tui.apply_snapshot(state);
@@ -1708,7 +1708,7 @@ fn playlist_metadata_refresh_keeps_occurrence_and_compact_lookup_scope() {
     next.library.revision += 1;
     tui.apply_snapshot(next.clone());
     let rows = tui.ui.query_request(&next).unwrap();
-    assert_eq!(rows.demand.kind, QueryKind::Playlist(1));
+    assert_eq!(rows.demand.kind(), QueryKind::Playlist(1));
     let View::PlaylistDetail { detail, .. } = &tui.ui.view else {
         unreachable!()
     };
@@ -1720,7 +1720,7 @@ fn playlist_metadata_refresh_keeps_occurrence_and_compact_lookup_scope() {
     tui.apply_snapshot(next.clone());
     let lookup = tui.ui.query_request(&next).unwrap();
     assert_eq!(
-        lookup.demand.kind,
+        lookup.demand.kind(),
         QueryKind::PlaylistSelection {
             playlist_id: 1,
             entry_id: 0
@@ -1738,7 +1738,7 @@ fn playlist_metadata_refresh_keeps_occurrence_and_compact_lookup_scope() {
     located.revisions = next.query_revisions(Some(1));
     assert!(tui.ui.apply_query(&next, &lookup, Ok(located)));
     let rows = tui.ui.query_request(&next).unwrap();
-    assert_eq!(rows.demand.kind, QueryKind::Playlist(1));
+    assert_eq!(rows.demand.kind(), QueryKind::Playlist(1));
     // An empty compact result is an observed removed occurrence, with the
     // scoped token still captured atomically by PlaylistEntryLocations.
     Arc::make_mut(&mut next.library.playlist_entry_revisions).insert(1, 11);
@@ -1758,7 +1758,7 @@ fn playlist_metadata_refresh_keeps_occurrence_and_compact_lookup_scope() {
     assert!(detail.entry_anchor.is_none());
     assert!(detail.selected_entry_id.is_none());
     assert_eq!(
-        tui.ui.query_request(&next).unwrap().demand.kind,
+        tui.ui.query_request(&next).unwrap().demand.kind(),
         QueryKind::Playlist(1)
     );
 }
@@ -1779,7 +1779,7 @@ fn deleted_playlist_returns_to_summaries_and_rejects_pending_rows() {
             .apply_query(&next, &request, Ok(response(&request, 12)))
     );
     assert_eq!(
-        tui.ui.query_request(&next).unwrap().demand.kind,
+        tui.ui.query_request(&next).unwrap().demand.kind(),
         QueryKind::Playlists
     );
 }
@@ -1913,7 +1913,7 @@ fn terminal_playlist_reorder_relocates_identity_and_rejects_stale_results() {
     assert!(!tui.ui.apply_query(&tui.snapshot, &pending, Ok(old_page)));
     let lookup = tui.ui.query_request(&tui.snapshot).unwrap();
     assert_eq!(
-        lookup.demand.kind,
+        lookup.demand.kind(),
         QueryKind::PlaylistSelection {
             playlist_id: 1,
             entry_id: 0
@@ -1933,7 +1933,7 @@ fn terminal_playlist_reorder_relocates_identity_and_rejects_stale_results() {
     entries[0].offset = 9;
     assert!(tui.ui.apply_query(&tui.snapshot, &lookup, Ok(located)));
     let page = tui.ui.query_request(&tui.snapshot).unwrap();
-    assert_eq!(page.demand.kind, QueryKind::Playlist(1));
+    assert_eq!(page.demand.kind(), QueryKind::Playlist(1));
     assert_eq!(page.demand.offset, 9);
     let mut relocated = response(&page, 12);
     let ViewResponse::PlaylistEntries(entries) = &mut relocated.view else {
@@ -2030,7 +2030,7 @@ fn other_tracks_pending_selection_regression(revisions: bool) {
     }
     let old = tui.ui.query_request(&state).unwrap();
     assert!(matches!(
-        old.demand.kind,
+        old.demand.kind(),
         QueryKind::OtherTracks {
             anchor: Some(42),
             ..
@@ -2045,7 +2045,7 @@ fn other_tracks_pending_selection_regression(revisions: bool) {
     }
     let fresh = tui.ui.query_request(&state).unwrap();
     assert!(matches!(
-        fresh.demand.kind,
+        fresh.demand.kind(),
         QueryKind::OtherTracks {
             anchor: Some(42),
             ..
@@ -2067,7 +2067,7 @@ fn other_tracks_pending_selection_regression(revisions: bool) {
     assert!(tui.ui.apply_query(&state, &fresh, Ok(located(0))));
     let rows = tui.ui.query_request(&state).unwrap();
     assert!(matches!(
-        rows.demand.kind,
+        rows.demand.kind(),
         QueryKind::OtherTracks { anchor: None, .. }
     ));
     assert!(tui.ui.apply_query(
@@ -2146,7 +2146,7 @@ fn other_tracks_selection_survives_changes_between_locate_and_page() {
         }
         let fresh = tui.ui.query_request(&state).unwrap();
         assert!(matches!(
-            fresh.demand.kind,
+            fresh.demand.kind(),
             QueryKind::OtherTracks {
                 anchor: Some(42),
                 ..
@@ -2171,7 +2171,7 @@ fn other_tracks_selection_survives_changes_between_locate_and_page() {
         tui.ui
             .key_action(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::ALT), &state);
         assert!(matches!(
-            tui.ui.query_request(&state).unwrap().demand.kind,
+            tui.ui.query_request(&state).unwrap().demand.kind(),
             QueryKind::OtherTracks {
                 anchor: Some(43),
                 ..
@@ -2226,10 +2226,13 @@ fn tree_top_level_has_configured_roots_then_other_and_restores_parent() {
             let request = ui.query_request(&state).unwrap();
             match &row {
                 DirectoryRow::OtherTracks => {
-                    assert!(matches!(request.demand.kind, QueryKind::OtherTracks { .. }));
+                    assert!(matches!(
+                        request.demand.kind(),
+                        QueryKind::OtherTracks { .. }
+                    ));
                 }
                 DirectoryRow::Directory { path } => {
-                    assert_eq!(request.demand.kind, QueryKind::Directory(path.clone()));
+                    assert_eq!(request.demand.kind(), QueryKind::Directory(path));
                 }
                 DirectoryRow::Track(_) => unreachable!(),
             }
@@ -2585,7 +2588,7 @@ fn details_containers_are_not_tracks_and_query_editor_owns_i() {
     assert!(ui.details_active);
     assert!(ui.details.target.is_none());
     assert!(
-        matches!(&ui.details.state, DetailState::Container(name) if name == "Full playlist name 夜航")
+        matches!(&ui.details.state, DetailState::Container(name) if name.as_ref() == "Full playlist name 夜航")
     );
     assert!(ui.query_request(&state).is_none());
     ui.key_action(KeyEvent::from(KeyCode::Esc), &state);
@@ -2784,8 +2787,8 @@ fn bitrate_changes_reload_retained_payloads_without_losing_coordinates_or_identi
     tui.ui.cancel_query();
     let hidden_tree = tui.ui.query_request(&next).unwrap();
     assert_eq!(
-        hidden_tree.demand.kind,
-        QueryKind::Directory("/music".into())
+        hidden_tree.demand.kind(),
+        QueryKind::Directory(std::path::Path::new("/music"))
     );
     assert_eq!(
         hidden_tree.demand.stamp.revisions().bitrate,
@@ -2798,7 +2801,7 @@ fn bitrate_changes_reload_retained_payloads_without_losing_coordinates_or_identi
     tui.ui.view = tui.ui.cached_playlists.take().unwrap();
     tui.ui.cancel_query();
     let hidden_playlist = tui.ui.query_request(&next).unwrap();
-    assert_eq!(hidden_playlist.demand.kind, QueryKind::Playlist(1));
+    assert_eq!(hidden_playlist.demand.kind(), QueryKind::Playlist(1));
     assert_eq!(
         hidden_playlist.demand.stamp.revisions().bitrate,
         next.library.bitrate_revision
@@ -2916,7 +2919,7 @@ fn bitrate_changes_do_not_retire_playlist_location_lookups() {
     detail.entry_anchor = Some(1);
     let pending = tui.ui.query_request(&state).unwrap();
     assert_eq!(
-        pending.demand.kind,
+        pending.demand.kind(),
         QueryKind::PlaylistSelection {
             playlist_id: 1,
             entry_id: 1
@@ -2933,7 +2936,7 @@ fn bitrate_changes_do_not_retire_playlist_location_lookups() {
             .apply_query(&next, &pending, Ok(response(&pending, 12)),)
     );
     let page = tui.ui.query_request(&next).unwrap();
-    assert_eq!(page.demand.kind, QueryKind::Playlist(1));
+    assert_eq!(page.demand.kind(), QueryKind::Playlist(1));
     assert_eq!(
         page.demand.stamp.revisions().bitrate,
         next.library.bitrate_revision
@@ -2979,7 +2982,7 @@ fn external_playlist_rename_refreshes_active_and_cached_titles_without_reloading
             tui.ui.switch_tab(true, &next);
         }
         let stale = tui.ui.query_request(&next).unwrap();
-        assert_eq!(stale.demand.kind, QueryKind::PlaylistSummary(1));
+        assert_eq!(stale.demand.kind(), QueryKind::PlaylistSummary(1));
         assert_eq!(
             stale.demand.query(),
             Query::PlaylistSummary { playlist_id: 1 }
@@ -3041,7 +3044,7 @@ fn failed_playlist_entries_do_not_block_title_refresh_or_retry_after_it() {
             .ui
             .query_request(&next)
             .expect("independent title refresh");
-        assert_eq!(summary.demand.kind, QueryKind::PlaylistSummary(1));
+        assert_eq!(summary.demand.kind(), QueryKind::PlaylistSummary(1));
         assert!(tui.ui.apply_query(
             &next,
             &summary,
@@ -3080,7 +3083,7 @@ fn failed_playlist_title_does_not_block_pages_or_retry_when_they_load() {
     next.library.playlist_revision += 1;
     tui.apply_snapshot(next.clone());
     let summary = tui.ui.query_request(&next).unwrap();
-    assert_eq!(summary.demand.kind, QueryKind::PlaylistSummary(1));
+    assert_eq!(summary.demand.kind(), QueryKind::PlaylistSummary(1));
     assert!(tui.ui.apply_query(
         &next,
         &summary,
@@ -3093,7 +3096,7 @@ fn failed_playlist_title_does_not_block_pages_or_retry_when_they_load() {
         .ui
         .query_request(&next)
         .expect("independent page prefetch");
-    assert_eq!(page.demand.kind, QueryKind::Playlist(1));
+    assert_eq!(page.demand.kind(), QueryKind::Playlist(1));
     assert_eq!(page.demand.offset, 6);
     assert!(tui.ui.apply_query(&next, &page, Ok(response(&page, 12))));
     assert!(
@@ -3104,7 +3107,7 @@ fn failed_playlist_title_does_not_block_pages_or_retry_when_they_load() {
     next.library.playlist_revision += 1;
     tui.apply_snapshot(next.clone());
     let refreshed = tui.ui.query_request(&next).expect("new title revision");
-    assert_eq!(refreshed.demand.kind, QueryKind::PlaylistSummary(1));
+    assert_eq!(refreshed.demand.kind(), QueryKind::PlaylistSummary(1));
     assert!(tui.ui.apply_query(
         &next,
         &refreshed,
@@ -3114,7 +3117,7 @@ fn failed_playlist_title_does_not_block_pages_or_retry_when_they_load() {
     tui.ui.key_action(KeyEvent::from(KeyCode::Down), &next);
     tui.ui.key_action(KeyEvent::from(KeyCode::Down), &next);
     let page = tui.ui.query_request(&next).unwrap();
-    assert_eq!(page.demand.kind, QueryKind::Playlist(1));
+    assert_eq!(page.demand.kind(), QueryKind::Playlist(1));
     assert!(tui.ui.apply_query(
         &next,
         &page,
@@ -3214,7 +3217,7 @@ fn malformed_title_response_cannot_overwrite_entries_or_block_page_loading() {
     next.library.playlist_revision += 1;
     tui.apply_snapshot(next.clone());
     let request = tui.ui.query_request(&next).unwrap();
-    assert_eq!(request.demand.kind, QueryKind::PlaylistSummary(1));
+    assert_eq!(request.demand.kind(), QueryKind::PlaylistSummary(1));
     let View::PlaylistDetail { detail, .. } = &tui.ui.view else {
         panic!("playlist detail")
     };
@@ -3238,7 +3241,277 @@ fn malformed_title_response_cannot_overwrite_entries_or_block_page_loading() {
         tui.ui.key_action(KeyEvent::from(KeyCode::Down), &next);
     }
     let page = tui.ui.query_request(&next).unwrap();
-    assert_eq!(page.demand.kind, QueryKind::Playlist(1));
+    assert_eq!(page.demand.kind(), QueryKind::Playlist(1));
     assert!(tui.ui.apply_query(&next, &page, Ok(response(&page, 12))));
     assert!(tui.ui.query_request(&next).is_none());
+}
+
+#[test]
+fn input_loop_reuses_pending_borrowed_demands_and_accepts_their_original_completion() {
+    let state = query_snapshot();
+    for kind in 0..7 {
+        let mut ui = UiState {
+            view: match kind {
+                0 => View::Queue,
+                1 => View::LibraryResults(PagedList::default()),
+                2 => View::Tree(LibraryTree {
+                    directory: "/音乐/夜航".into(),
+                    ..LibraryTree::default()
+                }),
+                3 => View::Tree(LibraryTree {
+                    other_tracks: true,
+                    favorite: Some(true),
+                    sort: rivu_protocol::model::LibrarySort::Album,
+                    ..LibraryTree::default()
+                }),
+                4 => View::Playlists(PagedList::default()),
+                _ => playlist_view(1),
+            },
+            ..UiState::default()
+        };
+        ui.search.active = true;
+        ui.search.applied_query = "夜航 e\u{301}".into();
+        if kind == 6 {
+            ui.details_active = true;
+            ui.details.target = Some(2);
+        }
+        assert!(ui.prepare_query_request(&state));
+        let request = ui.requested.clone().unwrap();
+        ui.open_search();
+        ui.search.query = "unsubmitted replacement".into();
+        for _ in 0..8 {
+            assert!(!ui.prepare_query_request(&state));
+        }
+        let result = if kind == 6 {
+            QueryResult {
+                revisions: request.demand.stamp.revisions(),
+                view: ViewResponse::Track(Some(full_track(2))),
+            }
+        } else {
+            response(&request, 12)
+        };
+        assert!(ui.apply_query(&state, &request, Ok(result)));
+        if kind == 6 {
+            assert!(!ui.prepare_query_request(&state));
+            assert!(ui.requested.is_none());
+        }
+    }
+}
+
+#[test]
+fn pending_directory_read_rejects_same_path_after_a_new_generation() {
+    let state = query_snapshot();
+    let mut ui = UiState {
+        view: View::Tree(LibraryTree {
+            directory: "/音乐/夜航".into(),
+            ..LibraryTree::default()
+        }),
+        ..UiState::default()
+    };
+    assert!(ui.prepare_query_request(&state));
+    let old = ui.requested.clone().unwrap();
+    for _ in 0..8 {
+        assert!(!ui.prepare_query_request(&state));
+    }
+    ui.cancel_query();
+    assert!(ui.prepare_query_request(&state));
+    let current = ui.requested.clone().unwrap();
+    assert_eq!(old.demand.query, current.demand.query);
+    assert!(!ui.apply_query(&state, &old, Ok(response(&old, 12))));
+    assert!(ui.apply_query(&state, &current, Ok(response(&current, 12))));
+}
+
+fn iteration_details_tui(source: usize) -> TuiState {
+    let state = query_snapshot();
+    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
+    tui.ui.view = match source {
+        0 => View::Queue,
+        1 => playlist_view(1),
+        _ => View::Tree(LibraryTree {
+            directory: "/music".into(),
+            ..LibraryTree::default()
+        }),
+    };
+    load_visible(&mut tui.ui, &state);
+    tui.ui.open_details();
+    assert_eq!(tui.ui.details.target, Some(if source == 0 { 7 } else { 0 }));
+    tui
+}
+
+fn iteration_change_details_source(next: &mut TuiSnapshot, source: usize, page_size: bool) {
+    if page_size {
+        next.system.query_batch_size += 1;
+    } else {
+        match source {
+            0 => next.queue.revision += 1,
+            1 => {
+                *Arc::make_mut(&mut next.library.playlist_entry_revisions)
+                    .get_mut(&1)
+                    .unwrap() += 1;
+            }
+            _ => next.library.structure_revision += 1,
+        }
+    }
+}
+
+#[test]
+fn iteration_details_accept_original_completion_across_source_and_page_size_changes() {
+    for source in 0..3 {
+        for page_size in [false, true] {
+            let mut tui = iteration_details_tui(source);
+            let track_id = tui.ui.details.target.unwrap();
+            let request = tui.ui.query_request(&tui.snapshot).unwrap();
+            let completion = QueryResult {
+                revisions: request.demand.stamp.revisions(),
+                view: ViewResponse::Track(Some(full_track(track_id))),
+            };
+            let mut next = tui.snapshot.clone();
+            iteration_change_details_source(&mut next, source, page_size);
+            tui.apply_snapshot(next.clone());
+            assert!(
+                tui.ui.apply_query(&next, &request, Ok(completion)),
+                "foreground details must retain ownership: source={source}, page_size={page_size}"
+            );
+            assert!(
+                matches!(&tui.ui.details.state, DetailState::Ready(track) if track.id == track_id)
+            );
+            assert!(
+                tui.ui.query_request(&next).is_none(),
+                "accepted details must not resubmit"
+            );
+            match &tui.ui.view {
+                View::Queue => {
+                    assert!(tui.ui.queue.pages.is_empty());
+                    if !page_size {
+                        assert_eq!(tui.ui.queue_anchor, Some(1000));
+                    }
+                }
+                View::PlaylistDetail { detail, .. } => {
+                    assert!(detail.entries.pages.is_empty());
+                    if !page_size {
+                        assert_eq!(detail.entry_anchor, Some(0));
+                    }
+                }
+                View::Tree(tree) => {
+                    assert!(tree.entries.pages.is_empty());
+                    assert_eq!(tree.anchor, Some(0));
+                }
+                _ => unreachable!(),
+            }
+            tui.ui.key_action(KeyEvent::from(KeyCode::Esc), &next);
+            assert!(
+                tui.ui.query_request(&next).is_some(),
+                "underlying page still needs refill"
+            );
+        }
+    }
+}
+
+#[test]
+fn iteration_failed_summary_stays_parked_through_entry_and_bitrate_refills() {
+    for bitrate_only in [false, true] {
+        let state = query_snapshot();
+        let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
+        tui.ui.view = playlist_view(1);
+        load_visible(&mut tui.ui, &state);
+        let mut next = state.clone();
+        next.library.playlist_revision += 1;
+        tui.apply_snapshot(next.clone());
+        let summary = tui.ui.query_request(&next).unwrap();
+        assert_eq!(summary.demand.kind(), QueryKind::PlaylistSummary(1));
+        assert!(tui.ui.apply_query(
+            &next,
+            &summary,
+            Err(QueryError::Message("summary unavailable".into()))
+        ));
+        assert!(tui.ui.query_request(&next).is_none());
+        if bitrate_only {
+            next.library.bitrate_revision += 1;
+        } else {
+            *Arc::make_mut(&mut next.library.playlist_entry_revisions)
+                .get_mut(&1)
+                .unwrap() += 1;
+        }
+        tui.apply_snapshot(next.clone());
+        let mut refilled = false;
+        for _ in 0..16 {
+            let Some(request) = tui.ui.query_request(&next) else {
+                break;
+            };
+            assert!(
+                matches!(
+                    request.demand.kind(),
+                    QueryKind::Playlist(1) | QueryKind::PlaylistSelection { playlist_id: 1, .. }
+                ),
+                "unchanged failed summary must not retry after independent refill"
+            );
+            refilled |= request.demand.kind() == QueryKind::Playlist(1);
+            assert!(
+                tui.ui
+                    .apply_query(&next, &request, Ok(response(&request, 12)))
+            );
+        }
+        assert!(refilled, "changed entry payload must actually refill");
+        assert!(tui.ui.query_request(&next).is_none());
+        let View::PlaylistDetail { detail, .. } = &tui.ui.view else {
+            unreachable!();
+        };
+        assert_eq!(detail.entries.selected().unwrap().track_id, 0);
+        assert!(
+            detail.summary_dirty,
+            "failed title is still outstanding, not silently marked loaded"
+        );
+        next.library.playlist_revision += 1;
+        tui.apply_snapshot(next.clone());
+        let fresh = tui
+            .ui
+            .query_request(&next)
+            .expect("genuine title freshness resumes demand");
+        assert_eq!(fresh.demand.kind(), QueryKind::PlaylistSummary(1));
+        assert!(tui.ui.apply_query(&next, &fresh, Ok(response(&fresh, 12))));
+        assert!(tui.ui.query_request(&next).is_none());
+    }
+}
+
+#[test]
+fn iteration_quiet_failed_details_stay_parked_through_unrelated_source_updates() {
+    for source in 0..3 {
+        for page_size in [false, true] {
+            for error in [QueryError::RevisionChanged, QueryError::Cancelled] {
+                let mut tui = iteration_details_tui(source);
+                let track_id = tui.ui.details.target.unwrap();
+                let failed = tui.ui.query_request(&tui.snapshot).unwrap();
+                assert!(!tui.ui.apply_query(&tui.snapshot, &failed, Err(error)));
+                assert!(tui.ui.query_request(&tui.snapshot).is_none());
+                let mut next = tui.snapshot.clone();
+                iteration_change_details_source(&mut next, source, page_size);
+                tui.apply_snapshot(next.clone());
+                assert!(
+                    tui.ui.query_request(&next).is_none(),
+                    "unchanged quiet details failure must stay parked: source={source}, page_size={page_size}"
+                );
+                assert!(tui.ui.message.is_none());
+                assert!(matches!(tui.ui.details.state, DetailState::Loading));
+                next.library.bitrate_revision += 1;
+                tui.apply_snapshot(next.clone());
+                let fresh = tui
+                    .ui
+                    .query_request(&next)
+                    .expect("new target freshness resumes demand");
+                assert_ne!(fresh.demand.stamp, failed.demand.stamp);
+                assert!(tui.ui.apply_query(
+                    &next,
+                    &fresh,
+                    Ok(QueryResult {
+                        revisions: fresh.demand.stamp.revisions(),
+                        view: ViewResponse::Track(Some(full_track(track_id))),
+                    })
+                ));
+                assert!(
+                    matches!(&tui.ui.details.state, DetailState::Ready(track) if track.id == track_id)
+                );
+                assert!(tui.ui.query_request(&next).is_none());
+            }
+        }
+    }
 }

@@ -15,15 +15,15 @@ fn queue_request(
     revisions: QueryRevisions,
 ) -> QueryRequest {
     let query = QueryKind::Queue.into_query(offset, 20);
+    let submission = tracker.submit(&query, revisions);
     QueryRequest {
         demand: QueryDemand {
-            kind: QueryKind::Queue,
-            filter: None,
             offset,
             limit: 20,
             stamp: query.stamp(revisions),
+            query,
         },
-        submission: tracker.submit(&query, revisions),
+        submission,
     }
 }
 

@@ -252,20 +252,19 @@ pub(super) fn spawn_command_worker(data_dir: &Path, instance_id: u32) -> Command
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum QueryKind {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum QueryKind<'a> {
     Queue,
     QueueSelection(u64),
-    Search(String),
+    Search(&'a str),
     LibrarySelection(i64),
-    Directory(PathBuf),
+    Directory(&'a Path),
     DirectorySelection {
         track_id: i64,
-        path: PathBuf,
+        path: &'a Path,
     },
     OtherTracksCount,
     OtherTracks {
-        query: String,
         favorite: Option<bool>,
         missing: Option<bool>,
         sort: LibrarySort,
@@ -281,10 +280,19 @@ pub(super) enum QueryKind {
     Track(i64),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct QueryDemandRef<'a> {
+    pub(super) kind: QueryKind<'a>,
+    pub(super) filter: Option<&'a str>,
+    pub(super) offset: usize,
+    pub(super) limit: usize,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct QueryDemand {
-    pub(super) kind: QueryKind,
-    pub(super) filter: Option<String>,
+    // The submitted protocol query owns the text/path once. Polling demand and
+    // checking freshness borrow it instead of rebuilding an owned query.
+    pub(super) query: Query,
     pub(super) offset: usize,
     pub(super) limit: usize,
     pub(super) stamp: QueryStamp,
@@ -296,8 +304,13 @@ pub(super) struct QueryRequest {
     pub(super) submission: QuerySubmission,
 }
 
-impl QueryKind {
-    pub(super) fn filtered_query(self, offset: usize, limit: usize, filter: &str) -> Query {
+impl QueryKind<'_> {
+    pub(super) fn filtered_query(
+        self,
+        offset: usize,
+        limit: usize,
+        filter: Option<String>,
+    ) -> Query {
         let mut query = self.into_query(offset, limit);
         match &mut query {
             Query::QueuePage { query, .. }
@@ -310,9 +323,9 @@ impl QueryKind {
             | Query::PlaylistSummaries { query, .. }
             | Query::PlaylistEntries { query, .. }
             | Query::PlaylistEntryLocations { query, .. }
-                if !filter.is_empty() =>
+                if filter.is_some() =>
             {
-                *query = Some(filter.into());
+                *query = filter;
             }
             _ => {}
         }
@@ -333,7 +346,7 @@ impl QueryKind {
             },
             QueryKind::DirectorySelection { track_id, path } => Query::LibraryLocate {
                 track_id,
-                path,
+                path: path.to_owned(),
                 tree: true,
                 query: None,
                 favorite: None,
@@ -352,7 +365,7 @@ impl QueryKind {
                 queue_ids: vec![queue_id],
             },
             QueryKind::Search(query) => Query::LibraryPage {
-                query: Some(query),
+                query: Some(query.to_owned()),
                 favorite: None,
                 missing: None,
                 sort: LibrarySort::Id,
@@ -360,7 +373,6 @@ impl QueryKind {
                 limit,
             },
             QueryKind::OtherTracks {
-                query,
                 favorite,
                 missing,
                 sort,
@@ -368,13 +380,13 @@ impl QueryKind {
             } => match anchor {
                 Some(track_id) => Query::OtherTracksLocate {
                     track_id,
-                    query: Some(query),
+                    query: Some(String::new()),
                     favorite,
                     missing,
                     sort,
                 },
                 None => Query::OtherTracksPage {
-                    query: Some(query),
+                    query: Some(String::new()),
                     favorite,
                     missing,
                     sort,
@@ -383,7 +395,7 @@ impl QueryKind {
                 },
             },
             QueryKind::Directory(path) => Query::DirectoryPage {
-                path,
+                path: path.to_owned(),
                 query: None,
                 favorite: None,
                 missing: None,
@@ -422,9 +434,32 @@ impl QueryKind {
         }
     }
 
+    // Revision selection depends on the query shape and filter presence, not
+    // owned text, paths or occurrence vectors. Snapshot checks need none of them.
+    fn stamp_query(self, filtered: bool) -> Query {
+        let kind = match self {
+            Self::QueueSelection(_) => Self::Queue,
+            Self::Search(_) => Self::Search(""),
+            Self::Directory(_) => Self::Directory(Path::new("")),
+            Self::DirectorySelection { track_id, .. } => Self::DirectorySelection {
+                track_id,
+                path: Path::new(""),
+            },
+            Self::PlaylistSelection { playlist_id, .. } => {
+                return Query::PlaylistEntryLocations {
+                    playlist_id,
+                    query: filtered.then(String::new),
+                    entry_ids: Vec::new(),
+                };
+            }
+            kind => kind,
+        };
+        kind.filtered_query(0, 0, filtered.then(String::new))
+    }
+
     pub(super) fn changed(self, previous: &TuiSnapshot, next: &TuiSnapshot, filter: &str) -> bool {
         let playlist_id = self.playlist_id();
-        let query = self.filtered_query(0, 0, filter);
+        let query = self.stamp_query(!filter.is_empty());
         query.stamp(previous.query_revisions(playlist_id))
             != query.stamp(next.query_revisions(playlist_id))
     }
@@ -436,7 +471,7 @@ impl QueryKind {
         filter: &str,
     ) -> bool {
         let playlist_id = self.playlist_id();
-        let query = self.filtered_query(0, 0, filter);
+        let query = self.stamp_query(!filter.is_empty());
         query.stamp(
             previous
                 .query_revisions(playlist_id)
@@ -445,9 +480,114 @@ impl QueryKind {
     }
 }
 
+impl QueryDemandRef<'_> {
+    pub(super) fn matches(self, demand: &QueryDemand, state: &TuiSnapshot) -> bool {
+        self == demand.borrowed() && demand.stamp == demand.query.stamp(demand.revisions(state))
+    }
+}
+
 impl QueryDemand {
+    pub(super) fn kind(&self) -> QueryKind<'_> {
+        match &self.query {
+            Query::QueuePage { .. } => QueryKind::Queue,
+            Query::QueueEntries { queue_ids, .. } => QueryKind::QueueSelection(queue_ids[0]),
+            Query::LibraryPage { query, .. } => {
+                QueryKind::Search(query.as_deref().unwrap_or_default())
+            }
+            Query::LibraryLocate {
+                track_id,
+                path,
+                tree,
+                ..
+            } => {
+                if *tree {
+                    QueryKind::DirectorySelection {
+                        track_id: *track_id,
+                        path,
+                    }
+                } else {
+                    QueryKind::LibrarySelection(*track_id)
+                }
+            }
+            Query::DirectoryPage { path, .. } => QueryKind::Directory(path),
+            Query::OtherTracksCount => QueryKind::OtherTracksCount,
+            Query::OtherTracksPage {
+                favorite,
+                missing,
+                sort,
+                ..
+            } => QueryKind::OtherTracks {
+                favorite: *favorite,
+                missing: *missing,
+                sort: *sort,
+                anchor: None,
+            },
+            Query::OtherTracksLocate {
+                track_id,
+                favorite,
+                missing,
+                sort,
+                ..
+            } => QueryKind::OtherTracks {
+                favorite: *favorite,
+                missing: *missing,
+                sort: *sort,
+                anchor: Some(*track_id),
+            },
+            Query::PlaylistSummaries { .. } => QueryKind::Playlists,
+            Query::PlaylistEntries { playlist_id, .. } => QueryKind::Playlist(*playlist_id),
+            Query::PlaylistSummary { playlist_id } => QueryKind::PlaylistSummary(*playlist_id),
+            Query::PlaylistEntryLocations {
+                playlist_id,
+                entry_ids,
+                ..
+            } => QueryKind::PlaylistSelection {
+                playlist_id: *playlist_id,
+                entry_id: entry_ids[0],
+            },
+            Query::Track { track_id } => QueryKind::Track(*track_id),
+            _ => unreachable!("terminal demand must use a terminal query kind"),
+        }
+    }
+
+    pub(super) fn borrowed(&self) -> QueryDemandRef<'_> {
+        let filter = match &self.query {
+            Query::QueuePage { query, .. }
+            | Query::QueueEntries { query, .. }
+            | Query::DirectoryPage { query, .. }
+            | Query::LibraryLocate { query, .. }
+            | Query::OtherTracksPage { query, .. }
+            | Query::OtherTracksLocate { query, .. }
+            | Query::PlaylistSummaries { query, .. }
+            | Query::PlaylistEntries { query, .. }
+            | Query::PlaylistEntryLocations { query, .. } => {
+                query.as_deref().filter(|query| !query.is_empty())
+            }
+            _ => None,
+        };
+        QueryDemandRef {
+            kind: self.kind(),
+            filter,
+            offset: self.offset,
+            limit: self.limit,
+        }
+    }
+
+    pub(super) fn revisions(&self, state: &TuiSnapshot) -> rivu_protocol::response::QueryRevisions {
+        let revisions = state.query_revisions(self.kind().playlist_id());
+        if matches!(self.query, Query::Track { .. }) {
+            revisions.for_query(
+                &self.query,
+                &state.library.playlist_entry_revisions,
+                &state.library.metadata_revisions,
+            )
+        } else {
+            revisions
+        }
+    }
+
     pub(super) fn accepts_view(&self, view: &ViewResponse) -> bool {
-        match (&self.kind, view) {
+        match (self.kind(), view) {
             (QueryKind::Queue, ViewResponse::QueuePage(_))
             | (QueryKind::QueueSelection(_), ViewResponse::QueueEntries(_))
             | (
@@ -470,21 +610,30 @@ impl QueryDemand {
                 true
             }
             (QueryKind::Track(id), ViewResponse::Track(track)) => {
-                track.as_ref().is_none_or(|track| track.id == *id)
+                track.as_ref().is_none_or(|track| track.id == id)
             }
             (QueryKind::PlaylistSummary(id), ViewResponse::PlaylistSummary(summary)) => {
-                summary.as_ref().is_none_or(|summary| summary.id == *id)
+                summary.as_ref().is_none_or(|summary| summary.id == id)
             }
             _ => false,
         }
     }
 
     pub(super) fn query(&self) -> Query {
-        self.kind.clone().filtered_query(
-            self.offset,
-            self.limit,
-            self.filter.as_deref().unwrap_or_default(),
-        )
+        let mut query = self.query.clone();
+        match &mut query {
+            Query::QueuePage { offset, limit, .. }
+            | Query::LibraryPage { offset, limit, .. }
+            | Query::DirectoryPage { offset, limit, .. }
+            | Query::OtherTracksPage { offset, limit, .. }
+            | Query::PlaylistSummaries { offset, limit, .. }
+            | Query::PlaylistEntries { offset, limit, .. } => {
+                *offset = self.offset;
+                *limit = self.limit;
+            }
+            _ => {}
+        }
+        query
     }
 }
 

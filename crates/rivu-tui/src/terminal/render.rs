@@ -134,8 +134,8 @@ fn detail_field(
     width: usize,
     colors: TerminalColors,
 ) -> Vec<Line<'static>> {
-    let label_indent = width.min(2);
-    let value_indent = width.min(4);
+    let label_indent = width.saturating_sub(1).min(2);
+    let value_indent = width.saturating_sub(1).min(4);
     let mut lines = Vec::new();
     for line in wrap_details(label, width.saturating_sub(label_indent)) {
         lines.push(Line::from(vec![
@@ -252,7 +252,7 @@ impl DetailsLayout {
                 (DetailState::Loading, DetailState::Loading)
                 | (DetailState::Removed, DetailState::Removed) => true,
                 (DetailState::Error(a), DetailState::Error(b))
-                | (DetailState::Container(a), DetailState::Container(b)) => a == b,
+                | (DetailState::Container(a), DetailState::Container(b)) => Arc::ptr_eq(a, b),
                 _ => false,
             }
     }
@@ -1123,6 +1123,7 @@ fn draw_messages(
 pub(super) struct RowContent<'a> {
     pub(super) title: Cow<'a, str>,
     title_path: Option<&'a std::path::Path>,
+    fitted_label_width: Option<usize>,
     pub(super) artist: &'a str,
     pub(super) album: &'a str,
     pub(super) codec: &'a str,
@@ -1139,6 +1140,7 @@ impl<'a> RowContent<'a> {
         Self {
             title: Cow::Borrowed(&track.title),
             title_path: None,
+            fitted_label_width: None,
             artist: &track.artist,
             album: &track.album,
             codec: &track.codec,
@@ -1155,6 +1157,7 @@ impl<'a> RowContent<'a> {
         Self {
             title: Cow::Borrowed(&entry.title),
             title_path: None,
+            fitted_label_width: None,
             artist: &entry.artist,
             album: &entry.album,
             codec: &entry.codec,
@@ -1171,6 +1174,7 @@ impl<'a> RowContent<'a> {
         Self {
             title,
             title_path: None,
+            fitted_label_width: None,
             artist: "",
             album: "",
             codec: "",
@@ -1185,6 +1189,15 @@ impl<'a> RowContent<'a> {
 }
 
 #[derive(Clone, Copy)]
+pub(super) struct IntrinsicColumns {
+    mode: BrowserMode,
+    artist: usize,
+    album: usize,
+    codec: usize,
+    duration: usize,
+}
+
+#[derive(Clone, Copy)]
 struct BrowserColumns {
     title: usize,
     artist: usize,
@@ -1194,15 +1207,13 @@ struct BrowserColumns {
     markers: usize,
 }
 
-impl BrowserColumns {
-    fn new<'a>(width: u16, tracks: bool, rows: impl Iterator<Item = RowContent<'a>>) -> Self {
-        let width = width as usize;
-        let markers = if tracks && width >= 14 { 7 } else { 0 };
+impl IntrinsicColumns {
+    fn measure<'a>(mode: BrowserMode, rows: impl Iterator<Item = RowContent<'a>>) -> Self {
         let mut artist = 0;
         let mut album = 0;
         let mut codec = 0;
         let mut duration = 0;
-        if tracks {
+        if !matches!(mode, BrowserMode::Labels) {
             // The caller supplies only retained page items, never the full library.
             for row in rows.filter(|row| row.is_track) {
                 artist = artist.max(Span::raw(row.artist).width().min(24));
@@ -1225,6 +1236,31 @@ impl BrowserColumns {
                 *column += 2;
             }
         }
+        Self {
+            mode,
+            artist,
+            album,
+            codec,
+            duration,
+        }
+    }
+}
+
+impl BrowserColumns {
+    fn fit(width: u16, intrinsic: IntrinsicColumns) -> Self {
+        let width = width as usize;
+        let markers = if !matches!(intrinsic.mode, BrowserMode::Labels) && width >= 14 {
+            7
+        } else {
+            0
+        };
+        let IntrinsicColumns {
+            mut artist,
+            mut album,
+            mut codec,
+            mut duration,
+            ..
+        } = intrinsic;
         let title_min = (width / 2).clamp(12, 24);
         let mut budget = width.saturating_sub(markers + title_min);
         for column in [&mut duration, &mut codec] {
@@ -1255,6 +1291,10 @@ impl BrowserColumns {
     }
 
     fn line(self, row: RowContent<'_>, colors: TerminalColors) -> Line<'static> {
+        // Recent labels already fit this exact final content width, including their live suffix.
+        if row.fitted_label_width == Some(self.title) {
+            return Line::from(row.title.into_owned());
+        }
         let mut spans = Vec::with_capacity(13);
         // Column measurement needs only attributes; expand Other paths for visible rows only.
         let row_title = match row.title_path {
@@ -1441,7 +1481,9 @@ fn draw_recent(
                         .to_string(),
                 );
             }
-            RowContent::label(Cow::Owned(title), " ")
+            let mut row = RowContent::label(Cow::Owned(title), " ");
+            row.fitted_label_width = Some(width);
+            row
         },
         i18n,
         BrowserStyle {
@@ -1452,7 +1494,7 @@ fn draw_recent(
     recent.entries = entries;
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum BrowserMode {
     Tracks,
     PlaylistTracks,
@@ -1481,7 +1523,6 @@ fn draw_paged_list<T>(
         area.width.saturating_sub(2),
         area.height,
     );
-    let tracks = !matches!(mode, BrowserMode::Labels);
     page.set_viewport(area.height.saturating_sub(1) as usize);
     let loading = !page.loaded
         || (page.selection.offset()..page.visible_end()).any(|index| page.get(index).is_none());
@@ -1498,10 +1539,19 @@ fn draw_paged_list<T>(
         items_area.x += items_area.width.min(1);
         items_area.width = items_area.width.saturating_sub(1);
     }
-    let columns = BrowserColumns::new(
+    if page
+        .columns
+        .as_ref()
+        .is_none_or(|columns| columns.mode != mode)
+    {
+        page.columns = Some(IntrinsicColumns::measure(
+            mode,
+            page.pages.values().flatten().map(&row),
+        ));
+    }
+    let columns = BrowserColumns::fit(
         items_area.width,
-        tracks,
-        page.pages.values().flatten().map(&row),
+        page.columns.expect("retained page columns"),
     );
     let count = if page.loaded {
         format!(

@@ -616,7 +616,7 @@ fn playlist_metadata_filter_changes_relocate_the_selected_occurrence_before_refi
         );
         assert!(!tui.ui.apply_query(&next, &stale, Ok(response(&stale, 2))));
         let lookup = tui.ui.query_request(&next).unwrap();
-        assert_eq!(lookup.demand.kind, stale.demand.kind);
+        assert_eq!(lookup.demand.kind(), stale.demand.kind());
         let located = result(
             &lookup,
             ViewResponse::PlaylistEntryLocations(vec![PlaylistEntryLocation {
@@ -635,7 +635,7 @@ fn playlist_metadata_filter_changes_relocate_the_selected_occurrence_before_refi
             assert!(!tui.ui.apply_query(&next, &lookup, Ok(response(&lookup, 2))));
         }
         let request = tui.ui.query_request(&next).unwrap();
-        assert_eq!(request.demand.kind, QueryKind::Playlist(1));
+        assert_eq!(request.demand.kind(), QueryKind::Playlist(1));
         assert_eq!(request.demand.offset, 0);
         let mut refreshed = response(&request, 2);
         let ViewResponse::PlaylistEntries(page) = &mut refreshed.view else {
@@ -1162,7 +1162,7 @@ fn container_scan_clear_survives_tab_cache_and_navigation_rejects_late_pages() {
         assert!(!ui.apply_query(&state, &old, Ok(container_page(&old, catalog, true, 4))));
         key(&mut ui, &state, KeyCode::BackTab);
         let clear = ui.query_request(&state).unwrap();
-        assert_eq!(clear.demand.filter, None);
+        assert_eq!(clear.demand.borrowed().filter, None);
         assert_eq!(clear.demand.offset, 0);
         assert!(ui.apply_query(&state, &clear, Ok(container_page(&clear, catalog, true, 4))));
         let second = ui.query_request(&state).unwrap();

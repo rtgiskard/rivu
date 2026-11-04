@@ -231,15 +231,10 @@ where
                 immediate_redraw = true;
             }
         }
-        match tui.ui.query_request(&tui.snapshot) {
-            Some(request) if tui.ui.requested.as_ref() != Some(&request) => {
-                queries.request(request.clone());
-                tui.ui.requested = Some(request);
-            }
-            None => {
-                queries.cancel();
-                tui.ui.requested = None;
-            }
+        let submit = tui.ui.prepare_query_request(&tui.snapshot);
+        match tui.ui.requested.as_ref() {
+            Some(request) if submit => queries.request(request.clone()),
+            None => queries.cancel(),
             _ => {}
         }
         if tui.ui.local_revision != local_revision {

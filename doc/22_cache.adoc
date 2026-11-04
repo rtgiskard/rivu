@@ -246,10 +246,20 @@ typography changes rebuild them, and source replacement releases obsolete
 measurements even while hidden. Tree pages similarly retain selection indexes
 rather than rescanning all expansions on viewport demand.
 
-The TUI retains one current help layout and one current details layout. Scrolling
-and playback updates reuse their styled lines; width, language, key context,
-theme or details source/content changes invalidate the affected layout. Rendering
-borrows visible lines without rebuilding or copying the cached strings.
+=== Terminal projections
+
+Pending reads borrow text, paths and filters; a new submission materializes its
+owned query. Foreground Details freshness is independent of its underlying list
+and page size. Background page invalidation does not retire that Details read.
+Page, Details and playlist-summary failures remain suppressed until their own
+demand or selected freshness changes, or an explicit user transition resets them.
+
+Retained pages keep intrinsic column widths until their payload or mode changes;
+each draw fits those widths to the current viewport. Recent counts and time labels
+remain live. The TUI also retains one current help layout and one current Details
+layout. Scrolling and playback reuse their styled lines; width, language, key
+context, theme or Details source changes invalidate the affected layout. Rendering
+borrows visible lines without rebuilding or copying cached text.
 
 == Processing output retention
 
