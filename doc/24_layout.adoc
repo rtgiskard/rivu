@@ -55,6 +55,12 @@ icons; `rivu-ui` remains the reusable GPUI controls package. Semantic RGB palett
 values belong to `rivu-format`; engine-independent display and query contracts
 belong to `rivu-protocol`.
 
+Shared icons and locale files live in `crates/rivu-presentation/data/` so the
+crate keeps its compile-time resources inside its package boundary. Root
+`data/icons` and `data/locales` are relative symlinks to those directories;
+`data/applications` holds desktop integration files. Installation rules use the
+root resource paths and follow the links to install regular files.
+
 Frontend-local tests run in their owning crates. Tests requiring a real Core
 use feature-gated application fixtures through the host boundary, not a second
 compilation of GUI source modules inside the application crate.
