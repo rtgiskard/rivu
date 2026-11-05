@@ -2562,23 +2562,107 @@ fn cached_audition_tracks_the_selected_port_without_following_new_results() {
     assert!(core.shared.read().processing_audition.is_none());
 }
 
+fn stopped_graph_preparation_after_command(command: Command) {
+    let (directory, mut core) = fixture();
+    source(directory.path());
+    std::fs::copy(
+        directory.path().join("1.wav"),
+        directory.path().join("2.wav"),
+    )
+    .unwrap();
+    let commands = recording_audio(&mut core);
+    let target = graph_port(2, 0);
+    core.processing_graph_run(1, target, GraphExecutionMode::Auto)
+        .unwrap();
+    let event = completion(&mut core);
+    assert!(matches!(
+        &event,
+        crate::processing::Event::Finished { result: Ok(_), .. }
+    ));
+    assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+    let generation = core.transport.generation;
+
+    // Hold the successful Finished event until the real newer intent is accepted.
+    core.command(command).unwrap();
+    assert_eq!(core.transport.generation, generation);
+    assert_eq!(core.processing.cancellation_requested(1), Some(false));
+    let queue = core.state.queue.clone();
+    let track = core.state.current_track.clone();
+    let playback = core.state.playback.clone();
+    while commands.try_recv().is_ok() {}
+    core.processing_event(event);
+
+    assert_eq!(core.state.queue, queue);
+    assert_eq!(core.state.current_track, track);
+    assert_eq!(core.state.playback, playback);
+    assert_eq!(core.transport.generation, generation);
+    assert!(core.processing.audition_projection().is_none());
+    assert!(core.pending_processing_audition.is_none());
+    assert_eq!(
+        core.processing_status(1).unwrap().phase,
+        ProcessingPhase::Complete
+    );
+    assert_eq!(core.processing.results().len(), 1);
+    assert!(!commands.try_iter().any(|command| matches!(
+        command,
+        AudioCommand::Audition { .. } | AudioCommand::GraphAudition { .. }
+    )));
+
+    // Revoking automatic selection does not discard the valid frozen result.
+    core.command(Command::ProcessingGraphAudition {
+        id: 1,
+        node: target,
+    })
+    .unwrap();
+    if core.processing.active_id().is_some() {
+        complete(&mut core);
+    }
+    let selected = core.processing.audition_projection().unwrap();
+    assert_eq!(selected.output, Some(target));
+    assert_eq!(core.state.current_track().unwrap().id, 1);
+}
+
 #[test]
-fn newer_playback_generation_does_not_get_replaced_by_late_graph_preparation() {
+fn stopped_graph_preparation_cannot_replace_newer_play_queue() {
+    stopped_graph_preparation_after_command(Command::PlayQueue { queue_id: 2 });
+}
+
+#[test]
+fn stopped_graph_preparation_cannot_undo_explicit_stop() {
+    stopped_graph_preparation_after_command(Command::Stop);
+}
+
+#[test]
+fn stopped_graph_preparation_cannot_undo_clear_queue() {
+    stopped_graph_preparation_after_command(Command::ClearQueue);
+}
+
+#[test]
+fn stopped_graph_preparation_keeps_its_own_source_handoff() {
     let (directory, mut core) = fixture();
     source(directory.path());
     let commands = recording_audio(&mut core);
-    core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Auto)
+    let target = graph_port(2, 0);
+    core.processing_graph_run(1, target, GraphExecutionMode::Auto)
         .unwrap();
     let event = completion(&mut core);
-    core.transport.generation = core.transport.generation.wrapping_add(1);
-    core.processing_event(event);
     assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
-    assert!(core.processing.audition_id().is_none());
-    assert!(
-        !commands
-            .try_iter()
-            .any(|command| matches!(command, AudioCommand::GraphAudition { .. }))
+    core.processing_event(event);
+    assert_eq!(
+        core.processing_status(1).unwrap().phase,
+        ProcessingPhase::Complete
     );
+    assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
+    assert_eq!(core.state.current_track().unwrap().id, 1);
+    assert_eq!(core.processing.audition_projection().unwrap().id, 1);
+    loop {
+        if matches!(
+            commands.recv_timeout(Duration::from_secs(2)).unwrap(),
+            AudioCommand::GraphAudition { .. }
+        ) {
+            break;
+        }
+    }
 }
 
 #[test]

@@ -41,7 +41,8 @@ The selected-audio line is Core's admitted source, not a guess from the latest
 task: it identifies the retained run, exact graph port and live/hybrid/cached path,
 with Playing, Paused or Stopped reported separately. Explicit Offline runs do
 not select their results. Auto, Realtime and Hybrid runs request audition when
-ready, provided the playback generation has not changed in the meantime.
+ready, provided their pending selection has not been revoked and the playback
+generation has not changed in the meantime.
 Return to original addresses the currently selected audition, even when the latest
 task belongs to a different run. Invalid node/port requests leave the prior
 selection unchanged; playback retirement clears it.
@@ -474,10 +475,12 @@ invalidates publication, terminates/reaps Python neural workers and retires part
 PCM. Native ONNX jobs check cancellation between model frames and resampling
 batches. Neither path publishes a partial result. Source identity and job settings
 are captured. Later configuration or graph edits do not change that snapshot;
-changes to its registered source or media invalidate publication. Switching the
-playback track is different: it suppresses a pending automatic graph-audition
-handoff through the playback generation, but does not discard a valid completed
-result. Use task IDs for completion and the selected-audio line for playback.
+changes to its registered source or media invalidate publication. Playback intent
+is separate: starting another source, explicitly stopping or clearing the queue
+revokes a pending automatic audition, even when no physical source was playing.
+These actions do not cancel processing or discard a valid completed result; the
+retained output can still be selected explicitly. Use task IDs for completion and
+the selected-audio line for playback.
 Numeric progress within a phase is coalesced at a 100 ms publication policy and
 does not accumulate behind a slow consumer. Phase changes, graph-node stages and
 terminal results remain reliable; a progress counter is a snapshot, not one
@@ -654,9 +657,10 @@ of completion. Use `task status processing INSTANCE:RUN_ID` and
 
 A realtime task reaching `complete` means its immutable live plan is prepared,
 not that an offline file was rendered: `graph_outputs` is empty. Automatic
-admission still depends on the captured playback generation; confirm the actual
-selection in the selected-audio line. Offline and hybrid tasks can retain rendered
-node outputs separately from later graph edits. Cached node/port audition is
+admission still requires pending selection intent and the captured playback
+generation; confirm the actual selection in the selected-audio line. Offline and
+hybrid tasks can retain rendered node outputs separately from later graph edits.
+Cached node/port audition is
 immediate and returns no processing task ID; uncached snapshot audition prepares
 a new run and returns its own task ID.
 To render a selected output from any retained graph snapshot, including realtime,
@@ -750,7 +754,9 @@ operations preserving that guarantee. Pure copies do not rescan samples; edge ga
 and summation check their new arithmetic results, including delayed tails.
 Seeking, source changes and incompatible formats reset history; pause does not
 advance audio time. Source identity and captured settings bind every result,
-while playback generation separately controls automatic audition handoff.
+while pending selection intent and playback generation separately control
+automatic audition handoff. Stopping without a physical source revokes that
+intent without advancing the physical source generation.
 
 === Timeline and source identity
 

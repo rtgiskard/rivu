@@ -656,6 +656,9 @@ impl Core {
     }
 
     pub(in crate::core) fn stop(&mut self) -> Result<()> {
+        // Stop relinquishes pending audition intent even without a physical source.
+        // Prepared graph handoff consumes its intent before establishing a source.
+        self.pending_processing_audition = None;
         self.transport.pending_navigation = None;
         self.stop_playback(false)
     }
