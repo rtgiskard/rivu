@@ -114,7 +114,7 @@ pub(super) struct SpectrumPresentation {
 #[derive(PartialEq)]
 struct SpectrumPresentationKey {
     output_revision: u64,
-    plot: Bounds<Pixels>,
+    plot_size: gpui::Size<Pixels>,
     grouping: SpectrumGroupingKey,
     top_db: f32,
     db_range: f32,
@@ -347,6 +347,9 @@ impl FrequencyState {
         low: f32,
         high: f32,
     ) -> Result<Option<Arc<GpuFrame>>, String> {
+        // Publications are panel-local; placement belongs to paint_gpu and must
+        // not enter tessellation or the retained content identity.
+        let plot = Bounds::new(point(px(0.0), px(0.0)), plot.size);
         self.prepare_spectrum_bins(panel_id, bars, low, high);
         self.spectrum.points.clear();
         self.spectrum.rectangles.clear();
@@ -557,7 +560,7 @@ impl FrequencyState {
         );
         let key = SpectrumPresentationKey {
             output_revision: self.spectrum.output_revision,
-            plot,
+            plot_size: plot.size,
             grouping: SpectrumGroupingKey {
                 bars,
                 generation: self.stream_generation,

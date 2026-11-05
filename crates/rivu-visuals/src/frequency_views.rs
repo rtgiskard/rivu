@@ -265,12 +265,7 @@ impl FrequencyViews {
             data.error = Some(error);
             data.spectrum.presentations.clear();
         }
-        if palette_changed
-            && !analysis_changed
-            && !heat_changed
-            && !history_span_changed
-            && !background_changed
-        {
+        if palette_changed && !analysis_changed && !heat_changed && !history_span_changed {
             // Reuse retained scalar fields, including suspended presentations.
             // Palette selection never invalidates analysis or resamples history.
             if let Err(error) = data.recolor_spectrogram() {
@@ -1072,7 +1067,7 @@ mod tests {
                     let gpui::GpuContent::Path { path, params } = body.content() else {
                         panic!("expected continuous spectrum path")
                     };
-                    let plot = Bounds::new(point(px(13.25), px(21.5)), size(px(100.0), px(100.0)));
+                    let plot = Bounds::new(point(px(0.0), px(0.0)), size(px(100.0), px(100.0)));
                     assert_eq!(path.bounds, plot);
                     assert_eq!(params.palette_range, [0.0, 1.0]);
                     let minimum_y = path
@@ -1093,6 +1088,87 @@ mod tests {
                             .all(|vertex| vertex.xy_position.y <= plot.bottom() + px(1.0))
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn spectrum_move_reuses_local_body_and_peaks_for_every_style() {
+        for style in [
+            SpectrumStyle::Bars,
+            SpectrumStyle::Led,
+            SpectrumStyle::Outline,
+            SpectrumStyle::Line,
+            SpectrumStyle::Solid,
+        ] {
+            for interpolate in [false, true] {
+                let mut visuals = configured_visuals();
+                visuals.configure_config(&Config {
+                    spectrum_style: style,
+                    spectrum_interpolate: interpolate,
+                    spectrum_peaks: true,
+                    spectrum_db_range: Some(100.0),
+                    spectrum_bar_layout: SpectrumBarLayout::Fixed { count: 4 },
+                    ..Config::default()
+                });
+                visuals.update(&frame(1.0, -30.0), Duration::from_secs(1));
+                let plot = Bounds::new(point(px(13.25), px(21.5)), size(px(120.5), px(80.25)));
+                let moved = Bounds::new(point(px(331.75), px(217.125)), plot.size);
+                let mut data = visuals.data.borrow_mut();
+                data.prepare_spectrum_presentation(1, plot).unwrap();
+                let body = data.spectrum.presentations[&1].body.clone().unwrap();
+                let peaks = data.spectrum.presentations[&1].peaks.clone();
+                assert!(!peaks.is_empty(), "{style:?}, interpolate={interpolate}");
+                match body.content() {
+                    gpui::GpuContent::Path { path, .. } => {
+                        assert_eq!(path.bounds.origin, point(px(0.0), px(0.0)));
+                        assert_eq!(path.bounds.size, plot.size);
+                        // The line's two-pixel stroke can extend one pixel past
+                        // the horizontal domain and is clipped at placement.
+                        assert!(path.vertices.iter().all(|vertex| {
+                            let position = vertex.xy_position;
+                            position.x >= -px(1.001)
+                                && position.x <= plot.size.width + px(1.001)
+                                && position.y >= -px(0.001)
+                                && position.y <= plot.size.height + px(0.001)
+                        }));
+                    }
+                    gpui::GpuContent::Rectangles { rectangles, params } => {
+                        assert!(!rectangles.is_empty());
+                        assert!(rectangles.iter().all(|rectangle| {
+                            let [x, y, width, height] = rectangle.bounds;
+                            x >= 0.0 && y >= 0.0 && x + width <= 1.0 && y + height <= 1.0
+                        }));
+                        if style == SpectrumStyle::Led {
+                            assert_eq!(params.cell_height, 3.0);
+                            assert_eq!(params.cell_gap, 2.0);
+                        }
+                    }
+                    _ => panic!("unexpected spectrum content"),
+                }
+                data.prepare_spectrum_presentation(1, moved).unwrap();
+                let presentation = &data.spectrum.presentations[&1];
+                assert!(Arc::ptr_eq(presentation.body.as_ref().unwrap(), &body));
+                assert_eq!(presentation.peaks, peaks);
+                for (bounds, _, _) in &peaks {
+                    let before = plot_bounds(plot, *bounds);
+                    let after = plot_bounds(moved, *bounds);
+                    assert_eq!(before.size, after.size);
+                    assert!(
+                        (after.left() - before.left() - (moved.left() - plot.left())).abs()
+                            < px(0.001)
+                    );
+                    assert!(
+                        (after.top() - before.top() - (moved.top() - plot.top())).abs() < px(0.001)
+                    );
+                    assert!((after.size.height - px(1.0)).abs() < px(0.001));
+                }
+                let resized = Bounds::new(moved.origin, size(px(180.5), px(120.25)));
+                data.prepare_spectrum_presentation(1, resized).unwrap();
+                assert!(!Arc::ptr_eq(
+                    data.spectrum.presentations[&1].body.as_ref().unwrap(),
+                    &body,
+                ));
             }
         }
     }
@@ -1865,6 +1941,194 @@ mod tests {
         }
     }
 
+    #[test]
+    fn spectrogram_panels_share_assembly_and_scroll_without_rebuilding_tiles() {
+        let mut visuals = configured_visuals();
+        visuals.update(&frame(1.0, -30.0), Duration::from_secs(1));
+        visuals.update(&frame(1.1, -30.0), Duration::from_secs(1));
+        let initial = {
+            let mut data = visuals.data.borrow_mut();
+            data.prepare_spectrogram_presentation(1).unwrap();
+            data.prepare_spectrogram_presentation(2).unwrap();
+            let initial = data.spectrogram.presentations[&1].clone();
+            assert!(!initial.layers.is_empty());
+            assert!(Arc::ptr_eq(&initial, &data.spectrogram.presentations[&2]));
+            for panel in [1, 2, 3, 1, 2, 3] {
+                data.prepare_spectrogram_presentation(panel).unwrap();
+                assert!(Arc::ptr_eq(
+                    &initial,
+                    &data.spectrogram.presentations[&panel]
+                ));
+            }
+            initial
+        };
+        assert!(visuals.animate(Duration::from_millis(1050)));
+        let current = {
+            let mut data = visuals.data.borrow_mut();
+            data.prepare_spectrogram_presentation(1).unwrap();
+            let current = data.spectrogram.presentations[&1].clone();
+            assert!(!Arc::ptr_eq(&initial, &current));
+            // A panel that has not painted retains its own final snapshot.
+            assert!(Arc::ptr_eq(&initial, &data.spectrogram.presentations[&2]));
+            assert_eq!(current.layers.len(), initial.layers.len());
+            for ((before, old_tile), (after, new_tile)) in
+                initial.layers.iter().zip(&current.layers)
+            {
+                assert!(Arc::ptr_eq(old_tile, new_tile));
+                let scroll = 0.05 / data.spectrogram.history_limit_seconds as f32;
+                assert!((before.left() - after.left() - scroll).abs() < 1e-6);
+                assert_eq!(before.size, after.size);
+            }
+            for panel in [1, 2, 3] {
+                data.prepare_spectrogram_presentation(panel).unwrap();
+                assert!(Arc::ptr_eq(
+                    &current,
+                    &data.spectrogram.presentations[&panel]
+                ));
+            }
+            current
+        };
+        visuals.set_enabled(false);
+        assert!(visuals.data.borrow().spectrogram.assembly.is_none());
+        for panel in [1, 2, 3] {
+            visuals
+                .data
+                .borrow_mut()
+                .prepare_spectrogram_presentation(panel)
+                .unwrap();
+            assert!(Arc::ptr_eq(
+                &current,
+                &visuals.data.borrow().spectrogram.presentations[&panel],
+            ));
+        }
+        let retained = Arc::downgrade(&current);
+        drop(current);
+        visuals.retain_presentation_panels(&[], &[]);
+        assert!(retained.upgrade().is_none());
+    }
+
+    #[test]
+    fn spectrogram_assembly_tracks_interval_content_and_sampling_changes() {
+        let mut visuals = configured_visuals();
+        visuals.data.borrow_mut().resize_history(2);
+        visuals.update(&frame(1.0, -30.0), Duration::from_secs(1));
+        let initial = {
+            let mut data = visuals.data.borrow_mut();
+            data.prepare_spectrogram_presentation(1).unwrap();
+            data.spectrogram.presentations[&1].clone()
+        };
+        // All these samples share one time bucket. An unchanged level still
+        // extends its interval, even while presentation time remains fixed.
+        visuals.update(&frame(1.1, -30.0), Duration::from_secs(1));
+        let extended = {
+            let mut data = visuals.data.borrow_mut();
+            data.prepare_spectrogram_presentation(1).unwrap();
+            let extended = data.spectrogram.presentations[&1].clone();
+            assert!(!Arc::ptr_eq(&initial, &extended));
+            assert!(extended.layers[0].0.size.width > initial.layers[0].0.size.width);
+            assert!(!Arc::ptr_eq(&initial.layers[0].1, &extended.layers[0].1));
+            extended
+        };
+        // A new accepted peak at the same audio/presentation time changes
+        // content without changing any layer placement.
+        let mut louder = frame(1.1, -6.0);
+        louder.sequence += 1;
+        visuals.update(&louder, Duration::from_secs(1));
+        let louder_publication = {
+            let mut data = visuals.data.borrow_mut();
+            data.prepare_spectrogram_presentation(1).unwrap();
+            let publication = data.spectrogram.presentations[&1].clone();
+            assert!(!Arc::ptr_eq(&extended, &publication));
+            assert_eq!(extended.layers[0].0, publication.layers[0].0);
+            assert!(!Arc::ptr_eq(
+                &extended.layers[0].1,
+                &publication.layers[0].1
+            ));
+            publication
+        };
+        // Reaccepting identical levels at the same sample time changes neither
+        // history nor placement and must not allocate another layer assembly.
+        louder.sequence += 1;
+        visuals.update(&louder, Duration::from_secs(1));
+        let mut data = visuals.data.borrow_mut();
+        data.prepare_spectrogram_presentation(1).unwrap();
+        assert!(Arc::ptr_eq(
+            &louder_publication,
+            &data.spectrogram.presentations[&1],
+        ));
+        data.spectrogram.panel_height = 7;
+        data.prepare_spectrogram_presentation(1).unwrap();
+        data.prepare_spectrogram_presentation(2).unwrap();
+        let resized = &data.spectrogram.presentations[&1];
+        assert!(!Arc::ptr_eq(&louder_publication, resized));
+        assert!(Arc::ptr_eq(resized, &data.spectrogram.presentations[&2]));
+        let gpui::GpuContent::Field { height, .. } = resized.layers[0].1.content() else {
+            panic!("expected spectrogram field");
+        };
+        assert_eq!(*height, 7);
+        assert!(!Arc::ptr_eq(
+            &louder_publication.layers[0].1,
+            &resized.layers[0].1
+        ));
+    }
+
+    #[test]
+    fn empty_spectrogram_assembly_keeps_each_panels_retained_publication() {
+        let mut visuals = configured_visuals();
+        visuals.update(&frame(1.0, -30.0), Duration::from_secs(1));
+        let retained = {
+            let mut data = visuals.data.borrow_mut();
+            data.prepare_spectrogram_presentation(1).unwrap();
+            data.prepare_spectrogram_presentation(2).unwrap();
+            data.spectrogram.presentations[&1].clone()
+        };
+        visuals.update(&frame(2.0, -30.0), Duration::ZERO);
+        let mut data = visuals.data.borrow_mut();
+        data.prepare_spectrogram_presentation(1).unwrap();
+        let empty = data.spectrogram.assembly.as_ref().unwrap().1.clone();
+        assert!(empty.layers.is_empty());
+        for panel in [1, 2, 3, 1, 2] {
+            data.prepare_spectrogram_presentation(panel).unwrap();
+            assert!(Arc::ptr_eq(
+                &empty,
+                &data.spectrogram.assembly.as_ref().unwrap().1,
+            ));
+        }
+        for panel in [1, 2] {
+            assert!(Arc::ptr_eq(
+                &retained,
+                &data.spectrogram.presentations[&panel]
+            ));
+        }
+        assert!(!data.spectrogram.presentations.contains_key(&3));
+    }
+
+    #[test]
+    fn combined_background_and_palette_change_recolors_shared_spectrogram_cache() {
+        let mut visuals = configured_visuals();
+        visuals.update(&frame(1.0, -30.0), Duration::from_secs(1));
+        publish_analysis_views(&visuals, 1);
+        let previous = visuals.data.borrow().spectrogram.presentations[&1].clone();
+        let config = Config {
+            visualization_background: "#202020".parse().unwrap(),
+            visualization_palette: VisualizationPalette::Viridis,
+            ..Config::default()
+        };
+        assert!(visuals.configure_config(&config));
+        let mut data = visuals.data.borrow_mut();
+        assert!(data.spectrogram.presentations.is_empty());
+        data.prepare_spectrogram_presentation(1).unwrap();
+        data.prepare_spectrogram_presentation(2).unwrap();
+        let current = &data.spectrogram.presentations[&1];
+        assert!(Arc::ptr_eq(current, &data.spectrogram.presentations[&2]));
+        assert_eq!(previous.layers[0].0, current.layers[0].0);
+        assert!(!Arc::ptr_eq(&previous.layers[0].1, &current.layers[0].1));
+        assert!(Arc::ptr_eq(
+            current.layers[0].1.palette(),
+            &data.palette_lut.gpu_palette().unwrap(),
+        ));
+    }
+
     fn retention_plot() -> Bounds<Pixels> {
         Bounds::new(point(px(0.0), px(0.0)), size(px(200.0), px(100.0)))
     }
@@ -2260,6 +2524,10 @@ mod tests {
                 let spectrum =
                     (!disabled).then(|| prepared_body(&visuals, 1, 100.0, 100.0).unwrap());
                 let data = visuals.data.borrow();
+                assert!(Arc::ptr_eq(
+                    &data.spectrogram.presentations[&1],
+                    &data.spectrogram.presentations[&2],
+                ));
                 let after = &data.spectrogram.presentations[&1].layers[0].1;
                 assert!(!Arc::ptr_eq(&before, after));
                 assert!(!Arc::ptr_eq(before.palette(), after.palette()));
@@ -2439,7 +2707,7 @@ mod tests {
             assert_eq!(data.spectrogram.heat_samples.capacity(), 0);
             assert_eq!(data.spectrogram.tiles.capacity(), 0);
             assert_eq!(data.spectrogram.tile_values.capacity(), 0);
-            assert_eq!(data.spectrogram.draws.capacity(), 0);
+            assert!(data.spectrogram.assembly.is_none());
             assert_eq!(data.latest_levels.capacity(), 0);
             assert_eq!(data.frequencies.capacity(), 0);
             assert_eq!(data.spectrum.peak_deadlines.capacity(), 0);

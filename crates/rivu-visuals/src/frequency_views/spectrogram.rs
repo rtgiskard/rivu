@@ -29,8 +29,9 @@ pub(super) struct Spectrogram {
     pub(super) tiles: Vec<Option<SpectrogramTile>>,
     pub(super) tile_values: Vec<f32>,
     pub(super) columns: Vec<Column>,
-    pub(super) presentations: HashMap<u64, SpectrogramPresentation>,
-    pub(super) draws: Vec<(Bounds<f32>, Arc<GpuFrame>)>,
+    pub(super) presentations: HashMap<u64, Arc<SpectrogramPresentation>>,
+    pub(super) assembly: Option<(SpectrogramAssemblyKey, Arc<SpectrogramPresentation>)>,
+    history_revision: u64,
     pub(super) db_range: f32,
     pub(super) interpolate: bool,
     pub(super) history_seconds: u32,
@@ -62,7 +63,8 @@ impl Spectrogram {
             tile_values: Vec::new(),
             columns: Vec::new(),
             presentations: HashMap::new(),
-            draws: Vec::new(),
+            assembly: None,
+            history_revision: 0,
             db_range: config.spectrogram_db_range(),
             interpolate: config.spectrogram_interpolate,
             history_seconds: config.spectrogram_history_seconds,
@@ -95,6 +97,12 @@ pub(super) struct Column {
     pub(super) revision: u64,
     pub(super) generation: u64,
     pub(super) source_generation: Option<u64>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct SpectrogramAssemblyKey {
+    history_revision: u64,
+    display_time: Duration,
 }
 
 pub(super) struct SpectrogramPresentation {
@@ -316,12 +324,18 @@ impl FrequencyState {
         }
         self.spectrogram.columns[index].generation = self.stream_generation;
         self.spectrogram.columns[index].source_generation = self.source_generation;
+        let interval_changed = self.spectrogram.columns[index].sample_time != Some(time);
         self.spectrogram.columns[index].sample_time = Some(time);
         if changed {
             self.spectrogram.columns[index].revision =
                 self.spectrogram.columns[index].revision.wrapping_add(1);
         }
         self.spectrogram.latest = Some(index);
+        // Even unchanged pooled levels can extend an interval. The assembly
+        // identity covers both history content and its time-domain geometry.
+        if changed || interval_changed {
+            self.spectrogram.history_revision = self.spectrogram.history_revision.wrapping_add(1);
+        }
     }
     pub(super) fn resize_history(&mut self, requested_columns: usize) {
         let new_columns = requested_columns.max(2);
@@ -383,7 +397,7 @@ impl FrequencyState {
             latest = Some(index);
         }
         self.spectrogram.columns = columns;
-        self.spectrogram.tiles.clear();
+        self.invalidate_spectrogram();
         self.spectrogram.history_columns = new_columns;
         self.spectrogram.len = len;
         self.spectrogram.head = head;
@@ -397,6 +411,7 @@ impl FrequencyState {
     }
     pub(super) fn invalidate_spectrogram(&mut self) {
         self.spectrogram.tiles.clear();
+        self.spectrogram.assembly = None;
     }
 
     pub(super) fn recolor_spectrogram(&mut self) -> Result<(), String> {
@@ -442,13 +457,36 @@ impl FrequencyState {
         for tile in self.spectrogram.tiles.iter_mut().flatten() {
             recolor(&mut tile.publication)?;
         }
-        for presentation in self.spectrogram.presentations.values_mut() {
-            for (_, publication) in &mut presentation.layers {
-                recolor(publication)?;
-            }
+        // Retained panels can point at older assemblies. Recolor each distinct
+        // immutable assembly once, preserving sharing and retained lifetimes.
+        let mut assemblies = HashMap::new();
+        let mut recolor_assembly =
+            |presentation: &mut Arc<SpectrogramPresentation>| -> Result<(), String> {
+                let identity = Arc::as_ptr(presentation);
+                let replacement = if let Some(assembly) = assemblies.get(&identity) {
+                    Arc::clone(assembly)
+                } else {
+                    let mut layers = Vec::with_capacity(presentation.layers.len());
+                    for (bounds, publication) in &presentation.layers {
+                        let mut publication = Arc::clone(publication);
+                        recolor(&mut publication)?;
+                        layers.push((*bounds, publication));
+                    }
+                    let assembly = Arc::new(SpectrogramPresentation {
+                        layers,
+                        labels: presentation.labels.clone(),
+                    });
+                    assemblies.insert(identity, Arc::clone(&assembly));
+                    assembly
+                };
+                *presentation = replacement;
+                Ok(())
+            };
+        if let Some((_, assembly)) = &mut self.spectrogram.assembly {
+            recolor_assembly(assembly)?;
         }
-        for (_, publication) in &mut self.spectrogram.draws {
-            recolor(publication)?;
+        for presentation in self.spectrogram.presentations.values_mut() {
+            recolor_assembly(presentation)?;
         }
         Ok(())
     }
@@ -489,7 +527,7 @@ impl FrequencyState {
         self.spectrogram.row_values = Vec::new();
         self.spectrogram.tiles = Vec::new();
         self.spectrogram.tile_values = Vec::new();
-        self.spectrogram.draws = Vec::new();
+        self.spectrogram.assembly = None;
     }
 
     pub(super) fn visible_range(&self) -> Option<(usize, usize, f32, f32)> {
@@ -527,12 +565,26 @@ impl FrequencyState {
                 frequency_rows(&self.spectrogram.frequencies, low, high, height, true);
             self.spectrogram.heat_sample_generation = self.stream_generation;
         }
+        let assembly_key = SpectrogramAssemblyKey {
+            history_revision: self.spectrogram.history_revision,
+            display_time: latest_time,
+        };
+        if let Some((key, assembly)) = &self.spectrogram.assembly
+            && *key == assembly_key
+        {
+            if !assembly.layers.is_empty() {
+                self.spectrogram
+                    .presentations
+                    .insert(panel_id, Arc::clone(assembly));
+            }
+            return Ok(());
+        }
         let tiles = self
             .spectrogram
             .history_columns
             .div_ceil(SPECTROGRAM_TILE_COLUMNS);
         self.spectrogram.tiles.resize_with(tiles, || None);
-        self.spectrogram.draws.clear();
+        let mut layers = Vec::with_capacity(tiles);
         for tile_index in 0..tiles {
             let first = tile_index * SPECTROGRAM_TILE_COLUMNS;
             let last = (first + SPECTROGRAM_TILE_COLUMNS).min(self.spectrogram.history_columns);
@@ -625,25 +677,23 @@ impl FrequencyState {
             if width <= 0.0 || left >= 1.0 || left + width <= 0.0 {
                 continue;
             }
-            self.spectrogram.draws.push((
+            layers.push((
                 Bounds::new(point(left, 0.0), size(width, 1.0)),
                 tile.publication.clone(),
             ));
         }
-        // Do not retire a restored publication for a frame with no drawable span.
-        if !self.spectrogram.draws.is_empty() {
-            let presentation = self
-                .spectrogram
+        let assembly = Arc::new(SpectrogramPresentation {
+            layers,
+            labels: self.spectrogram.frequency_labels.clone(),
+        });
+        // Cache even an empty assembly so sibling panels do not rescan history,
+        // but keep their retained publication until a drawable span is ready.
+        if !assembly.layers.is_empty() {
+            self.spectrogram
                 .presentations
-                .entry(panel_id)
-                .or_insert_with(|| SpectrogramPresentation {
-                    layers: Vec::new(),
-                    labels: self.spectrogram.frequency_labels.clone(),
-                });
-            std::mem::swap(&mut presentation.layers, &mut self.spectrogram.draws);
-            presentation.labels = self.spectrogram.frequency_labels.clone();
-            self.spectrogram.draws.clear();
+                .insert(panel_id, Arc::clone(&assembly));
         }
+        self.spectrogram.assembly = Some((assembly_key, assembly));
         Ok(())
     }
 
