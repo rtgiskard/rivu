@@ -128,6 +128,8 @@ async fn run_bus(
     let setup = async {
         Builder::session()?
             .name(service_name.as_str())?
+            .allow_name_replacements(false)
+            .replace_existing_names(false)
             .serve_at(SNI_PATH, item)?
             .serve_at(MENU_PATH, menu)?
             .build()

@@ -1394,6 +1394,8 @@ mod tests {
                     .unwrap()
                     .name(BUS_NAME)
                     .unwrap()
+                    .allow_name_replacements(false)
+                    .replace_existing_names(false)
                     .serve_at(OBJECT_PATH, Root { app })
                     .unwrap()
                     .build(),
@@ -1430,14 +1432,7 @@ mod tests {
         ).is_err());
         drop(active_reply);
         // A retained closed connection cannot prevent reacquiring the name.
-        let replacement = futures::executor::block_on(
-            Builder::address(bus.address.as_str())
-                .unwrap()
-                .name(BUS_NAME)
-                .unwrap()
-                .build(),
-        )
-        .unwrap();
+        let replacement = bus.serve_root(AppHandle::new(&runtime, _directory.path()));
         futures::executor::block_on(replacement.close()).unwrap();
         runtime.control.request_shutdown().unwrap();
         runtime.join().unwrap();
@@ -1465,14 +1460,7 @@ mod tests {
             "publisher stopped: publisher task panicked",
         );
         assert!(retained.is_closed());
-        let replacement = async_io::block_on(
-            Builder::address(bus.address.as_str())
-                .unwrap()
-                .name(BUS_NAME)
-                .unwrap()
-                .build(),
-        )
-        .unwrap();
+        let replacement = bus.serve_root(AppHandle::new(&runtime, _directory.path()));
         async_io::block_on(replacement.close()).unwrap();
         runtime.control.request_shutdown().unwrap();
         runtime.join().unwrap();
