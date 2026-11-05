@@ -9,9 +9,43 @@ use serde::Serialize;
 use std::{
     fs::{self, File, Metadata},
     io::{BufReader, Seek},
-    os::unix::fs::MetadataExt,
+    os::unix::{ffi::OsStrExt, fs::MetadataExt},
     path::{Path, PathBuf},
 };
+
+/// Lossless JSON representation for offline source-tag paths.
+/// UTF-8 paths remain strings; other Unix paths expose their original bytes.
+pub struct JsonPath<'a>(pub &'a Path);
+
+impl Serialize for JsonPath<'_> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        if let Some(path) = self.0.to_str() {
+            serializer.serialize_str(path)
+        } else {
+            use serde::ser::SerializeStruct;
+            let mut value = serializer.serialize_struct("UnixPath", 1)?;
+            value.serialize_field("unix_bytes", self.0.as_os_str().as_bytes())?;
+            value.end()
+        }
+    }
+}
+
+fn serialize_path<S: serde::Serializer>(
+    path: &Path,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    JsonPath(path).serialize(serializer)
+}
+
+fn serialize_optional_path<S: serde::Serializer>(
+    path: &Option<PathBuf>,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    path.as_deref().map(JsonPath).serialize(serializer)
+}
 
 /// `None` leaves a field untouched; an empty string removes that field.
 #[derive(Clone, Debug, Default)]
@@ -24,11 +58,15 @@ pub struct TagPatch {
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum EditOutcome {
     Unchanged,
-    Replaced { backup_path: PathBuf },
+    Replaced {
+        #[serde(serialize_with = "serialize_path")]
+        backup_path: PathBuf,
+    },
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct EditReport {
+    #[serde(serialize_with = "serialize_path")]
     pub path: PathBuf,
     #[serde(flatten)]
     pub outcome: EditOutcome,
@@ -49,12 +87,19 @@ impl EditReport {
 #[derive(Debug, Serialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum EditFailureOutcome {
-    BeforeReplace { backup_path: Option<PathBuf> },
-    ReplacedDurabilityUnknown { backup_path: PathBuf },
+    BeforeReplace {
+        #[serde(serialize_with = "serialize_optional_path")]
+        backup_path: Option<PathBuf>,
+    },
+    ReplacedDurabilityUnknown {
+        #[serde(serialize_with = "serialize_path")]
+        backup_path: PathBuf,
+    },
 }
 
 #[derive(Debug, Serialize)]
 pub struct EditFailure {
+    #[serde(serialize_with = "serialize_path")]
     pub path: PathBuf,
     #[serde(flatten)]
     pub outcome: EditFailureOutcome,

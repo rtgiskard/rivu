@@ -28,7 +28,14 @@ pub(super) struct CliError {
 }
 
 pub(super) fn print_error(error: &CliError) {
-    let _ = output::write_error(&mut std::io::stderr().lock(), &error.error, error.json);
+    let mut output = std::io::stderr().lock();
+    if let Err(output_error) = output::write_error(&mut output, &error.error, error.json) {
+        let fallback = anyhow::anyhow!(
+            "{:#}; could not write the requested error output: {output_error:#}",
+            error.error
+        );
+        let _ = output::write_error(&mut output, &fallback, false);
+    }
 }
 
 pub(super) fn run() -> std::result::Result<(), CliError> {

@@ -82,7 +82,7 @@ pub(super) fn run(
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
-                        "path": path,
+                        "path": rivu_metadata::JsonPath(&path),
                         "tags": tags,
                     }))?
                 );
