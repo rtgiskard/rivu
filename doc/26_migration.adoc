@@ -2,27 +2,23 @@
 :toc:
 :toclevels: 2
 
-== Scope and decisions
+== Before upgrading
 
-This chapter defines database migration, read-only configuration validation and
-the startup handoff. See link:02_library.adoc#sqlite-maintenance[SQLite maintenance]
-for database operations and
-link:01_config.adoc#saving-configuration[configuration saving].
+`rivu-migrate` checks database compatibility and validates configuration without
+rewriting it. `apply` upgrades supported databases and retains a durable SQLite
+backup. Current resources are unchanged and need no backup.
 
-=== Current implementation
-
-Current database and configuration formats are defined by `rivu-format`; see
-<<version-authority,Version authority>>.
-
-`rivu-migrate check` validates without conversion; `apply` performs the
-<<supported-source-formats,supported database upgrade>>, retaining a durable
-SQLite backup. The upgrade adds `playlists.position` in playlist-ID order and
-preserves contents, playback statistics, indexes and queue state. Current
-resources remain unchanged without a backup; configuration is always read-only.
+[[supported-source-formats]]
+The supported database upgrade is format `2` to `4`: it adds `playlists.position`
+in playlist-ID order, preserving contents, playback statistics, indexes and queue
+state. It retires no source schema objects. Other noncurrent formats and unknown
+schema objects are rejected, not guessed or removed.
 
 Missing default resources are reported without creation; an explicitly selected
-missing database is an error. Unknown or malformed formats are rejected. Valid
-unversioned configuration is current and remains untouched.
+missing database is an error. Valid unversioned configuration is current and
+remains untouched. See <<configuration-schema,Configuration schema>> for version
+rules and <<configuration-compatibility,Configuration compatibility>> for manual
+setting changes.
 
 To inspect or upgrade a supported database before application startup, stop Rivu
 and run the tool with the intended data directory and configuration:
@@ -37,12 +33,11 @@ rivu-migrate --data-dir /path/to/data --config /path/to/config.toml apply
 on failure. `apply` exits `0` on success or a no-op, otherwise `2`. Reports and backup
 paths go to stdout, diagnostics to stderr. Check reserves nothing; Apply revalidates.
 
-=== Integration scope
-
 Normal application opening initializes empty databases or requires the current
 format. Historical recognition and conversion belong only to the independent tool.
 Downgrade, cross-file transactions, paired restore, layout/cache conversion and
-undocumented historical conversions are outside this contract.
+undocumented historical conversions are outside this contract. For other database
+operations, see link:02_library.adoc#sqlite-maintenance[SQLite maintenance].
 
 == Application invocation
 
@@ -60,29 +55,12 @@ There is no blind retry, data reset or automatic restoration.
 
 == Dependency and ownership boundaries
 
-`rivu-format` owns current schemas, defaults and validation without application or
-migration dependencies. Its optional `database` feature enables SQLite;
-configuration-only consumers leave it disabled, subject to Cargo feature unification.
-Both executables use this authority.
-
-The application owns runtime connections, caches, configuration I/O and Core/UI
-state. The tool owns offline preflight, backups and historical conversions; these
-do not enter normal decoding or SQL.
-
-`rivu-utils` owns general-purpose mechanisms without application state,
-configuration or database format dependencies. Its default feature set is empty;
-`regular_file::open_regular_file` provides descriptor-based ordinary-file admission
-without pulling in diagnostic dependencies. It follows ordinary symbolic links,
-rejects non-regular opened objects, and opens nonblocking so a FIFO cannot wait
-for a writer. Format, audio and metadata consumers use this shared mechanism.
-
-The optional `logging` and `terminal` features enable process logging and terminal
-diagnostics independently. Both executables explicitly enable them; low-level
-consumers leave them disabled, subject to Cargo feature unification. Configuration
-mapping, query semantics and application executor lifetimes stay with their owners.
-
-Run `cargo test -p rivu-format --no-default-features` for configuration contracts;
-add `--features database` for schema and trigger behavior.
+`rivu-format` is the shared authority for current schemas, defaults and validation;
+it has no application or migration dependencies. Its optional `database` feature
+enables SQLite. The application owns runtime connections, caches, configuration
+I/O and Core/UI state; the tool owns offline preflight, backups and historical
+conversions. Historical decoders and migration dependencies must not enter the
+application's normal decoding or SQL paths.
 
 == Version authority
 
@@ -139,8 +117,7 @@ Runtime tokens are not persisted. External writes require stopping Rivu first.
 
 Target selection follows the application's
 link:../readme.adoc#files-and-data-directories[path rules]; `--config` alone does
-not select a database. Targets remain fixed for one operation, and an explicitly
-selected missing database is an error.
+not select a database. Targets remain fixed for one operation.
 
 Check opens SQLite read-only without creating application directories, writer
 locks or backups. SQLite may still update WAL shared-memory sidecars. Its result
@@ -154,10 +131,10 @@ configuration remains read-only, preserving bytes and symlinks. Its ordinary-fil
 admission and 4 MiB UTF-8 TOML limit follow
 link:01_config.adoc#file-access-and-external-editors[Configuration file access].
 
-Reports escape control characters without changing paths; argument errors retain
-clap's layout, streams and status. Progress uses `info`, failures `error`, under
-link:01_config.adoc#logging-and-diagnostics[normal logging rules]. The tool creates
-no log files.
+Reports escape path control characters without changing the paths. Argument errors
+retain clap's layout, streams and status. Diagnostics follow
+link:01_config.adoc#logging-and-diagnostics[normal logging rules], but the tool
+creates no log files.
 
 == Apply protocol
 
@@ -189,16 +166,15 @@ without whole-library buffers, scanning, network access or decoder probing.
 
 == Failure and reentry
 
-Only the database transaction mutates formal resources; configuration stays
-unchanged. Preflight or backup failure permits no mutation, and transaction failure
-rolls back. For an uncertain commit, inspect persisted version and structure before
-retrying. Current resources need no rewrite, transformation or backup.
+Preflight or backup failure permits no database mutation; transaction failure rolls
+back. Backup files and partial evidence are retained, never automatically restored
+or replaced. For an uncertain commit, inspect persisted version and structure
+before retrying: reentry follows persisted state, not a step journal.
 
-Persisted state determines reentry; there is no step journal or rollback engine.
-Backups never replace earlier ones. Manual restoration requires selecting the
-appropriate backup with all writers stopped. Errors report targets, backups and
-known completed changes: failure does not imply nothing changed. Never recover by
-resetting data, substituting defaults or replaying an uncertain mutation.
+Errors report targets, backups and known completed changes; failure does not imply
+nothing changed. Manual restoration requires choosing the appropriate backup with
+all writers stopped. Never recover by resetting data, substituting defaults or
+replaying an uncertain mutation.
 
 == Acceptance boundaries
 
@@ -208,14 +184,18 @@ transaction failure/reentry, no-ops, retained backups, directory aliases and own
 exclusion. These are requirements, not a record of checks run by this document.
 
 Integration proof must run the tool, then load settings and query/write its database
-with the application. Unit tests or compilation alone are insufficient. The
-application dependency graph must contain no migration package or historical decoder.
+with the application. Unit tests or compilation alone are insufficient.
 
-== Supported source formats
+== Configuration compatibility
 
-The supported upgrade is database format `2` to `4`. Other noncurrent formats
-and unknown schema objects are rejected rather than guessed or removed.
-The conversion adds catalog positions and retires no source schema objects.
-Configuration is validated against its current schema, never converted.
+The tool validates current configuration; it does not translate historical keys or
+values. Update these manually with Rivu stopped, following
+link:01_config.adoc#file-access-and-external-editors[Configuration file access]:
+
+* Replace `visualizations.spectrogram.palette` with
+  `visualizations.general.palette`.
+* Replace the removed signal palette `tokyo_night` with a supported
+  link:01_config.adoc#visualizations[signal palette]. The Tokyo Night interface
+  theme is unchanged.
 
 

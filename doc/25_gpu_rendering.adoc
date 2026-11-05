@@ -37,10 +37,10 @@ not invalid memory access, stale source identity, unbounded retention or audio s
 [[internal-led-vertical-slice]]
 === Publication and drawing API
 
-Rivu uses a private fixed-schema model through the existing Scene-to-renderer path.
-FFT, analysis and simulation remain application-owned; no platform service, arbitrary
-shader composition or ABI generator is introduced. The original rectangle-only
-LED experiment is retained under <<initial-comparative-measurements>>.
+Rivu consumes private fixed schemas through GPUI's existing Scene-to-renderer path.
+The implementations described here live in the external pinned GPUI/WGPU patch;
+FFT, analysis and simulation remain Rivu-owned. The original rectangle-only LED
+experiment is retained under <<initial-comparative-measurements>>.
 
 The pinned renderer exposes the experimental `GpuPalette`, `GpuFrame`,
 schema-stable `GpuState`, `GpuSource` and `Window::paint_gpu` interfaces.
@@ -138,13 +138,11 @@ into one device-aligned immutable slab; its full initialized capacity remains
 charged until completion. Changed fields still copy/upload their whole numerical
 payload: there are no partial-field updates or reusable upload pages.
 
-Ordinary GPUI uniforms are cached per device-resource generation. Viewport/alpha
-changes refresh their buffer; gamma, contrast or RGB/BGR changes refresh glyph
-uniforms. Failed encoding still flushes staged writes so cached values match the
-buffers. This is separate from per-placement material uniforms. Absent primitive
-kinds allocate no instance binding or aligned storage; nonempty kinds retain their
-alignment, transport limits and order. MSAA admission starts at the actual upload
-cursor, not a reserved allocation for absent primitives.
+Ordinary GPUI uniform caching is separate from material placement storage. It
+tracks device generation and changed viewport, alpha or glyph appearance; failed
+encoding still finalizes staged writes so cached state agrees with buffers.
+Absent primitive kinds reserve no instance storage. Nonempty kinds retain their
+alignment, transport limits and scene order.
 
 === Consumer integration boundary
 
@@ -261,14 +259,11 @@ under <<surface-reattachment>>.
 Attachment bytes are separate from the material buffer budget. Four-byte targets
 with 4x sampling retain `width * height * (4 + 1) * 4` nominal bytes; single-sample
 fallback retains only the resolved texture. Backend allocation overhead and
-retired queue-owned attachments are not included. Test/bench-support headless
-hooks report current extent, cumulative pair allocations, nominal retained bytes
-and offscreen raster pass count, plus the actual adapter sample count. They also
-support no-readback submission and explicit completion waits. Baseline image and
-mixed-scene performance comparisons use separate binaries built from the fixed
-baseline and current source.
-Image comparisons must cover clipping, translucent overlap, fractional coverage,
-native packed batches, nonzero raster origins, resize and resource recovery.
+retired queue-owned attachments are not included. External renderer headless hooks
+expose attachment extent, allocations, nominal retained bytes, pass/sample counts,
+no-readback submission and completion waits. Cross-binary comparisons must cover
+clipping, translucent overlap, fractional coverage, native packed batches, nonzero
+raster origins, resize and resource recovery.
 
 
 === Admission and retirement
@@ -281,10 +276,9 @@ charged through completion. Failed pre-submit work follows the renderer's
 queue-flush/finalization path so later draw failure cannot strand a provisional
 submission.
 
-The renderer reuses bounded resolution vectors/maps and publication/palette ID
-sets. Scratch publication references are cleared after preparation, including
-rejected work, so retained capacity does not extend CPU publication lifetimes.
-Placement slabs remain exact-sized and immutable until submission completion.
+Reusable preparation storage does not retain CPU publications after preparation,
+including rejected work. Placement slabs remain exact-sized and immutable through
+submission completion.
 
 Unsupported capabilities and capacity pressure omit the affected material and
 report an error without preventing unrelated controls from rendering. Capability
@@ -620,14 +614,13 @@ GPU delay. Pixel differences help locate errors but are not the sole visual
 acceptance criterion. An imperceptible difference can be accepted for meaningful
 performance gains; reduced draw calls or fewer source lines alone prove neither.
 
-Follow repository checks for implemented changes: Rust changes require `make lint`
-and relevant behavior tests; build/configuration/dependency changes require checks
-and artifacts appropriate to the affected packages, features and linking behavior.
-Exercise actual GUI behavior and affected feature branches when those are part of
-the change. Documentation-only maintenance needs content, link and command checks,
-not a fresh GUI run or benchmark. Keep permanent tests for consumer-visible
-invariants and errors, not incidental API spelling or code
-layout. Keep throwaway profiling/prototype artifacts separate from product code.
+Run checks in the repository that owns the change: renderer/shader checks belong
+to the pinned external GPUI/WGPU repository; Rivu integration and GUI behavior
+checks belong here. Commands and platform prerequisites are in
+link:23_visuals.adoc#renderer-regression-checks[Renderer regression checks].
+Documentation maintenance does not imply a fresh GUI run or benchmark. Permanent
+tests should protect observable invariants and errors, not incidental API spelling
+or code layout; profiling/prototype artifacts remain separate from product code.
 
 == Recorded measurements
 
@@ -771,11 +764,10 @@ excluded from both. Milliseconds below are median [minimum–maximum]:
 |Complete first image |47.285 [45.966–47.987] |41.446 [39.956–41.714]
 |===
 
-The total is measured directly; phase medians need not sum to its median. Fresh
-processes eliminate reuse of the headless device between paths, but the driver
-shader cache was not cleared, so these are not cold-driver-cache timings. Original
-steady-state samples remain associated with their recorded source hashes; the raw
-record appends this first-use supplement rather than replacing historical samples.
+Phase medians need not sum to the directly measured total. Fresh processes prevent
+headless-device reuse, but the driver shader cache was not cleared: these are not
+cold-driver-cache timings. The supplement does not replace the original
+steady-state samples or their recorded source identities.
 
 At the initial single-panel state, the baseline expands 3,308 cells into 19,848
 CPU vertices. Tested record strides imply 2,858,128 bytes of path vertices and
@@ -931,7 +923,6 @@ cross-binary screenshots do not establish pixel equality.
 * https://doc.qt.io/qt-6/qsgmaterial.html[Qt Quick materials] and https://doc.qt.io/qt-6/qml-qtquick-shadereffect.html[ShaderEffect]: geometry/material separation, shared programs and build-time shader metadata.
 * https://github.com/linebender/vello/blob/main/ARCHITECTURE.md[Vello architecture]: compact scene data and explicit CPU/GPU tradeoffs, not a requirement to adopt compute for all work.
 
-These references inform the design, not a dependency replacement plan. Bindless
-resources, indirect drawing, general render graphs, shader editors and GPU FFT
-are not prerequisites. Add a mechanism only when a real consumer and measurements
-justify its lifetime and maintenance cost.
+These references inform the proposal, not a dependency replacement plan. Additional
+mechanisms require a demonstrated consumer and evidence for their lifetime and
+maintenance cost.

@@ -127,27 +127,21 @@ not change selection or start playback. Hover a directory or root for Rescan;
 rescanning does not change selection or expansion. The toolbar's Append and Remove
 actions require selected tracks, not just folders.
 
-Right-click the Library panel and open `Track information` to choose Artist,
-Album, Duration, Codec, and Bitrate columns. Duration and Codec start enabled;
-the choice applies to both views and survives restart. Hover truncated rows for
-full metadata or paths, even when their information columns are hidden. Directory
-loading, empty, and unavailable states remain visible independently of the columns.
+Right-click the Library panel → `Track information` to choose Artist, Album,
+Duration, Codec, and Bitrate columns for both views. Duration and Codec are enabled
+by default; choices survive restart. Hover truncated rows for full metadata and paths.
 
-Root totals include missing files and recursively count unloaded or collapsed
-tracks; filter counts are described in <<desktop-list-search,Desktop list search>>.
-If a count fails, the directory action stays visible and retries the count instead
-of rescanning; after recovery it returns to Rescan.
+Root totals include missing files and tracks in unloaded or collapsed directories.
+See <<desktop-list-search,Desktop list search>> for filtered counts. If a count
+fails, the directory action retries it before returning to Rescan.
 
-Dragging a directory adds its full contents, not only tracks matching the
-display filter. To add only matching, favorite, or missing tracks, select and drag the track rows.
+Dragging a directory adds its full contents, regardless of display filters. To add
+only matching, favorite, or missing tracks, select and drag the track rows.
 
-Click selects one row; Ctrl/Command-click toggles it. Shift-click selects the
-inclusive range from the original anchor, and Ctrl/Command-Shift-click adds that
-range. Changing the endpoint keeps the original anchor. Range selection includes
-unloaded rows; selection actions and dragging are disabled while it loads.
-Changing search, favorites, or the missing filter cancels a loading range; its old
-results cannot change the selection for the new filters.
-Batch actions and dragging use library track IDs.
+Click selects one row; Ctrl/Command-click toggles it. Shift-click selects a range
+from the original anchor; Ctrl/Command-Shift-click adds that range. Range selection
+includes unloaded rows, disabling selection actions and dragging until loading
+finishes. Changing search or filters cancels a loading range.
 
 Right-clicking a selected track preserves its group; right-clicking an unselected
 track selects that track alone. Track menus offer Play, Append to queue,
@@ -159,16 +153,12 @@ Panel and background menus contain panel or collection operations, not actions
 on a previously selected track group.
 
 Dragging carries the selection at drag start, or only the dragged row if it was
-unselected. That set stays fixed for the gesture; Esc cancels it.
+unselected; Esc cancels. Grouped-list selections can include root headers across
+groups and unloaded pages. Selected headers support recursive rescanning and
+dragging; overlapping sources contribute each track once.
 
-In the grouped list, Shift selection can include root headers across groups and
-unloaded pages. Selected headers support recursive rescanning and dragging;
-overlapping sources contribute each track once. Search changes preserve unrelated
-expansion choices. For root removal, see <<roots-and-scanning,Roots and scanning>>.
-
-Scans refresh affected views, including previously empty expanded folders;
-collapsed folders load current contents when reopened. Unchanged scans preserve
-existing views.
+Scans refresh affected views, including empty expanded folders; collapsed folders
+load current contents when reopened. Unchanged scans preserve existing views.
 
 == Desktop list search
 
@@ -178,14 +168,13 @@ An empty field folds on losing focus. A nonempty field stays visible; Clear sear
 restores the complete list without closing it. From list focus, Esc first clears
 the query, then folds an empty field; editors, popups, and composition take precedence.
 
-The open field shows matches / total; a pending or failed total does not hide
-available album results. No matches is distinct from an empty collection. Search
-changes the view, not saved contents or playback order.
+The open field shows matches / total; unavailable totals do not hide loaded results.
+No matches is distinct from an empty collection. Search changes the view, not
+saved contents or playback order.
 
-Desktop searches apply nonempty edits after 150 ms without input; Enter does not
-bypass the delay. Surrounding whitespace is ignored, and clearing applies
-immediately. The link:04_playback.adoc#terminal-client[terminal client] applies
-search only when Enter is pressed in its editor.
+Nonempty edits apply after 150 ms without input; Enter does not bypass the delay.
+Surrounding whitespace is ignored, and clearing applies immediately. The
+link:04_playback.adoc#terminal-client[terminal client] instead applies search on Enter.
 
 Library searches title, artist, and the full source path, combined with its
 favorite and missing-file filters; it does not search album metadata. Albums
@@ -239,35 +228,29 @@ shows its complete path.
 == Albums
 
 Add the dockable `Albums` panel to browse the cover grid. Double-click a card to
-open its tracks; Back returns to the grid. Both views load while scrolling.
-Hover a card, or use Tab, to reach `Play album` and `Add to queue`; Enter or Space
-activates the focused action without opening details. Both target the complete
-album, including unloaded tracks. For queue replacement and confirmation, see
+open its tracks; Back returns to the grid. Hover a card, or use Tab, to reach Play
+and Add to queue; Enter or Space activates the focused action. Both target the
+complete album, including unloaded tracks. For replacement and confirmation, see
 link:04_playback.adoc#transport-and-timing[Playback]. Double-clicking a track plays
 only that track.
 
-Missing artists use `-` in album cards and the shared person symbol in track rows.
+Right-click a card to add the complete album to a playlist or set its favorites.
+Drag it to Queue to insert at a row boundary or append in blank space, or to a
+named playlist catalog row to append in album order; track rows can be transferred
+individually. Transfers reject changed album membership rather than copying a
+stale or partial list. External database edits while Rivu
+is running are unsupported.
 
-Right-click an album card for actions on the complete album, including adding it
-to a playlist and setting or clearing favorites. Drag a card to Queue or a named
-playlist catalog row to append the complete album in album order. Track rows
-offer the shared track menu and can be dragged individually to either destination.
-Transfers fail if the source album changes before copying, rather than copying
-stale or partial membership. External database edits while Rivu is running are
-unsupported.
+Search matches album titles or member artists across the library. An artist match
+keeps the complete album, including other artists' tracks. The sort icon switches
+between title and artist order. Search and sort changes return to the top; Back,
+resizing, hiding, playback, and refreshes preserve browsing position where possible.
+Each Albums panel keeps independent browsing state. Both views load while scrolling;
+failed loads offer Retry without replacing other rows.
 
-Search matches effective album titles or any member artist across the library,
-not just the loaded rows. Matching an artist keeps the complete album visible,
-including compilation tracks by other artists. The sort icon beside the search
-field switches between title and artist order; its tooltip identifies the current
-order and the next action. Searches and sort changes return to the top.
-Each Albums panel keeps its own search, sort, detail view, and scrolling position;
-resizing or navigating one panel does not change another panel.
-
-Back, resizing, hiding the panel, playback, and refreshes preserve browsing position;
-shorter results may clamp it. Unloaded rows show placeholders and failed loads
-offer Retry without replacing the rest of the list. Track rows show duration,
-missing-file status, and playback state by library track, not queue occurrence.
+Track rows show duration, missing-file status, and playback state by library track,
+not queue occurrence. Missing artists use `-` on cards and the shared person symbol
+in track rows.
 
 Albums group tracks by exact effective album title and immediate parent directory.
 Blank titles, including empty overrides, form no album; those tracks remain in
@@ -279,18 +262,14 @@ Metadata overrides affect grouping.
 
 == Recent tracks
 
-Recent tracks keeps its own selection, independent of Library, using the
-link:02_library.adoc#desktop-selection-and-directory-tree[shared selection rules].
-Ctrl+A selects all matching recent tracks when this panel has focus. Sorting
-preserves selected track identities; refreshes discard selections that no longer exist.
+Recent tracks uses the <<desktop-selection-and-directory-tree,shared selection rules>>
+and track menus, independently of Library selection. Ctrl+A selects all matches
+in the focused panel. Sorting preserves selected tracks; refresh discards removed
+ones. Double-click plays the clicked track; hover for its favorite toggle.
 
-Right-click a track for the shared track actions, including batch Favorite and
-Unfavorite. Each is disabled when all selected tracks already have that state.
-Drag selected tracks to Queue or a named playlist catalog row to
-append them in their displayed order; dragging an unselected track carries only
-that track. These transfers do not remove history entries or change Library
-selection. Double-click plays the clicked track. Columns remain sortable and
-shrink to fit; hovering a row exposes its individual favorite toggle.
+Drag a selection to Queue or a named playlist catalog row in displayed order,
+without removing history entries. Queue row drops insert at the indicated boundary;
+blank space and playlist catalog rows append. Columns remain sortable and shrink to fit.
 
 `Remove from recent tracks` removes the selected history records and clears their
 last-played times, without deleting tracks or changing play counts. Playback is
@@ -333,29 +312,16 @@ output. See <<cli-output,CLI output>> for result shapes.
 
 == Paged views
 
-GUI/TUI library and playlist views, and the GUI Albums panel, load results
-automatically while scrolling; there are no page numbers or manual load-more
-controls. Expand a GUI directory to browse its children. Collapsing it preserves
-descendant expansion choices
-for reopening. Loading more rows does not clear selections or an active Details input.
-Failed GUI loads offer a retry button that reloads data without rescanning files;
-TUI loads can be requested again by leaving and reopening the view.
-Desktop queries time out after 12 seconds; retry without rescanning. Row-navigation
-and selection keys target the explicitly focused visible panel, never an earlier
-selection in another panel. Library, Queue, and playlist tracks support Home/End.
+GUI/TUI library and playlist views, and GUI Albums, load while scrolling. Directory
+collapse preserves descendant expansion choices; loading rows preserves selection
+and active Details input. Failed GUI loads offer Retry without rescanning files.
+Desktop queries time out after 12 seconds. TUI failures can be retried by leaving
+and reopening the view; obsolete or cancelled reads retire without a query error.
 
-Desktop playlist and Track details queries retire version races and cancelled
-reads without displaying a query error. An unchanged obsolete demand waits for a
-relevant revision or selection change, or an explicit retry/reload. Timeouts still
-report failure; retry does not start a second physical reader while the earlier
-reader is still finishing. An unexpected response type is a failure, not a retry.
-
-The TUI Library tree lists configured roots, including empty roots, followed by
-Other when its unfiltered collection is nonempty. The Other entry shows its name
-without a track count. With no roots, Other contains all registered tracks;
-no filesystem-root entry is inferred from stored tracks.
-Terminal browsing and
-collection actions are documented in
+Navigation and selection keys act on the focused visible panel. Library, Queue,
+and playlist tracks support Home/End. The TUI Library lists configured roots,
+including empty ones, followed by <<other,Other>> when nonempty; it does not infer
+filesystem roots from registered tracks. Terminal actions are documented in
 link:04_playback.adoc#terminal-client[Terminal client].
 
 In the GUI, PageUp/PageDown scrolls a viewport without changing selection. It uses
@@ -425,13 +391,11 @@ rivu --json library tags /path/to/track.flac
 rivu library tags /path/to/track.flac --title "New title" --artist "Artist"
 ----
 
-Source editing preserves an independent original-file backup and reports its
-path. An unchanged edit does not rewrite the source or create a backup. Writes
-edit a same-directory temporary copy, verify the resulting metadata, and validate
-the source identity before atomic replacement. Audio movement uses bounded buffers;
-the temporary copy and backup still require space for two complete files.
-Stop other file writers before editing; the lock is advisory. Keep the reported
-backup until the result has been checked.
+Source editing makes an independent original-file backup and reports its path.
+Unchanged edits neither rewrite the source nor create a backup. Replacement uses
+a verified same-directory temporary copy and checks that the source has not changed.
+Allow space for two complete files in addition to the source. Stop other writers
+first: the lock is advisory. Keep the backup until the result has been checked.
 
 Source-edit results distinguish `unchanged` and `replaced`; a replacement reports
 the independent `backup_path`. Failures distinguish `before_replace` (including
@@ -462,34 +426,24 @@ source afterward; matching IDs, user overrides, favorites, history, and list
 references remain intact. Existing overrides still take precedence over newly
 read source fields. Restoring a backup also requires a rescan.
 
-Tags, dates, track/disc numbers, and embedded artwork use Lofty exclusively.
-Containers outside its metadata coverage may still play, but do not acquire tags
-or embedded artwork from the audio backend. Source-tag inspection reports an
-unsupported container separately from a supported file with no tags. Technical
-properties needed for decoding, exact timing, and measured bitrate remain owned
-by the audio backend. Source tag editing does not transcode audio or change CUE
-segment boundaries.
-
-Lofty follows the format's declared encoding; it does not automatically repair
-GBK or other legacy bytes incorrectly marked as Latin-1. This command is not an
-automatic encoding-normalization operation and cannot reconstruct lost text.
+Lofty supplies source tags and embedded artwork; containers outside its metadata
+coverage may still play but have no audio-backend tag fallback. Inspection
+distinguishes unsupported containers from supported files without tags. Editing
+does not transcode audio or change CUE boundaries. Declared text encoding is
+respected: incorrectly labeled legacy bytes are not automatically repaired, and
+lost text cannot be reconstructed.
 
 === Inline Track details edits
 
-Title, artist, album and play count appear as compact label/value rows. Hover a row
-for Edit followed by Copy; both use the same Nerd Font action style. Edit focuses
-the single-line input and selects its current value. Enter saves only that field;
-an unchanged value sends no write. Escape or leaving the input cancels unsubmitted
-text. Empty title, artist and album values display as `-`; their editors start
-empty, without the display placeholder. Saving an empty value clears that field,
-not the audio file's tags. Play count accepts integers from `0` to `9223372036854775807`.
-Setting the count does not change last-played time or reset the current playback's
-already-counted state. Any deferred playback statistics are recovered before the
-manual count is applied.
+Hover Title, Artist, Album, or Play count for Edit and Copy. Edit selects the
+current value; Enter saves that field, while Escape or leaving the input cancels
+unsubmitted text. Unchanged values send no write. Empty text displays as `-` but
+starts empty in the editor; saving it clears the database field, not source tags.
 
-Tags are ordered as title/artist, album/release date, disc number/track number,
-then play count/last played. Decoder guidance is available from the info icon
-to the right of its dropdown.
+Play count accepts integers from `0` to `9223372036854775807`. Setting it does not
+change last-played time or reset the current playback's already-counted state;
+pending playback statistics are recovered first. Decoder guidance is available
+beside its dropdown.
 
 Only one inline field is edited at a time. Same-track refreshes preserve its input;
 a failed save retains the input and an error for correction or retry. Selecting a
@@ -498,12 +452,10 @@ confirmation. Playback-follow details switch immediately when playback changes;
 an explicit selection remains on that track. Closing the window or quitting does
 not ask about unsubmitted text.
 
-Submitted commands may still finish after blur, cancellation or selection changes.
-Their completion cannot replace a newer editor or another track's details. A
-successful save refreshes authoritative details; a refresh failure does not roll
-back a committed write. Decoder hint is a dropdown: choosing an option saves it
-immediately and independently of the inline text field. It applies on the next
-track open or full waveform request.
+Submitted saves can finish after cancellation or a selection change, but cannot
+replace a newer editor or another track's details. A refresh failure does not undo
+a saved edit; see <<database-edits,Database edits>>. Decoder hint saves immediately,
+independently of text edits, and applies on the next track open or full waveform request.
 
 === Loading and unavailable records
 
@@ -513,11 +465,10 @@ actions are disabled until the selected track is ready. Switching tracks clears
 old values and artwork; same-track refreshes retain ready details and active input,
 including after query failure.
 
-Reload exits manual selection and follows the then-current Playback track without
-changing list selections. Without a current track, it clears details. A confirmed
-unavailable record clears details and cancels its inline editor. Cached playback
-data and earlier acknowledgements cannot restore an unavailable record; only a
-successful details read can do so.
+Reload leaves manual selection and follows the current Playback track without
+changing list selections; with no current track, it clears details. A confirmed
+unavailable record clears details and cancels editing until a successful read
+restores that record.
 
 Decoder routing and DTS-WAV safety:
 link:04_playback.adoc#optional-ffmpeg-decoder[Playback].
@@ -610,33 +561,23 @@ rules: link:21_ipc.adoc#scanning-and-metadata-ownership[Scanning and metadata ow
 
 === Rereading sources
 
-==== Source validation
-
 CUE sheets must be ordinary files no larger than 1 MiB. Audio sources, including
-CUE references, must also be ordinary files; normal symlinks to such files work.
-FIFOs, devices, oversized sheets, and unreadable sources report local errors
-without waiting for a producer or blocking unrelated imports.
+CUE references, must also be ordinary files; symlinks to them work. Devices,
+FIFOs, oversized sheets, and unreadable sources report local errors without
+waiting for a producer or blocking unrelated imports. A source changed during
+analysis fails rather than saving mixed-version metadata. Playback and waveform
+loading also require ordinary files.
 
-A source changed during analysis reports an error rather than saving mixed-version
-metadata. Playback and waveform loading also require ordinary files. See
-link:21_ipc.adoc#scanning-and-metadata-ownership[Scanning and metadata ownership]
-for scan ownership and task lifecycle contracts.
+Ordinary scans reuse fingerprints when size and modification time are unchanged.
+Reusing metadata also requires the current probe version. `--force` rereads both
+while preserving user edits; CUE sheets are always reread. An unchanged scan
+preserves existing views; an unchanged playlist import still creates its requested
+playlist.
 
-==== Metadata reuse
-Ordinary scans reuse fingerprints when file size and modification time are
-unchanged. Reusing metadata also requires the current probe version. `--force`
-rereads both metadata and fingerprints; scans preserve user edits. CUE sheets
-are always reread. An unchanged scan still reports errors but preserves existing
-views; an unchanged playlist import still creates its requested playlist.
-
-==== Bounded execution
-
-Scanning runs in the background. Cancellation waits for an active probe to return
-before another media task can start; see <<cancellation,Cancellation>>.
-Overlapping explicit scan requests traverse each scope once while preserving
-each root's independent relative depth, missing detection and uncertainty authority.
-This does not relax the prohibition on overlapping configured library roots.
-Worker and resource contracts are described in
+Overlapping explicit scan scopes are traversed once while retaining their own
+depth and missing-detection boundaries. Configured roots still must not overlap.
+Cancellation and saving follow <<cancellation,the shared media-task lifecycle>>;
+worker and coverage contracts are in
 link:21_ipc.adoc#scanning-and-metadata-ownership[Scanning and metadata ownership].
 
 Descriptive tags use upstream Lofty; native audio parsing has separate metadata
@@ -692,29 +633,19 @@ separate IDs and the missing identity's user state and playlist references;
 scan order never chooses a destination. Ambiguity is per CUE segment key, so it
 does not prevent other uniquely matched segments from relocating.
 
-Use Settings → Library → `Same files / Relocation candidates` to
-inspect paged ordinary-file groups. Closing the review returns to Settings
-without applying or discarding its unsaved edits. Historical cached BLAKE3 hashes
-identify candidates, not fresh proof. Rows show paths, current existence, scan
-state, metadata, favorites, overrides, history and playlist/queue reference counts.
-Choose a missing old identity and a present destination, then review and confirm.
-Refresh and Close sit at the upper-right of the review. Hovering a group shows
-its fingerprint prefix and file count. The close icon leaves undecided pairs
-unchanged. `Keep destination independent`
-persists a decision that excludes that row from automatic and manual relocation,
-including after rescanning. No audio files are deleted.
+Open Settings → Library → `Same files / Relocation candidates` to inspect ordinary
+file groups. Cached BLAKE3 hashes identify candidates, not fresh proof. Rows show
+paths, existence, scan state, metadata, user state, and reference counts. Choose
+`Use as old record` on a missing identity and `Use as destination` on a present
+one, then review and confirm. Ineligible destinations show a rejection warning.
 
-While the review is open, Tab cycles through its controls rather than the
-Settings behind it. Esc closes the review without applying or discarding the
-Settings draft.
+Group and file pages are independent; paging preserves the selected pair.
+Confirmation locks selection and paging. Use Back to selection to revise the pair
+or Refresh to reset. Close or Esc leaves undecided pairs unchanged and returns
+to Settings without applying or discarding its draft; Tab stays within the review.
 
-Eligible rows offer `Use as old record` or `Use as destination`. A destination
-with user state or references shows a rejection warning; old records and
-ineligible rows retain that information as metadata. Group and file paging are
-independent, and paging files preserves the selected old identity and destination.
-During confirmation, group selection, role selection and both pagers are locked.
-Use Back to selection to revise the pair, Refresh to reset, or Close to leave
-undecided files unchanged.
+`Keep destination independent` persistently excludes that row from automatic and
+manual relocation, including after rescanning. No audio files are deleted.
 
 Confirmation verifies the destination's current full-file hash, file identity,
 and source absence before an atomic database update. The old ID, overrides,
@@ -751,14 +682,10 @@ external database edits. Queue restoration: link:04_playback.adoc#queue[Playback
 
 === Independent migration tool
 
-`rivu-migrate check` inspects configuration and database formats without starting
-the player or changing their contents; SQLite may update coordination sidecars.
-`apply` requires exclusive offline ownership: stop Rivu and external database
-writers first. It performs the
-link:26_migration.adoc#supported-source-formats[supported database upgrade] with a
-durable backup, preserving the existing playlist catalog order and all user data.
-Current resources are validated without rewriting them or creating backups;
-missing resources are not initialized.
+Use `rivu-migrate check` to inspect formats or `apply` for supported offline
+upgrades. Stop Rivu and external writers before applying. The tool keeps a durable
+backup and preserves user data and playlist catalog order; current resources are
+validated without rewriting, and missing resources are not initialized.
 
 [source,sh]
 ----
@@ -766,10 +693,10 @@ rivu-migrate --data-dir /path/to/rivu-data --config /path/to/config.toml check
 rivu-migrate --data-dir /path/to/rivu-data --config /path/to/config.toml apply
 ----
 
-Use the intended host's paths: `--config` alone does not select the database
-directory. Both commands exit `0` for valid current resources and `2` on error.
-See link:26_migration.adoc[Database and configuration migration] for the full
-offline workflow and missing-resource rules.
+Use the intended host's paths: `--config` alone does not select the database.
+Both commands exit `0` for valid current resources and `2` on error. `check` does
+not change configuration or database contents, though SQLite may update sidecars.
+Full workflow and compatibility: link:26_migration.adoc[Database and configuration migration].
 
 === Database operations
 

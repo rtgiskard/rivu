@@ -35,22 +35,16 @@ warning without suppressing other logs.
 Status: deferred, 2026-10-18. The open policy question is whether loading
 feedback should include time waiting for an obsolete physical worker to retire.
 
-Queue loading text starts its 150 ms delay when a page query is submitted.
-After a search replacement or a window hide/reopen, current demand may wait
-behind an obsolete physical worker. During that interval, unloaded rows can
-have no loading text. This concerns database query scheduling, not tracks
-waiting for playback. The interval is established by code inspection; it has
-not been reproduced as a live GUI failure.
+Queue loading text starts its 150 ms delay when a page query is submitted. After
+search replacement or hide/reopen, unloaded rows can remain blank while an obsolete
+physical worker retires. This is a scheduling observation from code inspection,
+not a reproduced GUI failure or confirmed permanent stall: retirement wakes the
+current demand automatically.
 
-Physical completion releases the occupied slot and notifies the view so current
-demand can submit without user input. This is not a confirmed permanent stall;
-obsolete search loading must remain retired.
-
-If policy expands feedback to logical waiting, bind its identity and elapsed
-delay to current demand. Obsolete completion cannot clear it, submission cannot
-restart the delay, and no replacement worker may bypass the occupied slot.
-Verify hide/reopen and search replacement behind a query longer than 150 ms,
-including failed-page retry. See
+If feedback is extended to this waiting interval, its identity and elapsed delay
+must follow current demand without reviving obsolete search feedback or bypassing
+the occupied worker. Verify search replacement, hide/reopen and failed-page retry
+behind a query longer than 150 ms. See
 link:22_cache.adoc#query-projection-retention[Query projection retention].
 
 === Different data directories sharing one database file
@@ -72,126 +66,98 @@ protection remains unresolved.
 
 Status: resolved in implementation, 2026-10-29.
 
-Workspace publishes panel membership, active tabs and instance preferences at
-structural boundaries. Presentation and artwork owners consume that publication
-while retaining their resources; source/seek identity, exact Stop fences and
-progressive waveform state remain dynamic. See link:24_layout.adoc[GUI layout].
+Panel membership, active tabs and instance preferences now reconcile at structural
+changes rather than every transport update. Source, seek, Stop and progressive
+waveform handling remain dynamic. See link:24_layout.adoc[GUI layout].
 
-Recorded acceptance used a real nested Wayland window with visualization tabs,
-Waveform and multiple album panels. Temporary probes observed no workspace-tree
-discovery during playback, Seek, Stop, visualization toggles, resize or lock changes; active
-tab/style edits and window recreation each discovered once. The exact Stop fence
-advanced source and seek identities once. The final uninstrumented build was
-also exercised through GUI and TUI input. These are traversal counts, not
-frame-time measurements.
-
-The nested backend did not report workspace occlusion as `visible=false`;
-deterministic regressions cover hidden/shutdown demand and full-preview retention.
+Historical nested-Wayland and TUI checks covered playback, seek, Stop, toggles,
+resize, locking and window recreation. Temporary probes observed no workspace
+rediscovery on transport-only changes; these were traversal counts, not frame-time
+measurements. The nested backend did not report occlusion reliably, so hidden-window
+and shutdown demand relied on deterministic regressions.
 
 === Stable configuration in high-frequency System IPC state
 
 Status: resolved in implementation, 2026-10-29.
 
-Runtime System and Configuration have independent IPC sections and revisions.
-Only explicit Configuration reads convert and transfer the effective Config;
-omitted sections preserve retained client values and do not acknowledge unread
-tokens. Configuration-only publications wake Watch, and a new instance requires
-a fresh Hello. See link:21_ipc.adoc#revisions-and-watching[Revisions and watching].
+System and Configuration now have independent sections and revisions. Omitted
+sections retain client values; configuration-only changes wake Watch, and restart
+requires a fresh Hello. See link:21_ipc.adoc#revisions-and-watching[Revisions and watching].
 
-The recorded comparison used 256 long-path roots and three retained clients,
-each reading System 100 times, repeated three times. Response bytes per client
-fell from 3,444,600 to 20,900; configuration-bearing runtime frames fell from 100
-to zero. Temporary probes at both Config wire conversions observed zero calls
-during runtime reads, then one encode/decode per explicit configuration read.
-Real configuration-only Watch, selective reads and restart recovery were also
-exercised. These are transfer/work-count results, not latency or RSS claims.
+A historical comparison with 256 long-path roots and three clients reduced each
+client's 100 runtime reads from 3,444,600 to 20,900 bytes, repeated three times.
+Selective reads and restart recovery were exercised. This is transfer/work-count
+evidence, not latency or RSS measurement.
+
+Update, 2026-11-05: Processing also has its own section and revision. Watch selects
+the sections its consumer needs; the TUI excludes processing task updates.
 
 === Query timeout and physical worker retirement
 
 Status: resolved in implementation, 2026-10-19.
 
-The 12-second GUI waiting deadline now delivers a logical error independently
-of the submitted reader's lifetime. Feature-local loading settles without
-releasing its physical worker slot. The original reply or disconnection retires
-that slot; late data and obsolete timeout feedback cannot publish, and only the
-latest retained demand may then start. Non-GUI query and command deadlines are
-unchanged. The ownership contract is documented in
+The 12-second GUI deadline ends logical waiting without releasing the physical
+worker slot. Late results cannot publish; the latest demand starts only after
+physical retirement. See
 link:22_cache.adoc#query-projection-retention[Query projection retention].
+
+Update, 2026-11-05: Demand replacement and logical timeout cancel the corresponding
+read through IPC, including executing SQL. Cancellation still waits for a reply or
+disconnection before releasing the physical slot; it does not cancel accepted writes.
 
 === Drag-only panel catalog insertion
 
 Status: resolved in implementation, 2026-10-21.
 
-Catalog insertion is drag-only, including the first panel in an empty workspace.
-Clicks and keyboard activation insert nothing; cancellation and invalid drops
-leave the tree unchanged. Preview candidates do not allocate live IDs.
-
-The recorded acceptance used layout tests and an isolated nested Wayland GUI:
-inert clicks, center/edge insertion, empty layouts, invalid drops, Escape and tab
-transfers. This is historical evidence, not a new run. Current operations are in
-link:01_config.adoc#layout[Configuration and layout].
+Catalog insertion is drag-only, including an empty workspace; clicks and keyboard
+activation insert nothing. Historical layout tests and a nested-Wayland check
+covered valid/invalid drops, cancellation and tab transfers. Current operations
+are in link:01_config.adoc#layout[Configuration and layout].
 
 === Small visualization canvas feedback
 
 Status: resolved in implementation, 2026-10-29.
 
-Small plots degrade without size warnings or tooltips. Spectrum and Spectrogram
-retain their drawing cutoffs; Audio Visualizer styles retain their small-geometry rules.
-Waveform omits time labels before losing its narrow plot, and an undrawable
-surface retires its capture and seek preview rather than retaining an invisible
-seek target. A fresh press works after the surface regains room.
-
-Acceptance used GUI behavior tests and a real nested Wayland window with labels
-enabled: capture, shrink until undrawable, grow while still held, release without
-a seek, then seek through a fresh press. Configured labels remained enabled and
-returned on larger surfaces. Current sizing belongs in
+Small views omit overlapping labels and retire undrawable seek targets without
+size warnings. Historical GUI checks shrank a captured waveform, restored its
+size while held, and confirmed that release did not seek; a fresh press did.
+Configured labels returned with sufficient space. Current rules are in
 link:24_layout.adoc#geometry-and-constrained-viewports[Geometry and constrained viewports].
 
 === Saved queue selection after startup read failure
 
 Status: resolved in implementation, 2026-10-31.
 
-A startup read failure before queue restoration left the runtime's default empty
-selection eligible for writeback at shutdown. A regression reproduced loss of the
-saved occurrence. Acceptance covered failed startup followed by shutdown, recovery
-before an append, and retry of a genuinely failed runtime selection save. An
-isolated headless instance with invalid historical metadata preserved the selected
-duplicate occurrence through shutdown and recovered it before an append after
-repair. Current behavior is documented in link:04_playback.adoc#queue[Queue].
+A failed startup read no longer lets an empty runtime selection overwrite the
+saved queue occurrence. Regressions covered shutdown after failure, recovery before
+append and retry of a failed selection save. A historical isolated headless check
+preserved the selected duplicate through shutdown and repair. Current behavior is
+in link:04_playback.adoc#queue[Queue].
 
 === Multi-root scan missing reconciliation
 
 Status: resolved in implementation, 2026-10-31.
 
-Missing reconciliation compared every absent identity against requested roots
-linearly, despite already having a borrowed root hash set. Ancestor membership
-now reuses that set; CUE ownership, exact-source checks, and incomplete-scan
-protection retain their existing behavior.
+Missing-source reconciliation now reuses indexed root membership instead of
+comparing every absent identity against every requested root. CUE ownership and
+incomplete-scan protection are unchanged.
 
-A deterministic probe with 1,000 distinct file roots and their 1,000 absent
-identities counted 500,500 root predicates before and 1,000 ancestor hash lookups
-after. These are operation counts, not latency or RSS measurements. An isolated
-headless scan of 1,000 absent files also exercised bounded-diagnostic truncation:
-the scan transaction committed, while all 1,000 identities remained protected from
-missing detection. See link:02_library.adoc#errors-and-partial-results[Errors and partial results].
+A historical 1,000-root/1,000-absent-source probe counted 500,500 root predicates
+before and 1,000 ancestor lookups after; these are operation counts, not timing.
+An isolated headless scan also verified that truncated diagnostics did not mark
+unconfirmed sources missing. See
+link:02_library.adoc#errors-and-partial-results[Errors and partial results].
 
 === Repeated playlist import identity resolution
 
 Status: resolved in implementation, 2026-10-31.
 
-Import saving queried the database and normalized paths for every occurrence,
-including repeated files and CUE subtracks. It now reuses preparation's normalized
-paths and keeps eligibility plus lazy resolution in one borrowed identity table.
-Positive and negative results are reused only within that import; occurrence order,
-multiplicity, admission policy, and separate scan/playlist commits are unchanged.
-The table and input items are released before playlist creation.
+Repeated import occurrences reuse identity lookups within that import while
+preserving order, multiplicity, admission rules and separate scan/playlist commits.
+No identity cache survives the import.
 
-A temporary probe on the default-feature debug binary observed five identity
-queries across two real CLI imports: 10,000 repetitions of one audio file, followed
-by seven mixed ordinary/CUE occurrences with four unique identities. A third import
-with 1,000 rejected short-file occurrences and two accepted existing-file
-occurrences made two identity queries and retained only the accepted pair.
-Database reads verified the full saved order and multiplicity. These are query
-counts, not latency or RSS measurements; the probe was removed after observation.
-Current import behavior is documented in
+A historical CLI probe counted five identity queries across an import with 10,000
+repetitions and a second import with four unique ordinary/CUE identities. A separate
+minimum-duration case retained only accepted entries. Database reads checked order
+and multiplicity; these are query counts, not latency or RSS measurements. See
 link:03_playlist.adoc#commit-and-export-lifecycle[Commit and export lifecycle].

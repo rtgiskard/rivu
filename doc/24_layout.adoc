@@ -14,10 +14,10 @@ Ownership follows lifetime rather than the visible panel tree:
 |Independent of desktop panels and layout edits
 |GUI session
 |Latest published layout collection and its single persistence worker
-|Survives window close; orderly application teardown flushes accepted state
+|Ends with the desktop process; flushes accepted state after the GPUI loop returns
 |Window workspace
 |Editable named trees, docking interactions, measurements and panel scroll positions
-|Recreated on window reopen from session memory, without transient edit state
+|Recreated on reopen from persisted layouts, without transient edit state
 |Window feature owners
 |Business selections, drafts, reads and presentation resources
 |Shared by panels of the same feature; not copied into named layouts
@@ -57,11 +57,9 @@ icons; `rivu-ui` remains the reusable GPUI controls package. Semantic RGB palett
 values belong to `rivu-format`; wire and query contracts belong to `rivu-protocol`,
 and display analysis contracts and execution belong to `rivu-analysis`.
 
-Shared icons and locale files live in `crates/rivu-presentation/data/` so the
-crate keeps its compile-time resources inside its package boundary. Root
-`data/icons` and `data/locales` are relative symlinks to those directories;
-`data/applications` holds desktop integration files. Installation rules use the
-root resource paths and follow the links to install regular files.
+Shared icons and locales are packaged in `rivu-presentation`; root resource
+symlinks preserve installation paths. Desktop integration files remain in
+`data/applications`.
 
 Frontend-local tests run in their owning crates. Tests requiring a real Core
 use feature-gated application fixtures through the host boundary, not a second
@@ -168,10 +166,8 @@ on its axis; the remaining center merges tabs. Corners with two competing edges
 and separator gutters are neutral. The outline and direction label identify
 the destination panel; shading previews the moved panel's final rectangle.
 
-Layout geometry owns edge classification. The shell declares known panel kinds,
-catalog order, stable keys and localized title identifiers together; construction
-dispatch is exhaustive over those kinds. Layout files retain string keys, including
-unknown kinds, which remain visible by their key with an unknown-panel placeholder.
+Unknown panel-kind keys survive layout loading and appear as named placeholders;
+they are not silently discarded.
 
 A target transition prepares one candidate using the actual move and measured
 reconciliation. Its projection previews source removal, collapse and gutters;
@@ -347,13 +343,13 @@ valid selected layout independently of file writes.
 
 === Initialization and teardown
 
-Initialization reads once with ordinary-file admission, rejecting FIFOs and links
-to them without waiting. Close/reopen retains session memory without writing and
-resets the window to locked. Orderly teardown flushes dirty state unless preserving
-failed startup input, joins the writer after the GPUI loop rather than inside its
-deadline-limited quit observer, and propagates save failure. Only teardown can
-wait for file I/O; interactions and window close/reopen do not. Abnormal exit loses
-unsynced changes.
+Initialization reads persisted layouts once, admitting ordinary files and rejecting
+FIFOs or links to them without waiting. Closing the last window ends the GPUI loop;
+the desktop then calls `flush_layouts`, joins the persistence worker and exits,
+propagating save failure. Dirty state is flushed unless failed startup input is
+being protected. The quit observer does not wait for file I/O inside GPUI's deadline.
+Reopening creates a new desktop from the persisted collection, with editing locked;
+there is no cross-close in-memory session. Abnormal exit can lose unsynced edits.
 
 == Rationale and alternatives
 
@@ -391,10 +387,8 @@ visibility in a frame. Inactive tabs retain their viewport state but cannot
 receive pointer or page-key input. Structural edits release state for removed
 panels; switching or duplicating a named layout starts new view-local scroll
 state. No per-layout scroll snapshots are kept.
-Albums registers only its currently displayed grid or track-list viewport for
-PageUp/PageDown. Paging updates that panel's existing scroll handle and invalidates
-its AlbumBrowser view; switching regions retires the previous input target without
-discarding the grid's retained position.
+Albums routes PageUp/PageDown only to its displayed grid or track-list viewport;
+switching regions preserves the grid's retained position.
 
 == GUI composition boundaries
 
@@ -499,14 +493,11 @@ feature synchronization. Geometry-only separator commits, resize, lock changes,
 and cancelled previews do not rediscover the panel tree. Rename and inactive-layout
 deletion leave the active demand intact.
 
-Playback updates consume these published facts rather than searching the layout
-for each feature or album panel. Visibility, visualization enablement, and shutdown gate existing
-demand. `VisualizerRuntime` retains ownership of its panel maps and rendering resources;
-it reconciles membership on workspace publication or relevant global visualizer
-style changes, independently of dynamic source generation, Seek revision, status,
-position, interaction, and progressive/full-waveform synchronization. Inactive
-panel removal still retires its retained resources even when active demand is
-unchanged. The exact Stop fence remains distinct from Seek and source replacement.
+Playback updates consume published demand rather than searching the layout.
+Visibility, visualization enablement and shutdown gate that demand. The visualizer
+owner separately reconciles panel membership/preferences and dynamic playback or
+waveform state. Removing an inactive panel still retires its resources; Stop,
+Seek and source replacement retain distinct continuity boundaries.
 
 Business panels have cached view boundaries separate from shell traversal and
 observe their feature owner directly; rendering never calls back into the window
@@ -564,7 +555,7 @@ and rich menu content needs a textual accessible name.
 
 Checkboxes and choices are controlled: owners accept changes, update dependent
 state and invalidate their owning entity. They do not save configuration or replace
-Settings' Apply/Discard boundary. Icon switches use `IconButton::new(...).switch(on)`;
+Settings' Apply/Discard boundary. Icon switches expose controlled on/off state;
 action groups share appearance, not state or commands. Hosts choose wrapping,
 inline clipping or scrolling. Hover actions appear on their row's hover or
 descendant keyboard-visible focus, not list-wide focus; hidden actions leave
@@ -621,9 +612,8 @@ Shared list viewport shells retain horizontal clearance but no vertical inset:
 scrollable content and edge fades meet the shell's top and bottom. Content-sized
 playlist viewports therefore use row heights directly, without extra vertical
 padding compensation.
-Edge fades default to the panel surface color. Elevated Choice lists supply their
-control surface color through `VirtualList::edge_fade_color`, so the fade blends
-into its host without changing popup borders, insets or scroll geometry.
+Edge fades use their host surface color, including elevated Choice lists, without
+changing popup borders or scroll geometry.
 
 List, tree, dropdown and paged-loading rows require an explicit resolved height.
 Range renderers resolve it once per batch and reuse it for records and placeholders,

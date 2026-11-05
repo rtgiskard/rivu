@@ -319,15 +319,9 @@ sample rate, exact frame count and mono/stereo speaker layout. Channels have
 independent recurrent state. CPU and 1–8 threads are supported; CUDA and the
 DeepFilterNet-only post-filter report errors rather than selecting another model.
 Wet mix and attenuation-limit controls remain available.
-Native analysis completes the last FFT512/hop256 frame with reflection against
-the original signal, then crops synthesis to the original length. This also
-defines short-input handling; it avoids a nearly zero single-window denominator
-at a partial final hop. A numerical reference must use the same explicit padding,
-not an unpadded upstream example with different final-frame coverage.
-Native restoration streams completed synthesis hops through finite resampling
-context into the final wet/dry output, without retaining a complete model-rate
-intermediate. Endpoint extension, exact output length and channel independence
-remain the same at equal and differing source rates.
+Short inputs and partial final frames retain the original length. Numerical
+comparisons must use the same padding; see <<timeline-and-source-identity,Timeline
+and source identity>>.
 
 For Python models, with `uv` already installed, run setup from the repository
 root. MossFormer2 and Kim use `.cache/neural/.venv`. The installer resolves
@@ -520,12 +514,8 @@ budget covers active, retained and retiring PCM, charging shared backing storage
 once until its last owner releases it. Exhaustion fails explicitly without disk
 spill. Decoder/DSP state, model weights, ONNX Runtime and Python workspace are
 additional costs; the budget is not a process-RSS limit.
-The actual ordered speaker layout travels with shared PCM storage and its slices,
-through graph intermediates, memory decoding and audition; channel count is derived
-from it, not used to reconstruct speaker identities.
-Export and stem mixing rely on these immutable frame counts when reading blocks.
-Mixing validates both stems' rate, layout and total length before reading; block
-length consistency is an internal invariant, not a recoverable file-read error.
+Outputs preserve the ordered speaker layout, sample rate and immutable frame
+count through processing, mixing and audition; channel count alone is not a layout.
 
 A new non-export run releases unselected PCM and prepared runners after successful
 admission, before worker allocation. Selected audition audio remains pinned.
@@ -539,15 +529,16 @@ See link:22_cache.adoc#processing-output-retention[Processing output retention].
 
 Native denoise and native-only graphs decode in blocks, retaining final PCM and
 bounded DSP/delay state rather than whole-track native intermediates. Profile
-capture rereads only the required prefix, including upstream causal context and
+capture reads only the required prefix, including upstream causal context and
 latency in a graph. Early completion validates cancellation and the opened source
-without inventing EOF or flushing artificial tails. Real EOF still flushes the
-required DSP context; a selection beyond the actual source remains invalid.
-Graphs containing neural nodes retain budgeted PCM at model boundaries. Original
-source storage retires once no remaining operation can reach it; original format
-and frame metadata remain available. Source forks and profile capture retain the
-source only while required. Input files remain bounded to 8 GiB.
-Actual decoded frames, including unknown-duration streams, determine EOF and coverage.
+without treating the prefix boundary as EOF or flushing artificial tails. Actual
+decoded frames determine EOF, including unknown-duration streams; real EOF flushes
+the required DSP context, and a selection beyond the source is invalid.
+
+Graphs with neural nodes retain budgeted PCM at model boundaries. Original source
+storage retires once no remaining operation can reach it; source forks and profile
+capture retain it only while needed. Original format and frame metadata remain
+available after that storage retires. Inputs are limited to 8 GiB.
 
 Neural input must be nonempty and no longer than four hours; each Python source
 context window is bounded to 128 MiB. Model weights/workspace remain additional
@@ -705,58 +696,35 @@ and interaction state, submitting typed, validated edits; graph commits require
 the expected revision. Failed validation leaves committed settings unchanged.
 JSON is a command-line/import representation, not a second configuration owner.
 
-Restoration and neural field descriptors supply labels, choices, input kinds and
-steps to both page and graph editors. Page edits remain sparse patches; graph
-edits replace a validated node at its expected revision. Draft completion matches
-the input entity, user-edit generation and text; programmatic synchronization is
-not a user edit. File-choice results, including cancellation and errors, must
-still belong to the original panel and draft. Graph choices additionally check
-node kind and revision. Completing an old request cannot clear a newer request's
-busy state or publish an error into its draft.
-Rendered graph actions reconcile current state before submission and preserve
-the revision that produced the intent. An old Add profile or Mix control cannot
-overwrite newer settings, drafts or an in-flight edit.
+Page edits submit sparse patches; graph edits replace a node at its expected
+revision. Draft acknowledgements and file-choice completions belong to the
+originating panel, target and edit generation. Stale completions cannot clear
+newer drafts, busy state or errors; programmatic synchronization is not a user edit.
 
-The processing service owns current/history task facts, retained availability,
-audition selection, worker retirement, the four-result bound, selected-audio pins
-and deferred resource release. Core keeps cross-domain automatic-audition intent,
-cancellation/source admission and export commit, and publishes the service's
-immutable projections. Result admission updates retention, eviction and the current
-task before deriving availability once, so no superseded current projection is
-copied just to be discarded. A cancellation acknowledgement does not transfer
-physical worker ownership to the caller. Model runners consume an input/settings request
-and return provenance plus an audio result; they do not rewrite task status or
-borrow a graph's operation and timeline fields as temporary model state.
+The processing service owns task history, retained outputs, audition selection
+and physical worker retirement. Core owns cross-domain playback intent,
+cancellation/source admission and export commit. Cancellation invalidates publication
+without transferring worker ownership. Model runners return audio and provenance;
+they do not own task status.
 
 Prepared DSP owns its coefficients, history and stream format. Device callbacks
 do no model loading, FFT planning or file I/O. Allocation, block work and retained
 storage are bounded; long-running preparation stays on workers. Bypass, gain,
 resampling and latency compensation are explicit, not silent quality fallbacks.
 
-Realtime and offline native graphs share `rivu-dsp::denoise::BlockDenoiser` for
-lookahead prefill, fixed-block output and one-time EOF flushing. Its staging is
-bounded by lookahead and the admitted block size, independent of source duration.
-Only the declared real input is processed; graph padding drains delay rather than
-extending the source. Reset clears both DSP history and adapter staging.
-Graph blocks initialize only regions not overwritten by source reads, copies or
-mixing. Short reads and ended branches remain zero-extended through the current
-block, including while downstream processors drain their tails.
+Realtime and offline graphs share bounded denoiser staging and EOF handling.
+Padding drains delay rather than extending the source; short reads and ended
+branches are zero-extended while downstream tails drain. Reset clears DSP history
+and staging. Mixing accumulates in `f64`, rounds once to `f32`, and rejects
+non-finite results rather than clipping or normalizing them.
 
-Offline nodes allocate wide accumulation scratch only for weighted, delayed or
-multi-input mixing. Direct copies retain no such buffer; mixing still accumulates
-in `f64` and rejects non-finite output rather than clipping or normalizing it.
-
-Non-finite input/intermediate PCM fails without publishing partial audio; finite
-over-range samples are not clipped or silenced. A failed DSP/profile operation
-requires reset before reuse because a finite prefix may have advanced history.
-Graph execution relies on finite PCM at its source boundary and on successful DSP
-operations preserving that guarantee. Pure copies do not rescan samples; edge gain
-and summation check their new arithmetic results, including delayed tails.
-Seeking, source changes and incompatible formats reset history; pause does not
-advance audio time. Source identity and captured settings bind every result,
-while pending selection intent and playback generation separately control
-automatic audition handoff. Stopping without a physical source revokes that
-intent without advancing the physical source generation.
+Non-finite input or intermediate PCM fails without publishing partial audio;
+finite over-range samples are preserved. A failed DSP/profile operation requires
+reset before reuse because a finite prefix may have advanced history. Seeking,
+source changes and incompatible formats reset history; pause does not advance it.
+Source identity and captured settings bind results. Playback generation and
+pending selection intent separately govern automatic audition; Stop revokes that
+intent even when no physical source is playing.
 
 === Timeline and source identity
 
@@ -766,6 +734,12 @@ source timeline. Optional `graph_outputs[].context` describes guarded PCM with a
 signed source-relative `start_frame`; hybrid suffixes consume it rather than the
 trimmed audition slice. At EOF, each denoiser finishes at its actual upstream end
 before tails propagate downstream; padding is not new source input.
+
+Native ONNX speech completes FFT512/hop256 analysis frames by reflecting the
+original signal at the endpoint, then crops synthesis to the source length.
+References must match this padding, including short inputs and partial final hops.
+Streaming resampling preserves length and independent channel state without
+retaining a full model-rate intermediate.
 
 Original audition validates the opened source descriptor; processed audition
 uses immutable PCM handles. Waveform reuse follows exact PCM identity and slice
@@ -945,145 +919,64 @@ standalone or graph dispatch paths.
 
 === Historical quality and integration observations
 
-.Historical measurements and application interaction records
-[%collapsible]
-====
-* EQ: `.cache/eq-candidate.json` records nine-repeat warm process-call measurements,
-  excluding copying, preparation, file I/O and device output, with zero process
-  allocations/bytes. At 32 bands × four stages, baseline RTF → candidate
-  min/median/max was 1.280530 → 0.329190/0.331402/0.334488 at 192 kHz/32 channels,
-  and 2.558151 → 0.739161/0.743460/0.747906 at 768 kHz/16 channels. Worst observed
-  256-frame blocks were 2.070 and 1.809 ms respectively, not device-deadline proof.
-  `eq-candidate-section-major.json` was a separate, unselected experiment.
-* Classical restoration: `audio-quality-corpus/classical-matrix-preservation/report.json`
-  records 64 noisy cases per mode. Median SI-SDR improvements were 2.501 dB
-  stationary, 4.434 dB profile and 0.926 dB adaptive; ranges were −2.501–6.021,
-  0.621–12.342 and 0.081–3.255 dB. Stationary degraded 14 cases, profile/adaptive
-  none in this matrix; this is not general music-transparency acceptance.
-* Upstream parity: `neural/moss-upstream-comparison.json` reports 81.571 dB absolute
-  SNR, RMS/peak error 5.54e-6/2.98e-5 and zero lag.
-  `neural/kim-upstream-comparison.json` reports zero sample error and lag.
-  Neither establishes whole-file parity across every outer context boundary.
-* Speech: `neural/delivery-evidence.json` covers 20 VoiceBank pairs, not the whole
-  corpus: median SI-SDR improvement 7.547 dB (1.766–17.672), STOI
-  0.96519 → 0.98002, ESTOI 0.85686 → 0.92819 and zero measured lag. Median warm
-  RTF was 0.2483; maximum reported RSS was 682100 KiB. A separate 16-case
-  synthetic evaluation reported median improvement 11.516 dB.
-* Quiet-content tradeoff: `neural/acceptance-evidence/speech61-clean-full-report.json`
-  and `speech61-clean-blend-report.json` compare one 3.885 s clean reference at
-  wet=1/attenuation=80 dB versus wet=0.75/attenuation=30 dB. Clean SI-SDR rose
-  18.4303 → 21.0568 dB, STOI 0.994905 → 0.998649 and weak-active 20 ms correlated
-  projection gain 0.18004 → 0.39763. Projection gain is not RMS attenuation or
-  phoneme/listening evidence. On the same source with 0 dB white noise, the blend
-  reduced SI-SDR 9.4838 → 7.4031 dB and STOI 0.882394 → 0.835501; it does not
-  justify a universal setting/default change.
-* Kim separation: valid historical track-01/02 comparisons reported median SI-SDR
-  improvement 17.640 dB (16.145–19.392). The Al James reference erratum, then
-  stored as track-00, was excluded; new evaluations identify it by source/hash,
-  not numbering. `neural/acceptance-evidence/summary.json` adds eight stem
-  comparisons from AM Contra / Heart Peripheral, Buitraker / Revo X, Cristina
-  Vane / So Easy and Georgia Wonder / Siren, all at zero estimated lag. AAC
-  reference stem-sum residual peaks were 0.0183–0.1007, versus structural output
-  reconstruction residual 2.98e-8; neither makes those references lossless.
-* Lossless coverage: that summary includes official
-  https://zenodo.org/records/1438309[MedleyDB Sample 1.0] (CC-BY-SA-4.0), verified
-  against publisher MD5; archive SHA256 is
-  `603fa6cc6fc8d6dd0f5ffcc5bd97b8b2c74820e2498b1e44a285308e772d7910`.
-  Liz Nelson & Jennifer Davies / Rainfall, seconds 30–37, uses 44.1 kHz stereo
-  PCM16 stems 1–3 as vocals and 4–5 as accompaniment, summed at unity without
-  alignment/gain fitting or clipping. It is a real-stem remix, not the released
-  master. Vocal per-channel SI-SDR was 17.9215/17.9421 dB and accompaniment
-  23.1954/23.1779 dB, both at zero lag. Only 9.47e-6 of mixture energy was above
-  16 kHz: this one folk excerpt is not broad fullband acceptance. The summary
-  identifies commands, corpus provenance, hashes, environment and individual runs.
-* Repeated neural cost: the same summary records three fresh-worker, four-thread
-  CPU runs, not guaranteed cold OS-cache runs. AM Contra end-to-end time
-  min/median/max was 52.415/54.100/61.298 s, processing RTF
-  7.307/7.555/8.610 and peak RSS 2135276/2135588/2181160 KiB: not realtime
-  separation. The speech white-noise 0 dB full-wet case recorded end-to-end
-  2.901/2.972/2.999 s, RTF 0.3317/0.3397/0.3423 and RSS
-  681380/681464/681624 KiB. Short excerpts do not establish all-duration costs.
-* Application smoke-owner observations covered accumulating keyboard EQ edits,
-  drafts surviving unrelated edits, preset/A-B round trips, drag cancellation
-  during resize, captured restoration settings and actual neural cancellation/
-  child reaping. Real Rivu/PipeWire audition on a muted sink preserved pause and
-  source identity; source SHA256 was unchanged. A 299880-frame, 44.1 kHz stereo
-  −6/−12 dB stem remix matched the declared linear sum sample-exactly, and resumed
-  playback advanced before pause.
-* Node-graph GUI smoke used an uninstrumented build, nested niri and compositor
-  pointer/keyboard input. Two 640px panels exercised shared drafts with separate
-  cursor geometry, rejected invalid Apply, corrected drafts, drag/Undo/Redo and
-  resize cancellation. Panel recreation retained drafts. GUI Run and opposite-panel
-  export produced 299880 stereo frames at 44.1 kHz; the −12 dB check had maximum
-  error 1.49e-8. Relative export was rejected and an absolute destination succeeded.
-  These are recorded input/lifecycle observations, not complete GUI coverage.
-====
+The following records identify earlier experiments, not acceptance of the current
+source. Some bundles are absent as noted above; recover the original evidence and
+verify its source, environment and corpus before reusing any result.
+
+[cols="1,2,3",options="header"]
+|===
+|Area |Recorded evidence under `.cache/` |What it establishes and what it does not
+|Equalizer
+|`eq-candidate.json`
+|Warm process-call timings and allocation counts excluded preparation, copying,
+file I/O and device output; they do not establish callback deadlines or end-to-end cost
+|Classical restoration
+|`audio-quality-corpus/classical-matrix-preservation/report.json`
+|A 64-case-per-mode synthetic matrix included Stationary regressions; it does not
+establish general music transparency
+|Neural reference parity
+|`neural/moss-upstream-comparison.json`, `neural/kim-upstream-comparison.json`
+|Comparisons with the selected upstream algorithms; not whole-file parity at every
+context boundary or listening approval
+|Speech and quiet-content tradeoffs
+|`neural/delivery-evidence.json`, `neural/acceptance-evidence/`
+|Partial VoiceBank and synthetic evaluations. One wet/attenuation blend improved
+clean-reference preservation while reducing noisy-input scores; not a universal default
+|Separation and lossless coverage
+|`neural/acceptance-evidence/summary.json`
+|AAC stem comparisons excluded the Al James reference erratum. One seven-second
+MedleyDB PCM16 remix adds lossless evidence, not broad fullband music coverage
+|Application and graph interaction
+|Earlier Rivu/PipeWire and nested-Wayland observations
+|EQ drafts, graph edits, cancellation/reaping, audition and export were exercised;
+these are historical observations, not complete GUI or current-build acceptance
+|===
+
+Historical separation timings were not realtime. Repeated worker measurements
+covered short excerpts and fresh processes, not guaranteed cold OS caches or
+all-duration memory/deadline bounds.
 
 === Node graph measurements
 
-.Graph runner and backend comparison records
-[%collapsible]
-====
-`.cache/audio-graph-evidence/graph-baseline.json` and `graph-optimized.json` cover
-stereo 48/96 kHz, 64/256/1024-frame calls and three workloads: parallel 4097-tap
-FIR/10-band IIR into an aligned mix; stationary denoise/10-band IIR into a mix;
-and cached prefix/live 4097-tap FIR. Each of 18 cases used nine repetitions.
-Warm process timing excluded copying, preparation, file I/O and device output;
-all cases reported zero process allocations/bytes and 96 untimed blocks matched
-the baseline sample-exactly. Representative 48 kHz/256-frame times, in microseconds:
+`audio-graph-evidence/graph-baseline.json` and `graph-optimized.json` recorded
+nine repetitions for each of 18 native graph workloads, excluding preparation,
+copying, file I/O and device output. Untimed output comparisons were sample-exact
+and processing allocated no additional storage. Timings did not show a uniform
+speedup or establish physical-device deadlines.
 
-[cols="3,1,1,1,1",options="header"]
-|===
-|Workload |Baseline p50 |Selected p50 |Baseline p99 |Selected p99
-|FIR/IIR branches |14.496 |13.765 |22.081 |19.396
-|Stationary/IIR branches |10.069 |11.080 |43.981 |43.000
-|Cached prefix/live FIR |8.315 |7.454 |10.590 |10.229
-|===
-
-The worst selected call was 248.281 microseconds, below its nominal block
-interval. Variation is not a uniform-speedup or physical-device deadline claim.
-
-The Kim result in `.cache/neural/graph-backend-evidence/comparison.json` covers
-the first three seconds of an official MUSDB AAC excerpt (132300 stereo frames,
-44.1 kHz). Vocal per-channel SI-SDR was 12.429/11.742 dB. A single four-thread
-CPU run reported processing RTF 10.327, not a repeated estimate. The reconstruction
-residual peak was 2.98e-8, a mixture-minus-vocals invariant, not evidence of
-separation quality. This is neither a full-corpus ranking nor fullband/listening
-acceptance.
-====
+`neural/graph-backend-evidence/comparison.json` covered three seconds of a MUSDB
+AAC excerpt with Kim. Its mixture reconstruction checks the accompaniment
+definition; one timing run is not a repeated performance estimate, quality ranking
+or fullband/listening acceptance.
 
 === Implementation cost audit
 
-These paired historical audits isolate numerical consumers/allocation costs,
-not real-model equivalence, listening, playback or whole-process RSS. Neural
-weight regressions require prepared manifests and matching interpreters; skipped
-tests or environment-installation failures are not passes. The shared worker
-record is `.cache/experiments/audio/audio-implementation-audit/`.
-
-==== Classical restoration
-
-`.cache/experiments/audio/classical-audit/results.json` records ten matching
-baseline/candidate output hashes for a 48 kHz stereo consumer. Full-wet preparation
-saved one allocation and 16,640 requested bytes at FFT 2048, or 65,792 bytes at
-FFT 8192; partial-wet capacity was unchanged. Both versions allocated zero bytes
-inside preallocated processing/finish. Seven timing repetitions showed no uniform
-speedup. Requested allocation bytes are not RSS or callback-deadline evidence.
-
-==== Shared worker storage
-
-Seven RMS-energy repetitions on 24 seconds of 192 kHz stereo measured temporary
-peaks 147,456,192 → 132,544 bytes, with relative energy difference about 2.05e-15
-from reduction order. Reference-release checks establish removal of previous-block
-references, not immediate OS reclamation or measured Torch/ORT peak-RSS reduction.
-
-==== MossFormer2 numerical processing
-
-`.cache/audio-review-next/moss-numeric-integrated.json` and
-`.cache/speech-optimize-20261023/moss-adoption-evidence.json` record 99 length/
-layout/floor cases under Torch/torchaudio 2.11.0 CPU and NumPy 2.2.6. Features
-and synthesis matched earlier expressions exactly; read-only input and the other
-speaker's mask were preserved. The 12-second 48 kHz stereo DSP consumer eliminated
-43,719,744 allocated bytes per block, not peak memory. Seven alternating timings
-had baseline/candidate medians 113.221/112.601 ms and ranges
-109.746–117.522/111.389–114.702 ms; no stable speedup was established.
-These execute Torch/Kaldi/DSP, not model weights; CUDA was not exercised.
+Earlier records in `experiments/audio/classical-audit/`,
+`experiments/audio/audio-implementation-audit/`, `audio-review-next/` and
+`speech-optimize-20261023/` isolate native allocation, shared worker storage and
+MossFormer2 numerical-processing costs. They do not measure whole-process RSS,
+model-weight equivalence or device deadlines. Paired numerical checks preserved
+outputs within their stated precision; timing did not establish a stable speedup.
+Torch/Kaldi/DSP checks did not execute model weights or CUDA. Real-model regression
+checks still require prepared manifests and matching interpreters; skipped tests
+and environment-installation failures are not passes.

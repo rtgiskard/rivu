@@ -16,18 +16,10 @@ directly, exit Rivu first, edit the file, and restart; the core does not watch
 external edits. Configuration controls application-wide defaults. Panel trees
 and instance preferences are saved separately in <<layout,`layout.json`>>.
 
-Configuration groups application settings into `[library]`, `[playback]`,
-`[interface]`, `[logging]`, and `[visualizations]`. Global visualization controls
-live in `[visualizations.general]`; `[visualizations.defaults]` seeds new panels.
-Shared effect colors belong to `[visualizations.effects]`, shared energy-response
-parameters to `[visualizations.reactive]`, and radial geometry and motion to
-`[visualizations.radial]`. View-specific settings live in
-`[visualizations.spectrum]`, `[visualizations.spectrogram]`,
-`[visualizations.waveform]`, and `[visualizations.oscilloscope]`.
-Artwork settings live in `[interface.artwork]`; audio processing uses
-the additional tables described under <<audio-processing-defaults,Audio processing defaults>>.
-Desktop integration belongs to Interface; output and decoding belong to Playback;
-shared analysis belongs to Visualizations. Dotted names below identify file paths.
+Settings are grouped under `[library]`, `[playback]`, `[interface]`, `[logging]`,
+and `[visualizations]`. Dotted parameter names below identify TOML paths.
+Visualization groups are described in <<visualizations,Visualizations>>;
+additional processing tables in <<audio-processing-defaults,Audio processing defaults>>.
 
 A minimal example (all omitted settings retain their defaults):
 
@@ -74,17 +66,21 @@ persistence are independent of configuration saving.
 
 === Apply and validation
 
-Apply retains the draft on validation or save failure; earlier runtime changes
-remain active. Invalid text blocks Apply even in an inactive control: Settings
-opens the affected page, and Reset field text restores only that field's accepted
-value. Other edits remain intact. Edits made during Apply await the next Apply;
-editing after success clears its notice.
+Apply validates all Settings pages and merges edited fields into the latest
+configuration, preserving unrelated changes from other controls and clients.
+An edited field wins over a concurrent change to that field; folder edits replace
+the roots list. Playback controls already accepted in memory are included.
 
-Apply reserves capacity for changed audio parameters before saving, then delivers
-those changes without resending unchanged EQ, visualization, buffer or decoder
-settings. Every explicit Apply still submits output settings: an idle output
-selection receives fresh device validation even when its value is unchanged.
-Playback controls already accepted in memory are included in the saved candidate.
+Validation or save failure retains the draft; earlier runtime changes remain
+active. Invalid text blocks Apply even in an inactive control. Settings opens
+the affected page; Reset field text restores only that field's accepted value.
+Edits made while Apply is pending await the next Apply, and the editor cannot
+close until completion. Discard then closes it and drops unsubmitted edits.
+
+Apply reserves capacity for changed audio parameters before saving. Unchanged
+audio settings are not resent, except output settings: every explicit Apply
+revalidates the selected device, even if unchanged. Display-only changes do not
+reopen audio.
 
 Save failures appear in logs, `rivu status` and the desktop notice. Correct the
 cause and retry; exit makes one final attempt. Atomic replacement prevents partial
@@ -266,12 +262,8 @@ connections and canvas positions, lives in `[processing_graph]` and its nested
 arrays. These are core settings in `config.toml`, not preferences in `layout.json`.
 The default graph connects Source directly to Output; the top-level Monitor EQ
 and restoration/neural defaults do not implicitly insert graph nodes.
-The graph edit revision is runtime-only and is not a configuration field. It
-starts fresh when configuration is loaded; IPC still carries the current token
-for optimistic edit checks.
-Unknown fields are rejected throughout the graph, including node-kind settings,
-node-local EQ/restoration/neural configuration, edges, ports, and noise selections;
-they are not silently ignored. Use the documented field names when editing TOML.
+The graph edit revision is a runtime-only optimistic-edit token, not a TOML field.
+Unknown graph fields are rejected, as elsewhere in configuration.
 
 For example, the following sets Monitor EQ and restoration/neural defaults; it
 does not construct a processing graph:
@@ -326,17 +318,11 @@ changes only the draft until Apply. Empty field hints are not submitted values;
 clearing an optional numeric override restores inheritance on Apply. Untouched
 numbers retain their TOML precision even if Settings displays fewer decimal places.
 
-Settings keeps a baseline and draft. Apply merges edited fields into the latest
-configuration, preserving unrelated changes from other controls and clients.
-An edited field wins over a concurrent change to that field; folder edits replace
-the roots list. Media read buffering affects future opens, including waveform
-scans, without reopening the current track. The application-menu Visualizations
-toggle applies immediately; see <<visualization-enablement,Visualization enablement>>.
-
-While Apply is pending, later edits remain for the next submission and the editor
-cannot close. After completion, Discard closes it and drops unsubmitted edits.
-Completions from a replaced session cannot alter its successor. Save failures and
-saved-but-audio-failed behavior are in <<saving-configuration,Saving configuration>>.
+Media read buffering affects future opens, including waveform scans, without
+reopening the current track. The application-menu Visualizations toggle applies
+immediately; see <<visualization-enablement,Visualization enablement>>.
+Draft merging, validation, Discard and save failures follow
+<<apply-and-validation,Apply and validation>>.
 
 Interface → Layout includes Layout snapping and Layout grid spacing. These save
 `interface.layout_snap_enabled` (default `true`) and `interface.layout_snap_grid_px` (default `16`,
@@ -367,9 +353,7 @@ settings editor. Static mode retains rotation parameters.
 `interface.theme` in `config.toml` selects the shared desktop and terminal theme.
 Presets are built in; no separate theme files are needed. Choose Theme in
 Settings → Interface → Appearance & layout, then Apply to save and update open
-clients without restarting. Choosing a theme only edits the settings draft;
-Discard leaves the active theme unchanged. Editing the configuration file takes
-effect when starting the core; the running core does not watch the file.
+clients without restarting. Discard leaves the active theme unchanged.
 The TUI uses the selected theme for search highlights and playback-property colors.
 
 [cols="1,2"]
@@ -438,16 +422,16 @@ Selection syntax, unavailable-device recovery, output rebuilding, normalization,
 and source-rate negotiation are documented in
 link:04_playback.adoc#output-devices-and-speaker-layouts[Playback output].
 
-Apply validates and saves the settings draft across all four sidebar groups together;
-navigation preserves the draft and each page's scroll position. An unavailable
-output target can be saved; applying it reports an audio error and can stop
-playback while retaining the saved selection. Draft merging, Discard, and error
-handling follow the <<desktop-settings,Desktop settings>> rules.
-Artwork instance settings apply only the selected panel's style, mode, period
-and direction to the in-memory layout. They do not request a `layout.json` write;
-use layout sync or orderly exit to persist them. Applying fails if the instance
-no longer exists. Visualization panels expose their local style, reference lines
-and labels directly in the right-click menu; Oscilloscope also offers Overlay channels.
+An unavailable output target can be saved; applying it reports an audio error and
+can stop playback while retaining the saved selection. See
+<<apply-and-validation,Apply and validation>> for the shared Apply contract.
+
+Artwork settings applies only the selected panel's style, mode, period and direction;
+it fails if that instance no longer exists. Instance Apply changes session memory;
+persist it with layout sync or orderly desktop exit, as described in
+<<layout,Layout>>. Visualization panels expose their local
+style, reference lines and labels in the right-click menu; Oscilloscope also
+offers Overlay channels.
 Inactive Spectrum fields retain their values and are still validated by Apply.
 If a retained value is invalid, open Visualizations → Spectrum: choose a Style
 other than Solid to edit the active bar-layout value or gap, or enable Peak markers to
@@ -464,10 +448,6 @@ Unscanned folders show zero after loading. Statistics load asynchronously when
 Settings opens and refresh after catalog changes or draft-root changes. Removing
 a root changes the draft only; Discard restores the saved roots.
 
-Display-only changes do not reopen audio. Hover an error to read its complete
-message, or click its copy icon to copy it.
-
-See link:../readme.adoc[README] for application lifecycle and host behavior.
 
 === Artwork cache maintenance
 
@@ -553,18 +533,23 @@ and playback controls; Album emphasizes albums and artwork, Visual the audio
 visualizations. Duplicate the active layout to create another. Renamed or deleted
 templates are not restored on restart.
 
-Edits, panel-settings Apply and layout selection update session memory. Use
-Sync layouts to file beside Rename to persist the collection, or quit orderly.
-Window close/reopen preserves session layouts without writing; an abnormal exit
-loses unsynced changes. Sync cancels drag/resize previews and captures the current
-collection; later edits require another sync. Progress and completion appear in
-the manager. Failure preserves the file and session edits and appears there or,
-after closing it, in the footer. Press Sync to retry; ordinary edits do not retry.
+Edits, panel-settings Apply and layout selection update desktop-session memory.
+Use Sync layouts to file beside Rename to persist the collection explicitly.
+Closing the last window ends the desktop event loop, flushes the final layout and
+exits the desktop process; the Core service continues running. A new desktop
+process loads the persisted collection. An abnormal desktop exit can lose
+unsaved changes.
 
-Sync and orderly exit skip unchanged valid content and initialize a missing file.
-If an existing file cannot load, Rivu reports the error and uses defaults, preserving
-the failed input until explicit Sync authorizes replacement. Exit before external
-file edits: layouts load once per GUI session and saves do not merge outside changes.
+Sync cancels drag/resize previews and captures the current collection; later edits
+require another sync. Progress and completion appear in the manager. Failure
+preserves the file and session edits and appears there or, after closing it, in
+the footer. Press Sync to retry; ordinary edits do not retry.
+
+Sync and orderly desktop exit skip unchanged valid content and initialize a missing
+file. If an existing file cannot load, Rivu reports the error and uses defaults,
+preserving the failed input until explicit Sync authorizes replacement. Exit the
+desktop before external file edits: layouts load once per desktop session and
+saves do not merge outside changes.
 
 Unlock with the bottom-right layout button's context menu to add, remove, move,
 resize or reorder panels. Left-click opens the catalog: drag an item onto the
@@ -601,8 +586,7 @@ do not start a move. Open menus or dialogs disable footer dragging.
 === Layout file
 
 `active` names an entry in the nonempty `layouts` object. Each entry requires
-`root`; `null` means an empty layout. Lock state is not stored; each newly opened
-window starts locked.
+`root`; `null` means an empty layout.
 
 [source,json]
 ----
@@ -635,7 +619,6 @@ length, excluding separator gutters, not weights or fractions of adjacent panes.
 Splits require at least two children and cannot directly contain a split in the
 same direction. At most 32 splits may occur along any root-to-leaf path; tabs
 do not count toward this limit.
-Configuration remains TOML; layout persistence remains JSON.
 
 `tabs` requires a nonempty `panels` array. Its optional `active` is a zero-based
 index, defaulting to `0`. Panel objects require `kind`; `show_tab_bar` defaults to
@@ -717,16 +700,12 @@ link:23_visuals.adoc#presentation-scheduling-and-visibility[Presentation schedul
 `visualizations.general.palette` sets the Spectrum, Spectrogram, and Waveform colors:
 `inferno`, `magma`, `viridis`, `cividis`, `grayscale`, or `deadbeef` (default).
 Select it under Settings → Visualizations → General.
-Older configurations must remove `visualizations.spectrogram.palette` and set
-`visualizations.general.palette` instead; the signal palette `tokyo_night` is
-no longer accepted. The Tokyo Night interface theme is unchanged.
+For older palette keys and values, see
+link:26_migration.adoc#configuration-compatibility[Configuration compatibility].
 Color settings use quoted `"#RRGGBB"` values.
 
-Visualization caches are always enabled within their resource bounds. Spectrum
-reuses frequency mappings but rebuilds its body on each panel render. Rendering
-reuse and resource budgets are described in
-link:22_cache.adoc#visualization-caching[Visualization caching]; signal and
-rendering design in link:23_visuals.adoc[Visualization Rendering Design].
+Visualization caches are always enabled within their resource bounds; see
+link:22_cache.adoc#visualization-caching[Visualization caching].
 
 Before audio data is available, visualization panels show no waiting message;
 their backgrounds and any applicable reference guides remain. Loading, failure,
@@ -743,14 +722,13 @@ Shared visualization settings apply as follows:
   Changing the signal resets realtime analysis history, but does not clear the
   rolling waveform or automatically start a full waveform scan. Equalizer changes
   preserve realtime history; newly visited waveform intervals replace their old data.
-  An explicit full waveform scan snapshots the selected signal and processing when
-  requested, keeping the displayed waveform until results are available.
+  An explicit full waveform scan uses the signal and processing captured when the
+  service handles it, not necessarily at the click. The prior display remains
+  visible; see link:23_visuals.adoc#waveform[Waveform capture].
 
 * `visualizations.general.background` sets the background for all views (default
-  `"#08090C"`); `visualizations.general.palette` is shared by Spectrum,
-  Spectrogram, and Waveform. The radial, stereo-analysis,
-  fractal, and Oscilloscope styles use the Audio Visualizer primary and secondary
-  colors.
+  `"#08090C"`). Radial, stereo-analysis, fractal, and Oscilloscope styles use the
+  Audio Visualizer primary and secondary colors instead of the shared palette.
 * `visualizations.general.db_range` supplies the display span for Spectrum, Spectrogram,
   and the radial/stereo/fractal styles unless their settings override it. It does
   not affect Waveform gain, Oscilloscope amplitude, or volume.
@@ -763,10 +741,8 @@ Shared visualization settings apply as follows:
   Changing only the analysis rate preserves compatible visualization content and
   the current analysis window. Small FFT windows at low rates can miss short
   transients; increasing animation FPS cannot recover unobserved audio.
-* Disabling visualizations stops visualization processing and discards results; see <<visualization-enablement,Visualization enablement>>.
-  This is independent of rendering reuse and media read buffering.
-  In Settings → Visualizations → General → Appearance, its switch sits
-  below the shared material-cache budget.
+* `visualizations.general.enabled` controls processing independently of media read
+  buffering and rendering reuse; see <<visualization-enablement,Visualization enablement>>.
 
 Each frequency view has a range override; leave it empty to inherit General,
 or clear an explicit value to restore inheritance. See
@@ -783,7 +759,6 @@ view. View-specific pages contain only independent parameters.
 Style, reference lines, and labels under New panel defaults affect new panels only;
 existing panels retain their layout-local choices. See
 <<audio-visualizer,Audio Visualizer>> for panel settings and style-specific effects.
-Inactive Spectrum style-dependent settings retain their values.
 
 === Visualization enablement
 
@@ -930,11 +905,9 @@ Its `visualizations.spectrogram.*` settings include:
 * `interpolate`: default `true`; controls interpolation between source rows.
 * `history_seconds`: `1`–`60`, default `20`; sets the displayed audio-time span.
 
-Spectrogram uses the full non-DC FFT bins rather than semitone display bands.
-Frequency rows and time buckets preserve peaks when multiple source values map
-to one display cell. Sampling follows physical panel pixels and available FFT
-detail, bounded by internal resource limits and the shared material budget.
-Interpolation does not change FFT size or create measured frequency detail.
+Spectrogram preserves peaks when source values share a display cell. Detail is
+bounded by panel resolution, FFT size and the shared material budget;
+interpolation does not create measured frequency detail.
 
 [source,toml]
 ----
@@ -948,25 +921,19 @@ GUI. It limits shared material buffers per window, not total GPU memory.
 Long Spectrogram histories may use fewer frequency rows to fit this budget;
 time resolution and playback audio are unchanged. See
 link:22_cache.adoc#visualization-caching[Visualization caching] for resource scope.
-Both views use a logarithmic frequency axis and share `visualizations.general.analysis_fft_size` and
-`visualizations.general.analysis_window`. Their independent `visualizations.spectrum.db_range` and
-`visualizations.spectrogram.db_range` overrides inherit `visualizations.general.db_range` when omitted;
-see <<visualization-db-ranges,Visualization dB ranges>>.
+Both views use a logarithmic frequency axis. Shared analysis controls are described
+under <<visualizations,Visualizations>>; display-range overrides under
+<<visualization-db-ranges,Visualization dB ranges>>.
 
 === Audio Visualizer
 
-Every Visualization panel uses the `audio_visualizer` kind and stores its style,
-reference-line visibility, and label visibility in `layout.json`. Right-click an
-instance and open `Visualizer style` to choose a style; its tab title, tooltip,
-and drag title follow that choice. `Back` returns without changing it. The main
-menu starts with style selection. The second group contains `Reference lines`,
-`Labels`, and style-specific actions; a checkmark means enabled. Choosing a style
-or toggling an overlay closes the menu.
-Moving panels preserves their choices; layout sync or orderly exit persists them
-across restarts. Different styles can run simultaneously. Global
-`visualizations.defaults.style`, `visualizations.defaults.reference_lines`, and
-`visualizations.defaults.labels` seed new panels only. Style defaults to `bars_rings`;
-both overlay defaults are `false`.
+Every Visualization panel uses the `audio_visualizer` kind. Right-click and open
+`Visualizer style` to choose a style; `Reference lines`, `Labels`, and
+style-specific actions follow it in the menu. Different styles can run simultaneously.
+Instance choices move with the panel and persist through <<layout,Layout>>.
+`visualizations.defaults.style` (default `bars_rings`),
+`visualizations.defaults.reference_lines` and `visualizations.defaults.labels`
+(both default `false`) seed new panels only.
 
 Reference lines and labels are independently optional. Radial guides show
 normalized bar levels; analysis views use their measured axes; fractal guides
@@ -998,18 +965,12 @@ labels that would overlap. Eleven styles are available:
   right. Enabling Overlay channels draws both traces on the same time and amplitude axes.
   A rising zero crossing on the left triggers a configured sweep; right-only
   audio triggers on the right. Short FFT windows show the available half-window.
-  Reference lines mark channel centers and visible amplitude limits. Dashed
-  vertical guides divide the time axis into ten equal intervals; in Separate
-  mode, each channel has its own guides that do not cross the inter-channel gap.
-  Labels show channel order as `L / R` in every language, input amplitude limits,
-  and the actual source-sample duration.
-  `visualizations.oscilloscope.overlay_channels` defaults to `false` (Separate).
-  Its Overlay channels switch under Settings → Visualizations → Oscilloscope is a
-  new-instance default, independent of the global time span and gain controls.
-  Existing panels retain their layout-local mode. Right-click an Oscilloscope
-  panel and toggle Overlay channels after Reference lines and Labels to change only
-  that panel; this preserves its reference-line setting and other options.
-  Switching visualizer styles retains the panel's mode.
+  Reference lines mark channel centers and amplitude limits, with ten equal time
+  intervals; Separate mode gives each channel its own guides.
+  Labels show channel order as `L / R`, input amplitude limits and the actual
+  source-sample duration. `visualizations.oscilloscope.overlay_channels` defaults
+  to `false` (Separate) and seeds new instances only. Change an existing panel
+  through its right-click Overlay channels action; switching styles retains it.
   Global controls under Settings →
   Visualizations → Oscilloscope are `visualizations.oscilloscope.time_span_ms`
   (`1`–`50` ms, default `20`) and `visualizations.oscilloscope.gain`
@@ -1051,8 +1012,7 @@ Keys are relative to `[visualizations]`:
 |`radial.inner_diameter` |0–2 |0.7
 |===
 
-Radial bar glow uses two fixed rendering passes. `reactive.bloom_intensity`
-controls its strength, with zero disabling the glow.
+`reactive.bloom_intensity` controls radial bar glow; zero disables it.
 
 `visualizations.radial.fade_when_idle` defaults to `false` and applies only to stopped playback; pause
 always preserves the last displayed frame. `visualizations.effects.primary_color` and

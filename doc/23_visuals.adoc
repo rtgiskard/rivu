@@ -292,12 +292,11 @@ new traversal's statistics. Lower gain can therefore decrease old peaks and RMS.
 Successive contiguous packets in the same traversal accumulate without counting
 overlapping samples twice; unvisited bins keep their prior values.
 
-An integer sample-to-bin ratio keeps cached statistics in stable coordinates
-through EOF correction and pairwise coarsening. Playback accumulates privately;
-ordinary refills publish dirty statistics only when the shared write lock is
-available, retaining them for a later refill on contention. EOF and retirement
-flush remaining statistics. Publication never replaces shared scan-cancellation
-controls, and identity/revision checks reject stale updates.
+An integer sample-to-bin ratio keeps statistics stable through EOF correction
+and pairwise coarsening. Playback batches publication without waiting for the
+shared write lock, then flushes pending statistics at EOF and retirement.
+Identity/revision checks reject stale updates without replacing scan-cancellation
+controls.
 
 Native and FFmpeg decoding use a finite work budget across packet skipping,
 seek discard, codec buffering and retained fragments. Exhaustion yields control,
@@ -306,11 +305,13 @@ fragment; internal codec allocation and blocking calls are outside that bound.
 
 An explicit full-track scan supplies a baseline for the same rolling display.
 The previous display remains visible during its Track query and decode, and on
-failure. Clicking captures the selected signal, monitor EQ and actual active
-audition source/graph, including retained PCM when memory-backed. Later EQ or
-signal edits neither change nor cancel that request. Without active playback,
-the scan opens the selected original source with its saved decoder hint; it does
-not activate a persisted graph.
+failure. The GUI sends only expected source identity and optional playback source
+generation; clicking does not freeze signal or EQ settings. While servicing the
+Full request, the IPC handler reads Core's configuration and asks Core for the
+audio snapshot identifying the actual active audition source/graph, including
+retained PCM for a memory-backed source. The scan uses that frozen capture; subsequent
+signal or EQ edits do not alter or cancel it. Without active playback, it opens
+the selected original source with its saved decoder hint, not a persisted graph.
 When the captured graph specifies a published frame count, the scan stops once
 that timeline is filled, without decoding or processing unrelated cached suffixes.
 Preguard and processing latency are discarded before counting published frames;
@@ -480,13 +481,9 @@ as zero. Spatial Spectrum maps individual FFT bins by frequency and channel
 power balance into a fixed 256 by 128 field. Cells retain the strongest power
 rather than summing crowded logarithmic rows, which would make color depend on
 bin density instead of signal level.
-The frequency-row mapping retains one axis keyed by the accepted frame's sample
-rate and bin count. The analyzer emits every non-DC bin of its fixed FFT axis;
-requested settings may change before a new frame arrives, so they do not identify
-the retained axis. Repeated frames reuse the mapping without comparing frequencies.
-The analyzer publishes calibrated linear bin power, including the single-sided
-DC/Nyquist endpoint normalization. The field consumes it without a CPU dB-to-power
-round trip, retaining the squared amplitude floor and full-scale saturation.
+Spatial frequency mapping follows the accepted frame's sample rate and bin count,
+not settings awaiting a new frame. Calibrated linear bin power preserves
+single-sided DC/Nyquist normalization without a CPU dB-to-power round trip.
 Overflowing power is omitted rather than promoted to a saturated bright cell.
 
 Both styles retain fixed-resolution numerical fields and share one GPU publication
@@ -595,13 +592,10 @@ Animated source images retain GPUI's focus-based playback policy; source animati
 alone does not keep the artwork owner ticking while the window is inactive.
 Resuming rotation does not replay suspended time. Visualization enablement does not affect artwork.
 
-Each artwork frame advances the shared runtime once, then invalidates only visible
-panel instances with running rotation or an active-window animated source.
-A static panel showing a still image does not redraw just because another panel
-rotates. Source-animation demand starts only after a successful decode with more
-than one frame; loading, failed, and single-frame images do not keep it ticking.
-Image completion notifications make newly decoded animations eligible. Source,
-style, and other shared presentation changes still notify the runtime's consumers.
+Artwork frames invalidate only visible rotating instances or active-window
+animated-source consumers. Loading, failed and single-frame images create no
+source-animation demand; successful animated decodes do. Shared source/style
+changes still invalidate all affected consumers.
 
 == Failure boundaries
 
@@ -680,8 +674,8 @@ Spectrum fills its geometry with the shared GPU palette material, retaining the
 full standard color maps or authored Deadbeef cubic rather than approximating
 them with two stops; see <<spectrum,Spectrum>>.
 
-Rust scene records, WGPU pipelines and shader layouts change together. Palette
-Paths, ordinary fills and transformed image sprites have distinct drawing paths.
+These external renderer extensions require matched Rust scene and shader layouts;
+Rivu consumes them through the pinned interfaces rather than owning their pipelines.
 
 Color images clamp linear texture sampling to their atlas tile's first and last
 texel centers. This prevents neighboring images from bleeding into magnified
@@ -741,12 +735,12 @@ printf '[interface]\ntray_enabled = false\nmpris_enabled = false\n' > "$smoke_di
 ----
 
 Retain the same `smoke_dir` in another terminal to stop the instance with
-`.cache/target/debug/rivu --data-dir "$smoke_dir" quit`; closing its window alone
-does not stop the core. Do not point the smoke instance at normal user storage
-or pass music paths unless importing test media is intentional. Keep the real
-Wayland runtime environment: changing `XDG_RUNTIME_DIR` would also disconnect
-the compositor and audio endpoints. This isolates application data and desktop
-registration, not the shared GPU or audio server.
+`.cache/target/debug/rivu --data-dir "$smoke_dir" quit`. Closing the last window
+exits the desktop process but leaves Core running. Do not point the smoke instance
+at normal user storage or pass music paths unless importing test media is
+intentional. Keep the real Wayland runtime environment: changing `XDG_RUNTIME_DIR`
+would also disconnect the compositor and audio endpoints. This isolates application
+data and desktop registration, not the shared GPU or audio server.
 
 Check initial text and artwork rendering, cached-view updates, window resizing,
 and the visualization styles being exercised. Empty isolated storage cannot

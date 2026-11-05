@@ -211,13 +211,10 @@ This avoids both a second control implementation and a universal whole-library
 snapshot on every playback update.
 
 Each TUI page and Details owns its demand, selection recovery and failed-read
-parking. A foreground coordinator submits only the visible demand, with a new
-ticket for every logical submission, including A→B→A and offset-only changes.
-One private read specification produces the query and borrowed demand in one
-direction; freshness comes from that actual query's stamp. Hidden pages invalidate
-without reading. Layout commits the viewport before input/read planning; drawing
-does not change retention or schedule I/O. Logical cancellation does not release
-the retained worker's physical query slot before its exchange retires.
+parking. Only visible demand is submitted; every logical submission, including
+A→B→A and offset-only changes, gets a new ticket. Hidden pages invalidate without
+reading. Layout establishes the viewport before read planning; drawing schedules
+no I/O. Cancelled reads retain their physical slot until the exchange retires.
 
 Processing task metadata is shared immutably across local snapshots; updates use
 copy-on-write, keeping older publications stable. Socket representation remains a
@@ -576,12 +573,9 @@ is a no-op. Summary pages, including search results, follow the saved catalog or
 `PlaylistSummary { playlist_id }` returns one optional summary by exact identity;
 it uses the catalog token and is independent of catalog position. Batch `after`
 values are traversal cursors, not numeric-ID lower bounds.
-Core issues content/lifetime tokens from one in-memory sequence after confirmed
-commits. Deleting and recreating a playlist, even with the same ID, cannot revive
-an old token within that Core instance. Retention is bounded by extant playlists;
-no durable versions, additional per-track version table or mutation event log is
-needed. Restart reconstructs tokens; the existing instance identity isolates old
-results from the new process.
+Content/lifetime tokens are issued after confirmed commits and retained only for
+extant playlists. Deleting and recreating a playlist cannot revive an old token
+within an instance; Hello identity isolates reconstructed tokens after restart.
 
 Queries take their revision stamps from Core memory. Publishing state performs
 no database version reads and queries do not reconcile an independent SQLite
@@ -636,9 +630,11 @@ content. Playlist reference changes advance member facts, while playlist names
 and order do not.
 
 Task-status queries select no query-data revision domains. Their empty stamp does
-not make status immutable: query the exact task again to observe progress or
-completion, or use System state updates to drive presentation. Status retention
-and task IDs are scoped to the running instance, not a persistent job database.
+not make status immutable: query the exact task again or use `WaitTask` for its
+terminal result. For presentation updates, subscribe to System for scan and
+relocation status, and to the independent Processing section and revision for
+processing status. System wire state does not carry processing. Task IDs and
+retained results belong to the running instance, not a persistent job database.
 
 Track and playlist metadata scopes share an index of at most 256 entries. Commits
 identify affected display metadata transactionally; decoder hints and playback
@@ -1014,10 +1010,9 @@ or all registered sources with no roots. It does not discover, relocate, or dele
 tracks; commit rechecks current scope. `force` bypasses metadata reuse. File checks
 and external queue admission share the scan task slot, saving boundary, cancellation,
 and shutdown joining contract.
-External-file preparation owns path normalization and occurrence indexing. Its
-prepared records and indices are read-only outside that owner; Saving consumes
-them without repeating normalization or an index-validation pass. Queue insertion
-positions and database identities are still checked against the saving transaction.
+External-file preparation normalizes paths and records occurrence order once.
+Saving still validates queue insertion positions and database identities against
+the transaction.
 
 Accepted scan, playlist-import, file-check, and external-admission commands return
 `Ack.scan_id` with their `u64` task ID. Acceptance is not completion. The CLI sends
@@ -1034,18 +1029,13 @@ independent task status and cancellation bind to that instance before sending a
 business request. References from an earlier instance are rejected after restart.
 The reference does not extend task retention or persist tasks across restarts.
 
-Task completion waiting belongs to Core, not to a socket-side revision observer.
-The owner atomically checks retained terminal results or registers a completion
-waiter, then continues processing business operations. At most 256 waits may be
-reserved, including requests still queued for owner admission; dropping the wait
-releases its reservation immediately. Ordinary progress does not inspect waiting
-clients or clone their result payloads. Completion
-returns the task-specific final object directly, without an intermediate
-notification or a follow-up query. `task status` remains an immediate query.
-Disconnecting or cancelling a wait releases its registration without cancelling
-the task; task cancellation remains an explicit command. A waiting connection
-cannot pipeline another request. Unknown or expired tasks fail rather than wait
-for a future task with the same numeric ID.
+Core atomically returns a retained terminal result or registers a completion
+waiter. At most 256 waits may be reserved, including queued admission; dropping a
+wait releases its reservation immediately without cancelling the task. Progress
+does not wake completion waiters. Completion returns the final task object without
+a follow-up query; `task status` remains immediate. A waiting connection cannot
+pipeline another request. Unknown or expired tasks fail rather than waiting for a
+future task with the same numeric ID.
 
 `ViewResponse::ScanTask` contains `{id, progress, message, library_committed,
 playlist_id, error}`. The phases are `Discovering`, `ReadingMetadata`, `Saving`,
@@ -1250,9 +1240,10 @@ retained IDs return `None`, unlike unknown scan and relocation task queries.
 `CancelProcessing { id }` requests cooperative cancellation of the matching active
 task; its acknowledgement does not prove worker retirement. `AuditionProcessing
 { id, mode, vocal_gain_db, accompaniment_gain_db }` selects
-original/denoised/vocals/accompaniment/mix. System state exposes the latest
-`processing` status. Use the exact task query for completion rather than an
-unrelated latest-task field, and keep task IDs bound to the Hello instance.
+original/denoised/vocals/accompaniment/mix. The independent Processing state section
+exposes the latest task under `processing.task`; subscribe to its revision, not
+System. Use the exact task query or `WaitTask` for that task's completion rather
+than an unrelated latest-task field, and bind task IDs to the Hello instance.
 Settings and source identity are captured with the job; output status reports
 the models actually used. Retained output availability is session-bounded.
 Known model identity and verified provenance remain visible after inference

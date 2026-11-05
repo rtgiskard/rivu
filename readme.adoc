@@ -213,18 +213,19 @@ Keep `Cargo.lock` to retain the resolved dependency versions. Run `make lint`
 to check formatting and all workspace targets with all features, including
 font embedding; install its additional prerequisites below first.
 
-Run `make test` for all behavior suites, or select a suite:
+Run `make test` for the main behavior suites, or select a suite:
 
 [cols="1,3",options="header"]
 |===
 |Command |Coverage
 |`make test-rust`
-|Workspace tests with default, all, and no default features; application tests
-with GUI only and TUI only; standalone `rivu-dsp` and `rivu-format` tests without
-default features; standalone `rivu-utils` tests with no features, logging only,
-terminal only, and both features
+|Workspace and standalone-crate feature combinations listed in link:Makefile[Makefile]
 |`make test-python`
 |Audio-processing worker and evaluation tests with synthetic inputs; no model downloads
+|`cargo test --locked -p rivu-ui --features showcase --example showcase`
+|Showcase dropdown keyboard regression; examples are not test targets by default
+|`cargo test --locked -p symphonia-metadata -p symphonia-format-ogg -p symphonia-format-mkv -p symphonia-format-isomp4 -p symphonia-format-riff -p symphonia-bundle-flac`
+|Local decoder/metadata patch regressions; these dependencies are not workspace members
 |===
 
 Rust tests use `Cargo.lock`. Install the build/font prerequisites and `dbus`;
@@ -342,12 +343,10 @@ and link:doc/23_visuals.adoc#pinned-gpu-extensions[pinned GPUI extensions].
 and enabled Cargo features (`gui`, `tui`, `ffmpeg`, `onnx`, `embed-nerd-font`, or `none`).
 `rivu-migrate -V` prints its package version.
 
-`make build` uses `git describe` (including `-dirty`) as the build identity;
-plain Cargo uses the package version. Override either with `RIVU_GIT_VERSION`,
-including for source archives without Git metadata. Git tags may differ from package
-versions. Compatibility is governed separately by
-link:doc/26_migration.adoc#version-authority[disk formats] and
-link:doc/21_ipc.adoc#wire-schemas[IPC schemas].
+`make build` derives build identity from Git; plain Cargo uses the package version.
+Override either with `RIVU_GIT_VERSION`. Build/release labels do not govern
+link:doc/26_migration.adoc#version-authority[disk formats] or
+link:doc/21_ipc.adoc#wire-schemas[IPC compatibility].
 
 Set `SOURCE_DATE_EPOCH` to nonnegative Unix seconds for a reproducible build
 timestamp. Invalid values fail the build; About displays the timestamp locally.

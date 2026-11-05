@@ -45,15 +45,11 @@ Select a playlist in the catalog to browse its tracks. The catalog and track lis
 have independent link:02_library.adoc#desktop-list-search[searches]; filtering
 does not restrict whole-playlist Play, Append, or Export.
 
-Drag a playlist name to change catalog order. A row's upper half inserts before
-that playlist and its lower half inserts after it; the accent line marks the
-shared insertion boundary without moving between the two neighboring half-rows.
-Dropping below the rows appends. Dropping on the source row
-or pressing Esc leaves the order unchanged. Catalog ordering is disabled while
-the playlist-name search is active; clear it before dragging. The order is saved
-across restarts, and new playlists append. Reordering does not change playlist
-contents, track selection, or the playback queue. If the catalog changes during
-the drag, the old ordering request is rejected.
+Drag a playlist name to reorder the catalog: the upper/lower half of a row inserts
+before/after it, and blank space appends. The accent line marks the insertion
+boundary; dropping on the source or pressing Esc cancels. Clear the name search
+before reordering. Order survives restart, with new playlists appended; it does
+not affect tracks or Queue. A changed catalog rejects an in-progress drag.
 
 Hover a catalog row for Play and its actions menu; they target that row, not the
 selected playlist. Play loads the complete saved order; Append copies it without
@@ -67,10 +63,9 @@ Add current track uses the playback track, not Library selection, and requires a
 current track. Remove duplicates keeps each track's first occurrence and changes
 only that playlist. It rejects a request if the playlist's contents have changed.
 
-Rename opens the current name; Enter submits, while Cancel or Esc discards the
-draft. Saving runs in the background. Failure keeps the draft for correction;
-closing the window cannot cancel a submitted save. Delete asks for confirmation
-and removes only the playlist, never music files.
+Rename opens the current name; Enter saves in the background, and Cancel or Esc
+discards the draft. Failure retains the draft for correction; closing cannot
+cancel a submitted save. Delete asks for confirmation and never deletes music files.
 
 === Track selection and ordering
 
@@ -82,17 +77,15 @@ removes selected entries. These keys do not operate the catalog, an editor, or
 another panel. Double-click or Enter plays the active track individually. Hover
 Play, Favorite, and Remove controls act only on their own row.
 
-Once loading completes, an empty playlist shows its empty state. Drag a selected
-track to move the selected group in its original playlist order; dragging an
-unselected track moves only that entry. A row's upper half inserts before that
-entry; its lower half inserts after it. The accent insertion line marks the
-boundary that will be committed; dropping below the rows appends. The dragged
-group is fixed at drag start, even if track selection changes during the gesture.
-Dropping on a member of that group or pressing Esc leaves playlist order unchanged.
-This saves playlist order without changing the queue. A drag is rejected if that
-playlist's membership or order changes, it is deleted, or the selection switches
-before dropping, including switching away and back. Renaming a playlist or editing
-another playlist does not cancel the drag.
+Drag a selection to move it in original playlist order; dragging an unselected
+row moves only that entry. The upper/lower half of a row inserts before/after it,
+and blank space appends. The accent line marks the boundary. The dragged group
+stays fixed; dropping on that group or pressing Esc cancels. Reordering saves
+the playlist without changing Queue.
+
+A drag is rejected if membership or order changes, the playlist is deleted, or
+you switch playlists before dropping, even away and back. Renames and edits to
+other playlists do not invalidate it.
 
 === Transfers and queue saving
 
@@ -114,10 +107,10 @@ tracks without changing the source collection. This selector also works when
 the Playlists panel is not visible. Track menus follow the
 link:02_library.adoc#desktop-selection-and-directory-tree[shared selection rules].
 
-For a nonempty queue, use Queue → Save queue as playlist. The editable default
-name is `Queue_YYYYMMDD_HHMMSS`. Every occurrence is saved in queue order without
-changing Queue. The dialog shares New playlist and Rename's background-save and
-failure-retry behavior; loading or failed queue selection shows status and Retry.
+For a nonempty queue, use Queue → Save queue as playlist. The default name is
+`Queue_YYYYMMDD_HHMMSS`; every occurrence is saved in queue order without changing
+Queue. The dialog uses the same naming and background-save rules as New playlist
+and Rename. Failed queue-selection loading offers Retry.
 
 === Loading and selection recovery
 
@@ -129,24 +122,17 @@ another client clears it on refresh. Empty playlists and unloaded pages do not
 imply deletion. See link:02_library.adoc#paged-views[Paged views] for loading,
 timeouts, and CLI incomplete-output recovery.
 
-A range is selected only after all its rows load. Failure preserves the previous
-selection. Committing a different Details track cancels its unsubmitted inline text.
-Refresh keeps entries that still exist and discards removed ones. Pending or failed
-selection loads disable group actions and offer Retry; loaded row controls remain row-local.
-Retry reconciles the previous selection rather than replaying a failed range or
-key command. With no previous selection it restores an empty selection so you
-can navigate again. Failed group removal does not partially remove entries.
+A range is selected only after all its rows load; failure preserves the previous
+selection. Pending or failed selection loads disable group actions and offer
+Retry, while loaded row controls remain usable. Retry reconciles the previous
+selection rather than replaying a failed range or key command; refresh drops
+removed entries. Group removal is atomic.
 
-=== Playlist query validity
-
-The entry view owns the current filter for both navigation requests and response
-acceptance. Changing it clears selection and revokes older navigation intent;
-late success or failure only retires its worker, without restoring selection.
-
-Listings restart if this playlist's membership or order changes, not on renames
-or changes to other playlists. Metadata edits may invalidate displayed results
-without changing entry identity. Stale group edits are rejected; exports use a
-consistent snapshot. Protocol details: link:21_ipc.adoc#query-results-and-pagination[IPC query validity].
+Changing the filter clears selection and cancels older navigation intent; late
+results cannot restore it. Listings refresh when membership or order changes,
+not on renames or edits to other playlists. Metadata changes can refresh display
+without changing entry identity. Stale group edits are rejected. Protocol details:
+link:21_ipc.adoc#query-results-and-pagination[IPC query validity].
 
 == Import and export
 
@@ -172,9 +158,9 @@ sheet in the same import; excluded new tracks do not enter the playlist.
 Import fails if no entries resolve successfully. Without `--name`, the playlist
 name comes from the imported file's name without its extension. Both explicit
 and default names are validated before a scan starts or any scan data is saved.
-Imports use the shared media-task slot; accepted-task feedback appears in Playlists,
-separately from rejected-request errors. Use `--wait` for completion. Preparation
-can be cancelled without saving; Saving cannot. Status, dismissal, and shutdown:
+Imports use the shared media-task slot, with feedback in Playlists. Use `--wait`
+for completion. Preparation can be cancelled without saving; Saving cannot.
+Status, errors, dismissal, and shutdown follow
 link:02_library.adoc#cancellation[Library cancellation].
 
 === Input limits and cancellation
@@ -191,24 +177,17 @@ limits aborts before saving; these are not playlist-size caps.
 
 === Commit and export lifecycle
 
-Scan saving and playlist creation commit separately; view refreshes do not undo
-either commit. A failure to save the scan does not create a playlist. Once the
-scan has been saved, a playlist-creation or later refresh failure does not roll
-back the saved tracks; once the playlist has been created, a refresh failure does
-not delete it. Task results retain `library_committed` and `playlist_id` for
-confirmed commits, including failures of later steps. The import is not replayed
-automatically; inspect the result before retrying a missing step.
+Scan saving and playlist creation commit separately. A failed scan save creates
+no playlist; failure after saving does not undo library changes, and refresh
+failure does not delete an already-created playlist. Results retain
+`library_committed` and `playlist_id` as evidence of confirmed commits. Imports
+are not replayed automatically: inspect the result before retrying a missing step.
 
-Imports retain resolved occurrences in expanded input order, including repeats.
-Export preserves saved order and multiplicity, subject to CUE restrictions below.
-
-Listings and exports include every entry, not only visible rows. For listing
-changes and retries, see link:02_library.adoc#paged-views[Paged views]. Only one
-export can run at a time. Its reply reports final output, not startup, and
-concurrent playlist edits do not alter the exported snapshot.
-
-The export row contract is application-local, shared by database reads, Core
-coordination and the playlist writer; it is not part of the IPC wire format.
+Imports retain expanded input order and repeats. Export preserves the complete
+saved order and multiplicity, not search results, subject to CUE restrictions
+below. One export runs at a time, using a consistent snapshot unaffected by later
+edits; its reply reports final output. Incomplete listing recovery is described in
+link:02_library.adoc#paged-views[Paged views].
 
 Export atomically replaces the destination only after successful output. Failure
 or shutdown cancellation before replacement preserves the old target; cancellation
