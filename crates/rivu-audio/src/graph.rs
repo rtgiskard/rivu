@@ -36,14 +36,14 @@ impl DelayLine {
             position: 0,
         }
     }
-    fn add(&mut self, input: &[f32], output: &mut [f32], gain: f32) {
+    fn add(&mut self, input: &[f32], output: &mut [f64], gain: f64) {
         if self.samples.is_empty() {
             for (output, input) in output.iter_mut().zip(input) {
-                *output += input * gain;
+                *output += f64::from(*input) * gain;
             }
         } else {
             for (output, input) in output.iter_mut().zip(input) {
-                *output += self.samples[self.position] * gain;
+                *output += f64::from(self.samples[self.position]) * gain;
                 self.samples[self.position] = *input;
                 self.position += 1;
                 if self.position == self.samples.len() {
@@ -67,7 +67,7 @@ enum Processor {
 }
 struct Input {
     node: usize,
-    gain: f32,
+    gain: f64,
     delay: DelayLine,
 }
 struct Node {
@@ -77,6 +77,7 @@ struct Node {
     output: Vec<f32>,
     // Logical nodes retain identity/timing/counts; only physical owners store PCM.
     output_node: usize,
+    needs_sum: bool,
     latency: usize,
     tail: usize,
     input_tail: usize,
@@ -122,6 +123,7 @@ struct PlannedNode {
     inputs: Vec<Input>,
     source: bool,
     bypassed: bool,
+    needs_sum: bool,
     latency: usize,
     input_latency: usize,
     tail: usize,
@@ -148,6 +150,7 @@ impl GraphPlan<'_> {
     }
 
     fn prepare_owned(self, graph: std::sync::Arc<ProcessingGraph>) -> Result<GraphRunner> {
+        let needs_sum = self.nodes.iter().any(|node| node.needs_sum);
         let mut nodes: Vec<Node> = Vec::with_capacity(self.nodes.len());
         for mut planned in self.nodes {
             let processor = if planned.source {
@@ -183,10 +186,7 @@ impl GraphPlan<'_> {
                     self.channels,
                 );
             }
-            let single_unity = planned.inputs.len() == 1
-                && planned.inputs[0].gain == 1.0
-                && planned.inputs[0].delay.samples.is_empty();
-            let output_node = if matches!(processor, Processor::Pass) && single_unity {
+            let output_node = if matches!(processor, Processor::Pass) && !planned.needs_sum {
                 nodes[planned.inputs[0].node].output_node
             } else {
                 nodes.len()
@@ -202,6 +202,7 @@ impl GraphPlan<'_> {
                     Vec::new()
                 },
                 output_node,
+                needs_sum: planned.needs_sum,
                 latency: planned.latency,
                 tail: planned.tail,
                 input_tail: planned.input_tail,
@@ -213,6 +214,11 @@ impl GraphPlan<'_> {
             latency: output.latency,
             tail: output.tail,
             nodes,
+            sum: if needs_sum {
+                vec![0.0; GRAPH_BLOCK_FRAMES * self.channels]
+            } else {
+                Vec::new()
+            },
             channels: self.channels,
             sample_rate: self.sample_rate,
             estimated_state_bytes: self.state_bytes,
@@ -234,6 +240,8 @@ impl GraphPlan<'_> {
 /// 65,536 frames; internal node rounds contain at most 256 frames.
 pub struct GraphRunner {
     nodes: Vec<Node>,
+    // Nodes execute serially, so all weighted/delayed inputs share one scratch block.
+    sum: Vec<f64>,
     channels: usize,
     sample_rate: u32,
     latency: usize,
@@ -324,6 +332,7 @@ impl GraphRunner {
         let mut nodes: Vec<PlannedNode> = Vec::with_capacity(ordered.len());
         let mut state_bytes = 0usize;
         let mut work_per_frame = 0u64;
+        let mut has_sum = false;
         for port in ordered {
             let graph_node = graph.node(port.node)?;
             let is_source =
@@ -371,7 +380,7 @@ impl GraphRunner {
                         let audible = !muted[input_port]
                             && (!solo.iter().any(|value| *value) || solo[input_port]);
                         input.gain = if audible {
-                            10.0_f32.powf(gains_db[input_port] / 20.0)
+                            10.0_f64.powf(f64::from(gains_db[input_port]) / 20.0)
                         } else {
                             0.0
                         };
@@ -379,6 +388,15 @@ impl GraphRunner {
                 }
             }
             let bypassed = !is_source && is_bypassed(&graph_node.kind);
+            let needs_sum = !is_source
+                && !(inputs.len() == 1
+                    && inputs[0].gain == 1.0
+                    && nodes[inputs[0].node].latency == upstream_latency);
+            if needs_sum && !has_sum {
+                state_bytes =
+                    state_bytes.saturating_add(GRAPH_BLOCK_FRAMES * channels * size_of::<f64>());
+                has_sum = true;
+            }
             // Bound cumulative state and work before preparing any processor.
             let (extra_state, extra_work) = if is_source || bypassed {
                 (0, 0)
@@ -388,8 +406,15 @@ impl GraphRunner {
             state_bytes =
                 state_bytes.saturating_add(extra_state + GRAPH_BLOCK_FRAMES * channels * 4);
             // Keep output admission conservative even for aliased logical nodes.
+            // Wide sums charge multiply/add per edge plus clearing, rounding,
+            // and finite validation per output sample; unity copies stay cheap.
+            let input_work = if needs_sum {
+                inputs.len() as u64 * 2 + 3
+            } else {
+                inputs.len() as u64
+            };
             work_per_frame =
-                work_per_frame.saturating_add(extra_work + inputs.len() as u64 * channels as u64);
+                work_per_frame.saturating_add(extra_work + input_work * channels as u64);
             ensure!(
                 state_bytes <= MAX_STATE_BYTES,
                 "realtime graph exceeds 64 MiB state budget"
@@ -442,6 +467,7 @@ impl GraphRunner {
                 inputs,
                 source: is_source,
                 bypassed,
+                needs_sum,
                 latency,
                 input_latency: upstream_latency,
                 tail: upstream_tail + tail,
@@ -601,20 +627,23 @@ impl GraphRunner {
                     output.copy_from_slice(&chunk[..output.len()]);
                 }
             } else {
-                if node.inputs.len() == 1
-                    && node.inputs[0].gain == 1.0
-                    && node.inputs[0].delay.samples.is_empty()
-                {
+                if !node.needs_sum {
                     let input = &previous[previous[node.inputs[0].node].output_node].output;
                     output.copy_from_slice(&input[..output.len()]);
                 } else {
-                    output.fill(0.0);
+                    let sum = &mut self.sum[..output.len()];
+                    sum.fill(0.0);
                     for input in &mut node.inputs {
                         input.delay.add(
                             &previous[previous[input.node].output_node].output[..output.len()],
-                            output,
+                            sum,
                             input.gain,
                         );
+                    }
+                    // Match offline mixing: preserve every edge in f64 and round
+                    // once at the node output, including delayed contributions.
+                    for (output, sum) in output.iter_mut().zip(sum) {
+                        *output = *sum as f32;
                     }
                     ensure!(
                         output.iter().all(|value| value.is_finite()),
@@ -793,6 +822,123 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    fn attenuated_sum_graph() -> ProcessingGraph {
+        let mut graph = chain_graph(
+            GraphNodeKind::Mix {
+                gains_db: vec![-75.0, 0.0],
+                muted: vec![false, true],
+                solo: vec![false; 2],
+            },
+            3,
+        );
+        graph.nodes[3].kind = GraphNodeKind::Mix {
+            gains_db: vec![0.0; 3],
+            muted: vec![false; 3],
+            solo: vec![false; 3],
+        };
+        graph.edges[2].from = port(1, 0);
+        graph.edges.extend(
+            [(1, 2, 1), (2, 3, 1), (3, 4, 1), (3, 4, 2)]
+                .into_iter()
+                .map(|(from, to, input)| GraphEdge {
+                    from: port(from, 0),
+                    to: port(to, input),
+                }),
+        );
+        graph
+    }
+
+    #[test]
+    fn native_mix_rounds_once_after_two_small_contributions() {
+        let graph = attenuated_sum_graph();
+        let gain = 10.0_f64.powf(-75.0 / 20.0);
+        let first = gain as f32;
+        let tiny = (f64::from(first) * gain) as f32;
+        let expected = (1.0 + f64::from(tiny) + f64::from(tiny)) as f32;
+        assert_eq!(expected.to_bits(), 1.0_f32.to_bits() + 1);
+        assert_eq!((1.0_f32 + tiny) + tiny, 1.0);
+        let mut runner = GraphRunner::compile(&graph, port(5, 0), 48_000, 2).unwrap();
+        for chunk_frames in [GRAPH_BLOCK_FRAMES, 37] {
+            let mut samples: Vec<_> = (0..GRAPH_BLOCK_FRAMES * 2 + 17)
+                .flat_map(|_| [1.0, -1.0])
+                .collect();
+            for chunk in samples.chunks_mut(chunk_frames * 2) {
+                runner.process_interleaved(chunk).unwrap();
+            }
+            assert!(
+                samples
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .all(|frame| *frame == [expected, -expected])
+            );
+            assert_eq!(runner.finish_interleaved(&mut [0.0; 2]).unwrap(), 0);
+            runner.reset();
+        }
+    }
+
+    #[test]
+    fn native_mix_uses_wide_db_gain_before_rounding_to_pcm() {
+        for gain_db in [-119.75, -75.03125, -6.0206, 0.125, 23.75] {
+            let mut graph = chain_graph(
+                GraphNodeKind::Mix {
+                    gains_db: vec![gain_db, 0.0],
+                    muted: vec![false, true],
+                    solo: vec![false; 2],
+                },
+                1,
+            );
+            graph.edges.push(GraphEdge {
+                from: port(1, 0),
+                to: port(2, 1),
+            });
+            let gain = 10.0_f64.powf(f64::from(gain_db) / 20.0);
+            let mut samples: Vec<_> = (1..=513).map(|i| i as f32 / 513.0).collect();
+            let expected: Vec<_> = samples
+                .iter()
+                .map(|sample| (f64::from(*sample) * gain) as f32)
+                .collect();
+            let mut runner = GraphRunner::compile(&graph, port(3, 0), 48_000, 1).unwrap();
+            runner.process_interleaved(&mut samples).unwrap();
+            assert_eq!(samples, expected, "gain {gain_db} dB");
+        }
+    }
+
+    #[test]
+    fn wide_mix_scratch_is_shared_and_charged_with_work_admission() {
+        let graph = attenuated_sum_graph();
+        let runner = GraphRunner::compile(&graph, port(5, 0), 48_000, 2).unwrap();
+        assert_eq!(runner.sum.len(), GRAPH_BLOCK_FRAMES * 2);
+        assert_eq!(
+            runner.estimated_state_bytes(),
+            GRAPH_BLOCK_FRAMES * 2 * (5 * size_of::<f32>() + size_of::<f64>())
+        );
+        let work = 2 * ((2 * 2 + 3) * 2 + (3 * 2 + 3) + 1);
+        assert_eq!(runner.estimated_work_per_frame(), work);
+        let rate = (MAX_WORK_PER_SECOND / work) as u32;
+        assert!(GraphRunner::plan(&graph, port(5, 0), None, rate, 2).is_ok());
+        assert!(GraphRunner::plan(&graph, port(5, 0), None, rate + 1, 2).is_err());
+    }
+
+    #[test]
+    fn delay_lines_keep_wide_contributions_and_reset_history() {
+        let tiny = 4.0e-8_f32;
+        let mut delayed = DelayLine::new(1, 1);
+        let mut sum = [0.0];
+        delayed.add(&[tiny], &mut sum, 1.0);
+        assert_eq!(sum, [0.0]);
+        sum[0] = 1.0;
+        delayed.add(&[0.0], &mut sum, 1.0);
+        assert_eq!(sum, [1.0 + f64::from(tiny)]);
+        DelayLine::new(0, 1).add(&[tiny], &mut sum, 1.0);
+        assert_eq!((sum[0] as f32).to_bits(), 1.0_f32.to_bits() + 1);
+        delayed.add(&[tiny], &mut [0.0], 1.0);
+        delayed.reset();
+        sum.fill(0.0);
+        delayed.add(&[0.0], &mut sum, 1.0);
+        assert_eq!(sum, [0.0]);
     }
 
     #[test]

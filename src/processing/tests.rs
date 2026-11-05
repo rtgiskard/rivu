@@ -608,7 +608,7 @@ fn retained_graph_failures_report_the_responsible_node_once() {
         let mut progress = ProgressReporter::new(&tx, status.id);
         // Exercise the retained-PCM executor directly, without model weights or Python.
         let error = graph::execute(
-            input,
+            input.clone(),
             Arc::clone(&budget),
             &mut status,
             &AtomicBool::new(false),
@@ -1367,7 +1367,7 @@ fn guarded_profile_selection_uses_source_frame_floor_in_both_execution_paths() {
             let (tx, _rx) = async_channel::unbounded();
             let mut progress = ProgressReporter::new(&tx, result.status.id);
             let retained = graph::execute(
-                &input,
+                input,
                 Arc::clone(&service.budget),
                 &mut result.status.clone(),
                 &AtomicBool::new(false),

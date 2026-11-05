@@ -373,11 +373,16 @@ impl Core {
                         .find(|p| p.name == name)
                         .context("Unknown equalizer preset")?;
                     use std::io::Write;
-                    let mut file = std::fs::OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .open(path)?;
-                    file.write_all(&serde_json::to_vec_pretty(&preset.config)?)?;
+                    let bytes = serde_json::to_vec_pretty(&preset.config)?;
+                    let parent = path
+                        .parent()
+                        .filter(|parent| !parent.as_os_str().is_empty())
+                        .unwrap_or_else(|| Path::new("."));
+                    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+                    temporary.write_all(&bytes)?;
+                    temporary
+                        .persist_noclobber(&path)
+                        .map_err(|error| error.error)?;
                     return Ok(());
                 }
                 _ => unreachable!("parameter edits are handled by apply_config"),

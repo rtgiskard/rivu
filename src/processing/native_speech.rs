@@ -384,12 +384,16 @@ fn reflect(index: i64, length: u64) -> u64 {
 // delay-compensated low-pass resampler, not linear interpolation or a model-rate
 // relabel. Kernel support is 16 zero crossings per side; rate ratios determine
 // exact phases once. Coefficients and context are independent of track length.
-struct Resampler<'a> {
-    pcm: &'a audio::PcmAudio,
+struct SincKernel {
+    source: u32,
     target: u32,
     phases: usize,
     radius: i64,
     kernels: Vec<f32>,
+}
+struct Resampler<'a> {
+    pcm: &'a audio::PcmAudio,
+    kernel: SincKernel,
     cache: Vec<f32>,
     start: u64,
     valid: usize,
@@ -400,15 +404,18 @@ fn gcd(mut a: u32, mut b: u32) -> u32 {
     }
     a
 }
-impl<'a> Resampler<'a> {
-    fn new(pcm: &'a audio::PcmAudio, target: u32, cancel: &AtomicBool) -> Result<Self> {
-        let source = pcm.sample_rate();
+impl SincKernel {
+    fn new(source: u32, target: u32, cancel: &AtomicBool) -> Result<Self> {
         ensure!(
             (8_000..=384_000).contains(&source) && (8_000..=384_000).contains(&target),
             "Native speech resampling supports 8000..384000 Hz"
         );
         let cutoff = (target as f64 / source as f64).min(1.0);
-        let radius = (16.0 / cutoff).ceil() as i64;
+        let radius = if source == target {
+            0
+        } else {
+            (16.0 / cutoff).ceil() as i64
+        };
         let phases = (target / gcd(source, target)) as usize;
         let taps = (2 * radius + 1) as usize;
         let mut kernels = Vec::new();
@@ -444,41 +451,216 @@ impl<'a> Resampler<'a> {
             }
         }
         Ok(Self {
-            pcm,
+            source,
             target,
             phases,
             radius,
             kernels,
+        })
+    }
+    fn position(&self, index: u64) -> i64 {
+        (u128::from(index) * u128::from(self.source) / u128::from(self.target)) as i64
+    }
+    fn sample(&self, index: u64, mut source: impl FnMut(i64) -> f32) -> f32 {
+        let integer = self.position(index);
+        if self.source == self.target {
+            return source(integer);
+        }
+        let remainder = u128::from(index) * u128::from(self.source) % u128::from(self.target);
+        let phase = (remainder * self.phases as u128 / u128::from(self.target)) as usize;
+        let taps = (2 * self.radius + 1) as usize;
+        let mut value = 0.0;
+        for i in 0..taps {
+            value += source(integer + i as i64 - self.radius) * self.kernels[phase * taps + i];
+        }
+        value
+    }
+}
+impl<'a> Resampler<'a> {
+    fn new(pcm: &'a audio::PcmAudio, target: u32, cancel: &AtomicBool) -> Result<Self> {
+        Ok(Self {
+            pcm,
+            kernel: SincKernel::new(pcm.sample_rate(), target, cancel)?,
             cache: vec![0.0; 8192 * usize::from(pcm.channels())],
             start: 0,
             valid: 0,
         })
     }
-    fn source(&mut self, index: i64, channel: usize) -> f32 {
-        // Constant extension is used by the FIR, while STFT reflection occurs
-        // at model-rate sample boundaries separately.
-        let index = index.clamp(0, self.pcm.frames() as i64 - 1) as u64;
-        if index < self.start || index >= self.start + self.valid as u64 {
-            self.start = index.saturating_sub(512);
-            self.valid = self.pcm.read_frames(self.start, &mut self.cache);
-        }
-        self.cache[(index - self.start) as usize * usize::from(self.pcm.channels()) + channel]
-    }
     fn sample(&mut self, index: u64, channel: usize) -> f32 {
-        let position = u128::from(index) * u128::from(self.pcm.sample_rate());
-        let integer = (position / u128::from(self.target)) as i64;
-        if self.pcm.sample_rate() == self.target {
-            return self.source(integer, channel);
+        // Split these borrows so both seekable and streaming restoration use
+        // the exact same phases, coefficients and f32 accumulation order.
+        let pcm = self.pcm;
+        let start = &mut self.start;
+        let valid = &mut self.valid;
+        let cache = &mut self.cache;
+        self.kernel.sample(index, |index| {
+            let index = index.clamp(0, pcm.frames() as i64 - 1) as u64;
+            if index < *start || index >= *start + *valid as u64 {
+                *start = index.saturating_sub(512);
+                *valid = pcm.read_frames(*start, cache);
+            }
+            cache[(index - *start) as usize * usize::from(pcm.channels()) + channel]
+        })
+    }
+}
+
+// Consume completed model hops directly. Only the next FIR support interval
+// remains live; endpoint extension is identical to the seekable resampler.
+struct StreamingResampler {
+    kernel: SincKernel,
+    channels: usize,
+    length: u64,
+    output_frames: u64,
+    received: u64,
+    next: u64,
+    start: u64,
+    pending: std::collections::VecDeque<f32>,
+    block: Vec<f32>,
+}
+impl StreamingResampler {
+    fn new(
+        source: u32,
+        target: u32,
+        channels: usize,
+        length: u64,
+        output_frames: u64,
+        cancel: &AtomicBool,
+    ) -> Result<Self> {
+        let kernel = SincKernel::new(source, target, cancel)?;
+        let capacity = (HOP + 2 * kernel.radius as usize + 2) * channels;
+        Ok(Self {
+            kernel,
+            channels,
+            length,
+            output_frames,
+            received: 0,
+            next: 0,
+            start: 0,
+            pending: std::collections::VecDeque::with_capacity(capacity),
+            block: vec![0.0; 4096 * channels],
+        })
+    }
+    fn push(
+        &mut self,
+        samples: &[f32],
+        cancel: &AtomicBool,
+        mut emit: impl FnMut(u64, &[f32]) -> Result<()>,
+    ) -> Result<()> {
+        check_cancel(cancel)?;
+        ensure!(
+            samples.len().is_multiple_of(self.channels) && samples.len() <= HOP * self.channels,
+            "Native restoration requires complete bounded model hops"
+        );
+        let count = samples.len() / self.channels;
+        ensure!(
+            self.received + count as u64 <= self.length,
+            "Native restoration input overflow"
+        );
+        self.pending.extend(samples.iter().copied());
+        self.received += count as u64;
+        while self.next < self.output_frames {
+            check_cancel(cancel)?;
+            let begin = self.next;
+            let mut count = 0;
+            while count < self.block.len() / self.channels && self.next < self.output_frames {
+                let right = self.kernel.position(self.next) + self.kernel.radius;
+                if self.received < self.length && right >= self.received as i64 {
+                    break;
+                }
+                for channel in 0..self.channels {
+                    self.block[count * self.channels + channel] =
+                        self.kernel.sample(self.next, |index| {
+                            let index = index.clamp(0, self.length as i64 - 1) as u64;
+                            self.pending[(index - self.start) as usize * self.channels + channel]
+                        });
+                }
+                self.next += 1;
+                count += 1;
+            }
+            if count == 0 {
+                break;
+            }
+            emit(begin, &self.block[..count * self.channels])?;
+            // The next output may skip beyond the received prefix when
+            // downsampling. Never discard samples that have not arrived yet.
+            let keep = (self.kernel.position(self.next) - self.kernel.radius).max(0) as u64;
+            let keep = keep.min(self.received);
+            let discard = (keep - self.start) as usize * self.channels;
+            self.pending.drain(..discard);
+            self.start = keep;
         }
-        let remainder = position % u128::from(self.target);
-        let phase = (remainder * self.phases as u128 / u128::from(self.target)) as usize;
-        let taps = (2 * self.radius + 1) as usize;
-        let mut value = 0.0;
-        for i in 0..taps {
-            let source = self.source(integer + i as i64 - self.radius, channel);
-            value += source * self.kernels[phase * taps + i];
-        }
-        value
+        Ok(())
+    }
+    fn finish(self) -> Result<()> {
+        ensure!(
+            self.received == self.length && self.next == self.output_frames,
+            "Native speech inverse STFT/restoration frame alignment mismatch"
+        );
+        Ok(())
+    }
+}
+
+struct SpeechOutput<'a> {
+    input: &'a audio::PcmAudio,
+    restored: StreamingResampler,
+    output: audio::PcmBuilder,
+    dry: Vec<f32>,
+    wet: f32,
+}
+impl<'a> SpeechOutput<'a> {
+    fn new(
+        input: &'a audio::PcmAudio,
+        length: u64,
+        wet: f32,
+        budget: Arc<audio::PcmBudget>,
+        cancel: &AtomicBool,
+    ) -> Result<Self> {
+        let channels = usize::from(input.channels());
+        Ok(Self {
+            input,
+            restored: StreamingResampler::new(
+                RATE,
+                input.sample_rate(),
+                channels,
+                length,
+                input.frames(),
+                cancel,
+            )?,
+            output: audio::PcmBuilder::new(
+                input.sample_rate(),
+                Arc::clone(input.layout()),
+                budget,
+            )?,
+            dry: vec![0.0; 4096 * channels],
+            wet,
+        })
+    }
+    fn push(&mut self, samples: &[f32], cancel: &AtomicBool) -> Result<()> {
+        let Self {
+            input,
+            restored,
+            output,
+            dry,
+            wet,
+        } = self;
+        restored.push(samples, cancel, |position, enhanced| {
+            let count = enhanced.len() / usize::from(input.channels());
+            let mixed = &mut dry[..enhanced.len()];
+            ensure!(
+                input.read_frames(position, mixed) == count,
+                "Truncated native speech source PCM"
+            );
+            for (dry, enhanced) in mixed.iter_mut().zip(enhanced) {
+                *dry = *dry * (1.0 - *wet) + enhanced * *wet;
+            }
+            check_cancel(cancel)?;
+            output.push(mixed)
+        })
+    }
+    fn finish(self, cancel: &AtomicBool) -> Result<audio::PcmAudio> {
+        check_cancel(cancel)?;
+        self.restored.finish()?;
+        self.output.finish()
     }
 }
 fn converted_frames(frames: u64, source: u32, target: u32) -> Result<u64> {
@@ -583,7 +765,7 @@ pub(super) fn run(
     let mut analysis = vec![[0.0; FFT]; channels];
     let mut spectrum = [0.0; BINS * 2];
     let mut block = vec![0.0; HOP * channels];
-    let mut native = audio::PcmBuilder::new(RATE, Arc::clone(input.layout()), Arc::clone(&budget))?;
+    let mut output = SpeechOutput::new(input, length, wet, budget, cancel)?;
     for frame in 0..=length.div_ceil(HOP as u64).max(1) {
         check_cancel(cancel)?;
         let center = frame * HOP as u64;
@@ -613,7 +795,7 @@ pub(super) fn run(
             }
         }
         if emitted > 0 {
-            native.push(&block[..emitted * channels])?;
+            output.push(&block[..emitted * channels], cancel)?;
         }
         for stft in &mut stfts {
             stft.advance();
@@ -625,38 +807,7 @@ pub(super) fn run(
             Some(input.frames()),
         );
     }
-    let native = native.finish()?;
-    ensure!(
-        native.frames() == length,
-        "Native speech inverse STFT frame alignment mismatch"
-    );
-    drop(source);
-    drop(states);
-    drop(stfts);
-    drop(session);
-    drop(model);
-    let mut restored = Resampler::new(&native, input.sample_rate(), cancel)?;
-    let mut output =
-        audio::PcmBuilder::new(input.sample_rate(), Arc::clone(input.layout()), budget)?;
-    let mut dry = vec![0.0; 4096 * channels];
-    let mut mixed = vec![0.0; dry.len()];
-    let mut position = 0;
-    while position < input.frames() {
-        check_cancel(cancel)?;
-        let count = input.read_frames(position, &mut dry);
-        ensure!(count > 0, "Truncated native speech source PCM");
-        for i in 0..count {
-            for ch in 0..channels {
-                let index = i * channels + ch;
-                mixed[index] =
-                    dry[index] * (1.0 - wet) + restored.sample(position + i as u64, ch) * wet;
-            }
-        }
-        output.push(&mixed[..count * channels])?;
-        position += count as u64;
-    }
-    check_cancel(cancel)?;
-    let output = output.finish()?;
+    let output = output.finish(cancel)?;
     ensure!(
         output.frames() == input.frames()
             && output.sample_rate() == input.sample_rate()
@@ -677,6 +828,160 @@ pub(super) fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rate_expansion_checks_cancellation_between_bounded_output_batches() {
+        let cancel = AtomicBool::new(false);
+        let mut restored =
+            StreamingResampler::new(RATE, 384000, 1, HOP as u64, (HOP * 24) as u64, &cancel)
+                .unwrap();
+        let mut emitted = 0;
+        let error = restored
+            .push(&[0.25; HOP], &cancel, |position, block| {
+                assert_eq!(position, 0);
+                emitted += block.len();
+                cancel.store(true, std::sync::atomic::Ordering::Release);
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("cancelled"));
+        assert_eq!(emitted, 4096);
+        assert!(restored.finish().is_err());
+    }
+
+    fn pcm(rate: u32, data: &[f32], budget: Arc<audio::PcmBudget>) -> audio::PcmAudio {
+        let mut builder = audio::PcmBuilder::new(
+            rate,
+            Arc::from([audio::Channel::FrontLeft, audio::Channel::FrontRight]),
+            budget,
+        )
+        .unwrap();
+        builder.push(data).unwrap();
+        builder.finish().unwrap()
+    }
+
+    #[test]
+    fn streamed_restoration_matches_seekable_fir_and_dry_mix_at_every_boundary() {
+        let cancel = AtomicBool::new(false);
+        for rate in [8000, 16000, 44100, 48000, 384000] {
+            for frames in [1, 2, 17, 255, 256, 257, 513, 8195] {
+                let budget = audio::PcmBudget::new(8 * 1024 * 1024);
+                let dry: Vec<f32> = (0..frames * 2)
+                    .map(|i| (i as f32 * 0.037).sin() * 0.2)
+                    .collect();
+                let input = pcm(rate, &dry, Arc::clone(&budget));
+                let original_bytes = budget.used_bytes();
+                let length = converted_frames(frames as u64, rate, RATE).unwrap();
+                let native: Vec<f32> = (0..length as usize * 2)
+                    .map(|i| {
+                        if i < 2 || i >= (length as usize - 1) * 2 {
+                            if i % 2 == 0 { 0.9 } else { -0.7 }
+                        } else {
+                            (i as f32 * 0.173).cos() * 0.3
+                        }
+                    })
+                    .collect();
+                let reference = pcm(RATE, &native, audio::PcmBudget::new(8 * 1024 * 1024));
+                let mut seekable = Resampler::new(&reference, rate, &cancel).unwrap();
+                let wet = 0.73;
+                let mut output =
+                    SpeechOutput::new(&input, length, wet, Arc::clone(&budget), &cancel).unwrap();
+                let capacity = output.restored.pending.capacity();
+                for block in native.chunks(HOP * 2) {
+                    output.push(block, &cancel).unwrap();
+                    assert_eq!(output.restored.pending.capacity(), capacity);
+                    assert!(
+                        output.restored.pending.len()
+                            <= (2 * output.restored.kernel.radius as usize + 2) * 2
+                    );
+                    assert!(budget.used_bytes() <= 2 * original_bytes);
+                }
+                let output = output.finish(&cancel).unwrap();
+                assert_eq!(output.frames(), frames as u64);
+                assert_eq!(output.sample_rate(), rate);
+                assert_eq!(output.layout(), input.layout());
+                assert_eq!(budget.used_bytes(), 2 * original_bytes);
+                let mut actual = vec![0.0; dry.len()];
+                assert_eq!(output.read_frames(0, &mut actual), frames);
+                for frame in 0..frames {
+                    for channel in 0..2 {
+                        let i = frame * 2 + channel;
+                        let expected =
+                            dry[i] * (1.0 - wet) + seekable.sample(frame as u64, channel) * wet;
+                        assert_eq!(
+                            actual[i].to_bits(),
+                            expected.to_bits(),
+                            "rate {rate}, frames {frames}, sample {i}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn streaming_final_hop_preserves_centered_stft_reflection() {
+        let cancel = AtomicBool::new(false);
+        for kind in [Kind::Gtcrn, Kind::UlUnas] {
+            for length in [1, 2, 255, 256, 257, 511, 512, 513, 777] {
+                let samples: Vec<f32> = (0..length).map(|i| (i as f32 * 0.17).sin()).collect();
+                let reconstructed = identity(kind, &samples);
+                let mut restored =
+                    StreamingResampler::new(RATE, RATE, 1, length as u64, length as u64, &cancel)
+                        .unwrap();
+                let mut actual = Vec::new();
+                for hop in reconstructed.chunks(HOP) {
+                    restored
+                        .push(hop, &cancel, |_, block| {
+                            actual.extend_from_slice(block);
+                            Ok(())
+                        })
+                        .unwrap();
+                }
+                restored.finish().unwrap();
+                assert_eq!(actual, reconstructed);
+                for (a, b) in actual.into_iter().zip(samples) {
+                    assert!((a - b).abs() < 2e-6);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cancellation_discards_partially_streamed_output_and_retry_is_clean() {
+        let budget = audio::PcmBudget::new(8 * 1024 * 1024);
+        let input = pcm(48000, &vec![0.25; 20000 * 2], Arc::clone(&budget));
+        let original_bytes = budget.used_bytes();
+        let length = converted_frames(input.frames(), input.sample_rate(), RATE).unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut output =
+            SpeechOutput::new(&input, length, 1.0, Arc::clone(&budget), &cancel).unwrap();
+        output.push(&vec![0.5; HOP * 2], &cancel).unwrap();
+        assert!(budget.used_bytes() > original_bytes);
+        cancel.store(true, std::sync::atomic::Ordering::Release);
+        assert!(
+            output
+                .push(&vec![0.5; HOP * 2], &cancel)
+                .unwrap_err()
+                .to_string()
+                .contains("cancelled")
+        );
+        drop(output);
+        assert_eq!(budget.used_bytes(), original_bytes);
+        cancel.store(false, std::sync::atomic::Ordering::Release);
+        let mut output =
+            SpeechOutput::new(&input, length, 1.0, Arc::clone(&budget), &cancel).unwrap();
+        let samples = vec![0.5; length as usize * 2];
+        for hop in samples.chunks(HOP * 2) {
+            output.push(hop, &cancel).unwrap();
+        }
+        let output = output.finish(&cancel).unwrap();
+        let mut actual = vec![0.0; 20000 * 2];
+        assert_eq!(output.read_frames(0, &mut actual), 20000);
+        assert!(actual.into_iter().all(|sample| (sample - 0.5).abs() < 2e-6));
+        drop(output);
+        assert_eq!(budget.used_bytes(), original_bytes);
+    }
     fn identity(kind: Kind, samples: &[f32]) -> Vec<f32> {
         let mut stft = Stft::new(kind);
         let mut output = Vec::new();

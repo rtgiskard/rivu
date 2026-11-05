@@ -229,7 +229,7 @@ pub(super) fn run(
         status.frames = Some(input.frames());
         if status.operation == ProcessingOperation::Graph {
             graph_outputs = graph::execute(
-                &input,
+                input,
                 Arc::clone(&budget),
                 &mut status,
                 cancel,
