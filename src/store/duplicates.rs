@@ -127,15 +127,16 @@ impl Store {
         {
             return Ok(cached.total);
         }
-        let total = self.conn.query_row(
-            "SELECT COUNT(*) FROM (
-                SELECT fingerprint FROM tracks INDEXED BY tracks_fingerprint
-                WHERE cue_sheet IS NULL AND fingerprint IS NOT NULL
-                GROUP BY fingerprint HAVING COUNT(*)>1
-             )",
-            [],
-            |row| row.get::<_, i64>(0),
-        )? as usize;
+        let total = self
+            .conn
+            .prepare_cached(
+                "SELECT COUNT(*) FROM (
+            SELECT fingerprint FROM tracks INDEXED BY tracks_fingerprint
+            WHERE cue_sheet IS NULL AND fingerprint IS NOT NULL
+            GROUP BY fingerprint HAVING COUNT(*)>1
+         )",
+            )?
+            .query_row([], |row| row.get::<_, i64>(0))? as usize;
         if cacheable {
             *self.duplicate_group_count_cache.borrow_mut() =
                 Some(DuplicateGroupCount { changes, total });
@@ -149,11 +150,11 @@ impl Store {
         limit: usize,
     ) -> Result<Page<DuplicateGroup>> {
         let total = self.duplicate_group_count()?;
-        let mut query = self.conn.prepare(
+        let mut query = self.conn.prepare_cached(
             "SELECT fingerprint,COUNT(*),SUM(missing<>0),SUM(missing=0)
-             FROM tracks INDEXED BY tracks_fingerprint
-             WHERE cue_sheet IS NULL AND fingerprint IS NOT NULL
-             GROUP BY fingerprint HAVING COUNT(*)>1 ORDER BY fingerprint LIMIT ?1 OFFSET ?2",
+         FROM tracks INDEXED BY tracks_fingerprint
+         WHERE cue_sheet IS NULL AND fingerprint IS NOT NULL
+         GROUP BY fingerprint HAVING COUNT(*)>1 ORDER BY fingerprint LIMIT ?1 OFFSET ?2",
         )?;
         let rows = query
             .query_map(
@@ -183,13 +184,16 @@ impl Store {
     ) -> Result<Page<DuplicateMember>> {
         let fingerprint = blake3::Hash::from_hex(fingerprint)
             .context("Invalid duplicate group BLAKE3 fingerprint")?;
-        let total = self.conn.query_row(
-            "SELECT COUNT(*) FROM tracks INDEXED BY tracks_fingerprint
-             WHERE cue_sheet IS NULL AND fingerprint=?1",
-            [fingerprint.as_bytes().as_slice()],
-            |row| row.get::<_, i64>(0),
-        )? as usize;
-        let mut query = self.conn.prepare(&format!(
+        let total = self
+            .conn
+            .prepare_cached(
+                "SELECT COUNT(*) FROM tracks INDEXED BY tracks_fingerprint
+         WHERE cue_sheet IS NULL AND fingerprint=?1",
+            )?
+            .query_row([fingerprint.as_bytes().as_slice()], |row| {
+                row.get::<_, i64>(0)
+            })? as usize;
+        let mut query = self.conn.prepare_cached(&format!(
             "SELECT {TRACK_COLUMNS},{DUPLICATE_MEMBER_COLUMNS}
              FROM tracks INDEXED BY tracks_fingerprint
              WHERE cue_sheet IS NULL AND fingerprint=?1 ORDER BY missing DESC,id
@@ -219,7 +223,7 @@ impl Store {
         );
         let fingerprint = blake3::Hash::from_hex(fingerprint)
             .context("Invalid duplicate group BLAKE3 fingerprint")?;
-        let mut query = self.conn.prepare(&format!(
+        let mut query = self.conn.prepare_cached(&format!(
             "SELECT {TRACK_COLUMNS},{DUPLICATE_MEMBER_COLUMNS}
              FROM tracks WHERE id IN (SELECT value FROM json_each(?2))
              AND cue_sheet IS NULL AND fingerprint=?1 ORDER BY missing DESC,id"

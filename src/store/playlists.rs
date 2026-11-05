@@ -15,20 +15,17 @@ impl Store {
     pub fn playlist_entry(&self, entry_id: i64) -> Result<Option<PlaylistEntryLocation>> {
         // Positions are contiguous. The covering playlist_order index supplies the last
         // position without counting or projecting the entire playlist.
-        Ok(self.conn.query_row(
-            "SELECT e.id,e.playlist_id,e.track_id,e.position,
-                    (SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=e.playlist_id)
-             FROM playlist_entries e WHERE e.id=?1 AND e.playlist_id>0",
-            [entry_id],
-            |row| Ok(PlaylistEntryLocation {
-                id: row.get(0)?,
-                playlist_id: row.get(1)?,
-                track_id: row.get(2)?,
-                position: row.get::<_, i64>(3)? as usize,
-                offset: row.get::<_, i64>(3)? as usize,
-                total: row.get::<_, i64>(4)? as usize,
-            }),
-        ).optional()?)
+        Ok(self.conn.prepare_cached("SELECT e.id,e.playlist_id,e.track_id,e.position,
+                (SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=e.playlist_id)
+         FROM playlist_entries e WHERE e.id=?1 AND e.playlist_id>0")?.query_row([entry_id],
+        |row| Ok(PlaylistEntryLocation {
+            id: row.get(0)?,
+            playlist_id: row.get(1)?,
+            track_id: row.get(2)?,
+            position: row.get::<_, i64>(3)? as usize,
+            offset: row.get::<_, i64>(3)? as usize,
+            total: row.get::<_, i64>(4)? as usize,
+        }),).optional()?)
     }
     pub fn playlist_entry_locations(
         &self,
@@ -43,11 +40,10 @@ impl Store {
             rivu_protocol::model::MAX_QUERY_ROWS
         );
         if entry_ids.is_empty() {
-            let exists = self.conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM playlists WHERE id=?1)",
-                [playlist_id],
-                |row| row.get::<_, bool>(0),
-            )?;
+            let exists = self
+                .conn
+                .prepare_cached("SELECT EXISTS(SELECT 1 FROM playlists WHERE id=?1)")?
+                .query_row([playlist_id], |row| row.get::<_, bool>(0))?;
             anyhow::ensure!(exists, "Playlist not found");
             return Ok(Vec::new());
         }
@@ -64,7 +60,7 @@ impl Store {
         } else {
             "SELECT id,track_id,position,position AS offset FROM playlist_entries WHERE playlist_id=?1 AND id IN (SELECT value FROM json_each(?2)) AND ?3 IS NULL ORDER BY position,id".into()
         };
-        let mut statement = self.conn.prepare(&sql)?;
+        let mut statement = self.conn.prepare_cached(&sql)?;
         Ok(statement
             .query_map(params![playlist_id, ids, query], |row| {
                 Ok(PlaylistEntryLocation {
@@ -96,9 +92,8 @@ impl Store {
             || {
                 Ok(self
                     .conn
-                    .query_row(&sql, params![playlist_id, query], |row| {
-                        row.get::<_, i64>(0)
-                    })
+                    .prepare_cached(&sql)?
+                    .query_row(params![playlist_id, query], |row| row.get::<_, i64>(0))
                     .optional()?
                     .context("Playlist not found")? as usize)
             },
@@ -106,20 +101,15 @@ impl Store {
     }
 
     pub fn playlist_summary(&self, playlist_id: i64) -> Result<Option<PlaylistSummary>> {
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT p.id,p.name,(SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries e WHERE e.playlist_id=p.id)
-                 FROM playlists p WHERE p.id=?1 AND p.id>0",
-                [playlist_id],
-                |row| {
-                    Ok(PlaylistSummary {
-                        id: row.get(0)?,
-                        name: row.get(1)?,
-                        entry_count: row.get::<_, i64>(2)? as usize,
-                    })
-                },
-            )
+        Ok(self.conn.prepare_cached("SELECT p.id,p.name,(SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries e WHERE e.playlist_id=p.id)
+         FROM playlists p WHERE p.id=?1 AND p.id>0")?.query_row([playlist_id],
+        |row| {
+            Ok(PlaylistSummary {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                entry_count: row.get::<_, i64>(2)? as usize,
+            })
+        },)
             .optional()?)
     }
 
@@ -130,21 +120,16 @@ impl Store {
         limit: usize,
     ) -> Result<Page<PlaylistSummary>> {
         let query = search_query(query);
-        let total = self.conn.query_row(
-            "SELECT COUNT(*) FROM playlists WHERE id>0 AND (?1 IS NULL OR instr(lower(name),?1)>0)",
-            [query.as_deref()],
-            |row| row.get::<_, i64>(0),
-        )? as usize;
+        let total = self.conn.prepare_cached("SELECT COUNT(*) FROM playlists WHERE id>0 AND (?1 IS NULL OR instr(lower(name),?1)>0)")?.query_row([query.as_deref()],
+        |row| row.get::<_, i64>(0),)? as usize;
         if limit == 0 {
             return Ok(Page {
                 total,
                 rows: Vec::new(),
             });
         }
-        let mut stmt = self.conn.prepare(
-            "SELECT p.id,p.name,(SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries e WHERE e.playlist_id=p.id)
-             FROM playlists p WHERE p.id>0 AND (?1 IS NULL OR instr(lower(p.name),?1)>0) ORDER BY p.position,p.id LIMIT ?2 OFFSET ?3",
-        )?;
+        let mut stmt = self.conn.prepare_cached("SELECT p.id,p.name,(SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries e WHERE e.playlist_id=p.id)
+         FROM playlists p WHERE p.id>0 AND (?1 IS NULL OR instr(lower(p.name),?1)>0) ORDER BY p.position,p.id LIMIT ?2 OFFSET ?3")?;
         let rows = stmt
             .query_map(
                 params![
@@ -205,7 +190,7 @@ impl Store {
         } else {
             "?2 IS NULL"
         };
-        let mut stmt = self.conn.prepare(&format!(
+        let mut stmt = self.conn.prepare_cached(&format!(
             "SELECT p.id,p.name,
                     (SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries e WHERE e.playlist_id=p.id)
              FROM playlists p WHERE p.id>0 AND (?1 IS NULL OR instr(lower(p.name),?1)>0) AND {cursor} ORDER BY p.position,p.id LIMIT ?3",
@@ -245,11 +230,10 @@ impl Store {
         if after.is_some_and(|after| after.scope != scope) {
             return Err(rivu_protocol::response::QueryError::RevisionChanged.into());
         }
-        let exists = self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM playlists WHERE id=?1)",
-            [playlist_id],
-            |row| row.get::<_, bool>(0),
-        )?;
+        let exists = self
+            .conn
+            .prepare_cached("SELECT EXISTS(SELECT 1 FROM playlists WHERE id=?1)")?
+            .query_row([playlist_id], |row| row.get::<_, bool>(0))?;
         if !exists {
             bail!("Playlist not found");
         }
@@ -257,7 +241,7 @@ impl Store {
         let (position, id) =
             after.map_or((-1, 0), |after| (after.cursor.position, after.cursor.id));
         let start = after.map_or(0, |after| after.offset);
-        let mut stmt = self.conn.prepare(&format!(
+        let mut stmt = self.conn.prepare_cached(&format!(
             "SELECT e.position,e.id,e.track_id,COALESCE(t.title_override,t.raw_title),COALESCE(t.artist_override,t.raw_artist),COALESCE(t.album_override,t.raw_album),COALESCE(t.missing,1),t.favorite,t.duration,COALESCE(t.codec,''),COALESCE(t.path,''),COALESCE(t.channels,0),COALESCE(t.sample_rate,0),t.bits_per_sample,t.bitrate_bps,COALESCE(t.bitrate_exact,0),t.cue_number FROM playlist_entries e LEFT JOIN tracks t ON t.id=e.track_id WHERE e.playlist_id=?1 AND {filter} AND (e.position,e.id)>(?3,?4) ORDER BY e.position,e.id LIMIT ?5"
         ))?;
         let mut db_rows = stmt.query(params![playlist_id, query, position, id, limit + 1])?;
@@ -327,7 +311,7 @@ impl Store {
         } else {
             " ORDER BY e.position,e.id LIMIT ?2"
         };
-        let mut stmt = self.conn.prepare(&format!(
+        let mut stmt = self.conn.prepare_cached(&format!(
             "SELECT t.id,t.path,COALESCE(t.title_override,t.raw_title),
                     COALESCE(t.artist_override,t.raw_artist),t.duration,
                     t.cue_sheet,t.cue_number,t.cue_start_frame,t.cue_end_frame,
@@ -388,7 +372,7 @@ impl Store {
         } else {
             "AND e.position>=?3 ORDER BY e.position,e.id LIMIT ?4"
         };
-        let mut stmt = self.conn.prepare(&format!("SELECT e.id,e.track_id,COALESCE(t.title_override,t.raw_title),COALESCE(t.artist_override,t.raw_artist),COALESCE(t.album_override,t.raw_album),COALESCE(t.missing,1),t.favorite,e.position,t.duration,COALESCE(t.codec,''),COALESCE(t.path,''),COALESCE(t.channels,0),COALESCE(t.sample_rate,0),t.bits_per_sample,t.bitrate_bps,COALESCE(t.bitrate_exact,0),t.cue_number FROM playlist_entries e LEFT JOIN tracks t ON t.id=e.track_id WHERE e.playlist_id=?1 AND {filter} {paging}"))?;
+        let mut stmt = self.conn.prepare_cached(&format!("SELECT e.id,e.track_id,COALESCE(t.title_override,t.raw_title),COALESCE(t.artist_override,t.raw_artist),COALESCE(t.album_override,t.raw_album),COALESCE(t.missing,1),t.favorite,e.position,t.duration,COALESCE(t.codec,''),COALESCE(t.path,''),COALESCE(t.channels,0),COALESCE(t.sample_rate,0),t.bits_per_sample,t.bitrate_bps,COALESCE(t.bitrate_exact,0),t.cue_number FROM playlist_entries e LEFT JOIN tracks t ON t.id=e.track_id WHERE e.playlist_id=?1 AND {filter} {paging}"))?;
         let limit = limit.min(rivu_protocol::model::MAX_QUERY_ROWS) as i64;
         let offset = offset.min(i64::MAX as usize) as i64;
         let mut rows = stmt
@@ -426,7 +410,7 @@ impl Store {
     #[cfg(test)]
     pub fn playlist_track_ids(&self, playlist_id: i64, limit: usize) -> Result<Vec<i64>> {
         anyhow::ensure!(playlist_id > 0, "Playlist not found");
-        let mut stmt = self.conn.prepare("SELECT track_id FROM playlist_entries WHERE playlist_id=?1 ORDER BY position,id LIMIT ?2")?;
+        let mut stmt = self.conn.prepare_cached("SELECT track_id FROM playlist_entries WHERE playlist_id=?1 ORDER BY position,id LIMIT ?2")?;
         let limit = limit.min(i64::MAX as usize) as i64;
         Ok(stmt
             .query_map(params![playlist_id, limit], |r| r.get(0))?

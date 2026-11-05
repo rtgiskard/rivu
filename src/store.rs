@@ -72,6 +72,9 @@ impl Drop for ReadSnapshot<'_> {
 impl Store {
     fn configure_connection(conn: &Connection) -> Result<()> {
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        // Query shapes are finite and parameter-bound; retain a bounded working
+        // set across requests, never one statement per filter/path value.
+        conn.set_prepared_statement_cache_capacity(64);
         // SQLite's built-in lower() is ASCII-only; preserve frontend Unicode search.
         conn.create_scalar_function(
             "lower",
@@ -92,7 +95,7 @@ impl Store {
     pub(crate) fn playlist_ids(&self) -> Result<Vec<i64>> {
         Ok(self
             .conn
-            .prepare("SELECT id FROM playlists WHERE id>0 ORDER BY position,id")?
+            .prepare_cached("SELECT id FROM playlists WHERE id>0 ORDER BY position,id")?
             .query_map([], |row| row.get(0))?
             .collect::<rusqlite::Result<_>>()?)
     }
@@ -134,6 +137,62 @@ impl Store {
         })
     }
 
+    /// Interrupt read-only SQL cooperatively; always detach before the borrowed
+    /// callback leaves its stack frame, including unwinding from `read`.
+    pub(crate) fn with_read_cancellation<T>(
+        &self,
+        cancelled: impl Fn() -> bool,
+        read: impl FnOnce() -> T,
+    ) -> T {
+        assert!(
+            self.revision_owned_counts,
+            "SQL cancellation requires a read-only store"
+        );
+        unsafe extern "C" fn check<F: Fn() -> bool>(context: *mut std::ffi::c_void) -> i32 {
+            // SAFETY: the registration borrows F for the synchronous read below;
+            // SQLite invokes this callback only on the executing connection thread.
+            let cancelled = unsafe { &*context.cast::<F>() };
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(cancelled)) {
+                Ok(cancelled) => i32::from(cancelled),
+                Err(payload) => {
+                    // Even a panic payload with a panicking destructor must not
+                    // unwind through SQLite's C callback boundary.
+                    std::mem::forget(payload);
+                    1
+                }
+            }
+        }
+        struct Registration<'a>(&'a Connection);
+        impl Drop for Registration<'_> {
+            fn drop(&mut self) {
+                // SAFETY: this guard retains the connection and removes the
+                // borrowed callback before its captured state is destroyed.
+                unsafe {
+                    rusqlite::ffi::sqlite3_progress_handler(
+                        self.0.handle(),
+                        0,
+                        None,
+                        std::ptr::null_mut(),
+                    )
+                };
+            }
+        }
+        fn register<F: Fn() -> bool>(connection: &Connection, cancelled: &F) {
+            // SAFETY: caller retains both arguments until Registration drops.
+            unsafe {
+                rusqlite::ffi::sqlite3_progress_handler(
+                    connection.handle(),
+                    1024,
+                    Some(check::<F>),
+                    std::ptr::from_ref(cancelled).cast_mut().cast(),
+                );
+            }
+        }
+        register(&self.conn, &cancelled);
+        let _registration = Registration(&self.conn);
+        read()
+    }
+
     /// On error, retire this connection: transaction rollback may also have failed.
     pub(crate) fn read_snapshot(&self) -> Result<ReadSnapshot<'_>> {
         self.pin_read_snapshot()?;
@@ -148,9 +207,8 @@ impl Store {
         // BEGIN is lazy: the first actual read establishes the WAL snapshot.
         if let Err(error) = self
             .conn
-            .query_row("SELECT COUNT(*) FROM sqlite_schema", [], |row| {
-                row.get::<_, i64>(0)
-            })
+            .prepare_cached("SELECT COUNT(*) FROM sqlite_schema")
+            .and_then(|mut statement| statement.query_row([], |row| row.get::<_, i64>(0)))
         {
             self.conn.execute_batch("ROLLBACK")?;
             return Err(error.into());

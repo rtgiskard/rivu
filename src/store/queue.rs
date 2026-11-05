@@ -66,21 +66,18 @@ impl Store {
     }
 
     pub(crate) fn queue_projection(&self, revision: u64) -> Result<QueueState> {
-        Ok(self.conn.query_row(
-            "SELECT current_queue_entry_id,(SELECT position FROM playlist_entries WHERE playlist_id=0 AND id=current_queue_entry_id),(SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=0) FROM rivu_meta WHERE singleton=1",
-            [], |row| Ok(QueueState {
-                total: integer(row, 2)?,
-                current_id: row.get::<_, Option<i64>>(0)?.map(|value| u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, value))).transpose()?,
-                current_position: row.get::<_, Option<i64>>(1)?.map(|value| usize::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(1, value))).transpose()?,
-                revision,
-            }),
-        )?)
+        Ok(self.conn.prepare_cached("SELECT current_queue_entry_id,(SELECT position FROM playlist_entries WHERE playlist_id=0 AND id=current_queue_entry_id),(SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=0) FROM rivu_meta WHERE singleton=1")?.query_row([], |row| Ok(QueueState {
+            total: integer(row, 2)?,
+            current_id: row.get::<_, Option<i64>>(0)?.map(|value| u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, value))).transpose()?,
+            current_position: row.get::<_, Option<i64>>(1)?.map(|value| usize::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(1, value))).transpose()?,
+            revision,
+        }),)?)
     }
 
     pub(crate) fn queue_ids(&self) -> Result<Vec<u64>> {
-        let mut statement = self
-            .conn
-            .prepare("SELECT id FROM playlist_entries WHERE playlist_id=0 ORDER BY position,id")?;
+        let mut statement = self.conn.prepare_cached(
+            "SELECT id FROM playlist_entries WHERE playlist_id=0 ORDER BY position,id",
+        )?;
         Ok(statement
             .query_map([], |row| integer(row, 0))?
             .collect::<rusqlite::Result<_>>()?)
@@ -92,22 +89,18 @@ impl Store {
         };
         Ok(self
             .conn
-            .query_row(
-                "SELECT id FROM playlist_entries WHERE playlist_id=0 AND position=?1",
-                [position],
-                |row| integer(row, 0),
-            )
+            .prepare_cached("SELECT id FROM playlist_entries WHERE playlist_id=0 AND position=?1")?
+            .query_row([position], |row| integer(row, 0))
             .optional()?)
     }
 
     pub(crate) fn queue_location(&self, id: u64) -> Result<(i64, usize)> {
         let id = i64::try_from(id).context("Queue entry ID exceeds database range")?;
         self.conn
-            .query_row(
+            .prepare_cached(
                 "SELECT track_id,position FROM playlist_entries WHERE playlist_id=0 AND id=?1",
-                [id],
-                |row| Ok((row.get(0)?, integer(row, 1)?)),
-            )
+            )?
+            .query_row([id], |row| Ok((row.get(0)?, integer(row, 1)?)))
             .optional()?
             .context("Queue entry not found")
     }
@@ -119,17 +112,12 @@ impl Store {
     pub(crate) fn queue_existing_ids(&self, ids: &[u64]) -> Result<HashSet<u64>> {
         // NOT INDEXED still permits rowid lookup. Otherwise SQLite can prefer
         // scanning playlist_order for playlist_id=0 over probing these few IDs.
-        Ok(self.conn.prepare("SELECT id FROM playlist_entries NOT INDEXED WHERE playlist_id=0 AND id IN (SELECT value FROM json_each(?1))")?.query_map([serde_json::to_string(ids)?], |row| integer(row, 0))?.collect::<rusqlite::Result<_>>()?)
+        Ok(self.conn.prepare_cached("SELECT id FROM playlist_entries NOT INDEXED WHERE playlist_id=0 AND id IN (SELECT value FROM json_each(?1))")?.query_map([serde_json::to_string(ids)?], |row| integer(row, 0))?.collect::<rusqlite::Result<_>>()?)
     }
 
     pub(crate) fn queued_track(&self, track_id: i64) -> Result<Option<u64>> {
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT id FROM playlist_entries WHERE playlist_id=0 AND track_id=?1 ORDER BY position,id LIMIT 1",
-                [track_id],
-                |row| integer(row, 0),
-            )
+        Ok(self.conn.prepare_cached("SELECT id FROM playlist_entries WHERE playlist_id=0 AND track_id=?1 ORDER BY position,id LIMIT 1")?.query_row([track_id],
+        |row| integer(row, 0),)
             .optional()?)
     }
 
@@ -139,11 +127,12 @@ impl Store {
             .transpose()
             .context("Queue entry ID exceeds database range")?;
         if let Some(id) = current {
-            let exists: bool = self.conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM playlist_entries WHERE playlist_id=0 AND id=?1)",
-                [id],
-                |row| row.get(0),
-            )?;
+            let exists: bool = self
+                .conn
+                .prepare_cached(
+                    "SELECT EXISTS(SELECT 1 FROM playlist_entries WHERE playlist_id=0 AND id=?1)",
+                )?
+                .query_row([id], |row| row.get(0))?;
             ensure!(exists, "Queue entry not found");
         }
         let changed = self.conn.execute(
@@ -151,11 +140,8 @@ impl Store {
             [current],
         )?;
         if changed == 0 {
-            let saved: bool = self.conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM rivu_meta WHERE singleton=1 AND current_queue_entry_id IS ?1)",
-                [current],
-                |row| row.get(0),
-            )?;
+            let saved: bool = self.conn.prepare_cached("SELECT EXISTS(SELECT 1 FROM rivu_meta WHERE singleton=1 AND current_queue_entry_id IS ?1)")?.query_row([current],
+            |row| row.get(0),)?;
             ensure!(saved, "Queue current selection was not saved");
         }
         Ok(())
@@ -171,9 +157,9 @@ impl Store {
         let filter = search_filter("t", "?1");
         let total = self.cached_count(super::CountDomain::Queue, &[query.as_deref().unwrap_or("")], || {
             if query.is_some() {
-                Ok(self.conn.query_row(&format!("SELECT COUNT(*) FROM playlist_entries q JOIN tracks t ON t.id=q.track_id WHERE q.playlist_id=0 AND {filter}"), [query.as_deref()], |row| integer(row, 0))?)
+                Ok(self.conn.prepare_cached(&format!("SELECT COUNT(*) FROM playlist_entries q JOIN tracks t ON t.id=q.track_id WHERE q.playlist_id=0 AND {filter}"))?.query_row([query.as_deref()], |row| integer(row, 0))?)
             } else {
-                Ok(self.conn.query_row("SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=0", [], |row| integer(row, 0))?)
+                Ok(self.conn.prepare_cached("SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=0")?.query_row([], |row| integer(row, 0))?)
             }
         })?;
         if limit == 0 {
@@ -187,7 +173,7 @@ impl Store {
         } else {
             "AND q.position>=?2 ORDER BY q.position,q.id LIMIT ?3"
         };
-        let mut statement = self.conn.prepare(&format!("SELECT q.id,q.track_id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED} FROM playlist_entries q JOIN tracks t ON t.id=q.track_id WHERE q.playlist_id=0 AND {filter} {paging}"))?;
+        let mut statement = self.conn.prepare_cached(&format!("SELECT q.id,q.track_id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED} FROM playlist_entries q JOIN tracks t ON t.id=q.track_id WHERE q.playlist_id=0 AND {filter} {paging}"))?;
         let mut rows = statement
             .query_map(
                 params![
@@ -220,7 +206,7 @@ impl Store {
             return Err(rivu_protocol::response::QueryError::RevisionChanged.into());
         }
         let filter = search_filter("t", "?4");
-        let mut statement = self.conn.prepare(&format!("SELECT q.id,q.track_id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED} FROM playlist_entries q JOIN tracks t ON t.id=q.track_id WHERE q.playlist_id=0 AND (q.position,q.id)>(?1,?2) AND {filter} ORDER BY q.position,q.id LIMIT ?3"))?;
+        let mut statement = self.conn.prepare_cached(&format!("SELECT q.id,q.track_id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED} FROM playlist_entries q JOIN tracks t ON t.id=q.track_id WHERE q.playlist_id=0 AND (q.position,q.id)>(?1,?2) AND {filter} ORDER BY q.position,q.id LIMIT ?3"))?;
         let (position, id) = after.map_or((-1, 0), |cursor| {
             (
                 cursor.cursor.position.min(i64::MAX as usize) as i64,
@@ -282,7 +268,7 @@ impl Store {
                 "SELECT q.id,q.track_id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED},q.position AS match_offset FROM playlist_entries q JOIN tracks t ON t.id=q.track_id WHERE q.playlist_id=0 AND q.id IN (SELECT value FROM json_each(?1)) AND ?2 IS NULL ORDER BY q.position,q.id"
             )
         };
-        let mut statement = self.conn.prepare(&sql)?;
+        let mut statement = self.conn.prepare_cached(&sql)?;
         Ok(statement
             .query_map(params![serde_json::to_string(ids)?, query], |row| {
                 let mut result = queue_row(row)?;

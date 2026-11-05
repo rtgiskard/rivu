@@ -40,18 +40,17 @@ impl Store {
         let filter = "?1 IS NULL OR instr(lower(title),lower(COALESCE(?1,'')))>0 OR EXISTS(SELECT 1 FROM album_artists WHERE directory=albums.directory AND title=albums.title AND instr(lower(artist),lower(COALESCE(?1,'')))>0)";
         let total =
             self.cached_count(super::CountDomain::Albums, &[query.unwrap_or("")], || {
-                Ok(self.conn.query_row(
-                    &format!("SELECT COUNT(*) FROM albums WHERE {filter}"),
-                    [query],
-                    |row| row.get::<_, i64>(0),
-                )? as usize)
+                Ok(self
+                    .conn
+                    .prepare_cached(&format!("SELECT COUNT(*) FROM albums WHERE {filter}"))?
+                    .query_row([query], |row| row.get::<_, i64>(0))? as usize)
             })?;
         let order = match sort {
             AlbumSort::Title => "title,directory",
             AlbumSort::Artist => "COALESCE(artist,'Unknown artist'),title,directory",
         };
-        let mut statement = self.conn.prepare(&format!("SELECT directory,title,track_count,artist FROM albums WHERE {filter} ORDER BY {order} LIMIT ?2 OFFSET ?3"))?;
-        let mut representative = self.conn.prepare(&format!(
+        let mut statement = self.conn.prepare_cached(&format!("SELECT directory,title,track_count,artist FROM albums WHERE {filter} ORDER BY {order} LIMIT ?2 OFFSET ?3"))?;
+        let mut representative = self.conn.prepare_cached(&format!(
             "SELECT {TRACK_COLUMNS} FROM tracks INDEXED BY tracks_album_members WHERE {DIRECTORY}=?1 AND {TITLE}=?2 ORDER BY {ORDER} LIMIT 1"
         ))?;
         let mut rows = statement.query(params![
@@ -97,20 +96,18 @@ impl Store {
             .context("Album directory is not UTF-8")?;
         let query = search_query(query);
         let filter = format!("{} AND {}", album_filter(), search_filter("tracks", "?3"));
-        let total = self.cached_count(
-            super::CountDomain::AlbumTracks,
-            &[directory, &key.title, query.as_deref().unwrap_or("")],
-            || {
-                Ok(self.conn.query_row(
-                    &format!(
-                        "SELECT COUNT(*) FROM tracks INDEXED BY tracks_album_members WHERE {filter}"
-                    ),
-                    params![directory, key.title, query],
-                    |row| row.get::<_, i64>(0),
-                )? as usize)
-            },
-        )?;
-        let mut statement = self.conn.prepare(&format!("SELECT {LIBRARY_ROW_COLUMNS} FROM tracks INDEXED BY tracks_album_members WHERE {filter} ORDER BY {ORDER} LIMIT ?4 OFFSET ?5"))?;
+        let total =
+            self.cached_count(
+                super::CountDomain::AlbumTracks,
+                &[directory, &key.title, query.as_deref().unwrap_or("")],
+                || {
+                    Ok(self.conn.prepare_cached(&format!(
+                    "SELECT COUNT(*) FROM tracks INDEXED BY tracks_album_members WHERE {filter}"
+                ))?.query_row(params![directory, key.title, query],
+                |row| row.get::<_, i64>(0),)? as usize)
+                },
+            )?;
+        let mut statement = self.conn.prepare_cached(&format!("SELECT {LIBRARY_ROW_COLUMNS} FROM tracks INDEXED BY tracks_album_members WHERE {filter} ORDER BY {ORDER} LIMIT ?4 OFFSET ?5"))?;
         let rows = statement
             .query_map(
                 params![
@@ -131,14 +128,13 @@ impl Store {
             .directory
             .to_str()
             .context("Album directory is not UTF-8")?;
-        Ok(self.conn.query_row(
-            &format!(
+        Ok(self
+            .conn
+            .prepare_cached(&format!(
                 "SELECT EXISTS(SELECT 1 FROM tracks INDEXED BY tracks_album_members WHERE {})",
                 album_filter()
-            ),
-            params![directory, key.title],
-            |row| row.get(0),
-        )?)
+            ))?
+            .query_row(params![directory, key.title], |row| row.get(0))?)
     }
 
     pub(crate) fn queue_album(&self, key: &AlbumKey, replace: bool) -> Result<()> {

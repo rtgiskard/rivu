@@ -52,7 +52,11 @@ impl Store {
             return Ok(Some(track.clone()));
         }
         let sql = format!("SELECT {TRACK_COLUMNS} FROM tracks WHERE id=?1");
-        let track = self.conn.query_row(&sql, [id], track_from_row).optional()?;
+        let track = self
+            .conn
+            .prepare_cached(&sql)?
+            .query_row([id], track_from_row)
+            .optional()?;
         if let Some(track) = &track
             && cache.capacity != 0
         {
@@ -191,6 +195,24 @@ impl Store {
             .retain(|entry| !domains.contains(&entry.domain));
     }
 
+    pub(crate) fn invalidate_playlist_count_revisions(
+        &self,
+        previous: &std::collections::BTreeMap<i64, u64>,
+        current: &std::collections::BTreeMap<i64, u64>,
+    ) {
+        self.scalar_counts.borrow_mut().entries.retain(|entry| {
+            if entry.domain != CountDomain::PlaylistEntries {
+                return true;
+            }
+            let OwnedScalarScope::Keys { identity, .. } = &entry.scope else {
+                return false;
+            };
+            previous
+                .get(identity)
+                .is_some_and(|revision| current.get(identity) == Some(revision))
+        });
+    }
+
     pub(super) fn cached_count(
         &self,
         domain: CountDomain,
@@ -248,7 +270,8 @@ impl Store {
             0
         } else {
             self.conn
-                .query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))?
+                .prepare_cached("PRAGMA data_version")?
+                .query_row([], |row| row.get::<_, i64>(0))?
         };
         {
             let mut cache = self.scalar_counts.borrow_mut();

@@ -120,7 +120,7 @@ pub(crate) struct PlaybackSource {
 impl Store {
     pub(crate) fn other_tracks_sources(&self, roots: &[PathBuf]) -> Result<Vec<PathBuf>> {
         let roots = serde_json::to_string(&other_root_prefixes(roots)?)?;
-        let mut statement = self.conn.prepare(&format!(
+        let mut statement = self.conn.prepare_cached(&format!(
             "SELECT DISTINCT path FROM tracks WHERE 1=1{} ORDER BY path",
             OTHER_SCOPE.replace("?4", "?1")
         ))?;
@@ -132,14 +132,13 @@ impl Store {
     pub(crate) fn other_tracks_count(&self, roots: &[PathBuf]) -> Result<usize> {
         let roots = serde_json::to_string(&other_root_prefixes(roots)?)?;
         self.cached_count(super::CountDomain::Other, &[&roots, "", "", ""], || {
-            Ok(self.conn.query_row(
-                &format!(
+            Ok(self
+                .conn
+                .prepare_cached(&format!(
                     "SELECT COUNT(*) FROM tracks WHERE 1=1{}",
                     OTHER_SCOPE.replace("?4", "?1")
-                ),
-                [&roots],
-                |row| row.get::<_, i64>(0),
-            )? as usize)
+                ))?
+                .query_row([&roots], |row| row.get::<_, i64>(0))? as usize)
         })
     }
 
@@ -168,16 +167,19 @@ impl Store {
                 bool_key(missing),
             ],
             || {
-                Ok(self.conn.query_row(
-                    &format!("SELECT COUNT(*) FROM tracks {TRACK_SEARCH_FILTER}{OTHER_SCOPE}"),
-                    params![query, favorite, missing, roots],
-                    |row| row.get::<_, i64>(0),
-                )? as usize)
+                Ok(self
+                    .conn
+                    .prepare_cached(&format!(
+                        "SELECT COUNT(*) FROM tracks {TRACK_SEARCH_FILTER}{OTHER_SCOPE}"
+                    ))?
+                    .query_row(params![query, favorite, missing, roots], |row| {
+                        row.get::<_, i64>(0)
+                    })? as usize)
             },
         )?;
         let mut rows = Vec::new();
         if limit != 0 && offset < total {
-            let mut statement = self.conn.prepare(&format!(
+            let mut statement = self.conn.prepare_cached(&format!(
                 "SELECT {LIBRARY_ROW_COLUMNS} FROM tracks {TRACK_SEARCH_FILTER}{OTHER_SCOPE} ORDER BY {} LIMIT ?5 OFFSET ?6",
                 library_order(sort)
             ))?;
@@ -209,29 +211,27 @@ impl Store {
     ) -> Result<rivu_protocol::model::LibraryLocateResult> {
         use rivu_protocol::model::{LibraryLocateResult, LibraryLocation};
         let roots = serde_json::to_string(&other_root_prefixes(roots)?)?;
-        let exists = self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM tracks WHERE id=?1)",
-            [track_id],
-            |row| row.get::<_, bool>(0),
-        )?;
+        let exists = self
+            .conn
+            .prepare_cached("SELECT EXISTS(SELECT 1 FROM tracks WHERE id=?1)")?
+            .query_row([track_id], |row| row.get::<_, bool>(0))?;
         if !exists {
             return Ok(LibraryLocateResult::Unavailable);
         }
-        let in_scope = self.conn.query_row(
-            &format!(
+        let in_scope = self
+            .conn
+            .prepare_cached(&format!(
                 "SELECT EXISTS(SELECT 1 FROM tracks WHERE id=?1{})",
                 OTHER_SCOPE.replace("?4", "?2")
-            ),
-            params![track_id, roots],
-            |row| row.get::<_, bool>(0),
-        )?;
+            ))?
+            .query_row(params![track_id, roots], |row| row.get::<_, bool>(0))?;
         if !in_scope {
             return Ok(LibraryLocateResult::OutsideRoot);
         }
         let query = search_query(query);
-        let location = self.conn.query_row(&format!(
+        let location = self.conn.prepare_cached(&format!(
             "WITH ranked AS (SELECT id,row_number() OVER (ORDER BY {})-1 AS position,COUNT(*) OVER () AS total FROM tracks {TRACK_SEARCH_FILTER}{OTHER_SCOPE}) SELECT position,total FROM ranked WHERE id=?5", library_order(sort)
-        ), params![query, favorite, missing, roots, track_id], |row| {
+        ))?.query_row(params![query, favorite, missing, roots, track_id], |row| {
             Ok(LibraryLocation { offset: row.get::<_, i64>(0)? as usize,
                 total: row.get::<_, i64>(1)? as usize, child: None })
         }).optional()?;
@@ -251,11 +251,13 @@ impl Store {
         let cue = track.cue.as_ref();
         let metadata = self
             .conn
-            .query_row(
+            .prepare_cached(
                 "SELECT file_size,modified_ns FROM tracks WHERE id=?1 AND path=?2
-                 AND fingerprint IS ?3 AND cue_sheet IS ?4 AND cue_number IS ?5
-                 AND cue_start_frame IS ?6 AND cue_end_frame IS ?7
-                 AND missing=0 AND (bitrate_bps IS NULL OR bitrate_exact=0)",
+         AND fingerprint IS ?3 AND cue_sheet IS ?4 AND cue_number IS ?5
+         AND cue_start_frame IS ?6 AND cue_end_frame IS ?7
+         AND missing=0 AND (bitrate_bps IS NULL OR bitrate_exact=0)",
+            )?
+            .query_row(
                 params![
                     track.id,
                     track
@@ -395,7 +397,7 @@ impl Store {
             });
         }
         let order = library_order(sort);
-        let mut stmt = self.conn.prepare(&format!(
+        let mut stmt = self.conn.prepare_cached(&format!(
             "SELECT {LIBRARY_ROW_COLUMNS} FROM tracks {TRACK_SEARCH_FILTER} ORDER BY {order} LIMIT ?4 OFFSET ?5"
         ))?;
         let rows = stmt
@@ -444,7 +446,7 @@ impl Store {
             });
         }
         let order = library_order(sort);
-        let mut stmt = self.conn.prepare(&format!(
+        let mut stmt = self.conn.prepare_cached(&format!(
             "SELECT {LIBRARY_ROW_COLUMNS} FROM tracks {TRACK_SEARCH_FILTER}{scope} ORDER BY {order} LIMIT ?5 OFFSET ?6"
         ))?;
         let rows = stmt
@@ -480,9 +482,8 @@ impl Store {
         use rivu_protocol::model::{LibraryLocateResult, LibraryLocation};
         let Some(source) = self
             .conn
-            .query_row("SELECT path FROM tracks WHERE id=?1", [track_id], |row| {
-                row.get::<_, String>(0)
-            })
+            .prepare_cached("SELECT path FROM tracks WHERE id=?1")?
+            .query_row([track_id], |row| row.get::<_, String>(0))
             .optional()?
         else {
             return Ok(LibraryLocateResult::Unavailable);
@@ -494,11 +495,14 @@ impl Store {
         let query = query
             .filter(|query| !query.is_empty())
             .map(str::to_lowercase);
-        let matches = self.conn.query_row(
-            &format!("SELECT EXISTS(SELECT 1 FROM tracks {TRACK_SEARCH_FILTER} AND id=?4)"),
-            params![query, favorite, missing, track_id],
-            |row| row.get::<_, bool>(0),
-        )?;
+        let matches = self
+            .conn
+            .prepare_cached(&format!(
+                "SELECT EXISTS(SELECT 1 FROM tracks {TRACK_SEARCH_FILTER} AND id=?4)"
+            ))?
+            .query_row(params![query, favorite, missing, track_id], |row| {
+                row.get::<_, bool>(0)
+            })?;
         if !matches {
             return Ok(LibraryLocateResult::Filtered);
         }
@@ -536,8 +540,8 @@ impl Store {
         };
         let location = self
             .conn
+            .prepare_cached(&sql)?
             .query_row(
-                &sql,
                 params![query, favorite, missing, prefix, target, track_id],
                 |row| {
                     Ok((
@@ -585,9 +589,7 @@ impl Store {
                 unique.push(prefix.as_str());
             }
         }
-        let mut stmt = self.conn.prepare(
-            "SELECT roots.key,CASE WHEN roots.value='' THEN (SELECT COUNT(*) FROM tracks) ELSE (SELECT COUNT(*) FROM tracks WHERE tracks.path>=roots.value AND tracks.path<(rtrim(roots.value,'/')||'0')) END FROM json_each(?1) AS roots ORDER BY roots.key"
-        )?;
+        let mut stmt = self.conn.prepare_cached("SELECT roots.key,CASE WHEN roots.value='' THEN (SELECT COUNT(*) FROM tracks) ELSE (SELECT COUNT(*) FROM tracks WHERE tracks.path>=roots.value AND tracks.path<(rtrim(roots.value,'/')||'0')) END FROM json_each(?1) AS roots ORDER BY roots.key")?;
         let totals = stmt
             .query_map([serde_json::to_string(&unique)?], |row| {
                 Ok(row.get::<_, i64>(1)? as usize)
@@ -630,23 +632,21 @@ impl Store {
                 unique.push(prefix.as_str());
             }
         }
-        let mut statement = self.conn.prepare(
-            "WITH roots AS (SELECT key,value FROM json_each(?1)),
-             source_totals AS (
-                 SELECT roots.key AS root_key,COUNT(*) AS track_total,MAX(tracks.file_size) AS source_size
-                 FROM roots CROSS JOIN tracks INDEXED BY tracks_path
-                 WHERE roots.value<>'' AND tracks.path>=roots.value
-                   AND tracks.path<(rtrim(roots.value,'/')||'0')
-                 GROUP BY roots.key,tracks.path
-                 UNION ALL
-                 SELECT roots.key,COUNT(*),MAX(tracks.file_size)
-                 FROM roots CROSS JOIN tracks INDEXED BY tracks_path
-                 WHERE roots.value='' GROUP BY roots.key,tracks.path
-             )
-             SELECT roots.key,COALESCE(SUM(track_total),0),COALESCE(SUM(source_size),0)
-             FROM roots LEFT JOIN source_totals ON source_totals.root_key=roots.key
-             GROUP BY roots.key ORDER BY roots.key",
-        )?;
+        let mut statement = self.conn.prepare_cached("WITH roots AS (SELECT key,value FROM json_each(?1)),
+         source_totals AS (
+             SELECT roots.key AS root_key,COUNT(*) AS track_total,MAX(tracks.file_size) AS source_size
+             FROM roots CROSS JOIN tracks INDEXED BY tracks_path
+             WHERE roots.value<>'' AND tracks.path>=roots.value
+               AND tracks.path<(rtrim(roots.value,'/')||'0')
+             GROUP BY roots.key,tracks.path
+             UNION ALL
+             SELECT roots.key,COUNT(*),MAX(tracks.file_size)
+             FROM roots CROSS JOIN tracks INDEXED BY tracks_path
+             WHERE roots.value='' GROUP BY roots.key,tracks.path
+         )
+         SELECT roots.key,COALESCE(SUM(track_total),0),COALESCE(SUM(source_size),0)
+         FROM roots LEFT JOIN source_totals ON source_totals.root_key=roots.key
+         GROUP BY roots.key ORDER BY roots.key")?;
         let totals = statement
             .query_map([serde_json::to_string(&unique)?], |row| {
                 Ok((row.get::<_, i64>(1)? as usize, row.get::<_, i64>(2)? as u64))
@@ -669,9 +669,8 @@ impl Store {
     pub(crate) fn track_count(&self) -> Result<usize> {
         Ok(self
             .conn
-            .query_row("SELECT COUNT(*) FROM tracks", [], |row| {
-                row.get::<_, i64>(0)
-            })? as usize)
+            .prepare_cached("SELECT COUNT(*) FROM tracks")?
+            .query_row([], |row| row.get::<_, i64>(0))? as usize)
     }
 
     fn filtered_track_count(
@@ -688,37 +687,27 @@ impl Store {
             Ok(match prefix {
                 Some(prefix) if query.is_none() && favorite.is_none() && missing.is_none() => {
                     // Omitting nullable predicates keeps this count on the covering path index.
-                    self.conn.query_row(
-                        "SELECT COUNT(*) FROM tracks WHERE path>=?1 AND path<(rtrim(?1,'/')||'0')",
-                        [prefix],
-                        |row| row.get::<_, i64>(0),
-                    )?
+                    self.conn.prepare_cached("SELECT COUNT(*) FROM tracks WHERE path>=?1 AND path<(rtrim(?1,'/')||'0')")?.query_row([prefix],
+                    |row| row.get::<_, i64>(0),)?
                 }
-                Some(prefix) => self.conn.query_row(
-                    &format!("SELECT COUNT(*) FROM tracks {TRACK_SEARCH_FILTER}{DIRECTORY_SCOPE}"),
-                    params![query, favorite, missing, prefix],
-                    |row| row.get::<_, i64>(0),
-                )?,
-                None => self.conn.query_row(
-                    &format!("SELECT COUNT(*) FROM tracks {TRACK_SEARCH_FILTER}"),
-                    params![query, favorite, missing],
-                    |row| row.get::<_, i64>(0),
-                )?,
+                Some(prefix) => self.conn.prepare_cached(&format!("SELECT COUNT(*) FROM tracks {TRACK_SEARCH_FILTER}{DIRECTORY_SCOPE}"))?.query_row(params![query, favorite, missing, prefix],
+                |row| row.get::<_, i64>(0),)?,
+                None => self.conn.prepare_cached(&format!("SELECT COUNT(*) FROM tracks {TRACK_SEARCH_FILTER}"))?.query_row(params![query, favorite, missing],
+                |row| row.get::<_, i64>(0),)?,
             } as usize)
         })
     }
 
     pub fn library_stats(&self) -> Result<rivu_protocol::model::LibraryStats> {
-        Ok(self.conn.query_row(
-            "SELECT COUNT(*),COALESCE(SUM(play_count),0) FROM tracks",
-            [],
-            |row| {
+        Ok(self
+            .conn
+            .prepare_cached("SELECT COUNT(*),COALESCE(SUM(play_count),0) FROM tracks")?
+            .query_row([], |row| {
                 Ok(rivu_protocol::model::LibraryStats {
                     total: row.get::<_, i64>(0)? as usize,
                     play_count: row.get::<_, i64>(1)? as u64,
                 })
-            },
-        )?)
+            })?)
     }
 
     pub fn directory_page(
@@ -754,11 +743,12 @@ impl Store {
                 bool_key(missing),
             ],
             || {
-                Ok(self.conn.query_row(
-                    &format!("{children} SELECT COUNT(*) FROM children"),
-                    params![query, favorite, missing, prefix],
-                    |row| row.get::<_, i64>(0),
-                )? as usize)
+                Ok(self
+                    .conn
+                    .prepare_cached(&format!("{children} SELECT COUNT(*) FROM children"))?
+                    .query_row(params![query, favorite, missing, prefix], |row| {
+                        row.get::<_, i64>(0)
+                    })? as usize)
             },
         )?;
         if limit == 0 || offset >= total {
@@ -770,7 +760,7 @@ impl Store {
         let sql = format!(
             "{children}, page AS MATERIALIZED (SELECT kind,child,track_id FROM children ORDER BY kind,child,track_id LIMIT ?5 OFFSET ?6) SELECT p.kind,p.child,{LIBRARY_ROW_COLUMNS_QUALIFIED} FROM page p LEFT JOIN tracks t ON p.kind=1 AND t.id=p.track_id ORDER BY p.kind,p.child,p.track_id"
         );
-        let mut stmt = self.conn.prepare(&sql)?;
+        let mut stmt = self.conn.prepare_cached(&sql)?;
         let mut result = stmt.query(params![
             query,
             favorite,
@@ -839,21 +829,11 @@ impl Store {
 
     pub fn track_id_for_identity(&self, identity: super::TrackIdentity<'_>) -> Result<Option<i64>> {
         let id = match identity {
-            super::TrackIdentity::File(path) => self
-                .conn
-                .query_row(
-                    "SELECT id FROM tracks WHERE path=?1 AND CASE WHEN cue_sheet IS NULL THEN 0 ELSE NULL END = 0 AND missing=0",
-                    [path.to_string_lossy().as_ref()],
-                    |row| row.get(0),
-                )
+            super::TrackIdentity::File(path) => self.conn.prepare_cached("SELECT id FROM tracks WHERE path=?1 AND CASE WHEN cue_sheet IS NULL THEN 0 ELSE NULL END = 0 AND missing=0")?.query_row([path.to_string_lossy().as_ref()],
+            |row| row.get(0),)
                 .optional()?,
-            super::TrackIdentity::Cue(path, number) => self
-                .conn
-                .query_row(
-                    "SELECT id FROM tracks WHERE cue_sheet=?1 AND cue_number=?2 AND missing=0",
-                    params![path.to_string_lossy().as_ref(), number],
-                    |row| row.get(0),
-                )
+            super::TrackIdentity::Cue(path, number) => self.conn.prepare_cached("SELECT id FROM tracks WHERE cue_sheet=?1 AND cue_number=?2 AND missing=0")?.query_row(params![path.to_string_lossy().as_ref(), number],
+            |row| row.get(0),)
                 .optional()?,
         };
         Ok(id)
@@ -882,7 +862,7 @@ impl Store {
         );
         let limit = limit.min(rivu_protocol::model::MAX_QUERY_ROWS) as i64;
         let offset = offset.min(i64::MAX as usize) as i64;
-        let mut stmt = self.conn.prepare(&sql)?;
+        let mut stmt = self.conn.prepare_cached(&sql)?;
         let rows = stmt
             .query_map(
                 params![pattern, favorite, missing, limit, offset],
@@ -905,11 +885,11 @@ impl Store {
             .filter(|value| !value.is_empty())
             .map(str::to_lowercase);
         let mut stmt = if after.is_some() {
-            self.conn.prepare(&format!(
+            self.conn.prepare_cached(&format!(
                 "SELECT {TRACK_COLUMNS} FROM tracks {TRACK_SEARCH_FILTER} AND tracks.id>?4 ORDER BY tracks.id LIMIT ?5"
             ))?
         } else {
-            self.conn.prepare(&format!(
+            self.conn.prepare_cached(&format!(
                 "SELECT {TRACK_COLUMNS} FROM tracks {TRACK_SEARCH_FILTER} ORDER BY tracks.id LIMIT ?4"
             ))?
         };
@@ -934,10 +914,8 @@ impl Store {
     }
 
     pub fn history(&self, limit: usize) -> Result<Vec<HistoryEntry>> {
-        let mut q = self.conn.prepare(
-            "SELECT id,COALESCE(title_override,raw_title),play_count,last_played,favorite FROM tracks
-             WHERE last_played IS NOT NULL ORDER BY last_played DESC,id DESC LIMIT ?",
-        )?;
+        let mut q = self.conn.prepare_cached("SELECT id,COALESCE(title_override,raw_title),play_count,last_played,favorite FROM tracks
+         WHERE last_played IS NOT NULL ORDER BY last_played DESC,id DESC LIMIT ?")?;
         Ok(q.query_map([limit.min(i64::MAX as usize) as i64], |r| {
             Ok(HistoryEntry {
                 track_id: r.get(0)?,

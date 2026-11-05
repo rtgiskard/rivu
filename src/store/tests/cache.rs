@@ -441,3 +441,177 @@ fn bitrate_commit_does_not_insert_absent_cached_tracks() {
         Some(192_000)
     );
 }
+
+// Inspect SQLite's actual retained statements and execution counters, rather
+// than asserting SQL spelling or relying on elapsed-time performance tests.
+fn statement_activity(store: &Store) -> (usize, i64) {
+    let mut count = 0;
+    let mut runs = 0;
+    // SAFETY: this test owns the idle connection; statements are inspected only
+    // during this synchronous call and no handles escape it.
+    unsafe {
+        let connection = store.conn.handle();
+        let mut statement = rusqlite::ffi::sqlite3_next_stmt(connection, std::ptr::null_mut());
+        while !statement.is_null() {
+            count += 1;
+            runs += i64::from(rusqlite::ffi::sqlite3_stmt_status(
+                statement,
+                rusqlite::ffi::SQLITE_STMTSTATUS_RUN,
+                0,
+            ));
+            statement = rusqlite::ffi::sqlite3_next_stmt(connection, statement);
+        }
+    }
+    (count, runs)
+}
+
+#[test]
+fn reader_playlist_counts_invalidate_only_the_changed_lifetime_token() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("playlist-count-tokens.db");
+    let writer = Store::open(&path).unwrap();
+    writer
+        .apply_scan(&scan(vec![rec("/music/a.wav", "a", "A", 10.0)]))
+        .unwrap();
+    let track = all_tracks(&writer).remove(0).id;
+    let a = writer.create_playlist_with_tracks("A", &[track]).unwrap();
+    let b = writer.create_playlist_with_tracks("B", &[track]).unwrap();
+    let reader = Store::open_reader(&path).unwrap();
+    let count = |id| reader.playlist_entries_page(id, None, 0, 0).unwrap().total;
+    assert_eq!(count(a), 1);
+    assert_eq!(count(b), 1);
+    let original = std::collections::BTreeMap::from([(a, 11), (b, 12)]);
+    let changed = std::collections::BTreeMap::from([(a, 11), (b, 13)]);
+    writer.add_playlist(b, &[track]).unwrap();
+    reader.invalidate_playlist_count_revisions(&original, &changed);
+    let before = statement_activity(&reader);
+    assert_eq!(count(a), 1);
+    assert_eq!(
+        statement_activity(&reader),
+        before,
+        "unrelated playlist count reran SQL"
+    );
+    assert_eq!(count(b), 2);
+    assert_eq!(statement_activity(&reader).1, before.1 + 1);
+
+    writer
+        .conn
+        .execute("DELETE FROM playlists WHERE id=?1", [a])
+        .unwrap();
+    let deleted = std::collections::BTreeMap::from([(b, 13)]);
+    reader.invalidate_playlist_count_revisions(&changed, &deleted);
+    assert!(reader.playlist_entries_page(a, None, 0, 0).is_err());
+    writer
+        .conn
+        .execute(
+            "INSERT INTO playlists(id,name,position) VALUES(?1,'Recreated',0)",
+            [a],
+        )
+        .unwrap();
+    let recreated = std::collections::BTreeMap::from([(a, 14), (b, 13)]);
+    reader.invalidate_playlist_count_revisions(&deleted, &recreated);
+    assert_eq!(count(a), 0);
+    assert_eq!(count(b), 2);
+}
+
+#[test]
+fn recurring_reader_sql_reuses_statements_across_filter_values() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("statement-cache.db");
+    let writer = Store::open(&path).unwrap();
+    writer
+        .apply_scan(&scan(vec![rec("/music/a.wav", "a", "A", 10.0)]))
+        .unwrap();
+    let reader = Store::open_reader(&path).unwrap();
+    reader
+        .library_page(Some("filter-0"), None, None, 0, 1)
+        .unwrap();
+    let before = statement_activity(&reader);
+    assert!(before.0 > 0);
+    for index in 1..128 {
+        assert_eq!(
+            reader
+                .library_page(Some(&format!("filter-{index}")), None, None, 0, 1)
+                .unwrap()
+                .total,
+            0
+        );
+    }
+    let after = statement_activity(&reader);
+    assert_eq!(after.0, before.0, "filter values created new SQL shapes");
+    assert!(after.1 > before.1);
+    assert!(after.0 <= 64);
+}
+
+#[test]
+fn scoped_read_cancellation_interrupts_sql_and_detaches_before_rollback() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("read-cancellation.db");
+    let _writer = Store::open(&path).unwrap();
+    let reader = Store::open_reader(&path).unwrap();
+    let snapshot = reader.read_snapshot().unwrap();
+    let checks = std::cell::Cell::new(0);
+    let long_query = || {
+        reader.conn.query_row(
+        "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000000) SELECT SUM(x) FROM n",
+        [], |row| row.get::<_, i64>(0),
+    )
+    };
+    let error = reader
+        .with_read_cancellation(
+            || {
+                checks.set(checks.get() + 1);
+                checks.get() == 3
+            },
+            long_query,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(error, rusqlite::Error::SqliteFailure(code, _) if code.code == rusqlite::ErrorCode::OperationInterrupted)
+    );
+    assert_eq!(checks.get(), 3);
+    snapshot.finish().unwrap();
+    // A fresh snapshot and long SQL both succeed without the retired callback.
+    reader.read_snapshot().unwrap().finish().unwrap();
+    assert_eq!(long_query().unwrap(), 500000500000);
+    assert_eq!(checks.get(), 3);
+}
+
+#[test]
+fn scoped_read_cancellation_contains_callback_panics_and_detaches_on_unwind() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("read-cancellation-panic.db");
+    let _writer = Store::open(&path).unwrap();
+    let reader = Store::open_reader(&path).unwrap();
+    let query = || {
+        reader.conn.query_row(
+        "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000) SELECT SUM(x) FROM n",
+        [], |row| row.get::<_, i64>(0),
+    )
+    };
+    let error = reader
+        .with_read_cancellation(|| panic!("cancellation predicate panic"), query)
+        .unwrap_err();
+    assert!(
+        matches!(error, rusqlite::Error::SqliteFailure(code, _) if code.code == rusqlite::ErrorCode::OperationInterrupted)
+    );
+    let checks = std::cell::Cell::new(0);
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            reader.with_read_cancellation(
+                || {
+                    checks.set(checks.get() + 1);
+                    false
+                },
+                || panic!("read panic"),
+            )
+        }))
+        .is_err()
+    );
+    assert_eq!(query().unwrap(), 500500);
+    assert_eq!(
+        checks.get(),
+        0,
+        "unwound read retained its cancellation callback"
+    );
+}
