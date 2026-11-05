@@ -183,6 +183,10 @@ symlinks), strict version/input rejection, missing resources, preserved user dat
 transaction failure/reentry, no-ops, retained backups, directory aliases and ownership
 exclusion. These are requirements, not a record of checks run by this document.
 
+Historical-format regressions use fixed source-format fixtures, independent of the
+current schema, and verify both preserved data and subsequent reads, writes and
+trigger behavior. Updating the current format must not silently redefine old inputs.
+
 Integration proof must run the tool, then load settings and query/write its database
 with the application. Unit tests or compilation alone are insufficient.
 

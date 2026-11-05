@@ -409,25 +409,64 @@ fn transactional_change_failure_rolls_back_and_reentry_keeps_distinct_backups() 
 }
 
 fn version_two_fixture() -> (tempfile::TempDir, Options) {
-    let (directory, options) = fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let options = Options {
+        data_dir: directory.path().to_path_buf(),
+        config: directory.path().join("config.toml"),
+        explicit_data_dir: true,
+    };
     let conn = Connection::open(options.data_dir.join("library.db")).unwrap();
-    // Schema 2 is the same occurrence schema, without persisted catalog order.
+    conn.execute_batch(include_str!("../tests/fixtures/schema2.sql"))
+        .unwrap();
     conn.execute_batch(
-        "ALTER TABLE playlists DROP COLUMN position;
-         UPDATE rivu_meta SET format_version=2;
-         INSERT INTO tracks(id,path) VALUES(1,'one'),(2,'two');
+        "INSERT INTO tracks(id,path,raw_album,raw_artist) VALUES
+             (1,'one','Original album','Original artist'),(2,'two','','');
+         INSERT INTO tracks(id,path,cue_sheet,cue_number,cue_start_frame,cue_end_frame,
+             raw_title,raw_album,raw_artist) VALUES
+             (3,'/album/image.flac','/album/disc.cue',1,0,4500,'First','CUE album','CUE artist'),
+             (4,'/album/image.flac','/album/disc.cue',2,4500,NULL,'Second','CUE album','CUE artist');
          INSERT INTO playlists(id,name) VALUES(30,'Zebra'),(10,'Middle'),(20,'Alpha');
          INSERT INTO playlist_entries(id,playlist_id,track_id,position) VALUES
-             (41,0,1,0),(42,0,2,1),(43,0,1,2),(51,10,2,0),(52,10,1,1),(53,10,2,2);
-         UPDATE tracks SET title_override='User title',favorite=1,play_count=7,last_played=42 WHERE id=1;
+             (41,0,1,0),(42,0,2,1),(43,0,1,2),(44,0,3,3),
+             (51,10,2,0),(52,10,1,1),(53,10,2,2),(54,10,4,3);
+         UPDATE tracks SET title_override='User title',favorite=1,play_count=7,last_played=42,
+             fingerprint=zeroblob(32),file_size=123456,modified_ns=987654321,
+             artist_override='User artist',album_override='User album',duration=60.5,
+             codec='flac',channels=2,sample_rate=44100,probe_version=3,bitrate_bps=1000000,
+             track_number=2,disc_number=1,bitrate_exact=1,bits_per_sample=16,
+             release_date='2001-02-03',relocation_independent=1,decoder_hint=2 WHERE id=1;
          UPDATE rivu_meta SET current_queue_entry_id=42;",
     )
     .unwrap();
+    catalog_order::validate(&conn).unwrap();
     (directory, options)
 }
 
 fn occurrence_snapshot(conn: &Connection) -> Vec<(i64, i64, i64, i64)> {
     conn.prepare("SELECT id,playlist_id,track_id,position FROM playlist_entries ORDER BY id")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+}
+
+fn track_snapshot(conn: &Connection) -> Vec<Vec<rusqlite::types::Value>> {
+    let mut statement = conn.prepare("SELECT * FROM tracks ORDER BY id").unwrap();
+    let columns = statement.column_count();
+    statement
+        .query_map([], |row| {
+            (0..columns).map(|column| row.get(column)).collect()
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+}
+
+fn album_snapshot(conn: &Connection) -> Vec<(String, String, i64, Option<String>)> {
+    conn.prepare("SELECT directory,title,track_count,artist FROM albums ORDER BY directory,title")
         .unwrap()
         .query_map([], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
@@ -448,6 +487,9 @@ fn catalog_migration_preserves_previous_order_contents_and_queue_after_reopen() 
     let path = options.data_dir.join("library.db");
     let conn = Connection::open(&path).unwrap();
     let source_version = format_version(&conn);
+    assert_eq!(source_version, 2);
+    let tracks = track_snapshot(&conn);
+    let albums = album_snapshot(&conn);
     let occurrences = occurrence_snapshot(&conn);
     let schema: i64 = conn
         .pragma_query_value(None, "schema_version", |row| row.get(0))
@@ -473,6 +515,8 @@ fn catalog_migration_preserves_previous_order_contents_and_queue_after_reopen() 
     assert_eq!(format_version(&backup), source_version);
     catalog_order::validate(&backup).unwrap();
     assert_eq!(occurrence_snapshot(&backup), occurrences);
+    assert_eq!(track_snapshot(&backup), tracks);
+    assert_eq!(album_snapshot(&backup), albums);
     drop(conn);
 
     let conn = Connection::open(&path).unwrap();
@@ -499,6 +543,8 @@ fn catalog_migration_preserves_previous_order_contents_and_queue_after_reopen() 
             .collect::<Vec<_>>()
     );
     assert_eq!(occurrence_snapshot(&conn), occurrences);
+    assert_eq!(track_snapshot(&conn), tracks);
+    assert_eq!(album_snapshot(&conn), albums);
     assert_eq!(
         conn.query_row("SELECT current_queue_entry_id FROM rivu_meta", [], |row| {
             row.get::<_, i64>(0)
@@ -537,6 +583,173 @@ fn catalog_migration_preserves_previous_order_contents_and_queue_after_reopen() 
     let repeated = execute(&options, Mode::Apply).unwrap();
     assert!(!repeated.needs_changes);
     assert!(repeated.backups.is_empty());
+}
+
+#[test]
+fn upgraded_history_supports_cue_identity_and_collection_writes() {
+    let (_directory, options) = version_two_fixture();
+    execute(&options, Mode::Apply).unwrap();
+    let conn = Connection::open(options.data_dir.join("library.db")).unwrap();
+    conn.pragma_update(None, "foreign_keys", true).unwrap();
+    let cue_tracks = conn
+        .prepare(
+            "SELECT id,cue_number,cue_start_frame,cue_end_frame
+             FROM tracks INDEXED BY tracks_cue
+             WHERE cue_sheet IS NOT NULL AND cue_sheet=?1 ORDER BY cue_number",
+        )
+        .unwrap()
+        .query_map(["/album/disc.cue"], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+            ))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(cue_tracks, [(3, 1, 0, Some(4500)), (4, 2, 4500, None)]);
+
+    // An ordinary track and separate CUE identities can share the audio path.
+    conn.execute_batch(
+        "INSERT INTO tracks(path) VALUES('/album/image.flac');
+         INSERT INTO tracks(path,cue_sheet,cue_number)
+             VALUES('/album/image.flac','/album/alternate.cue',1);",
+    )
+    .unwrap();
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM tracks INDEXED BY tracks_path WHERE path=?1
+             AND CASE WHEN cue_sheet IS NULL THEN 0 ELSE NULL END=0 AND missing=0",
+            ["/album/image.flac"],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+        1
+    );
+    for sql in [
+        "INSERT INTO tracks(path,missing) VALUES('/album/image.flac',1)",
+        "INSERT INTO tracks(path,cue_sheet,cue_number) VALUES('/other.flac','/album/disc.cue',1)",
+    ] {
+        assert_eq!(
+            conn.execute(sql, []).unwrap_err().sqlite_error_code(),
+            Some(rusqlite::ErrorCode::ConstraintViolation)
+        );
+    }
+
+    conn.execute(
+        "INSERT INTO playlists(name,position)
+         SELECT 'New playlist',COALESCE(MAX(position)+1,0) FROM playlists WHERE id>0",
+        [],
+    )
+    .unwrap();
+    let playlist = conn.last_insert_rowid();
+    assert_eq!(playlist, 31);
+    assert_eq!(
+        conn.query_row(
+            "SELECT position FROM playlists WHERE id=?1",
+            [playlist],
+            |row| { row.get::<_, i64>(0) }
+        )
+        .unwrap(),
+        3
+    );
+    conn.execute(
+        "INSERT INTO playlist_entries(playlist_id,track_id,position)
+         SELECT ?1,value,CAST(key AS INTEGER) FROM json_each('[3,3]') ORDER BY CAST(key AS INTEGER)",
+        [playlist],
+    )
+    .unwrap();
+    let appended = occurrence_snapshot(&conn)
+        .into_iter()
+        .filter(|entry| entry.1 == playlist)
+        .collect::<Vec<_>>();
+    assert_eq!(appended.len(), 2);
+    assert!(appended.iter().all(|entry| entry.0 > 54 && entry.2 == 3));
+    assert_eq!((appended[0].3, appended[1].3), (0, 1));
+
+    conn.execute_batch(
+        "UPDATE rivu_meta SET current_queue_entry_id=43 WHERE singleton=1;
+         DELETE FROM playlist_entries WHERE id=41;",
+    )
+    .unwrap();
+    assert_eq!(
+        conn.query_row(
+            "SELECT current_queue_entry_id,
+                 (SELECT track_id FROM playlist_entries WHERE id=current_queue_entry_id)
+             FROM rivu_meta WHERE singleton=1",
+            [],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .unwrap(),
+        (43, 1)
+    );
+    conn.execute_batch("DELETE FROM tracks WHERE id=1;")
+        .unwrap();
+    assert_eq!(
+        conn.query_row("SELECT current_queue_entry_id FROM rivu_meta", [], |row| {
+            row.get::<_, Option<i64>>(0)
+        })
+        .unwrap(),
+        None
+    );
+    assert!(!occurrence_snapshot(&conn).iter().any(|entry| entry.2 == 1));
+    conn.execute("DELETE FROM playlists WHERE id=?1", [playlist])
+        .unwrap();
+    assert!(
+        !occurrence_snapshot(&conn)
+            .iter()
+            .any(|entry| entry.1 == playlist)
+    );
+}
+
+#[test]
+fn upgraded_history_keeps_album_summary_triggers_writable() {
+    let (_directory, options) = version_two_fixture();
+    execute(&options, Mode::Apply).unwrap();
+    let conn = Connection::open(options.data_dir.join("library.db")).unwrap();
+    let original = album_snapshot(&conn);
+    conn.execute_batch(
+        "INSERT INTO tracks(id,path,raw_album,raw_artist)
+             VALUES(5,'/fresh/one.flac','Fresh album','First artist'),
+                   (6,'/fresh/two.flac','Fresh album','Second artist');",
+    )
+    .unwrap();
+    let summary = |title: &str| {
+        conn.query_row(
+            "SELECT track_count,artist FROM albums WHERE directory='/fresh' AND title=?1",
+            [title],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .unwrap()
+    };
+    assert_eq!(summary("Fresh album"), (2, "Various artists".to_owned()));
+    conn.execute(
+        "UPDATE tracks SET artist_override='First artist' WHERE id=6",
+        [],
+    )
+    .unwrap();
+    assert_eq!(summary("Fresh album"), (2, "First artist".to_owned()));
+    conn.execute(
+        "UPDATE tracks SET album_override='Moved album' WHERE id=6",
+        [],
+    )
+    .unwrap();
+    assert_eq!(summary("Fresh album"), (1, "First artist".to_owned()));
+    assert_eq!(summary("Moved album"), (1, "First artist".to_owned()));
+    conn.execute_batch("DELETE FROM tracks WHERE id IN (5,6);")
+        .unwrap();
+    assert_eq!(album_snapshot(&conn), original);
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM album_artists WHERE directory='/fresh'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+        0
+    );
 }
 
 #[test]
