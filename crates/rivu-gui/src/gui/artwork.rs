@@ -887,11 +887,33 @@ impl ImageCache for ArtworkImage {
 #[derive(Default)]
 pub(super) struct ArtworkLoader {
     active: Option<ArtworkIdentity>,
+    negative: Option<ArtworkIdentity>,
 }
 
 impl ArtworkLoader {
+    /// A visible consumer owns its completed miss independently of cache eviction.
+    /// This is demand state, not a lease on a shared cache entry.
+    pub(super) fn retain_negative(&mut self, track: Option<&Track>) {
+        if !track.is_some_and(|track| {
+            self.negative
+                .as_ref()
+                .is_some_and(|identity| identity.matches(crate::artwork_source(track)))
+        }) {
+            self.negative = None;
+        }
+    }
+
+    pub(super) fn remember_result(&mut self, identity: ArtworkIdentity, positive: bool) {
+        self.negative = (!positive).then_some(identity);
+    }
+
     pub(super) fn prepare(&mut self, track: &Track) -> Option<Track> {
-        if self.active.is_some() {
+        if self.active.is_some()
+            || self
+                .negative
+                .as_ref()
+                .is_some_and(|identity| identity.matches(crate::artwork_source(track)))
+        {
             return None;
         }
         self.active = Some(ArtworkIdentity::new(crate::artwork_source(track)));
@@ -2947,5 +2969,36 @@ mod tests {
         assert!(loader.prepare(&first).is_none());
         assert!(loader.finish(&replacement));
         assert!(loader.active.is_none());
+    }
+
+    #[test]
+    fn negative_demand_is_retained_only_for_the_visible_exact_source() {
+        let original = track(1, "original");
+        let identity = ArtworkIdentity::new(crate::artwork_source(&original));
+        let mut relocated = original.clone();
+        relocated.path = "/relocated/track.wav".into();
+        let changed = track(1, "replacement");
+        let other = track(2, "original");
+        for next in [relocated, changed, other] {
+            let mut loader = ArtworkLoader::default();
+            loader.remember_result(identity.clone(), false);
+            loader.retain_negative(Some(&original));
+            assert!(loader.prepare(&original).is_none());
+            loader.retain_negative(Some(&next));
+            assert!(loader.prepare(&next).is_some());
+            // Hiding clears demand, never the still-running physical slot.
+            loader.retain_negative(None);
+            assert!(loader.prepare(&original).is_none());
+            assert!(loader.finish(&ArtworkIdentity::new(crate::artwork_source(&next))));
+            assert!(loader.prepare(&original).is_some());
+        }
+        let mut loader = ArtworkLoader::default();
+        loader.remember_result(identity.clone(), false);
+        loader.retain_negative(None);
+        assert!(loader.prepare(&original).is_some());
+        assert!(loader.finish(&identity));
+        loader.remember_result(identity.clone(), false);
+        loader.remember_result(identity, true);
+        assert!(loader.prepare(&original).is_some());
     }
 }

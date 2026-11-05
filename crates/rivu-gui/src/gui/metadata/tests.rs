@@ -440,13 +440,7 @@ fn completed_negative_artwork_keeps_fallback_when_details_reopen(cx: &mut TestAp
         this.visible = true;
         this.prepare_artwork(cx);
         assert!(this.artwork_view.image(cx).is_none());
-        assert!(this.artwork_loader.prepare(&selected).is_some());
-        assert!(
-            this.artwork_loader
-                .finish(&rivu_metadata::artwork::ArtworkIdentity::new(
-                    crate::artwork_source(&selected)
-                ))
-        );
+        assert!(this.artwork_loader.prepare(&selected).is_none());
         this.set_visible(false, cx);
     });
     // A completed miss is not a new acquisition demand on every render/reopen.
@@ -465,14 +459,58 @@ fn completed_negative_artwork_keeps_fallback_when_details_reopen(cx: &mut TestAp
         );
         assert!(this.artwork_view.image(cx).is_none());
         this.prepare_artwork(cx);
-        assert!(this.artwork_loader.prepare(&selected).is_some());
+        assert!(this.artwork_loader.prepare(&selected).is_none());
+        assert!(this.artwork_view.image(cx).is_none());
+    });
+}
+
+#[gpui::test]
+fn visible_details_keep_negative_artwork_after_shared_cache_eviction(cx: &mut TestAppContext) {
+    let (directory, _runtime, metadata) = fixture(cx);
+    let mut selected = track(7, "Missing cover");
+    selected.path = directory.path().join("missing-cover.wav");
+    metadata.update(cx, |this, cx| {
         assert!(
-            this.artwork_loader
-                .finish(&rivu_metadata::artwork::ArtworkIdentity::new(
-                    crate::artwork_source(&selected)
-                ))
+            this.artwork_manager
+                .load(crate::artwork_source(&selected))
+                .is_none()
+        );
+        artwork_selection(this, selected.clone(), cx);
+        this.visible = true;
+        this.prepare_artwork(cx);
+        for id in 100..170 {
+            let mut pressure = track(id, "Missing");
+            pressure.path = directory.path().join("pressure").join(format!("{id}.wav"));
+            assert!(
+                this.artwork_manager
+                    .load(crate::artwork_source(&pressure))
+                    .is_none()
+            );
+        }
+        assert!(
+            this.artwork_manager
+                .cached_result(crate::artwork_source(&selected))
+                .is_none()
+        );
+        rivu_metadata::artwork::test_support::tagged_wav(&selected.path);
+        this.prepare_artwork(cx);
+    });
+    cx.run_until_parked();
+    metadata.update(cx, |this, cx| {
+        assert!(
+            this.artwork_manager
+                .cached_result(crate::artwork_source(&selected))
+                .is_none()
         );
         assert!(this.artwork_view.image(cx).is_none());
+        // Hiding releases the negative identity. Revealing cold demand may probe again.
+        this.set_visible(false, cx);
+        this.set_visible(true, cx);
+        this.prepare_artwork(cx);
+    });
+    cx.run_until_parked();
+    metadata.update(cx, |this, cx| {
+        assert!(this.artwork_view.image(cx).is_some());
     });
 }
 

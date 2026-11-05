@@ -791,6 +791,108 @@ fn concurrent_requests_probe_once_and_share_a_complete_image() {
     assert_eq!(probes.load(std::sync::atomic::Ordering::Relaxed), 1);
 }
 
+#[test]
+fn cue_track_ids_share_positive_and_negative_physical_source_probes() {
+    for positive in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let selected = source_fixture(directory.path().join("album.wav"));
+        if positive {
+            tagged_wav(&selected.path);
+        }
+        let manager = ArtworkManager::new(directory.path());
+        let tracks: Vec<_> = (1..=4)
+            .map(|id| TestSource {
+                id,
+                ..selected.clone()
+            })
+            .collect();
+        let barrier = std::sync::Barrier::new(tracks.len());
+        let probes = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            let manager = &manager;
+            let barrier = &barrier;
+            let probes = &probes;
+            let handles: Vec<_> = tracks
+                .iter()
+                .map(|track| {
+                    scope.spawn(move || {
+                        barrier.wait();
+                        manager.load_with(track.source(), || {
+                            probes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            manager.source_uri(&track.path, manager.max_image_bytes)
+                        })
+                    })
+                })
+                .collect();
+            for (track, handle) in tracks.iter().zip(handles) {
+                let result = handle.join().unwrap();
+                assert_eq!(result.is_some(), positive);
+                assert_eq!(manager.cached_result(track.source()), Some(result));
+            }
+        });
+        assert_eq!(probes.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+}
+
+#[test]
+fn one_cue_lease_does_not_pin_idle_logical_aliases() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut selected = source_fixture(directory.path().join("album.wav"));
+    tagged_wav(&selected.path);
+    let manager = ArtworkManager::new(directory.path());
+    let held = manager.load(selected.source()).unwrap();
+    for id in 2..=(MAX_ARTWORK_ENTRIES * 3) as i64 {
+        selected.id = id;
+        assert_eq!(
+            manager.load_with(selected.source(), || panic!("same CUE source reprobed")),
+            Some(held.clone())
+        );
+    }
+    selected.id = 1;
+    assert_eq!(manager.cached(selected.source()), Some(held));
+    selected.id = 2;
+    assert!(manager.cached_result(selected.source()).is_none());
+    let cache = manager.entries.lock();
+    assert_eq!(cache.insertion_order.len(), MAX_ARTWORK_ENTRIES);
+    assert_eq!(cache.items.len(), MAX_ARTWORK_ENTRIES);
+}
+
+#[test]
+fn shared_cue_misses_remain_bounded_and_path_and_version_sensitive() {
+    let directory = tempfile::tempdir().unwrap();
+    let manager = ArtworkManager::new(directory.path());
+    let mut selected = source_fixture(directory.path().join("album.wav"));
+    assert!(manager.load(selected.source()).is_none());
+    for id in 2..=(MAX_ARTWORK_ENTRIES * 3) as i64 {
+        selected.id = id;
+        assert!(
+            manager
+                .load_with(selected.source(), || panic!("same CUE source reprobed"))
+                .is_none()
+        );
+    }
+    assert_eq!(
+        manager.entries.lock().insertion_order.len(),
+        MAX_ARTWORK_ENTRIES
+    );
+    assert_eq!(manager.entries.lock().items.len(), MAX_ARTWORK_ENTRIES);
+    let moved = directory.path().join("moved");
+    fs::create_dir(&moved).unwrap();
+    let bytes = directory_image(&moved.join("cover.png"), 42);
+    selected.path = moved.join("album.wav");
+    let relocated = manager.load(selected.source()).unwrap();
+    assert_eq!(fs::read(relocated.path()).unwrap(), bytes);
+    // Another logical ID shares this directory result, not the original miss.
+    selected.id += 1;
+    assert_eq!(
+        manager.load_with(selected.source(), || panic!("directory reprobed")),
+        Some(relocated)
+    );
+    fs::remove_file(moved.join("cover.png")).unwrap();
+    selected.fingerprint = Some("replacement".into());
+    assert!(manager.load(selected.source()).is_none());
+}
+
 #[cfg(unix)]
 #[test]
 fn fifo_without_writer_falls_back_and_releases_worker_and_maintenance() {

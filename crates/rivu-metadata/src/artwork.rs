@@ -33,20 +33,24 @@ struct ArtworkFile {
 
 /// Holds a published file and protects its URI until it is released.
 #[derive(Clone)]
-pub struct Artwork(Arc<ArtworkFile>);
+pub struct Artwork {
+    file: Arc<ArtworkFile>,
+    // Keep this logical lookup resident, not every alias of its physical image.
+    _entry: Option<Arc<CachedArtwork>>,
+}
 
 impl Artwork {
     pub fn uri(&self) -> &str {
-        &self.0.uri
+        &self.file.uri
     }
 
     pub fn path(&self) -> Arc<Path> {
-        Arc::clone(&self.0.path)
+        Arc::clone(&self.file.path)
     }
 
     /// Immutable encoded admission policy of the session that published this file.
     pub fn max_image_bytes(&self) -> usize {
-        self.0.max_image_bytes
+        self.file.max_image_bytes
     }
 }
 
@@ -58,7 +62,7 @@ impl std::fmt::Debug for Artwork {
 
 impl PartialEq for Artwork {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
+        Arc::ptr_eq(&self.file, &other.file)
     }
 }
 
@@ -115,7 +119,7 @@ impl ArtworkIdentity {
 
 struct CachedArtwork {
     identity: ArtworkIdentity,
-    lookup: OnceLock<ArtworkLookup>,
+    lookup: Arc<OnceLock<ArtworkLookup>>,
 }
 
 enum ArtworkSource {
@@ -164,6 +168,20 @@ impl ArtworkCache {
             })
     }
 
+    fn source_lookup(&self, source: Source<'_>) -> Option<Arc<OnceLock<ArtworkLookup>>> {
+        self.insertion_order
+            .iter()
+            .find(|entry| {
+                entry.identity.path == source.path
+                    && entry.identity.fingerprint.as_deref() == source.fingerprint
+                    && entry
+                        .lookup
+                        .get()
+                        .is_none_or(|lookup| lookup.applies_to(source.path))
+            })
+            .map(|entry| Arc::clone(&entry.lookup))
+    }
+
     fn trim(&mut self) {
         while self.insertion_order.len() > MAX_ARTWORK_ENTRIES {
             let Some(position) = self.insertion_order.iter().position(|entry| {
@@ -171,14 +189,9 @@ impl ArtworkCache {
                     .items
                     .get(&entry.identity.id)
                     .is_some_and(|latest| Arc::ptr_eq(latest, entry));
-                // In-flight loads hold the lookup; published Artwork handles
-                // hold its file directly. Either keeps this version resident.
+                // In-flight loads and published leases pin only their own
+                // logical version, even when physical source lookups are shared.
                 Arc::strong_count(entry) == 1 + usize::from(indexed)
-                    && entry
-                        .lookup
-                        .get()
-                        .and_then(|lookup| lookup.image.as_ref())
-                        .is_none_or(|file| Arc::strong_count(file) == 1)
             }) else {
                 break;
             };
@@ -262,7 +275,10 @@ impl ArtworkManager {
                     "png",
                 );
                 match write_image(&path, bytes) {
-                    Ok(uri) => Some(Artwork(artwork_file(uri, self.max_image_bytes))),
+                    Ok(uri) => Some(Artwork {
+                        file: artwork_file(uri, self.max_image_bytes),
+                        _entry: None,
+                    }),
                     Err(error) => {
                         tracing::warn!(%error, "mpris_default_artwork_export_failed");
                         None
@@ -282,10 +298,14 @@ impl ArtworkManager {
     /// remove it. Never performs filesystem work or waits for a probe.
     pub fn cached_result(&self, source: Source<'_>) -> Option<Option<Artwork>> {
         let cache = self.entries.lock();
-        let lookup = cache.find(source)?.lookup.get()?;
-        lookup
-            .applies_to(source.path)
-            .then(|| lookup.image.as_ref().map(|file| Artwork(Arc::clone(file))))
+        let entry = cache.find(source)?;
+        let lookup = entry.lookup.get()?;
+        lookup.applies_to(source.path).then(|| {
+            lookup.image.as_ref().map(|file| Artwork {
+                file: Arc::clone(file),
+                _entry: Some(Arc::clone(entry)),
+            })
+        })
     }
 
     /// Blocking singleflight load; a late old version never replaces its successor.
@@ -308,9 +328,14 @@ impl ArtworkManager {
                 if let Some(entry) = cache.find(source) {
                     Arc::clone(entry)
                 } else {
+                    // Logical CUE tracks retain independent content identities,
+                    // but the same physical source version needs only one probe.
+                    let lookup = cache
+                        .source_lookup(source)
+                        .unwrap_or_else(|| Arc::new(OnceLock::new()));
                     let entry = Arc::new(CachedArtwork {
                         identity: ArtworkIdentity::new(source),
-                        lookup: OnceLock::new(),
+                        lookup,
                     });
                     cache.items.insert(source.id, Arc::clone(&entry));
                     cache.insertion_order.push_back(Arc::clone(&entry));
@@ -330,7 +355,10 @@ impl ArtworkManager {
             if !lookup.applies_to(source.path) {
                 continue;
             }
-            let result = lookup.image.as_ref().map(|file| Artwork(Arc::clone(file)));
+            let result = lookup.image.as_ref().map(|file| Artwork {
+                file: Arc::clone(file),
+                _entry: Some(Arc::clone(&cached)),
+            });
             self.entries.lock().trim();
             return result;
         }
@@ -436,7 +464,7 @@ impl ArtworkManager {
                 .default
                 .get()
                 .and_then(Option::as_ref)
-                .is_some_and(|artwork| artwork.0.path.as_ref() == path)
+                .is_some_and(|artwork| artwork.file.path.as_ref() == path)
         {
             report.protected_files += 1;
             report.protected_bytes += metadata.len();

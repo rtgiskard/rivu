@@ -327,6 +327,8 @@ impl ArtworkRuntime {
     }
 
     fn prepare_artwork(&mut self, cx: &mut Context<Self>) {
+        self.loader
+            .retain_negative(self.track.as_ref().filter(|_| self.visible));
         if !self.visible {
             // The physical load retires normally; hidden panels own no demand.
             return;
@@ -335,6 +337,14 @@ impl ArtworkRuntime {
             .track
             .as_ref()
             .and_then(|track| self.manager.cached_result(crate::artwork_source(track)));
+        if let Some(result) = &cached
+            && let Some(track) = &self.track
+        {
+            self.loader.remember_result(
+                ArtworkIdentity::new(crate::artwork_source(track)),
+                result.is_some(),
+            );
+        }
         let cold = cached.is_none();
         self.replace_artwork(cached.flatten(), cx);
         if let Some(track) = self.track.as_ref().filter(|_| cold)
@@ -362,6 +372,7 @@ impl ArtworkRuntime {
                         .as_ref()
                         .is_some_and(|track| identity.matches(crate::artwork_source(track)))
                 {
+                    this.loader.remember_result(identity, loaded.is_some());
                     this.replace_artwork(loaded, cx);
                 } else {
                     this.prepare_artwork(cx);
@@ -851,12 +862,65 @@ mod tests {
                 cx,
             );
             assert!(owner.view.image(cx).is_none());
-            assert!(owner.loader.prepare(&missing).is_some());
+            assert!(owner.loader.prepare(&missing).is_none());
+            for id in 200..270 {
+                let mut pressure = missing.clone();
+                pressure.id = id;
+                pressure.path = directory.path().join("pressure").join(format!("{id}.wav"));
+                assert!(
+                    owner
+                        .manager
+                        .load(crate::artwork_source(&pressure))
+                        .is_none()
+                );
+            }
             assert!(
                 owner
-                    .loader
-                    .finish(&ArtworkIdentity::new(crate::artwork_source(&missing)))
+                    .manager
+                    .cached_result(crate::artwork_source(&missing))
+                    .is_none()
             );
+            std::fs::create_dir_all(missing.path.parent().unwrap()).unwrap();
+            rivu_metadata::artwork::test_support::tagged_wav(&missing.path);
+            owner.sync(
+                Some(&missing),
+                PlaybackStatus::Paused,
+                &config,
+                &panels,
+                true,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        owner.update(cx, |owner, cx| {
+            // Eviction does not turn unchanged visible demand into another probe.
+            assert!(
+                owner
+                    .manager
+                    .cached_result(crate::artwork_source(&missing))
+                    .is_none()
+            );
+            assert!(owner.view.image(cx).is_none());
+            owner.sync(
+                Some(&missing),
+                PlaybackStatus::Paused,
+                &config,
+                &panels,
+                false,
+                cx,
+            );
+            owner.sync(
+                Some(&missing),
+                PlaybackStatus::Paused,
+                &config,
+                &panels,
+                true,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        owner.update(cx, |owner, cx| {
+            assert!(owner.view.image(cx).is_some());
         });
     }
 

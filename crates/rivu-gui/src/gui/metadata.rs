@@ -166,6 +166,7 @@ impl Metadata {
         } else {
             self.cancel_edit(cx);
             self.close_hint(cx);
+            self.artwork_loader.retain_negative(None);
             self.artwork_view.replace(None, cx);
         }
         cx.notify();
