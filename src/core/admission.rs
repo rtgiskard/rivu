@@ -588,6 +588,12 @@ mod tests {
 
     #[test]
     fn preparation_drop_joins_physical_worker_after_cancellation() {
+        if crate::test_support::run_in_subprocess(
+            "core::admission::tests::preparation_drop_joins_physical_worker_after_cancellation",
+            Duration::from_secs(15),
+        ) {
+            return;
+        }
         let runtime = TaskRuntime::start().unwrap();
         let cancellation = library::ScanCancellation::default();
         let worker_cancellation = cancellation.clone();

@@ -1223,6 +1223,12 @@ mod tests {
 
     #[test]
     fn artwork_retirement_waits_for_physical_completion() {
+        if crate::test_support::run_in_subprocess(
+            "mpris::tests::artwork_retirement_waits_for_physical_completion",
+            Duration::from_secs(15),
+        ) {
+            return;
+        }
         let pool = crate::execution::BlockingExecutor::new(1);
         let retired = Arc::new(AtomicBool::new(false));
         let worker_retired = Arc::clone(&retired);
@@ -1231,7 +1237,7 @@ mod tests {
         let completion = async move {
             pool.execute(move || {
                 started.send(()).unwrap();
-                released.recv().unwrap();
+                released.recv_timeout(Duration::from_secs(5)).unwrap();
                 worker_retired.store(true, Ordering::Release);
             })
             .await
@@ -1368,28 +1374,51 @@ mod tests {
 
     impl TestBus {
         fn start() -> Self {
-            let mut child = std::process::Command::new("dbus-daemon")
+            let child = std::process::Command::new("dbus-daemon")
                 .args(["--session", "--nofork", "--print-address=1"])
                 .stdout(Stdio::piped())
                 .spawn()
                 .expect("MPRIS lifecycle tests require dbus-daemon");
-            let mut address = String::new();
-            BufReader::new(child.stdout.take().unwrap())
-                .read_line(&mut address)
-                .unwrap();
-            Self {
+            // Own the daemon before waiting, so a failed address handshake
+            // kills and reaps it during unwinding as well.
+            let mut bus = Self {
                 child,
-                address: address.trim().to_owned(),
-            }
+                address: String::new(),
+            };
+            let stdout = bus.child.stdout.take().unwrap();
+            let (send, address) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let mut address = String::new();
+                let result = BufReader::new(stdout)
+                    .read_line(&mut address)
+                    .map(|_| address);
+                let _ = send.send(result);
+            });
+            bus.address = address
+                .recv_timeout(Duration::from_secs(5))
+                .expect("isolated D-Bus daemon did not publish its address")
+                .unwrap()
+                .trim()
+                .to_owned();
+            assert!(
+                !bus.address.is_empty(),
+                "isolated D-Bus daemon exited before publishing its address"
+            );
+            bus
         }
 
         fn connect(&self) -> Connection {
-            futures::executor::block_on(Builder::address(self.address.as_str()).unwrap().build())
-                .unwrap()
+            async_io::block_on(rivu_protocol::transport::timeout(
+                Duration::from_secs(5),
+                Builder::address(self.address.as_str()).unwrap().build(),
+            ))
+            .expect("isolated D-Bus connection timed out")
+            .unwrap()
         }
 
         fn serve_root(&self, app: AppHandle) -> Connection {
-            futures::executor::block_on(
+            async_io::block_on(rivu_protocol::transport::timeout(
+                Duration::from_secs(5),
                 Builder::address(self.address.as_str())
                     .unwrap()
                     .name(BUS_NAME)
@@ -1399,7 +1428,8 @@ mod tests {
                     .serve_at(OBJECT_PATH, Root { app })
                     .unwrap()
                     .build(),
-            )
+            ))
+            .expect("isolated D-Bus root registration timed out")
             .unwrap()
         }
     }

@@ -230,6 +230,8 @@ pub struct ArtworkManager {
     // only reads never take this gate, and no lookup lock covers filesystem I/O.
     maintenance: RwLock<()>,
     entries: Mutex<ArtworkCache>,
+    #[cfg(test)]
+    cleanup_waiting: Option<std::sync::mpsc::Sender<bool>>,
 }
 
 impl ArtworkManager {
@@ -242,6 +244,8 @@ impl ArtworkManager {
             default: OnceLock::new(),
             maintenance: RwLock::new(()),
             entries: Mutex::new(ArtworkCache::default()),
+            #[cfg(test)]
+            cleanup_waiting: None,
         }
     }
 
@@ -433,7 +437,13 @@ impl ArtworkManager {
         // thumbnail holds pixels, not a URI lease: its disposable disk file can
         // expire independently of a resident original, and a worker racing
         // cleanup regenerates it on a cache-open miss.
-        let _removal = clean.then(|| self.maintenance.write());
+        let _removal = clean.then(|| {
+            #[cfg(test)]
+            if let Some(waiting) = &self.cleanup_waiting {
+                let _ = waiting.send(self.maintenance.try_write().is_none());
+            }
+            self.maintenance.write()
+        });
         let metadata = match fs::symlink_metadata(path) {
             Ok(metadata) if metadata.is_file() => metadata,
             Ok(_) => return,

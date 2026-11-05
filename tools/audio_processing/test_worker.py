@@ -516,6 +516,7 @@ class ExplicitExportTests(unittest.TestCase):
         import soundfile as sf
         from types import SimpleNamespace
         from unittest.mock import patch
+        from export import FileInput
 
         class InspectedOutputs(Exception):
             pass
@@ -540,12 +541,18 @@ class ExplicitExportTests(unittest.TestCase):
 
             # Exercise real output writers before inference. Advertise a long
             # source only at admission, avoiding multi-GiB fixtures/model loads.
-            info = SimpleNamespace(format="WAV", subtype="FLOAT", samplerate=48000, channels=2,
-                                   frames=2**28 + 1)
+            open_source = FileInput.__init__
+            def advertise_long_source(admitted, path, stack):
+                open_source(admitted, path, stack)
+                reader = admitted.reader
+                admitted.reader = SimpleNamespace(
+                    format=reader.format, subtype=reader.subtype,
+                    samplerate=reader.samplerate, channels=reader.channels,
+                    frames=2**28 + 1, seek=reader.seek, read=reader.read)
             with patch("runtime.worker.build_engine", return_value=(48000, inspect_outputs)), \
                  patch("runtime.worker.deny_network"), patch.dict(os.environ), \
                  patch("runtime.worker.importlib.metadata.version", return_value="1"), \
-                 patch.object(sf, "info", return_value=info), \
+                 patch.object(FileInput, "__init__", advertise_long_source), \
                  patch("export.shutil.disk_usage", return_value=SimpleNamespace(free=16 * 1024**3)):
                 with self.assertRaises(InspectedOutputs):
                     process_export(request, lambda *args, **kwargs: None)

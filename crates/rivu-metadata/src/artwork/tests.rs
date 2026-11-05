@@ -1178,7 +1178,9 @@ fn cleanup_waits_for_first_acquisition_and_preserves_newly_registered_file() {
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("track.wav");
     tagged_wav(&source);
-    let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_IMAGE);
+    let mut manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_IMAGE);
+    let (waiting, cleanup_waiting) = std::sync::mpsc::channel();
+    manager.cleanup_waiting = Some(waiting);
     let selected = source_fixture(source);
     let cache = directory.path().join("artwork/cache");
     let path = cache_paths::original_path(&cache, blake3::hash(DEFAULT_IMAGE), "png");
@@ -1193,13 +1195,20 @@ fn cleanup_waits_for_first_acquisition_and_preserves_newly_registered_file() {
         let loader = scope.spawn(move || {
             manager.load_with(selected.source(), || {
                 started.send(()).unwrap();
-                released.recv().unwrap();
+                released.recv_timeout(Duration::from_secs(5)).unwrap();
                 manager.source_uri(&selected.path, manager.max_image_bytes)
             })
         });
-        loading.recv().unwrap();
+        // This sender must drop before scope joins on assertion unwinding.
+        let release_before_join = release;
+        loading.recv_timeout(Duration::from_secs(5)).unwrap();
         let cleanup = scope.spawn(|| manager.maintain(Duration::from_secs(86_400), true));
-        release.send(()).unwrap();
+        assert!(
+            cleanup_waiting
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+        );
+        release_before_join.send(()).unwrap();
         let loaded = loader.join().unwrap().unwrap();
         let report = cleanup.join().unwrap().unwrap();
         assert_eq!(

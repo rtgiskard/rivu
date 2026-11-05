@@ -728,6 +728,12 @@ mod tests {
 
     #[test]
     fn grouped_menu_quit_stops_core_without_window_and_reports_invalid_ids() {
+        if crate::test_support::run_in_subprocess(
+            "tray::tests::grouped_menu_quit_stops_core_without_window_and_reports_invalid_ids",
+            Duration::from_secs(15),
+        ) {
+            return;
+        }
         let directory = tempfile::tempdir().unwrap();
         let mut runtime = crate::core::CoreRuntime::start(
             directory.path(),

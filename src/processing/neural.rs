@@ -492,6 +492,12 @@ mod tests {
         subprocess_fixture(ProcessingOperation::Speech, 1, 1, "onnx-disabled", None);
     }
 
+    #[cfg(feature = "onnx")]
+    #[test]
+    fn enabled_onnx_rejects_invalid_native_manifest_without_python_fallback() {
+        subprocess_fixture(ProcessingOperation::Speech, 1, 1, "onnx-invalid", None);
+    }
+
     #[test]
     fn subprocess_complete_then_nonzero_exit_is_failure() {
         subprocess_fixture(
@@ -537,10 +543,14 @@ mod tests {
     ) {
         let directory = tempfile::tempdir().unwrap();
         let worker = directory.path().join("pcm_worker.py");
+        let started = directory.path().join("worker-started");
         // Requires python3 on PATH; only the standard library is used, not models.
         std::fs::write(
             &worker,
-            format!(r#"import json, signal, struct, sys
+            format!(r#"import json, pathlib, signal, struct, sys
+pathlib.Path(__file__).with_name('worker-started').write_bytes(b'python worker entered')
+if sys.argv[1:] == ['--admission-probe']:
+    raise SystemExit(73)
 signal.alarm(10)  # A broken duplex exchange must fail rather than hang the suite.
 
 def read_frame():
@@ -602,7 +612,19 @@ if outcome == 'complete-then-nonzero':
 "#),
         )
         .unwrap();
-        let manifest = if outcome == "onnx-disabled" {
+        // Exercise this exact interpreter/script before using absence of its marker.
+        // Also require the admission error below, so an interpreter failure or a
+        // child killed before Python executes cannot masquerade as valid rejection.
+        let probe = Command::new("python3")
+            .arg(&worker)
+            .arg("--admission-probe")
+            .env("PYTHONDONTWRITEBYTECODE", "1")
+            .status()
+            .expect("admission fixture requires python3 on PATH");
+        assert_eq!(probe.code(), Some(73));
+        assert_eq!(std::fs::read(&started).unwrap(), b"python worker entered");
+        std::fs::remove_file(&started).unwrap();
+        let manifest = if matches!(outcome, "onnx-disabled" | "onnx-invalid") {
             &b"{\"backend\":\"onnx\"}"[..]
         } else {
             &b"{\"id\":\"stdlib-fixture\",\"sha256\":\"fixture-hash\"}"[..]
@@ -647,18 +669,34 @@ if outcome == 'complete-then-nonzero':
         );
         let result = outcome_result.result;
         let provenance = outcome_result.provenance;
-        if outcome == "unsupported-layout" {
-            assert!(result.is_err(), "unsupported speakers must not publish PCM");
+        if matches!(
+            outcome,
+            "unsupported-layout" | "onnx-disabled" | "onnx-invalid"
+        ) {
+            let error = match result {
+                Ok(_) => panic!("rejected input must not publish PCM"),
+                Err(error) => error,
+            };
+            if outcome == "unsupported-layout" {
+                assert!(error.to_string().contains("speaker layout"), "{error:#}");
+            } else if outcome == "onnx-disabled" {
+                assert!(error.to_string().contains("onnx feature"), "{error:#}");
+            } else {
+                // The native consumer must parse the manifest, rather than try Python.
+                assert!(
+                    error.downcast_ref::<serde_json::Error>().is_some(),
+                    "{error:#}"
+                );
+            }
+            assert!(
+                !started.exists(),
+                "rejected input started the Python worker"
+            );
             assert_eq!(rx.len(), 1);
             assert_eq!(budget.used_bytes(), source_bytes);
             return;
         }
-        if outcome == "onnx-disabled" {
-            assert!(result.is_err(), "disabled ONNX must not publish PCM");
-            assert_eq!(rx.len(), 1);
-            assert_eq!(budget.used_bytes(), source_bytes);
-            return;
-        }
+        assert_eq!(std::fs::read(&started).unwrap(), b"python worker entered");
         assert_eq!(rx.len(), 2);
         assert!(matches!(
             rx.try_recv().unwrap(),

@@ -581,6 +581,12 @@ fn missing_file_returns_defaults_without_creating_directories() {
 
 #[test]
 fn configuration_load_follows_regular_links_and_rejects_fifos_without_a_writer() {
+    if crate::test_support::run_in_subprocess(
+        "config::tests::configuration_load_follows_regular_links_and_rejects_fifos_without_a_writer",
+        std::time::Duration::from_secs(15),
+    ) {
+        return;
+    }
     use std::{ffi::CString, os::unix::fs::symlink};
 
     let directory = tempfile::tempdir().unwrap();

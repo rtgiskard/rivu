@@ -1054,8 +1054,18 @@ fn directory_aliases_share_instance_ownership_and_transport() {
     let symlink = directory.path().join("alias");
     std::os::unix::fs::symlink(&data_dir, &symlink).unwrap();
     let current_dir = std::env::current_dir().unwrap();
-    let relative = data_dir.strip_prefix(&current_dir).unwrap();
-    for alias in [symlink.as_path(), relative] {
+    let shared = current_dir
+        .components()
+        .zip(data_dir.components())
+        .take_while(|(left, right)| left == right)
+        .count();
+    let relative: std::path::PathBuf = current_dir
+        .components()
+        .skip(shared)
+        .map(|_| std::path::Component::ParentDir)
+        .chain(data_dir.components().skip(shared))
+        .collect();
+    for alias in [symlink.as_path(), relative.as_path()] {
         assert!(SocketOwner::acquire(alias).is_err());
         let address = rivu_protocol::wire::address(alias).unwrap();
         assert!(std::os::unix::net::UnixStream::connect_addr(&address).is_ok());
@@ -1064,7 +1074,7 @@ fn directory_aliases_share_instance_ownership_and_transport() {
     let owner = SocketOwner::acquire(&symlink).unwrap();
     assert!(SocketOwner::acquire(&data_dir).is_err());
     drop(owner);
-    assert!(SocketOwner::acquire(relative).is_ok());
+    assert!(SocketOwner::acquire(&relative).is_ok());
 }
 
 #[test]

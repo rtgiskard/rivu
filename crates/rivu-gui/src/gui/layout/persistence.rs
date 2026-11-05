@@ -307,6 +307,9 @@ impl Drop for LayoutPersistence {
 mod tests {
     use super::*;
     use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    const WAIT: Duration = Duration::from_secs(5);
 
     fn named(name: &str) -> LayoutSet {
         let mut set = LayoutSet::default();
@@ -323,6 +326,7 @@ mod tests {
     }
 
     fn wait_for_completion(handle: &LayoutPersistenceHandle, request_id: u64) -> Completion {
+        let deadline = Instant::now() + WAIT;
         let mut state = handle.0.state.lock();
         loop {
             if let Some(completion) = &state.completion
@@ -330,7 +334,12 @@ mod tests {
             {
                 return completion.clone();
             }
-            handle.0.changed.wait(&mut state);
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "layout request {request_id} did not complete"
+            );
+            handle.0.changed.wait_for(&mut state, remaining);
         }
     }
 
@@ -369,19 +378,24 @@ mod tests {
         let original = named("disk");
         let owner = LayoutPersistence::start(original.clone(), None, true, move |snapshot| {
             started.send(snapshot.active_name().to_owned()).unwrap();
-            releases.recv().unwrap();
+            releases
+                .recv_timeout(WAIT)
+                .map_err(|error| error.to_string())?;
             Ok(())
         });
+        // Move the sender after the owner: unwinding disconnects blocked writers
+        // before the production owner's Drop joins them.
+        let release_after_owner = release;
         let handle = owner.handle();
         handle.submit(&named("captured"));
         let request = handle.sync();
-        assert_eq!(starts.recv().unwrap(), "captured");
+        assert_eq!(starts.recv_timeout(WAIT).unwrap(), "captured");
         handle.submit(&original);
-        release.send(()).unwrap();
+        release_after_owner.send(()).unwrap();
         assert!(wait_for_completion(&handle, request).result.is_ok());
         let request = handle.sync();
-        assert_eq!(starts.recv().unwrap(), "disk");
-        release.send(()).unwrap();
+        assert_eq!(starts.recv_timeout(WAIT).unwrap(), "disk");
+        release_after_owner.send(()).unwrap();
         assert!(wait_for_completion(&handle, request).result.is_ok());
         owner.flush().unwrap();
     }
@@ -500,23 +514,26 @@ mod tests {
         let owner = LayoutPersistence::start(LayoutSet::default(), None, true, move |snapshot| {
             assert_ne!(std::thread::current().id(), gui_thread);
             started.send(snapshot.active_name().to_owned()).unwrap();
-            releases.recv().unwrap();
+            releases
+                .recv_timeout(WAIT)
+                .map_err(|error| error.to_string())?;
             writes.lock().push(snapshot.active_name().to_owned());
             Ok(())
         });
+        let release_after_owner = release;
         let handle = owner.handle();
         handle.submit(&named("first"));
         handle.sync();
-        assert_eq!(starts.recv().unwrap(), "first");
+        assert_eq!(starts.recv_timeout(WAIT).unwrap(), "first");
         handle.submit(&named("replaced"));
         handle.sync();
         handle.submit(&named("manual"));
         let requested = handle.sync();
         handle.submit(&named("session-only"));
-        release.send(()).unwrap();
-        assert_eq!(starts.recv().unwrap(), "manual");
+        release_after_owner.send(()).unwrap();
+        assert_eq!(starts.recv_timeout(WAIT).unwrap(), "manual");
         assert!(handle.completion().is_none());
-        release.send(()).unwrap();
+        release_after_owner.send(()).unwrap();
         assert!(wait_for_completion(&handle, requested).result.is_ok());
         handle.submit(&named("later-still"));
         assert_eq!(handle.completion().unwrap().revision, requested);
@@ -531,34 +548,37 @@ mod tests {
         let (release, releases) = mpsc::channel();
         let owner = LayoutPersistence::start(LayoutSet::default(), None, true, move |snapshot| {
             started.send(snapshot.active_name().to_owned()).unwrap();
-            releases.recv().unwrap();
+            releases
+                .recv_timeout(WAIT)
+                .map_err(|error| error.to_string())?;
             Ok(())
         });
+        let release_after_owner = release;
         let handle = owner.handle();
         handle.submit(&named("running"));
         handle.sync();
-        assert_eq!(starts.recv().unwrap(), "running");
+        assert_eq!(starts.recv_timeout(WAIT).unwrap(), "running");
         handle.submit(&named("latest"));
         let flushing = handle.clone();
         let (finished, finishes) = mpsc::channel();
         let flush = std::thread::spawn(move || {
             finished.send(flushing.flush()).unwrap();
         });
-        release.send(()).unwrap();
-        assert_eq!(starts.recv().unwrap(), "latest");
+        release_after_owner.send(()).unwrap();
+        assert_eq!(starts.recv_timeout(WAIT).unwrap(), "latest");
         handle.submit(&named("newest"));
         assert!(matches!(
             finishes.try_recv(),
             Err(mpsc::TryRecvError::Empty)
         ));
-        release.send(()).unwrap();
-        assert_eq!(starts.recv().unwrap(), "newest");
+        release_after_owner.send(()).unwrap();
+        assert_eq!(starts.recv_timeout(WAIT).unwrap(), "newest");
         assert!(matches!(
             finishes.try_recv(),
             Err(mpsc::TryRecvError::Empty)
         ));
-        release.send(()).unwrap();
-        finishes.recv().unwrap().unwrap();
+        release_after_owner.send(()).unwrap();
+        finishes.recv_timeout(WAIT).unwrap().unwrap();
         flush.join().unwrap();
         owner.flush().unwrap();
         assert!(handle.completion().unwrap().result.is_ok());
@@ -576,7 +596,9 @@ mod tests {
             move |snapshot| {
                 attempts += 1;
                 started.send(snapshot.active_name().to_owned()).unwrap();
-                releases.recv().unwrap();
+                releases
+                    .recv_timeout(WAIT)
+                    .map_err(|error| error.to_string())?;
                 if attempts == 1 {
                     Err("save failure".into())
                 } else {
@@ -584,12 +606,13 @@ mod tests {
                 }
             },
         );
+        let release_after_owner = release;
         let handle = owner.handle();
         handle.submit(&named("requested"));
         let failed = handle.sync();
-        assert_eq!(starts.recv().unwrap(), "requested");
+        assert_eq!(starts.recv_timeout(WAIT).unwrap(), "requested");
         handle.submit(&named("later-edit"));
-        release.send(()).unwrap();
+        release_after_owner.send(()).unwrap();
         assert_eq!(
             wait_for_completion(&handle, failed).result,
             Err("save failure".into())
@@ -599,8 +622,8 @@ mod tests {
         let retry = handle.sync();
         assert!(retry > failed);
         assert!(handle.completion().is_none());
-        assert_eq!(starts.recv().unwrap(), "later-edit");
-        release.send(()).unwrap();
+        assert_eq!(starts.recv_timeout(WAIT).unwrap(), "later-edit");
+        release_after_owner.send(()).unwrap();
         assert!(wait_for_completion(&handle, retry).result.is_ok());
         assert!(handle.snapshot().1.is_none());
         owner.flush().unwrap();
@@ -614,14 +637,17 @@ mod tests {
         let writes = Arc::clone(&written);
         let owner = LayoutPersistence::start(LayoutSet::default(), None, true, move |snapshot| {
             started.send(snapshot.active_name().to_owned()).unwrap();
-            releases.recv().unwrap();
+            releases
+                .recv_timeout(WAIT)
+                .map_err(|error| error.to_string())?;
             writes.lock().push(snapshot.active_name().to_owned());
             Ok(())
         });
+        let release_after_owner = release;
         let window = owner.handle();
         window.submit(&named("old"));
         window.sync();
-        assert_eq!(starts.recv().unwrap(), "old");
+        assert_eq!(starts.recv_timeout(WAIT).unwrap(), "old");
         window.submit(&named("manual"));
         window.sync();
         window.submit(&named("reopened"));
@@ -634,10 +660,10 @@ mod tests {
             stopped.send(()).unwrap();
         });
         assert!(matches!(stops.try_recv(), Err(mpsc::TryRecvError::Empty)));
-        release.send(()).unwrap();
-        assert_eq!(starts.recv().unwrap(), "manual");
-        release.send(()).unwrap();
-        stops.recv().unwrap();
+        release_after_owner.send(()).unwrap();
+        assert_eq!(starts.recv_timeout(WAIT).unwrap(), "manual");
+        release_after_owner.send(()).unwrap();
+        stops.recv_timeout(WAIT).unwrap();
         teardown.join().unwrap();
         assert_eq!(&*written.lock(), &["old", "manual"]);
     }
