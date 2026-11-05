@@ -1005,6 +1005,71 @@ fn scan_depth_keeps_allowed_files_and_reports_skipped_branches() -> Result<()> {
 }
 
 #[test]
+fn overlapping_roots_walk_only_their_owned_subtrees_at_relative_depth() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().to_path_buf();
+    let nested = root.join("nested");
+    let child = nested.join("child");
+    let excluded = child.join("excluded");
+    fs::create_dir_all(&excluded)?;
+    let outer_audio = root.join("outer.wav");
+    let inner_audio = child.join("inner.wav");
+    let explicit_audio = excluded.join("explicit.wav");
+    for path in [&outer_audio, &inner_audio, &explicit_audio] {
+        wav(path, 75)?;
+    }
+    let broken = nested.join("broken");
+    std::os::unix::fs::symlink(nested.join("absent"), &broken)?;
+    for paths in [
+        vec![root.clone(), nested.clone(), explicit_audio.clone()],
+        vec![explicit_audio.clone(), nested.clone(), root.clone()],
+    ] {
+        let result = scan_paths_at_depth(&paths, &[], false, 1, |_, _, _, _, _| {})?;
+        assert_eq!(result.roots, paths);
+        assert_eq!(result.track_count(), 3);
+        let nested_index = paths.iter().position(|path| path == &nested).unwrap();
+        assert_eq!(
+            result.skipped_directories,
+            [SkippedDirectory {
+                root_index: nested_index,
+                path: excluded.clone(),
+            }]
+        );
+        assert_eq!(
+            result.uncertainties,
+            [ScanUncertainty::Subtree {
+                root_index: nested_index,
+                path: broken.clone(),
+            }]
+        );
+        // A second traversal would repeat the broken-link error and report the
+        // nested child as exceeding its ancestor's depth limit.
+        assert_eq!(result.errors.len(), 2, "{:?}", result.errors);
+        assert!(!result.scan_incomplete);
+    }
+    Ok(())
+}
+
+#[test]
+fn explicit_failed_and_missing_roots_retain_independent_authority() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().to_path_buf();
+    let failed = root.join("loop");
+    let missing = root.join("missing");
+    std::os::unix::fs::symlink(&failed, &failed)?;
+    let paths = vec![root, failed, missing];
+    let result = scan_paths_at_depth(&paths, &[], false, 1, |_, _, _, _, _| {})?;
+    assert_eq!(result.roots, paths);
+    assert_eq!(
+        result.uncertainties,
+        [ScanUncertainty::Root { root_index: 1 }]
+    );
+    assert_eq!(result.errors.len(), 2);
+    assert!(result.skipped_directories.is_empty());
+    Ok(())
+}
+
+#[test]
 fn duplicate_normalized_requests_do_not_exhaust_scan_diagnostics() -> Result<()> {
     let directory = tempfile::tempdir()?;
     fs::create_dir_all(directory.path().join("child/deeper"))?;

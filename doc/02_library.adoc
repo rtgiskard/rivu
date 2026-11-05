@@ -618,6 +618,9 @@ views; an unchanged playlist import still creates its requested playlist.
 
 Scanning runs in the background. Cancellation waits for an active probe to return
 before another media task can start; see <<cancellation,Cancellation>>.
+Overlapping explicit scan requests traverse each scope once while preserving
+each root's independent relative depth, missing detection and uncertainty authority.
+This does not relax the prohibition on overlapping configured library roots.
 Worker and resource contracts are described in
 link:21_ipc.adoc#scanning-and-metadata-ownership[Scanning and metadata ownership].
 

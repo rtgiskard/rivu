@@ -1297,3 +1297,65 @@ fn cue_import_rescan_relocation_and_copy_preserve_independent_user_state() -> Re
         Ok(())
     })
 }
+
+#[test]
+fn overlapping_discovery_preserves_nearest_explicit_reconciliation_authority() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().to_path_buf();
+    let nested = root.join("nested");
+    let excluded = nested.join("child/excluded");
+    let uncertain = root.join("uncertain");
+    let missing = root.join("missing");
+    fs::create_dir_all(&excluded)?;
+    fs::create_dir(&uncertain)?;
+    fs::create_dir(&missing)?;
+    let removed = nested.join("child/removed.wav");
+    let protected_depth = excluded.join("protected.wav");
+    let explicit_file = excluded.join("explicit.wav");
+    let protected_uncertainty = uncertain.join("protected.wav");
+    let removed_root = missing.join("removed.wav");
+    let paths = [
+        &removed,
+        &protected_depth,
+        &explicit_file,
+        &protected_uncertainty,
+        &removed_root,
+    ];
+    for path in paths {
+        wav(path, 75)?;
+    }
+    let store = crate::store::Store::open(Path::new(":memory:"))?;
+    store.apply_scan(&scan_paths(std::slice::from_ref(&root), &[], false)?)?;
+    let ids = paths.map(|path| {
+        store
+            .track_id_for_identity(crate::store::TrackIdentity::File(path))
+            .unwrap()
+            .unwrap()
+    });
+    for path in paths {
+        fs::remove_file(path)?;
+    }
+    fs::remove_dir(&missing)?;
+    fs::remove_dir(&uncertain)?;
+    std::os::unix::fs::symlink(&uncertain, &uncertain)?;
+    let requested = [root, nested, uncertain, missing, explicit_file];
+    let result = scan_paths_at_depth(&requested, &[], false, 1, |_, _, _, _, _| {})?;
+    assert_eq!(result.roots, requested);
+    assert_eq!(
+        result.uncertainties,
+        [ScanUncertainty::Root { root_index: 2 }]
+    );
+    assert_eq!(
+        result.skipped_directories,
+        [SkippedDirectory {
+            root_index: 1,
+            path: excluded
+        }]
+    );
+    store.apply_scan(&result)?;
+    let missing_states = ids.map(|id| store.track(id).unwrap().unwrap().missing);
+    // Nested depth resets admit removed.wav, while exclusions remain local to
+    // their nearest root. Explicit missing scopes override ancestor exclusions.
+    assert_eq!(missing_states, [true, false, true, false, true]);
+    Ok(())
+}

@@ -387,7 +387,13 @@ where
             continue;
         }
         result.roots.push(root.clone());
-        let root_index = result.roots.len() - 1;
+    }
+    // Every explicit request owns its own reconciliation/depth boundary, even
+    // when an ancestor is requested first. Ancestors never enter these paths.
+    let requested_roots = Arc::new(result.roots.iter().cloned().collect::<HashSet<_>>());
+    for root_index in 0..result.roots.len() {
+        cancellation.check()?;
+        let root = result.roots[root_index].clone();
         let metadata = match workers
             .execute({
                 let root = root.clone();
@@ -448,7 +454,7 @@ where
                 workers,
                 &root,
                 metadata,
-                (root_index, max_depth),
+                (root_index, max_depth, &requested_roots),
                 cancellation,
                 (&mut files, &mut result),
                 &mut progress,
@@ -667,13 +673,13 @@ where
     Ok(result)
 }
 
-/// One sequential DFS: at most max_depth + 1 directory readers, no task per
-/// entry, and inode ancestry detects loops without erasing logical aliases.
+/// One sequential DFS per disjoint explicit-root scope: at most max_depth + 1
+/// readers, no task per entry; inode ancestry detects loops, not logical aliases.
 async fn discover_directory(
     workers: &BlockingExecutor,
     root: &Path,
     metadata: fs::Metadata,
-    (root_index, max_depth): (usize, u32),
+    (root_index, max_depth, requested_roots): (usize, u32, &Arc<HashSet<PathBuf>>),
     cancellation: &ScanCancellation,
     (files, result): (&mut HashSet<PathBuf>, &mut ScanResult),
     progress: &mut impl FnMut(ScanPhase, usize, Option<usize>, usize, Option<&Path>),
@@ -712,6 +718,7 @@ async fn discover_directory(
     while !stack.is_empty() {
         cancellation.check()?;
         let token = cancellation.clone();
+        let requested_roots = Arc::clone(requested_roots);
         let (next_stack, discoveries) = workers
             .execute(move || {
                 let mut discoveries = Vec::new();
@@ -735,6 +742,9 @@ async fn discover_directory(
                         }
                     };
                     let path = entry.path();
+                    if requested_roots.contains(&path) {
+                        continue;
+                    }
                     let file_type = match entry.file_type() {
                         Ok(file_type) => file_type,
                         Err(error) => {
