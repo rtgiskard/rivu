@@ -13,11 +13,11 @@ unexport DESTDIR
 .PHONY: build lint test test-rust test-python ui-demo clean install package
 
 build:
-	RIVU_GIT_VERSION="$(RIVU_GIT_VERSION)" cargo build --workspace --release
+	RIVU_GIT_VERSION="$(RIVU_GIT_VERSION)" cargo build --locked --workspace --release
 
 lint:
 	cargo fmt --all -- --check
-	cargo clippy --workspace --all-targets --all-features -- -D warnings
+	cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
 test: test-rust test-python
 
