@@ -282,19 +282,13 @@ impl Service {
     pub(crate) fn node_status(&mut self, id: u64, node: GraphNodeStatus) {
         if self.active_id() == Some(id)
             && let Some(status) = self.current.as_mut().filter(|status| status.id == id)
-            && status
+            && let Some(index) = status
                 .graph_nodes
                 .iter()
-                .any(|entry| entry.node == node.node && *entry != node)
+                .position(|entry| entry.node == node.node)
+            && status.graph_nodes[index] != node
         {
-            let status = Arc::make_mut(status);
-            if let Some(existing) = status
-                .graph_nodes
-                .iter_mut()
-                .find(|entry| entry.node == node.node)
-            {
-                *existing = node;
-            }
+            Arc::make_mut(status).graph_nodes[index] = node;
         }
     }
 
@@ -493,27 +487,20 @@ impl Service {
     pub(crate) fn accept_result(&mut self, result: Box<ProcessingResult>) {
         let status = result.status.clone();
         if result.retains_audio() {
-            self.retain_result(result);
+            if self.results.len() >= 4 {
+                let index = self
+                    .results
+                    .iter()
+                    .position(|result| Some(result.status.id) != self.audition_id())
+                    .expect("only one retained result can be pinned");
+                let result = self.results.remove(index).unwrap();
+                self.retire(Box::new(result));
+            }
+            self.results.push_back(*result);
         } else {
             self.retire(result);
         }
         self.accept_status(status);
-    }
-
-    /// Retention, eviction and projection are one resource-owner transition.
-    fn retain_result(&mut self, result: Box<ProcessingResult>) {
-        debug_assert!(result.retains_audio());
-        if self.results.len() >= 4 {
-            let index = self
-                .results
-                .iter()
-                .position(|result| Some(result.status.id) != self.audition_id())
-                .expect("only one retained result can be pinned");
-            let result = self.results.remove(index).unwrap();
-            self.retire(Box::new(result));
-        }
-        self.results.push_back(*result);
-        self.refresh_availability();
     }
 
     pub(crate) fn take_graph_runner(&mut self, id: u64) -> Option<audio::GraphRunner> {

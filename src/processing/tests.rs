@@ -85,7 +85,7 @@ fn fixture() -> (tempfile::TempDir, Service, Track, Arc<Config>) {
         accompaniment: true,
         ..Default::default()
     });
-    service.retain_result(Box::new(result));
+    service.accept_result(Box::new(result));
     service.select_audition(Some((1, 0)));
     (directory, service, track, config)
 }
@@ -1152,7 +1152,7 @@ fn wav_export_preserves_side_speakers_and_reorders_custom_frames() {
 fn unpinned_audio_release_preserves_frozen_history_and_selected_audition() {
     let (_directory, mut service, track, config) = fixture();
     let result = completed(&mut service, &track, &config);
-    service.retain_result(Box::new(result));
+    service.accept_result(Box::new(result));
     service.select_audition(Some((1, 0)));
     service.release_unpinned_audio();
     assert!(service.results()[0].outputs.vocals.is_some());
@@ -1180,10 +1180,8 @@ fn resource_directory_projects_eviction_without_overwriting_outcome_or_pinned_au
     service.retain_terminal(1);
     for _ in 0..4 {
         let result = completed(&mut service, &track, &config);
-        let status = result.status.clone();
-        let id = status.id;
-        service.retain_result(Box::new(result));
-        service.accept_status(status);
+        let id = result.status.id;
+        service.accept_result(Box::new(result));
         service.retain_terminal(id);
     }
     assert_eq!(service.results().len(), 4);

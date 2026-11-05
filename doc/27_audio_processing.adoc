@@ -717,8 +717,10 @@ The processing service owns current/history task facts, retained availability,
 audition selection, worker retirement, the four-result bound, selected-audio pins
 and deferred resource release. Core keeps cross-domain automatic-audition intent,
 cancellation/source admission and export commit, and publishes the service's
-immutable projections. A cancellation acknowledgement does not transfer physical
-worker ownership to the caller. Model runners consume an input/settings request
+immutable projections. Result admission updates retention, eviction and the current
+task before deriving availability once, so no superseded current projection is
+copied just to be discarded. A cancellation acknowledgement does not transfer
+physical worker ownership to the caller. Model runners consume an input/settings request
 and return provenance plus an audio result; they do not rewrite task status or
 borrow a graph's operation and timeline fields as temporary model state.
 
