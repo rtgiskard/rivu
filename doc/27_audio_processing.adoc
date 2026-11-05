@@ -62,6 +62,10 @@ all stream channels, not individual speaker channels. Separation exposes vocals
 allowed, but every required input in the selected chain must be connected.
 A Mix has 2–16 inputs with independent gain, mute and solo: any solo excludes
 non-solo inputs, while mute still silences a soloed input.
+Native and offline Mix execution use double-precision gains and accumulation,
+rounding once per node to finite native-layout `f32` PCM. Realtime admission
+includes reusable wide-sum storage and mixing work; processing blocks allocate
+no additional mixing scratch.
 
 Add nodes from the toolbar and select one to inspect its algorithm and parameters.
 Each node has independent settings, including its prepared neural backend.
@@ -217,6 +221,8 @@ settings are already known. Both operations respect the 32-band bank limit.
 
 CLI preset import/export paths are relative to the invoking client's working
 directory, not the host's. Absolute paths are unchanged.
+Preset export publishes atomically to a new destination. Failed writes do not
+leave a partial preset at the requested final path; existing files are never replaced.
 
 === Restoration
 
@@ -317,6 +323,10 @@ the original signal, then crops synthesis to the original length. This also
 defines short-input handling; it avoids a nearly zero single-window denominator
 at a partial final hop. A numerical reference must use the same explicit padding,
 not an unpadded upstream example with different final-frame coverage.
+Native restoration streams completed synthesis hops through finite resampling
+context into the final wet/dry output, without retaining a complete model-rate
+intermediate. Endpoint extension, exact output length and channel independence
+remain the same at equal and differing source rates.
 
 For Python models, with `uv` already installed, run setup from the repository
 root. MossFormer2 and Kim use `.cache/neural/.venv`. The installer resolves
@@ -525,8 +535,10 @@ capture rereads only the required prefix, including upstream causal context and
 latency in a graph. Early completion validates cancellation and the opened source
 without inventing EOF or flushing artificial tails. Real EOF still flushes the
 required DSP context; a selection beyond the actual source remains invalid.
-Graphs containing neural nodes retain budgeted PCM at model boundaries; their
-source PCM also counts against the budget. Input files remain bounded to 8 GiB.
+Graphs containing neural nodes retain budgeted PCM at model boundaries. Original
+source storage retires once no remaining operation can reach it; original format
+and frame metadata remain available. Source forks and profile capture retain the
+source only while required. Input files remain bounded to 8 GiB.
 Actual decoded frames, including unknown-duration streams, determine EOF and coverage.
 
 Neural input must be nonempty and no longer than four hours; each Python source

@@ -7,7 +7,7 @@ use rivu_metadata::artwork::{Artwork, ArtworkIdentity, ArtworkManager};
 
 use crate::{
     app::AppHandle,
-    core::{CoreHandle, Navigation},
+    core::{CoreHandle, Navigation, RevisionInterest},
     execution::BlockingExecutor,
     projection::MprisSnapshot,
 };
@@ -52,7 +52,7 @@ impl MprisController {
         executor: &Arc<async_executor::Executor<'static>>,
         workers: Arc<BlockingExecutor>,
     ) -> Self {
-        let changes = handle.subscribe_revisions();
+        let changes = handle.subscribe_revisions(RevisionInterest::MprisService);
         let service_executor = Arc::clone(executor);
         let (stop, stopped) = oneshot::channel();
         let worker = executor.spawn(async move {
@@ -231,7 +231,7 @@ impl Mpris {
         executor: &Arc<async_executor::Executor<'static>>,
         workers: Arc<BlockingExecutor>,
     ) -> Self {
-        let updates = handle.subscribe_revisions();
+        let updates = handle.subscribe_revisions(RevisionInterest::Mpris);
         let initial = handle.mpris_snapshot();
         let initial_can_raise = app.can_raise();
         let (cancel, mut cancelled) = oneshot::channel();
@@ -1133,7 +1133,9 @@ mod tests {
     }
 
     fn wait_status(handle: &CoreHandle, expected: &str) {
-        let changes = handle.subscribe_revisions();
+        let changes = handle.subscribe_revisions(RevisionInterest::Sections(
+            rivu_protocol::response::StateSections::ALL,
+        ));
         async_io::block_on(rivu_protocol::transport::timeout(
             Duration::from_secs(5),
             async {
@@ -1481,7 +1483,11 @@ mod tests {
         let bus = TestBus::start();
         let (_directory, mut runtime) = runtime_fixture();
         let connection = bus.serve_root(AppHandle::new(&runtime, _directory.path()));
-        let changes = runtime.handle.subscribe_revisions();
+        let changes = runtime
+            .handle
+            .subscribe_revisions(RevisionInterest::Sections(
+                rivu_protocol::response::StateSections::ALL,
+            ));
         let client = bus.connect();
         let quit = runtime.test_executor().spawn(async move {
             client

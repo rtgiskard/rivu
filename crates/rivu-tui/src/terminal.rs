@@ -172,10 +172,15 @@ where
             }
             let next = TuiSnapshot::from_client(&state, tui.as_ref().map(|tui| &tui.snapshot));
             match &mut tui {
-                Some(tui) => tui.apply_snapshot(next),
-                None => tui = Some(TuiState::new(next, Arc::clone(&i18n))),
+                Some(tui) => {
+                    redraw |= !next.same_presentation(&tui.snapshot);
+                    tui.apply_snapshot(next);
+                }
+                None => {
+                    tui = Some(TuiState::new(next, Arc::clone(&i18n)));
+                    redraw = true;
+                }
             }
-            redraw = true;
         }
         let Some(tui) = &mut tui else {
             if redraw {

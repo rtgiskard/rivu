@@ -1,4 +1,8 @@
-use crate::{app::AppHandle, core::CoreHandle, projection::TraySnapshot};
+use crate::{
+    app::AppHandle,
+    core::{CoreHandle, RevisionInterest},
+    projection::TraySnapshot,
+};
 use futures::{FutureExt, StreamExt, channel::oneshot, future::Shared};
 use parking_lot::RwLock;
 use rivu_presentation::i18n::Localizer;
@@ -100,14 +104,13 @@ async fn run_bus(
     executor: Arc<async_executor::Executor<'static>>,
 ) {
     let cancelled = cancelled.shared();
+    let updates = handle.subscribe_revisions(RevisionInterest::Tray);
     let data = Arc::new(RwLock::new(TrayData {
         i18n,
         snapshot: handle.tray_snapshot(),
         menu_revision: 1,
     }));
-    // Subscribe after the published baseline, before bus setup. Reconcile even
-    // when no later publication wakes this worker.
-    let updates = handle.subscribe_revisions();
+    // Reconcile after bus setup even when no later publication wakes this worker.
     let service_name = format!(
         "org.freedesktop.StatusNotifierItem-{}-{}",
         std::process::id(),

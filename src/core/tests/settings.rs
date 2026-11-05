@@ -6,7 +6,7 @@ fn configuration_only_publication_wakes_watchers_without_invalidating_runtime() 
     let (_directory, mut core) = fixture();
     core.publish();
     let (handle, _requests) = super::task_wait::wait_handle(&core);
-    let updates = handle.subscribe_revisions();
+    let updates = handle.subscribe_revisions(RevisionInterest::Sections(StateSections::ALL));
     let initial = handle.state(StateSections::ALL);
     let mut snapshot = ClientSnapshot::default();
     initial.clone().apply_to(&mut snapshot);
@@ -47,6 +47,195 @@ fn configuration_only_publication_wakes_watchers_without_invalidating_runtime() 
         handle.state(changed).configuration.unwrap().config_path,
         std::path::Path::new("/relocated/config.toml")
     );
+}
+
+#[test]
+fn desktop_subscriptions_filter_clock_and_management_but_retain_owner_changes() {
+    let (_directory, mut core) = fixture();
+    core.state.current_track = Some(Arc::new(core.track(1).unwrap()));
+    core.publish();
+    let (handle, _requests) = super::task_wait::wait_handle(&core);
+    let all = handle.subscribe_revisions(RevisionInterest::Sections(StateSections::ALL));
+    let service = handle.subscribe_revisions(RevisionInterest::MprisService);
+    let mpris = handle.subscribe_revisions(RevisionInterest::Mpris);
+    #[cfg(feature = "gui")]
+    let tray = handle.subscribe_revisions(RevisionInterest::Tray);
+    type Mutation = (&'static str, fn(&mut CoreState), bool, bool, bool);
+    let mutations: &[Mutation] = &[
+        ("clock", |s| s.playback.position += 1.0, false, false, false),
+        (
+            "activity",
+            |s| s.playback.last_heard_at = Some(42),
+            false,
+            false,
+            false,
+        ),
+        ("catalog", |s| s.library.revision += 1, false, false, false),
+        (
+            "scan",
+            |s| s.system.scan_message = "Scanning".into(),
+            false,
+            false,
+            false,
+        ),
+        (
+            "service status",
+            |s| s.system.mpris_status = "Connected".into(),
+            false,
+            false,
+            false,
+        ),
+        (
+            "configuration",
+            |s| Arc::make_mut(&mut s.configuration.config).waveform_seek_enabled ^= true,
+            false,
+            false,
+            false,
+        ),
+        (
+            "service enable",
+            |s| Arc::make_mut(&mut s.configuration.config).mpris_enabled ^= true,
+            true,
+            false,
+            false,
+        ),
+        (
+            "playback status",
+            |s| s.playback.status = PlaybackStatus::Playing,
+            false,
+            true,
+            true,
+        ),
+        ("volume", |s| s.playback.volume = 0.4, false, true, false),
+        ("shuffle", |s| s.playback.shuffle ^= true, false, true, true),
+        (
+            "repeat",
+            |s| s.playback.repeat = RepeatMode::All,
+            false,
+            true,
+            true,
+        ),
+        ("queue order", |s| s.queue.revision += 1, false, true, false),
+        (
+            "queue selection",
+            |s| s.queue.current_position = Some(2),
+            false,
+            true,
+            false,
+        ),
+        (
+            "duration",
+            |s| s.playback.duration = Some(42.0),
+            false,
+            true,
+            false,
+        ),
+        (
+            "seek",
+            |s| s.playback.seek_revision += 1,
+            false,
+            true,
+            false,
+        ),
+        (
+            "track metadata",
+            |s| Arc::make_mut(s.current_track.as_mut().unwrap()).title = "Renamed".into(),
+            false,
+            true,
+            true,
+        ),
+        (
+            "track removal",
+            |s| s.current_track = None,
+            false,
+            true,
+            true,
+        ),
+        (
+            "shutdown",
+            |s| s.system.shutting_down = true,
+            true,
+            true,
+            true,
+        ),
+    ];
+    for &(name, mutate, service_changed, mpris_changed, _tray_changed) in mutations {
+        mutate(&mut core.state);
+        core.publish();
+        assert_eq!(all.try_recv(), Ok(()), "{name}: all sections");
+        assert_eq!(
+            service.try_recv().is_ok(),
+            service_changed,
+            "{name}: manager"
+        );
+        assert_eq!(mpris.try_recv().is_ok(), mpris_changed, "{name}: MPRIS");
+        #[cfg(feature = "gui")]
+        assert_eq!(tray.try_recv().is_ok(), _tray_changed, "{name}: tray");
+    }
+    core.publish();
+    assert_eq!(all.try_recv(), Err(mpsc::TryRecvError::Empty));
+    assert_eq!(service.try_recv(), Err(mpsc::TryRecvError::Empty));
+    assert_eq!(mpris.try_recv(), Err(mpsc::TryRecvError::Empty));
+    #[cfg(feature = "gui")]
+    assert_eq!(tray.try_recv(), Err(mpsc::TryRecvError::Empty));
+}
+
+#[test]
+fn selected_section_subscriptions_do_not_wake_uninterested_readers() {
+    let (_directory, mut core) = fixture();
+    core.publish();
+    let (handle, _requests) = super::task_wait::wait_handle(&core);
+    let playback = handle.subscribe_revisions(RevisionInterest::Sections(StateSections {
+        playback: true,
+        ..Default::default()
+    }));
+    let system = handle.subscribe_revisions(RevisionInterest::Sections(StateSections {
+        system: true,
+        ..Default::default()
+    }));
+    core.state.playback.position = 1.0;
+    core.publish();
+    assert_eq!(playback.try_recv(), Ok(()));
+    assert_eq!(system.try_recv(), Err(mpsc::TryRecvError::Empty));
+    core.state.system.last_error = Some("new status".into());
+    core.publish();
+    assert_eq!(playback.try_recv(), Err(mpsc::TryRecvError::Empty));
+    assert_eq!(system.try_recv(), Ok(()));
+}
+
+#[test]
+fn desktop_subscription_reconciliation_keeps_setup_changes_without_a_later_wakeup() {
+    let (_directory, mut core) = fixture();
+    core.publish();
+    let (handle, _requests) = super::task_wait::wait_handle(&core);
+    let updates = handle.subscribe_revisions(RevisionInterest::Mpris);
+    let baseline = handle.mpris_snapshot();
+    #[cfg(feature = "gui")]
+    let tray_updates = handle.subscribe_revisions(RevisionInterest::Tray);
+    #[cfg(feature = "gui")]
+    let tray_baseline = handle.tray_snapshot();
+
+    // Both state changes happen while async desktop setup is suspended. A
+    // one-slot subscription must retain a wake and reconcile the latest state.
+    core.state.playback.status = PlaybackStatus::Playing;
+    core.publish();
+    core.state.playback.status = PlaybackStatus::Paused;
+    core.publish();
+    assert_eq!(updates.try_recv(), Ok(()));
+    assert_eq!(updates.try_recv(), Err(mpsc::TryRecvError::Empty));
+    assert_eq!(baseline.playback.status, PlaybackStatus::Stopped);
+    assert_eq!(
+        handle.mpris_snapshot().playback.status,
+        PlaybackStatus::Paused
+    );
+    #[cfg(feature = "gui")]
+    {
+        assert_eq!(tray_updates.try_recv(), Ok(()));
+        assert_eq!(tray_updates.try_recv(), Err(mpsc::TryRecvError::Empty));
+        let reconciled = handle.tray_snapshot();
+        assert!(reconciled.changed_from(&tray_baseline));
+        assert_eq!(reconciled.status, PlaybackStatus::Paused);
+    }
 }
 
 #[test]
@@ -1226,7 +1415,7 @@ fn ffmpeg_external_load_result_survives_runtime_disable_and_reenable() {
     Arc::make_mut(&mut core.state.configuration.config).ffmpeg_enabled = false;
     core.state.system.ffmpeg_status = "disabled".into();
     let (handle, control, worker, _publications) = navigation_runtime(core);
-    let changes = handle.subscribe_revisions();
+    let changes = handle.subscribe_revisions(RevisionInterest::Sections(StateSections::ALL));
     let configure = |enabled| {
         let mut config = handle.config_snapshot().as_ref().clone();
         config.ffmpeg_enabled = enabled;

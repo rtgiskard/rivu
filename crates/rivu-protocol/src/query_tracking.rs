@@ -9,7 +9,13 @@ use std::sync::{
 #[derive(Debug, Default)]
 pub struct QueryEpoch {
     generation: u64,
-    shared: Option<Arc<AtomicU64>>,
+    shared: Option<Arc<QueryEpochState>>,
+}
+
+#[derive(Debug)]
+struct QueryEpochState {
+    generation: AtomicU64,
+    changed: event_listener::Event,
 }
 
 impl QueryEpoch {
@@ -24,15 +30,19 @@ impl QueryEpoch {
     pub fn advance(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         if let Some(shared) = &self.shared {
-            shared.store(self.generation, Ordering::Release);
+            shared.generation.store(self.generation, Ordering::Release);
+            shared.changed.notify(usize::MAX);
         }
     }
 
     /// Allocate once on first submission; later tickets only clone the Arc.
     pub fn ticket(&mut self) -> QueryTicket {
-        let shared = self
-            .shared
-            .get_or_insert_with(|| Arc::new(AtomicU64::new(self.generation)));
+        let shared = self.shared.get_or_insert_with(|| {
+            Arc::new(QueryEpochState {
+                generation: AtomicU64::new(self.generation),
+                changed: event_listener::Event::new(),
+            })
+        });
         QueryTicket {
             shared: Arc::clone(shared),
             generation: self.generation,
@@ -48,13 +58,24 @@ impl Drop for QueryEpoch {
 
 #[derive(Clone, Debug)]
 pub struct QueryTicket {
-    shared: Arc<AtomicU64>,
+    shared: Arc<QueryEpochState>,
     generation: u64,
 }
 
 impl QueryTicket {
     pub fn is_current(&self) -> bool {
-        self.shared.load(Ordering::Acquire) == self.generation
+        self.shared.generation.load(Ordering::Acquire) == self.generation
+    }
+
+    /// Wake when this owner retires the ticket, without a polling task.
+    pub async fn cancelled(&self) {
+        loop {
+            let changed = self.shared.changed.listen();
+            if !self.is_current() {
+                return;
+            }
+            changed.await;
+        }
     }
 }
 
@@ -170,6 +191,56 @@ mod tests {
         assert!(next.is_current());
         drop(epoch);
         assert!(!next.is_current());
+    }
+
+    #[test]
+    fn cancellation_wakes_all_ticket_waiters_but_not_another_owner() {
+        use std::sync::atomic::AtomicUsize;
+        use std::task::{Context, Poll};
+
+        #[derive(Default)]
+        struct WakeCount(AtomicUsize);
+        impl futures::task::ArcWake for WakeCount {
+            fn wake_by_ref(waker: &Arc<Self>) {
+                waker.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let mut owner = QueryEpoch::default();
+        let mut independent = QueryEpoch::default();
+        let ticket = owner.ticket();
+        let independent_ticket = independent.ticket();
+        let wakes = Arc::new(WakeCount::default());
+        let untouched = Arc::new(WakeCount::default());
+        let waker = futures::task::waker(Arc::clone(&wakes));
+        let other_waker = futures::task::waker(Arc::clone(&untouched));
+        let mut context = Context::from_waker(&waker);
+        let mut other_context = Context::from_waker(&other_waker);
+        let mut first = Box::pin(ticket.cancelled());
+        let mut second = Box::pin(ticket.cancelled());
+        let mut other = Box::pin(independent_ticket.cancelled());
+        assert!(first.as_mut().poll(&mut context).is_pending());
+        assert!(second.as_mut().poll(&mut context).is_pending());
+        assert!(other.as_mut().poll(&mut other_context).is_pending());
+        owner.cancel();
+        assert!(wakes.0.load(Ordering::Relaxed) >= 2);
+        assert_eq!(untouched.0.load(Ordering::Relaxed), 0);
+        assert_eq!(first.as_mut().poll(&mut context), Poll::Ready(()));
+        assert_eq!(second.as_mut().poll(&mut context), Poll::Ready(()));
+        assert!(other.as_mut().poll(&mut other_context).is_pending());
+
+        // Retirement remains sticky for listeners installed after the event.
+        assert!(
+            Box::pin(ticket.cancelled())
+                .as_mut()
+                .poll(&mut context)
+                .is_ready()
+        );
+        let replacement = owner.ticket();
+        let mut next = Box::pin(replacement.cancelled());
+        assert!(next.as_mut().poll(&mut context).is_pending());
+        drop(owner);
+        assert!(next.as_mut().poll(&mut context).is_ready());
     }
 
     #[test]

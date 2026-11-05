@@ -7,14 +7,18 @@ pub(crate) struct TestQueryPort {
 
 pub(crate) struct TestQueryReply {
     reply: oneshot::Sender<CoreResponse>,
+    ticket: Option<QueryTicket>,
 }
 
 impl TestQueryPort {
     pub(crate) async fn receive(&self) -> TestQueryReply {
         let request = self.requests.recv().await.unwrap();
-        assert!(matches!(request.operation, Operation::Query { .. }));
+        let Operation::Query { ticket, .. } = request.operation else {
+            panic!("expected query operation");
+        };
         TestQueryReply {
             reply: request.reply.unwrap(),
+            ticket,
         }
     }
 }
@@ -26,6 +30,14 @@ impl TestQueryReply {
 
     pub(crate) async fn cancelled(&mut self) {
         self.reply.cancellation().await;
+    }
+
+    pub(crate) async fn owner_cancelled(&self) {
+        self.ticket.as_ref().unwrap().cancelled().await;
+    }
+
+    pub(crate) fn ticket_is_current(&self) -> bool {
+        self.ticket.as_ref().unwrap().is_current()
     }
 
     pub(crate) fn respond(self, response: QueryResponse) {
@@ -53,7 +65,7 @@ impl CoreHandle {
             subscribers.len(),
             subscribers
                 .iter()
-                .filter(|sender| !sender.is_closed())
+                .filter(|subscriber| !subscriber.sender.is_closed())
                 .count(),
         )
     }
@@ -65,8 +77,16 @@ impl CoreHandle {
             state.revisions
         };
         if notify {
-            self.revision_updates.write().retain(|sender| {
-                !matches!(sender.try_send(()), Err(mpsc::TrySendError::Closed(_)))
+            self.revision_updates.write().retain(|subscriber| {
+                if matches!(subscriber.interest, RevisionInterest::Sections(sections) if sections.library)
+                {
+                    !matches!(
+                        subscriber.sender.try_send(()),
+                        Err(mpsc::TrySendError::Closed(_))
+                    )
+                } else {
+                    !subscriber.sender.is_closed()
+                }
             });
         }
         revisions

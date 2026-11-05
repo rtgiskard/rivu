@@ -94,6 +94,35 @@ impl TuiSnapshot {
             },
         }
     }
+
+    /// Publication sequencing and non-terminal configuration do not change the screen.
+    pub(crate) fn same_presentation(&self, previous: &Self) -> bool {
+        self.playback == previous.playback
+            && self.queue == previous.queue
+            && self.current_track == previous.current_track
+            && self.library.revision == previous.library.revision
+            && self.library.structure_revision == previous.library.structure_revision
+            && self.library.album_revision == previous.library.album_revision
+            && self.library.playlist_revision == previous.library.playlist_revision
+            && self.library.bitrate_revision == previous.library.bitrate_revision
+            && self.library.duplicate_groups_revision == previous.library.duplicate_groups_revision
+            && self.library.duplicate_members_revision
+                == previous.library.duplicate_members_revision
+            && self.library.playlist_entry_revisions == previous.library.playlist_entry_revisions
+            && Arc::ptr_eq(
+                &self.library.metadata_revisions,
+                &previous.library.metadata_revisions,
+            )
+            && Arc::ptr_eq(&self.library.history, &previous.library.history)
+            && self.system.scanning == previous.system.scanning
+            && self.system.scan_progress == previous.system.scan_progress
+            && self.system.scan_task_id == previous.system.scan_task_id
+            && self.system.scan_message == previous.system.scan_message
+            && self.system.last_error == previous.system.last_error
+            && self.system.library_roots == previous.system.library_roots
+            && self.system.query_batch_size == previous.system.query_batch_size
+            && self.system.ui_theme == previous.system.ui_theme
+    }
 }
 
 impl TuiSnapshot {
@@ -129,6 +158,30 @@ impl TuiSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redraw_ignores_publication_sequence_and_unprojected_state() {
+        let mut client = ClientSnapshot::default();
+        let initial = TuiSnapshot::from_client(&client, None);
+        client.system.revision += 1;
+        client.system.selected_device = Some("another device".into());
+        Arc::make_mut(&mut client.configuration.config).volume = 0.25;
+        let ignored = TuiSnapshot::from_client(&client, Some(&initial));
+        assert!(ignored.same_presentation(&initial));
+
+        client.system.scan_message = "Scanning library".into();
+        let scan = TuiSnapshot::from_client(&client, Some(&ignored));
+        assert!(!scan.same_presentation(&ignored));
+        client.system.last_error = Some("Scan failed".into());
+        let error = TuiSnapshot::from_client(&client, Some(&scan));
+        assert!(!error.same_presentation(&scan));
+        client.playback.position = 3.0;
+        let playback = TuiSnapshot::from_client(&client, Some(&error));
+        assert!(!playback.same_presentation(&error));
+        Arc::make_mut(&mut client.configuration.config).query_batch_size += 1;
+        let page_size = TuiSnapshot::from_client(&client, Some(&playback));
+        assert!(!page_size.same_presentation(&playback));
+    }
 
     #[test]
     fn projection_reuses_library_roots_until_the_configuration_changes_them() {

@@ -569,78 +569,94 @@ impl ReadQueries {
             revisions,
             result: Err(error),
         };
-        let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            {
-                let mut gate = fence.state.lock();
-                while gate.owner_busy {
-                    fence.owner_ready.wait(&mut gate);
-                }
-                if request.is_cancelled() {
-                    return failed(QueryError::Cancelled);
-                }
-                // SQL is pinned before this version check. No I/O holds the gate,
-                // and the owner cannot begin a commit/publication transition here.
-                let published = shared.read();
-                // An entry-ID lookup has no owning-playlist stamp until resolved.
-                // Copy-on-write map identity covers movement and deletion in O(1).
-                let entry_map_changed = matches!(&request.query, Query::PlaylistEntry { .. })
-                    && !Arc::ptr_eq(
-                        &published.library.playlist_entry_revisions,
+        let response = connection.store.with_read_cancellation(
+            || request.is_cancelled(),
+            || {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    {
+                        let mut gate = fence.state.lock();
+                        while gate.owner_busy {
+                            fence.owner_ready.wait(&mut gate);
+                        }
+                        if request.is_cancelled() {
+                            return failed(QueryError::Cancelled);
+                        }
+                        // SQL is pinned before this version check. No I/O holds the gate,
+                        // and the owner cannot begin a commit/publication transition here.
+                        let published = shared.read();
+                        // An entry-ID lookup has no owning-playlist stamp until resolved.
+                        // Copy-on-write map identity covers movement and deletion in O(1).
+                        let entry_map_changed =
+                            matches!(&request.query, Query::PlaylistEntry { .. })
+                                && !Arc::ptr_eq(
+                                    &published.library.playlist_entry_revisions,
+                                    &request.state.playlist_entry_revisions,
+                                );
+                        if gate.maintenance
+                            || entry_map_changed
+                            || request
+                                .query
+                                .stamp(published.query_revisions_for(&request.query))
+                                != request.query.stamp(revisions)
+                        {
+                            return failed(QueryError::RevisionChanged);
+                        }
+                    }
+                    // Only accepted snapshots can change cache ownership. A rejected
+                    // version cannot tag old cached totals as belonging to a newer one.
+                    if connection.library_revision != revisions.library {
+                        snapshot.invalidate_scalar_count_domains(&[
+                            CountDomain::FilteredLibrary,
+                            CountDomain::Other,
+                            CountDomain::Directory,
+                            CountDomain::Queue,
+                            CountDomain::PlaylistEntries,
+                        ]);
+                        connection.library_revision = revisions.library;
+                    }
+                    if connection.duplicate_groups_revision != revisions.duplicate_groups {
+                        snapshot.invalidate_duplicate_group_count();
+                        connection.duplicate_groups_revision = revisions.duplicate_groups;
+                    }
+                    let scalar_revisions = (revisions.structure, revisions.album, revisions.queue);
+                    if connection.scalar_revisions.0 != scalar_revisions.0 {
+                        snapshot.invalidate_scalar_count_domains(&[
+                            CountDomain::Other,
+                            CountDomain::Directory,
+                        ]);
+                    }
+                    if connection.scalar_revisions.1 != scalar_revisions.1 {
+                        snapshot.invalidate_scalar_count_domains(&[
+                            CountDomain::Albums,
+                            CountDomain::AlbumTracks,
+                        ]);
+                    }
+                    if connection.scalar_revisions.2 != scalar_revisions.2 {
+                        snapshot.invalidate_scalar_count_domains(&[CountDomain::Queue]);
+                    }
+                    connection.scalar_revisions = scalar_revisions;
+                    if !Arc::ptr_eq(
+                        &connection.scalar_playlist_revisions,
                         &request.state.playlist_entry_revisions,
-                    );
-                if gate.maintenance
-                    || entry_map_changed
-                    || request
-                        .query
-                        .stamp(published.query_revisions_for(&request.query))
-                        != request.query.stamp(revisions)
-                {
-                    return failed(QueryError::RevisionChanged);
-                }
-            }
-            // Only accepted snapshots can change cache ownership. A rejected
-            // version cannot tag old cached totals as belonging to a newer one.
-            if connection.library_revision != revisions.library {
-                snapshot.invalidate_scalar_count_domains(&[
-                    CountDomain::FilteredLibrary,
-                    CountDomain::Other,
-                    CountDomain::Directory,
-                    CountDomain::Queue,
-                    CountDomain::PlaylistEntries,
-                ]);
-                connection.library_revision = revisions.library;
-            }
-            if connection.duplicate_groups_revision != revisions.duplicate_groups {
-                snapshot.invalidate_duplicate_group_count();
-                connection.duplicate_groups_revision = revisions.duplicate_groups;
-            }
-            let scalar_revisions = (revisions.structure, revisions.album, revisions.queue);
-            if connection.scalar_revisions.0 != scalar_revisions.0 {
-                snapshot
-                    .invalidate_scalar_count_domains(&[CountDomain::Other, CountDomain::Directory]);
-            }
-            if connection.scalar_revisions.1 != scalar_revisions.1 {
-                snapshot.invalidate_scalar_count_domains(&[
-                    CountDomain::Albums,
-                    CountDomain::AlbumTracks,
-                ]);
-            }
-            if connection.scalar_revisions.2 != scalar_revisions.2 {
-                snapshot.invalidate_scalar_count_domains(&[CountDomain::Queue]);
-            }
-            connection.scalar_revisions = scalar_revisions;
-            if !Arc::ptr_eq(
-                &connection.scalar_playlist_revisions,
-                &request.state.playlist_entry_revisions,
-            ) {
-                snapshot.invalidate_scalar_count_domains(&[CountDomain::PlaylistEntries]);
-                connection.scalar_playlist_revisions =
-                    Arc::clone(&request.state.playlist_entry_revisions);
-            }
-            // Later writes cannot change this accepted WAL snapshot/version.
-            request.state.read(&snapshot, &request.query, false)
-        }))
-        .unwrap_or_else(|_| failed(QueryError::Message("Read worker panicked".into())));
+                    ) {
+                        snapshot.invalidate_playlist_count_revisions(
+                            &connection.scalar_playlist_revisions,
+                            &request.state.playlist_entry_revisions,
+                        );
+                        connection.scalar_playlist_revisions =
+                            Arc::clone(&request.state.playlist_entry_revisions);
+                    }
+                    // Later writes cannot change this accepted WAL snapshot/version.
+                    request.state.read(&snapshot, &request.query, false)
+                }))
+                .unwrap_or_else(|_| failed(QueryError::Message("Read worker panicked".into())))
+            },
+        );
+        let response = if request.is_cancelled() {
+            failed(QueryError::Cancelled)
+        } else {
+            response
+        };
         // Logical cancellation/error/panic still physically retires the snapshot.
         snapshot.finish()?;
         Ok(response)

@@ -769,12 +769,14 @@ fn partial_state_wire_round_trip_omits_unrequested_sections() {
             library: 3,
             system: 4,
             configuration: 5,
+            processing: 6,
         },
         playback: None,
         queue: None,
         library: Some(rivu_protocol::model::LibrarySnapshot::default()),
         system: None,
         configuration: None,
+        processing: None,
     };
     let mut encoded = Vec::new();
     encode_response_frame_into(&WireResponse::State(wire_state(response)), &mut encoded).unwrap();
@@ -871,6 +873,7 @@ fn system_scan_task_identity_wire_round_trip_preserves_boundaries() {
                 library: None,
                 system: Some(system),
                 configuration: None,
+                processing: None,
             })),
             &mut encoded,
         )
@@ -932,6 +935,7 @@ fn configuration_wire_adapter_preserves_optional_fields_and_library_columns() {
                 library: None,
                 system: None,
                 configuration: Some(configuration),
+                processing: None,
             })),
             &mut encoded,
         )
@@ -964,16 +968,24 @@ fn request_round_trip_uses_explicit_message_types() {
             queue_id: 4,
             index: 9,
         })),
-        WireRequest::Watch(StateRevisions {
-            playback: 1,
-            queue: 2,
-            library: 3,
-            system: 4,
-            configuration: 5,
-        }),
+        WireRequest::Watch(
+            StateRevisions {
+                playback: 1,
+                queue: 2,
+                library: 3,
+                system: 4,
+                configuration: 5,
+                processing: 6,
+            }
+            .into(),
+        ),
         WireRequest::WaitTask(rivu_protocol::model::TaskTarget::Scan { id: 42 }),
-        WireRequest::QueryRetained(WireQuery::Track { track_id: 42 }),
+        WireRequest::QueryRetained(rivu_protocol::wire::WireRetainedQuery {
+            id: 73,
+            query: WireQuery::Track { track_id: 42 },
+        }),
         WireRequest::RegisterDesktop,
+        WireRequest::QueryCancel(73),
     ];
     for request in requests {
         let expected_type = match &request {
@@ -985,6 +997,7 @@ fn request_round_trip_uses_explicit_message_types() {
             WireRequest::WaitTask(_) => RequestTag::WaitTask,
             WireRequest::QueryRetained(_) => RequestTag::QueryRetained,
             WireRequest::RegisterDesktop => RequestTag::RegisterDesktop,
+            WireRequest::QueryCancel(_) => RequestTag::QueryCancel,
         };
         let mut encoded = Vec::new();
         encode_request_frame_into(&request, &mut encoded).unwrap();
@@ -995,24 +1008,32 @@ fn request_round_trip_uses_explicit_message_types() {
                 assert_eq!((offset, limit), (7, 11))
             }
             WireRequest::State(_) | WireRequest::Hello(_) => {}
-            WireRequest::QueryRetained(WireQuery::Track { track_id }) => assert_eq!(track_id, 42),
+            WireRequest::QueryRetained(query) => {
+                assert_eq!(query.id, 73);
+                assert!(matches!(query.query, WireQuery::Track { track_id: 42 }));
+            }
             WireRequest::RegisterDesktop => {}
+            WireRequest::QueryCancel(id) => assert_eq!(id, 73),
             WireRequest::WaitTask(target) => {
                 assert_eq!(target, rivu_protocol::model::TaskTarget::Scan { id: 42 })
             }
             WireRequest::Command(WireCommand::MoveQueue { queue_id, index }) => {
                 assert_eq!((queue_id, index), (4, 9))
             }
-            WireRequest::Watch(StateRevisions {
-                playback,
-                queue,
-                library,
-                system,
-                configuration,
-            }) => assert_eq!(
-                (playback, queue, library, system, configuration),
-                (1, 2, 3, 4, 5)
-            ),
+            WireRequest::Watch(watch) => {
+                assert_eq!(watch.sections, StateSections::ALL);
+                assert_eq!(
+                    watch.revisions,
+                    StateRevisions {
+                        playback: 1,
+                        queue: 2,
+                        library: 3,
+                        system: 4,
+                        configuration: 5,
+                        processing: 6,
+                    }
+                );
+            }
             _ => panic!("unexpected request variant"),
         }
     }
@@ -1191,7 +1212,7 @@ fn request_encoding_rejects_oversized_body_before_completion() {
 fn postcard_frame_headers_and_bodies_preserve_wire_contract() {
     let mut encoded = Vec::new();
     encode_request_frame_into(&WireRequest::Hello(StateSections::ALL), &mut encoded).unwrap();
-    assert_eq!(encoded, [7, 0, 0, 0, PROTOCOL_VERSION, 0, 1, 1, 1, 1, 1]);
+    assert_eq!(encoded, [8, 0, 0, 0, PROTOCOL_VERSION, 0, 1, 1, 1, 1, 1, 1]);
     encode_response_frame_into(&WireResponse::Error("x".into()), &mut encoded).unwrap();
     assert_eq!(encoded, [4, 0, 0, 0, PROTOCOL_VERSION, 255, 1, b'x']);
 }
@@ -1893,26 +1914,68 @@ fn graph_task_query_frame_retains_pcm_availability_and_context_without_paths() {
         serde_json::to_value(&previous.system).unwrap()["processing"],
         json
     );
+    // A system request has identical bytes whether the owner retains a large
+    // processing graph or not: it cannot serialize or transfer that payload.
     encode_response_frame_into(
         &WireResponse::State(wire_state(StateResponse {
-            system: Some(snapshot.system),
+            system: Some(snapshot.system.clone()),
+            ..Default::default()
+        })),
+        &mut encoded,
+    )
+    .unwrap();
+    let system_with_task = encoded.clone();
+    let mut system_without_task = snapshot.system.clone();
+    system_without_task.processing = None;
+    encode_response_frame_into(
+        &WireResponse::State(wire_state(StateResponse {
+            system: Some(system_without_task),
+            ..Default::default()
+        })),
+        &mut encoded,
+    )
+    .unwrap();
+    assert_eq!(encoded, system_with_task);
+    let WireResponse::State(decoded) = decode_response_frame(&encoded[4..]).unwrap() else {
+        panic!("expected system-only state");
+    };
+    let system_only = state_response(decoded);
+    assert!(system_only.processing.is_none());
+    assert!(system_only.system.as_ref().unwrap().processing.is_none());
+    system_only.apply_to(&mut snapshot);
+    assert_eq!(
+        snapshot.system.processing.as_ref().unwrap().phase,
+        ProcessingPhase::Cancelled
+    );
+
+    encode_response_frame_into(
+        &WireResponse::State(wire_state(StateResponse {
+            processing: Some(crate::response::ProcessingState {
+                task: snapshot.system.processing.clone(),
+            }),
             ..StateResponse::default()
         })),
         &mut encoded,
     )
     .unwrap();
     let WireResponse::State(decoded) = decode_response_frame(&encoded[4..]).unwrap() else {
-        panic!("expected shared processing system response");
+        panic!("expected shared processing response");
     };
     assert_eq!(
         state_response(decoded)
-            .system
-            .unwrap()
             .processing
+            .unwrap()
+            .task
             .unwrap()
             .phase,
         ProcessingPhase::Cancelled
     );
+    StateResponse {
+        processing: Some(crate::response::ProcessingState { task: None }),
+        ..Default::default()
+    }
+    .apply_to(&mut snapshot);
+    assert!(snapshot.system.processing.is_none());
 }
 
 #[test]

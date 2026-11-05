@@ -10,6 +10,7 @@ test-support = []
 [dependencies]
 anyhow = "1"
 async-io = "2"
+event-listener = "5"
 futures-lite = "2"
 blake3 = "1"
 bytes = "1"

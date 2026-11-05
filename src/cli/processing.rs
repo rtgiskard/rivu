@@ -144,11 +144,11 @@ fn show_processing(
     graph_only: bool,
 ) -> Result<()> {
     let response = session.get_state(StateSections {
-        system: true,
+        processing: true,
         configuration: true,
         ..Default::default()
     })?;
-    let state = response.system.context("Missing system state")?;
+    let state = response.processing.context("Missing processing state")?;
     let config = response
         .configuration
         .context("Missing configuration state")?
@@ -156,7 +156,7 @@ fn show_processing(
     let instance_id = super::tasks::instance_id(session)?;
     if json {
         let processing = state
-            .processing
+            .task
             .as_ref()
             .map(|task| super::tasks::task_json(instance_id, task.id, task))
             .transpose()?;
@@ -170,7 +170,7 @@ fn show_processing(
         show_settings(
             i18n,
             &config,
-            state.processing.as_deref(),
+            state.task.as_deref(),
             instance_id,
             graph_only,
         )?;

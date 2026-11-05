@@ -103,6 +103,75 @@ fn begin_mix(core: &mut Core, id: u64) {
     core.state.system.processing = Some(Arc::new(status));
 }
 
+#[test]
+fn processing_progress_is_authoritative_without_waking_terminal_state_interest() {
+    let (directory, mut core) = fixture();
+    source(directory.path());
+    core.start_processing(1, ProcessingOperation::Denoise, None)
+        .unwrap();
+    complete(&mut core);
+    core.publish();
+    let (handle, _requests) = super::task_wait::wait_handle(&core);
+    let terminal_sections = StateSections {
+        processing: false,
+        ..StateSections::ALL
+    };
+    let terminal = handle.subscribe_revisions(RevisionInterest::Sections(terminal_sections));
+    let processing = handle.subscribe_revisions(RevisionInterest::Sections(StateSections {
+        processing: true,
+        ..Default::default()
+    }));
+    let full = handle.state(StateSections::ALL);
+    assert!(full.system.as_ref().unwrap().processing.is_none());
+    assert!(full.processing.as_ref().unwrap().task.is_some());
+    let before = full.revisions;
+    let mut snapshot = ClientSnapshot::default();
+    full.apply_to(&mut snapshot);
+    let retained = snapshot.system.processing.clone();
+
+    Arc::make_mut(core.state.system.processing.as_mut().unwrap()).completed += 1;
+    core.publish();
+    assert_eq!(terminal.try_recv(), Err(mpsc::TryRecvError::Empty));
+    assert_eq!(processing.try_recv(), Ok(()));
+    assert_eq!(
+        handle.state_revisions().changed_since(before),
+        StateSections {
+            processing: true,
+            ..Default::default()
+        }
+    );
+    let update = handle.state(StateSections {
+        processing: true,
+        ..Default::default()
+    });
+    assert!(update.system.is_none());
+    update.apply_to(&mut snapshot);
+    assert_ne!(snapshot.system.processing, retained);
+
+    core.state.system.processing = None;
+    core.publish();
+    assert_eq!(terminal.try_recv(), Err(mpsc::TryRecvError::Empty));
+    assert_eq!(processing.try_recv(), Ok(()));
+    handle
+        .state(StateSections {
+            processing: true,
+            ..Default::default()
+        })
+        .apply_to(&mut snapshot);
+    assert!(snapshot.system.processing.is_none());
+
+    core.state.system.shutting_down = true;
+    core.publish();
+    assert_eq!(terminal.try_recv(), Ok(()));
+    assert!(
+        handle
+            .state(terminal_sections)
+            .system
+            .unwrap()
+            .shutting_down
+    );
+}
+
 fn mix_completion(core: &mut Core) -> crate::processing::Event {
     let event = next_processing_event(core, Duration::from_secs(10)).unwrap();
     assert!(matches!(
@@ -464,6 +533,111 @@ fn equalizer_preset_import_bounds_bytes_and_rejects_non_regular_inputs() {
     worker.join().unwrap();
     result.unwrap_err();
     assert_eq!(config, accepted);
+}
+
+#[test]
+fn equalizer_preset_export_publishes_complete_json_without_clobbering() {
+    let (directory, mut core) = fixture();
+    core.equalizer_edit(EqualizerEdit::SavePreset {
+        name: "Reference".into(),
+        overwrite: false,
+    })
+    .unwrap();
+    let configuration = core.state.configuration.config.clone();
+    let saved = std::fs::read(&core.state.configuration.config_path).unwrap();
+    let exports = directory.path().join("exports");
+    std::fs::create_dir(&exports).unwrap();
+    let path = exports.join("preset.json");
+    let export = |path| EqualizerEdit::ExportPreset {
+        path,
+        name: "Reference".into(),
+    };
+    core.equalizer_edit(export(path.clone())).unwrap();
+    let expected = serde_json::to_vec_pretty(&configuration.equalizer_presets[0].config).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), expected);
+    assert_eq!(std::fs::read_dir(&exports).unwrap().count(), 1);
+
+    std::fs::write(&path, b"created by another owner").unwrap();
+    core.equalizer_edit(export(path.clone())).unwrap_err();
+    assert_eq!(std::fs::read(&path).unwrap(), b"created by another owner");
+    assert_eq!(std::fs::read_dir(&exports).unwrap().count(), 1);
+    let missing = exports.join("missing/preset.json");
+    core.equalizer_edit(export(missing.clone())).unwrap_err();
+    assert!(!missing.parent().unwrap().exists());
+    assert_eq!(std::fs::read_dir(&exports).unwrap().count(), 1);
+    assert!(Arc::ptr_eq(
+        &core.state.configuration.config,
+        &configuration
+    ));
+    assert_eq!(
+        std::fs::read(&core.state.configuration.config_path).unwrap(),
+        saved
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn equalizer_preset_export_write_failure_leaves_no_final_or_temporary_file() {
+    const CHILD: &str = "RIVU_PRESET_EXPORT_WRITE_FAILURE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        // File-size limits and signal dispositions are process-wide. Isolate the
+        // actual failing filesystem write from the rest of the parallel suite.
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "core::tests::processing::equalizer_preset_export_write_failure_leaves_no_final_or_temporary_file",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "child failed:\n{}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr),
+        );
+        return;
+    }
+
+    let (directory, mut core) = fixture();
+    core.equalizer_edit(EqualizerEdit::SavePreset {
+        name: "Reference".into(),
+        overwrite: false,
+    })
+    .unwrap();
+    let exports = directory.path().join("exports");
+    std::fs::create_dir(&exports).unwrap();
+    let path = exports.join("preset.json");
+    // SAFETY: pointers refer to initialized limits, and these process-wide
+    // changes are confined to the child and restored immediately after export.
+    let (limits, signal) = unsafe {
+        let mut limits = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        assert_eq!(libc::getrlimit(libc::RLIMIT_FSIZE, &mut limits), 0);
+        let signal = libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+        assert_ne!(signal, libc::SIG_ERR);
+        let limited = libc::rlimit {
+            rlim_cur: limits.rlim_cur.min(16),
+            rlim_max: limits.rlim_max,
+        };
+        assert_eq!(libc::setrlimit(libc::RLIMIT_FSIZE, &limited), 0);
+        (limits, signal)
+    };
+    let result = core.equalizer_edit(EqualizerEdit::ExportPreset {
+        path: path.clone(),
+        name: "Reference".into(),
+    });
+    // SAFETY: restore the limits and signal disposition captured above.
+    unsafe {
+        assert_eq!(libc::setrlimit(libc::RLIMIT_FSIZE, &limits), 0);
+        assert_ne!(libc::signal(libc::SIGXFSZ, signal), libc::SIG_ERR);
+    }
+    assert!(result.is_err());
+    assert!(!path.exists());
+    assert_eq!(std::fs::read_dir(&exports).unwrap().count(), 0);
 }
 
 #[test]

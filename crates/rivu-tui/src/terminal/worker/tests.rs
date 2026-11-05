@@ -9,6 +9,21 @@ use rivu_protocol::query_tracking::QueryTracker;
 use rivu_protocol::response::QueryRevisions;
 use std::time::Duration;
 
+fn assert_query_socket_closed(mut stream: std::os::unix::net::UnixStream) {
+    use std::io::Read;
+    let mut received = Vec::new();
+    stream.read_to_end(&mut received).unwrap();
+    let mut pending = received.as_slice();
+    while !pending.is_empty() {
+        let length = u32::from_le_bytes(pending[..4].try_into().unwrap()) as usize;
+        assert!(matches!(
+            rivu_protocol::transport::decode_request_frame(&pending[4..4 + length]).unwrap(),
+            rivu_protocol::wire::WireRequest::QueryCancel(_)
+        ));
+        pending = &pending[4 + length..];
+    }
+}
+
 fn queue_request(
     tracker: &mut QueryTracker,
     offset: usize,
@@ -73,7 +88,7 @@ fn shutdown_snapshot_exits_loading_before_input_or_worker_dispatch() {
 fn shutdown_snapshot_exits_existing_projection_and_cancels_pending_query() {
     use ipc::{complete_test_handshake, read_test_query};
     use ratatui::{Terminal, backend::TestBackend};
-    use std::{io::Read, os::unix::net::UnixListener};
+    use std::os::unix::net::UnixListener;
 
     let directory = tempfile::tempdir().unwrap();
     let listener =
@@ -115,7 +130,7 @@ fn shutdown_snapshot_exits_existing_projection_and_cancels_pending_query() {
     )
     .unwrap();
     // The owner joined its query worker; no reply, key, or server poll unblocks it.
-    assert_eq!(pending.unwrap().read(&mut [0]).unwrap(), 0);
+    assert_query_socket_closed(pending.unwrap());
     server.join().unwrap();
 }
 
@@ -204,6 +219,101 @@ fn watcher_reports_initial_connection_failure_to_loading_consumer() {
 }
 
 #[test]
+fn watcher_excludes_processing_reads_and_publications_but_keeps_shutdown() {
+    use rivu_protocol::{
+        response::{StateResponse, StateRevisions},
+        transport::encode_response_frame_into,
+        wire::{HelloResponse, WireRequest, WireResponse, wire_state},
+    };
+    use std::{io::Write, os::unix::net::UnixListener};
+
+    let directory = tempfile::tempdir().unwrap();
+    let listener =
+        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
+    let (continue_watch, continuation) = bounded(1);
+    let (ignored, ignored_update) = bounded(1);
+    let server = std::thread::spawn(move || {
+        let mut stream = listener.accept().unwrap().0;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let reply = |stream: &mut std::os::unix::net::UnixStream, response| {
+            let mut frame = Vec::new();
+            encode_response_frame_into(&response, &mut frame).unwrap();
+            stream.write_all(&frame).unwrap();
+        };
+        assert!(
+            matches!(ipc::read_test_request(&mut stream), WireRequest::Hello(sections)
+            if sections == TERMINAL_SECTIONS)
+        );
+        reply(
+            &mut stream,
+            WireResponse::Hello(HelloResponse {
+                instance_id: 1u32.to_le_bytes(),
+                state: wire_state(StateResponse::default()),
+            }),
+        );
+        assert!(
+            matches!(ipc::read_test_request(&mut stream), WireRequest::Watch(watch)
+            if watch.sections == TERMINAL_SECTIONS && watch.revisions == StateRevisions::default())
+        );
+        continuation.recv_timeout(Duration::from_secs(5)).unwrap();
+        let processing_only = StateRevisions {
+            processing: 1,
+            ..Default::default()
+        };
+        // Even a redundant announcement must not cause a state fetch or publication.
+        reply(&mut stream, WireResponse::Watch(processing_only));
+        assert!(
+            matches!(ipc::read_test_request(&mut stream), WireRequest::Watch(watch)
+            if watch.sections == TERMINAL_SECTIONS && watch.revisions == processing_only)
+        );
+        ignored.send(()).unwrap();
+        continuation.recv_timeout(Duration::from_secs(5)).unwrap();
+        let shutdown = StateRevisions {
+            system: 1,
+            ..processing_only
+        };
+        reply(&mut stream, WireResponse::Watch(shutdown));
+        assert!(
+            matches!(ipc::read_test_request(&mut stream), WireRequest::State(sections)
+            if sections == (StateSections { system: true, ..Default::default() }))
+        );
+        reply(
+            &mut stream,
+            WireResponse::State(wire_state(StateResponse {
+                revisions: shutdown,
+                system: Some(rivu_protocol::model::SystemState {
+                    shutting_down: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })),
+        );
+    });
+    let watcher = spawn_watcher(directory.path());
+    watcher
+        .receiver
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap();
+    let (_, initial) = watcher.take_update().unwrap().unwrap();
+    assert!(initial.system.processing.is_none());
+    continue_watch.send(()).unwrap();
+    ignored_update.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(watcher.latest.lock().is_none());
+    assert!(watcher.receiver.try_recv().is_err());
+    continue_watch.send(()).unwrap();
+    watcher
+        .receiver
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap();
+    let (_, shutdown) = watcher.take_update().unwrap().unwrap();
+    assert!(shutdown.system.shutting_down);
+    assert!(shutdown.system.processing.is_none());
+    server.join().unwrap();
+}
+
+#[test]
 fn replacing_queries_keeps_one_stalled_socket_until_worker_shutdown() {
     use std::{io::Read, os::unix::net::UnixListener};
 
@@ -263,7 +373,8 @@ fn replacing_queries_keeps_one_stalled_socket_until_worker_shutdown() {
 
 #[test]
 fn replaced_bitrate_queries_drain_then_send_only_latest_on_the_same_session() {
-    use ipc::{complete_test_handshake, read_test_query, reply_test_query};
+    use ipc::{complete_test_handshake, read_test_query, read_test_request, reply_test_query};
+    use rivu_protocol::wire::{WireQuery, WireRequest};
     use std::os::unix::net::UnixListener;
 
     let directory = tempfile::tempdir().unwrap();
@@ -271,14 +382,22 @@ fn replaced_bitrate_queries_drain_then_send_only_latest_on_the_same_session() {
         UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
     let (started, active) = bounded(1);
     let (release, resume) = bounded(1);
+    let (cancel_seen, cancellation) = bounded(1);
     let server = std::thread::spawn(move || {
         let mut stream = listener.accept().unwrap().0;
         complete_test_handshake(&mut stream);
+        let WireRequest::QueryRetained(query) = read_test_request(&mut stream) else {
+            panic!("expected retained query");
+        };
         assert!(matches!(
-            read_test_query(&mut stream),
-            Query::QueuePage { offset: 0, .. }
+            query.query,
+            WireQuery::QueuePage { offset: 0, .. }
         ));
         started.send(()).unwrap();
+        assert!(
+            matches!(read_test_request(&mut stream), WireRequest::QueryCancel(id) if id == query.id)
+        );
+        cancel_seen.send(()).unwrap();
         resume.recv_timeout(Duration::from_secs(5)).unwrap();
         for offset in [0, 99] {
             if offset != 0 {
@@ -311,6 +430,7 @@ fn replaced_bitrate_queries_drain_then_send_only_latest_on_the_same_session() {
             QueryRevisions::default().with_bitrate_revision(offset as u64),
         ));
     }
+    cancellation.recv_timeout(Duration::from_secs(5)).unwrap();
     assert!(worker.latest.lock().is_none());
     release.send(()).unwrap();
     // Finish the accepted jobs without shutdown cancellation so the final
@@ -328,7 +448,7 @@ fn replaced_bitrate_queries_drain_then_send_only_latest_on_the_same_session() {
 #[test]
 fn query_worker_shutdown_cancels_active_exchange_and_discards_pending_job() {
     use ipc::{complete_test_handshake, read_test_query};
-    use std::{io::Read, os::unix::net::UnixListener};
+    use std::os::unix::net::UnixListener;
 
     let directory = tempfile::tempdir().unwrap();
     let listener =
@@ -347,7 +467,7 @@ fn query_worker_shutdown_cancels_active_exchange_and_discards_pending_job() {
     let mut tracker = QueryTracker::default();
     let request = queue_request(&mut tracker, 0, QueryRevisions::default());
     worker.request(request.clone());
-    let mut stream = active.recv_timeout(Duration::from_secs(5)).unwrap();
+    let stream = active.recv_timeout(Duration::from_secs(5)).unwrap();
     worker.request(QueryRequest {
         demand: QueryDemand {
             offset: 99,
@@ -360,7 +480,7 @@ fn query_worker_shutdown_cancels_active_exchange_and_discards_pending_job() {
     drop(worker);
     assert!(pending.lock().is_none());
     assert!(results.lock().is_none());
-    assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+    assert_query_socket_closed(stream);
     server.join().unwrap();
 }
 

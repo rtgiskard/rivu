@@ -10,7 +10,7 @@ pub fn socket_test_directory() -> tempfile::TempDir {
     tempfile::tempdir_in(cache).unwrap()
 }
 
-fn read_test_request(stream: &mut std::os::unix::net::UnixStream) -> WireRequest {
+pub fn read_test_request(stream: &mut std::os::unix::net::UnixStream) -> WireRequest {
     use std::io::Read;
     let mut prefix = [0; 4];
     stream.read_exact(&mut prefix).unwrap();
@@ -51,14 +51,17 @@ pub fn complete_test_handshake_for_instance(
                 library: None,
                 system: None,
                 configuration: None,
+                processing: None,
             }),
         }),
     );
 }
 
 pub fn read_test_query(stream: &mut std::os::unix::net::UnixStream) -> Query {
-    let WireRequest::Query(query) = read_test_request(stream) else {
-        panic!("expected query")
+    let query = match read_test_request(stream) {
+        WireRequest::Query(query) => query,
+        WireRequest::QueryRetained(query) => query.query,
+        _ => panic!("expected query"),
     };
     Query::try_from(query).unwrap()
 }

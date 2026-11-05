@@ -15,6 +15,54 @@ pub(super) enum BusinessEvent {
     Shutdown(CoreLifecycle),
 }
 
+struct PublicationChanges {
+    sections: StateSections,
+    mpris_service: bool,
+    mpris: bool,
+    #[cfg(feature = "gui")]
+    tray: bool,
+}
+
+impl PublicationChanges {
+    fn between(current: &CoreState, previous: &CoreState, sections: StateSections) -> Self {
+        let track_changed = match (&current.current_track, &previous.current_track) {
+            (Some(current), Some(previous)) => !Arc::ptr_eq(current, previous),
+            (None, None) => false,
+            _ => true,
+        };
+        let transport_changed = track_changed
+            || current.playback.status != previous.playback.status
+            || current.playback.shuffle != previous.playback.shuffle
+            || current.playback.repeat != previous.playback.repeat
+            || current.system.shutting_down != previous.system.shutting_down;
+        Self {
+            sections,
+            mpris_service: current.configuration.config.mpris_enabled
+                != previous.configuration.config.mpris_enabled
+                || current.system.shutting_down != previous.system.shutting_down,
+            mpris: transport_changed
+                || current.queue != previous.queue
+                || current.playback.volume != previous.playback.volume
+                || current.playback.duration != previous.playback.duration
+                || current.playback.seek_revision != previous.playback.seek_revision,
+            #[cfg(feature = "gui")]
+            tray: transport_changed,
+        }
+    }
+
+    fn includes(&self, interest: RevisionInterest) -> bool {
+        match interest {
+            RevisionInterest::Sections(sections) => {
+                !self.sections.intersection(sections).is_empty()
+            }
+            RevisionInterest::MprisService => self.mpris_service,
+            RevisionInterest::Mpris => self.mpris,
+            #[cfg(feature = "gui")]
+            RevisionInterest::Tray => self.tray,
+        }
+    }
+}
+
 impl Core {
     /// Event waiting and state transitions stay on the same dedicated owner.
     /// The shared runtime only drives I/O, timers and independent long jobs.
@@ -431,9 +479,10 @@ impl Core {
     pub(in crate::core) fn publish(&mut self) {
         self.state.source_generation = self.generation;
         self.state.system.revision = self.state.system.revision.wrapping_add(1);
-        let revisions_changed = {
+        let changes = {
             let mut shared = self.shared.write();
             let changed = self.state.changed_sections(&shared);
+            let changes = PublicationChanges::between(&self.state, &shared, changed);
             let revisions = &mut self.state.revisions;
             if changed.playback {
                 revisions.playback = revisions.playback.wrapping_add(1);
@@ -449,6 +498,9 @@ impl Core {
             }
             if changed.configuration {
                 revisions.configuration = revisions.configuration.wrapping_add(1);
+            }
+            if changed.processing {
+                revisions.processing = revisions.processing.wrapping_add(1);
             }
             if changed.playback {
                 shared.playback = self.state.playback.clone();
@@ -468,18 +520,25 @@ impl Core {
             } else {
                 // Publication advances even without a System section change.
                 shared.system.revision = self.state.system.revision;
+                if changed.processing {
+                    shared.system.processing = self.state.system.processing.clone();
+                }
             }
             if changed.configuration {
                 shared.configuration = self.state.configuration.clone();
             }
-            let revisions_changed = shared.revisions != *revisions;
             shared.revisions = *revisions;
-            revisions_changed
+            changes
         };
         self.flush_task_completions();
-        if revisions_changed {
-            self.revision_updates.write().retain(|sender| {
-                !matches!(sender.try_send(()), Err(mpsc::TrySendError::Closed(_)))
+        if !changes.sections.is_empty() {
+            self.revision_updates.write().retain(|subscriber| {
+                !subscriber.sender.is_closed()
+                    && (!changes.includes(subscriber.interest)
+                        || !matches!(
+                            subscriber.sender.try_send(()),
+                            Err(mpsc::TrySendError::Closed(_))
+                        ))
             });
         }
         #[cfg(test)]

@@ -16,6 +16,7 @@ pub struct StateRevisions {
     /// System-section revision; distinct from `SystemState::revision`, which is a publication sequence.
     pub system: u64,
     pub configuration: u64,
+    pub processing: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,6 +26,7 @@ pub struct StateSections {
     pub library: bool,
     pub system: bool,
     pub configuration: bool,
+    pub processing: bool,
 }
 
 impl StateSections {
@@ -34,9 +36,42 @@ impl StateSections {
         library: true,
         system: true,
         configuration: true,
+        processing: true,
     };
     pub fn is_empty(self) -> bool {
-        !self.playback && !self.queue && !self.library && !self.system && !self.configuration
+        !self.playback
+            && !self.queue
+            && !self.library
+            && !self.system
+            && !self.configuration
+            && !self.processing
+    }
+
+    pub fn intersection(self, other: Self) -> Self {
+        Self {
+            playback: self.playback && other.playback,
+            queue: self.queue && other.queue,
+            library: self.library && other.library,
+            system: self.system && other.system,
+            configuration: self.configuration && other.configuration,
+            processing: self.processing && other.processing,
+        }
+    }
+}
+
+/// Domains and previously applied tokens for a selective state watch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateWatch {
+    pub revisions: StateRevisions,
+    pub sections: StateSections,
+}
+
+impl From<StateRevisions> for StateWatch {
+    fn from(revisions: StateRevisions) -> Self {
+        Self {
+            revisions,
+            sections: StateSections::ALL,
+        }
     }
 }
 
@@ -48,6 +83,7 @@ impl StateRevisions {
             library: self.library != previous.library,
             system: self.system != previous.system,
             configuration: self.configuration != previous.configuration,
+            processing: self.processing != previous.processing,
         }
     }
 
@@ -67,6 +103,9 @@ impl StateRevisions {
         }
         if sections.configuration {
             self.configuration = current.configuration;
+        }
+        if sections.processing {
+            self.processing = current.processing;
         }
     }
 }
@@ -264,6 +303,12 @@ pub struct PlaybackSnapshot {
     pub processing_audition: Option<crate::model::ProcessingAudition>,
 }
 
+/// Requested independently from system state, including an authoritative empty task.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ProcessingState {
+    pub task: Option<Arc<crate::model::ProcessingTaskStatus>>,
+}
+
 /// Only requested sections are present; omitted sections must be preserved by clients.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct StateResponse {
@@ -273,6 +318,7 @@ pub struct StateResponse {
     pub library: Option<LibrarySnapshot>,
     pub system: Option<SystemState>,
     pub configuration: Option<ConfigurationState>,
+    pub processing: Option<ProcessingState>,
 }
 
 impl StateResponse {
@@ -283,6 +329,7 @@ impl StateResponse {
             library: self.library.is_some(),
             system: self.system.is_some(),
             configuration: self.configuration.is_some(),
+            processing: self.processing.is_some(),
         }
     }
 
@@ -301,11 +348,15 @@ impl StateResponse {
         if let Some(section) = self.library {
             state.library = section;
         }
-        if let Some(section) = self.system {
+        if let Some(mut section) = self.system {
+            section.processing = state.system.processing.take();
             state.system = section;
         }
         if let Some(section) = self.configuration {
             state.configuration = section;
+        }
+        if let Some(section) = self.processing {
+            state.system.processing = section.task;
         }
     }
 }
@@ -373,6 +424,7 @@ mod tests {
             library: 1,
             system: 1,
             configuration: 1,
+            processing: 1,
         };
         let notified = StateRevisions {
             playback: 2,

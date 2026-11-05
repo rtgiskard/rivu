@@ -82,7 +82,7 @@ fn startup_device_enumeration_keeps_restored_queue_queries_available() {
     assert!(!retired.load(Ordering::Acquire));
     assert!(handle.state_snapshot().system.devices.is_empty());
 
-    let changes = handle.subscribe_revisions();
+    let changes = handle.subscribe_revisions(RevisionInterest::Sections(StateSections::ALL));
     release.send(()).unwrap();
     futures::executor::block_on(async {
         rivu_protocol::transport::timeout(Duration::from_secs(5), async {

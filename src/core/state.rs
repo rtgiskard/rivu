@@ -89,7 +89,6 @@ impl CoreState {
                 || system.scan_task_id != old.scan_task_id
                 || self.scan_owner != previous.scan_owner
                 || system.relocation_task != old.relocation_task
-                || processing_changed
                 || system.last_error != old.last_error
                 || !Arc::ptr_eq(&system.devices, &old.devices)
                 || system.selected_device != old.selected_device
@@ -99,6 +98,7 @@ impl CoreState {
                 || system.shutting_down != old.shutting_down,
             configuration: !Arc::ptr_eq(&self.configuration.config, &previous.configuration.config)
                 || self.configuration.config_path != previous.configuration.config_path,
+            processing: processing_changed,
         }
     }
 }

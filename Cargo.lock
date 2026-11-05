@@ -5351,6 +5351,7 @@ dependencies = [
  "async-io",
  "blake3",
  "bytes",
+ "event-listener",
  "futures",
  "futures-lite",
  "libc",

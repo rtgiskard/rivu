@@ -6,18 +6,22 @@ use rivu_protocol::{
     AppCommand,
     model::{ClientSnapshot, LibrarySort, Query, QueryStamp},
     query_tracking::QuerySubmission,
-    response::{Ack, QueryError, StateSections, ViewResponse},
+    response::{Ack, QueryError, StateSections, StateWatch, ViewResponse},
 };
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
 use std::{
     path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::Arc,
     thread::JoinHandle,
 };
 
 type WatchedSnapshot = Result<(u32, ClientSnapshot), String>;
+
+const TERMINAL_SECTIONS: StateSections = StateSections {
+    processing: false,
+    ..StateSections::ALL
+};
 
 pub(super) struct Watcher {
     pub(super) receiver: Receiver<()>,
@@ -70,7 +74,7 @@ pub(super) fn spawn_watcher(data_dir: &Path) -> Watcher {
             let _ = sender.try_send(());
             return;
         };
-        let initial = session.get_state(StateSections::ALL).and_then(|response| {
+        let initial = session.get_state(TERMINAL_SECTIONS).and_then(|response| {
             let instance_id = session
                 .instance_id()
                 .context("Missing IPC Hello identity")?;
@@ -82,8 +86,6 @@ pub(super) fn spawn_watcher(data_dir: &Path) -> Watcher {
                 let mut state = ClientSnapshot::default();
                 let revisions = response.revisions;
                 response.apply_to(&mut state);
-                // Processing is not part of the terminal projection or publication.
-                state.system.processing = None;
                 (state, revisions, instance_id)
             }
             Err(error) => {
@@ -98,9 +100,14 @@ pub(super) fn spawn_watcher(data_dir: &Path) -> Watcher {
             return;
         }
         loop {
-            match session.watch_until(state.1) {
+            match session.watch_until(StateWatch {
+                revisions: state.1,
+                sections: TERMINAL_SECTIONS,
+            }) {
                 Ok(Some(revisions)) => {
-                    let changed = revisions.changed_since(state.1);
+                    let changed = revisions
+                        .changed_since(state.1)
+                        .intersection(TERMINAL_SECTIONS);
                     if !changed.is_empty() {
                         match session.get_state(changed) {
                             Ok(response) => {
@@ -108,7 +115,6 @@ pub(super) fn spawn_watcher(data_dir: &Path) -> Watcher {
                                     .1
                                     .apply_sections(response.revisions, response.sections());
                                 response.apply_to(&mut state.0);
-                                state.0.system.processing = None;
                                 let shutting_down = state.0.system.shutting_down;
                                 *latest_worker.lock() = Some(Ok((state.2, state.0.clone())));
                                 let disconnected = sender.try_send(()).is_err_and(|error| {
@@ -644,7 +650,7 @@ pub(super) struct QueryResult {
 
 struct QueryJob {
     request: QueryRequest,
-    cancelled: Arc<AtomicBool>,
+    ticket: rivu_protocol::query_tracking::QueryTicket,
 }
 
 type QueryCompletion = (QueryRequest, Result<QueryResult, WorkerFailure>);
@@ -653,7 +659,7 @@ pub(super) struct QueryWorker {
     sender: Option<Sender<()>>,
     pending: Arc<Mutex<Option<QueryJob>>>,
     pub(super) latest: Arc<Mutex<Option<QueryCompletion>>>,
-    cancellation: Option<Arc<AtomicBool>>,
+    cancellation: rivu_protocol::query_tracking::QueryEpoch,
     shutdown: rivu_client::SessionCancellation,
     worker: Option<JoinHandle<()>>,
 }
@@ -661,18 +667,15 @@ pub(super) struct QueryWorker {
 impl QueryWorker {
     pub(super) fn request(&mut self, request: QueryRequest) {
         self.cancel();
-        let cancelled = Arc::new(AtomicBool::new(false));
-        self.cancellation = Some(Arc::clone(&cancelled));
-        *self.pending.lock() = Some(QueryJob { request, cancelled });
+        let ticket = self.cancellation.ticket();
+        *self.pending.lock() = Some(QueryJob { request, ticket });
         if let Some(sender) = &self.sender {
             let _ = sender.try_send(());
         }
     }
 
     pub(super) fn cancel(&mut self) {
-        if let Some(cancelled) = self.cancellation.take() {
-            cancelled.store(true, Ordering::Release);
-        }
+        self.cancellation.cancel();
         self.pending.lock().take();
     }
 }
@@ -680,9 +683,8 @@ impl QueryWorker {
 impl Drop for QueryWorker {
     fn drop(&mut self) {
         self.cancel();
-        // Replacement invalidates results, not the in-flight server query. Only
-        // shutdown aborts its socket wait; otherwise one active query drains
-        // before the most recent pending request is sent.
+        // Replacements cancel the active read but retain its physical wait.
+        // Shutdown closes the socket, dropping Core's reply receiver instead.
         self.shutdown.cancel();
         self.sender.take();
         if let Some(worker) = self.worker.take() {
@@ -714,9 +716,12 @@ pub(super) fn spawn_query_worker(data_dir: &Path, instance_id: u32) -> QueryWork
             let Some(job) = requests.lock().take() else {
                 continue;
             };
+            if !job.ticket.is_current() {
+                continue;
+            }
             let result = match &mut session {
                 Ok(session) => session
-                    .query(job.request.demand.query())
+                    .query_retained_until(job.request.demand.query(), job.ticket.cancelled())
                     .map_err(WorkerFailure::from)
                     .and_then(|response| {
                         let view = response.result.map_err(WorkerFailure::from)?;
@@ -728,7 +733,7 @@ pub(super) fn spawn_query_worker(data_dir: &Path, instance_id: u32) -> QueryWork
                 Err(error) => Err(error.clone()),
             };
             let instance_changed = result.as_ref().is_err_and(|error| error.instance_changed);
-            if instance_changed || !job.cancelled.load(Ordering::Acquire) {
+            if instance_changed || job.ticket.is_current() {
                 *results.lock() = Some((job.request, result));
             }
             if instance_changed {
@@ -740,7 +745,7 @@ pub(super) fn spawn_query_worker(data_dir: &Path, instance_id: u32) -> QueryWork
         sender: Some(sender),
         pending,
         latest,
-        cancellation: None,
+        cancellation: rivu_protocol::query_tracking::QueryEpoch::default(),
         shutdown,
         worker: Some(worker),
     }

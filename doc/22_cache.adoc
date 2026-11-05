@@ -79,9 +79,12 @@ Queue, and playlist entries. Filtered Library retains only its latest scope,
 including the unfiltered full-library total, within that shared limit. Keys preserve
 optional filters and collection identity, never page boundaries. The read owner
 reuses counts across snapshots while their data-domain revisions remain valid,
-advancing cache ownership only after snapshot
-publication validation. Unrelated collection changes, no-change scans, and
-bitrate-only changes preserve library totals.
+advancing cache ownership only after snapshot publication validation. Playlist
+counts follow their individual playlist lifetime tokens; changing another
+playlist preserves them. Metadata changes still invalidate affected search totals.
+Unrelated collection changes, no-change scans, and bitrate-only changes preserve
+library totals. Each connection also retains at most 64 parameterized prepared
+statements; values and page offsets do not create new statement identities.
 
 Writable count caches check local SQLite changes and on-demand `PRAGMA data_version`
 for independent commits; writer transactions bypass them to avoid rollback leakage.
@@ -131,20 +134,23 @@ demand when issuing it and validates the response version when accepting it.
 The receipt is local to its issuing tracker, not a wire field or a page reservation.
 Failure suppression still follows demand and freshness rather than submission
 identity, so suppressed reads cannot invalidate another pending demand.
-`QueryTicket` separately carries cancellation validity into Core for in-process
-reads. Cancelling a tracker retires its submissions and tickets without
-invalidating an otherwise current cached payload.
+`QueryTicket` carries owner-scoped cancellation validity; remote query workers
+propagate revocation to the corresponding Core request without cancelling another
+consumer's read or invalidating an otherwise current cached payload.
 
 Every submitted read holds its physical slot until the actual reply or channel
-disconnection. Replacement, hiding, cancellation, and logical timeout cannot free
-it. Matching retirement re-drives the latest eligible demand; old completions
-cannot publish or clear replacement requests. Core can skip obsolete queued GUI
-reads before Store admission, but cannot interrupt dispatched SQL or replay writes.
+disconnection. Replacement, hiding, cancellation, and logical timeout revoke
+unneeded execution but do not themselves prove retirement. Matching retirement
+re-drives the latest eligible demand; old completions cannot publish or clear
+replacement requests. Core skips obsolete queued reads and cooperatively interrupts
+executing read SQL, then cleans up its snapshot before releasing the physical lease.
+Accepted writes retain their independent admission and commit semantics.
 
 GUI admission allows two seconds and response presentation twelve seconds. Timeout
-ends loading feedback and shows an error, discarding late payloads; explicit retry
-still waits for physical retirement. Transport errors have no payload stamp and
-do not prove collection changes. This policy does not alter IPC or command deadlines.
+ends loading feedback and shows an error, cancels the now-unused read, and discards
+late payloads; explicit retry still waits for physical retirement. Transport errors
+have no payload stamp and do not prove collection changes. This policy does not
+alter command deadlines.
 
 Album Browser publishes a page before requesting an uncached unfiltered search
 total. Auxiliary failure leaves the rows intact and counter unavailable. The same
@@ -361,9 +367,10 @@ or imposing copy-on-write snapshots on the audio producer.
 
 ==== Spectrum
 
-Spectrum retains frequency mappings per panel; levels reuse compatible mappings,
-while geometry, grouping or display-mapping changes rebuild them. Each panel render
-rebuilds its body, though retained scenes can replay without a render.
+Spectrum retains frequency mappings and immutable body/peak publications per panel.
+Unchanged output and display settings reuse the body. Content identity includes
+plot size, grouping and appearance, not plot position: local geometry is placed
+at paint time, so translation alone does not rebuild it.
 Spectrum and Spectrogram share the selected GPU color map; range, size and style
 do not change its identity. Waveform uses paired endpoints from the same map.
 Body representation belongs to
@@ -372,8 +379,7 @@ link:25_gpu_rendering.adoc#consumer-cutover-contracts[GPU consumer contracts].
 Suspension retains the final immutable body, normalized peak markers, and display
 labels for each current layout panel. Envelopes, frequency mappings, and scratch
 are released. Restoration draws that presentation until a current drawable result
-replaces it; semantic invalidation discards it. This frozen presentation is not a
-body-reuse cache. Envelope and palette semantics are in
+replaces it; semantic invalidation discards it. Envelope and palette semantics are in
 link:23_visuals.adoc#spectrum[Spectrum rendering].
 
 ==== Spectrogram
@@ -385,6 +391,10 @@ history; duration/rate changes resize retention and start a new pooling interval
 Unrelated Spectrum settings do not rebucket audio. Pooling semantics belong to
 link:23_visuals.adoc#spectrogram[Spectrogram]; tile publication belongs to
 link:25_gpu_rendering.adoc#spectrogram-column-fields[GPU column fields].
+Panels share one immutable layer assembly for the effective history, display time
+and sampling state. Each panel retains its accepted presentation independently;
+scrolling can replace layer placement without rebuilding unchanged numerical tiles.
+Suspension releases working assembly ownership, not another panel's retained output.
 
 Drawable panels share one bounded history sized for the largest requested
 physical plot width, capped by history seconds times analysis FPS, with at least
@@ -513,9 +523,9 @@ link:25_gpu_rendering.adoc#admission-and-retirement[GPU retirement].
 
 === Design tradeoffs
 
-Waveform and Spectrogram reuse aggregation and publications, not rendering work.
-Spectrum reuses mappings but rebuilds bodies. Shared immutable publications avoid
-a second geometry representation; further consolidation needs workload evidence.
+Waveform and Spectrogram reuse aggregation and publications; Spectrum also reuses
+unchanged local geometry. Shared immutable publications avoid a second geometry
+representation, while draw submission and GPU retirement remain renderer costs.
 
 [[native-metadata-admission]]
 == Metadata admission
@@ -594,13 +604,19 @@ warm the cache but cannot start another hidden lookup. Revealing it acquires the
 latest track. Other consumers, including MPRIS, retain their own acquisition demand.
 A path change updates the panel's source snapshot and retires the previous cover
 even when track ID and fingerprint are unchanged; it does not reset track rotation.
+Completed misses remain stable for an unchanged visible source after shared-cache
+eviction. Hiding the consumer or changing its source releases that retained
+negative demand identity; an in-flight physical load has its own lifetime.
 
-Track ID plus source fingerprint identifies content. Resident concurrent requests
-share one probe outside the lookup lock. In-flight work and published consumers
-keep that version resident; a changed fingerprint can coexist with an old cover
-still in use. GUI replacement retires after a frame boundary; MPRIS holds its
-published result until replacement/shutdown and returned properties until the
-next read/shutdown. No visited-file registry is retained.
+Logical request identity remains track ID, fingerprint and path. Physical probe
+ownership additionally shares a source path and fingerprint across CUE track IDs,
+without conflating their completion rights. Resident concurrent requests share
+one probe outside the lookup lock. In-flight work and published consumers keep
+their logical versions resident without pinning idle CUE aliases of the same
+image. A changed fingerprint can coexist with an old cover still in use.
+GUI replacement retires after a frame boundary; MPRIS holds its published
+result until replacement/shutdown and returned properties until the next
+read/shutdown. No visited-file registry is retained.
 
 Successful embedded covers remain reusable after a path move that preserves
 track ID and fingerprint. Directory covers, misses, and source/probe failures

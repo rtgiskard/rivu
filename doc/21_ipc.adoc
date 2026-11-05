@@ -150,6 +150,9 @@ Core applies state transitions on one persistent dedicated thread. Bounded
 channels carry requests and worker facts; replies and revision subscriptions
 wake consumers without polling. Notifications coalesce, so consumers read the
 current authoritative projection after a wakeup rather than replaying events.
+Subscriptions express their owner's interests. Tray and MPRIS management ignore
+irrelevant playback-clock updates; the MPRIS publisher still receives explicit
+seek, metadata and control changes required by its interface.
 
 Command execution returns an explicit outcome: immediate acknowledgement, an
 allocated task ID, or a deferred export/maintenance reply. Dispatch publishes the
@@ -163,9 +166,13 @@ validating it against captured Core revisions. A publication fence prevents read
 from pairing a committed database change with preceding state. Count reuse follows
 data-domain revisions; maintenance waits for physical snapshot retirement.
 
-IPC disconnection or shutdown drops a pending query's reply receiver. Obsolete
-queued reads are skipped before database admission, but SQL already executing
-keeps its snapshot lease until completion. This does not cancel accepted commands.
+IPC disconnection or shutdown drops a pending query's reply receiver. Demand
+replacement and logical failure revoke the corresponding read, including an
+executing SQL statement. A request-scoped SQLite progress handler observes
+cancellation between bounded VM instruction batches; it is detached before
+snapshot cleanup. Cancellation is cooperative, not a hard filesystem/I/O deadline.
+The query owner retains its physical lease through SQL exit and snapshot cleanup
+before replying or executing the next read. This does not cancel accepted commands.
 
 App explicitly supplies execution capabilities to Core and services, independently
 of the business `CoreHandle`. It retains `TaskRuntime` through Core, service, and
@@ -215,10 +222,11 @@ The frame header is six bytes. `body_length` excludes the four-byte length field
 and includes the version, message type, and serialized body.
 
 Bodies use Postcard serialization without COBS framing. The command protocol is
-version 15, defined by `PROTOCOL_VERSION` in
+version 16, defined by `PROTOCOL_VERSION` in
 link:../crates/rivu-protocol/src/wire.rs[the wire contract]. Both peers must use
-matching protocol versions and positional wire schemas. Version 15 removes the
-global `Analysis` command; restart Core and use matching clients after upgrading.
+matching protocol versions and positional wire schemas. Version 16 adds identified
+query cancellation and a separately selected processing section; restart Core and
+use matching clients after upgrading.
 The four-byte frame
 length remains little-endian; body integers follow Postcard's encoding.
 Version mismatches are rejected before decoding the body. There is no schema
@@ -311,8 +319,10 @@ cannot target a replacement instance, and Watch never automatically reconnects.
 A fatal connection, handshake, or identity error restores the terminal and exits,
 without replaying queued commands.
 
-Query replacement drains the active exchange before sending only the latest
-pending query. TUI exit closes in-flight waits, including command and Hello waits.
+Query replacement cancels the active read, drains its physical exchange, then
+sends only the latest pending query. TUI exit closes in-flight waits, including
+command and Hello waits. TUI state and Watch requests exclude processing tasks;
+processing-only progress does not wake or redraw the terminal.
 
 === Message types
 
@@ -322,12 +332,14 @@ Request types:
 * `State` (`1`) — read selected state sections
 * `Query` (`2`) — execute a read-only query
 * `Command` (`3`) — execute a state-changing command
-* `Watch` (`4`) — wait for a revision change
+* `Watch` (`4`) — wait for a change in selected sections, carrying their prior revisions
 * `WaitTask` (`5`) — wait for a specific scan, relocation, or processing task's terminal result
-* `QueryRetained` (`6`) — execute a query while preserving its physical worker
-  ownership through completion, even if the GUI's logical wait times out
+* `QueryRetained` (`6`) — execute an identified query while preserving its physical
+  worker ownership through reply, including after cancellation or logical timeout
 * `RegisterDesktop` (`7`) — register an instance-bound desktop activation session;
   returns `Ack`
+* `QueryCancel` (`8`) — revoke only the identified retained read on this session;
+  no reply is emitted, and later queries are unaffected
 
 Response types:
 
@@ -351,6 +363,12 @@ Configuration state carries the effective `Config` and `config_path`; its Config
 uses the explicit positional `WireConfig` adapter. Runtime `SystemState` contains
 no configuration payload. Both section schemas are versioned positional contracts;
 collection lengths and optional fields are encoded in the message body.
+Processing is an independent selected state section and revision domain. Its
+payload is `processing.task`; requested empty processing explicitly clears the
+task, while an omitted section preserves the client's current task. System wire
+state excludes processing, so system-only updates never transport a task payload.
+Full `status --json` exposes the task under `processing.task`.
+
 Library information-column selection is encoded in WireConfig as five booleans
 in Artist, Album, Duration, Codec, and Bitrate order; all false means no columns.
 
@@ -463,10 +481,11 @@ revokes its result.
 === Revisions and watching
 
 State revisions are tracked independently for Playback, Queue, Library, System,
-and Configuration sections, in that positional order. Section selection uses the
-same order. Tokens are compared for equality, not ordered as clocks. A Watch
-request waits until the current revisions differ from the expected revisions;
-its response contains the latest revisions rather than an event log.
+Configuration, and Processing sections, in that positional order. Section selection
+uses the same order. Tokens are compared for equality, not ordered as clocks.
+A Watch request carries expected revisions and selected sections; only a changed
+selected section completes it. Its response contains the latest revisions rather
+than an event log.
 
 The `system` token in `StateRevisions` invalidates the System section. It is
 distinct from `SystemState.revision` and acknowledgement `revision`, which are

@@ -184,7 +184,7 @@ fn cancelling_client_session_closes_pending_watch_with_partial_response() {
         session
             .bind_instance(session.instance_id().unwrap())
             .unwrap();
-        session.watch_until(StateRevisions::default())
+        session.watch_until(StateRevisions::default().into())
     });
     let mut stream = listener.accept().unwrap().0;
     complete_test_handshake(&mut stream);
@@ -349,7 +349,7 @@ fn retained_query_uses_physical_request_and_returns_actual_reply() {
         let WireRequest::QueryRetained(query) = read_test_request(&mut stream) else {
             panic!("expected physical retained query");
         };
-        assert_eq!(Query::try_from(query).unwrap(), Query::LibraryStats);
+        assert_eq!(Query::try_from(query.query).unwrap(), Query::LibraryStats);
         admitted.send(()).unwrap();
         continue_reply.recv().unwrap();
         write_test_response(
@@ -405,4 +405,76 @@ fn cancelling_retained_query_disconnects_its_physical_session() {
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
     assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+}
+
+#[test]
+fn owner_cancel_sends_identified_control_and_keeps_reply_order_until_physical_completion() {
+    use rivu_protocol::{
+        query_tracking::QueryEpoch,
+        response::{QueryError, ViewResponse},
+    };
+    use std::os::unix::net::UnixListener;
+
+    let directory = socket_test_directory();
+    let listener =
+        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
+    let (admitted, active) = std::sync::mpsc::sync_channel(1);
+    let (cancel_seen, cancelled) = std::sync::mpsc::sync_channel(1);
+    let (release, released) = std::sync::mpsc::sync_channel(1);
+    let server = std::thread::spawn(move || {
+        let mut stream = listener.accept().unwrap().0;
+        complete_test_handshake(&mut stream);
+        let WireRequest::QueryRetained(query) = read_test_request(&mut stream) else {
+            panic!("expected retained query");
+        };
+        assert!(matches!(query.query, WireQuery::LibraryStats));
+        admitted.send(()).unwrap();
+        assert!(
+            matches!(read_test_request(&mut stream), WireRequest::QueryCancel(id) if id == query.id)
+        );
+        cancel_seen.send(()).unwrap();
+        released.recv_timeout(Duration::from_secs(2)).unwrap();
+        write_test_response(
+            &mut stream,
+            WireResponse::Query(QueryResponse {
+                revisions: Default::default(),
+                result: Err(QueryError::Cancelled),
+            }),
+        );
+        assert!(matches!(
+            read_test_request(&mut stream),
+            WireRequest::Query(WireQuery::Track { track_id: 42 })
+        ));
+        write_test_response(
+            &mut stream,
+            WireResponse::Query(QueryResponse {
+                revisions: Default::default(),
+                result: Ok(ViewResponse::Track(None)),
+            }),
+        );
+    });
+    let mut owner = QueryEpoch::default();
+    let ticket = owner.ticket();
+    let mut session = client_session(directory.path()).unwrap();
+    let (finished, completion) = std::sync::mpsc::sync_channel(1);
+    let client = std::thread::spawn(move || {
+        let first = session
+            .query_retained_until(Query::LibraryStats, ticket.cancelled())
+            .unwrap();
+        let next = session.query(Query::Track { track_id: 42 }).unwrap();
+        finished.send((first, next)).unwrap();
+    });
+    active.recv_timeout(Duration::from_secs(2)).unwrap();
+    owner.cancel();
+    cancelled.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(matches!(
+        completion.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+    release.send(()).unwrap();
+    let (first, next) = completion.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(matches!(first.result, Err(QueryError::Cancelled)));
+    assert!(matches!(next.result, Ok(ViewResponse::Track(None))));
+    client.join().unwrap();
+    server.join().unwrap();
 }

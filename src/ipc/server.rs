@@ -15,13 +15,14 @@ use rivu_protocol::transport::{
     write_frame_buffered,
 };
 use rivu_protocol::wire::{
-    HELLO_TIMEOUT, HelloResponse, MAX_CLIENTS, MAX_REQUEST, SessionState, UNKNOWN_INSTANCE,
-    WireRequest, WireResponse, wire_state,
+    HELLO_TIMEOUT, HelloResponse, MAX_CLIENTS, MAX_REQUEST, RequestTag, SessionState,
+    UNKNOWN_INSTANCE, WireRequest, WireResponse, wire_state,
 };
 use rivu_protocol::{AppCommand, query_wait_timeout};
 use rivu_protocol::{
     model::Query,
-    response::{Ack, QueryResponse, StateRevisions},
+    query_tracking::QueryEpoch,
+    response::{Ack, QueryResponse, StateRevisions, StateWatch},
 };
 use std::{
     fs,
@@ -150,6 +151,10 @@ impl RequestReader {
         Ok(frame)
     }
 
+    fn next_is_query_cancel(&self) -> bool {
+        self.complete >= 6 && self.pending[5] == RequestTag::QueryCancel as u8
+    }
+
     async fn read_ahead(&mut self, stream: &mut (impl AsyncRead + Unpin)) -> Result<()> {
         // Complete frames wait untimed for earlier replies. Only the trailing
         // incomplete frame owns a deadline, even when the receive buffer is full.
@@ -254,12 +259,14 @@ async fn wait_for_query(
     reader: &mut RequestReader,
     handle: &CoreHandle,
     query: Query,
-    retained: bool,
+    retained: Option<u64>,
     shutdown: &Receiver<()>,
 ) -> Result<Option<Result<QueryResponse>>> {
+    let mut owner = QueryEpoch::default();
+    let ticket = retained.map(|_| owner.ticket());
     let query = async {
-        if retained {
-            Ok(handle.query_retained(query).await)
+        if let Some(ticket) = ticket {
+            Ok(handle.query_retained_if_current(query, ticket).await)
         } else {
             run_query(handle, query).await
         }
@@ -267,6 +274,16 @@ async fn wait_for_query(
     .fuse();
     futures::pin_mut!(query);
     loop {
+        // This control frame never owns a reply. A late cancellation can be
+        // consumed during the next read, but its identity cannot retire it.
+        while reader.next_is_query_cancel() {
+            let WireRequest::QueryCancel(id) = reader.read(stream).await?? else {
+                unreachable!("query cancellation tag decoded as another request");
+            };
+            if retained == Some(id) {
+                owner.cancel();
+            }
+        }
         futures::select! {
             response = query => return Ok(Some(response)),
             _ = shutdown.recv().fuse() => return Ok(None),
@@ -285,21 +302,31 @@ fn wait_for_revisions<'a>(
     reader: &'a mut RequestReader,
     pending_request: &'a mut Option<Result<WireRequest>>,
     handle: &'a CoreHandle,
-    expected: StateRevisions,
+    expected: StateWatch,
     shutdown: &'a Receiver<()>,
 ) -> impl Future<Output = Result<Option<WatchResult>>> + 'a {
     let current = handle.state_revisions();
     // Register only a live Watch. The future rechecks after registration so a
     // publish before subscription cannot leave this wait asleep. On exit the
     // next subscription/publication prunes the dropped receiver's sender.
-    let updates = (current == expected).then(|| handle.subscribe_revisions());
+    let updates = current
+        .changed_since(expected.revisions)
+        .intersection(expected.sections)
+        .is_empty()
+        .then(|| {
+            handle.subscribe_revisions(crate::core::RevisionInterest::Sections(expected.sections))
+        });
     async move {
         let Some(updates) = updates else {
             return Ok(Some(WatchResult::Revisions(current)));
         };
         loop {
             let current = handle.state_revisions();
-            if current != expected {
+            if !current
+                .changed_since(expected.revisions)
+                .intersection(expected.sections)
+                .is_empty()
+            {
                 return Ok(Some(WatchResult::Revisions(current)));
             }
             futures::select! {
@@ -401,8 +428,8 @@ async fn serve_connection(
             }
             request @ (WireRequest::Query(_) | WireRequest::QueryRetained(_)) => {
                 let (query, retained) = match request {
-                    WireRequest::Query(query) => (query, false),
-                    WireRequest::QueryRetained(query) => (query, true),
+                    WireRequest::Query(query) => (query, None),
+                    WireRequest::QueryRetained(query) => (query.query, Some(query.id)),
                     _ => unreachable!(),
                 };
                 let query = match Query::try_from(query) {
@@ -445,6 +472,9 @@ async fn serve_connection(
                 };
                 write_frame_buffered(&mut stream, &response, &mut write_buffer).await?;
             }
+            // No response: the matching retained read owns the sole query reply.
+            // Cancellation arriving after its reply is deliberately inert.
+            WireRequest::QueryCancel(_) => {}
             WireRequest::RegisterDesktop => {
                 let result = if desktop_registration.is_some() {
                     Err(anyhow::anyhow!(
@@ -735,7 +765,14 @@ mod tests {
 
     #[test]
     fn query_wait_eof_and_shutdown_cancel_the_core_reply_receiver() {
-        for (shutdown_connection, pipeline) in [(false, false), (true, false), (false, true)] {
+        for (shutdown_connection, pipeline, retained) in [
+            (false, false, None),
+            (true, false, None),
+            (false, true, None),
+            (false, false, Some(41)),
+            (true, false, Some(41)),
+            (false, true, Some(41)),
+        ] {
             async_io::block_on(async {
                 let (handle, queries) = CoreHandle::test_query_port();
                 let (mut peer, mut stream) = socket_pair();
@@ -746,7 +783,7 @@ mod tests {
                     &mut reader,
                     &handle,
                     Query::LibraryStats,
-                    false,
+                    retained,
                     &shutdown,
                 ));
                 assert!(waiting.as_mut().now_or_never().is_none());
@@ -783,6 +820,70 @@ mod tests {
     }
 
     #[test]
+    fn identified_cancel_retires_only_its_owner_and_retains_the_physical_reply() {
+        async_io::block_on(async {
+            let (handle, queries) = CoreHandle::test_query_port();
+            let (mut peer, mut stream) = socket_pair();
+            let mut reader = RequestReader::default();
+            let (_stop, shutdown) = async_channel::bounded(1);
+            let mut encoded = Vec::new();
+            for id in [41, 42] {
+                // Include a delayed cancellation from the previous request before
+                // admitting this one. A stale control must not poison its ticket.
+                encode_request_frame_into(&WireRequest::QueryCancel(id - 1), &mut encoded).unwrap();
+                peer.write_all(&encoded).await.unwrap();
+                while !reader.next_is_query_cancel() {
+                    reader.read_ahead(&mut stream).await.unwrap();
+                }
+                let mut waiting = Box::pin(wait_for_query(
+                    &mut stream,
+                    &mut reader,
+                    &handle,
+                    Query::LibraryStats,
+                    Some(id),
+                    &shutdown,
+                ));
+                assert!(waiting.as_mut().now_or_never().is_none());
+                let reply = timeout(Duration::from_secs(2), queries.receive())
+                    .await
+                    .unwrap();
+                assert!(reply.ticket_is_current());
+                assert!(!reply.is_cancelled());
+
+                encode_request_frame_into(&WireRequest::QueryCancel(id), &mut encoded).unwrap();
+                peer.write_all(&encoded).await.unwrap();
+                timeout(
+                    Duration::from_secs(2),
+                    futures_lite::future::or(
+                        async {
+                            let _ = waiting.as_mut().await;
+                            panic!("cancellation released the physical read before its reply");
+                        },
+                        reply.owner_cancelled(),
+                    ),
+                )
+                .await
+                .unwrap();
+                assert!(!reply.ticket_is_current());
+                assert!(
+                    !reply.is_cancelled(),
+                    "cancellation must retain the Core reply receiver"
+                );
+                assert!(waiting.as_mut().now_or_never().is_none());
+                reply.respond(QueryResponse {
+                    revisions: Default::default(),
+                    result: Err(rivu_protocol::response::QueryError::Cancelled),
+                });
+                let response = waiting.await.unwrap().unwrap().unwrap();
+                assert!(matches!(
+                    response.result,
+                    Err(rivu_protocol::response::QueryError::Cancelled)
+                ));
+            }
+        });
+    }
+
+    #[test]
     fn query_wait_keeps_complete_and_partial_following_requests_in_order() {
         async_io::block_on(async {
             let (handle, queries) = CoreHandle::test_query_port();
@@ -794,7 +895,7 @@ mod tests {
                 &mut reader,
                 &handle,
                 Query::LibraryStats,
-                false,
+                None,
                 &shutdown,
             ));
             assert!(waiting.as_mut().now_or_never().is_none());
@@ -805,8 +906,11 @@ mod tests {
             encode_request_frame_into(&WireRequest::State(StateSections::ALL), &mut encoded)
                 .unwrap();
             peer.write_all(&encoded).await.unwrap();
-            encode_request_frame_into(&WireRequest::Watch(StateRevisions::default()), &mut encoded)
-                .unwrap();
+            encode_request_frame_into(
+                &WireRequest::Watch(StateRevisions::default().into()),
+                &mut encoded,
+            )
+            .unwrap();
             peer.write_all(&encoded).await.unwrap();
             encode_request_frame_into(&WireRequest::Hello(StateSections::ALL), &mut encoded)
                 .unwrap();
@@ -825,7 +929,7 @@ mod tests {
             ));
             assert!(matches!(
                 reader.read(&mut stream).await.unwrap().unwrap(),
-                WireRequest::Watch(revisions) if revisions == StateRevisions::default()
+                WireRequest::Watch(revisions) if revisions == StateRevisions::default().into()
             ));
             assert_eq!(reader.deadline, Some(deadline));
             peer.write_all(&encoded[1..]).await.unwrap();
@@ -859,8 +963,11 @@ mod tests {
             let mut first = Vec::new();
             encode_request_frame_into(&WireRequest::State(StateSections::ALL), &mut first).unwrap();
             let mut second = Vec::new();
-            encode_request_frame_into(&WireRequest::Watch(StateRevisions::default()), &mut second)
-                .unwrap();
+            encode_request_frame_into(
+                &WireRequest::Watch(StateRevisions::default().into()),
+                &mut second,
+            )
+            .unwrap();
             let mut pipeline = first.clone();
             pipeline.extend_from_slice(&second);
             let mut input = pipeline.as_slice();
@@ -904,7 +1011,7 @@ mod tests {
                     &mut reader,
                     &handle,
                     Query::LibraryStats,
-                    false,
+                    None,
                     &shutdown,
                 ));
                 assert!(waiting.as_mut().now_or_never().is_none());
@@ -971,7 +1078,7 @@ mod tests {
                     &mut reader,
                     &handle,
                     Query::LibraryStats,
-                    false,
+                    None,
                     &shutdown,
                 ));
                 assert!(waiting.as_mut().now_or_never().is_none());
@@ -1072,7 +1179,7 @@ mod tests {
                 &mut reader,
                 &mut pending,
                 &handle,
-                baseline,
+                baseline.into(),
                 &shutdown,
             );
             // Simulate publication whose wakeup was missed at registration. The
@@ -1086,7 +1193,7 @@ mod tests {
             // An already changed baseline replies without another subscription.
             assert!(matches!(
                 wait_for_revisions(
-                    &mut stream, &mut reader, &mut pending, &handle, baseline, &shutdown,
+                    &mut stream, &mut reader, &mut pending, &handle, baseline.into(), &shutdown,
                 ).await.unwrap(),
                 Some(WatchResult::Revisions(revisions)) if revisions == current
             ));
@@ -1111,7 +1218,7 @@ mod tests {
                     &mut reader,
                     &mut pending,
                     &handle,
-                    baseline,
+                    baseline.into(),
                     &shutdown,
                 ));
                 assert!(waiting.as_mut().now_or_never().is_none());
@@ -1173,7 +1280,7 @@ mod tests {
                     &mut reader,
                     &mut pending,
                     &handle,
-                    baseline,
+                    baseline.into(),
                     &shutdown,
                 );
                 assert_eq!(handle.test_revision_subscriptions(), (1, 1));

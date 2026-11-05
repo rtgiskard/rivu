@@ -125,8 +125,22 @@ pub struct CoreHandle {
     pub(crate) waveform: Arc<RwLock<rivu_protocol::waveform::WaveformFrame>>,
     pub(crate) waveform_control: Arc<audio::WaveformControl>,
     sender: mpsc::Sender<Request>,
-    revision_updates: Arc<RwLock<Vec<mpsc::Sender<()>>>>,
+    revision_updates: Arc<RwLock<Vec<RevisionSubscription>>>,
     task_waiters: Arc<Mutex<TaskWaiters>>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum RevisionInterest {
+    Sections(StateSections),
+    MprisService,
+    Mpris,
+    #[cfg(feature = "gui")]
+    Tray,
+}
+
+struct RevisionSubscription {
+    interest: RevisionInterest,
+    sender: mpsc::Sender<()>,
 }
 
 pub(crate) struct MprisServiceState {
@@ -191,11 +205,13 @@ impl CoreHandle {
         self.state.read().clone()
     }
 
-    pub(crate) fn subscribe_revisions(&self) -> mpsc::Receiver<()> {
+    /// Subscribe before reading a baseline, then reconcile after async setup.
+    /// Notifications coalesce; consumers always re-read their published state.
+    pub(crate) fn subscribe_revisions(&self, interest: RevisionInterest) -> mpsc::Receiver<()> {
         let (sender, receiver) = mpsc::bounded(1);
         let mut subscribers = self.revision_updates.write();
-        subscribers.retain(|sender| !sender.is_closed());
-        subscribers.push(sender);
+        subscribers.retain(|subscriber| !subscriber.sender.is_closed());
+        subscribers.push(RevisionSubscription { interest, sender });
         receiver
     }
 
@@ -205,12 +221,25 @@ impl CoreHandle {
 
     /// IPC retained reads keep their physical slot until the owner replies.
     pub(crate) async fn query_retained(&self, query: Query) -> QueryResponse {
+        self.query_retained_with_ticket(query, None).await
+    }
+
+    pub(crate) async fn query_retained_if_current(
+        &self,
+        query: Query,
+        ticket: QueryTicket,
+    ) -> QueryResponse {
+        self.query_retained_with_ticket(query, Some(ticket)).await
+    }
+
+    async fn query_retained_with_ticket(
+        &self,
+        query: Query,
+        ticket: Option<QueryTicket>,
+    ) -> QueryResponse {
         let (tx, rx) = oneshot::channel();
         let request = Request {
-            operation: Operation::Query {
-                query,
-                ticket: None,
-            },
+            operation: Operation::Query { query, ticket },
             reply: Some(tx),
         };
         let response = match self.admit(request).await {
@@ -282,10 +311,16 @@ impl CoreHandle {
             library: sections.library.then(|| state.library.clone()),
             system: sections.system.then(|| {
                 let mut system = state.system.clone();
+                system.processing = None;
                 system.scan_owner = state.scan_owner;
                 system
             }),
             configuration: sections.configuration.then(|| state.configuration.clone()),
+            processing: sections
+                .processing
+                .then(|| rivu_protocol::response::ProcessingState {
+                    task: state.system.processing.clone(),
+                }),
         }
     }
 
@@ -351,7 +386,7 @@ struct Core {
     workers: Arc<BlockingExecutor>,
     read_queries: Option<query_worker::ReadQueries>,
     initial_devices: Option<runtime::InitialDevices>,
-    revision_updates: Arc<RwLock<Vec<mpsc::Sender<()>>>>,
+    revision_updates: Arc<RwLock<Vec<RevisionSubscription>>>,
     state: CoreState,
     shared: Arc<RwLock<CoreState>>,
     #[cfg(test)]

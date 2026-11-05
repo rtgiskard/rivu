@@ -146,7 +146,7 @@ fn configuration_change_wakes_ipc_watch_and_selective_read_omits_runtime() {
     let watched = std::thread::spawn(move || {
         let mut revisions = before;
         loop {
-            let next = watcher.watch(revisions).unwrap();
+            let next = watcher.watch(revisions.into()).unwrap();
             let configuration_changed = next.changed_since(revisions).configuration;
             revisions = next;
             if configuration_changed {
@@ -205,7 +205,7 @@ fn app_commands_route_over_ipc_without_changing_business_state() {
     let server =
         Server::start(&owner, runtime.handle.clone(), app, runtime.test_executor()).unwrap();
     let mut client = client_session(directory.path()).unwrap();
-    // A query fences asynchronous startup before comparing published state.
+    // Fence initial database projection; optional device discovery remains independent.
     client.query(Query::ScanTask { id: 0 }).unwrap();
     for target in [
         rivu_protocol::model::TaskTarget::Scan { id: u64::MAX },
@@ -227,11 +227,24 @@ fn app_commands_route_over_ipc_without_changing_business_state() {
     assert!(accepted.is_success());
     #[cfg(not(feature = "gui"))]
     assert!(!accepted.is_success());
-    assert_eq!(accepted.revision, before.system.as_ref().unwrap().revision);
     let after = client.get_state(StateSections::ALL).unwrap();
     assert_eq!(
-        serde_json::to_value(before).unwrap(),
-        serde_json::to_value(after).unwrap()
+        serde_json::to_value((
+            before.playback,
+            before.queue,
+            before.library,
+            before.configuration,
+            before.processing
+        ))
+        .unwrap(),
+        serde_json::to_value((
+            after.playback,
+            after.queue,
+            after.library,
+            after.configuration,
+            after.processing
+        ))
+        .unwrap()
     );
     let ack = client.request_ack(AppCommand::Shutdown).unwrap();
     assert!(ack.is_success());
@@ -242,6 +255,82 @@ fn app_commands_route_over_ipc_without_changing_business_state() {
     assert!(SocketOwner::acquire(directory.path()).is_err());
     drop(owner);
     assert!(SocketOwner::acquire(directory.path()).is_ok());
+}
+
+#[test]
+fn selective_watch_ignores_unselected_processing_revision_before_dispatch() {
+    use rivu_protocol::response::StateWatch;
+    use std::{
+        io::{Read, Write},
+        time::Duration,
+    };
+
+    fn read_response(stream: &mut std::os::unix::net::UnixStream) -> WireResponse {
+        let mut prefix = [0; 4];
+        stream.read_exact(&mut prefix).unwrap();
+        let length = u32::from_le_bytes(prefix) as usize;
+        assert!(length <= MAX_RESPONSE);
+        let mut frame = vec![0; length];
+        stream.read_exact(&mut frame).unwrap();
+        decode_response_frame(&frame).unwrap()
+    }
+
+    let directory = socket_test_directory();
+    let config_path = directory.path().join("config.toml");
+    crate::config::Config {
+        media_read_buffer_mib: 1,
+        ffmpeg_enabled: false,
+        ..Default::default()
+    }
+    .save(&config_path)
+    .unwrap();
+    let owner = SocketOwner::acquire(directory.path()).unwrap();
+    let mut runtime = crate::core::CoreRuntime::start(directory.path(), &config_path).unwrap();
+    let app = AppHandle::new(&runtime, directory.path());
+    let server =
+        Server::start(&owner, runtime.handle.clone(), app, runtime.test_executor()).unwrap();
+    let mut control = client_session(directory.path()).unwrap();
+    control.query(Query::ScanTask { id: 0 }).unwrap();
+    let address = rivu_protocol::wire::address(directory.path()).unwrap();
+    let mut stream = std::os::unix::net::UnixStream::connect_addr(&address).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut encoded = Vec::new();
+    encode_request_frame_into(&WireRequest::Hello(StateSections::default()), &mut encoded).unwrap();
+    stream.write_all(&encoded).unwrap();
+    assert!(matches!(read_response(&mut stream), WireResponse::Hello(_)));
+    let mut baseline = runtime.handle.state_revisions();
+    baseline.processing = baseline.processing.wrapping_add(1);
+    encode_request_frame_into(
+        &WireRequest::Watch(StateWatch {
+            revisions: baseline,
+            sections: StateSections {
+                configuration: true,
+                ..Default::default()
+            },
+        }),
+        &mut encoded,
+    )
+    .unwrap();
+    stream.write_all(&encoded).unwrap();
+    encode_request_frame_into(&WireRequest::Query(WireQuery::LibraryStats), &mut encoded).unwrap();
+    stream.write_all(&encoded).unwrap();
+    // Pending requests still supersede a watch; an unrelated revision must not
+    // produce a Watch response ahead of the real query response.
+    assert!(matches!(read_response(&mut stream), WireResponse::Query(_)));
+    drop(stream);
+    assert!(
+        control
+            .request_ack(AppCommand::Shutdown)
+            .unwrap()
+            .is_success()
+    );
+    runtime.join().unwrap();
+    drop(server);
 }
 
 #[test]
@@ -285,7 +374,7 @@ fn malformed_request_during_watch_receives_invalid_request_response() {
     assert!(matches!(read_response(&mut stream), WireResponse::Hello(_)));
 
     encode_request_frame_into(
-        &WireRequest::Watch(runtime.handle.state_revisions()),
+        &WireRequest::Watch(runtime.handle.state_revisions().into()),
         &mut encoded,
     )
     .unwrap();

@@ -12,7 +12,7 @@ use rivu_client::{
     ClientSession, CommandFailure, InstanceChanged, SessionCancellation, client_session_with_cancel,
 };
 use rivu_format::config::Config;
-use rivu_protocol::query_tracking::QueryTicket;
+use rivu_protocol::query_tracking::{QueryEpoch, QueryTicket};
 use rivu_protocol::waveform::WaveformFrame;
 use rivu_protocol::{
     ADMISSION_TIMEOUT, AppCommand, REPLY_TIMEOUT,
@@ -217,6 +217,7 @@ struct CommandRequest {
 struct QueryRequest {
     query: Query,
     ticket: Option<QueryTicket>,
+    owner: QueryTicket,
     reply: oneshot::Sender<QueryResponse>,
 }
 
@@ -323,7 +324,7 @@ impl FrontendRuntime {
         runtime.spawn("rivu-gui-watch", move |shared| {
             while !shared.stop.is_cancelled() {
                 let current = shared.published.read().revisions;
-                let announced = match watcher.watch_until(current) {
+                let announced = match watcher.watch_until(current.into()) {
                     Ok(Some(revisions)) => revisions,
                     Ok(None) => break,
                     Err(error) => {
@@ -441,11 +442,12 @@ fn command_worker(
 }
 
 fn query_worker(shared: Arc<Shared>, mut session: ClientSession, receiver: Receiver<QueryRequest>) {
-    while let Ok(request) = receiver.recv_blocking() {
+    while let Ok(mut request) = receiver.recv_blocking() {
         if shared.stop.is_cancelled() {
             break;
         }
         if request.reply.is_canceled()
+            || !request.owner.is_current()
             || request
                 .ticket
                 .as_ref()
@@ -456,7 +458,20 @@ fn query_worker(shared: Arc<Shared>, mut session: ClientSession, receiver: Recei
                 .send(shared.query_error(&request.query, QueryError::Cancelled));
             continue;
         }
-        let response = match session.query_retained(request.query.clone()) {
+        let cancelled = async {
+            futures_lite::future::or(request.reply.cancellation(), async {
+                futures_lite::future::or(request.owner.cancelled(), async {
+                    if let Some(ticket) = &request.ticket {
+                        ticket.cancelled().await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                })
+                .await;
+            })
+            .await;
+        };
+        let response = match session.query_retained_until(request.query.clone(), cancelled) {
             Ok(response) => response,
             Err(error) => {
                 if error.downcast_ref::<InstanceChanged>().is_some() {
@@ -465,10 +480,11 @@ fn query_worker(shared: Arc<Shared>, mut session: ClientSession, receiver: Recei
                 shared.query_error(&request.query, QueryError::from(error))
             }
         };
-        let response = if request
-            .ticket
-            .as_ref()
-            .is_some_and(|ticket| !ticket.is_current())
+        let response = if !request.owner.is_current()
+            || request
+                .ticket
+                .as_ref()
+                .is_some_and(|ticket| !ticket.is_current())
         {
             shared.query_error(&request.query, QueryError::Cancelled)
         } else {
@@ -590,9 +606,11 @@ impl FrontendHandle {
             return self.shared.query_error(&query, QueryError::Cancelled);
         }
         let (reply, mut receiver) = oneshot::channel();
+        let mut owner = QueryEpoch::default();
         let request = QueryRequest {
             query: query.clone(),
             ticket: ticket.clone(),
+            owner: owner.ticket(),
             reply,
         };
         if !self.is_connected()
@@ -614,6 +632,7 @@ impl FrontendHandle {
                 QueryError::Message(format!("GUI query disconnected: {error}")),
             ),
             Err(error) => {
+                owner.cancel();
                 let response = self.shared.query_error(
                     &query,
                     QueryError::Message(format!("GUI query response timed out: {error}")),
@@ -879,5 +898,144 @@ mod tests {
         drop(pause);
         let state = rivu_client::get_state(directory.path(), StateSections::ALL).unwrap();
         assert!(!state.system.unwrap().shutting_down);
+    }
+
+    #[test]
+    fn logical_timeout_retires_only_the_request_owner_and_keeps_its_reply_receiver() {
+        let (_directory, runtime) = fixture();
+        let (sender, requests) = async_channel::bounded(1);
+        let (notice, notices) = async_channel::bounded(1);
+        let mut handle = runtime.handle.clone().with_query_timeout(move |response| {
+            notice.try_send(response).unwrap();
+        });
+        handle.queries = sender;
+        let mut source = QueryEpoch::default();
+        let ticket = source.ticket();
+        let (response, timed_out) = futures::executor::block_on(async {
+            futures::join!(
+                handle.query_with_ticket(
+                    Query::Track { track_id: 42 },
+                    Some(ticket.clone()),
+                    Duration::ZERO,
+                ),
+                async {
+                    let request = requests.recv().await.unwrap();
+                    let timed_out = notices.recv().await.unwrap();
+                    assert!(!request.owner.is_current());
+                    assert!(
+                        ticket.is_current(),
+                        "one timed-out page cannot cancel its source owner"
+                    );
+                    assert!(
+                        !request.reply.is_canceled(),
+                        "timeout must retain physical completion"
+                    );
+                    request
+                        .reply
+                        .send(QueryResponse {
+                            revisions: Default::default(),
+                            result: Err(QueryError::Cancelled),
+                        })
+                        .unwrap();
+                    timed_out
+                },
+            )
+        });
+        assert!(matches!(response.result, Err(QueryError::Message(_))));
+        assert_eq!(response.result.err(), timed_out.result.err());
+        assert!(ticket.is_current());
+    }
+
+    #[test]
+    fn query_worker_cancels_dropped_reply_and_retired_ticket_before_reusing_its_session() {
+        use futures::FutureExt;
+        use rivu::test_support::ipc::{
+            complete_test_handshake, read_test_request, reply_test_query, socket_test_directory,
+        };
+        use rivu_protocol::{
+            response::ViewResponse,
+            wire::{WireQuery, WireRequest},
+        };
+        use std::os::unix::net::UnixListener;
+
+        let (_fixture_directory, runtime) = fixture();
+        let directory = socket_test_directory();
+        let listener =
+            UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap())
+                .unwrap();
+        let (started, active) = std::sync::mpsc::sync_channel(1);
+        let (cancel_seen, cancelled) = std::sync::mpsc::sync_channel(1);
+        let (release, resume) = std::sync::mpsc::sync_channel(1);
+        let server = thread::spawn(move || {
+            let mut stream = listener.accept().unwrap().0;
+            complete_test_handshake(&mut stream);
+            let mut previous_id = None;
+            for track_id in 0..3 {
+                let WireRequest::QueryRetained(query) = read_test_request(&mut stream) else {
+                    panic!("expected retained GUI query");
+                };
+                assert_ne!(previous_id, Some(query.id));
+                previous_id = Some(query.id);
+                assert!(matches!(query.query, WireQuery::Track { track_id: id } if id == track_id));
+                if track_id < 2 {
+                    started.send(()).unwrap();
+                    assert!(matches!(
+                        read_test_request(&mut stream),
+                        WireRequest::QueryCancel(id) if id == query.id
+                    ));
+                    cancel_seen.send(()).unwrap();
+                    resume.recv_timeout(Duration::from_secs(5)).unwrap();
+                }
+                reply_test_query(
+                    &mut stream,
+                    QueryResponse {
+                        revisions: Default::default(),
+                        result: if track_id < 2 {
+                            Err(QueryError::Cancelled)
+                        } else {
+                            Ok(ViewResponse::Track(None))
+                        },
+                    },
+                );
+            }
+        });
+        let mut handle = runtime.handle.clone();
+        let (sender, receiver) = async_channel::bounded(4);
+        handle.queries = sender;
+        let shared = Arc::clone(&handle.shared);
+        let mut session =
+            client_session_with_cancel(directory.path(), shared.stop.clone()).unwrap();
+        session.bind_instance(1).unwrap();
+        let worker = thread::spawn(move || query_worker(shared, session, receiver));
+
+        let mut abandoned = Box::pin(handle.query_for_gui(Query::Track { track_id: 0 }));
+        assert!(abandoned.as_mut().now_or_never().is_none());
+        active.recv_timeout(Duration::from_secs(5)).unwrap();
+        drop(abandoned);
+        cancelled.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        let mut owner = QueryEpoch::default();
+        let mut replaced =
+            Box::pin(handle.query_if_current(Query::Track { track_id: 1 }, owner.ticket()));
+        assert!(replaced.as_mut().now_or_never().is_none());
+        release.send(()).unwrap();
+        active.recv_timeout(Duration::from_secs(5)).unwrap();
+        owner.cancel();
+        cancelled.recv_timeout(Duration::from_secs(5)).unwrap();
+        // Logical retirement must not free this worker before the server's
+        // physical completion, even though its result is already obsolete.
+        assert!(replaced.as_mut().now_or_never().is_none());
+        release.send(()).unwrap();
+        assert!(matches!(
+            futures::executor::block_on(replaced).result,
+            Err(QueryError::Cancelled)
+        ));
+        assert!(matches!(
+            futures::executor::block_on(handle.query_for_gui(Query::Track { track_id: 2 })).result,
+            Ok(ViewResponse::Track(None))
+        ));
+        handle.queries.close();
+        worker.join().unwrap();
+        server.join().unwrap();
     }
 }

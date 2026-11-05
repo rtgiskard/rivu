@@ -6,14 +6,14 @@ pub use config_patch::WireConfigMutation;
 use crate::{
     AppCommand,
     model::{Command, ConfigurationState, Query, SystemState},
-    response::{Ack, QueryResponse, StateResponse, StateRevisions, StateSections},
+    response::{Ack, QueryResponse, StateResponse, StateRevisions, StateSections, StateWatch},
 };
 use anyhow::{Context, Result, bail};
 use rivu_format::decoder_hint::DecoderHint;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub const PROTOCOL_VERSION: u8 = 15;
+pub const PROTOCOL_VERSION: u8 = 16;
 pub const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub const MAX_CLIENTS: usize = 16;
@@ -31,6 +31,7 @@ pub enum RequestTag {
     WaitTask = 5,
     QueryRetained = 6,
     RegisterDesktop = 7,
+    QueryCancel = 8,
 }
 
 impl TryFrom<u8> for RequestTag {
@@ -46,6 +47,7 @@ impl TryFrom<u8> for RequestTag {
             5 => Self::WaitTask,
             6 => Self::QueryRetained,
             7 => Self::RegisterDesktop,
+            8 => Self::QueryCancel,
             _ => bail!("Unknown IPC request type {value}"),
         })
     }
@@ -95,10 +97,18 @@ pub enum WireRequest {
     State(StateSections),
     Query(WireQuery),
     Command(WireCommand),
-    Watch(StateRevisions),
+    Watch(StateWatch),
     WaitTask(crate::model::TaskTarget),
-    QueryRetained(WireQuery),
+    QueryRetained(WireRetainedQuery),
     RegisterDesktop,
+    /// Serial control frame: cancels only the matching read and has no reply.
+    QueryCancel(u64),
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct WireRetainedQuery {
+    pub id: u64,
+    pub query: WireQuery,
 }
 
 /// Binary query wire format. Variant order belongs to the versioned wire schema.
@@ -1691,8 +1701,71 @@ pub struct WireStateResponse {
     playback: Option<crate::response::PlaybackSnapshot>,
     queue: Option<crate::model::QueueState>,
     library: Option<crate::model::LibrarySnapshot>,
-    system: Option<SystemState>,
+    system: Option<WireSystemState>,
     configuration: Option<WireConfigurationState>,
+    processing: Option<crate::response::ProcessingState>,
+}
+
+/// System payload deliberately excludes the independently requested processing task.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct WireSystemState {
+    scanning: bool,
+    scan_message: String,
+    scan_progress: Option<crate::model::ScanProgress>,
+    scan_task_id: Option<u64>,
+    scan_owner: Option<crate::model::MediaTaskOwner>,
+    last_error: Option<String>,
+    devices: Arc<Vec<String>>,
+    selected_device: Option<String>,
+    revision: u64,
+    mpris_status: String,
+    ffmpeg_status: String,
+    database_optimization: Option<crate::model::DatabaseOptimization>,
+    shutting_down: bool,
+    relocation_task: Option<crate::model::RelocationTaskStatus>,
+}
+
+impl From<SystemState> for WireSystemState {
+    fn from(value: SystemState) -> Self {
+        Self {
+            scanning: value.scanning,
+            scan_message: value.scan_message,
+            scan_progress: value.scan_progress,
+            scan_task_id: value.scan_task_id,
+            scan_owner: value.scan_owner,
+            last_error: value.last_error,
+            devices: value.devices,
+            selected_device: value.selected_device,
+            revision: value.revision,
+            mpris_status: value.mpris_status,
+            ffmpeg_status: value.ffmpeg_status,
+            database_optimization: value.database_optimization,
+            shutting_down: value.shutting_down,
+            relocation_task: value.relocation_task,
+        }
+    }
+}
+
+impl From<WireSystemState> for SystemState {
+    fn from(value: WireSystemState) -> Self {
+        Self {
+            scanning: value.scanning,
+            scan_message: value.scan_message,
+            scan_progress: value.scan_progress,
+            scan_task_id: value.scan_task_id,
+            scan_owner: value.scan_owner,
+            last_error: value.last_error,
+            devices: value.devices,
+            selected_device: value.selected_device,
+            revision: value.revision,
+            mpris_status: value.mpris_status,
+            ffmpeg_status: value.ffmpeg_status,
+            database_optimization: value.database_optimization,
+            shutting_down: value.shutting_down,
+            relocation_task: value.relocation_task,
+            processing: None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -2041,8 +2114,9 @@ pub fn wire_state(response: StateResponse) -> WireStateResponse {
         playback: response.playback,
         queue: response.queue,
         library: response.library,
-        system: response.system,
+        system: response.system.map(WireSystemState::from),
         configuration: response.configuration.map(WireConfigurationState::from),
+        processing: response.processing,
     }
 }
 
@@ -2052,7 +2126,8 @@ pub fn state_response(response: WireStateResponse) -> StateResponse {
         playback: response.playback,
         queue: response.queue,
         library: response.library,
-        system: response.system,
+        system: response.system.map(SystemState::from),
         configuration: response.configuration.map(ConfigurationState::from),
+        processing: response.processing,
     }
 }
